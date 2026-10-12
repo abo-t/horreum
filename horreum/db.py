@@ -187,17 +187,27 @@ def connect(path):
     WAL + busy_timeout (PLAN_gui §5): GUI to długo żyjące połączenie RW, możliwy równoległy CLI/skan
     na tej samej bazie. WAL pozwala czytelnikom i jednemu writerowi współistnieć; busy_timeout daje
     czekanie zamiast natychmiastowego `database is locked`. To PRAGMA (infra), ZERO DML — meta-test
-    AST przepuszcza. (`:memory:` ignoruje WAL — wraca 'memory', nieszkodliwe.)"""
+    AST przepuszcza. (`:memory:` ignoruje WAL - wraca 'memory', nieszkodliwe.)
+
+    Plik, który nie jest bazą (śmieci, obcięta kopia), przechodzi `sqlite3.connect` i pada dopiero
+    na `journal_mode` - połączenie zamykamy przed rzutem. Porzucone połączenie nie zamyka się samo:
+    siedzi w cyklu z własną pamięcią podręczną instrukcji, więc na Windows trzymałoby plik do
+    przebiegu GC (zmierzone przy AR-124: przeniesienie pliku = `PermissionError`, po `gc.collect()`
+    przechodzi)."""
     con = sqlite3.connect(path)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA busy_timeout = 5000")
-    # TRWAŁOŚĆ BACKUPU (astra, warunek 5): backup nagłówka i faza zapisu w miejscu MUSZĄ przetrwać
-    # utratę zasilania zaraz po commicie transakcji - dopiero wtedy wolno ruszyć plik. W WAL tylko
-    # FULL synchronizuje commit na dysk (NORMAL może zgubić ostatnie transakcje). Domyślna wartość
-    # bundlowanego SQLite to dziś FULL, ale domyślna to cudza decyzja kompilacji - ustawiamy jawnie.
-    con.execute("PRAGMA synchronous = FULL")
+    try:
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("PRAGMA journal_mode = WAL")
+        con.execute("PRAGMA busy_timeout = 5000")
+        # TRWAŁOŚĆ BACKUPU (astra, warunek 5): backup nagłówka i faza zapisu w miejscu MUSZĄ przetrwać
+        # utratę zasilania zaraz po commicie transakcji - dopiero wtedy wolno ruszyć plik. W WAL tylko
+        # FULL synchronizuje commit na dysk (NORMAL może zgubić ostatnie transakcje). Domyślna wartość
+        # bundlowanego SQLite to dziś FULL, ale domyślna to cudza decyzja kompilacji - ustawiamy jawnie.
+        con.execute("PRAGMA synchronous = FULL")
+    except BaseException:
+        con.close()
+        raise
     return con
 
 

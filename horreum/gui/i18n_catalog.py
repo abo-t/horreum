@@ -1740,6 +1740,14 @@ CATALOG = {
               "program knows schemas up to v{supported}.\n\nUpdate Horreum. The database is left "
               "untouched.",
     },
+    "main.db_open_failed": {
+        "pl": "Nie udało się otworzyć bazy {name}.\n\nPowód: {reason}\n\nPlik może być uszkodzony, "
+              "zajęty przez inny program albo nie być bazą Horreum. Okno nie przełączyło się na "
+              "ten plik.",
+        "en": "Could not open database {name}.\n\nReason: {reason}\n\nThe file may be damaged, "
+              "locked by another program, or not a Horreum database. The window did not switch "
+              "to this file.",
+    },
 
     # --- FAZY DŁUGICH OPERACJI (F-1) — czasownik w pierwszej osobie ---
     # „Czytam bazę…", nie „Ładowanie": user pytał, czy aplikacja COŚ ROBI, więc odpowiedź ma być

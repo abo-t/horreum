@@ -4143,10 +4143,27 @@ class MainWindow(QMainWindow):
         cokolwiek w bazie zmieni. Okno zostaje przy dotychczasowej bazie (przy starcie - bez
         bazy) i mówi to oknem komunikatu. Bez tego start z zapamiętaną nowszą bazą kończył się
         śladem stosu przed `app.exec()` przy KAŻDYM uruchomieniu. Ścieżka zostaje zapamiętana:
-        po aktualizacji programu ta sama baza otworzy się sama."""
-        try:
-            with busy.busy(self._say_phase, i18n.t("busy.open_db", name=Path(path).name)) as faza:
+        po aktualizacji programu ta sama baza otworzy się sama.
+
+        KAŻDY INNY BŁĄD OTWARCIA (AR-124) - plik, który nie jest bazą, obcięta kopia, baza sprzed
+        przejścia fitsmirror, katalog zamiast pliku - kończy się tym samym: jedno okno „nie udało
+        się otworzyć” z powodem, okno nie przełącza się na ten plik. Obwódka obejmuje WYŁĄCZNIE
+        `open_db` (plik z zewnątrz, niczego jeszcze nie przejęliśmy); błąd montażu widoków to błąd
+        programu i wybucha dalej. Okno komunikatu pada PO `busy`, bez kursora oczekiwania.
+        Z `except` wychodzi samo zdanie: wyjątek w zmiennej lokalnej tworzy cykl z ramką i żyje do
+        przebiegu GC razem z tym, co jego ramki trzymają."""
+        name = Path(path).name
+        with busy.busy(self._say_phase, i18n.t("busy.open_db", name=name)) as faza:
+            try:
                 new_con = db.open_db(path)
+            except db.SchemaTooNew as exc:           # nic nie przejęte - okno zostaje, jak było
+                odmowa = i18n.t("main.db_too_new", name=name, found=exc.found,
+                                supported=db.SCHEMA_VERSION)
+            except Exception as exc:
+                odmowa = i18n.t("main.db_open_failed", name=name,
+                                reason=str(exc) or type(exc).__name__)
+            else:
+                odmowa = None
                 old = self.con
                 self.con = new_con
                 self.db_path = path
@@ -4155,11 +4172,9 @@ class MainWindow(QMainWindow):
                 self._sync_db_state()
                 if old is not None:
                     old.close()
-        except db.SchemaTooNew as exc:              # rzuca wyłącznie `open_db` - nic nie przejęte
+        if odmowa is not None:
             self._end_phase()
-            QMessageBox.warning(self, i18n.t("dialog.open_db_title"), i18n.t(
-                "main.db_too_new", name=Path(path).name, found=exc.found,
-                supported=db.SCHEMA_VERSION))
+            QMessageBox.warning(self, i18n.t("dialog.open_db_title"), odmowa)
             return
         self._end_phase()
         if self._on_db_changed is not None:        # zapamiętaj ostatnią bazę (trwałe ustawienia)

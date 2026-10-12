@@ -907,6 +907,88 @@ def test_start_z_zapamietana_nowsza_baza_stoi_bez_bazy(qapp, tmp_path, monkeypat
             w.close()
 
 
+def _zepsute_bazy(tmp_path):
+    """Trzy pliki, których `open_db` nie otworzy, każdy innym wyjątkiem (AR-124): śmieci
+    (`DatabaseError`), baza sprzed przejścia fitsmirror (`RuntimeError`), katalog
+    (`OperationalError`)."""
+    import sqlite3
+
+    smieci = tmp_path / "smieci.db"
+    smieci.write_bytes(b"to nie jest baza Horreum" * 200)
+    stara = tmp_path / "stara.db"
+    con = sqlite3.connect(stara)
+    con.execute("CREATE TABLE x (a)")
+    con.execute("PRAGMA user_version = 1")
+    con.commit()
+    con.close()
+    katalog = tmp_path / "katalog.db"
+    katalog.mkdir()
+    return [str(smieci), str(stara), str(katalog)]
+
+
+def test_kazdy_blad_otwarcia_bazy_okno_komunikatu_i_zostaje_przy_swojej(qapp, tmp_path,
+                                                                        monkeypatch):
+    """AR-124: dotąd okno łapało wyłącznie odmowę bazy z nowszego Horreum, a każdy inny błąd
+    otwarcia ginął w slocie menu (w wydaniu bez konsoli: nic na ekranie). Teraz jedno okno
+    komunikatu z nazwą pliku i powodem; okno zostaje przy swojej bazie, ścieżka nie zostaje
+    zapamiętana, faza gaśnie, plik da się przenieść zaraz po odmowie.
+    Falsyfikator: zdejmij klauzulę `except Exception` z `_open_path` → wyjątek z `open_path`."""
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    ostrzezenia = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: ostrzezenia.append(a[2]))
+    zapamietane = []
+    win = MainWindow(on_db_changed=zapamietane.append)
+    try:
+        swoja = _seeded_db(tmp_path)
+        win.open_path(swoja)
+        con = win.con
+        for zepsuta in _zepsute_bazy(tmp_path):
+            win.open_path(zepsuta)
+            zdanie = ostrzezenia.pop()
+            assert Path(zepsuta).name in zdanie and "Nie udało się otworzyć" in zdanie
+            assert "Powód: " in zdanie and "Powód: \n" not in zdanie
+            assert win.con is con and win.db_path == swoja and zapamietane == [swoja]
+            assert win.phase_label.text() == ""
+            Path(zepsuta).rename(zepsuta + ".przeniesiona")
+        assert ostrzezenia == []
+        assert win.con.execute("SELECT count(*) FROM frame").fetchone()[0] > 0
+    finally:
+        win.close()
+
+
+def test_start_z_zepsuta_baza_stoi_bez_bazy(qapp, tmp_path, monkeypatch):
+    """AR-124, ścieżka startu: zapamiętany plik, który nie jest bazą, wywracał program przed
+    `app.exec()` śladem stosu (w wydaniu onefile - bez okna). Teraz okno stoi bez bazy
+    z pustym stanem i jednym oknem komunikatu."""
+    from PySide6.QtWidgets import QMessageBox
+    from horreum.gui import app as app_mod, i18n
+
+    ostrzezenia = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: ostrzezenia.append(a[2]))
+    okna = []
+    prawdziwy_show = app_mod.MainWindow.show
+
+    def _show(self):
+        okna.append(self)
+        return prawdziwy_show(self)
+
+    monkeypatch.setattr(app_mod.MainWindow, "show", _show)
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda self: 0)
+    try:
+        smieci = _zepsute_bazy(tmp_path)[0]
+        assert app_mod.main([smieci]) == 0
+        (win,) = okna
+        (zdanie,) = ostrzezenia
+        assert "smieci.db" in zdanie and "Nie udało się otworzyć" in zdanie
+        assert win.con is None and win.empty_note.text() == i18n.t("main.no_db")
+    finally:
+        for w in okna:
+            w.close()
+
+
 def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypatch):
     """F-1, cała naprawa siedzi w KOLEJNOŚCI: do tej zmiany `MainWindow(start)` otwierał bazę
     i montował cztery widoki W KONSTRUKTORZE, a `show()` szedł dopiero po nim — 4,65 s czarnego

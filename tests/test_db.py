@@ -1,5 +1,6 @@
 """Połączenie + runner migracji (user_version, idempotencja, FK, jawny błąd dla bazy v1)."""
 import hashlib
+import sqlite3
 
 import pytest
 
@@ -103,6 +104,26 @@ def test_open_db_zamyka_polaczenie_przy_odmowie_i_nie_rusza_pliku(tmp_path):
     with pytest.raises(db.SchemaTooNew):
         db.open_db(str(path))
     assert hashlib.sha1(path.read_bytes()).hexdigest() == przed
+    path.rename(tmp_path / "przeniesiona.db")
+
+
+@pytest.mark.parametrize("rodzaj", ["smieci", "obcieta"])
+def test_open_db_plik_ktory_nie_jest_baza_nie_trzyma_uchwytu(tmp_path, rodzaj):
+    """AR-124: plik-śmieć i obcięta kopia przechodzą `sqlite3.connect`, a padają dopiero na
+    `journal_mode` w `connect` - poza obwódką migracji w `open_db`. Porzucone połączenie żyje
+    w cyklu z własną pamięcią podręczną instrukcji, więc bez `close()` trzyma plik do przebiegu
+    GC. Dowód z dysku: przeniesienie zaraz po błędzie, bez `gc.collect()`.
+    Falsyfikator: zdejmij `con.close()` z `except` w `connect` → `PermissionError` na Windows."""
+    path = tmp_path / f"{rodzaj}.db"
+    if rodzaj == "smieci":
+        path.write_bytes(b"to nie jest baza Horreum" * 200)
+    else:
+        zrodlo = tmp_path / "zrodlo.db"
+        db.open_db(str(zrodlo)).close()
+        dane = zrodlo.read_bytes()
+        path.write_bytes(dane[: len(dane) // 3])
+    with pytest.raises(sqlite3.DatabaseError):
+        db.open_db(str(path))
     path.rename(tmp_path / "przeniesiona.db")
 
 

@@ -194,6 +194,14 @@ _POTW_STOSY_1006 = Pomiar(_POMIAR_STOSY_1006.dzien, _POMIAR_STOSY_1006.przebieg 
 # Oba przebiegi na kodzie `e1dbe60` po przepięciu kotwic AR-53: WSZYSTKO PASS.
 _POTW_E1DBE60 = Pomiar("2026-10-06", "FULL (56 kryteriów) i FULL+STOSY (73) --donor --xisf-root <archiwum> "
                        "--live-db: WSZYSTKO PASS", _POMIAR_STOSY_1006.stan_r, "e1dbe60")
+# Przebieg po falach 4 i 10 (AR-114): 7 FAIL, każdy z ustaloną przyczyną - kod fali 4 (AR-96: 11
+# masterflatów z `IMAGETYP='FLAT'` liczonych jako `master_flat`; Ł5: rodowód stosów „N z M”) albo stan
+# archiwum po próbie fali 10 (400 plików przeniesionych, których zamrożony dawca nie znajdzie).
+_POMIAR_STOSY_1012 = Pomiar("2026-10-12", "FULL+STOSY --donor --xisf-root <archiwum> --stacks-root "
+                            "<archiwum>\\STACKS --live-db (7 FAIL, przyczyny zbadane 2026-10-12)",
+                            "po próbie fali 10 (przeniesione: Sh2-229 -> IC405 308, `_COMETS` 90, "
+                            "NGC3034 -> NGC2632 2); przed krokami ręki fali 4 (nagłówki `IMAGETYP` "
+                            "masterflatów bez zmian); 193 stosy pod `STACKS`", "fb358dd")
 
 # ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`) ──────────────────────────────────────
 # UWAGA 2026-08-01: doskan NIE jest już „XISF-owy" — odkąd istnieje moduł DSLR (`e7dcdda`), ciągnie
@@ -252,7 +260,10 @@ EXP_OBJECT_PCT_MIN = Kotwica(85.0, _PROG)
 # masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat). AR-53 (c): od `64f8fbc`
 # skan czyta taki plik - degeneratu nie ma, kotwica 0 pilnuje, żeby nie wrócił.
 EXP_UNCOMPUTABLE_FULL = Kotwica(0, _POMIAR_FULL_1005, _POTW_E1DBE60)
-EXP_FRAME_REVIEW_FULL = Kotwica(0, _POMIAR_FULL_1005, _POTW_E1DBE60)   # ten sam masterflat, dziś czytelny
+# 0 → 400 (2026-10-12): wszystkie 400 to „import: plik dawcy nieosiągalny (os.stat)” - dokładnie pliki
+# przeniesione próbą fali 10 (308 + 90 + 2), których ścieżek zamrożony dawca nie zna; degenerat OIII
+# dalej czytelny. Liczba spadnie, gdy import nauczy się relokacji z żywej bazy (AR-130).
+EXP_FRAME_REVIEW_FULL = Kotwica(400, _POMIAR_STOSY_1012)
 # Po kind-scopingu config (wariant B, 2026-07-22) dark/bias są POZA osią teleskopu: ich `config_id
 # IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
@@ -278,6 +289,8 @@ EXP_CONFIG_REVIEW_RAW_FULL = Kotwica(425, _POMIAR_RAW_0804)   # było 432 - nota
 EXP_XISF_KINDS = Kotwica(
     {"flat": 11, "light": 228, "master_dark": 38, "master_flat": 74, "unknown": 1},
     _POMIAR_FULL_1005, _POTW_E1DBE60)   # AR-53: (c) OIII 15629 unknown → master_flat, (d) +26 lightów XISF
+# ⚠ NIEZMIERZONA po fali 4: przebieg FULL+STOSY 2026-10-12 dał `flat` 11 → `master_flat` 85 (AR-96),
+# ale tej kotwicy (FULL bez stosów) nikt nie zmierzył - spodziewany FAIL do pierwszego przebiegu FULL.
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
 # do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
 # także dla XISF, a backfill (`horreum backfill-xisf`) dociąga je do lokacji sprzed P6a — 202 klatki
@@ -323,7 +336,9 @@ EXP_MASTERS_EXCLUDED_FULL = Kotwica(1, _POMIAR_FULL_1005, _POTW_E1DBE60)
 # lighty z masterdarkiem (reszta: 5978 brak przepisu + 207 niekompletny)
 EXP_LINEAGE_DARK = Kotwica(7370, _POMIAR_FULL_1005, _POTW_E1DBE60)   # AR-53 (d)
 # lighty z masterflatem (reszta: 1455 brak przepisu + 123 brak mastera)
-EXP_LINEAGE_FLAT = Kotwica(12003, _POMIAR_FULL_1005, _POTW_E1DBE60)   # AR-53 (d)
+# 12003 → 12190 (2026-10-12): skutek AR-96 - 11 masterflatów z `IMAGETYP='FLAT'` weszło na oś
+# kalibracji jako `master_flat` i podpięło 187 lightów.
+EXP_LINEAGE_FLAT = Kotwica(12190, _POMIAR_STOSY_1012)
 # KOTWICA NAWROTU P-D (D-PD-10): lighty, których nagłówek MILCZY o obiekcie. `delta_report` był na
 # nie ślepy (mianownik wymaga `object_raw NOT NULL`), więc §5.7 świeciło zielono o klatkach, których
 # nie widzi. Kotwica jest STAGE-AWARE i to nie jest ozdoba: w IMPORT baza powstaje z ZAMROŻONEGO
@@ -348,7 +363,9 @@ EXP_NAMELESS_IMPORT = Kotwica(25, _POMIAR_IMPORT_0801, _POTW_IMPORT_1004)   # ZM
 # co resolver dla klatki bez `object_raw` (region po współrzędnych). Kotwica łapie zmianę W DAWCY
 # niezależnie od stanu `R:` i od ziarna; podgrupa przeliczona dostaje OSOBNĄ, raportowaną liczbę
 # (bez kotwicy - jej wartość zależy od tego, czy przeliczenie w ogóle zaszło, i od stanu dysku).
-EXP_NAMELESS_FULL = Kotwica(25, _POMIAR_FULL_0801, _POTW_FULL_1004)   # ZMIERZONE po pilocie P-D.
+# 25 → 23 (2026-10-12): dwie klatki odzyskały nazwę między 10-04 a 10-12; która i czym -
+# nieweryfikowalne (baza akceptacji z 10-04 nie przetrwała); kandydaci: fala 4 i przenosiny fali 10.
+EXP_NAMELESS_FULL = Kotwica(23, _POMIAR_STOSY_1012)   # pierwotnie 25, ZMIERZONE po pilocie P-D.
 # **Przesłanka briefu §6 pkt 9 („po naprawie padnie na 0")
 # OKAZAŁA SIĘ FAŁSZYWA i to jest tu udokumentowane, żeby nikt nie „poprawił" tej liczby z powrotem
 # na 0:** baza akceptacji bierze `mtime` ze STANU NA DYSKU, ale zeznanie FITS (nagłówek, `file_sha1`,
@@ -415,8 +432,8 @@ EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_1006, _POTW_E1DBE60)
 # dodawaniem. Słownik kindów wypisany WPROST (do AR-53 `dict(EXP_XISF_KINDS, master_light=…)`):
 # ponowny pomiar kotwicy FULL nie może po cichu przestawić kotwicy, której nikt nie mierzył.
 EXP_XISF_KINDS_STACKS = Kotwica(
-    {"flat": 11, "light": 228, "master_dark": 38, "master_flat": 74, "unknown": 1,
-     "master_light": 193}, _POMIAR_STOSY_1006, _POTW_E1DBE60)
+    {"light": 228, "master_dark": 38, "master_flat": 85, "unknown": 1,
+     "master_light": 193}, _POMIAR_STOSY_1012)   # AR-96: 11 `flat` z `IMAGETYP='FLAT'` → `master_flat`
 # Zmierzone, nie policzone z rachunku. (Konkretny korzeń starego drzewa obróbki trzyma kolejka
 # sesji - poza gitem; tu liczy się TRYB pomiaru.)
 # 12 z FULL + DWIE etykiety, które żyją WYŁĄCZNIE w drzewie obróbki:
@@ -453,10 +470,12 @@ EXP_NO_GPS_STACKS = Kotwica(467, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # AR-53: 2
 # w obiekt, którego nazwę naprawiano. To ZBIEG OKOLICZNOŚCI tych danych, nie reguła: pierwszy stos
 # NGC7000 rozjedzie te dwa światy i wtedy ta kotwica ma zaświecić, a nie zostać „poprawiona".
 # integracje z co najmniej jednym wejściem (z 128 stosów)
-EXP_SLIN_LINKED = Kotwica(124, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # AR-53: ze 193 stosów
-EXP_SLIN_INPUTS = Kotwica(5742, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # wierszy `integration_input`
+# AR-114 (2026-10-12): Ł5 fali 4 - werdykt „N z M” zamiast `history_mismatch` dokłada wiersze `window`,
+# a stosy z nazwami archiwum przechodzą na podstawę `name`: 124 → 140, 5742 → 7199, 27 → 28.
+EXP_SLIN_LINKED = Kotwica(140, _POMIAR_STOSY_1012)   # ze 193 stosów
+EXP_SLIN_INPUTS = Kotwica(7199, _POMIAR_STOSY_1012)   # wierszy `integration_input`
 # …z tego DOWIEDZIONE zeznaniem pliku; 75 to KANDYDACI z okna.
-EXP_SLIN_HISTORY = Kotwica(27, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # AR-53: reszta (97) to kandydaci z okna
+EXP_SLIN_HISTORY = Kotwica(28, _POMIAR_STOSY_1012)   # reszta (112) to kandydaci z okna
 # Reszta populacji to trzy rozłączne kubełki „nie wiem": okno zdegenerowane 24, brak obiektu 18,
 # okno puste 5 (81 + 47 == 128 — partycję pilnuje osobne kryterium, nie te trzy liczby).
 # ⚠️ Te kotwice są RUCHOME tak samo jak `EXP_NAMELESS_STACKS`: stoją na ŻYWYM skanie drzewa obróbki,

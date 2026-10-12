@@ -88,17 +88,22 @@ class Rig:
             return None
         return 206.265 * self.pixel_um / self.focal_mm
 
+    def _bok_arcmin(self, n_px):
+        """Kąt boku matrycy `n_px` pikseli: 2·atan(n·piksel / 2f) (AR-68). Liniowe `n·skala` zawyża
+        szerokie kadry (48 mm: 46,1° zamiast 43,8°); przy teleskopie różnica jest poniżej 0,1'."""
+        if self.scale_arcsec_px is None or self.naxis is None:
+            return None
+        return 2.0 * math.degrees(math.atan(n_px * self.pixel_um / (2000.0 * self.focal_mm))) * 60.0
+
     @property
     def fov_x_arcmin(self):
         """Dłuższy bok kadru."""
-        s = self.scale_arcsec_px
-        return None if s is None or self.naxis is None else max(self.naxis) * s / 60.0
+        return None if self.naxis is None else self._bok_arcmin(max(self.naxis))
 
     @property
     def fov_y_arcmin(self):
         """Krótszy bok kadru."""
-        s = self.scale_arcsec_px
-        return None if s is None or self.naxis is None else min(self.naxis) * s / 60.0
+        return None if self.naxis is None else self._bok_arcmin(min(self.naxis))
 
     @property
     def fov_arcmin(self):

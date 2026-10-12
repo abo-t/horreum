@@ -148,13 +148,22 @@ def _cfg1(con):
 
 def test_raw_bez_xpixsz_bierze_piksel_kamery(con):
     """A7S + 50 mm: EXIF nie niesie piksela, `camera.pixel_um` (8,4) jest zapasem - kadr powstaje.
-    Liczby: 206,265·8,4/50 = 34,65"/px; 2832 px => 27,26° krótszym bokiem."""
+    Liczby: 206,265·8,4/50 = 34,65"/px; 2832 px => 2·atan(2832·8,4 µm / 100 mm) = 26,76° krótszym
+    bokiem (liniowe 2832·34,65" dawało 27,26° - AR-68)."""
     con.execute("UPDATE camera SET pixel_um = 8.4 WHERE id = 1")
     for i in range(3):
         _raw_light(con, sha1=f"r{i}")
     r = _cfg1(con)
     assert r.reason is None and r.pixel_um == 8.4 and r.naxis == (4240, 2832)
-    assert r.fov_arcmin / 60 == pytest.approx(27.26, abs=0.01)
+    assert r.fov_arcmin / 60 == pytest.approx(26.76, abs=0.01)
+
+
+def test_szeroki_obiektyw_kat_z_atan_nie_liniowo():
+    """AR-68: 48 mm, matryca 36 mm (6000 × 6 µm) - kąt 2·atan(18/48) = 41,11°, liniowo byłoby 42,97°."""
+    r = sky.Rig(config_id=1, telescope="T", camera="C", focal_mm=48.0, pixel_um=6.0,
+                naxis=(6000, 4000), lights=1, last_seen=None, mode_share=1.0, reason=None)
+    assert r.fov_x_arcmin / 60 == pytest.approx(41.11, abs=0.01)
+    assert r.fov_y_arcmin / 60 == pytest.approx(2 * math.degrees(math.atan(12 / 48)), abs=1e-6)
 
 
 def test_xpixsz_klatki_wygrywa_z_kamera(con):

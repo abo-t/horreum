@@ -808,8 +808,9 @@ ZLOTA_PROJEKCJA = {
     "counts": {"pool": 14, "feasible": 11, "above_horizon": 10, "matched": 3, "visible": 9,
                "rows": 9, "marked": 1, "hidden_by_status": 1},
     "hidden": 0,
-    "rigs": (("A140R", ("ASI2600MC", "ASI2600MM"), 103.01, 68.85, 8, True),
-             ("RC8", ("ASI2600MM",), 50.48, 33.74, 3, True)),
+    # AR-68: kadr z 2·atan zamiast liniowego - 103.01 → 103.00 i 50.48 → 50.47 (różnica < 0,01').
+    "rigs": (("A140R", ("ASI2600MC", "ASI2600MM"), 103.0, 68.85, 8, True),
+             ("RC8", ("ASI2600MM",), 50.47, 33.74, 3, True)),
     "unmatched": {"Veil": 0.5},
     "orphans": ("SYN-ZNIKNAL",),
     # (kanon, best_rig, panele w A140R/RC8, rada, powód, luki, widoczny, h nad, kulminacja, plan)
@@ -867,7 +868,9 @@ ZLOTY_TEKST = (
 # Pełny JSON ma ~10 kB; strukturę wiersza pinuje projekcja wyżej, tu - każdy bajt poza `fill_pct`.
 # PL-1 R2: liczba to zrzut z HEAD `cf1911d` z wierszami PRZESTAWIONYMI w kolejność kubełka kadru
 # (sprzed R2: cd39af16…a935) - słowniki wierszy równe co do bajtu, zmieniła się wyłącznie kolejność.
-ZLOTY_JSON_SHA256 = "d7314a8aad23c21cf1015b3d67380aefecbc659d6f78110b56b756bdd9748cc7"
+# AR-68: kadr z 2·atan (sprzed: d7314a8a…48cc7) - diff zrzutów HEAD/drzewo = WYŁĄCZNIE `fov_x`/`fov_y`
+# dwóch zestawów, reszta bajt w bajt.
+ZLOTY_JSON_SHA256 = "91ac6237da3e8ea77c62168fee20ee500591f66f1168fa99c41bef625328877e"
 
 
 def _zloty_park(con, monkeypatch):

@@ -134,6 +134,10 @@ from importlib import resources
 # z backupem przed pierwszą podmianą: nazwy kopii wypartej, kopii zwrotnej i pliku tymczasowego, pełny
 # sha1 przygotowanej wersji i faza rekoncyliacji. Wchodzi PUSTA - backupy sprzed migracji
 # rekoncyliują się dawną regułą (nagłówek na dysku).
+# 0039 to PRZYROST (ADD COLUMN + backfill, AR-128): `telescope.focal_user`/`f_ratio_user` - optyka
+# teleskopu z ręki obok wartości z plików (`*_nominal`). Backfill: teleskop powołany ręką
+# (`telescope.proposed` z aktorem `user:%`) dostaje wartości z payloadu tego zdarzenia + zdarzenie
+# z pochodzeniem; teleskopy automatu wchodzą z NULL.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -172,6 +176,7 @@ MIGRATIONS = [
     (36, "0036_object_change.sql"),
     (37, "0037_withheld_write.sql"),
     (38, "0038_replace_intent.sql"),
+    (39, "0039_telescope_optics_hand.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})
@@ -290,8 +295,39 @@ def open_db(path):
     odmowę łapie (okno GUI), nie dostaje połączenia, które mógłby zamknąć."""
     con = connect(path)
     try:
+        przed = _user_version(con)
         migrate(con)
+        _po_migracji(con, przed)
     except BaseException:
         con.close()
         raise
     return con
+
+
+# Wersja, od której kolumny automatu optyki teleskopu niosą wartość z plików (AR-128, migracja 0039).
+_OPTYKA_Z_PLIKOW = 39
+
+
+def _po_migracji(con, przed):
+    """KROKI POMIGRACYJNE W PYTHONIE - derywacje, których SQL migracji nie powtarza, bo mają jednego
+    właściciela w rdzeniu (SPOT).
+
+    0039 (bramka kodu T24, N1): `telescope.*_nominal` niosły wartość PIERWSZEJ klatki grupy, a od tej
+    kolumny zależą kubełek „f/ niezgodna z teleskopem" i cel gestu naprawy plików. Między migracją
+    a pierwszą Dostawą nie może być okna, w którym te kolumny są stare (na żywym archiwum: kubełek
+    f/ 7396 zamiast 27, gest gotowy przepisać 7370 dobrych plików A140R). Dlatego przy PRZEJŚCIU
+    przez 39 liczymy wartość z plików tą samą funkcją co Dostawa (`grouper.refresh_all_optics`,
+    aktor `migration:0039`, zdarzenie tylko przy zmianie, idempotentnie).
+
+    DLACZEGO TU, nie w `migrate`: `migrate` to czysty łańcuch skryptów SQL (wołany też tam, gdzie nie
+    ma jeszcze rdzenia), a `open_db` jest wejściem do bazy z rdzeniem gotowym. Import leniwy, bo
+    `db` jest liściem pakietu: `grouper` importuje `repo`, a ten - moduły rozwiązywania; import na
+    górze tego pliku domknąłby cykl przy każdym `import horreum.db`. Jeśli proces padnie między
+    zatwierdzeniem migracji a tym krokiem, następne otwarcie go nie powtórzy (wersja już 39) - wtedy
+    przelicza najbliższa Dostawa, a gest naprawy plików i tak odmawia celu niezgodnego z większością
+    plików (`queries.optics_fix_targets`)."""
+    if przed < _OPTYKA_Z_PLIKOW <= _user_version(con):
+        from datetime import datetime, timezone
+        from . import grouper
+        grouper.refresh_all_optics(con, datetime.now(timezone.utc).isoformat(),
+                                   actor="migration:0039")

@@ -2074,13 +2074,17 @@ def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwr
     # Import odroczony: `grouper` importuje `repo` (kierunek stały), a ta stała jest wyprowadzana
     # z `calibration.KIND_RECIPE` — SPOT ma jednego właściciela, więc pytamy jego, zamiast wyliczać
     # drugi raz tutaj. Ten sam idiom, co `cli.py` → `supersede`.
-    from .grouper import NO_TELESCOPE_KINDS
+    from .grouper import NO_TELESCOPE_KINDS, refresh_all_optics
 
     g = ConfigGesture()
-    with _immediate(con):
+    # `atomic`, nie samo `_immediate` (bramka kodu T24, N2): odświeżenie wartości z plików teleskopu
+    # źródłowego i docelowego (`refresh_all_optics` → `_tx`) musi dołączyć do TEJ transakcji - goły
+    # `with con:` w środku `_immediate` zatwierdziłby gest w połowie.
+    with atomic(con):
         if con.execute("SELECT 1 FROM telescope WHERE id = ?", (telescope_id,)).fetchone() is None:
             raise ValueError(f"telescope:{telescope_id} nie istnieje")
         actor = f"user:{uid}"
+        zrodla = set()                           # teleskopy, z których klatki wyszły (N2)
         cfg_per_camera = {}                      # kamera → config; jeden SELECT na korpus, nie na klatkę
         for frame_id in frame_ids:
             fr = con.execute(
@@ -2126,6 +2130,8 @@ def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwr
                            now=now, payload={"telescope_id": telescope_id,
                                              "camera_id": fr["camera_id"]})
             if fr["config_id"] is not None:      # PRZEPIĘCIE — para verbów, inaczej parytet kłamie
+                zrodla.add(con.execute("SELECT telescope_id FROM config WHERE id = ?",
+                                       (fr["config_id"],)).fetchone()[0])
                 emit_event(con, actor=actor, verb="config.unassigned", target=f"frame:{frame_id}",
                            now=now, payload={"config_id": fr["config_id"],
                                              "config_source": fr["config_source"]},
@@ -2136,6 +2142,11 @@ def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwr
             emit_event(con, actor=actor, verb="config.assigned", target=f"frame:{frame_id}",
                        now=now, payload={"config_id": cfg_id, "config_source": "user"})
             g.assigned += 1
+        # WARTOŚĆ Z PLIKÓW teleskopu docelowego i źródłowych idzie za klatkami w tej samej transakcji
+        # (bramka kodu T24, N2): bez tego Oś i kubełki mówiły modą sprzed przepięcia do najbliższej
+        # Dostawy. Jedna derywacja (`grouper.refresh_all_optics`), zdarzenie tylko przy zmianie.
+        if g.assigned:
+            refresh_all_optics(con, now, actor=actor, telescope_ids={telescope_id} | zrodla)
     return g
 
 
@@ -3411,6 +3422,220 @@ def unmerge_telescope(con, *, telescope_id, now, uid="local"):
                    target=f"telescope:{telescope_id}", now=now,
                    payload={"before": merged_into, "after": None})
     return True
+
+
+# ============================================================ optyka teleskopu: ręka + pliki (AR-128)
+#
+# Ogniskowa i f/ teleskopu mają dwa miejsca (migracja 0039): `*_nominal` = wartość Z PLIKÓW (pisze
+# wyłącznie `refresh_telescope_optics`, wartość liczy `grouper.optics_from_files`), `*_user` = wartość
+# RĘKI (pisze wyłącznie gest człowieka). Ręka wygrywa przy każdym odczycie; automat jej nie czyta
+# i nie pisze, więc nowa Dostawa nie ma czym jej cofnąć (D-1012-2 `Q13`).
+#
+# WALIDATORY SĄ WSPÓLNE (bramka planu T24, zarzut 6): każda klinga piszącą ten fakt - setter osi
+# i okno „Dopisz nowy…" - woła TĘ SAMĄ funkcję. Druga droga zapisu bez nich wpuściłaby do ręki
+# znany błąd pliku (f/200), a ręka wygrywa zawsze, więc błąd stałby się prawdą osi.
+
+TELESCOPE_FOCAL_RANGE_MM = (5.0, 20000.0)
+"""Zakres ogniskowej wpisywanej ręką [mm]. Ochrona przed literówką, nie fakt optyczny: najkrótsza
+ogniskowa archiwum to 48 mm (zoom), najdłuższa 1600 mm (RC8)."""
+TELESCOPE_F_RATIO_RANGE = (0.5, 50.0)
+"""Zakres f/ wpisywanej ręką. Odbija znany błąd pliku `FOCRATIO = 200` (26 klatek RC8, 2022-04)."""
+
+
+def _valid_number(value, lo, hi, what, unit):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not lo <= value <= hi:
+        raise ValueError(f"{what} musi być liczbą od {lo:g} do {hi:g}{unit}, jest {value!r}")
+    return float(value)
+
+
+def valid_telescope_focal(focal_mm):
+    """Ogniskowa ręki → `float` albo `ValueError` po polsku (jedyny właściciel zakresu)."""
+    return _valid_number(focal_mm, *TELESCOPE_FOCAL_RANGE_MM, "ogniskowa", " mm")
+
+
+def valid_telescope_f_ratio(f_ratio):
+    """f/ ręki → `float` albo `ValueError` po polsku (jedyny właściciel zakresu)."""
+    return _valid_number(f_ratio, *TELESCOPE_F_RATIO_RANGE, "f/", "")
+
+
+def valid_telescope_park(in_park):
+    """Trójstan parku: 1 = w parku · 0 = jawnie historyczny · `None` = nic nie powiedziano."""
+    if in_park not in (0, 1, None):
+        raise ValueError(f"in_park={in_park!r} - dozwolone 1 (park) | 0 (historyczny) | None")
+    return None if in_park is None else int(in_park)
+
+
+def valid_telescope_name(con, name):
+    """Nazwa NOWEGO teleskopu z ręki → nazwa po `strip` albo `ValueError`.
+
+    Projektowana od zera (bramka planu, uwaga `kimi`): `label_telescope` sprawdza tylko pustość,
+    a UNIQUE NOCASE ma wyłącznie `telescop_canon`. Nowa nazwa staje się i kanonem, i etykietą, więc
+    nie wolno jej zderzyć ani z kanonem (UNIQUE wybuchłby w środku transakcji), ani z etykietą innego
+    teleskopu (dwa wiersze osi wyglądałyby jak jeden). Porównanie bez wielkości liter."""
+    tekst = str(name or "").strip()
+    if not tekst:
+        raise ValueError("nazwa teleskopu jest pusta")
+    zajety = con.execute(
+        "SELECT id FROM telescope WHERE telescop_canon = ? OR label = ? COLLATE NOCASE LIMIT 1",
+        (tekst, tekst)).fetchone()
+    if zajety is not None:
+        raise ValueError(f"nazwa „{tekst}” jest już zajęta (telescope:{zajety['id']})")
+    return tekst
+
+
+def _telescope_optics_row(con, telescope_id):
+    """Wiersz optyki KANONICZNEGO teleskopu albo `ValueError` (brak wiersza, wiersz scalony - optyka
+    scalonego opisywałaby oś, której już nie ma; lustro `set_telescope_park`)."""
+    row = con.execute(
+        "SELECT focal_nominal, f_ratio_nominal, focal_user, f_ratio_user, merged_into "
+        "FROM telescope WHERE id = ?", (telescope_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"telescope:{telescope_id} nie istnieje")
+    if row["merged_into"] is not None:
+        raise ValueError(f"telescope:{telescope_id} jest scalony (merged_into={row['merged_into']}) "
+                         "- optyka tylko dla kanonicznego")
+    return row
+
+
+def set_telescope_focal(con, *, telescope_id, focal_mm, now, uid="local"):
+    """Ogniskowa teleskopu wpisana RĘKĄ (`focal_user`) + `event(telescope.focal_user_set)`
+    {`after`, `before`, `files`}. Ta sama wartość → `False` bez zdarzenia (QUIET). Pliki
+    nietknięte: to zdanie o teleskopie w bazie, nie zapis nagłówków."""
+    focal_mm = valid_telescope_focal(focal_mm)
+    with _immediate(con):
+        row = _telescope_optics_row(con, telescope_id)
+        if row["focal_user"] == focal_mm:
+            return False
+        con.execute("UPDATE telescope SET focal_user = ? WHERE id = ?", (focal_mm, telescope_id))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.focal_user_set",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"after": focal_mm, "before": row["focal_user"],
+                            "files": row["focal_nominal"]})
+    return True
+
+
+def clear_telescope_focal(con, *, telescope_id, now, uid="local"):
+    """„Przywróć z plików" dla ogniskowej: `focal_user` → NULL + `event(telescope.focal_user_cleared)`
+    {`before`}. Wartość z plików (`focal_nominal`) stoi obok nietknięta. Bez ręki → `False`."""
+    with _immediate(con):
+        row = _telescope_optics_row(con, telescope_id)
+        if row["focal_user"] is None:
+            return False
+        con.execute("UPDATE telescope SET focal_user = NULL WHERE id = ?", (telescope_id,))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.focal_user_cleared",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"before": row["focal_user"], "files": row["focal_nominal"]})
+    return True
+
+
+def set_telescope_f_ratio(con, *, telescope_id, f_ratio, now, uid="local"):
+    """f/ teleskopu wpisana RĘKĄ (`f_ratio_user`) + `event(telescope.f_ratio_user_set)` - lustro
+    `set_telescope_focal`."""
+    f_ratio = valid_telescope_f_ratio(f_ratio)
+    with _immediate(con):
+        row = _telescope_optics_row(con, telescope_id)
+        if row["f_ratio_user"] == f_ratio:
+            return False
+        con.execute("UPDATE telescope SET f_ratio_user = ? WHERE id = ?", (f_ratio, telescope_id))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.f_ratio_user_set",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"after": f_ratio, "before": row["f_ratio_user"],
+                            "files": row["f_ratio_nominal"]})
+    return True
+
+
+def clear_telescope_f_ratio(con, *, telescope_id, now, uid="local"):
+    """„Przywróć z plików" dla f/ - lustro `clear_telescope_focal`."""
+    with _immediate(con):
+        row = _telescope_optics_row(con, telescope_id)
+        if row["f_ratio_user"] is None:
+            return False
+        con.execute("UPDATE telescope SET f_ratio_user = NULL WHERE id = ?", (telescope_id,))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.f_ratio_user_cleared",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"before": row["f_ratio_user"], "files": row["f_ratio_nominal"]})
+    return True
+
+
+def clear_telescope_optics(con, *, telescope_id, now, uid="local"):
+    """„Przywróć z plików" (Oś teleskopu): zdejmij rękę OBU pól optyki JEDNĄ transakcją - dwa
+    zdarzenia (`*_user_cleared`), każde tylko przy realnej zmianie (bramka kodu T24, N12). Zwraca
+    `(ogniskowa_zdjeta, f_zdjeta)`. Błąd w drugim polu wycofuje pierwsze."""
+    with atomic(con):
+        return (clear_telescope_focal(con, telescope_id=telescope_id, now=now, uid=uid),
+                clear_telescope_f_ratio(con, telescope_id=telescope_id, now=now, uid=uid))
+
+
+def refresh_telescope_optics(con, *, telescope_id, focal, f_ratio, now, actor="grouper"):
+    """Wartość Z PLIKÓW (`focal_nominal`, `f_ratio_nominal`) ← wynik `grouper.optics_from_files`.
+
+    Pisze WYŁĄCZNIE kolumny automatu - kolumn ręki nie czyta i nie pisze (ręka wygrywa przy odczycie,
+    D-1012-2 `Q13`). `None` = brak zeznań i NIE nadpisuje (RC8R: 1200 bez ani jednej klatki
+    z ogniskową). Zmiana → jedno `event(telescope.optics_derived)` {`before`, `after`}; bez zmiany
+    zero zdarzeń (drugi przebieg Dostawy jest cichy). `focal` zapisujemy w milimetrach całkowitych -
+    tak, jak kolumna była pisana od 0002."""
+    with _tx(con):
+        row = con.execute(
+            "SELECT focal_nominal, f_ratio_nominal FROM telescope WHERE id = ?",
+            (telescope_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"telescope:{telescope_id} nie istnieje")
+        nowa_ogn = row["focal_nominal"] if focal is None else int(round(focal))
+        nowe_f = row["f_ratio_nominal"] if f_ratio is None else float(f_ratio)
+        if (nowa_ogn, nowe_f) == (row["focal_nominal"], row["f_ratio_nominal"]):
+            return False
+        con.execute("UPDATE telescope SET focal_nominal = ?, f_ratio_nominal = ? WHERE id = ?",
+                    (nowa_ogn, nowe_f, telescope_id))
+        emit_event(con, actor=actor, verb="telescope.optics_derived",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"before": {"focal": row["focal_nominal"], "f_ratio": row["f_ratio_nominal"]},
+                            "after": {"focal": nowa_ogn, "f_ratio": nowe_f}})
+    return True
+
+
+def user_assign_config_new_telescope(con, *, frame_ids, name, focal_mm, f_ratio=None, in_park=None,
+                                     source_telescope_id=None, now, uid="local"):
+    """„Dopisz nowy…" (D-1012-2 `Q8`/`Q11`): NOWY teleskop z ręki + przypisanie mu klatek - JEDNA
+    transakcja (`atomic`), więc teleskop bez klatek nie powstaje.
+
+    Teleskop w Horreum to fizyczny teleskop z ogniskową, potwierdzony ręką - dlatego wiersz wchodzi od
+    razu nazwany i zatwierdzony, z ogniskową (i f/) ręki. KAŻDE zapisane pole ma swoje zdarzenie,
+    zapisane CIAŁAMI istniejących gestów osi (dołączają do `atomic`), żeby Historia nowego teleskopu
+    była nieodróżnialna od Historii teleskopu nazwanego gest po geście (bramka planu, zarzut 7):
+    `telescope.proposed` (aktor `user:<uid>`, `via: add:<źródło>`) → `telescope.labeled` →
+    `telescope.approved` → `telescope.focal_user_set` → `telescope.f_ratio_user_set` (tylko przy
+    podanej f/) → `telescope.parked` (tylko 0/1 - `None` to brak decyzji, zdarzenia nie ma) → pary
+    `config.*` gestu przypisania z nadpisaniem (`user_assign_config(overwrite=True)`) → wartość
+    z plików liczona TĄ SAMĄ derywacją co Dostawa (`grouper.optics_from_files`) na przypiętych klatkach.
+
+    Walidacja WSZYSTKICH pól przed pierwszym DML (wspólne walidatory). Zero przypisanych klatek →
+    `ValueError` i wycofanie całości. Zwraca `(telescope_id, ConfigGesture)`."""
+    focal_mm = valid_telescope_focal(focal_mm)
+    f_ratio = None if f_ratio is None else valid_telescope_f_ratio(f_ratio)
+    in_park = valid_telescope_park(in_park)
+    via = f"add:{source_telescope_id}" if source_telescope_id is not None else "add"
+    with atomic(con):
+        nazwa = valid_telescope_name(con, name)
+        cur = con.execute(
+            "INSERT INTO telescope(telescop_canon, label, f_ratio_nominal, focal_nominal, "
+            "status, created_at) VALUES (?, NULL, NULL, NULL, 'proposed', ?)", (nazwa, now))
+        tid = cur.lastrowid
+        emit_event(con, actor=f"user:{uid}", verb="telescope.proposed", target=f"telescope:{tid}",
+                   now=now, payload={"telescop_canon": nazwa, "f_ratio_nominal": None,
+                                     "focal_nominal": None, "member_count": len(frame_ids),
+                                     "via": via})
+        label_telescope(con, telescope_id=tid, label=nazwa, now=now, uid=uid)
+        approve_telescope(con, telescope_id=tid, now=now, uid=uid)
+        set_telescope_focal(con, telescope_id=tid, focal_mm=focal_mm, now=now, uid=uid)
+        if f_ratio is not None:
+            set_telescope_f_ratio(con, telescope_id=tid, f_ratio=f_ratio, now=now, uid=uid)
+        set_telescope_park(con, telescope_id=tid, in_park=in_park, now=now, uid=uid, via=via)
+        g = user_assign_config(con, frame_ids=frame_ids, telescope_id=tid, now=now, uid=uid,
+                               overwrite=True)
+        if not g.assigned:
+            raise ValueError("żadna ze wskazanych klatek nie dostała zestawu - teleskop nie powstaje")
+        # wartość z plików nowego teleskopu i źródeł odświeżył już `user_assign_config` (N2)
+    return tid, g
 
 
 # ============================================================ oś OBSERWATORIUM — zapis usera (GUI)
@@ -6387,16 +6612,18 @@ def clear_target_plan(con, *, canon, now, uid="local"):
     return True
 
 
-def set_telescope_park(con, *, telescope_id, in_park, now, uid="local"):
+def set_telescope_park(con, *, telescope_id, in_park, now, uid="local", via=None):
     """Wstaw/wyjmij teleskop z PARKU AKTUALNEGO (`telescope.in_park`) — akcja usera (D-T3-d).
 
     `in_park`: 1 = w parku · 0 = jawnie historyczny · `None` = cofnięcie do „nic nie powiedziano".
     Trójstan jest niesiony do końca, bo `NULL` i `0` znaczą co innego (baza świeża vs park
     przejrzany). GUARD: tylko KANONICZNY teleskop (`merged_into IS NULL`) — park wskazujący wiersz
     scalony w inny opisywałby oś, której już nie ma (lustro `approve_telescope`). Idempotentny:
-    ta sama wartość → `False` bez eventu."""
-    if in_park not in (0, 1, None):
-        raise ValueError(f"in_park={in_park!r} — dozwolone 1 (park) | 0 (historyczny) | None")
+    ta sama wartość → `False` bez eventu.
+
+    `via` (AR-128) = skąd przyszła decyzja, gdy nie z osi parku - okno „Dopisz nowy…" zapisuje
+    `add:<teleskop źródłowy>`; trafia do payloadu, jak `via: merge:<id>` przy scaleniu."""
+    in_park = valid_telescope_park(in_park)
     with _immediate(con):
         row = con.execute(
             "SELECT telescop_canon, in_park, merged_into FROM telescope WHERE id = ?",
@@ -6412,7 +6639,8 @@ def set_telescope_park(con, *, telescope_id, in_park, now, uid="local"):
         emit_event(con, actor=f"user:{uid}", verb="telescope.parked",
                    target=f"telescope:{telescope_id}", now=now,
                    payload={"telescope": row["telescop_canon"],
-                            "before": row["in_park"], "after": in_park})
+                            "before": row["in_park"], "after": in_park,
+                            **({"via": via} if via is not None else {})})
     return True
 
 

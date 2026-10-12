@@ -174,6 +174,14 @@ def test_parytet_tokenow_dynamicznych_z_katalogiem():
     braki += [f"grid.lin.cal.head.{s}" for s in ("linked", "linked_inactive", "linked_mismatch",
                                                  "pending", "gap")
               if f"grid.lin.cal.head.{s}" not in CATALOG]
+    # AR-128 (bramka kodu T24, N14/N15): powód braku kadru zestawu na panelu Osi teleskopu i powód
+    # odmowy gestu „Popraw f/ w plikach…" - oba składane w locie z tokenów właściciela.
+    from horreum import sky
+    from horreum.gui import queries
+    braki += [f"axis.tel.rig_reason.{r}" for r in sky.RIG_REASONS
+              if f"axis.tel.rig_reason.{r}" not in CATALOG]
+    braki += [f"grid.optics.refused.{r}" for r in queries.FIX_REFUSALS
+              if f"grid.optics.refused.{r}" not in CATALOG]
     assert not braki, f"rdzeń produkuje tokeny bez zdania w katalogu: {braki}"
 
 

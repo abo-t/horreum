@@ -32,7 +32,8 @@ from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     _REVIEW_TAG, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_FILE_OBJECT_MISMATCH,
+from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_F_RATIO_MISMATCH,
+                              PRESET_FILE_OBJECT_MISMATCH,
                               PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
                               PRESET_PATH_HEADER_CONFLICT, PRESET_PENDING_FINISH, PRESET_RETIRED,
                               PRESET_TORN_WRITE, PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS,
@@ -113,6 +114,13 @@ _TASKS = [
     # roboty" przy 423 klatkach bez zestawu i 1223 bez stanowiska. Liczba czyta predykat jedynego
     # właściciela (`_liczniki_osi`), a klik prowadzi do podstrony z gestem.
     ("config_review_frames", "tasks.config_review_frames", _PAGE_OBJECTS),
+    # Dwa wiersze AKCYJNE i ROBOTA optyki teleskopu (AR-128 `Q8`, AR-129), pod kubełkiem sprzętu,
+    # bo to ta sama oś. „Ogniskowa niezgodna" prowadzi do podstrony z gestem „Przypisz zestaw…"
+    # (wybór z teleskopów w tolerancji albo nowy - program sam teleskopu nie zakłada, D-1012-2),
+    # „f/ niezgodna" do perspektywy z gestem naprawy pliku w menu prawego kliku. Liczby czytają
+    # jeden predykat (`resolver.optics_mismatch_frame_ids`).
+    ("focal_mismatch_frames", "tasks.focal_mismatch_frames", _PAGE_OBJECTS),
+    ("f_ratio_mismatch_frames", "tasks.f_ratio_mismatch_frames", PRESET_F_RATIO_MISMATCH),
     ("telescopes_unlabeled", "tasks.telescopes_unlabeled", _PAGE_TELESCOPE),
     ("observatory_review_frames", "tasks.observatory_review_frames", _PAGE_OBSERVATORY),
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
@@ -248,8 +256,13 @@ def _liczniki_osi(con):
     Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
     1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów."""
     niezgodne = queries.copy_conflict_frame_ids(con)
+    stan = resolver.review_state(con)
     return {
-        "config_review_frames": resolver.review_state(con).no_config,
+        "config_review_frames": stan.no_config,
+        # AR-128/AR-129: dwa kubełki optyki - właściciel predykatu `resolver.optics_mismatch_frame_ids`
+        # (lista pod klikiem czyta TEN SAM zbiór; poza `total` kolejki przeglądu).
+        "focal_mismatch_frames": stan.focal_mismatch,
+        "f_ratio_mismatch_frames": stan.f_ratio_mismatch,
         "observatory_review_frames": len(queries.observatory_review_frames(con)),
         "object_kept_frames": len(supersede.kept_object_facts(con)),
         "copy_conflict_open": len(niezgodne - queries.hand_testimony_frame_ids(con, niezgodne)),
@@ -260,11 +273,14 @@ def _liczniki_osi(con):
 
 # Wiersz, którego podstrona ma kilka kubełków: klik ZAZNACZA właściwy, żeby lista klatek i gest
 # stały gotowe (klucz wiersza → tag kubełka kolejki przeglądu `ObjectAxisView`).
-_KUBELEK_PODSTRONY = {"config_review_frames": "config_review"}
+_KUBELEK_PODSTRONY = {"config_review_frames": "config_review",
+                      "focal_mismatch_frames": "config_focal"}
 
 # Podpowiedzi wierszy AR-59/AR-41 - mówią, gdzie mieszka gest (nazwy z katalogu przy renderze).
 _PODPOWIEDZI_OSI = {
     "config_review_frames": ("tasks.config_review_tip", {"assign": "object.set_config_btn"}),
+    "focal_mismatch_frames": ("tasks.focal_mismatch_tip", {"assign": "object.set_config_btn"}),
+    "f_ratio_mismatch_frames": ("tasks.f_ratio_mismatch_tip", {"fix": "grid.optics.fix_action"}),
     "observatory_review_frames": ("tasks.observatory_review_tip",
                                   {"assign": "obshand.btn_assign"}),
     "object_kept_frames": ("tasks.object_kept_tip", {"persp": "perspective.superseded"}),
@@ -325,6 +341,9 @@ class TasksView(QWidget):
         self.axis_view = TelescopeAxisView(con, now_fn=now_fn)
         self.observatory_view = ObservatoryAxisView(con, now_fn=now_fn)
         self.object_view = ObjectAxisView(con, now_fn=now_fn)
+        # Gest zestawu zmienia oś teleskopu (liczby, wartość z plików, nowy wiersz „Dopisz nowy…") -
+        # Oś teleskopu odświeża się od razu, bez ręcznego „Odśwież" (wizytacja N4).
+        self.object_view.telescope_axis_changed.connect(self.axis_view.refresh)
         self._build_ui()
 
     # ---------------------------------------------------------------- budowa UI
@@ -513,6 +532,10 @@ class TasksView(QWidget):
                 self.open_object_change_run.emit(przebiegi[0])
             return
         if isinstance(action, int):
+            if action == _PAGE_TELESCOPE:
+                # Wejście na Oś teleskopu czyta bazę od nowa (wizytacja N4) - lustro
+                # `_zaznacz_kubelek`, które przeładowuje kolejkę przeglądu obiektów.
+                self.axis_view.refresh()
             self.pages.setCurrentIndex(action)         # podstrona osi
             if key in _KUBELEK_PODSTRONY:
                 self._zaznacz_kubelek(_KUBELEK_PODSTRONY[key])

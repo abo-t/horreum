@@ -65,14 +65,15 @@ from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_u
 from horreum.gui.grid_model import (
     BASE_COLS, _CEL_GEST, _CEL_WIDOK, _COLORS, CzlonRecepty, _dolacz_kopie, _dup_tip, _EdycjaKomorki,
     elizja_w_srodku, _ElizjaWSrodku, _EMPTY_DB, _EMPTY_FILTER, _EMPTY_PERSP, _EMPTY_VIEW, FIND_COLS,
-    _FLAGA_WERSJI, _FLAGA_ZASTAPIONYCH, _FLAGA_ZGODNOSCI_PLIKU, _FLAGI_CZEKAJA_NA_FAKTY,
+    _FLAGA_OPTYKI, _FLAGA_WERSJI, _FLAGA_ZASTAPIONYCH, _FLAGA_ZGODNOSCI_PLIKU,
+    _FLAGI_CZEKAJA_NA_FAKTY,
     _FLAGI_KOPII_WIODACEJ, _FLAGI_OBRAZOW,
     _FLAGI_SCIEZKI_Z_TRESCI, GridTableModel, _GRUPA_WERSJI, _half_away, _klucz_kryterium, _klucz_spec,
     kolumna_z_tresci, _kopie_wielokrotne, _lista_kanonow, _nieznane_warunki, _OBJECT_STATE_TIPS, _object_tip,
     _ODWROT_COFNIECIA, _ODWROT_PRZYWROCENIA, _ODWROT_UWAG, _ODWROT_WERDYKTU, _ODWROT_WYCOFANIA,
     _ogon_sciezki, OPERATORS,
     _pole_rozjazdu, _POWROT_PERSPEKTYWA, _POWROT_ZBIOR, PRESET_COPY_CONFLICT, _PRESET_CZYSTY, PRESET_DUPS,
-    PRESET_FILE_OBJECT_MISMATCH,
+    PRESET_F_RATIO_MISMATCH, PRESET_FILE_OBJECT_MISMATCH,
     _PRESET_LABELS, PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY, PRESET_PATH_HEADER_CONFLICT,
     PRESET_PENDING_FINISH, PRESET_READY_IMAGES, PRESET_RETIRED, PRESET_RETIRED_CONFLICT,
     PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
@@ -92,6 +93,11 @@ from horreum.gui.grid_lineage import (
 from horreum.gui.grid_lineage import calibration_class_name, _nazwa_pliku   # oś kalibracji (E4-5)
 from horreum.gui.grid_selection import _PanelStack, ReleaseDialog, SelectionBar, StagingDrawer
 from horreum.gui.grid_workers import _liczniki_listwy, PolaWorker, _sklad_zbioru, ZbiorWorker
+
+
+def _fmt_f(v):
+    """f/ do zdania recepty perspektywy optyki: `8.0` → `8`, brak → `-`."""
+    return "-" if v is None else f"{v:g}"
 
 
 class FramesView(QWidget):
@@ -525,6 +531,12 @@ class FramesView(QWidget):
         self._sep_zgodnosci = self._menu_tabeli.addSeparator()
         self.act_align_files = self._menu_tabeli.addAction(i18n.t("grid.sel.object_change_align"))
         self.act_align_files.triggered.connect(self._on_align_files)
+        # AR-129: „Popraw f/ w plikach…" - wyłącznie w perspektywie „f/ niezgodna z teleskopem".
+        # Na życzenie: gest stawia wpisy w szufladzie zapisu (ta sama droga co edycja komórki),
+        # a zapis i cofnięcie robi szuflada - plik zmienia się dopiero po „Zapisz".
+        self._sep_optyki = self._menu_tabeli.addSeparator()
+        self.act_fix_optics = self._menu_tabeli.addAction(i18n.t("grid.optics.fix_action"))
+        self.act_fix_optics.triggered.connect(self._on_fix_optics)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
         # PUSTY STAN = ZDANIE + GEST (FH-4). `self.empty` zostaje etykietą z tekstem (kontrakt testów
@@ -828,6 +840,21 @@ class FramesView(QWidget):
         if getattr(self, _FLAGA_ZGODNOSCI_PLIKU) and self._frame_ids:
             self.status_recipe.emit(_zlacz_recepty([i18n.t(
                 "grid.sel.object_change_recipe", align=i18n.t("grid.sel.object_change_align"))]))
+        # „f/ niezgodna z teleskopem" (N19): kolumna FOCRATIO pliku dochodzi do pól widoku (dopisana,
+        # nie podmieniona - wybór usera zostaje), a recepta mówi, co wpisze gest: f/ w pliku → f/
+        # teleskopu z liczbą klatek, albo powód odmowy strażnika większości.
+        if getattr(self, _FLAGA_OPTYKI) and self._frame_ids:
+            if ("FOCRATIO" in (getattr(self, "_all_keywords", None) or [])
+                    and "FOCRATIO" not in self._columns):
+                self._columns = self._columns + ["FOCRATIO"]
+                self._wypelnij_pola()
+                self.refresh(w_tle=True)
+            czlony = [i18n.t("grid.optics.recipe_line", telescope=tel or "-",
+                             file=_fmt_f(plik), target=_fmt_f(cel), n=n)
+                      for tel, plik, cel, n in queries.optics_fix_summary(self.con, self._frame_ids)]
+            self.status_recipe.emit(_zlacz_recepty([i18n.t(
+                "grid.optics.recipe", fix=i18n.t("grid.optics.fix_action"),
+                lines="; ".join(czlony))]))
 
     def apply_object_facet(self, pairs):
         """Ustaw zbiór na WSKAZANE obiekty — publiczny seam dla wejść spoza widoku (T5e: „Pokaż
@@ -3439,7 +3466,8 @@ class FramesView(QWidget):
         zastapione = bool(getattr(self, _FLAGA_ZASTAPIONYCH))
         kopie = any(getattr(self, atrybut) for atrybut in _FLAGI_KOPII_WIODACEJ)
         zgodnosc = bool(getattr(self, _FLAGA_ZGODNOSCI_PLIKU))
-        if not wersje and not zapis and not zastapione and not zgodnosc:
+        optyka = bool(getattr(self, _FLAGA_OPTYKI))
+        if not wersje and not zapis and not zastapione and not zgodnosc and not optyka:
             if poza_zaznaczeniem:
                 wiersze = ([pod_kursorem] if isinstance(pod_kursorem, dict)
                            and "_group" not in pod_kursorem else [])
@@ -3469,6 +3497,13 @@ class FramesView(QWidget):
         self._menu_kopii.menuAction().setVisible(kopie)
         self._sep_zgodnosci.setVisible(zgodnosc and (wersje or zapis or zastapione or kopie))
         self.act_align_files.setVisible(zgodnosc)
+        self._sep_optyki.setVisible(optyka and (wersje or zapis or zastapione or kopie or zgodnosc))
+        self.act_fix_optics.setVisible(optyka)
+        if optyka:
+            zajety = self._powod_zajetosci()
+            self.act_fix_optics.setEnabled(zajety is None and bool(self._selected_data_rows()))
+            self.act_fix_optics.setToolTip(i18n.t(zajety) if zajety is not None
+                                           else i18n.t("grid.optics.fix_tip"))
         if zgodnosc:
             self._sync_menu_zgodnosci()
         if kopie:
@@ -4266,6 +4301,56 @@ class FramesView(QWidget):
         self.status_message.emit(i18n.t(
             "grid.cell.staged_replaced" if zastapione else "grid.cell.staged", kw=keyword,
             old="∅" if pv.old_value is None else pv.old_value, new=pv.new_value))
+
+    def _on_fix_optics(self):
+        """„Popraw f/ w plikach…" (AR-129): zaznaczone klatki perspektywy „f/ niezgodna z teleskopem"
+        dostają w szufladzie wpis `FOCRATIO` = f/ teleskopu ich zestawu (ręka, potem pliki). Każdy
+        wpis idzie TĄ SAMĄ drogą co edycja komórki (`macro.plan_manual_change` →
+        `repo.stage_pending_replacing`, bramki celu i karty), więc zapis, „Odrzuć" i „Cofnij" są
+        wspólne z makrem. Plik zmienia się dopiero po „Zapisz" w szufladzie - na życzenie.
+        Odmowy (RAW, kilka kopii, brak f/ teleskopu) liczą się w zdaniu, nie giną."""
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        if self._rename_pending_count() > 0:             # staging na wyłączność (R2 #8)
+            self.status_message.emit(i18n.t("grid.cell.staging_busy"))
+            return
+        ids = [r["frame_id"] for r in self._selected_data_rows()]
+        if not ids:
+            return
+        wstawione, odmowy = 0, {}
+        for fid, wartosc, odmowa, teleskop in queries.optics_fix_targets(self.con, ids):
+            if wartosc is None:
+                # strażnik większości i brak celu (N1b) - powód z katalogu, policzony (N15)
+                powod = i18n.t(f"grid.optics.refused.{odmowa}", telescope=teleskop)
+                odmowy[powod] = odmowy.get(powod, 0) + 1
+                continue
+            pv, powod = macro_mod.plan_manual_change(
+                queries.writeback_frame_targets(self.con, [fid]), "FOCRATIO", f"{wartosc:g}",
+                cards_fn=lambda lid: queries.location_cards(self.con, lid))
+            if pv is None:
+                odmowy[powod] = odmowy.get(powod, 0) + 1
+                continue
+            if not wstawione:
+                # „Cofnij" poprzedniego zapisu znika dopiero, gdy do szuflady COŚ wchodzi (N15)
+                self._dismiss_undo()
+                if self._run_id is None:
+                    self._run_id = uuid.uuid4().hex
+                if self._komorki_run != self._run_id:
+                    self._komorki_run, self._komorki = self._run_id, set()
+            repo.stage_pending_replacing(self.con, run_id=self._run_id, preview=pv)
+            self._komorki.add((pv.location_id, pv.keyword))
+            wstawione += 1
+        if wstawione:
+            self._note_preview_takeover("macro")
+            self.model.set_preview(self._podglad_ze_stagingu())
+            self._refresh_drawer()
+        zdanie = i18n.t_plural("grid.optics.staged", wstawione)
+        if odmowy:
+            zdanie += i18n.t("grid.optics.skipped", reasons="; ".join(
+                f"{p} ({n})" for p, n in sorted(odmowy.items(), key=lambda pn: -pn[1])))
+        self.status_message.emit(zdanie)
 
     def _on_macro_clear(self):
         self.model.set_preview({})

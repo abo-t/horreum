@@ -103,8 +103,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v38_po_migracji(tmp_path):
-    """0038 podnosi user_version do 38 (świeża baza leci 0002→…→0038 sekwencyjnie; 0025 = wersja
+def test_user_version_v39_po_migracji(tmp_path):
+    """0039 podnosi user_version do 39 (świeża baza leci 0002→…→0039 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -116,13 +116,14 @@ def test_user_version_v38_po_migracji(tmp_path):
     `object_change_run`, pozycje ze stanem sprzed `pending_object_change` i katalogi gestu `run_dir`,
     AR-17 krok 3; 0037 = zapis z zeznaniem wstrzymanym `withheld_write`, wiązanie
     `pending_changes.withheld_id` i wersja decyzji ręki `header_backups.hand_version`, AR-82;
-    0038 = zamiar podmiany drogi atomowej `replace_intent`, AR-64).
+    0038 = zamiar podmiany drogi atomowej `replace_intent`, AR-64; 0039 = optyka teleskopu z ręki
+    `telescope.focal_user`/`f_ratio_user`, AR-128).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 38
-    assert db.SCHEMA_VERSION == 38
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 39
+    assert db.SCHEMA_VERSION == 39
     con.close()
 
 
@@ -293,6 +294,63 @@ def test_0038_zamiar_podmiany_przyrost_na_bazie_v37_i_CHECK(tmp_path):
             con.execute(wstaw, zly)
     con.execute(wstaw, (s, s, 7, "returned", None, None))
     assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    con.close()
+
+
+def _baza_v38_z_teleskopami(path):
+    """Baza v38 z reprezentatywną osią teleskopu: RC8R powołany RĘKĄ (zdarzenie `user:local`,
+    1200 mm, f/ NULL) z kolumną ROZJECHANĄ od payloadu (1000 - dawny przebieg pisał istniejący
+    wiersz; bramka planu T24 `kimi` Z10), teleskop automatu (A140R, aktor `grouper`), korzeń
+    i scalony członek, park 1/0/NULL, statusy `approved`/`proposed`."""
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 38:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    tel = ("INSERT INTO telescope(id, telescop_canon, label, f_ratio_nominal, focal_nominal, status, "
+           "merged_into, created_at, in_park) VALUES (?, ?, ?, ?, ?, ?, ?, 't', ?)")
+    con.execute(tel, (1, "A140R", None, 5.6, 784, "proposed", None, 1))
+    con.execute(tel, (2, "ED120R", "ED 120", 6.6, 789, "approved", None, 0))
+    con.execute(tel, (3, "ED", None, None, 796, "proposed", 2, None))
+    con.execute(tel, (4, "RC8R", None, None, 1000, "proposed", None, 0))
+    ev = ("INSERT INTO event(ts, actor, verb, target, payload) VALUES ('t', ?, 'telescope.proposed', "
+          "?, ?)")
+    con.execute(ev, ("grouper", "telescope:1", json.dumps(
+        {"telescop_canon": "A140R", "f_ratio_nominal": 8.0, "focal_nominal": 784})))
+    # pierwsze zdarzenie ręki BEZ ogniskowej (bramka kodu N11): `via` ma wskazać zdarzenie, z którego
+    # wzięto wartość, nie najstarsze z ręki
+    con.execute(ev, ("user:local", "telescope:4", json.dumps(
+        {"telescop_canon": "RC8R", "f_ratio_nominal": None, "focal_nominal": None,
+         "member_count": 0})))
+    con.execute(ev, ("user:local", "telescope:4", json.dumps(
+        {"telescop_canon": "RC8R", "f_ratio_nominal": None, "focal_nominal": 1200,
+         "member_count": 0})))
+    con.commit()
+    return con
+
+
+def test_0039_optyka_reki_backfill_z_payloadu_na_bazie_v38(tmp_path):
+    """0039 na bazie v38 z danymi (bramka planu T24 `sol` Z9, `kimi` Z10): stare kolumny i wiersze
+    teleskopów nietknięte; RC8R powołany ręką dostaje `focal_user` = 1200 z PAYLOADU (nie 1000
+    z kolumny) i zdarzenie z pochodzeniem; teleskopy automatu - NULL w obu kolumnach ręki; CHECK
+    obu kolumn odrzuca 0; druga migracja = no-op.
+    Falsyfikatory: backfill z kolumny daje 1000; brak backfillu daje NULL; zdjęty CHECK przyjmuje 0."""
+    con = _baza_v38_z_teleskopami(str(tmp_path / "h.db"))
+    kolumny = ("id, telescop_canon, label, f_ratio_nominal, focal_nominal, status, merged_into, "
+               "created_at, in_park")
+    przed = [tuple(r) for r in con.execute(f"SELECT {kolumny} FROM telescope ORDER BY id")]
+    assert db.migrate(con) == db.SCHEMA_VERSION == 39
+    assert [tuple(r) for r in con.execute(f"SELECT {kolumny} FROM telescope ORDER BY id")] == przed
+    reka = {r[0]: (r[1], r[2]) for r in con.execute(
+        "SELECT id, focal_user, f_ratio_user FROM telescope")}
+    assert reka == {1: (None, None), 2: (None, None), 3: (None, None), 4: (1200.0, None)}
+    zdarzenia = [(r[0], r[1], json.loads(r[2])) for r in con.execute(
+        "SELECT actor, verb, payload FROM event WHERE actor = 'migration:0039'")]
+    assert zdarzenia == [("migration:0039", "telescope.focal_user_set",
+                          {"after": 1200.0, "before": None, "via": "proposed:3"})]
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    for kol in ("focal_user", "f_ratio_user"):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(f"UPDATE telescope SET {kol} = 0 WHERE id = 1")
     con.close()
 
 

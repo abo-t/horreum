@@ -40,8 +40,10 @@ def test_spis_zna_KAZDA_os_gestu_ktora_repo_ma():
         "observatory_hand", "testimony_hand", "notes_hand"}
     # E5-1: odniesienie niesie też migawkę TOŻSAMOŚCI osi obiektu i znak wodny dziennika - to nie
     # są osie (nie ma ich w `counts`), tylko materiał rozstrzygnięcia po klatkach.
+    # AR-128: oś teleskopu jest MIGAWKĄ REKORDÓW (`telescope_hand`), nie liczbą - liczność tej osi
+    # nie widzi nadpisania pola, więc nie ma jej w `counts`.
     assert set(_spis().snapshot) == set(_spis().counts) | {"object_hand_frames",
-                                                           "event_watermark"}
+                                                           "event_watermark", "telescope_hand"}
 
 
 def test_odniesienie_bez_nowej_osi_wczytuje_sie_jako_zero():

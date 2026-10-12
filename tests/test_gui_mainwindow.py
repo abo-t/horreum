@@ -381,7 +381,9 @@ def test_lista_zadan_hugguje_tresc(qapp, tmp_path):
         win.tasks_view.refresh_counts()
         oczekiwana = tasks.sizeHintForRow(0) * tasks.count() + 2 * tasks.frameWidth()
         assert tasks.height() == oczekiwana
-        assert tasks.height() < 300                        # treść, nie cały pion strony
+        # treść, nie cały pion strony; sufit podniesiony o dwa wiersze optyki (AR-128/AR-129) -
+        # falsyfikator „lista rośnie z oknem" niżej zostaje bez zmian
+        assert tasks.height() < 340
         win.resize(1400, 1800)                             # dwa razy wyższe okno…
         qapp.processEvents()
         assert tasks.height() == oczekiwana                # …lista tej samej wysokości

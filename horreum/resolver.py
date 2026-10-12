@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass, field
 
 from . import repo
-from .grouper import NO_TELESCOPE_KINDS
+from .grouper import NO_TELESCOPE_KINDS, OPTICS_EVIDENCE_KINDS, OPTICS_TOLERANCE
 from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
 from .resolve.catalog import catalog_canon, header_form
@@ -782,6 +782,11 @@ class ReviewState:
     # klatka z dwiema kopiami może mieć dwa rodzaje, więc tylko liczba kopii się sumuje.
     # Klucze `io`/`parse`/`db`/`unknown` - kontrakt `unreadable_kind_counts`.
     unreadable_kinds: dict = field(default_factory=lambda: dict.fromkeys(UNREADABLE_KINDS, 0))
+    # OPTYKA NIEZGODNA Z TELESKOPEM (AR-128 `Q8`, AR-129) - POZA `total`, świadomie: `total` to
+    # kolejka „klatka bez osi", która karmi raport delty i kotwice akceptacji, a ta klatka oś MA;
+    # jej rozjazd z teleskopem nie jest brakiem. Predykat: `optics_mismatch_frame_ids`.
+    focal_mismatch: int = 0   # ogniskowa pliku > `OPTICS_TOLERANCE` od teleskopu (wybór ręki z listy)
+    f_ratio_mismatch: int = 0  # f/ pliku > `OPTICS_TOLERANCE` od teleskopu (naprawa pliku na życzenie)
 
 
 # Rodzaje awarii odczytu kopii w kolejności raportu (P4-2): `io` dysk/dostęp, `parse` nagłówek,
@@ -895,7 +900,59 @@ def review_state(con):
         "           AND l.unreadable_since IS NOT NULL))", (off_axis,)).fetchone()[0]
     return ReviewState(no_config=no_config, headerless=headerless, no_camera=no_camera,
                        kind_unknown=kind_unknown, unreadable=unreadable, total=total,
-                       unreadable_kinds=unreadable_kinds)
+                       unreadable_kinds=unreadable_kinds,
+                       focal_mismatch=len(optics_mismatch_frame_ids(con, "focal")),
+                       f_ratio_mismatch=len(optics_mismatch_frame_ids(con, "f_ratio")))
+
+
+OPTICS_FIELDS = ("focal", "f_ratio")
+"""Pola optyki z kubełkiem „niezgodna z teleskopem" (AR-128 `Q8`, AR-129)."""
+
+
+def optics_mismatch_frame_ids(con, field):
+    """Klatki, których optyka w PLIKU nie zgadza się z teleskopem zestawu - JEDYNY właściciel
+    predykatu dwóch kubełków Porządków („Ogniskowa niezgodna z teleskopem" - `field='focal'`, AR-128
+    `Q8`; „f/ niezgodna z teleskopem" - `field='f_ratio'`, AR-129). Read-only; `set` id klatek.
+
+    Warunki (każdy ze swoim właścicielem):
+      * klatka AKTYWNA (`superseded_by`/`retired_at` NULL);
+      * OGNISKOWA: rodzaj z `grouper.OPTICS_EVIDENCE_KINDS` (lighty i flaty; stosy poza - D-1012-2
+        `Q15`) i zestaw z AUTOMATU (`config_source IS NULL`): `'user'` to trwały wybór teleskopu ręką
+        (`repo.STICKY_CONFIG_SOURCES`), jego drogą zmiany jest `config_by_hand`;
+      * f/ (plan 2.7, bramka kodu N9/N10): wyłącznie LIGHTY, BEZ warunku źródła zestawu - klatka
+        przypięta ręką do teleskopu f/4 z f/8 w pliku to dokładnie „plik kłamie o f/", a gest naprawy
+        pliku ma do niej dojść;
+      * zeznanie pola jest (brak f/ to brak, nie sprzeczność - D-1012-2 `Q12`) i różni się od wartości
+        KORZENIA zestawu (ręka, potem pliki) o więcej niż `grouper.OPTICS_TOLERANCE` (względnie).
+    Dwa literały, nie f-string (bramka AST): pole wybiera gałąź."""
+    kinds = json.dumps(list(OPTICS_EVIDENCE_KINDS))
+    if field == "focal":
+        rows = con.execute(
+            "SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id "
+            "JOIN config c ON c.id = f.config_id "
+            "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+            "JOIN telescope r ON r.id = tc.canon_id "
+            "WHERE f.superseded_by IS NULL AND f.retired_at IS NULL AND f.config_source IS NULL "
+            "AND f.kind IN (SELECT value FROM json_each(?)) AND h.focallen IS NOT NULL "
+            "AND COALESCE(r.focal_user, r.focal_nominal) > 0 "
+            "AND abs(h.focallen - COALESCE(r.focal_user, r.focal_nominal)) "
+            "    > ? * COALESCE(r.focal_user, r.focal_nominal)",
+            (kinds, OPTICS_TOLERANCE)).fetchall()
+    elif field == "f_ratio":
+        rows = con.execute(
+            "SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id "
+            "JOIN config c ON c.id = f.config_id "
+            "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+            "JOIN telescope r ON r.id = tc.canon_id "
+            "WHERE f.superseded_by IS NULL AND f.retired_at IS NULL "
+            "AND f.kind = 'light' AND h.focratio_raw IS NOT NULL "
+            "AND COALESCE(r.f_ratio_user, r.f_ratio_nominal) > 0 "
+            "AND abs(h.focratio_raw - COALESCE(r.f_ratio_user, r.f_ratio_nominal)) "
+            "    > ? * COALESCE(r.f_ratio_user, r.f_ratio_nominal)",
+            (OPTICS_TOLERANCE,)).fetchall()
+    else:
+        raise ValueError(f"pole optyki {field!r} - dozwolone {OPTICS_FIELDS}")
+    return {r[0] for r in rows}
 
 
 NO_OBJECT_CARD_FILETYPES = ("raw",)

@@ -6,6 +6,30 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Dodane
+
+- **Ogniskowa i f/ teleskopu wpisane ręką.** Dwuklik w kolumnach **f/** i **Ogniskowa** na Osi
+  teleskopu zapisuje Twoją wartość. Pliki zostają bez zmian. Twoja wartość wygrywa w osi, planerze
+  i Porządkach, a obok dalej widać, co mówią pliki. **Przywróć z plików** ją zdejmuje.
+- **Panel Zestawy** na Osi teleskopu: piksel, skala ″/px przy bin 1 i bin 2 i kadr dla każdej
+  kamery, a nad nimi średnica wyliczona z ogniskowej i f/.
+- **Porządki: „Ogniskowa niezgodna z teleskopem"** - wybierasz teleskop z listy tych o pasującej
+  ogniskowej (5 %) albo dopisujesz nowy razem z parkiem. Horreum nigdy nie zakłada teleskopu sam.
+- **Porządki: „f/ niezgodna z teleskopem"** - perspektywa z kolumną FOCRATIO i gestem **Popraw f/
+  w plikach…** przez szufladę zapisu, z cofnięciem. Gest poprawia tylko mniejszość plików. Gdy f/
+  teleskopu nie zgadza się z większością jego plików, odmawia i mówi dlaczego.
+
+### Zmienione
+
+- Ogniskowa i f/ teleskopu to wartość najczęstsza wśród klatek. Liczy się od nowa przy pierwszym
+  otwarciu bazy w tej wersji, przy każdym **Przyjmij** i po każdym przypięciu klatek do teleskopu.
+  Dotąd zapisywała się z pierwszej klatki i już się nie zmieniała - A140R pokazywał f/8.0 przy
+  7370 klatkach f/5.6. Komórka, która nie zgadza się z plikami, mówi „nieaktualne”.
+- Planer liczy kadr z ogniskowej teleskopu: najpierw Twojej, potem z plików. Zestawy teleskopu
+  scalonego są widoczne pod teleskopem, w który go scalono.
+- Schemat bazy v39: kolumny ręki optyki teleskopu. Teleskop dopisany kiedyś ręką przenosi swoją
+  ogniskową do nowej kolumny.
+
 ## [0.11.0] - 2026-10-12
 
 Wydanie o **całej drodze jednego obiektu** - od nocy na dysku do gotowego stosu w archiwum. Dotąd

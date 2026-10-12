@@ -5596,4 +5596,173 @@ CATALOG = {
                "many": "zmiana obiektu - {n} plików w nowym miejscu albo pod nową nazwą"},
         "en": {"one": "object change - {n} file in a new place or under a new name",
                "other": "object change - {n} files in a new place or under a new name"}},
+    # ---- optyka teleskopu: ręka, pliki, zestawy, kubełki (AR-128, AR-129, D-1012-2) ----
+    "axis.tel.rigs": {"pl": "Zestawy (z planera):", "en": "Setups (from the planner):"},
+    "axis.tel.restore_optics": {"pl": "Przywróć z plików", "en": "Restore from files"},
+    "axis.tel.restore_optics_tip": {
+        "pl": "Zdejmij ogniskowę i f/ wpisane ręką - oś wróci do wartości z plików. "
+              "Pliki nie są ruszane.",
+        "en": "Remove the focal length and f/ entered by hand - the axis returns to the values "
+              "from the files. The files are not touched."},
+    "axis.tel.files_focal": {"pl": "pliki: {v} mm ({n} kl.)", "en": "files: {v} mm ({n} fr.)"},
+    "axis.tel.files_f_ratio": {"pl": "pliki: f/{v} ({n} kl.)", "en": "files: f/{v} ({n} fr.)"},
+    "axis.tel.files_none": {"pl": "pliki: brak zeznania", "en": "files: no value"},
+    "axis.tel.optics_hand_tip": {
+        "pl": "Wartość wpisana ręką - wygrywa w osi, planerze i Porządkach.\n{files}\n"
+              "Dwuklik: zmień; pusty wpis albo „Przywróć z plików”: wróć do plików.",
+        "en": "Value entered by hand - it wins on the axis, in the planner and in Housekeeping.\n"
+              "{files}\nDouble-click: change; empty entry or “Restore from files”: back to the files."},
+    "axis.tel.optics_files_tip": {
+        "pl": "Wartość z plików (najczęstsza wśród klatek tego teleskopu).\n{files}\n"
+              "Dwuklik: wpisz własną - pliki nie są ruszane.",
+        "en": "Value from the files (the most common among this telescope's frames).\n{files}\n"
+              "Double-click: enter your own - the files are not touched."},
+    "axis.tel.optics_not_number": {"pl": "„{text}” to nie liczba",
+                                   "en": "“{text}” is not a number"},
+    "axis.tel.optics_saved": {"pl": "Zapisano wartość ręki.", "en": "Hand value saved."},
+    "axis.tel.optics_cleared": {"pl": "Ręka zdjęta - oś mówi wartością z plików.",
+                                "en": "Hand value removed - the axis uses the files again."},
+    "axis.tel.optics_unchanged": {"pl": "Optyka bez zmian.", "en": "Optics unchanged."},
+    "axis.tel.optics_rejected": {"pl": "Nie zapisano: {e}", "en": "Not saved: {e}"},
+    "axis.tel.aperture": {"pl": "średnica (wyliczona): {d} mm = {focal} / {f}",
+                          "en": "aperture (computed): {d} mm = {focal} / {f}"},
+    "axis.tel.aperture_unknown": {"pl": "średnica: brak ogniskowej albo f/ - wpisz, żeby policzyć",
+                                  "en": "aperture: focal length or f/ missing - enter it to compute"},
+    "axis.tel.rig_line": {
+        "pl": "{camera} · piksel {px} µm · {s1}″/px (bin 2: {s2}″/px) · kadr {fx}′ × {fy}′",
+        "en": "{camera} · pixel {px} µm · {s1}″/px (bin 2: {s2}″/px) · field {fx}′ × {fy}′"},
+    "axis.tel.rig_unknown": {"pl": "{camera} · {reason}", "en": "{camera} · {reason}"},
+    "axis.tel.rig_reason.no_focal": {"pl": "brak ogniskowej", "en": "no focal length"},
+    "axis.tel.rig_reason.no_pixel": {"pl": "brak rozmiaru piksela", "en": "no pixel size"},
+    "axis.tel.rig_reason.no_naxis": {"pl": "brak wymiarów klatki", "en": "no frame dimensions"},
+    "axis.tel.rig_reason.mixed_optics": {"pl": "klatki różnej optyki - kadr nieznany",
+                                         "en": "frames of mixed optics - field unknown"},
+    "object.config_focal_line": {"pl": "- ogniskowa niezgodna z teleskopem",
+                                 "en": "- focal length disagrees with the telescope"},
+    "object.frames_config_focal": {
+        "pl": "Klatki z ogniskową niezgodną z teleskopem ({n})",
+        "en": "Frames whose focal length disagrees with the telescope ({n})"},
+    "object.set_config_tip_focal": {
+        "pl": "Ogniskowa w pliku odbiega od teleskopu o ponad 5 %. Wybierz teleskop z listy tych, "
+              "które mieszczą się w tej różnicy, albo dopisz nowy. Zapis idzie do BAZY; pliki "
+              "zostają bez zmian.",
+        "en": "The focal length in the file differs from the telescope by more than 5 %. Pick a "
+              "telescope from those within that difference, or add a new one. The write goes to "
+              "the DATABASE; the files stay unchanged."},
+    "cfg.title_focal": {"pl": "Teleskop dla ogniskowej z plików",
+                        "en": "Telescope for the focal length in the files"},
+    "cfg.head_focal": {
+        "pl": "{folders} · {frames} - ogniskowa w pliku nie zgadza się z teleskopem, do którego "
+              "klatki trafiły. Lista pokazuje teleskopy mieszczące się w 5 % od tej ogniskowej; "
+              "„Dopisz nowy…” zakłada teleskop razem z przypisaniem. Zapis idzie do BAZY.",
+        "en": "{folders} · {frames} - the focal length in the file disagrees with the telescope "
+              "these frames went to. The list shows telescopes within 5 % of that focal length; "
+              "“Add new…” creates a telescope together with the assignment. The write goes to "
+              "the DATABASE."},
+    "cfg.focal_item": {"pl": "pliki: {focal} mm · dziś: {telescope} {source_focal} mm ({park})",
+                       "en": "files: {focal} mm · now: {telescope} {source_focal} mm ({park})"},
+    "cfg.err_group_focal": {
+        "pl": "Grupa {folder} ma w plikach {focal} mm - poza 5 % od teleskopu ({telescope} mm). "
+              "Odznacz ją albo wybierz inny teleskop.",
+        "en": "Group {folder} has {focal} mm in its files - more than 5 % from the telescope "
+              "({telescope} mm). Uncheck it or pick another telescope."},
+    "cfg.park_yes": {"pl": "w parku", "en": "in park"},
+    "cfg.park_no": {"pl": "historyczny", "en": "historical"},
+    "cfg.park_unsaid": {"pl": "park nieoznaczony", "en": "park not set"},
+    "cfg.add_new": {"pl": "Dopisz nowy…", "en": "Add new…"},
+    "cfg.new_name": {"pl": "Nazwa teleskopu:", "en": "Telescope name:"},
+    "cfg.new_focal": {"pl": "Ogniskowa [mm]:", "en": "Focal length [mm]:"},
+    "cfg.new_f_ratio": {"pl": "f/:", "en": "f/:"},
+    "cfg.new_f_ratio_hint": {"pl": "puste = nie wiem", "en": "empty = unknown"},
+    "cfg.new_park": {"pl": "W parku:", "en": "In park:"},
+    "cfg.new_park_pick": {"pl": "- wybierz -", "en": "- pick -"},
+    "cfg.err_new_focal": {"pl": "Podaj ogniskową nowego teleskopu.",
+                          "en": "Enter the focal length of the new telescope."},
+    "cfg.err_new_park": {"pl": "Zaznaczone grupy pochodzą z teleskopów o różnym parku - wybierz park.",
+                         "en": "The checked groups come from telescopes with different park "
+                               "settings - pick one."},
+    "tasks.focal_mismatch_frames": {"pl": "Ogniskowa niezgodna z teleskopem",
+                                    "en": "Focal length disagrees with the telescope"},
+    "tasks.focal_mismatch_tip": {
+        "pl": "Klatki, których ogniskowa w pliku odbiega od teleskopu o ponad 5 %. Horreum nie "
+              "zakłada teleskopu samo - wybierasz z listy pasujących albo dopisujesz nowy.\n"
+              "W podstronie: kubełek jest zaznaczony, gest „{assign}”.",
+        "en": "Frames whose focal length in the file differs from the telescope by more than 5 %. "
+              "Horreum does not create telescopes on its own - you pick a matching one or add a "
+              "new one.\nOn the subpage: the bucket is selected, gesture “{assign}”."},
+    "tasks.f_ratio_mismatch_frames": {"pl": "f/ niezgodna z teleskopem",
+                                      "en": "f/ disagrees with the telescope"},
+    "tasks.f_ratio_mismatch_tip": {
+        "pl": "Klatki, których f/ w pliku odbiega od teleskopu o ponad 5 % (np. f/200 zamiast "
+              "f/8). Brak f/ w pliku tu nie trafia.\nW Zbiorach: zaznacz klatki, prawy klik → "
+              "„{fix}” - zapis do plików dopiero po „Zapisz” w szufladzie, z cofnięciem.",
+        "en": "Frames whose f/ in the file differs from the telescope by more than 5 % (e.g. f/200 "
+              "instead of f/8). A missing f/ does not land here.\nIn Collections: select frames, "
+              "right-click → “{fix}” - files are written only after “Save” in the drawer, with undo."},
+    "perspective.f_ratio_mismatch": {"pl": "f/ niezgodna z teleskopem",
+                                     "en": "f/ disagrees with the telescope"},
+    "grid.criteria.only_f_ratio_mismatch": {
+        "pl": "tylko f/ w pliku niezgodna z teleskopem",
+        "en": "only f/ in the file disagreeing with the telescope"},
+    "grid.optics.fix_action": {"pl": "Popraw f/ w plikach (zgodnie z teleskopem)…",
+                               "en": "Fix f/ in the files (to match the telescope)…"},
+    "grid.optics.fix_tip": {
+        "pl": "Wpisy FOCRATIO = f/ teleskopu trafią do szuflady zapisu; pliki zmienią się dopiero "
+              "po „Zapisz”, z cofnięciem.",
+        "en": "FOCRATIO = telescope f/ entries go to the write drawer; files change only after "
+              "“Save”, with undo."},
+    "grid.optics.staged": {
+        "pl": {"one": "W szufladzie: {n} wpis f/.", "few": "W szufladzie: {n} wpisy f/.",
+               "many": "W szufladzie: {n} wpisów f/."},
+        "en": {"one": "In the drawer: {n} f/ entry.", "other": "In the drawer: {n} f/ entries."}},
+    "grid.optics.skipped": {"pl": " Pominięte: {reasons}.", "en": " Skipped: {reasons}."},
+    "grid.optics.refused.no_target": {
+        "pl": "{telescope} nie ma f/ - wpisz ją na Osi teleskopu",
+        "en": "{telescope} has no f/ - enter it on the Telescope axis"},
+    "grid.optics.refused.no_files": {
+        "pl": "pliki {telescope} nie zeznają f/ - nie ma większości do porównania",
+        "en": "the files of {telescope} carry no f/ - no majority to compare with"},
+    "grid.optics.refused.majority": {
+        "pl": "f/ teleskopu {telescope} nie zgadza się z większością jego plików - sprawdź Oś "
+              "teleskopu albo uruchom Dostawę; gest poprawia mniejszość, nie większość",
+        "en": "the f/ of {telescope} disagrees with most of its files - check the Telescope axis "
+              "or run Intake; the gesture fixes the minority, never the majority"},
+    "grid.optics.recipe": {
+        "pl": "f/ w pliku → f/ teleskopu: {lines}. Zaznacz klatki, prawy klik → „{fix}”.",
+        "en": "f/ in the file → telescope f/: {lines}. Select frames, right-click → “{fix}”."},
+    "grid.optics.recipe_line": {"pl": "{telescope} {file} → {target} ({n} kl.)",
+                                "en": "{telescope} {file} → {target} ({n} fr.)"},
+    "axis.tel.optics_header": {"pl": "Optyka:", "en": "Optics:"},
+    "axis.tel.optics_busy": {"pl": "Trwa etap Dostawy - optyka teleskopu poczeka na jego koniec.",
+                             "en": "An Intake stage is running - telescope optics wait for it to end."},
+    "axis.tel.optics_earlier_tip": {
+        "pl": "Pliki nie zeznają tej wartości - zapisano ją wcześniej (np. przy powołaniu "
+              "teleskopu).\n{files}\nDwuklik: potwierdź albo wpisz własną.",
+        "en": "The files carry no such value - it was stored earlier (e.g. when the telescope was "
+              "created).\n{files}\nDouble-click: confirm it or enter your own."},
+    "axis.tel.optics_stale_tip": {
+        "pl": "Nieaktualne - Dostawa przeliczy (pliki mówią dziś inaczej).\n{files}\n"
+              "Dwuklik: wpisz własną wartość.",
+        "en": "Out of date - Intake will recompute it (the files say otherwise today).\n{files}\n"
+              "Double-click: enter your own value."},
+    "axis.tel.restore_focal_files": {"pl": "Ogniskowa wróci do plików: {v} mm.",
+                                     "en": "Focal length returns to the files: {v} mm."},
+    "axis.tel.restore_focal_earlier": {
+        "pl": "Pliki nie zeznają ogniskowej - zostanie {v} mm zapisane wcześniej.",
+        "en": "The files carry no focal length - {v} mm stored earlier will remain."},
+    "axis.tel.restore_focal_none": {"pl": "Pliki nie zeznają ogniskowej - pole zostanie puste.",
+                                    "en": "The files carry no focal length - the field stays empty."},
+    "axis.tel.restore_f_ratio_files": {"pl": "f/ wróci do plików: f/{v}.",
+                                       "en": "f/ returns to the files: f/{v}."},
+    "axis.tel.restore_f_ratio_earlier": {
+        "pl": "Pliki nie zeznają f/ - zostanie f/{v} zapisane wcześniej.",
+        "en": "The files carry no f/ - f/{v} stored earlier will remain."},
+    "axis.tel.restore_f_ratio_none": {"pl": "Pliki nie zeznają f/ - pole zostanie puste.",
+                                      "en": "The files carry no f/ - the field stays empty."},
+    "object.config_focal_info_empty": {
+        "pl": "Ogniskowe w plikach zgadzają się z teleskopami - nic do wyboru.",
+        "en": "Focal lengths in the files agree with the telescopes - nothing to pick."},
+    "object.config_new_telescope_undo": {
+        "pl": " Pomyłka? Scal „{telescope}” na Osi teleskopu z właściwym teleskopem.",
+        "en": " Mistake? Merge “{telescope}” into the right telescope on the Telescope axis."},
 }

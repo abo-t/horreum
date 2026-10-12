@@ -776,7 +776,7 @@ def _main(argv=None):
             con.close()
             raise db.SchemaTooNew(version)
         spis = audit.human_facts_census(con)
-        spadki, rozbior = {}, None
+        spadki, rozbior, rozbior_tel = {}, None, None
         if args.baseline:
             with open(args.baseline, encoding="utf-8") as fh:
                 odniesienie = audit.HumanFacts(**json.load(fh))
@@ -785,8 +785,11 @@ def _main(argv=None):
             przejete = audit.path_to_header_since(con, odniesienie.event_watermark)
             # Gest „Przywroc automat” zdejmuje wskazanie kalibratora reka - decyzja, nie ubytek.
             zdjete_reka = audit.calibration_hand_restored_since(con, odniesienie.event_watermark)
-            spadki = spis.spadki(odniesienie, przejete, zdjete_reka)
+            # AR-128: zmiana pola osi teleskopu gestem reki po znaku wodnym - decyzja, nie ubytek.
+            gesty_tel = audit.telescope_hand_gestures_since(con, odniesienie.event_watermark)
+            spadki = spis.spadki(odniesienie, przejete, zdjete_reka, gesty_tel)
             rozbior = spis.reka_obiektu(odniesienie, przejete)
+            rozbior_tel = spis.reka_teleskopu(odniesienie, gesty_tel)
         con.close()
         if args.json:
             # Odniesienie niesie migawke tozsamosci osi obiektu i znak wodny dziennika - bez nich
@@ -795,7 +798,12 @@ def _main(argv=None):
         else:
             lines = [f"Horreum human-facts {args.db}:"]
             lines += [f"  {k:<18} {v}" for k, v in spis.counts.items()]
+            if spis.telescope_hand is not None:
+                lines.append(f"  {'telescope_hand':<18} {len(spis.telescope_hand)} (rekordy osi teleskopu)")
             if args.baseline:
+                if rozbior_tel:
+                    lines += [f"  teleskop {tid}: pole {pole} {bylo!r} -> {jest!r} bez gestu reki"
+                              for tid, pole, bylo, jest in rozbior_tel[:20]]
                 lines.append(f"  odniesienie: {args.baseline}")
                 if rozbior is None:
                     lines.append("  odniesienie bez migawki klatek - porownanie po sumach")

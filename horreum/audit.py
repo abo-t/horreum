@@ -522,12 +522,27 @@ class HumanFacts:
     ręki (`path_to_header_since`). Poza porównaniem równości spisów: dwa spisy o tych samych
     faktach ręki są równe, choćby między nimi przybyło zdarzeń bez związku z ręką."""
 
+    telescope_hand: tuple | None = None
+    """OŚ TELESKOPU - trzynasta oś (AR-128, bramka planu T24 zarzut 8): MIGAWKA REKORDÓW, nie liczba.
+    Krotka `(id, focal_user, f_ratio_user, label, in_park, merged_into, status)` dla każdego
+    teleskopu z którymkolwiek faktem ręki (`TELESCOPE_HAND_FIELDS`), posortowana po id.
+
+    Liczność tej osi nie mówi nic: automat nadpisujący `focal_user` 800 → 900 albo zamieniający
+    etykiety dwóch teleskopów nie zmienia liczby rekordów, a porównanie `<` meldowałoby „ubytków
+    BRAK". Ubytkiem jest więc rekord odniesienia, którego id zniknął albo którego POLE ma inną
+    wartość - chyba że dziennik po znaku wodnym niesie gest ręki na tym polu tego teleskopu
+    (`telescope_hand_gestures_since`): zmiana ręki ręką nie jest wycofaniem. Nowe rekordy wolno
+    dodać. `None` = odniesienie sprzed 0039 - oś poza porównaniem."""
+
     def __post_init__(self):
         # Odniesienie z JSON-a niesie listę; spis z bazy krotkę. Jedna postać, żeby równość spisów
         # mówiła o faktach, a nie o drodze, którą przyszły.
         if self.object_hand_frames is not None:
             object.__setattr__(self, "object_hand_frames",
                                tuple(sorted(int(i) for i in self.object_hand_frames)))
+        if self.telescope_hand is not None:
+            object.__setattr__(self, "telescope_hand", tuple(sorted(
+                _telescope_hand_record(r) for r in self.telescope_hand)))
 
     @property
     def counts(self):
@@ -550,7 +565,27 @@ class HumanFacts:
         return {**self.counts,
                 "object_hand_frames": (None if self.object_hand_frames is None
                                        else list(self.object_hand_frames)),
+                "telescope_hand": (None if self.telescope_hand is None
+                                   else [list(r) for r in self.telescope_hand]),
                 "event_watermark": self.event_watermark}
+
+    def reka_teleskopu(self, wczesniej, gesty=frozenset()):
+        """Ubytki osi teleskopu PO REKORDACH - posortowana krotka `(id, pole, było, jest)`, albo
+        `None`, gdy któryś spis nie niesie migawki. Teleskop, którego rekordu bieżąca migawka nie ma
+        (wszystkie fakty ręki zniknęły albo zniknął wiersz), porównuje się z rekordem PUSTYM - każde
+        pole, które ręka miała, jest wtedy ubytkiem. `gesty` = `{(id, pole)}` zmienione gestem ręki
+        po znaku wodnym odniesienia (`telescope_hand_gestures_since`) - wyjaśnione, nie ubytek."""
+        if wczesniej.telescope_hand is None or self.telescope_hand is None:
+            return None
+        teraz = {r[0]: r for r in self.telescope_hand}
+        out = []
+        for rec in wczesniej.telescope_hand:
+            tid = rec[0]
+            biezacy = teraz.get(tid, (tid,) + (None,) * len(TELESCOPE_HAND_FIELDS))
+            for i, pole in enumerate(TELESCOPE_HAND_FIELDS, start=1):
+                if rec[i] != biezacy[i] and (tid, pole) not in gesty:
+                    out.append((tid, pole, rec[i], biezacy[i]))
+        return tuple(out)
 
     def reka_obiektu(self, wczesniej, przejete=frozenset()):
         """Rozbiór zniknięć faktu ręki osi obiektu PO TOŻSAMOŚCI - `(utracone, przejete_przez_naglowek)`
@@ -564,7 +599,7 @@ class HumanFacts:
         zniknely = set(wczesniej.object_hand_frames) - set(self.object_hand_frames)
         return tuple(sorted(zniknely - przejete)), tuple(sorted(zniknely & przejete))
 
-    def spadki(self, wczesniej, przejete=frozenset(), zdjete_reka=0):
+    def spadki(self, wczesniej, przejete=frozenset(), zdjete_reka=0, gesty_teleskopu=frozenset()):
         """Osie, na których fakt ręki UBYŁ wobec wcześniejszego spisu — `{oś: (było, jest)}`.
 
         Pusty słownik == warunek dotrzymany. WZROST NIE JEST NARUSZENIEM: nowy materiał wolno
@@ -580,8 +615,16 @@ class HumanFacts:
         OŚ KALIBRATORA RĘKI (`calibration_links`, E4-5): gest „Przywróć automat” celowo zdejmuje
         wskazanie ręki - to decyzja człowieka, nie wycofanie przez przebieg. `zdjete_reka` = ile
         takich zdjęć niesie dziennik PO znaku wodnym (`calibration_hand_restored_since`); spadek
-        nie większy od niej jest wyjaśniony, większy zostaje ubytkiem w całości."""
+        nie większy od niej jest wyjaśniony, większy zostaje ubytkiem w całości.
+
+        OŚ TELESKOPU PO REKORDACH (AR-128): ubytek, gdy `reka_teleskopu` zwraca choć jedną pozycję -
+        para `(było, jest)` to wtedy liczba rekordów i liczba ich naruszeń."""
         ubytki = {k: (v, self.counts[k]) for k, v in wczesniej.counts.items() if self.counts[k] < v}
+        teleskop = self.reka_teleskopu(wczesniej, gesty_teleskopu)
+        if teleskop:
+            naruszone = {t[0] for t in teleskop}
+            ubytki["telescope_hand"] = (len(wczesniej.telescope_hand),
+                                        len(wczesniej.telescope_hand) - len(naruszone))
         kal = ubytki.get("calibration_links")
         if kal is not None and kal[0] - kal[1] <= zdjete_reka:
             ubytki.pop("calibration_links")
@@ -611,6 +654,59 @@ def path_to_header_since(con, watermark):
         "AND json_extract(payload, '$.object_source') IN (SELECT value FROM json_each(?)) "
         "AND json_extract(payload, '$.next_object_id') = json_extract(payload, '$.object_id')",
         (watermark, json.dumps(sorted(WEAK_OBJECT_SOURCES)))).fetchall())
+
+
+TELESCOPE_HAND_FIELDS = ("focal_user", "f_ratio_user", "label", "in_park", "merged_into", "status")
+"""Pola osi teleskopu, które pisze WYŁĄCZNIE ręka (kolejność = kolejność rekordu migawki po `id`)."""
+
+# Czasownik gestu ręki osi teleskopu → pole, które zmienia. Dziennik po znaku wodnym wyjaśnia zmianę
+# TYLKO tego pola TEGO teleskopu (`telescope_hand_gestures_since`).
+_TELESCOPE_HAND_VERBS = {
+    "telescope.focal_user_set": "focal_user", "telescope.focal_user_cleared": "focal_user",
+    "telescope.f_ratio_user_set": "f_ratio_user", "telescope.f_ratio_user_cleared": "f_ratio_user",
+    "telescope.labeled": "label", "telescope.parked": "in_park",
+    "telescope.merged": "merged_into", "telescope.unmerged": "merged_into",
+    "telescope.approved": "status",
+}
+
+
+def _telescope_hand_record(r):
+    """Rekord migawki osi teleskopu w JEDNEJ postaci, z bazy i z JSON-a: liczby ręki jako `float`
+    (REAL po 0039, a JSON zapisuje `1200.0` i `1200` różnie), park i scalenie jako `int`."""
+    def f(v):
+        return None if v is None else float(v)
+
+    def i(v):
+        return None if v is None else int(v)
+    tid, focal, fr, label, park, merged, status = r
+    return (int(tid), f(focal), f(fr), label, i(park), i(merged), status)
+
+
+def telescope_hand_gestures_since(con, watermark):
+    """`{(telescope_id, pole)}` zmienione GESTEM RĘKI (aktor `user:*`) po znaku wodnym - wyjaśnienie
+    zmian osi teleskopu w `HumanFacts.spadki`. READ-ONLY. `None` → pusty zbiór. Zdarzenie migracji
+    (`migration:0039`) gestem ręki nie jest - przeniesienie nie zmienia wartości, tylko kolumnę."""
+    if watermark is None:
+        return frozenset()
+    return frozenset(
+        (int(r[0]), _TELESCOPE_HAND_VERBS[r[1]]) for r in con.execute(
+            "SELECT CAST(substr(target, 11) AS INTEGER), verb FROM event "
+            "WHERE id > ? AND target LIKE 'telescope:%' AND actor LIKE 'user:%' "
+            "AND verb IN (SELECT value FROM json_each(?))",
+            (watermark, json.dumps(sorted(_TELESCOPE_HAND_VERBS)))).fetchall())
+
+
+def _telescope_hand(con):
+    """Migawka osi teleskopu: rekordy teleskopów z którymkolwiek faktem ręki. Baza sprzed 0039
+    (spis biegnie bez migracji - `cli human-facts`) nie ma kolumn ręki optyki: `None`, oś poza
+    porównaniem, zamiast wyjątku na brakującej kolumnie."""
+    if con.execute("PRAGMA user_version").fetchone()[0] < 39:
+        return None
+    return tuple(_telescope_hand_record(tuple(r)) for r in con.execute(
+        "SELECT id, focal_user, f_ratio_user, label, in_park, merged_into, status FROM telescope "
+        "WHERE focal_user IS NOT NULL OR f_ratio_user IS NOT NULL OR label IS NOT NULL "
+        "OR in_park IS NOT NULL OR merged_into IS NOT NULL OR status = 'approved' "
+        "ORDER BY id").fetchall())
 
 
 def calibration_hand_restored_since(con, watermark):
@@ -671,6 +767,7 @@ def human_facts_census(con):
         observatory_hand=_observatory_hand(con),
         testimony_hand=_testimony_hand(con),
         notes_hand=_notes_hand(con),
+        telescope_hand=_telescope_hand(con),
     )
 
 

@@ -12,11 +12,20 @@ obiecywałaby jeden gest tam, gdzie muszą powstać dwa zestawy.
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFontMetrics, QGuiApplication
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QStyle, QStyledItemDelegate, QVBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
+from horreum import repo
 from horreum.gui import i18n, queries
+
+# Tryb ogniskowej (AR-128): rola wiersza niosąca słownik grupy, wartownik pozycji „Dopisz nowy…"
+# w liście teleskopów i wartownik nie wybranego parku (`None` w `itemData` znaczy „nic nie
+# powiedziano" - to legalna wartość parku, więc „nie wybrano" potrzebuje własnego znaku).
+GROUP_ROLE = Qt.UserRole + 11
+NEW_TELESCOPE = "__nowy__"
+PARK_UNPICKED = "__wybierz__"
+_PARK_KEYS = {1: "cfg.park_yes", 0: "cfg.park_no", None: "cfg.park_unsaid"}
 
 # ---------------------------------------------------------------------------------------------
 # LISTA FOLDERÓW OKIEN GESTU RĘKI - wspólne dla tego okna i `observatory_dialog` (jedna konwencja
@@ -199,19 +208,35 @@ class AssignConfigDialog(QDialog):
     Drugiego okna nie ma świadomie: pytanie jest jedno („czym to fotografowano"), a dwie
     powierzchnie dla jednego pytania rozjeżdżają się przy pierwszej zmianie kontraktu.
 
-    `self.selected` = `(telescope_id, telescope_label, frame_ids)` albo `None`."""
+    TRZECI TRYB - OGNISKOWA (`focal`, AR-128, D-1012-2 `Q8`): grupy z kubełka „ogniskowa niezgodna
+    z teleskopem" (folder × kamera × ogniskowa pliku × teleskop źródłowy). Teleskop w Horreum to
+    fizyczny teleskop z ogniskową, potwierdzony ręką - więc lista NIE jest całym parkiem, tylko
+    teleskopami, których ogniskowa mieści się w tolerancji od ogniskowej KAŻDEJ zaznaczonej grupy
+    (`queries.telescopes_near_focal`), plus pozycja „Dopisz nowy…". ODWRACA to zakaz wolnego tekstu
+    z akapitu wyżej - świadomie, decyzją Zdzinia: nowy teleskop powstaje razem z przypisaniem klatek
+    w jednej transakcji (`repo.user_assign_config_new_telescope`), więc wiersza bez klatek nie ma.
+    Pole „w parku" startuje wartością teleskopu źródłowego zaznaczonych grup (D-1012-2 `Q11`);
+    przy źródłach o różnym parku wyboru nie zgadujemy - trzeba go wskazać.
 
-    def __init__(self, con, *, groups, change=False, parent=None):
+    `self.selected` = `(telescope_id, telescope_label, frame_ids)` albo `None`; przy „Dopisz nowy…"
+    `telescope_id` = `None`, a `self.new_telescope` = `{name, focal_mm, f_ratio, in_park,
+    source_telescope_id}`."""
+
+    def __init__(self, con, *, groups, change=False, focal=False, parent=None):
         super().__init__(parent)
         self.con = con
         self.groups = list(groups)
         self.change = change
+        self.focal = focal
         self.selected = None
-        self.setWindowTitle(i18n.t("cfg.title_change" if change else "cfg.title"))
+        self.new_telescope = None
+        self.setWindowTitle(i18n.t("cfg.title_focal" if focal else
+                                   "cfg.title_change" if change else "cfg.title"))
         lay = QVBoxLayout(self)
 
         klatek = sum(g["n_frames"] for g in self.groups)
-        head = QLabel(i18n.t("cfg.head_change" if change else "cfg.head",
+        head = QLabel(i18n.t("cfg.head_focal" if focal else
+                             "cfg.head_change" if change else "cfg.head",
                              folders=i18n.t_plural("dlg.n_groups", len(self.groups)),
                              frames=i18n.t_plural("dlg.n_frames", klatek)))
         head.setWordWrap(True)
@@ -242,7 +267,14 @@ class AssignConfigDialog(QDialog):
             kamera = g["camera_model"] or i18n.t("cfg.no_camera")
             # W trybie ZMIANY świadkiem jest to, CO DZIŚ STOI na osi (wskazanie ręki), a nie co
             # mówi nagłówek: user wraca tu właśnie po to, żeby zobaczyć własny poprzedni wybór.
-            if change:
+            if focal:
+                # dzisiejsza ogniskowa źródła stoi przy grupie - powód niezgodności widać (N21)
+                swiadek = i18n.t("cfg.focal_item", focal=g["focal_mm"],
+                                 telescope=g["telescope_label"] or "-",
+                                 source_focal=("-" if g["source_focal"] is None
+                                               else f"{g['source_focal']:g}"),
+                                 park=i18n.t(_PARK_KEYS[g["source_in_park"]]))
+            elif change:
                 swiadek = i18n.t("cfg.now_set", telescope=g["telescope_label"] or "—")
             else:
                 swiadek = (i18n.t("cfg.header_says", telescop=g["telescop"]) if g["telescop"]
@@ -278,6 +310,7 @@ class AssignConfigDialog(QDialog):
             it.setCheckState(Qt.Unchecked if slabe else Qt.Checked)
             it.setData(Qt.UserRole, g["frame_ids"])
             it.setData(Qt.UserRole + 1, g["camera_id"])
+            it.setData(GROUP_ROLE, g)
             self.items.addItem(it)
         self.items.itemChanged.connect(lambda _it: self._sync_check_all())
         self._sync_check_all()
@@ -292,15 +325,13 @@ class AssignConfigDialog(QDialog):
 
         lay.addWidget(QLabel(i18n.t("cfg.telescope")))
         self.combo = QComboBox()
-        self.combo.addItem(i18n.t("cfg.pick_telescope"), None)
-        park = [r for r in queries.park_overview(con) if r["in_park"] == 1]
-        reszta = [r for r in queries.park_overview(con) if r["in_park"] != 1]
-        for r in park + reszta:
-            nazwa = queries.telescope_label(r)
-            if r["in_park"] == 1:
-                nazwa += f"  ({i18n.t('cfg.park_badge')})"
-            self.combo.addItem(nazwa, (r["id"], queries.telescope_label(r)))
         lay.addWidget(self.combo)
+        self._focal_dotkniete = False       # user zmienił ogniskową nowego teleskopu - nie nadpisujemy
+        self._parki_ostatnie = None         # zbiór parków źródeł przy ostatniej przebudowie pola parku
+        self._fill_combo()
+        if focal:
+            lay.addWidget(self._build_new_form())
+            self._on_combo_changed()
 
         self.error = QLabel("")
         self.error.setProperty("role", "error")     # kolor z motywu (P-C), nie sztywny hex
@@ -313,11 +344,124 @@ class AssignConfigDialog(QDialog):
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
-        self.items.itemChanged.connect(self._sync_accept_enabled)
+        self.items.itemChanged.connect(lambda _it: self._sync_wyboru())
         self.combo.currentIndexChanged.connect(self._sync_accept_enabled)
         self._sync_accept_enabled()
         self.resize(default_dialog_size(self))
         self.filter.setFocus()
+
+    def _sync_wyboru(self):
+        """JEDYNY synchronizator stanu zależnego od ZBIORU zaznaczonych grup (bramka kodu N3): lista
+        teleskopów w tolerancji, wartości startowe „Dopisz nowy…", licznik i dostępność przycisku.
+        Wołają go WSZYSTKIE drogi zmiany zbioru - klik w wiersz, „zaznacz wszystkie" (który blokuje
+        sygnały wierszy, więc `itemChanged` nie przychodzi) i filtr (zmienia zbiór widocznych)."""
+        if self.focal:
+            self._fill_combo()
+        self._sync_accept_enabled()
+
+    def _fill_combo(self):
+        """Lista teleskopów: park na górze (`queries.park_overview`, jedyny właściciel kolejności).
+        W trybie ogniskowej tylko teleskopy w tolerancji od ogniskowej KAŻDEJ zaznaczonej grupy -
+        teleskop spoza niej zostawiłby klatkę w kubełku po geście - i na końcu „Dopisz nowy…".
+        Filtr 5 % ma jednego właściciela: `queries.telescopes_near_focal` (N13). Wybór sprzed
+        przebudowy zostaje, jeśli dalej jest na liście."""
+        poprzedni = self.combo.currentData()
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        self.combo.addItem(i18n.t("cfg.pick_telescope"), None)
+        wiersze = queries.park_overview(self.con)
+        if self.focal:
+            ogniskowe = {g["focal_mm"] for g in self._zaznaczone_grupy()}
+            pasujace = None
+            for f in ogniskowe:
+                ids = {r["id"] for r in queries.telescopes_near_focal(self.con, f)}
+                pasujace = ids if pasujace is None else pasujace & ids
+            wiersze = [r for r in wiersze if pasujace and r["id"] in pasujace]
+        park = [r for r in wiersze if r["in_park"] == 1]
+        reszta = [r for r in wiersze if r["in_park"] != 1]
+        for r in park + reszta:
+            nazwa = queries.telescope_label(r)
+            if self.focal:
+                nazwa += f"  · {queries.telescope_focal(r):g} mm"
+            if r["in_park"] == 1:
+                nazwa += f"  ({i18n.t('cfg.park_badge')})"
+            self.combo.addItem(nazwa, (r["id"], queries.telescope_label(r)))
+        if self.focal:
+            self.combo.addItem(i18n.t("cfg.add_new"), NEW_TELESCOPE)
+        idx = next((i for i in range(self.combo.count())
+                    if poprzedni is not None and self.combo.itemData(i) == poprzedni), 0)
+        self.combo.setCurrentIndex(idx)
+        self.combo.blockSignals(False)
+        self._on_combo_changed()
+
+    def _build_new_form(self):
+        """Pola „Dopisz nowy…" (D-1012-2 `Q8`/`Q11`): nazwa, ogniskowa (start = ogniskowa pliku
+        zaznaczonych grup), f/ (pusta - f/ w pliku opisuje stary teleskop), park (start = park
+        teleskopu źródłowego, gdy wszystkie zaznaczone grupy mają ten sam)."""
+        self.new_form = QWidget()
+        form = QFormLayout(self.new_form)
+        self.new_name = QLineEdit()
+        self.new_focal = QLineEdit()
+        self.new_f_ratio = QLineEdit()
+        self.new_f_ratio.setPlaceholderText(i18n.t("cfg.new_f_ratio_hint"))
+        self.new_park = QComboBox()
+        form.addRow(i18n.t("cfg.new_name"), self.new_name)
+        form.addRow(i18n.t("cfg.new_focal"), self.new_focal)
+        form.addRow(i18n.t("cfg.new_f_ratio"), self.new_f_ratio)
+        form.addRow(i18n.t("cfg.new_park"), self.new_park)
+        self.new_form.setVisible(False)
+        self.combo.currentIndexChanged.connect(self._on_combo_changed)
+        self.new_focal.textEdited.connect(self._on_focal_edited)
+        return self.new_form
+
+    def _on_focal_edited(self, _tekst):
+        """Ogniskowa nowego teleskopu wpisana przez usera - odtąd zmiana zbioru jej nie nadpisuje (N6)."""
+        self._focal_dotkniete = True
+
+    def _zaznaczone_grupy(self):
+        return [it.data(GROUP_ROLE) for it in visible_rows(self.items)
+                if it.checkState() == Qt.Checked and it.data(Qt.UserRole + 1) is not None]
+
+    def _on_combo_changed(self, *_):
+        """„Dopisz nowy…" wybrany → pola nowego teleskopu z wartościami startowymi zaznaczonych
+        grup (N6/N7):
+          * ogniskowa = najczęstsza ogniskowa pliku wśród zaznaczonych klatek, odświeżana przy
+            każdej zmianie zbioru, DOPÓKI user jej nie dotknął;
+          * park przebudowywany WYŁĄCZNIE, gdy zmienił się zbiór parków źródeł - legalny wybór usera
+            zostaje. Przy źródłach o różnym parku pierwsza pozycja to „wybierz", którą trzeba zmienić."""
+        if not self.focal or not hasattr(self, "new_form"):
+            return
+        nowy = self.combo.currentData() == NEW_TELESCOPE
+        self.new_form.setVisible(nowy)
+        grupy = self._zaznaczone_grupy()
+        if not self._focal_dotkniete:
+            wagi = {}
+            for g in grupy:
+                if g["focal_mm"] is not None:
+                    wagi[g["focal_mm"]] = wagi.get(g["focal_mm"], 0) + g["n_frames"]
+            self.new_focal.setText(
+                str(max(sorted(wagi), key=lambda f: wagi[f])) if wagi else "")
+        parki = frozenset(g["source_in_park"] for g in grupy)
+        if parki == self._parki_ostatnie:
+            return
+        self._parki_ostatnie = parki
+        self.new_park.blockSignals(True)
+        self.new_park.clear()
+        if len(parki) != 1:
+            self.new_park.addItem(i18n.t("cfg.new_park_pick"), PARK_UNPICKED)
+        for wartosc in (1, 0, None):
+            self.new_park.addItem(i18n.t(_PARK_KEYS[wartosc]), wartosc)
+        cel = next(iter(parki)) if len(parki) == 1 else PARK_UNPICKED
+        self.new_park.setCurrentIndex(next(i for i in range(self.new_park.count())
+                                           if self.new_park.itemData(i) == cel))
+        self.new_park.blockSignals(False)
+
+    def pokaz_odmowe(self, powod):
+        """Klinga odmówiła po zamknięciu okna (N16) - okno wraca z polami, które user wpisał,
+        i z powodem na etykiecie błędu; gospodarz woła `exec()` ponownie."""
+        self.selected = None
+        self.new_telescope = None
+        self.error.setText(powod)
 
     def _on_check_all(self):
         """Klik w przełącznik całości — ustaw KAŻDY wiersz na jedno albo drugie.
@@ -349,7 +493,7 @@ class AssignConfigDialog(QDialog):
             it.setCheckState(stan)
         self.items.blockSignals(False)
         self._sync_check_all()
-        self._sync_accept_enabled()
+        self._sync_wyboru()                          # sygnały wierszy były zablokowane (N3)
 
     def _sync_check_all(self):
         """Przełącznik CAŁOŚCI odbija stan listy: wszystkie / żadna / częściowo.
@@ -367,9 +511,10 @@ class AssignConfigDialog(QDialog):
         self.check_all.blockSignals(False)
 
     def _on_filter(self):
-        """Fraza filtra zmieniła zakres widocznych wierszy - a z nim zakres zapisu i licznik."""
+        """Fraza filtra zmieniła zakres widocznych wierszy - a z nim zakres zapisu, licznik i (tryb
+        ogniskowej) listę teleskopów w tolerancji (N3)."""
         self._sync_check_all()
-        self._sync_accept_enabled()
+        self._sync_wyboru()
 
     def _zaznaczone(self):
         """Klatki z zaznaczonych grup — POMIJAJĄC grupy bez kamery (klinga i tak je odmówi).
@@ -398,5 +543,66 @@ class AssignConfigDialog(QDialog):
         if wybor is None:
             self.error.setText(i18n.t("cfg.err_no_telescope"))
             return
+        if wybor == NEW_TELESCOPE:
+            nowy = self._new_telescope_spec()
+            if nowy is None:
+                return
+            self.new_telescope = nowy
+            self.selected = (None, nowy["name"], ids)
+            self.accept()
+            return
+        if self.focal:
+            # PONOWNA WERYFIKACJA na BIEŻĄCYM zbiorze (N3): lista mogła nie nadążyć za zmianą
+            # zaznaczenia; zapis poza tolerancją przypiąłby klatki na stałe do złej ogniskowej.
+            wiersz = next((r for r in queries.park_overview(self.con) if r["id"] == wybor[0]), None)
+            odstajaca = self._grupa_poza_tolerancja(
+                None if wiersz is None else queries.telescope_focal(wiersz))
+            if odstajaca is not None:
+                self.error.setText(odstajaca)
+                return
         self.selected = (wybor[0], wybor[1], ids)
         self.accept()
+
+    def _grupa_poza_tolerancja(self, ogniskowa):
+        """Zdanie o PIERWSZEJ zaznaczonej grupie, której ogniskowa pliku nie mieści się w tolerancji
+        od `ogniskowa` (teleskopu z listy albo nowego) - albo `None`. Ta sama reguła co lista
+        (`queries.within_tolerance`) i predykat kubełka (N3/N6)."""
+        for g in self._zaznaczone_grupy():
+            if not queries.within_tolerance(g["focal_mm"], ogniskowa):
+                return i18n.t("cfg.err_group_focal", folder=g["folder"] or i18n.t("cfg.no_folder"),
+                              focal=g["focal_mm"],
+                              telescope="-" if ogniskowa is None else f"{ogniskowa:g}")
+        return None
+
+    def _new_telescope_spec(self):
+        """Pola „Dopisz nowy…" → słownik dla klingi albo `None` z powodem na etykiecie błędu.
+        Walidacja to TE SAME funkcje, których użyje klinga (`repo.valid_telescope_*`) - okno nie ma
+        własnej kopii zakresów; tu tylko wcześniej mówi, co klinga i tak by odrzuciła."""
+        def liczba(pole):
+            tekst = pole.text().strip().replace(",", ".")
+            if not tekst:
+                return None
+            try:
+                return float(tekst)
+            except ValueError:
+                raise ValueError(i18n.t("axis.tel.optics_not_number", text=tekst)) from None
+        try:
+            nazwa = repo.valid_telescope_name(self.con, self.new_name.text())
+            ogn = liczba(self.new_focal)
+            if ogn is None:
+                raise ValueError(i18n.t("cfg.err_new_focal"))
+            ogn = repo.valid_telescope_focal(ogn)
+            f = liczba(self.new_f_ratio)
+            f = None if f is None else repo.valid_telescope_f_ratio(f)
+            park = self.new_park.currentData()
+            if park == PARK_UNPICKED:
+                raise ValueError(i18n.t("cfg.err_new_park"))
+            odstajaca = self._grupa_poza_tolerancja(ogn)       # ta sama bramka co lista (N6)
+            if odstajaca is not None:
+                raise ValueError(odstajaca)
+        except ValueError as e:
+            self.error.setText(str(e))
+            return None
+        zrodla = {g["source_id"] for g in self._zaznaczone_grupy()}
+        return {"name": nazwa, "focal_mm": ogn, "f_ratio": f, "in_park": park,
+                "source_telescope_id": next(iter(zrodla)) if len(zrodla) == 1 else None}

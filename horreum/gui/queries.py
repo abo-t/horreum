@@ -17,6 +17,7 @@ import os
 import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
+from horreum.grouper import OPTICS_TOLERANCE, optics_from_files   # optyka teleskopu (AR-128)
 from horreum.lineage import RAW_FLAT_WINDOW_DAYS, raw_flats_for   # surowe flaty teczek wydania
 from horreum.naming import header_dt
 from horreum.object_change import ObjectTarget             # cel gestu zmiany obiektu (AR-17)
@@ -37,8 +38,8 @@ from horreum.resolve.paths import (STACK_KIND, STACKS_DIR, filter_folder_from_pa
 from horreum.resolve.recipe import parse_master_path
 from horreum.resolve.stack import read_testimony, signature_timestamp
 from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_lookup, alias_snapshot,
-                              forma_karty_object, library_root_from_db, path_proposals,
-                              resolve_name, review_state)
+                              forma_karty_object, library_root_from_db,
+                              optics_mismatch_frame_ids, path_proposals, resolve_name, review_state)
 from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, propose_lineage_candidates
 
 
@@ -277,10 +278,10 @@ def active_telescopes(con):
     sumuje się pod jednym kanonem. `LEFT JOIN` => teleskop bez klatek ma `frame_count=0` (nie znika).
     Frame z `config_id IS NULL` (review) NIE dołącza się do żadnego configu => poza sumą (poprawne —
     jest w delcie, nie na osi). Zwraca wiersze: id, telescop_canon, label, status, f_ratio_nominal,
-    focal_nominal, frame_count."""
+    focal_nominal, f_ratio_user, focal_user, frame_count (optyka: `telescope_focal`/`telescope_f_ratio`)."""
     return con.execute(
         "SELECT t.id, t.telescop_canon, t.label, t.status, t.f_ratio_nominal, t.focal_nominal, "
-        "       COUNT(fr.id) AS frame_count "
+        "       t.f_ratio_user, t.focal_user, COUNT(fr.id) AS frame_count "
         "FROM telescope t "
         "LEFT JOIN telescope_canonical tc ON tc.canon_id = t.id "
         "LEFT JOIN config c ON c.telescope_id = tc.id "
@@ -295,9 +296,11 @@ def merged_under(con, canon_id):
     """Teleskopy scalone „pod" danym kanonem (widok szczegółu — co zwinięto w ten teleskop). Dzięki
     inwariantowi głębokość ≤ 1 (§3a) wszystkie są BEZPOŚREDNIMI członkami (`merged_into = canon_id`),
     więc prosty filtr po kolumnie wystarcza — nie ma głębszych łańcuchów do rozwijania. Zwraca wiersze:
-    id, telescop_canon, label, status, f_ratio_nominal, focal_nominal (puste, gdy nic nie scala)."""
+    id, telescop_canon, label, status, f_ratio_nominal, focal_nominal, f_ratio_user, focal_user
+    (puste, gdy nic nie scala)."""
     return con.execute(
-        "SELECT id, telescop_canon, label, status, f_ratio_nominal, focal_nominal "
+        "SELECT id, telescop_canon, label, status, f_ratio_nominal, focal_nominal, "
+        "       f_ratio_user, focal_user "
         "FROM telescope WHERE merged_into = ? ORDER BY id",
         (canon_id,),
     ).fetchall()
@@ -757,6 +760,7 @@ def review_queue(con):
             "path_proposed_stack_names": prop_s_names,
             "path_proposed_stack_frames": prop_s_frames,
             "config_review_count": st.no_config,
+            "focal_mismatch_count": st.focal_mismatch,
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
 
@@ -1021,8 +1025,13 @@ def config_by_hand_frames(con):
         "ORDER BY l.path, f.id").fetchall()
 
 
-def _grupuj_po_folderze_i_kamerze(rows):
-    """Wspólny składacz grup **folder × kamera** dla obu list osi sprzętu (SPOT).
+def _grupuj_po_folderze_i_kamerze(rows, klucz_dodatkowy=()):
+    """Wspólny składacz grup **folder × kamera** dla list osi sprzętu (SPOT).
+
+    `klucz_dodatkowy` = nazwy kolumn wiersza, które DOKŁADAJĄ się do klucza grupy i jadą do niej
+    wprost (AR-128, bramka planu T24 zarzut 5): kubełek ogniskowej grupuje też po ogniskowej pliku
+    i po teleskopie źródłowym, bo ta sama ogniskowa nie identyfikuje teleskopu (~800 mm mają A140R,
+    ED120R i N800), a domyślny park nowego teleskopu bierze się ze źródła TEJ grupy.
 
     Jedna funkcja, bo obie odpowiadają na to samo pytanie („co jest jednostką gestu"), a dwie kopie
     rozjechałyby się przy pierwszej zmianie klucza — a klucz jest tu kontraktem DDL, nie gustem.
@@ -1037,7 +1046,7 @@ def _grupuj_po_folderze_i_kamerze(rows):
     grupy = {}
     for r in rows:
         folder = os.path.dirname(r["path"]) if r["path"] else None
-        klucz = (folder, r["camera_id"])
+        klucz = (folder, r["camera_id"]) + tuple(r[k] for k in klucz_dodatkowy)
         g = grupy.get(klucz)
         if g is None:
             g = grupy[klucz] = {"folder": folder, "camera_id": r["camera_id"],
@@ -1045,6 +1054,7 @@ def _grupuj_po_folderze_i_kamerze(rows):
                                 # właściciel reguły `label → telescop_canon`: oś bez nazwy usera mówi
                                 # kanonem z nagłówka, nie milczy („dziś: —” przy zestawie wskazanym)
                                 "telescope_label": telescope_label(r),
+                                **{k: r[k] for k in klucz_dodatkowy},
                                 "n_frames": 0, "frame_ids": [], "_kinds": {}}
         elif g["telescop"] != r["telescop"]:
             g["telescop"] = None                 # folder z dwoma zeznaniami nie ma jednego świadka
@@ -1088,6 +1098,134 @@ def config_review_groups(con):
     Zwraca listę dictów: {folder, camera_id, camera_model, telescop, telescope_label, n_frames,
     frame_ids}."""
     return _grupuj_po_folderze_i_kamerze(config_review_frames(con))
+
+
+# ============================================================ optyka teleskopu (AR-128, AR-129)
+
+def telescope_focal(row):
+    """Ogniskowa teleskopu DO WYŚWIETLENIA i porównań: ręka (`focal_user`), a bez niej wartość
+    z plików (`focal_nominal`). JEDYNY właściciel reguły „ręka, potem pliki" po stronie odczytu
+    (wzorzec `telescope_label`) - wiersz bez obu kolumn to błąd zapytania (EXPECT)."""
+    return row["focal_user"] if row["focal_user"] is not None else row["focal_nominal"]
+
+
+def telescope_f_ratio(row):
+    """f/ teleskopu: ręka, potem pliki - lustro `telescope_focal`."""
+    return row["f_ratio_user"] if row["f_ratio_user"] is not None else row["f_ratio_nominal"]
+
+
+def within_tolerance(value, reference):
+    """Czy `value` mieści się w `grouper.OPTICS_TOLERANCE` od `reference` (względnie)? Ta sama
+    reguła co predykat kubełka (`resolver.optics_mismatch_frame_ids`), więc teleskop z listy wyboru
+    nie wraca klatce do kubełka. Brak którejś liczby → `False`."""
+    if value is None or reference is None or reference <= 0:
+        return False
+    return abs(value - reference) <= OPTICS_TOLERANCE * reference
+
+
+def telescopes_near_focal(con, focal_mm):
+    """Lista wyboru okna „Przypisz zestaw…" w kubełku ogniskowej (D-1012-2 `Q8`): KANONICZNE
+    teleskopy, których ogniskowa (ręka, potem pliki) mieści się w tolerancji od `focal_mm`. Wiersze
+    `park_overview` (park na górze robi okno), w jego kolejności."""
+    return [r for r in park_overview(con) if within_tolerance(focal_mm, telescope_focal(r))]
+
+
+def focal_mismatch_frames(con):
+    """Drążenie kubełka „Ogniskowa niezgodna z teleskopem" (AR-128 `Q8`) - jeden wiersz na klatkę.
+    Zbiór klatek od JEDYNEGO właściciela predykatu (`resolver.optics_mismatch_frame_ids`), tu tylko
+    dekorowany kolumnami panelu (`config_review_frames`) i grupy okna: ogniskowa pliku w mm
+    (`focal_mm`), KORZEŃ teleskopu źródłowego (`source_id`, `source_in_park`) i jego dzisiejsza
+    ogniskowa (`source_focal`, ręka, potem pliki - okno mówi, Z CZYM plik się nie zgadza, N21)."""
+    ids = sorted(optics_mismatch_frame_ids(con, "focal"))
+    return con.execute(
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, f.kind, h.date_obs, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       cam.model_canon AS camera_model, f.camera_id, h.telescop, "
+        "       CAST(round(h.focallen) AS INTEGER) AS focal_mm, h.focratio_raw AS f_ratio_file, "
+        "       t.id AS source_id, t.in_park AS source_in_park, "
+        "       COALESCE(t.focal_user, t.focal_nominal) AS source_focal, "
+        "       l.id AS location_id, l.path, "
+        "       (SELECT COUNT(*) FROM location WHERE frame_id = f.id AND present = 1) AS n_present "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "JOIN config c ON c.id = f.config_id "
+        "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.path, f.id", (json.dumps(ids),)).fetchall()
+
+
+def focal_mismatch_groups(con):
+    """Kubełek ogniskowej w JEDNOSTKACH GESTU: folder × kamera × ogniskowa pliku × teleskop źródłowy
+    (bramka planu T24, zarzut 5) - projekcja `focal_mismatch_frames`, ten sam składacz co reszta
+    osi sprzętu. Grupa niesie `focal_mm`, `source_id`, `source_in_park`, `source_focal` (park
+    i ogniskowa źródła są funkcją `source_id`, więc nie dzielą grup - jadą w kluczu, żeby trafić do
+    grupy wprost)."""
+    return _grupuj_po_folderze_i_kamerze(
+        focal_mismatch_frames(con),
+        klucz_dodatkowy=("focal_mm", "source_id", "source_in_park", "source_focal"))
+
+
+def f_ratio_mismatch_frame_ids(con):
+    """Perspektywa „f/ niezgodna z teleskopem" (AR-129) - zbiór od jedynego właściciela predykatu."""
+    return optics_mismatch_frame_ids(con, "f_ratio")
+
+
+FIX_REFUSALS = ("no_target", "no_files", "majority")
+"""Powody odmowy gestu „Popraw f/ w plikach…" (`optics_fix_targets`) - tokeny zdań
+`grid.optics.refused.<token>` (parytet pinuje test i18n)."""
+
+
+def optics_fix_targets(con, frame_ids):
+    """Cel gestu „Popraw f/ w plikach…" (AR-129): `[(frame_id, f/ docelowa | None, token odmowy |
+    None, teleskop)]` - f/ KORZENIA zestawu klatki, ręka, potem pliki (reguła `telescope_f_ratio`).
+
+    STRAŻNIK WIĘKSZOŚCI (bramka kodu T24, N1b): gest naprawia MNIEJSZOŚĆ plików, nigdy nie przepisuje
+    większości. Cel musi mieścić się w tolerancji od mody f/ plików tego teleskopu
+    (`optics_from_files`) - inaczej to teleskop się myli (kolumna sprzed przeliczenia, literówka
+    ręki 0.8 zamiast 8), nie pliki, i gest odmawia (`majority`). Teleskop bez f/ - `no_target`;
+    pliki teleskopu bez żadnej f/ - `no_files` (nie ma większości, którą dałoby się sprawdzić)."""
+    rows = con.execute(
+        "SELECT f.id, COALESCE(t.f_ratio_user, t.f_ratio_nominal), t.id, t.label, t.telescop_canon "
+        "FROM frame f "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) ORDER BY f.id",
+        (json.dumps(sorted(int(i) for i in frame_ids)),)).fetchall()
+    pliki = {}
+    out = []
+    for fid, cel, tid, label, canon in rows:
+        nazwa = label or canon or ""
+        if cel is None:
+            out.append((fid, None, "no_target", nazwa))
+            continue
+        if tid not in pliki:
+            pliki[tid] = optics_from_files(con, tid).f_ratio
+        if pliki[tid] is None:
+            out.append((fid, None, "no_files", nazwa))
+        elif not within_tolerance(pliki[tid], cel):
+            out.append((fid, None, "majority", nazwa))
+        else:
+            out.append((fid, cel, None, nazwa))
+    return out
+
+
+def optics_fix_summary(con, frame_ids):
+    """Zdanie perspektywy „f/ niezgodna z teleskopem" (bramka kodu N19): `[(teleskop, f/ w pliku,
+    f/ docelowa | None, liczba klatek)]` - ile klatek ma jaką f/ w pliku i co wpisze gest."""
+    cele = {fid: (cel, nazwa) for fid, cel, _powod, nazwa in optics_fix_targets(con, frame_ids)}
+    licz = {}
+    for fid, fr in con.execute(
+            "SELECT frame_id, focratio_raw FROM header WHERE frame_id IN "
+            "(SELECT value FROM json_each(?))", (json.dumps(sorted(cele)),)).fetchall():
+        cel, nazwa = cele[fid]
+        klucz = (nazwa, fr, cel)
+        licz[klucz] = licz.get(klucz, 0) + 1
+    return sorted(((k[0], k[1], k[2], n) for k, n in licz.items()),
+                  key=lambda x: (-x[3], x[0]))
 
 
 def nameless_stack_frames(con, cleared=False):
@@ -1239,9 +1377,11 @@ def park_overview(con):
     alfabetycznie (determinizm), ale człowiek szuka swojego głównego teleskopu na górze.
     Zwraca wiersze: id, telescop_canon, label, in_park, lights, last_seen — OBIE kolumny nazwy, bo
     wiersz musi przejść przez `telescope_label` (dialog „Park…" pokazuje nazwę USERA), a `canon`
-    zostaje tożsamością zestawu i tokenem CLI `horreum park --add`."""
+    zostaje tożsamością zestawu i tokenem CLI `horreum park --add`. Kolumny optyki (`focal_nominal`,
+    `focal_user`, `f_ratio_nominal`, `f_ratio_user`) karmią listę wyboru po ogniskowej (AR-128)."""
     return con.execute(
-        "SELECT t.id, t.telescop_canon, t.label, t.in_park, "
+        "SELECT t.id, t.telescop_canon, t.label, t.in_park, t.focal_nominal, t.focal_user, "
+        "  t.f_ratio_nominal, t.f_ratio_user, "
         "  (SELECT COUNT(*) FROM frame f JOIN config c ON c.id = f.config_id "
         "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS lights, "
         "  (SELECT MAX(h.date_obs) FROM frame f JOIN config c ON c.id = f.config_id "
@@ -1268,9 +1408,11 @@ def object_ids_for_canons(con, canons):
 def telescope_facets(con):
     """Distinct KANONICZNE teleskopy (`merged_into IS NULL`) do kontrolki filtra — żeby filtr pokazywał
     realnie istniejące osie. `telescop_canon` służy za etykietę zastępczą, gdy `label` pusty (teleskop
-    jeszcze nienazwany — proposed). Zwraca: id, telescop_canon, label, f_ratio_nominal, focal_nominal."""
+    jeszcze nienazwany - proposed). Zwraca: id, telescop_canon, label, f_ratio_nominal, focal_nominal,
+    f_ratio_user, focal_user."""
     return con.execute(
-        "SELECT id, telescop_canon, label, f_ratio_nominal, focal_nominal FROM telescope "
+        "SELECT id, telescop_canon, label, f_ratio_nominal, focal_nominal, f_ratio_user, focal_user "
+        "FROM telescope "
         "WHERE merged_into IS NULL ORDER BY id"
     ).fetchall()
 

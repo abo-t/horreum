@@ -25,8 +25,8 @@ from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QFontMetrics, 
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget,
-    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget,
+    QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from horreum import db, macro as macro_mod, projection, repo, resolver, stacks
@@ -134,11 +134,14 @@ _REPAIR_TIPS = {
     # `OBJECT`, która nie ma z nimi nic wspólnego.
     "config_review": "repair.tip_config",
     "config_by_hand": "repair.tip_config",
+    "config_focal": "repair.tip_config",
     None: "repair.tip_pick",
 }
-# Kubełki osi SPRZĘTU — dwie rozłączne populacje, jedna akcja („Przypisz zestaw…"), bo różni je
-# to, SKĄD bierze się grupa, a nie to, co się z nią robi (lustro `_ASSIGN_TAGS` na osi obiektu).
-_CONFIG_TAGS = frozenset({"config_review", "config_by_hand"})
+# Kubełki osi SPRZĘTU - rozłączne populacje, jedna akcja („Przypisz zestaw…"), bo różni je to,
+# SKĄD bierze się grupa, a nie to, co się z nią robi (lustro `_ASSIGN_TAGS` na osi obiektu).
+# Trzeci (AR-128, D-1012-2 `Q8`): klatki z zestawem automatu, których ogniskowa w pliku odbiega od
+# teleskopu - okno wybiera z teleskopów mieszczących się w tolerancji albo dopisuje nowy.
+_CONFIG_TAGS = frozenset({"config_review", "config_by_hand", "config_focal"})
 # Stałe nagłówków trzymają KLUCZE katalogu (nie stringi) — etykieta rozwiązuje się `_headers()` w czasie
 # BUDOWY widżetu, po `i18n.set_lang` w `main` (D-L1: stałe module-level ewaluują się przed set_lang, więc
 # string zamroziłby domyślny PL; klucz jest językowo-neutralny).
@@ -300,10 +303,30 @@ def _fmt_obs_date(s):
     return s.split(".")[0] if s and "T" in s else (s or "")
 
 
+class _OptykaEdycja(QStyledItemDelegate):
+    """Edytor komórek f/ i Ogniskowej Osi teleskopu (AR-128, bramka kodu N5): edytor startuje
+    wartością bez znacznika ręki, a zatwierdzenie oddaje WPIS do `on_commit(wiersz, kolumna, tekst)`
+    zawsze - także wtedy, gdy tekst równa się temu, co komórka pokazuje. Model komórki nie jest
+    zmieniany: po zapisie widok i tak przeładowuje się z bazy. Wpis idzie przez `QTimer.singleShot(0)`:
+    przeładowanie tabeli w środku zamykania edytora usuwałoby komórkę, którą Qt jeszcze obsługuje."""
+
+    def __init__(self, on_commit, parent=None):
+        super().__init__(parent)
+        self._on_commit = on_commit
+
+    def setEditorData(self, editor, index):
+        editor.setText(index.data(Qt.UserRole + 1) or "")
+
+    def setModelData(self, editor, model, index):
+        wiersz, kolumna, tekst = index.row(), index.column(), editor.text()
+        QTimer.singleShot(0, lambda: self._on_commit(wiersz, kolumna, tekst))
+
+
 class TelescopeAxisView(QWidget):
     """Osadzalny widok osi TELESKOP: lista kanonicznych teleskopów (lewa) + szczegół zaznaczonego
-    (prawa: członkowie scaleni pod nim, audyt). Akcje usera (`label`/`approve`/`merge`/`unmerge`)
-    idą przez `repo`. Komunikaty statusu emituje sygnałem `status_message` — pasek statusu należy do
+    (prawa: członkowie scaleni pod nim, zestawy, audyt). Akcje usera (`label`/`approve`/`merge`/
+    `unmerge`, od AR-128 także f/ i ogniskowa ręką oraz „Przywróć z plików") idą przez `repo`.
+    Komunikaty statusu emituje sygnałem `status_message` - pasek statusu należy do
     okna-gospodarza (`MainWindow`/`TelescopeAxisWindow`), nie do widoku.
 
     `con` = otwarte połączenie RW (NIE własność widoku — zamyka je okno/gospodarz). `now_fn` = źródło
@@ -317,6 +340,9 @@ class TelescopeAxisView(QWidget):
         self._now = now_fn
         self._loading = False                # tłumi itemChanged podczas programowego wypełniania
         self._source_mergeable = False       # czy zaznaczony wiersz może być źródłem scalenia
+        self._rows = {}                      # id → wiersz `active_telescopes` z ostatniego refresh
+        self._pliki = {}                     # id → `FilesOptics` (wartość z plików) z ostatniego refresh
+        self._busy = False                   # etap Dostawy pisze w tle - gesty optyki odmawiają (N8)
         self._build_ui()
         self.refresh()
 
@@ -344,6 +370,12 @@ class TelescopeAxisView(QWidget):
         self._edit_triggers = self.table.editTriggers()   # przywracane po set_busy(False) (wizytator T3)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.itemChanged.connect(self._on_item_changed)
+        # Edytor optyki zatwierdza WPIS, nie zmianę tekstu komórki (wizytacja N5): `itemChanged` nie
+        # strzela, gdy user wpisze to, co komórka już pokazuje (1600 z plików), a to jest właśnie
+        # potwierdzenie ręką - teleskop w Horreum to wartość potwierdzona ręką (D-1012-2).
+        self._optyka_delegat = _OptykaEdycja(self._on_optics_edited, self.table)
+        for c in (COL_FOCAL, COL_FRATIO):
+            self.table.setItemDelegateForColumn(c, self._optyka_delegat)
         lv.addWidget(self.table)
 
         actions = QHBoxLayout()
@@ -370,6 +402,27 @@ class TelescopeAxisView(QWidget):
         self.btn_unmerge = QPushButton(i18n.t("action.unmerge"))
         self.btn_unmerge.clicked.connect(self._on_unmerge)
         rv.addWidget(self.btn_unmerge)
+        # OPTYKA (AR-128) - własny blok nad Zestawami (wizytacja N22): średnica WYLICZONA z ogniskowej
+        # i f/ (pola średnicy nie ma - decyzja Zdzinia 2026-10-12) i „Przywróć z plików", który zdejmuje
+        # rękę obu pól optyki zaznaczonego teleskopu. Przycisk aktywny wyłącznie, gdy jest co zdjąć
+        # i nic nie biegnie w tle - szczery disabled, jak reszta paska (wizytator P2).
+        rv.addWidget(QLabel(i18n.t("axis.tel.optics_header")))
+        self.aperture = QLabel("")
+        self.aperture.setWordWrap(True)
+        rv.addWidget(self.aperture)
+        self.btn_restore_optics = QPushButton(i18n.t("axis.tel.restore_optics"))
+        self.btn_restore_optics.setToolTip(i18n.t("axis.tel.restore_optics_tip"))
+        self.btn_restore_optics.clicked.connect(self._on_restore_optics)
+        rv.addWidget(self.btn_restore_optics)
+        # ZESTAWY (AR-128): co ten teleskop daje z każdą kamerą - piksel, skala bin 1/bin 2, kadr.
+        # Liczby z planera (`sky.rigs`), więc panel i planer nie mają prawa mówić różnie.
+        rv.addWidget(QLabel(i18n.t("axis.tel.rigs")))
+        self.rigs = QListWidget()
+        # Wiersz zestawu bywa dłuższy niż panel (firsthand na kopii `pf4`: poziomy pasek przewijania
+        # pod trzema wierszami) - elizja z prawej, pełne zdanie w podpowiedzi wiersza.
+        self.rigs.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.rigs.setTextElideMode(Qt.ElideRight)
+        rv.addWidget(self.rigs)
         rv.addWidget(QLabel(i18n.t("axis.history")))
         self.events = QListWidget()
         rv.addWidget(self.events)
@@ -389,6 +442,9 @@ class TelescopeAxisView(QWidget):
         self._loading = True
         try:
             rows = queries.active_telescopes(self.con)
+            self._rows = {row["id"]: row for row in rows}
+            # jedna derywacja „z plików" (AR-128) - ta sama, którą liczy Dostawa
+            self._pliki = queries.optics_from_files(self.con)
             _przeladuj_wiersze(self.table, len(rows))
             target_row = -1
             for r, row in enumerate(rows):
@@ -396,8 +452,13 @@ class TelescopeAxisView(QWidget):
                 self._set_cell(r, COL_CANON, row["telescop_canon"])
                 self._set_cell(r, COL_LABEL, row["label"] or "", editable=True)
                 self._set_cell(r, COL_STATUS, row["status"])
-                self._set_cell(r, COL_FRATIO, _fmt(row["f_ratio_nominal"]), align=_NUM_ALIGN)
-                self._set_cell(r, COL_FOCAL, _fmt(row["focal_nominal"]), align=_NUM_ALIGN)
+                pliki = self._pliki.get(row["id"])
+                self._set_optics_cell(r, COL_FRATIO, row["f_ratio_user"], row["f_ratio_nominal"],
+                                      None if pliki is None else pliki.f_ratio,
+                                      None if pliki is None else pliki.f_ratio_n)
+                self._set_optics_cell(r, COL_FOCAL, row["focal_user"], row["focal_nominal"],
+                                      None if pliki is None else pliki.focal,
+                                      None if pliki is None else pliki.focal_n)
                 self._set_cell(r, COL_FRAMES, str(row["frame_count"]), align=_NUM_ALIGN)
                 if row["id"] == prev:
                     target_row = r
@@ -415,7 +476,7 @@ class TelescopeAxisView(QWidget):
     def _set_cell(self, r, c, text, *, editable=False, data=None, align=None):
         item = QTableWidgetItem(text)
         flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
-        if editable:                          # tylko etykieta jest edytowalna in-line
+        if editable:                          # etykieta, f/ i ogniskowa (AR-128) - edycja in-line
             flags |= Qt.ItemIsEditable
         item.setFlags(flags)
         if align is not None:                 # liczby prawo-wyrównane (skanowalność, wizytator T1)
@@ -423,6 +484,36 @@ class TelescopeAxisView(QWidget):
         if data is not None:                  # telescope_id na kolumnie ID (kotwica wiersza)
             item.setData(Qt.UserRole, data)
         self.table.setItem(r, c, item)
+
+    def _set_optics_cell(self, r, c, hand, column, files, files_n):
+        """Komórka f/ albo Ogniskowej (AR-128): wartość = ręka, a bez niej kolumna automatu (reguła
+        `queries.telescope_focal`/`telescope_f_ratio`), edytowalna dwuklikiem. Ręka niesie znacznik
+        i kolor werdyktu (`_WERDYKT` - „to Twoje zdanie"), tooltip mówi zawsze, co mówią PLIKI
+        (moda i liczba klatek, które ją niosą) - po wpisaniu ręką ta liczba nie znika.
+
+        KOMÓRKA NIE PODPISUJE SIĘ „Z PLIKÓW", GDY TO NIEPRAWDA (bramka kodu N2/N5): kolumna automatu
+        różna od dzisiejszej mody plików → szarość i zdanie „nieaktualne - Dostawa przeliczy";
+        pliki milczą, a kolumna coś niesie → zdanie „pliki nie zeznają - wartość zapisana wcześniej"
+        (RC8R: 1200 z chwili powołania teleskopu ręką)."""
+        value = hand if hand is not None else column
+        tekst = _fmt(value)
+        self._set_cell(r, c, tekst, editable=True, align=_NUM_ALIGN)
+        item = self.table.item(r, c)
+        item.setData(Qt.UserRole + 1, tekst)                 # wartość do edytora (bez znacznika)
+        z_plikow = (i18n.t("axis.tel.files_focal" if c == COL_FOCAL else "axis.tel.files_f_ratio",
+                           v=_fmt(files), n=files_n)
+                    if files is not None else i18n.t("axis.tel.files_none"))
+        if hand is not None:
+            item.setForeground(_WERDYKT["fg"])
+            item.setText(f"{queries.CLEARED_MARK} {tekst}")
+            item.setToolTip(i18n.t("axis.tel.optics_hand_tip", files=z_plikow))
+        elif column is not None and files is None:
+            item.setToolTip(i18n.t("axis.tel.optics_earlier_tip", files=z_plikow))
+        elif column is not None and float(column) != float(files):
+            item.setForeground(_DIM["fg"])
+            item.setToolTip(i18n.t("axis.tel.optics_stale_tip", files=z_plikow))
+        else:
+            item.setToolTip(i18n.t("axis.tel.optics_files_tip", files=z_plikow))
 
     def _selected_telescope_id(self):
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
@@ -470,6 +561,12 @@ class TelescopeAxisView(QWidget):
         self.combo_target.setCurrentIndex(0)  # placeholder — użytkownik musi wybrać cel świadomie
         self.combo_target.blockSignals(False)
 
+        self._fill_rigs(tid)
+        reka = self._rows.get(tid) if tid is not None else None
+        self.btn_restore_optics.setEnabled(
+            not self._busy and reka is not None
+            and (reka["focal_user"] is not None or reka["f_ratio_user"] is not None))
+        self.btn_restore_optics.setToolTip(self._zdanie_przywrocenia(reka))
         self.btn_approve.setEnabled(tid is not None and self._selected_status() != "approved")
         # źródło mergowalne tylko gdy kanoniczne BEZ członków (inwariant głębokość ≤ 1, §3a) i JEST jakiś
         # realny cel (count>1: placeholder + ≥1 teleskop). Sam wybór celu rozstrzyga `_sync_merge_enabled`.
@@ -488,11 +585,16 @@ class TelescopeAxisView(QWidget):
     def set_busy(self, busy):
         """Podczas etapu pipeline'u wyłącz akcje ZAPISU osi (szczery disabled — UI nie kłamie, że
         można pisać, gdy worker pisze do bazy w tle, §6). Po etapie gospodarz woła `set_busy(False)`,
-        co przez `_on_selection_changed` przywraca SZCZERE stany przycisków dla zaznaczenia."""
+        co przez `_on_selection_changed` przywraca SZCZERE stany przycisków dla zaznaczenia.
+
+        Stan trzyma flaga `_busy` (bramka kodu N8): zmiana zaznaczenia w trakcie etapu nie zapala
+        „Przywróć z plików", a edytor optyki otwarty przed etapem odmawia zapisu z komunikatem."""
+        self._busy = bool(busy)
         if busy:
             self.btn_approve.setEnabled(False)
             self.btn_merge.setEnabled(False)
             self.btn_unmerge.setEnabled(False)
+            self.btn_restore_optics.setEnabled(False)
             self.combo_target.setEnabled(False)
             self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)   # zamknij in-line edyt etykiety (T3)
         else:
@@ -508,7 +610,12 @@ class TelescopeAxisView(QWidget):
     def _on_item_changed(self, item):
         """Edycja in-line etykiety → `repo.label_telescope`. Pusty label → `ValueError` (kasowanie
         etykiety poza v1) złapany i pokazany, widok wraca do prawdy bazy (refresh)."""
-        if self._loading or item.column() != COL_LABEL:
+        if self._loading:
+            return
+        if item.column() in (COL_FOCAL, COL_FRATIO):
+            self._on_optics_edited(item.row(), item.column(), item.text())
+            return
+        if item.column() != COL_LABEL:
             return
         tid = self.table.item(item.row(), COL_ID).data(Qt.UserRole)
         try:
@@ -520,6 +627,112 @@ class TelescopeAxisView(QWidget):
             return
         self._flash(i18n.t("axis.tel.label_saved") if changed else i18n.t("axis.tel.label_unchanged"))
         self.refresh()
+
+    def _on_optics_edited(self, row, col, text):
+        """Wpis w f/ albo Ogniskowej (AR-128) → klinga ręki. Porównanie ze STANEM RĘKI, nie z tekstem
+        komórki (bramka kodu N5): przy braku ręki każda poprawna liczba zapisuje rękę, także równa
+        wartości z plików - to potwierdzenie. Pusty wpis = cofnięcie ręki tego pola; przy braku ręki
+        nic do cofnięcia. Przecinek dziesiętny przyjmujemy (`5,6`). Wartość nieliczbowa albo spoza
+        zakresu → komunikat z klingi i widok wraca do prawdy bazy. Każda droga mówi na pasku - stary
+        komunikat nie zostaje. Pliki nietknięte - to zdanie o teleskopie w bazie. W trakcie etapu
+        (`_busy`) odmowa z komunikatem (N8)."""
+        tid = self.table.item(row, COL_ID).data(Qt.UserRole)
+        if self._busy:
+            self._flash(i18n.t("axis.tel.optics_busy"))
+            self.refresh()
+            return
+        tekst = (text or "").replace(queries.CLEARED_MARK, "").strip().replace(",", ".")
+        ogn = col == COL_FOCAL
+        reka = self._rows[tid]["focal_user" if ogn else "f_ratio_user"]
+        try:
+            if not tekst:
+                changed = reka is not None and (
+                    repo.clear_telescope_focal if ogn else repo.clear_telescope_f_ratio)(
+                    self.con, telescope_id=tid, now=self._now())
+                msg = "axis.tel.optics_cleared"
+            else:
+                try:
+                    wartosc = float(tekst)
+                except ValueError:
+                    raise ValueError(i18n.t("axis.tel.optics_not_number", text=tekst)) from None
+                if ogn:
+                    changed = repo.set_telescope_focal(self.con, telescope_id=tid, focal_mm=wartosc,
+                                                       now=self._now())
+                else:
+                    changed = repo.set_telescope_f_ratio(self.con, telescope_id=tid, f_ratio=wartosc,
+                                                         now=self._now())
+                msg = "axis.tel.optics_saved"
+        except ValueError as e:
+            self._flash(i18n.t("axis.tel.optics_rejected", e=e))
+            self.refresh()
+            return
+        self._flash(i18n.t(msg) if changed else i18n.t("axis.tel.optics_unchanged"))
+        self.refresh()
+
+    def _on_restore_optics(self):
+        """„Przywróć z plików": zdejmij rękę OBU pól optyki zaznaczonego teleskopu JEDNĄ klingą
+        (`repo.clear_telescope_optics` - jedna transakcja, dwa zdarzenia, N12). Widok wraca do prawdy
+        bazy ZAWSZE (`finally`), także gdy klinga odmówiła. W trakcie etapu - odmowa (N8)."""
+        tid = self._selected_telescope_id()
+        if tid is None:
+            return
+        if self._busy:
+            self._flash(i18n.t("axis.tel.optics_busy"))
+            return
+        try:
+            a, b = repo.clear_telescope_optics(self.con, telescope_id=tid, now=self._now())
+            self._flash(i18n.t("axis.tel.optics_cleared") if a or b
+                        else i18n.t("axis.tel.optics_unchanged"))
+        except ValueError as e:
+            self._flash(i18n.t("axis.tel.optics_rejected", e=e))
+        finally:
+            self.refresh()
+
+    def _zdanie_przywrocenia(self, row):
+        """Podpowiedź „Przywróć z plików" PRZED zapisem (wizytacja N5): co zostanie w polu po zdjęciu
+        ręki - moda plików, a gdy pliki milczą, wartość zapisana wcześniej (RC8R: 1200 z chwili
+        powołania) albo nic. Bez ręki - zdanie ogólne."""
+        if row is None or (row["focal_user"] is None and row["f_ratio_user"] is None):
+            return i18n.t("axis.tel.restore_optics_tip")
+        pliki = self._pliki.get(row["id"])
+        czesci = []
+        for reka, kolumna, z_plikow, klucz in (
+                (row["focal_user"], row["focal_nominal"], pliki and pliki.focal, "focal"),
+                (row["f_ratio_user"], row["f_ratio_nominal"], pliki and pliki.f_ratio, "f_ratio")):
+            if reka is None:
+                continue
+            if z_plikow is not None:
+                czesci.append(i18n.t(f"axis.tel.restore_{klucz}_files", v=_fmt(z_plikow)))
+            elif kolumna is not None:
+                czesci.append(i18n.t(f"axis.tel.restore_{klucz}_earlier", v=_fmt(kolumna)))
+            else:
+                czesci.append(i18n.t(f"axis.tel.restore_{klucz}_none"))
+        return i18n.t("axis.tel.restore_optics_tip") + "\n" + "\n".join(czesci)
+
+    def _fill_rigs(self, tid):
+        """Panel „Zestawy" zaznaczonego teleskopu (AR-128): średnica wyliczona ogniskowa / f/ (ręka,
+        potem pliki) i wiersz na zestaw z planera (`sky.rigs` - ta sama ogniskowa, ten sam kadr)."""
+        from horreum import sky                              # lazy: jak reszta odczytów planera
+        self.rigs.clear()
+        row = self._rows.get(tid) if tid is not None else None
+        if row is None:
+            self.aperture.setText("")
+            return
+        ogn, f = queries.telescope_focal(row), queries.telescope_f_ratio(row)
+        self.aperture.setText(
+            i18n.t("axis.tel.aperture", d=f"{ogn / f:.0f}", focal=_fmt(ogn), f=_fmt(f))
+            if ogn and f else i18n.t("axis.tel.aperture_unknown"))
+        for rig in sky.rigs(self.con, only=[row["telescop_canon"]]):
+            if rig.scale_arcsec_px is None:
+                tekst = i18n.t("axis.tel.rig_unknown", camera=rig.camera,
+                               reason=i18n.t(f"axis.tel.rig_reason.{rig.reason}"))
+            else:
+                tekst = i18n.t("axis.tel.rig_line", camera=rig.camera, px=_fmt(rig.pixel_um),
+                               s1=f"{rig.scale_arcsec_px:.2f}", s2=f"{2 * rig.scale_arcsec_px:.2f}",
+                               fx=f"{rig.fov_x_arcmin:.1f}", fy=f"{rig.fov_y_arcmin:.1f}")
+            it = QListWidgetItem(tekst)
+            it.setToolTip(tekst)
+            self.rigs.addItem(it)
 
     def _on_approve(self):
         tid = self._selected_telescope_id()
@@ -1434,6 +1647,9 @@ class ObjectAxisView(QWidget):
 
     status_message = Signal(str)
     writeback_busy = Signal(bool)         # okno naprawy pisze do plików → mutex gridu (D-PD-3)
+    # Gest „Przypisz zestaw…" zmienia oś TELESKOPU: liczbę klatek, wartość z plików, a „Dopisz
+    # nowy…" dokłada wiersz (wizytacja N4) - gospodarz odświeża nią Oś teleskopu.
+    telescope_axis_changed = Signal()
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
@@ -1855,6 +2071,16 @@ class ObjectAxisView(QWidget):
             self._add_review_item(
                 i18n.t("object.config_by_hand_line"),
                 count=i18n.t_plural("object.review_count", q["config_by_hand_count"]), tag="config_by_hand")
+        # OGNISKOWA NIEZGODNA Z TELESKOPEM (AR-128, D-1012-2 `Q8`) - trzecia populacja osi sprzętu:
+        # zestaw jest, ale z automatu, a ogniskowa w pliku odbiega od teleskopu ponad tolerancję.
+        # Program nie zakłada teleskopu sam; wybór należy do ręki. Przy zerze wiersz zostaje jako
+        # INFORMACYJNY ze zdaniem o sobie (wizytacja N20): klik z Porządków w „0" trafiał na podstronę
+        # bez zaznaczenia i z podpowiedzią cudzego kubełka.
+        self._add_review_item(
+            i18n.t("object.config_focal_line"),
+            count=i18n.t_plural("object.review_count", q["focal_mismatch_count"]),
+            tag="config_focal" if q["focal_mismatch_count"] > 0 else None,
+            info=i18n.t("object.config_focal_info_empty"))
         # licznik POZOSTAŁEGO kanału jako pozycja informacyjna (bez tagu → nieklikana); nota
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do klatek bez nagłówka — obiekt-review, kopie
         # i (od R1) oś sprzętu mają już swoje akcje.
@@ -2055,6 +2281,7 @@ class ObjectAxisView(QWidget):
         self.set_config_btn.setToolTip(i18n.t(
             "object.set_config_tip_change" if tag == "config_by_hand"
             else "object.set_config_tip" if tag == "config_review"
+            else "object.set_config_tip_focal" if tag == "config_focal"
             else "object.set_config_tip_pick"))
         # WIZ #12: „Przypisz obiekt…" gasł BEZ SŁOWA obok aktywnego „Napraw nagłówek…", więc obie
         # drogi naprawy wyglądały jak jedna zepsuta. Wygaszony przycisk tłumaczy się sam — tooltip
@@ -2166,18 +2393,19 @@ class ObjectAxisView(QWidget):
             rows = queries.path_proposal_frames(self.con, ids)
             self.frames_label.setText(i18n.t("object.frames_path_proposed", n=len(rows)))
             self._fill_frames(rows, present_col=False)
-        elif tag in ("config_review", "config_by_hand"):
+        elif tag in _CONFIG_TAGS:
             # Drążenie pokazuje KLATKI, a jednostkę gestu — folder × kamerę — pokazuje dopiero
             # okno (lustro `path_proposals` wyżej: tam jednostką jest nazwa). Read-model jest
-            # LUSTREM licznika kubełka i test pinuje tę równość. Dwa tagi, bo dwie ROZŁĄCZNE
-            # populacje (bez zestawu / z zestawem od ręki) — i to jest cały sens drugiego wiersza.
+            # LUSTREM licznika kubełka i test pinuje tę równość. Trzy tagi, bo trzy ROZŁĄCZNE
+            # populacje (bez zestawu / z zestawem od ręki / ogniskowa niezgodna z teleskopem).
             self._restore_frames_mode()
-            reka = tag == "config_by_hand"
-            rows = (queries.config_by_hand_frames(self.con) if reka
-                    else queries.config_review_frames(self.con))
-            self.frames_label.setText(i18n.t(
-                "object.frames_config_by_hand" if reka else "object.frames_config_review",
-                n=len(rows)))
+            rows, klucz = {
+                "config_by_hand": (queries.config_by_hand_frames, "object.frames_config_by_hand"),
+                "config_focal": (queries.focal_mismatch_frames, "object.frames_config_focal"),
+                "config_review": (queries.config_review_frames, "object.frames_config_review"),
+            }[tag]
+            rows = rows(self.con)
+            self.frames_label.setText(i18n.t(klucz, n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag == "unreadable":
             self._show_copies()
@@ -2394,27 +2622,46 @@ class ObjectAxisView(QWidget):
         DWA WEJŚCIA, JEDNA DROGA ZAPISU (bramka pakietu 3a, zarzut 1): kubełek „bez zestawu"
         NADAJE, a jego druga połowa („zestaw wskazany ręką") ZMIENIA — ta sama klinga, różnica
         w jednym parametrze. Bez drugiego wejścia pierwsza pomyłka ręki była nieodwracalna
-        z ekranu: klatka wypada z kubełka, a automat jej nie tknie."""
+        z ekranu: klatka wypada z kubełka, a automat jej nie tknie.
+
+        TRZECIE WEJŚCIE (AR-128, D-1012-2 `Q8`): kubełek „ogniskowa niezgodna z teleskopem" otwiera
+        okno w trybie ogniskowej - lista zawężona do teleskopów w tolerancji i „Dopisz nowy…". Zestaw
+        z automatu NADPISUJE się (`overwrite=True`), bo ręka właśnie orzekła, że automat się mylił;
+        nowy teleskop powstaje razem z przypisaniem jedną klingą."""
         tag, _ = self._selected_review()
         zmiana = tag == "config_by_hand"
+        ogniskowa = tag == "config_focal"
         grupy = (queries.config_by_hand_groups(self.con) if zmiana
+                 else queries.focal_mismatch_groups(self.con) if ogniskowa
                  else queries.config_review_groups(self.con))
         if not grupy:
             self.status_message.emit(i18n.t("cfg.err_nothing"))
             return
-        dlg = AssignConfigDialog(self.con, groups=grupy, change=zmiana, parent=self)
-        if dlg.exec() != QDialog.Accepted or dlg.selected is None:
-            return
-        telescope_id, telescope_label, frame_ids = dlg.selected
-        try:
-            with busy.busy(self.status_message.emit,
-                           i18n.t_plural("busy.saving_frames", len(frame_ids))):
-                g = repo.user_assign_config(self.con, frame_ids=frame_ids,
-                                            telescope_id=telescope_id, now=self._now(),
-                                            overwrite=zmiana)
-        except ValueError as e:                # dryf do nieistniejącej klatki/teleskopu
-            QMessageBox.warning(self, i18n.t("cfg.title"), str(e))
-            return
+        dlg = AssignConfigDialog(self.con, groups=grupy, change=zmiana, focal=ogniskowa,
+                                 parent=self)
+        # ODMOWA KLINGI NIE GUBI WPISU (bramka kodu N16): przy „Dopisz nowy…" okno wraca otwarte
+        # z polami, które user wypełnił, i z powodem odmowy; przy wyborze z listy - komunikat jak dawniej.
+        while True:
+            if dlg.exec() != QDialog.Accepted or dlg.selected is None:
+                return
+            telescope_id, telescope_label, frame_ids = dlg.selected
+            nowy = getattr(dlg, "new_telescope", None)         # tylko tryb ogniskowej go ma
+            try:
+                with busy.busy(self.status_message.emit,
+                               i18n.t_plural("busy.saving_frames", len(frame_ids))):
+                    if nowy is not None:
+                        _tid, g = repo.user_assign_config_new_telescope(
+                            self.con, frame_ids=frame_ids, now=self._now(), **nowy)
+                    else:
+                        g = repo.user_assign_config(self.con, frame_ids=frame_ids,
+                                                    telescope_id=telescope_id, now=self._now(),
+                                                    overwrite=zmiana or ogniskowa)
+                break
+            except ValueError as e:            # dryf do nieistniejącej klatki/teleskopu, zła nazwa
+                if nowy is None or not hasattr(dlg, "pokaz_odmowe"):
+                    QMessageBox.warning(self, i18n.t("cfg.title"), str(e))
+                    return
+                dlg.pokaz_odmowe(str(e))
         from horreum.gui import grid       # lazy - wzorzec `_on_confirm`
         # Suma i rozbicie pominięć mają JEDNEGO właściciela - `ConfigGesture` (R-S2b-15); zdanie
         # składa ten sam dom, co na osi obiektu, z prefiksem kluczy osi sprzętu i bez zer.
@@ -2430,8 +2677,12 @@ class ObjectAxisView(QWidget):
             # czyimś materiałem. Mówimy GDZIE to przeliczyć, zamiast liczyć za usera przy okazji
             # innego gestu (takt należy do Dostawy, jak takt 3 przy naprawie nagłówka).
             msg += i18n.t("object.config_next_step")
+        if nowy is not None and g.assigned:
+            # „Dopisz nowy…" nie ma cofnięcia jednym gestem - zdanie wskazuje drogę (N16).
+            msg += i18n.t("object.config_new_telescope_undo", telescope=telescope_label)
         self.status_message.emit(msg)
         self.refresh()
+        self.telescope_axis_changed.emit()
 
     # ------------------------------------------------ akcja zapisu do PLIKU (P-D)
 

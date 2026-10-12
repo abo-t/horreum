@@ -4,12 +4,13 @@ Trzy pytania, na które moduł odpowiada liczbą: czym to sfotografuję (FOV zes
 (kadrowanie i kawałkowanie), kiedy to widać (okno nocy) — plus czwarte, które rozstrzyga PALETĘ:
 ile dziś kosztuje Księżyc.
 
-POLE WIDZENIA IDZIE Z ZEZNANIA, NIE Z DEKLARACJI: `telescope.focal_nominal` jest zamrożony przy
-pierwszym powołaniu osi (`repo.upsert_telescope`) i żyje per TELESKOP, a pole widzenia należy do
-CONFIGU — ten sam ED120R z ASI294MC daje 56,9', a z ASI2600MM 68,4'. Dlatego czytamy `header`
-i bierzemy MODĘ KROTKI `(focallen, xpixsz, naxis1, naxis2)`: moda, bo średnia po rozjeździe
-wyprodukowałaby liczbę, której nie zeznała żadna klatka; krotki, bo inaczej złożylibyśmy ogniskową
-z jednej optyki z geometrią z innej sesji. Wyłącznie `kind='light'` — `master_light` po integracji
+POLE WIDZENIA NALEŻY DO ZESTAWU, nie do teleskopu - ten sam ED120R z ASI294MC daje 56,9', a z
+ASI2600MM 68,4'. Dlatego bierzemy MODĘ KROTKI `(ogniskowa, xpixsz, naxis1, naxis2)` klatek zestawu:
+moda, bo średnia po rozjeździe wyprodukowałaby liczbę, której nie zeznała żadna klatka; krotki, bo
+inaczej złożylibyśmy ogniskową z jednej optyki z geometrią z innej sesji. OGNISKOWA (AR-128,
+D-1012-2): ręka teleskopu → wartość teleskopu z plików (moda, odświeżana przy każdej Dostawie) →
+zeznanie klatki (`_focal_of`). Zestaw = (korzeń scalenia, kamera) - config członka scalenia należy
+do zestawu korzenia. Wyłącznie `kind='light'` - `master_light` po integracji
 jest PRZYCIĘTY i zaniżyłby NAXIS.
 
 BRAK FAKTU NIE JEST ZEREM (lustro D-C-2): config bez ogniskowej, piksela albo geometrii dostaje
@@ -60,6 +61,10 @@ V_ZEN_DEFAULT = 20.5      # ciemne tło w zenicie [mag/arcsec^2]
 K_EXT_DEFAULT = 0.20      # ekstynkcja [mag/masa powietrza]
 
 _MODE_SHARE_MIN = 0.90    # poniżej => 'mixed_optics'; cicha większość przy dwóch optykach kłamie
+# Powody braku pola widzenia zestawu (`Rig.reason`) - JEDYNY właściciel tokenów: panel „Zestawy" Osi
+# teleskopu składa z nich klucz zdania (`axis.tel.rig_reason.<token>`), a test parytetu i18n pilnuje,
+# że każdy ma zdanie (bramka kodu T24, N14).
+RIG_REASONS = ("no_focal", "no_pixel", "no_naxis", "mixed_optics")
 _D2R = math.pi / 180.0
 
 
@@ -130,40 +135,68 @@ def rigs(con, only=None):
     """Zestawy z bazy; `only` = jawna lista `telescop_canon` (None => wszystkie, bez udawania,
     że moduł wie, co jest aktualne).
 
-    Filtr idzie `json_each(?)` w STAŁYM literale (bramka AST); kanoniczność osi JAWNIE
-    (`telescope_canonical` + `merged_into IS NULL`, wzorem `queries.active_telescopes`) — sam join
-    przez widok nie odsiewa scalonych, a scalenie wariantu nazwy wyrzuciłoby zestaw z parku."""
+    Filtr idzie `json_each(?)` w STAŁYM literale (bramka AST). Kanoniczność przez KORZEŃ
+    (`telescope_canonical` → `canon_id`, wzorem `queries.active_telescopes`): config członka scalenia
+    wchodzi do zestawu korzenia z tą samą kamerą, filtr parku i nazwa zestawu idą z korzenia - dawny
+    filtr `merged_into IS NULL` wyrzucał z planera klatki, które Oś teleskopu pokazuje pod korzeniem."""
     rows = con.execute(
         # Modę liczymy w Pythonie (SQLite nie ma mody) — SQL oddaje surowe krotki geometrii.
         # `json_extract` na NAXIS daje int (FITS), string (RAW, karty EXIF są stringami) albo NULL
         # (XISF, RAW sprzed mapowania wymiarów); `_to_int` domyka wariant stringowy. Filtr parku
         # siedzi w TYM SAMYM literale (bramka AST zabrania składania SQL ze stałych, nie tylko
         # f-stringów): `?1 IS NULL` => brak filtru, inaczej `json_each`.
-        "SELECT cf.id AS config_id, t.telescop_canon AS telescope, cam.model_canon AS camera, "
-        "       h.focallen AS focal, h.xpixsz AS pixel, "
+        # KORZEŃ SCALENIA (AR-128, bramka planu T24 zarzut 2): config członka scalenia należy do
+        # zestawu korzenia (`telescope_canonical`) - Oś teleskopu roluje jego klatki do korzenia,
+        # więc planer nie ma prawa ich gubić. Optyka (ręka, pliki) i nazwa idą z KORZENIA.
+        "SELECT cf.id AS config_id, cf.telescope_id AS cfg_tel, r.id AS root_id, "
+        "       cf.camera_id AS camera_id, r.telescop_canon AS telescope, "
+        "       cam.model_canon AS camera, "
+        "       h.focallen AS focal, r.focal_user AS tel_focal_user, "
+        "       r.focal_nominal AS tel_focal_files, h.xpixsz AS pixel, "
         "       cam.pixel_um AS cam_pixel, cam.pixel_conflict AS cam_conflict, "
         "       cam.pixel_source AS cam_source, "
         "       json_extract(h.raw_json, '$.NAXIS1') AS nx, "
         "       json_extract(h.raw_json, '$.NAXIS2') AS ny, h.date_obs AS d "
         "FROM config cf "
-        "JOIN telescope t ON t.id = cf.telescope_id "
+        "JOIN telescope_canonical tc ON tc.id = cf.telescope_id "
+        "JOIN telescope r ON r.id = tc.canon_id "
         "JOIN camera cam ON cam.id = cf.camera_id "
-        "LEFT JOIN telescope_canonical tc ON tc.canon_id = t.id "
         "JOIN frame f ON f.config_id = cf.id AND f.kind = 'light' "
         "JOIN header h ON h.frame_id = f.id "
-        "WHERE t.merged_into IS NULL "
-        "  AND (?1 IS NULL OR t.telescop_canon IN (SELECT value FROM json_each(?1))) "
+        "WHERE (?1 IS NULL OR r.telescop_canon IN (SELECT value FROM json_each(?1))) "
         "ORDER BY cf.id",
         (None if only is None else json.dumps(list(only)),)
     ).fetchall()
-    return [_rig_from_rows(cid, grp) for cid, grp in _group_by_config(rows)]
+    return [_rig_from_rows(cid, grp) for cid, grp in _group_by_rig(rows)]
 
 
-def _group_by_config(rows):
-    out = {}
+def _group_by_rig(rows):
+    """Zestaw = (korzeń scalenia, kamera) → `(config_id przedstawiciela, wiersze)`. Przedstawiciel
+    jest DETERMINISTYCZNY, bo jest kluczem konsumentów (`targets` trzyma kadry po `config_id`):
+    config samego korzenia z tą kamerą, a gdy go nie ma - najmniejszy id członka."""
+    grupy, przedst = {}, {}
     for r in rows:
-        out.setdefault(r["config_id"], []).append(r)
-    return out.items()
+        klucz = (r["root_id"], r["camera_id"])
+        grupy.setdefault(klucz, []).append(r)
+        kand = (r["cfg_tel"] != r["root_id"], r["config_id"])     # korzeń przed członkiem
+        if klucz not in przedst or kand < przedst[klucz]:
+            przedst[klucz] = kand
+    return sorted(((przedst[k][1], w) for k, w in grupy.items()), key=lambda kw: kw[0])
+
+
+def _focal_of(r):
+    """Ogniskowa wiersza zestawu (AR-128, D-1012-2): RĘKA teleskopu → wartość teleskopu Z PLIKÓW
+    (moda, `grouper.optics_from_files`) → zeznanie klatki.
+
+    Odstępstwo od „ręka, potem zeznanie" piksela jest wymuszone: klatka przypięta ręką do innego
+    teleskopu niesie w pliku ogniskową STAREGO (1600 przy A140R 784), więc jej zeznanie rozbiłoby
+    modę krotki i kadr. Zeznanie klatki zostaje zapasem dla teleskopu, który jeszcze nie ma wartości
+    (baza sprzed pierwszej Dostawy po 0039)."""
+    for v in (r["tel_focal_user"], r["tel_focal_files"], r["focal"]):
+        f = _to_float(v)
+        if f is not None and f > 0:
+            return f
+    return None
 
 
 def _rig_from_rows(config_id, rows):
@@ -175,7 +208,8 @@ def _rig_from_rows(config_id, rows):
     (zmierzone: RC8×ASI2600MC ma 202 XISF na 2733 klatki => udział spadał do 0,93).
 
     Piksel: ręka kamery, potem zeznanie klatki, a gdy go brak - `camera.pixel_um` bez konfliktu
-    (nagłówek modułu)."""
+    (nagłówek modułu). Ogniskowa: ręka teleskopu, potem wartość teleskopu z plików, potem zeznanie
+    klatki (`_focal_of`)."""
     counts, last, complete = {}, None, 0
     missing = {"no_focal": 0, "no_pixel": 0, "no_naxis": 0}
     for r in rows:
@@ -186,7 +220,7 @@ def _rig_from_rows(config_id, rows):
         nx, ny = _to_int(r["nx"]), _to_int(r["ny"])
         if nx is not None and ny is not None:
             nx, ny = max(nx, ny), min(nx, ny)
-        key = (_to_float(r["focal"]), pixel, nx, ny)
+        key = (_focal_of(r), pixel, nx, ny)
         if r["d"] and (last is None or r["d"] > last):
             last = r["d"]
         if key[0] is None:

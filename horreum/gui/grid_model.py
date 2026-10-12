@@ -358,6 +358,12 @@ PRESET_PENDING_FINISH = "Zapis czeka na dokończenie"
 # dogania obiekt, który klatka już ma. Predykat `queries.file_object_mismatch_frame_ids`, ten sam
 # co liczba wiersza Porządków. Stała współdzielona z TasksView po nazwie.
 PRESET_FILE_OBJECT_MISMATCH = "Plik nie zgadza się z obiektem"
+# PRESET_F_RATIO_MISMATCH - piętnasty bliźniak (AR-129). Klatka (light, flat) z zestawem automatu,
+# której `FOCRATIO` w pliku odbiega od f/ teleskopu (ręka, potem pliki) ponad tolerancję - na
+# archiwum 26 XISF RC8 z f/200 i jeden FITS A140R z f/8. Robotą jest gest „Popraw f/ w plikach…"
+# (menu prawego kliku w tej perspektywie) - na życzenie, przez szufladę zapisu z cofnięciem.
+# Predykat `queries.f_ratio_mismatch_frame_ids`, ten sam co liczba wiersza Porządków.
+PRESET_F_RATIO_MISMATCH = "f/ niezgodna z teleskopem"
 # PRESET_READY_IMAGES - gotowe obrazy pogrupowane po stanie rodowodu. Bez flagi `only_*`: zbiór
 # niesie ISTNIEJĄCY facet Rodzaj (`master_light`), więc listwa pokazuje go jako wybór, a facet
 # „Rodowód" obok zawęża dalej jednym klikiem. Grupowanie po kolumnie „Rodowód" stawia stosy bez
@@ -395,6 +401,7 @@ PRESETS = {
     PRESET_PENDING_FINISH: {"filter": None, "group_by": None, "only_pending_finish": True},
     PRESET_FILE_OBJECT_MISMATCH: {"filter": None, "group_by": None,
                                   "only_file_object_mismatch": True},
+    PRESET_F_RATIO_MISMATCH: {"filter": None, "group_by": None, "only_f_ratio_mismatch": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -419,6 +426,7 @@ _PRESET_LABELS = {
     PRESET_TORN_WRITE: "perspective.torn_write",
     PRESET_PENDING_FINISH: "perspective.pending_finish",
     PRESET_FILE_OBJECT_MISMATCH: "perspective.file_object_mismatch",
+    PRESET_F_RATIO_MISMATCH: "perspective.f_ratio_mismatch",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -465,6 +473,7 @@ _TRIMY = (
     ("_only_torn_write", "torn_write_frame_ids"),
     ("_only_pending_finish", "pending_finish_frame_ids"),
     ("_only_file_object_mismatch", "file_object_mismatch_frame_ids"),
+    ("_only_f_ratio_mismatch", "f_ratio_mismatch_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model
@@ -479,6 +488,9 @@ _FLAGA_ZASTAPIONYCH = "_only_superseded"
 # Perspektywa „Plik nie zgadza się z obiektem" dokłada do menu tabeli gest „Uzgodnij pliki…"
 # (AR-17 krok 3) i przy wejściu podaje jego receptę - ta sama figura: jedna flaga, pod stałą.
 _FLAGA_ZGODNOSCI_PLIKU = "_only_file_object_mismatch"
+# Perspektywa „f/ niezgodna z teleskopem" dokłada do menu tabeli gest „Popraw f/ w plikach…"
+# (AR-129) - ta sama figura: jedna flaga, pod stałą.
+_FLAGA_OPTYKI = "_only_f_ratio_mismatch"
 # Te same zasady dla dwóch perspektyw izolacji zapisu w miejscu: w nich menu tabeli pokazuje drogi
 # wyjścia z izolacji także nad pustym zaznaczeniem (wygaszone z powodem), a wejście w perspektywę
 # podaje receptę gestu (`_RECEPTY_ZAPISU`). Klucz = flaga z `_TRIMY`.

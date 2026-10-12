@@ -117,6 +117,7 @@ def test_po_cofnieciu_skan_znow_uzupelnia(con):
 
 def _row(pixel, cam_pixel, cam_source=None, cam_conflict=0):
     return {"telescope": "T", "camera": "C", "focal": 135.0, "pixel": pixel,
+            "tel_focal_user": None, "tel_focal_files": None,        # AR-128: optyka teleskopu
             "cam_pixel": cam_pixel, "cam_conflict": cam_conflict, "cam_source": cam_source,
             "nx": 4240, "ny": 2832, "d": "2026-01-01"}
 

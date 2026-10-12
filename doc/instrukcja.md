@@ -391,6 +391,8 @@ Pogrubiona liczba to robota; szare wiersze to historia albo stan bez roboty.
 | **Klatki bez obiektu** | automat nie wie, co jest na zdjęciu | **Przegląd obiektów** |
 | **Obrazy bez rodowodu** | gotowy obraz nie wie, z czego powstał | perspektywa **Rodowód do potwierdzenia** |
 | **Klatki bez zestawu** | brak teleskopu × kamery (typowo RAW z lustrzanki) | **Przegląd obiektów**, gest **Przypisz zestaw…** |
+| **Ogniskowa niezgodna z teleskopem** | ogniskowa w pliku odbiega od teleskopu o ponad 5 % | **Przegląd obiektów**, gest **Przypisz zestaw…** |
+| **f/ niezgodna z teleskopem** | f/ w pliku odbiega od teleskopu o ponad 5 % (np. f/200 zamiast f/8) | perspektywa o tej nazwie, prawy klik **Popraw f/ w plikach (zgodnie z teleskopem)…** |
 | **Teleskopy bez etykiety** | sprzęt ma tylko techniczną nazwę z nagłówka | **Oś teleskopu** |
 | **Klatki bez stanowiska** | nagłówek nie niesie GPS | **Oś obserwatorium**, gest **Wskaż stanowisko…** |
 | **Stanowiska bez nazwy** | miejsce ma tylko współrzędne | **Oś obserwatorium** |
@@ -412,6 +414,34 @@ Z podstrony wracasz strzałką **← Porządki**.
 4. Klatki bez GPS: na **Oś obserwatorium** kliknij **Wskaż stanowisko…** - okno grupuje je po folderach.
 
 > Nazwy i scalenia są **odwracalne**, dlatego program nie pyta „czy na pewno?".
+
+### Popraw ogniskową i f/ teleskopu
+
+Teleskop w Horreum to konkretny teleskop z konkretną ogniskową. Kolumny **f/** i **Ogniskowa** na
+**Oś teleskopu** pokazują wartość z plików - tę, którą zapisuje większość klatek tego teleskopu.
+Liczy się ona od nowa po każdym **Przyjmij** i po każdym przypięciu klatek do teleskopu.
+
+1. Pliki mają błąd albo chcesz potwierdzić wartość: dwuklik w **f/** albo **Ogniskowa**, wpisz liczbę,
+   Enter - także tę samą, którą widzisz. Twoja wartość ma znacznik `↺` i wygrywa w osi, w planerze
+   i w Porządkach. Pliki zostają bez zmian. Podpowiedź komórki dalej mówi, co zapisują pliki, np.
+   „pliki: 784 mm (7370 kl.)". Szara komórka z podpowiedzią „Nieaktualne” przeliczy się przy
+   najbliższym **Przyjmij**.
+2. Pusty wpis albo **Przywróć z plików** (blok **Optyka** pod listą scalonych) zdejmuje Twoją
+   wartość. Podpowiedź przycisku mówi przed kliknięciem, co zostanie w polu.
+3. Panel **Zestawy** pokazuje, co teleskop daje z każdą kamerą: piksel, skalę w ″/px (także przy
+   bin 2) i kadr. Średnica wyliczona z ogniskowej i f/ stoi nad nim, w bloku **Optyka**.
+
+Horreum nigdy nie zakłada teleskopu sam. Klatki, których ogniskowa odbiega od teleskopu o ponad 5 %,
+czekają w zadaniu **Ogniskowa niezgodna z teleskopem**. **Przypisz zestaw…** pokazuje wtedy tylko
+teleskopy o pasującej ogniskowej. Gdy żaden nie pasuje, wybierz **Dopisz nowy…** i podaj nazwę,
+ogniskową, f/ i park. Pole parku startuje od parku teleskopu, w którym klatki są dziś. Twój wybór
+zostaje na stałe - kolejne **Przyjmij** go nie zmieni. Pomyłkę z **Dopisz nowy…** naprawiasz,
+scalając nowy teleskop na **Oś teleskopu** z właściwym.
+
+**f/ niezgodna z teleskopem** pokazuje klatki z kolumną FOCRATIO. Zaznacz je, prawy klik
+**Popraw f/ w plikach (zgodnie z teleskopem)…** - wpisy trafiają do szuflady zapisu, a pliki zmieniają
+się dopiero po **Zapisz**. Gest poprawia tylko mniejszość. Gdy f/ teleskopu nie zgadza się
+z większością jego plików, gest odmawia i każe sprawdzić Oś teleskopu.
 
 ### Nazwij obiekty, których automat nie rozpoznał
 

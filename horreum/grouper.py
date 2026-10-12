@@ -25,7 +25,16 @@ co najmniej dwie ogniskowe, oś rozdziela się po `FOCALLEN` (`_soczewki_raw`); 
 nazwie zostaje przy ogniskowej, którą już deklaruje. „8 nazw × 1 ogniskowa" dotyczy lightów
 i flatów FITS - gotowe obrazy niosą ogniskową z rozwiązania astrometrycznego i dlatego FITS/XISF
 rozdziałowi nie podlegają.
+
+TELESKOP = FIZYCZNY TELESKOP Z OGNISKOWĄ, POTWIERDZONY RĘKĄ (D-1012-2): przebieg nigdy nie zakłada
+teleskopu po ogniskowej FITS/XISF. Klatka, której ogniskowa odbiega od teleskopu o więcej niż
+`OPTICS_TOLERANCE`, czeka w kubełku Porządków na wybór ręki z listy teleskopów mieszczących się w tej
+tolerancji albo na „Dopisz nowy…". Wartość osi „z plików" to MODA zeznań (`optics_from_files`),
+odświeżana przy każdej Dostawie; wartość ręki (`telescope.*_user`) wygrywa przy odczycie.
 """
+from __future__ import annotations       # `int | None` w ciele dataclassy (lustro `sky.py`)
+
+import json
 from dataclasses import dataclass
 
 from . import repo
@@ -40,6 +49,27 @@ from .calibration import KIND_RECIPE
 # C0 §8): trafiłby do przepisów, a w osi teleskopu zostałby pominięty i zaczął budować configi pod
 # cudzą optyką. Wartość dziś == dawny literał {dark, bias, master_dark, master_bias} (test pinuje).
 NO_TELESCOPE_KINDS = frozenset(k for k, (_cls, on_axis) in KIND_RECIPE.items() if not on_axis)
+
+# OPTYKA Z PLIKÓW (AR-128, D-1012-2). Trzy przełączniki decyzji właściciela, każdy w JEDNYM miejscu:
+#
+# `OPTICS_EVIDENCE_KINDS` - kto ZEZNAJE o optyce teleskopu, w kolejności pierwszeństwa: głosuje przy
+# wartości z plików (`optics_from_files`) i trafia do kubełka „ogniskowa niezgodna z teleskopem"
+# (`resolver.optics_mismatch_frame_ids`; kubełek f/ bierze same lighty). Stosy (`master_light`)
+# i mastery flatów są POZA (D-1012-2 `Q15`): ogniskową stosu zapisuje program obróbki, wyliczając ją
+# z rozwiązania astrometrycznego i SWOJEGO wpisu rozmiaru piksela - a fałszywy bywa właśnie ten wpis
+# (obiektyw 105 mm: XPIXSZ 5,4 zamiast 4,62 µm daje 122 mm), podobnie po drizzlu i przy złożeniu
+# zdrizzlowanych masterów. Każdy z 11 rozjazdów stosu na archiwum (> 5 %) to taki wpis, nie inny
+# sprzęt. Dopisanie `master_light` włączyłoby stosy.
+OPTICS_EVIDENCE_KINDS = ("light", "flat")
+# `OPTICS_TOLERANCE` - względna różnica ogniskowej albo f/, od której klatka „nie zgadza się
+# z teleskopem" i od której teleskop mieści się na liście wyboru (D-1012-2 `Q8`: 5 %). Zmierzony szum
+# tej samej optyki w plikach: ≤ 1,3 % (master flaty A140R 794 przy 784).
+OPTICS_TOLERANCE = 0.05
+# `RAW_LENS_SPLIT` - wyjątek od zasady „program nigdy nie rozdziela teleskopu sam" (D-1012-2 `Q8`):
+# nazwa zastępcza adaptera RAW (`DT 0mm F0 SAM`) dzieli się po ogniskowej z EXIF-u (`_soczewki_raw`).
+# Decyzja właściciela `Q14` (D-1012-2): zostaje - etykiety obiektywów nada sam; `False` wyłącza rozdział, a zdjęcia o ogniskowej
+# odległej od teleskopu trafiają wtedy do kubełka i okna wyboru jak każde inne.
+RAW_LENS_SPLIT = True
 
 
 @dataclass
@@ -56,7 +86,93 @@ class GroupSummary:
     configs_unassigned: int = 0    # stęchłe przypisania kalibracji zdjęte (dane sprzed kind-scopingu)
     config_by_hand: int = 0        # zestaw wskazany RĘKĄ — przebieg go mija (R1b, NIE review)
     configs_by_twin: int = 0       # wariant kadru bez TELESCOP z zestawem ORYGINAŁU (AR-54)
+    optics_refreshed: int = 0      # teleskopy, którym zmieniła się wartość z plików (AR-128)
     variants: object = None        # relacje wariantu z zeznań (`stack_variants.LinkSummary`)
+
+
+@dataclass(frozen=True)
+class FilesOptics:
+    """Wartość Z PLIKÓW jednego teleskopu (`optics_from_files`) - moda zeznań z liczbą klatek, które
+    ją niosą. `None` = żadna klatka nie zeznała; `lights_without_focal` = lighty bez FOCALLEN."""
+    focal: int | None = None
+    focal_n: int = 0
+    f_ratio: float | None = None
+    f_ratio_n: int = 0
+    lights: int = 0
+    lights_without_focal: int = 0
+
+
+def _moda(licznik):
+    """Moda z remisem rozstrzyganym na rzecz WIĘKSZEJ wartości (jak `sky._rig_from_rows`) - wynik
+    nie zależy od kolejności wierszy."""
+    return max(sorted(licznik, reverse=True), key=lambda k: licznik[k])
+
+
+def _optics(rows):
+    """Wiersze `(kind, focallen, focratio_raw, reka)` → `FilesOptics`, osobno dla każdego pola:
+    moda lightów z zestawem AUTOMATU, bez nich - lightów przypiętych RĘKĄ, potem tak samo flaty
+    (kolejność `OPTICS_EVIDENCE_KINDS`).
+
+    DLACZEGO RĘKA NA KOŃCU (bramka kodu T24, N2): odświeżenie idzie teraz za każdym przepięciem klatek,
+    a klatka przypięta ręką niesie w pliku ogniskową STAREGO teleskopu (5 klatek RC8 1600 przypiętych
+    do A140R 784 przegłosowałoby jego 3 klatki i planer liczyłby kadr z 1600). Teleskop, który ma
+    WYŁĄCZNIE klatki ręki (świeżo dopisany), bierze modę z nich - innego świadka nie ma."""
+    kolejnosc = [(k, reka) for k in OPTICS_EVIDENCE_KINDS for reka in (False, True)]
+    ogn = {k: {} for k in kolejnosc}
+    f = {k: {} for k in kolejnosc}
+    lights = bez = 0
+    for kind, fl, fr, reka in rows:
+        klucz = (kind, bool(reka))
+        if kind == "light":
+            lights += 1
+            bez += fl is None
+        if fl is not None:
+            v = int(round(fl))
+            ogn[klucz][v] = ogn[klucz].get(v, 0) + 1
+        if fr is not None:
+            f[klucz][float(fr)] = f[klucz].get(float(fr), 0) + 1
+    wynik = {"lights": lights, "lights_without_focal": bez}
+    for pole, liczniki in (("focal", ogn), ("f_ratio", f)):
+        for klucz in kolejnosc:
+            if liczniki[klucz]:
+                m = _moda(liczniki[klucz])
+                wynik[pole], wynik[f"{pole}_n"] = m, liczniki[klucz][m]
+                break
+    return FilesOptics(**wynik)
+
+
+def optics_from_files(con, telescope_id=None):
+    """JEDYNA derywacja wartości Z PLIKÓW (AR-128, bramka planu T24 zarzut 3) - `FilesOptics` jednego
+    teleskopu, a bez `telescope_id` słownik `{id korzenia: FilesOptics}` dla wszystkich kanonicznych.
+
+    Populacja = AKTYWNE klatki (`superseded_by`/`retired_at` NULL; klatka bez obecnej kopii głosuje -
+    zeznanie nagłówka zostaje prawdziwe) rodzajów `OPTICS_EVIDENCE_KINDS` z zestawów KORZENIA
+    i jego członków scalenia (`telescope_canonical`) - czyli po przypisaniach, także ręcznych (te
+    głosują na końcu, `_optics`). Głos mają więc klatki, które oś przypisuje temu teleskopowi, nie te,
+    które niosą jego nazwę w pliku. Konsumenci: Dostawa (`run_grouper`), krok pomigracyjny 0039,
+    gesty przypięcia (`refresh_all_optics`), Oś teleskopu (tooltip „pliki: …"), strażnik gestu
+    „Popraw f/", przez kolumnę automatu - planer i kubełki. Read-only, SELECT literałem."""
+    kinds = json.dumps(list(OPTICS_EVIDENCE_KINDS))
+    if telescope_id is not None:
+        rows = con.execute(
+            "SELECT f.kind, h.focallen, h.focratio_raw, f.config_source IS NOT NULL "
+            "FROM telescope_canonical tc "
+            "JOIN config c ON c.telescope_id = tc.id JOIN frame f ON f.config_id = c.id "
+            "JOIN header h ON h.frame_id = f.id "
+            "WHERE tc.canon_id = ? AND f.superseded_by IS NULL AND f.retired_at IS NULL "
+            "AND f.kind IN (SELECT value FROM json_each(?))", (telescope_id, kinds)).fetchall()
+        return _optics([tuple(r) for r in rows])
+    rows = con.execute(
+        "SELECT tc.canon_id, f.kind, h.focallen, h.focratio_raw, f.config_source IS NOT NULL "
+        "FROM telescope_canonical tc "
+        "JOIN config c ON c.telescope_id = tc.id JOIN frame f ON f.config_id = c.id "
+        "JOIN header h ON h.frame_id = f.id "
+        "WHERE f.superseded_by IS NULL AND f.retired_at IS NULL "
+        "AND f.kind IN (SELECT value FROM json_each(?))", (kinds,)).fetchall()
+    per = {}
+    for r in rows:
+        per.setdefault(r[0], []).append((r[1], r[2], r[3], r[4]))
+    return {tid: _optics(w) for tid, w in per.items()}
 
 
 # Kanon teleskopu wydzielonego z nazwy RAW po ogniskowej. Nazwa bazowa zostaje na czele, żeby
@@ -149,7 +265,12 @@ def run_grouper(con, now):
     (`config.camera_id == frame.camera_id`), inaczej przegląd jak dotąd, a zestaw przejęty wcześniej
     od oryginału schodzi (`repo.unassign_config`, wyłącznie automat). Warianty idą na KONIEC
     fazy 2, a config oryginału czytamy w chwili wariantu - oryginał przypisany w tym samym przebiegu
-    jest już widoczny."""
+    jest już widoczny.
+
+    KROK (3) - WARTOŚĆ Z PLIKÓW (AR-128): po fazie 2 każdy kanoniczny teleskop dostaje modę zeznań
+    klatek, które oś mu przypisała (`optics_from_files`, `repo.refresh_telescope_optics`); dawniej
+    zostawała na zawsze wartość PIERWSZEJ klatki grupy. Teleskopu po ogniskowej FITS/XISF przebieg
+    NIE zakłada (D-1012-2) - klatka o obcej ogniskowej idzie do kubełka i wyboru ręki."""
     from . import stack_variants              # leniwie: plan wersji ciągnie projekcję i skan
     s = GroupSummary()
     s.variants = stack_variants.link_from_testimonies(con, now)
@@ -163,9 +284,8 @@ def run_grouper(con, now):
     oryginaly = {r["variant_frame_id"]: r["original_frame_id"] for r in con.execute(
         "SELECT variant_frame_id, original_frame_id FROM stack_variant").fetchall()}
 
-    # (1) grupy po strip() — reprezentatywne właściwości (f/, ogniskowa) z pierwszego
-    # niepustego zeznania grupy (nullable właściwości audytowe, nie klucz — brief §3).
-    # Kalibracja bez teleskopu NIE zeznaje: dark z 'ED' w nagłówku nie powołuje teleskopu do życia.
+    # (1) grupy po strip() - f/ i ogniskowa to nullable właściwości, nie klucz (brief §3); wartość
+    # z plików liczy krok (3). Kalibracja bez teleskopu NIE zeznaje: dark z 'ED' w nagłówku nie powołuje teleskopu do życia.
     groups = {}
     for r in rows:
         if r["kind"] in NO_TELESCOPE_KINDS:
@@ -180,19 +300,22 @@ def run_grouper(con, now):
     # `X @ 70mm`) - to ta sama oś, więc listy się ŁĄCZĄ; nadpisanie zgubiłoby klatki grupy.
     split = {}
     for canon, members in groups.items():
-        for klucz, czlonkowie in _soczewki_raw(con, canon, members).items():
+        podzial = _soczewki_raw(con, canon, members) if RAW_LENS_SPLIT else {canon: members}
+        for klucz, czlonkowie in podzial.items():
             split.setdefault(klucz, []).extend(czlonkowie)
     groups = split
     canon_of = {m["fid"]: canon for canon, members in groups.items() for m in members}
 
     tel_ids = {}
     for canon, members in groups.items():
-        focal = next((m["fl"] for m in members if m["fl"] is not None), None)
-        fratio = next((m["fr"] for m in members if m["fr"] is not None), None)
+        # Wartość startowa NOWEGO wiersza: moda zeznań grupy (AR-128) - dawniej pierwsza klatka.
+        # Istniejący wiersz jej nie bierze; jego wartość z plików odświeża koniec przebiegu
+        # (`optics_from_files` po fazie 2), bo dopiero wtedy wiadomo, które klatki oś mu przypisała.
+        start = _optics([(m["kind"], m["fl"], m["fr"], m["cfg_src"] is not None) for m in members
+                         if m["kind"] in OPTICS_EVIDENCE_KINDS])
         tel_id, created = repo.propose_telescope(
-            con, telescop_canon=canon, f_ratio_nominal=fratio,
-            focal_nominal=int(round(focal)) if focal is not None else None,
-            member_count=len(members), now=now)
+            con, telescop_canon=canon, f_ratio_nominal=start.f_ratio,
+            focal_nominal=start.focal, member_count=len(members), now=now)
         s.telescopes_proposed += created
         tel_ids[canon] = tel_id
 
@@ -242,4 +365,32 @@ def run_grouper(con, now):
         s.configs_proposed += created
         if repo.assign_config(con, frame_id=r["fid"], config_id=cfg_id, now=now):
             s.configs_assigned += 1
+
+    # (3) WARTOŚĆ Z PLIKÓW (AR-128) - PO całej fazie 2, łącznie z wariantami AR-54 i klatkami
+    # przypiętymi ręką: jedna derywacja dla kanonicznych korzeni. Ręki nie dotyka (`repo`).
+    s.optics_refreshed = refresh_all_optics(con, now)
     return s
+
+
+def refresh_all_optics(con, now, actor="grouper", telescope_ids=None):
+    """Wartość Z PLIKÓW (`*_nominal`) każdego kanonicznego teleskopu albo podanych `telescope_ids`
+    (ich korzeni) ← `optics_from_files` - JEDNO miejsce odświeżenia, wołane przez Dostawę (krok 3
+    `run_grouper`), krok pomigracyjny 0039 (`db.open_db`) i gesty przypięcia klatek
+    (`repo.user_assign_config*`, bramka kodu N2). Ręki nie dotyka; bez zmiany zero zdarzeń. Zwraca
+    liczbę teleskopów, którym wartość się zmieniła."""
+    if telescope_ids is None:
+        korzenie = [r[0] for r in con.execute(
+            "SELECT id FROM telescope WHERE merged_into IS NULL").fetchall()]
+        pliki = optics_from_files(con)
+    else:
+        korzenie = sorted({r[0] for r in con.execute(
+            "SELECT canon_id FROM telescope_canonical WHERE id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(int(i) for i in telescope_ids)),)).fetchall()})
+        pliki = {tid: optics_from_files(con, tid) for tid in korzenie}
+    n = 0
+    for tid in korzenie:
+        o = pliki.get(tid)
+        if o is not None and repo.refresh_telescope_optics(
+                con, telescope_id=tid, focal=o.focal, f_ratio=o.f_ratio, now=now, actor=actor):
+            n += 1
+    return n

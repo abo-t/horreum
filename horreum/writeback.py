@@ -202,6 +202,7 @@ def _dopisz(powod: str | None, dopisek: str | None) -> str | None:
 _REPLACEFILE_FLAGS = 0x2 | 0x4          # REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS
 _PODMIANA_PRZEJSCIOWA = frozenset({5, 32, 33, 1175, 1176})
 _PODMIANA_PONOWIENIA = (0.1, 0.3, 1.0)
+_RENAME_ZAJETY = frozenset({32, 33})    # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION (AR-125)
 _KOPIA_SUFFIX = ".horreum-kopia"
 
 
@@ -2819,18 +2820,42 @@ class RenameFileResult:
 def rename_file(old_path, new_path) -> RenameFileResult:
     """Prymityw renamu pliku (KLINGA). Brama anty-clobber: źródło istnieje ORAZ cel NIE istnieje na
     dysku (przenośne) → `os.rename` (Windows: `FileExistsError` przy wyścigu = backstop). Rename w tym
-    samym katalogu = atomowy na wolumenie. Zwraca status; wołający (`commit_renames`) mapuje na staging."""
+    samym katalogu = atomowy na wolumenie. Zwraca status; wołający (`commit_renames`) mapuje na staging.
+
+    PLIK ZAJĘTY (AR-125, `_RENAME_ZAJETY`: antywirus, indeksowanie, Eksplorator po założeniu katalogu)
+    → krótkie ponowienie `_PODMIANA_PONOWIENIA`, wyłącznie gdy plik stoi na miejscu (`_na_miejscu`);
+    brama anty-clobber przed KAŻDĄ próbą. Odmowa 'blocked' zapada tylko przed pierwszym `os.rename` -
+    po nieudanej próbie brama, która nie przechodzi, oddaje 'failed' z ostatnim błędem, bo plik mógł
+    przejść mimo błędu klienta SMB, a o tym rozstrzyga wołający z dysku (`_przeszedl`)."""
     old_path = os.fspath(old_path)
     new_path = os.fspath(new_path)
-    try:
-        if not os.path.exists(old_path):
-            return RenameFileResult("blocked", "źródło nie istnieje na dysku")
-        if os.path.exists(new_path):
-            return RenameFileResult("blocked", "cel już istnieje na dysku (anty-clobber)")
-        os.rename(old_path, new_path)
-    except Exception as exc:  # noqa: BLE001 — raport zamiast wyjątku w warstwie zapisu
-        return RenameFileResult("failed", f"{type(exc).__name__}: {exc}")
-    return RenameFileResult("applied", None)
+    blad = None
+    for proba, pauza in enumerate((*_PODMIANA_PONOWIENIA, None), start=1):
+        try:
+            if blad is None and not os.path.exists(old_path):
+                return RenameFileResult("blocked", "źródło nie istnieje na dysku")
+            if blad is None and os.path.exists(new_path):
+                return RenameFileResult("blocked", "cel już istnieje na dysku (anty-clobber)")
+            if blad is not None and not _na_miejscu(old_path, new_path):
+                return RenameFileResult("failed", _powod_bledu_renamu(blad, proba - 1))
+            os.rename(old_path, new_path)
+            return RenameFileResult("applied", None)
+        except Exception as exc:  # noqa: BLE001 — raport zamiast wyjątku w warstwie zapisu
+            blad = exc
+            if (pauza is None or getattr(exc, "winerror", None) not in _RENAME_ZAJETY
+                    or not _na_miejscu(old_path, new_path)):
+                return RenameFileResult("failed", _powod_bledu_renamu(exc, proba))
+            time.sleep(pauza)
+    raise AssertionError("pętla ponowień renamu wyszła bez wyniku")
+
+
+def _powod_bledu_renamu(exc, prob: int) -> str:
+    """Powód porażki prymitywu renamu: plik zajęty zdaniem z receptą, każdy inny błąd surowo."""
+    kod = getattr(exc, "winerror", None)
+    if kod in _RENAME_ZAJETY:
+        return (f"plik zajęty przez inny program (WinError {kod}, prób: {prob}) - "
+                f"spróbuj ponownie za chwilę")
+    return f"{type(exc).__name__}: {exc}"
 
 
 def renames_for_run(con, run_id):

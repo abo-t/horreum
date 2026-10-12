@@ -824,3 +824,122 @@ def test_odrzucenie_stagingu_zostawia_wiersz_z_zamiarem(tmp_path, monkeypatch):
     repo.clear_renames_for_run(con, "R")
     assert _wiersz(con)["in_flight"] == "commit"
     con.close()
+
+
+# ---------- AR-125: plik zajęty przez inny program - krótkie ponowienie w prymitywie renamu ----------
+
+class _Zajety(PermissionError):
+    """`os.rename` na Windows przy uchwycie innego procesu: `PermissionError` z `winerror` 32."""
+    winerror = 32
+
+
+def _rename_zajety(monkeypatch, ile, *, po_bledzie=None):
+    """`os.rename` rzuca `_Zajety` przez `ile` pierwszych prób (`None` = zawsze), potem prawdziwy.
+    `po_bledzie(src, dst)` wołane przy każdym rzucie - świat zmieniony między próbami. Zwraca
+    listę pauz `time.sleep` prymitywu."""
+    prawdziwy, pauzy, stan = os.rename, [], {"n": 0}
+
+    def _rename(src, dst):
+        stan["n"] += 1
+        if ile is None or stan["n"] <= ile:
+            if po_bledzie:
+                po_bledzie(src, dst)
+            raise _Zajety(13, "The process cannot access the file")
+        return prawdziwy(src, dst)
+    monkeypatch.setattr(writeback.os, "rename", _rename)
+    monkeypatch.setattr(writeback.time, "sleep", pauzy.append)
+    return pauzy
+
+
+def _para(tmp_path):
+    src, dst = tmp_path / "a.fits", tmp_path / "b.fits"
+    src.write_bytes(b"DANE")
+    return str(src), str(dst)
+
+
+@pytest.mark.parametrize("ile", [1, 3])
+def test_rename_zajety_przejsciowo_przechodzi_po_ponowieniu(tmp_path, monkeypatch, ile):
+    """AR-125 (próba fali 10, bv): jedna blokada `WinError 32` na 405 przeniesień na `R:`. Zajęcie
+    raz i trzy razy - prymityw ponawia z pauzami pisarza kart i przenosi plik."""
+    src, dst = _para(tmp_path)
+    pauzy = _rename_zajety(monkeypatch, ile)
+    w = writeback.rename_file(src, dst)
+    assert (w.status, w.reason) == ("applied", None)
+    assert pauzy == list(writeback._PODMIANA_PONOWIENIA[:ile])
+    assert not os.path.exists(src) and open(dst, "rb").read() == b"DANE"
+
+
+def test_rename_zajety_stale_oddaje_powod_z_recepta(tmp_path, monkeypatch):
+    """Po wszystkich ponowieniach powód mówi człowiekowi, co się stało i co zrobić - bez surowego
+    `PermissionError` ze ścieżkami z podwójnymi ukośnikami. Plik nietknięty."""
+    src, dst = _para(tmp_path)
+    pauzy = _rename_zajety(monkeypatch, None)
+    w = writeback.rename_file(src, dst)
+    assert w.status == "failed" and not w.torn
+    assert "plik zajęty przez inny program" in w.reason and "spróbuj ponownie" in w.reason
+    assert "prób: 4" in w.reason and "PermissionError" not in w.reason, w.reason
+    assert pauzy == list(writeback._PODMIANA_PONOWIENIA)
+    assert os.path.exists(src) and not os.path.exists(dst)
+
+
+def test_rename_inny_blad_bez_ponowienia(tmp_path, monkeypatch):
+    """Ponowienie wyłącznie dla zajęcia (32/33) - odmowa dostępu (5) i każdy inny błąd wracają od
+    razu, surowo."""
+    src, dst = _para(tmp_path)
+    pauzy = []
+    monkeypatch.setattr(writeback.time, "sleep", pauzy.append)
+
+    class _Odmowa(PermissionError):
+        winerror = 5
+
+    def _rename(a, b):
+        raise _Odmowa(13, "Access is denied")
+    monkeypatch.setattr(writeback.os, "rename", _rename)
+    w = writeback.rename_file(src, dst)
+    assert w.status == "failed" and w.reason.startswith("_Odmowa:") and pauzy == []
+
+
+def test_rename_przeniesiony_mimo_bledu_nie_jest_odmowa(tmp_path, monkeypatch):
+    """Serwer SMB przeniósł plik, klient dostał 32: stan nie jest nietknięty, więc bez ponowienia
+    i bez 'blocked' („źródło nie istnieje”) - 'failed', a wołający pyta dysk (`_przeszedl`)."""
+    src, dst = _para(tmp_path)
+    prawdziwy = os.rename
+    pauzy = _rename_zajety(monkeypatch, None, po_bledzie=lambda a, b: prawdziwy(a, b))
+    w = writeback.rename_file(src, dst)
+    assert w.status == "failed" and pauzy == []
+    assert writeback._przeszedl(src, dst)
+
+
+def test_rename_cel_pojawil_sie_miedzy_probami_bez_clobbera(tmp_path, monkeypatch):
+    """Brama anty-clobber przed KAŻDĄ próbą: inny proces zakłada plik pod nazwą celu w pauzie -
+    prymityw nie nadpisuje go i oddaje 'failed' z ostatnim błędem (nie 'blocked', bo próba była)."""
+    src, dst = _para(tmp_path)
+    prawdziwy, pauzy, stan = os.rename, [], {"n": 0}
+
+    def _rename(a, b):
+        stan["n"] += 1
+        if stan["n"] == 1:
+            raise _Zajety(13, "The process cannot access the file")
+        return prawdziwy(a, b)
+
+    def _pauza(s):
+        pauzy.append(s)
+        open(dst, "wb").write(b"CUDZY")
+    monkeypatch.setattr(writeback.os, "rename", _rename)
+    monkeypatch.setattr(writeback.time, "sleep", _pauza)
+    w = writeback.rename_file(src, dst)
+    assert w.status == "failed" and "plik zajęty" in w.reason and stan["n"] == 1
+    assert open(dst, "rb").read() == b"CUDZY" and open(src, "rb").read() == b"DANE"
+
+
+def test_commit_renamu_przechodzi_przez_przejsciowe_zajecie(tmp_path, monkeypatch):
+    """Cała droga zatwierdzenia nazw (`commit_renames` → straż → prymityw): zajęcie raz nie robi
+    pozycji zablokowanej - plik przeniesiony, lokacja przepięta z eventem, zamiar zgaszony."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    pauzy = _rename_zajety(monkeypatch, 1)
+    writeback.commit_renames(con, "R", now=NOW)
+    assert pauzy == [writeback._PODMIANA_PONOWIENIA[0]]
+    assert _wiersz(con)["status"] == "applied" and _wiersz(con)["in_flight"] is None
+    assert _stan(con, lid) == (nowa, 1, 1)
+    assert os.path.exists(nowa) and not os.path.exists(stara)
+    con.close()

@@ -201,7 +201,8 @@ def test_powrot_wypartego_niemozliwy_obie_wersje_zostaja_i_powod_mowi_gdzie(tmp_
                                                                             fmt):
     """Powrót nie wychodzi nawet po ponowieniach: 'failed', pod ścieżką NASZA wersja, wersja innego
     pisarza bajt w bajt pod kopią, której nikt nie kasuje, a powód podaje obie ścieżki - nic nie
-    ginie, nic nie znika po cichu."""
+    ginie, nic nie znika po cichu. Od AR-64 (C3) powrót robi automat rekoncyliacji: faza
+    `returning` zostaje, a ponowienie zapisu albo cofnięcia dokończy powrót."""
     con, p, lid = _baza(tmp_path, fmt)
     cudzy = {}
     _cudza_podmiana_w_oknie(monkeypatch, cudzy)
@@ -221,9 +222,10 @@ def test_powrot_wypartego_niemozliwy_obie_wersje_zostaja_i_powod_mowi_gdzie(tmp_
 def test_trzeci_pisarz_w_oknie_powrotu_wszystkie_wersje_zostaja(tmp_path, monkeypatch, fmt):
     """A1: w oknie powrotu wersji B (innego pisarza z okna podmiany) trzeci pisarz podmienia plik
     na C. Powrót zachowuje plik wypierany spod ścieżki i sprawdza, że to NASZA wersja - tu nie jest:
-    'failed', pod ścieżką B, pod drugą kopią C, obie ścieżki w powodzie, nic nie zginęło.
-    Falsyfikator: powrót bez sprawdzenia wypieranego - C znika, wynik 'blocked' mówi, że cudza
-    wersja wróciła."""
+    pod ścieżką B, pod kopią zwrotną C, nic nie zginęło. Od AR-64 (C3) powrót robi automat
+    rekoncyliacji: werdykt `kept` - 'blocked' z kopią zwrotną „do oka” w powodzie i w stanie
+    (wiersz Porządków). Falsyfikator: powrót bez sprawdzenia wypieranego - C znika, wynik mówi, że
+    cudza wersja wróciła."""
     con, p, lid = _baza(tmp_path, fmt)
     cudzy = {}
     _cudza_podmiana_w_oknie(monkeypatch, cudzy)
@@ -236,11 +238,11 @@ def test_trzeci_pisarz_w_oknie_powrotu_wszystkie_wersje_zostaja(tmp_path, monkey
     monkeypatch.setattr(writeback, "_replace_file_w", _trzeci)
     res = writeback.commit(con, "R", now=NOW)
     monkeypatch.undo()
-    (f,) = res.failed
+    (f,) = res.blocked
     assert p.read_bytes() == cudzy["bajty"]                               # B na miejscu
     (zwrotna,) = [x for x in tmp_path.iterdir() if x.name.endswith(writeback._KOPIA_SUFFIX)]
     assert zwrotna.read_bytes() == cudzy["c"]                             # C zachowane
-    assert str(p) in f.reason and str(zwrotna) in f.reason and "ręcznie" in f.reason
+    assert str(zwrotna) in f.reason and "do oka" in f.reason
     assert [x for x in tmp_path.iterdir() if x.suffix == ".tmp"] == []
     con.close()
 
@@ -408,8 +410,8 @@ def _smierc_po_podmianie(monkeypatch):
     """Podmiana zaszła, proces zginął przed potwierdzeniem backupu i przed re-synciem."""
     prawdziwy = writeback._podmien
 
-    def _f(tmp, path, replace_guard, odcisk, po_podmianie=None):
-        prawdziwy(tmp, path, replace_guard, odcisk, None)
+    def _f(tmp, path, replace_guard, odcisk, po_podmianie=None, **kw):
+        prawdziwy(tmp, path, replace_guard, odcisk, None, **kw)
         raise _Smierc()
     monkeypatch.setattr(writeback, "_podmien", _f)
 

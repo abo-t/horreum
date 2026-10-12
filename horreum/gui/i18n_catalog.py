@@ -1898,6 +1898,7 @@ CATALOG = {
     "perspective.orphan_testimony": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
     "perspective.withheld_testimony": {"pl": "Zeznanie wstrzymane", "en": "Testimony withheld"},
+    "perspective.kept_copies": {"pl": "Kopie zostawione do oka", "en": "Copies kept for review"},
     "perspective.torn_write": {
         "pl": "Plik po przerwanym zapisie", "en": "File after an interrupted write"},
     "perspective.pending_finish": {
@@ -2934,6 +2935,8 @@ CATALOG = {
         "pl": "tylko zeznanie z nieobecnej kopii", "en": "only testimony from a missing copy"},
     "grid.criteria.only_withheld_testimony": {
         "pl": "tylko zapisy z zeznaniem wstrzymanym", "en": "only writes with testimony withheld"},
+    "grid.criteria.only_kept_copies": {
+        "pl": "tylko kopie zostawione do oka", "en": "only copies kept for review"},
     "grid.criteria.only_torn_write": {
         "pl": "tylko pliki po przerwanym zapisie", "en": "only files after an interrupted write"},
     "grid.criteria.only_pending_finish": {
@@ -4709,6 +4712,9 @@ CATALOG = {
     # AR-82: plik kopii zapisany, zeznanie klatki przy innej kopii.
     "tasks.withheld_testimony_frames": {
         "pl": "Zeznanie wstrzymane", "en": "Testimony withheld"},
+    # AR-64: kopie plików zostawione obok ścieżki po przerwanej podmianie.
+    "tasks.kept_copy_frames": {
+        "pl": "Kopie zostawione do oka", "en": "Copies kept for review"},
     # Człon drugi dwóch wierszy wyżej, gdy ich zero znaczy „nie wiem": kopia bez zebranego zeznania
     # w porównaniu nie bierze udziału. „?" mówi, że liczby nie ma, reszta - dlaczego. Człon mówi
     # STAN, nie drogę: „czeka na Dostawę" było nieprawdą przy kopii, której pliku już nie ma
@@ -5103,6 +5109,14 @@ CATALOG = {
         "en": "The frame speaks with the voice of a file that is gone.\nIn Collections: "
               "right-click the frame → “{lead}” and a present copy. A frame with one copy is also "
               "fixed by Intake on that copy's folder."},
+    "tasks.kept_copy_tip": {
+        "pl": "Przerwany zapis zostawił kopie pliku obok ścieżki (*.horreum-kopia, *.tmp) - stanu nie "
+              "dało się dowieść.\nPorównaj je z plikiem (ścieżki w dzienniku zdarzeń lokacji) "
+              "i usuń zbędne; wiersz znika, gdy ich nie ma.",
+        "en": "An interrupted write left copies of the file next to its path (*.horreum-kopia, "
+              "*.tmp) - their state could not be proven.\nCompare them with the file (paths in the "
+              "location's event log) and delete the unneeded ones; the row disappears when they "
+              "are gone."},
     "tasks.withheld_testimony_tip": {
         "pl": "Plik kopii zapisany, ale klatka mówi głosem innej kopii.\nW Zbiorach: prawy klik na "
               "klatce → „{lead}” i zapisana kopia - zapis się dokończy. Albo „Cofnij” zapisu.",

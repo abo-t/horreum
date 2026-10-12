@@ -37,6 +37,7 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_FILE_OBJ
                               PRESET_PATH_HEADER_CONFLICT, PRESET_PENDING_FINISH, PRESET_RETIRED,
                               PRESET_TORN_WRITE, PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS,
                               PRESET_SUPERSEDED, PRESET_VANISHED, PRESET_WITHHELD_TESTIMONY,
+                              PRESET_KEPT_COPIES,
                               zdanie_kopii_bez_zeznania)
 from horreum.gui.rows import TwoPartDelegate
 
@@ -140,6 +141,12 @@ _TASKS = [
     # dokańcza zapis (wpisy, nagrobek, pozycja gestu). Liczba, lista i dostępność gestu czytają
     # jeden predykat (`queries.withheld_testimony_frame_ids`).
     ("withheld_testimony_frames", "tasks.withheld_testimony_frames", PRESET_WITHHELD_TESTIMONY),
+    # Wiersz AKCYJNY i ROBOTA (AR-64): rekoncyliacja przerwanej podmiany nie mogła dowieść stanu
+    # plików pełnym sha1 i zostawiła kopie obok ścieżki - człowiek porównuje je z plikiem i usuwa
+    # zbędne; wiersz pustoszeje sam, gdy plików nie ma. Skan tych kopii nie widzi (sufiks), więc
+    # bez wiersza zostawałyby niewidoczne. Liczba i lista czytają jeden predykat
+    # (`queries.kept_copy_frame_ids`).
+    ("kept_copy_frames", "tasks.kept_copy_frames", PRESET_KEPT_COPIES),
     # Wiersz AKCYJNY (0022, Q8): kopia po przerwanym zapisie nagłówka w miejscu, izolowana od skanu.
     # Robota człowieka: odzysk z dziennika operacji albo zwolnienie po własnym rozstrzygnięciu.
     ("torn_write_frames", "tasks.torn_write_frames", PRESET_TORN_WRITE),
@@ -265,6 +272,7 @@ _PODPOWIEDZI_OSI = {
     "copy_conflict_frames": ("tasks.copy_conflict_tip", {"lead": "grid.lead.menu"}),
     "orphan_testimony_frames": ("tasks.orphan_testimony_tip", {"lead": "grid.lead.menu"}),
     "withheld_testimony_frames": ("tasks.withheld_testimony_tip", {"lead": "grid.lead.menu"}),
+    "kept_copy_frames": ("tasks.kept_copy_tip", {}),
     # AR-17 krok 3: „Uzgodnij pliki…" mieszka w menu prawego kliku perspektywy.
     "file_object_mismatch_frames": ("tasks.file_object_mismatch_tip",
                                     {"align": "grid.sel.object_change_align"}),

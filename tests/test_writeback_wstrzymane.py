@@ -298,8 +298,8 @@ def test_rekoncyliacja_po_smierci_po_podmianie_wstrzymuje_zamiast_applied(tmp_pa
     s = _scena(tmp_path, nagrobek=True)
     prawdziwy = writeback._podmien
 
-    def _f(tmp, path, replace_guard, odcisk, po_podmianie=None):
-        prawdziwy(tmp, path, replace_guard, odcisk, None)
+    def _f(tmp, path, replace_guard, odcisk, po_podmianie=None, **kw):
+        prawdziwy(tmp, path, replace_guard, odcisk, None, **kw)
         raise _Smierc()
     monkeypatch.setattr(writeback, "_podmien", _f)
     with pytest.raises(_Smierc):
@@ -682,8 +682,8 @@ def test_rekoncyliacja_nie_gasi_nowszej_decyzji_reki(tmp_path, monkeypatch):
     con, L, lok = _jedna_kopia_z_nagrobkiem(tmp_path)
     prawdziwy = writeback._podmien
 
-    def _f(tmp, path, replace_guard, odcisk, po_podmianie=None):
-        prawdziwy(tmp, path, replace_guard, odcisk, None)
+    def _f(tmp, path, replace_guard, odcisk, po_podmianie=None, **kw):
+        prawdziwy(tmp, path, replace_guard, odcisk, None, **kw)
         raise _Smierc()
     monkeypatch.setattr(writeback, "_podmien", _f)
     with pytest.raises(_Smierc):

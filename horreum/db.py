@@ -130,6 +130,10 @@ from importlib import resources
 # `pending_changes.withheld_id` (wiązanie wpisów takiej próby) i `header_backups.hand_version` (wersja
 # decyzji ręki o obiekcie sprzed pierwszego bajtu zapisu). Wchodzi PUSTE - SQL nie wie, które commity
 # sprzed migracji zgłosiły sukces przy wstrzymanym zeznaniu.
+# 0038 to PRZYROST (nowa tabela, AR-64): `replace_intent` - zamiar podmiany drogi atomowej utrwalony
+# z backupem przed pierwszą podmianą: nazwy kopii wypartej, kopii zwrotnej i pliku tymczasowego, pełny
+# sha1 przygotowanej wersji i faza rekoncyliacji. Wchodzi PUSTA - backupy sprzed migracji
+# rekoncyliują się dawną regułą (nagłówek na dysku).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -167,6 +171,7 @@ MIGRATIONS = [
     (35, "0035_stack_variant.sql"),
     (36, "0036_object_change.sql"),
     (37, "0037_withheld_write.sql"),
+    (38, "0038_replace_intent.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

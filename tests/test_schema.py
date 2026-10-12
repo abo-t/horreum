@@ -25,6 +25,8 @@ EXPECTED_TABLES = {
     "object_change_run", "pending_object_change", "run_dir",
     # 0037 - zapis z zeznaniem wstrzymanym (AR-82)
     "withheld_write",
+    # 0038 - zamiar podmiany drogi atomowej (AR-64)
+    "replace_intent",
 }
 
 
@@ -101,8 +103,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v37_po_migracji(tmp_path):
-    """0037 podnosi user_version do 37 (świeża baza leci 0002→…→0037 sekwencyjnie; 0025 = wersja
+def test_user_version_v38_po_migracji(tmp_path):
+    """0038 podnosi user_version do 38 (świeża baza leci 0002→…→0038 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -113,13 +115,14 @@ def test_user_version_v37_po_migracji(tmp_path):
     0035 = wariant kadru stosu `stack_variant`, AR-54; 0036 = przebieg gestu zmiany obiektu
     `object_change_run`, pozycje ze stanem sprzed `pending_object_change` i katalogi gestu `run_dir`,
     AR-17 krok 3; 0037 = zapis z zeznaniem wstrzymanym `withheld_write`, wiązanie
-    `pending_changes.withheld_id` i wersja decyzji ręki `header_backups.hand_version`, AR-82).
+    `pending_changes.withheld_id` i wersja decyzji ręki `header_backups.hand_version`, AR-82;
+    0038 = zamiar podmiany drogi atomowej `replace_intent`, AR-64).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 37
-    assert db.SCHEMA_VERSION == 37
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 38
+    assert db.SCHEMA_VERSION == 38
     con.close()
 
 
@@ -253,6 +256,42 @@ def test_0037_wstrzymanie_przyrost_na_bazie_v36_i_CHECK(tmp_path):
                 ("commit", 0, None, "t", "porzucone")):
         with pytest.raises(sqlite3.IntegrityError):
             con.execute(wstaw, zly)
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    con.close()
+
+
+def test_0038_zamiar_podmiany_przyrost_na_bazie_v37_i_CHECK(tmp_path):
+    """0038 na bazie v37 z backupem (AR-64): `replace_intent` wchodzi PUSTA (backup sprzed migracji
+    zostaje bez zamiaru - reguła dawna), druga migracja = no-op. CHECK-i: zamknięcie razem
+    z werdyktem i chwilą, faza powrotu wymaga sha1 wersji wypartej, sha1 o długości 40, para sha1 i
+    rozmiaru wypartej. Falsyfikator: zdejmij CHECK fazy powrotu - wiersz `returning` bez B wchodzi."""
+    con = db.connect(str(tmp_path / "h.db"))
+    for version, filename in db.MIGRATIONS:
+        if version <= 37:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    con.execute("INSERT INTO frame(id, sha1_data, kind, first_seen_at) VALUES (1, 'a', 'light', 't')")
+    con.execute("INSERT INTO location(id, frame_id, volume, path) VALUES (1, 1, 'V', 'R:\\L\\a.fits')")
+    con.execute("INSERT INTO commits(id, run_id) VALUES (1, 'R')")
+    con.execute("INSERT INTO header_backups(id, commit_id, location_id, header_text, post_hash) "
+                "VALUES (1, 1, 1, 'x', 'p')")
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    assert con.execute("SELECT count(*) FROM replace_intent").fetchone()[0] == 0
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    wstaw = ("INSERT INTO replace_intent(backup_id, displaced_path, return_path, prepared_path, "
+             "prepared_sha1, prepared_size, displaced_sha1, displaced_size, phase, outcome, "
+             "opened_at, closed_at) VALUES (1, 'k', 'z', 't', ?, 1, ?, ?, ?, ?, 't', ?)")
+    s = "a" * 40
+    for zly in ((s, s, None, "returning", None, None),        # B bez rozmiaru
+                (s, None, None, "returning", None, None),     # powrót bez B
+                (s, None, None, "closed", None, "t"),         # zamknięty bez werdyktu
+                (s, None, None, "closed", "kept", None),      # werdykt bez chwili
+                (s, None, None, "prepared", "kept", None),    # werdykt bez zamknięcia
+                ("krotki", None, None, "prepared", None, None),
+                (s, None, None, "prepared", "zgubiony", None)):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(wstaw, zly)
+    con.execute(wstaw, (s, s, 7, "returned", None, None))
     assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     con.close()
 

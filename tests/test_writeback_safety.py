@@ -213,8 +213,11 @@ def _zapis_w_klindze(tree):
 # `_zloz_plik_tymczasowy` (AR-18/AR-19, 2026-10-05) zastąpił `_write_xisf_file`: jedno miejsce, które
 # składa plik tymczasowy drogi atomowej (zapis XISF, cofnięcie bajtowe i semantyczne XISF) z części
 # z uchwytu blokady - nadal wyłącznie plik NOWY z `mkstemp`, nigdy plik usera.
-_OTWARCIA_DO_ZAPISU = {("_exclusive", "os.fdopen"), ("_zloz_plik_tymczasowy", "open")}
-_ZAPISY_BAJTOW = {"_apply_inplace", "_zloz_plik_tymczasowy"}
+# `_zapisz_tymczasowy_fits` + `_StrumienSha1.write` (AR-64, Z13): plik tymczasowy drogi atomowej FITS
+# (nowy plik z `mkstemp`) pisany przez strumień liczący pełny sha1 wersji N - bez drugiego odczytu.
+_OTWARCIA_DO_ZAPISU = {("_exclusive", "os.fdopen"), ("_zloz_plik_tymczasowy", "open"),
+                       ("_zapisz_tymczasowy_fits", "open")}
+_ZAPISY_BAJTOW = {"_apply_inplace", "_zloz_plik_tymczasowy", "_StrumienSha1"}
 
 
 def test_zapis_w_klindze_tylko_w_dozwolonych_funkcjach():

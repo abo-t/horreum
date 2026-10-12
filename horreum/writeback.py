@@ -130,6 +130,10 @@ CODE_INPLACE_FALLBACK = "inplace_fallback"
 # NIE przyjęło jego nagłówka - głosem klatki mówi inna obecna kopia. Status zapisu 'withheld',
 # cofnięcia 'restored' z tym kodem; dokończenie po przejęciu zeznania tej kopii (`repo.withheld_write`).
 CODE_ZEZNANIE_WSTRZYMANE = "testimony_withheld"
+# `CODE_POWROT_WYPARTEJ` (AR-64, wewnętrzny między pisarzem a orkiestracją): podmiana z zamiarem
+# wyparła cudzą wersję - pod ścieżką nasza, cudza pod kopią, backup niepotwierdzony; powrót robi
+# automat rekoncyliacji (`_rekoncyliuj_zamiar`), a wynik lokacji niesie jego werdykt.
+CODE_POWROT_WYPARTEJ = "displaced_return"
 PREFIKS_DROGI_ATOMOWEJ = "droga dotychczasowa"
 
 
@@ -273,6 +277,17 @@ class _PodmianaOdbita(Exception):
         self.reason = reason
 
 
+class _WypartaDoPowrotu(Exception):
+    """Rewalidacja po podmianie z zamiarem (AR-64) wykryła cudzą wersję pod kopią wypartą: pod
+    ścieżką nasza wersja, cudza pod kopią, backup niepotwierdzony. Powrót robi automat
+    rekoncyliacji orkiestracji (`_rekoncyliuj_zamiar`) - z fazami utrwalanymi przed każdą mutacją,
+    czego transakcja straży (wycofywana razem z wyjątkiem) zapewnić nie może (C3)."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class _PodmianaRozdarta(Exception):
     """Stanu po podmianie nie dało się doprowadzić do zgodnego - `reason` mówi, gdzie co leży.
     `zaszla` = pod ścieżką stoi nasza wersja (wynik niesie backup), `zachowaj_tmp` = plik tymczasowy
@@ -292,6 +307,93 @@ def _nazwa_kopii(path: str) -> str:
         kopia = os.path.join(katalog, f"{nazwa}.{os.urandom(4).hex()}{_KOPIA_SUFFIX}")
         if not os.path.exists(kopia):
             return kopia
+
+
+def _nazwa_zwrotna(kopia: str) -> str:
+    """Nazwa KOPII ZWROTNEJ (AR-64) - wyliczana z nazwy kopii pliku wypartego, więc znana od chwili
+    utrwalenia zamiaru podmiany: tu trafia nasza wersja, gdy wersja innego pisarza wraca pod ścieżkę.
+    Śmierć procesu w oknie powrotu zostawia ją pod nazwą, którą rekoncyliacja zna (Z2). Sufiks kopii
+    zostaje na końcu - skan jej nie wciąga."""
+    return kopia[:-len(_KOPIA_SUFFIX)] + ".zwrot" + _KOPIA_SUFFIX
+
+
+@dataclasses.dataclass(frozen=True)
+class _Zamiar:
+    """Zamiar podmiany drogi atomowej (0038, `repo.insert_header_backup(intent=)`): nazwy kopii
+    wypartej (K), kopii zwrotnej (Z) i pliku tymczasowego (T) oraz pełny sha1 i rozmiar
+    przygotowanej wersji N - policzone w strumieniu zapisu pliku tymczasowego (Z13)."""
+    displaced_path: str
+    return_path: str
+    prepared_path: str
+    prepared_sha1: str
+    prepared_size: int
+
+
+def _zamiar(path: str, tmp: str, sha1: str, size: int) -> _Zamiar:
+    kopia = _nazwa_kopii(path)
+    return _Zamiar(kopia, _nazwa_zwrotna(kopia), tmp, sha1, size)
+
+
+class _StrumienSha1:
+    """Strumień zapisu liczący sha1 i rozmiar tego, co przechodzi do pliku (Z13): pełny dowód wersji
+    N z aktu wytworzenia bajtów, bez drugiego pełnego odczytu pliku tymczasowego (po `R:` to drugi
+    odczyt całego pliku na każdy zapis). Bez `fileno` celowo: astropy z deskryptorem pisałby dane
+    obrazu z pominięciem `write` (`ndarray.tofile`), a sha1 nie objąłby danych. Zmierzone
+    2026-10-12: bajty identyczne z `writeto(ścieżka)`."""
+    mode = "wb"
+    closed = False
+
+    def __init__(self, fh):
+        self._fh = fh
+        self._sha1 = hashlib.sha1()
+        self.size = 0
+
+    def write(self, data):
+        widok = memoryview(data).cast("B")
+        self._sha1.update(widok)
+        self.size += len(widok)
+        return self._fh.write(widok)
+
+    def flush(self):
+        self._fh.flush()
+
+    def tell(self):
+        return self.size
+
+    def seek(self, *_a):
+        raise OSError("strumień liczący sha1 nie przewija")
+
+    def seekable(self):
+        return False
+
+    def hexdigest(self) -> str:
+        return self._sha1.hexdigest()
+
+
+def _zapisz_tymczasowy_fits(hdul, tmp: str) -> _StrumienSha1:
+    """Plik tymczasowy drogi atomowej FITS (nowy plik z `mkstemp`, nigdy plik usera) zapisany przez
+    strumień liczący sha1 i rozmiar (Z13) - pełny dowód wersji N bez drugiego odczytu."""
+    with open(tmp, "wb") as dst:
+        strumien = _StrumienSha1(dst)
+        hdul.writeto(strumien)
+    return strumien
+
+
+def _sha1_pliku(path: str) -> tuple[str, int] | None:
+    """Pełny sha1 i rozmiar pliku albo `None`, gdy pliku nie ma - jedyne rozpoznanie wersji
+    w rekoncyliacji zamiaru podmiany (A/N/B, AR-64): nagłówek nie odróżnia wersji o tym samym
+    nagłówku i innych danych (Z1, Z12)."""
+    try:
+        with open(path, "rb") as fh:
+            h, n = hashlib.sha1(), 0
+            while True:
+                b = fh.read(_SHA1_BUF)
+                if not b:
+                    return h.hexdigest(), n
+                h.update(b)
+                n += len(b)
+    except FileNotFoundError:
+        return None
 
 
 def _replace_z_ponowieniem(path: str, tmp: str, kopia: str) -> OSError | None:
@@ -365,7 +467,10 @@ def _oddaj_wyparty(path: str, kopia: str, rozjazd: list[str], nasza: _Odcisk) ->
     wszystkie wersje zostają na dysku, a powód podaje każdą ścieżkę. Dawniej `os.replace(kopia, path)`
     kasował C bez śladu, a wynik mówił, że cudza wersja wróciła.
     Powrót, który nie zajdzie (po ponowieniach błędu przejściowego) → `_PodmianaRozdarta`: N pod
-    ścieżką, B pod kopią, obie zostają."""
+    ścieżką, B pod kopią, obie zostają.
+
+    Wyłącznie droga BEZ zamiaru podmiany (cofnięcie atomowe): zapis z zamiarem oddaje cudzą wersję
+    automatem rekoncyliacji (`_WypartaDoPowrotu` → `_rekoncyliuj_zamiar`, AR-64 C3)."""
     zmiana = f"plik zmienił się między odczytem a podmianą ({', '.join(rozjazd)})"
     zwrotna = _nazwa_kopii(path)
     blad = _replace_z_ponowieniem(path, kopia, zwrotna)
@@ -393,7 +498,8 @@ def _oddaj_wyparty(path: str, kopia: str, rozjazd: list[str], nasza: _Odcisk) ->
                                   f"zapisana; ponów po odświeżeniu stagingu", uwaga))
 
 
-def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=None) -> str | None:
+def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=None, *,
+             zamiar: _Zamiar | None = None) -> str | None:
     """PODMIANA SYSTEMOWA (sekcja wyżej): `ReplaceFileW` z kopią pliku wypartego, rozpoznanie stanu
     z dysku, rewalidacja kopii wobec `odcisk` i sprzątnięcie kopii. Zwraca uwagę dla wyniku (kopia,
     której nie dało się skasować) albo `None`; błąd podmiany przy pliku nietkniętym albo podmienionym
@@ -407,10 +513,20 @@ def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=N
     po podmianie zgłoszonej przez system i zgodnej rewalidacji; jego porażka zostawia backup
     niepotwierdzony (rekoncyliacja z dyskiem go rozstrzygnie), więc jest połykana. Błąd przy
     ZAMKNIĘCIU straży już po podmianie nie cofa podmiany - też połykany (o wyniku mówi weryfikacja
-    po podmianie)."""
-    kopia = _nazwa_kopii(path)
-    with open(tmp, "rb") as fh:          # odcisk NASZEJ wersji - powrót wypartego ją rozpozna (A1)
-        nasza = _odcisk(fh, 0, min(_PROBE_BYTES, os.fstat(fh.fileno()).st_size))
+    po podmianie).
+
+    ZAMIAR PODMIANY (AR-64): `zamiar` niesie nazwy kopii wypartej i zwrotnej (utrwalone z backupem
+    przed tą chwilą) i pełny sha1 naszej wersji. Kopia wyparta znika wyłącznie po POTWIERDZONYM
+    backupie (`po_podmianie` i zamknięcie straży bez błędu): gdy potwierdzenie przepadło, backup
+    zostaje niepotwierdzony, a kopia jest dowodem dla rekoncyliacji (Z12) - ta ją sprzątnie po
+    rozpoznaniu pełnym sha1. Cudza wersja wykryta rewalidacją przy zamiarze NIE wraca tutaj:
+    `_WypartaDoPowrotu` wycofuje straż, a powrót robi automat rekoncyliacji orkiestracji (C3)."""
+    kopia = _nazwa_kopii(path) if zamiar is None else zamiar.displaced_path
+    nasza = None
+    if zamiar is None:
+        with open(tmp, "rb") as fh:      # odcisk NASZEJ wersji - powrót wypartego ją rozpozna (A1)
+            nasza = _odcisk(fh, 0, min(_PROBE_BYTES, os.fstat(fh.fileno()).st_size))
+    potwierdzone = po_podmianie is None
     straz = replace_guard() if replace_guard is not None else contextlib.nullcontext()
     straz.__enter__()
     try:
@@ -423,11 +539,17 @@ def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=N
                 raise _PodmianaRozdarta(f"plik podmieniony, ale kopii pliku wypartego nie da się "
                                         f"przeczytać ({exc}) - zostaje pod {kopia}", zaszla=True) \
                     from exc
+            if rozjazd and zamiar is not None:
+                # C3: powrót cudzej wersji idzie WYŁĄCZNIE wspólnym automatem rekoncyliacji
+                # (trwałe fazy w osobnych transakcjach) - po wycofaniu straży, nie w niej.
+                raise _WypartaDoPowrotu(f"plik zmienił się między odczytem a podmianą "
+                                        f"({', '.join(rozjazd)})")
             if rozjazd:
                 _oddaj_wyparty(path, kopia, rozjazd, nasza)
             if blad is None and po_podmianie is not None:
                 try:
                     po_podmianie()
+                    potwierdzone = True
                 except Exception:  # noqa: BLE001 - backup zostaje niepotwierdzony (docstring)
                     pass
     except BaseException:
@@ -437,8 +559,17 @@ def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=N
     try:
         straz.__exit__(None, None, None)
     except Exception:  # noqa: BLE001 - podmiana już zaszła (docstring)
-        pass
-    uwaga = _usun_kopie(kopia) if zaszla else None
+        potwierdzone = False
+    if zaszla and not potwierdzone and zamiar is not None:
+        uwaga = (f"potwierdzenie podmiany w bazie przepadło - kopia pliku sprzed zapisu zostaje pod "
+                 f"{kopia} do rekoncyliacji (następny zapis albo cofnięcie tej lokacji)")
+    elif zaszla and not potwierdzone:
+        # C6: bez zamiaru (cofnięcie) nie ma backupu do rekoncyliacji - kopii nikt nie sprzątnie.
+        uwaga = (f"zamknięcie transakcji podmiany padło - kopia pliku sprzed tej operacji została "
+                 f"pod {kopia} i nic jej nie sprzątnie; zgodna z plikiem sprzed operacji - po "
+                 f"sprawdzeniu można ją skasować ręcznie")
+    else:
+        uwaga = _usun_kopie(kopia) if zaszla else None
     if blad is not None:
         raise blad
     return uwaga
@@ -634,7 +765,7 @@ def _post_hash(path: str) -> str:
 
 
 def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
-                  persist_backup: Callable[[str, str], None] | None = None,
+                  persist_backup: Callable[[str, str, _Zamiar], None] | None = None,
                   replace_guard=None, confirm_backup: Callable[[], None] | None = None) -> WriteResult:
     """Atomowo zapisz zmiany w nagłówku wybranego HDU. Kontrola `header_hash`: nagłówek na dysku ≠
     `expected_hash` → 'blocked', NIE pisze. Treść łamiąca reguły karty FITS 4.0 (`card_violation`)
@@ -648,10 +779,11 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
     `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only (rename dozwolony osobno).
 
     BACKUP PRZED PODMIANĄ (Z3, 2026-09-26): `backup_text` = `RegionBackup` (surowy region nagłówka
-    sprzed zmian + metadane), a `persist_backup(backup_text, post_hash)` - gdy podany - utrwala go
-    w bazie PRZED `os.replace`. Porażka backupu → 'failed', oryginał nietknięty, plik tymczasowy
-    sprzątnięty. Dawniej backup powstawał PO podmianie, więc jego porażka zostawiała plik zmieniony
-    bez drogi powrotu.
+    sprzed zmian + metadane), a `persist_backup(backup_text, post_hash, zamiar)` - gdy podany -
+    utrwala go w bazie PRZED `os.replace`, razem z zamiarem podmiany (`_Zamiar`, AR-64: nazwy kopii
+    i pełny sha1 pliku tymczasowego policzony w strumieniu zapisu, Z13). Porażka backupu → 'failed',
+    oryginał nietknięty, plik tymczasowy sprzątnięty. Dawniej backup powstawał PO podmianie, więc
+    jego porażka zostawiała plik zmieniony bez drogi powrotu.
 
     STRAŻ PODMIANY (`replace_guard`, astra 2026-09-27): `os.replace` idzie pod menedżerem kontekstu
     wołającego (`_podmien`) - orkiestracja podaje `repo.guard_file_replace`, która w transakcji
@@ -702,7 +834,7 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
                 fd, tmp = tempfile.mkstemp(suffix=".tmp",
                                            dir=os.path.dirname(os.path.abspath(path)))
                 os.close(fd)
-                hdul.writeto(tmp, overwrite=True)
+                strumien = _zapisz_tymczasowy_fits(hdul, tmp)
             # Odczyt pliku tymczasowego TĄ SAMĄ formułą co skan, zanim zastąpi oryginał: nieczytelny
             # → 'failed' i oryginał nietknięty; czytelny → hash tego, co za chwilę będzie na dysku
             # (kotwica `_after_replace`).
@@ -710,19 +842,23 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
             odcisk = _odcisk(fh, start, data_start - start)
             backup_text = RegionBackup("fits", start, odcisk.region, odcisk.size, odcisk.ino,
                                        current, _sha1_uchwytu(fh)).encode()
+        zamiar = _zamiar(path, tmp, strumien.hexdigest(), strumien.size)
         if persist_backup is not None:
             try:
-                persist_backup(backup_text, written_hash)
+                persist_backup(backup_text, written_hash, zamiar)
             except Exception as exc:  # noqa: BLE001 - bez backupu nie podmieniamy
                 return WriteResult("failed", f"backup do cofnięcia NIE powstał, więc podmiany nie "
                                              f"było - plik nietknięty: {type(exc).__name__}: {exc}",
                                    None)
-        uwaga = _podmien(tmp, path, replace_guard, odcisk, confirm_backup)
+        uwaga = _podmien(tmp, path, replace_guard, odcisk, confirm_backup,
+                         zamiar=zamiar if persist_backup is not None else None)
         tmp = None
     except repo.InplaceConflict as exc:                    # straż odbiła podmianę - plik nietknięty
         return WriteResult("blocked", _powod_konfliktu(exc.op), None)
     except _PodmianaOdbita as exc:                         # cudza zmiana wróciła na miejsce
         return WriteResult("blocked", exc.reason, None)
+    except _WypartaDoPowrotu as exc:                       # powrót zrobi automat orkiestracji
+        return WriteResult("failed", exc.reason, None, code=CODE_POWROT_WYPARTEJ)
     except _PodmianaRozdarta as exc:
         zachowaj_tmp = exc.zachowaj_tmp
         return WriteResult("failed", exc.reason, written_hash if exc.zaszla else None,
@@ -1263,7 +1399,7 @@ def _xisf_prepare(path: str, ops: list[WriteOp], expected_hash: str | None):
 
 
 def write_xisf_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
-                       persist_backup: Callable[[str, str], None] | None = None,
+                       persist_backup: Callable[[str, str, _Zamiar], None] | None = None,
                        replace_guard=None,
                        confirm_backup: Callable[[], None] | None = None) -> WriteResult:
     """Łata bajtowa nagłówka XISF - bliźniak `write_changes` z tym samym kontraktem `WriteResult`.
@@ -1295,18 +1431,22 @@ def write_xisf_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
             # Header_hash XISF to sha1 bajtów XML (D-X-3), a pisarz zapisuje je 1:1 - więc hash
             # tego, co zapiszemy, znamy bez odczytu, a odczyt (T3) ma go tylko potwierdzić.
             written_hash = hashlib.sha1(new_xml).hexdigest()
-            tmp, _, file_sha1 = _zloz_plik_tymczasowy(path, fh, [region, (meta.first_attachment, None)],
-                                                      oryginal_region=odcisk.region)
+            # sha1 pliku tymczasowego liczy złożenie w tym samym przebiegu (Z13) - bez drugiego
+            # odczytu; rozmiar ze `stat`.
+            tmp, sha1_tmp, file_sha1 = _zloz_plik_tymczasowy(
+                path, fh, [region, (meta.first_attachment, None)], oryginal_region=odcisk.region)
             backup_text = RegionBackup("xisf", 0, odcisk.region, odcisk.size, odcisk.ino,
                                        meta.header_hash, file_sha1).encode()
+        zamiar = _zamiar(path, tmp, sha1_tmp, os.path.getsize(tmp))
         if persist_backup is not None:
             try:
-                persist_backup(backup_text, written_hash)
+                persist_backup(backup_text, written_hash, zamiar)
             except Exception as exc:  # noqa: BLE001 - bez backupu nie podmieniamy
                 return WriteResult("failed", f"backup do cofnięcia NIE powstał, więc podmiany nie "
                                              f"było - plik nietknięty: {type(exc).__name__}: {exc}",
                                    None)
-        uwaga = _podmien(tmp, path, replace_guard, odcisk, confirm_backup)
+        uwaga = _podmien(tmp, path, replace_guard, odcisk, confirm_backup,
+                         zamiar=zamiar if persist_backup is not None else None)
         tmp = None
     except _XisfRefusal as ref:
         return WriteResult("blocked", ref.reason, None)
@@ -1314,6 +1454,8 @@ def write_xisf_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
         return WriteResult("blocked", _powod_konfliktu(exc.op), None)
     except _PodmianaOdbita as exc:                         # cudza zmiana wróciła na miejsce
         return WriteResult("blocked", exc.reason, None)
+    except _WypartaDoPowrotu as exc:                       # powrót zrobi automat orkiestracji
+        return WriteResult("failed", exc.reason, None, code=CODE_POWROT_WYPARTEJ)
     except _PodmianaRozdarta as exc:
         zachowaj_tmp = exc.zachowaj_tmp
         return WriteResult("failed", exc.reason, written_hash if exc.zaszla else None,
@@ -2506,11 +2648,18 @@ def _rekoncyliuj_backupy(con, zalegle, loc, *, now) -> str | None:
     backup zostaje niepotwierdzony."""
     path = loc["path"]
     try:
-        with _exclusive(path):
-            for b in zalegle:
-                powod = _rekoncyliuj_backup(con, b, loc, now=now)
-                if powod is not None:
-                    return powod
+        for b in zalegle:
+            # Backup z zamiarem podmiany (0038, AR-64) - automat pełnego sha1, bez blokady pliku
+            # (podmiana systemowa wymaga pliku bez otwartego uchwytu, a ścieżki bywa brak); bez
+            # zamiaru (sprzed 0038) - reguła dawna, pod blokadą.
+            zamiar = repo.replace_intent(con, b["id"])
+            if zamiar is not None:
+                powod = _rekoncyliuj_zamiar(con, b, zamiar, loc, now=now)
+            else:
+                with _exclusive(path):
+                    powod = _rekoncyliuj_backup(con, b, loc, now=now)
+            if powod is not None:
+                return powod
     except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
         return (f"backup commitu {zalegle[0]['commit_id']} czeka na potwierdzenie podmiany, a "
                 f"rekoncyliacja z dyskiem padła ({type(exc).__name__}: {exc}) - lokacja zablokowana "
@@ -2532,34 +2681,231 @@ def _rekoncyliuj_backup(con, b, loc, *, now) -> str | None:
     niepotwierdzony.
 
     Wpisy próby rozlicza PO wjeździe `repo.settle_backup_attempt` (AR-82): 'applied' z nagrobkiem
-    wyłącznie przy dowodzie zeznania, inaczej zapis wstrzymany."""
+    wyłącznie przy dowodzie zeznania, inaczej zapis wstrzymany.
+
+    REGUŁA DAWNA - wyłącznie dla backupu BEZ zamiaru podmiany (sprzed 0038): backup z zamiarem
+    rozstrzyga `_rekoncyliuj_zamiar` pełnym sha1 (Z12)."""
     path = loc["path"]
     pre = _backup_pre_hash(path, b["header_text"])
     dysk = _post_hash(path)
+    try:
+        if dysk == b["post_hash"]:
+            return _potwierdz_z_dysku(con, b, loc, now=now)
+        repo.settle_pending_backup(con, backup_id=b["id"],
+                                   replaced=False if dysk == pre else None, now=now)
+    except repo.BackupAlreadySettled:
+        return _po_odmowie(con, b, loc)
+    return None
+
+
+def _po_odmowie(con, b, loc) -> str | None:
+    """Po `repo.BackupAlreadySettled`: backup nadal niepotwierdzony to błąd, nie sukces."""
+    if any(z["id"] == b["id"] for z in repo.pending_header_backups(con, loc["id"])):
+        return (f"backup commitu {b['commit_id']} nadal niepotwierdzony po odmowie "
+                f"rozstrzygnięcia - lokacja zablokowana do ponowienia")
+    return None
+
+
+def _potwierdz_z_dysku(con, b, loc, *, now, intent_outcome=None) -> str | None:
+    """Podmiana zaszła (na dysku zapisana wersja): re-sync pliku z kontrolą tożsamości, a w JEGO
+    transakcji potwierdzenie backupu (przed wjazdem, A4; z zamknięciem zamiaru `intent_outcome`)
+    i rozliczenie wpisów próby po wjeździe (dowód zeznania, AR-82)."""
     proba: list[int] = []
 
     def _potwierdz():
-        proba.extend(repo.settle_pending_backup(con, backup_id=b["id"], replaced=True, now=now))
+        proba.extend(repo.settle_pending_backup(con, backup_id=b["id"], replaced=True, now=now,
+                                                intent_outcome=intent_outcome))
 
     def _rozlicz(zeznanie):
         repo.settle_backup_attempt(
             con, backup_id=b["id"], pending_ids=proba, testimony_ok=zeznanie, now=now,
             withheld_reason=None if zeznanie else repo.withheld_reason(
                 con, location_id=loc["id"], commit_id=b["commit_id"]))
+    wynik = _resync(con, loc["path"], loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
+                    przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz)
+    if wynik.niezgodne is not None:
+        return (f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na dysku "
+                f"leży wersja tego commitu, ale {wynik.niezgodne}")
+    return None
+
+
+def _rekoncyliuj_zamiar(con, b, zamiar, loc, *, now) -> str | None:
+    """REKONCYLIACJA BACKUPU Z ZAMIAREM PODMIANY (AR-64, 0038) - automat wznawialny po śmierci procesu
+    w każdym etapie, bez blokady pliku. Wersje rozpoznaje WYŁĄCZNIE pełnym sha1 i rozmiarem (Z1, Z12):
+    A = plik sprzed zapisu (`RegionBackup.file_sha1`), N = przygotowana wersja (zamiar), B = wersja
+    innego pisarza zastana pod kopią (utrwalona przed powrotem, Z11). Pliki: P (ścieżka), K (kopia
+    wyparta), Z (kopia zwrotna), T (plik tymczasowy).
+
+    Faza `prepared` (zamiar utrwalony, nic więcej nie wiadomo). KAŻDY powrót cudzej wersji - także
+    wykryty w biegu zapisu (`_WypartaDoPowrotu`) - idzie tym automatem: sha1 B i faza `returning`
+    utrwalone PRZED pierwszą mutacją (C3):
+      * Z istnieje - stan, którego żadna droga z zamiarem nie zostawia bez fazy powrotu → `kept`
+        ze wszystkimi plikami (nikt nie kasuje i nie wnioskuje, czym był B);
+      * K = B (≠ A): P = N → `returning`, potem powrót (`_powrot_b`); P brak → `returning`, potem
+        K pod ścieżkę; P inne (C, choćby z nagłówkiem N) → `kept`;
+      * K = A: P = N → potwierdzenie pod blokadą, K precz dopiero PO nim (C5); P brak → K wraca
+        (`not_replaced`); P inne → `kept` (A zostaje - jedyna kopia wersji sprzed zapisu);
+      * K brak: P = N → potwierdzenie pod blokadą; P = A → T (rozpoznana N) precz,
+        `not_replaced`; inaczej → `kept` z T - plik tymczasowy znika wyłącznie, gdy pod ścieżką
+        stoi A albo N; przy ścieżce pustej albo obcej bywa jedyną pełną kopią danych (C2).
+    Fazy `returning`/`returned` - `_dokoncz_powrot`. Werdykt i zamknięcie zamiaru idą jedną
+    transakcją (`repo.settle_pending_backup(intent_outcome=)`), `kept` zostawia zdarzenie ze ścieżkami
+    i pliki obok ścieżki w stanie (`replace_intent.kept_paths`, wiersz Porządków, C8). Po `returned`
+    baza jest odświeżana z pliku (C7). Zwraca `None` (lokacja wolna do zapisu) albo powód blokady."""
+    env = RegionBackup.decode(b["header_text"])
+    if env is None or env.file_sha1 is None:
+        raise ValueError(f"backup {b['id']} z zamiarem podmiany bez sha1 pliku sprzed zapisu")
+    a = (env.file_sha1, env.size)
+    n = (zamiar["prepared_sha1"], zamiar["prepared_size"])
+    p, k, z, t = loc["path"], zamiar["displaced_path"], zamiar["return_path"], zamiar["prepared_path"]
+    cid = b["commit_id"]
+
+    def _werdykt(outcome, replaced, powod=None, kept=()):
+        if outcome == "returned":
+            # C7: pod ścieżką wróciła cudza wersja, a baza mogła w międzyczasie przyjąć naszą
+            # (skan po śmierci procesu). Trwały znacznik „przeczytaj od nowa” PRZED werdyktem -
+            # śmierć między nimi zostawia backup niepotwierdzony, ponowienie dojdzie tu znowu.
+            repo.mark_location_rescan(con, location_id=loc["id"], now=now,
+                                      reason=f"powrót cudzej wersji po commicie {cid}")
+        repo.settle_pending_backup(con, backup_id=b["id"], replaced=replaced, now=now,
+                                   intent_outcome=outcome, kept_paths=tuple(kept))
+        if outcome == "returned":
+            powod = _dopisz(powod, _odswiez_po_powrocie(con, loc, now=now))
+        return powod
+
+    def _zostaw(*sciezki):
+        # Pod ścieżką wersja nie do dowiedzenia (ani A, ani N): backup bez dowodu wykonania (A3).
+        # Lokację blokuje wyłącznie plik ZOSTAWIONY obok (kopia wyparta albo zwrotna) - sam plik pod
+        # ścieżką to zmiana poza programem, którą odbije kotwica stagingu, jak przed zamiarem.
+        zostaja = [s for s in sciezki if s != p and os.path.exists(s)]
+        slad = ([p] if os.path.exists(p) else []) + zostaja
+        powod = None if not zostaja else (
+            f"przerwany commit {cid}: stanu plików nie da się dowieść pełnym sha1 - zostają do "
+            f"oka: {', '.join(zostaja)}; zmiana NIE potwierdzona, cofnięcie tego commitu nic nie "
+            f"ruszy")
+        return _werdykt("kept", None, powod, slad)
+
+    powrot = (f"przerwany commit {cid}: inny program zmienił plik w oknie podmiany - jego wersja "
+              f"wróciła pod ścieżkę, zmiana NIE zapisana, cofnięcie tego commitu nic nie ruszy; "
+              f"odśwież staging i zatwierdź ponownie")
     try:
-        if dysk == b["post_hash"]:
-            wynik = _resync(con, path, loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
-                            przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz)
-            if wynik.niezgodne is not None:
-                return (f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na dysku "
-                        f"leży nagłówek tego commitu, ale {wynik.niezgodne}")
-        else:
-            repo.settle_pending_backup(con, backup_id=b["id"],
-                                       replaced=False if dysk == pre else None, now=now)
+        if zamiar["phase"] in ("returning", "returned"):
+            return _dokoncz_powrot(con, b, loc, p, k, z, n, now=now, werdykt=_werdykt,
+                                   zostaw=_zostaw, powrot=powrot)
+        if os.path.exists(z):                    # bez fazy powrotu nie wiadomo, czym był B
+            return _zostaw(p, k, z, t)
+        sk = _sha1_pliku(k)
+        sp = _sha1_pliku(p)
+        if sk is not None and sk != a:           # B pod kopią
+            if sp is not None and sp != n:
+                return _zostaw(p, k, t)
+            repo.mark_intent_returning(con, backup_id=b["id"], displaced_sha1=sk[0],
+                                       displaced_size=sk[1])
+            if sp is None:                       # 1177 pierwotnej podmiany: B wraca na pustą P
+                _kopia_na_miejsce(k, p)
+                return _dokoncz_powrot(con, b, loc, p, k, z, n, now=now, werdykt=_werdykt,
+                                       zostaw=_zostaw, powrot=powrot)
+            return _powrot_b(con, b, loc, p, k, z, n, now=now, werdykt=_werdykt, zostaw=_zostaw,
+                             powrot=powrot)
+        if sk is not None:                       # A pod kopią
+            if sp is None:
+                _kopia_na_miejsce(k, p)
+                return _werdykt("not_replaced", False)
+            if sp != n:
+                return _zostaw(p, k, t)
+            return _potwierdz_pod_blokada(con, b, loc, n, now=now, kopia_a=k)
+        if sp == n:
+            return _potwierdz_pod_blokada(con, b, loc, n, now=now)
+        if sp == a:
+            if _sha1_pliku(t) == n:              # pod ścieżką A - T (nasza N) zbędny
+                _usun_kopie(t)
+            return _werdykt("not_replaced", False)
+        return _zostaw(p, t)
     except repo.BackupAlreadySettled:
-        if any(z["id"] == b["id"] for z in repo.pending_header_backups(con, loc["id"])):
-            return (f"backup commitu {b['commit_id']} nadal niepotwierdzony po odmowie "
-                    f"rozstrzygnięcia - lokacja zablokowana do ponowienia")
+        return _po_odmowie(con, b, loc)
+
+
+def _nie_usunieta(commit_id, sciezka) -> str:
+    return (f"przerwany commit {commit_id}: rozpoznanej kopii {sciezka} nie dało się usunąć - "
+            f"lokacja zablokowana, ponowienie zapisu albo cofnięcia dokończy rekoncyliację")
+
+
+def _powrot_b(con, b, loc, p, k, z, n, *, now, werdykt, zostaw, powrot) -> str | None:
+    """POWRÓT wersji innego pisarza (faza `returning` już utrwalona razem z jej sha1): podmiana
+    systemowa `P ← K`, nasza wersja pod kopię zwrotną Z. Powrót, który nie zaszedł (stan nietknięty
+    albo 1177 cofnięty), zostawia fazę - ponowienie spróbuje znowu."""
+    blad = _replace_z_ponowieniem(p, k, z)
+    try:
+        zaszedl = _czy_zaszla(p, k, z, blad)
+    except _PodmianaRozdarta as exc:
+        return f"przerwany commit {b['commit_id']}: powrót wersji innego pisarza przerwany - {exc.reason}"
+    if not zaszedl:
+        return (f"przerwany commit {b['commit_id']}: powrót wersji innego pisarza pod ścieżkę nie "
+                f"zaszedł ({blad}) - pod {p} nasza wersja, wersja innego pisarza pod {k}, obie "
+                f"zostają; ponowienie zapisu albo cofnięcia tej lokacji dokończy powrót, a gdy "
+                f"plik pozostaje zajęty - przenieś {k} na {p} ręcznie")
+    return _dokoncz_powrot(con, b, loc, p, k, z, n, now=now, werdykt=werdykt, zostaw=zostaw,
+                           powrot=powrot)
+
+
+def _dokoncz_powrot(con, b, loc, p, k, z, n, *, now, werdykt, zostaw, powrot) -> str | None:
+    """Wznowienie powrotu z faz `returning`/`returned` (Z11) - stan z dysku, pełnym sha1:
+      * `returning`, K = B, Z brak, P = N → powrót jeszcze nie zaszedł: wykonaj go;
+      * `returning`, P brak, K = B (1177 pierwotnej podmiany albo powrotu, Z brak albo = N) → K pod
+        pustą ścieżkę;
+      * `returning` → `returned` WYŁĄCZNIE, gdy powrót się dokonał: P = B, K brak, Z = N albo brak
+        (C4); każdy inny stan (np. P = C, K = B, Z = N) → `kept` ze WSZYSTKIMI istniejącymi plikami;
+      * `returned`: K wróciła albo Z ≠ N → `kept` (wszystko zostaje); Z = N → precz (rozpoznana N),
+        potem P = B → `returned`, P inne (trzeci pisarz po powrocie) → `kept`.
+    """
+    zamiar = repo.replace_intent(con, b["id"])
+    bb = (zamiar["displaced_sha1"], zamiar["displaced_size"])
+    if zamiar["phase"] == "returning":
+        sp, sk, sz = _sha1_pliku(p), _sha1_pliku(k), _sha1_pliku(z)
+        if sk == bb and sz is None and sp == n:
+            return _powrot_b(con, b, loc, p, k, z, n, now=now, werdykt=werdykt, zostaw=zostaw,
+                             powrot=powrot)
+        if sp is None and sk == bb and sz in (None, n):
+            _kopia_na_miejsce(k, p)
+            sp, sk = bb, None
+        if sk is not None or sp != bb or sz not in (None, n):
+            return zostaw(p, k, z)
+        repo.mark_intent_returned(con, backup_id=b["id"])
+    sk, sz = _sha1_pliku(k), _sha1_pliku(z)
+    if sk is not None or sz not in (None, n):
+        return zostaw(p, k, z)
+    if sz is not None and _usun_kopie(z) is not None:
+        return _nie_usunieta(b["commit_id"], z)
+    if _sha1_pliku(p) == bb:
+        return werdykt("returned", False, powrot)
+    return zostaw(p, k, z)
+
+
+def _potwierdz_pod_blokada(con, b, loc, n, *, now, kopia_a=None) -> str | None:
+    """P = N z odczytu bez blokady - pod blokadą pełny sha1 jeszcze raz (inny pisarz mógł zdążyć),
+    potem potwierdzenie z re-synciem (`_potwierdz_z_dysku`, zamknięcie zamiaru `replaced`).
+    `kopia_a` (K rozpoznana jako A) znika DOPIERO po potwierdzeniu (C5): odmowa zostawia ją jako
+    jedyną kopię wersji sprzed zapisu, a ponowienie trafi w gałąź „K = A, P inne” (`kept`)."""
+    with _exclusive(loc["path"]) as fh:
+        if (_sha1_uchwytu(fh), os.fstat(fh.fileno()).st_size) != n:
+            return (f"backup commitu {b['commit_id']}: plik zmienił się w trakcie rekoncyliacji - "
+                    f"lokacja zablokowana do ponowienia")
+        powod = _potwierdz_z_dysku(con, b, loc, now=now, intent_outcome="replaced")
+    if powod is None and kopia_a is not None and _usun_kopie(kopia_a) is not None:
+        return None                      # commit potwierdzony; nieusunięta kopia A to tylko resztka
+    return powod
+
+
+def _odswiez_po_powrocie(con, loc, *, now) -> str | None:
+    """C7: po powrocie cudzej wersji baza czyta plik od nowa (wjazd rekordu semantyką skanu - bez
+    kotwic zapisu, bo pod ścieżką stoi wersja innego pisarza). Porażka zostawia trwały znacznik
+    odczytu (`repo.mark_location_rescan`, postawiony przed werdyktem) - skan dokończy."""
+    try:
+        scan.ingest_record(con, scan.scan_file(loc["path"]), volume=loc["volume"], now=now,
+                           summary=scan.ScanSummary(), actor="user:local")
+    except Exception as exc:  # noqa: BLE001 - znacznik odczytu zostaje
+        return (f"baza nie odczytała jeszcze wróconej wersji ({type(exc).__name__}: {exc}) - "
+                f"najbliższy skan przeczyta plik od nowa")
     return None
 
 
@@ -2761,21 +3107,22 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
 
     backup_pliku: list[int] = []      # id backupu drogi atomowej utrwalonego dla TEGO pliku
 
-    def _persist(backup_text, post_hash):
+    def _persist(backup_text, post_hash, zamiar):
         # Backup PRZED podmianą (droga atomowa): commit powstaje przy pierwszym pliku, który
         # naprawdę ma być ruszony.
         if stan.commit_id is None:
             stan.commit_id = repo.insert_commit(con, run_id=stan.run_id, now=stan.clock(),
                                                 summary=f"run {stan.run_id}")
         # NIEPOTWIERDZONY do podmiany (AR-40): potwierdza go `_potwierdz` w transakcji straży;
-        # niesie wpisy stagingu tej próby - rekoncyliacja potwierdzi wyłącznie je (A5).
+        # niesie wpisy stagingu tej próby - rekoncyliacja potwierdzi wyłącznie je (A5). Razem
+        # z nim ZAMIAR PODMIANY (AR-64): nazwy kopii i pełny sha1 naszej wersji, jedną transakcją.
         backup_pliku.append(repo.insert_header_backup(
             con, commit_id=stan.commit_id, location_id=location_id, hdu_index=loc["hdu_index"],
             header_text=backup_text, post_hash=post_hash, pending_since=now,
-            pending_rows=tuple(rows)))
+            pending_rows=tuple(rows), intent=zamiar))
 
     def _potwierdz():
-        repo.confirm_backup_replaced(con, backup_id=backup_pliku[0])
+        repo.confirm_backup_replaced(con, backup_id=backup_pliku[0], now=now)
 
     class _Dziennik:
         """Dziennik commitu w miejscu: backup + commit + operacja + wiązanie wpisów stagingu
@@ -2813,6 +3160,20 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         res = write_changes(path, ops, expected, persist_backup=_persist,
                             replace_guard=_straz, confirm_backup=_potwierdz)  # podmiana pod strażą
 
+    if res.code == CODE_POWROT_WYPARTEJ and backup_pliku:
+        # C3 (AR-64): podmiana wyparła cudzą wersję - jej powrót przez wspólny automat
+        # rekoncyliacji (fazy w osobnych transakcjach, wznawialny po śmierci w każdym kroku).
+        # Werdykt automatu jest wynikiem lokacji: plik wraca do cudzej wersji, zmiana NIE zapisana.
+        powod = _rekoncyliuj_backupy(con, repo.pending_header_backups(con, location_id),
+                                     _location(con, location_id), now=now)
+        reason = _dopisz(res.reason, powod)
+        # Backup rozstrzygnięty → pod ścieżką nie ma naszej wersji ('blocked'); nadal
+        # niepotwierdzony → powrót w toku, pod ścieżką może stać nasza wersja ('failed').
+        w_toku = any(z["id"] == backup_pliku[0]
+                     for z in repo.pending_header_backups(con, location_id))
+        status = "failed" if w_toku else "blocked"
+        _mark(rows, status, reason)
+        return _ZapisLokacji(FileResult(location_id, path, status, reason), dotknieto=w_toku)
     if res.backup_text is None:       # zapisu nie było: odmowa albo awaria przed plikiem
         status = "blocked" if res.status == "blocked" else "failed"
         reason = res.reason

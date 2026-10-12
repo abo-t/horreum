@@ -177,6 +177,9 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         # AR-82: fikstura nie zna zapisu karty - zero z braku populacji; predykat na prawdziwym
         # zapisie wstrzymanym pinuje `test_writeback_wstrzymane.py`.
         "withheld_testimony_frames": 0,
+        # AR-64: fikstura nie zna przerwanej podmiany - zero z braku populacji; predykat pinuje
+        # `test_writeback_zamiar.py`.
+        "kept_copy_frames": 0,
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
         "vanished_frames": 1,

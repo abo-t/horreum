@@ -39,7 +39,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0035 stack_variant (wariant kadru stosu powiązany z oryginałem, AR-54)
     # + 0036 object_change_run + pending_object_change + run_dir (zmiana obiektu z plikiem, AR-17)
     # + 0037 withheld_write + pending_changes.withheld_id + header_backups.hand_version (AR-82)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 37
+    # + 0038 replace_intent (zamiar podmiany drogi atomowej, AR-64)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 38
     con.close()
 
 

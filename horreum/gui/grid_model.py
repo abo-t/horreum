@@ -331,6 +331,10 @@ PRESET_ORPHAN_TESTIMONY = "Zeznanie z nieobecnej kopii"
 # prowadzi”. Kopie bywają zgodne w polach „Kopii niezgodnych”, więc ten stan nie miał powierzchni.
 # Predykat `queries.withheld_testimony_frame_ids`. Stała współdzielona z TasksView po nazwie.
 PRESET_WITHHELD_TESTIMONY = "Zeznanie wstrzymane"
+# PRESET_KEPT_COPIES - bliźniak AR-64. Rekoncyliacja przerwanej podmiany nie mogła dowieść stanu
+# plików i zostawiła kopie obok ścieżki (wyparta, zwrotna, tymczasowa) - człowiek je porównuje
+# i usuwa zbędne. Predykat `queries.kept_copy_frame_ids`. Stała współdzielona z TasksView po nazwie.
+PRESET_KEPT_COPIES = "Kopie zostawione do oka"
 # PRESET_PATH_HEADER_CONFLICT - jedenasty bliźniak (E5-2). Obiekt klatki zatwierdził człowiek
 # z folderu (`object_source='path'`), a karta `OBJECT` w pliku mówi co innego albo coś, czego
 # drabina nie zna. „Do przeglądu" tego nie widzi (klatka MA obiekt), więc bez tej perspektywy
@@ -384,6 +388,7 @@ PRESETS = {
     PRESET_ORPHAN_TESTIMONY: {"filter": None, "group_by": None, "only_orphan_testimony": True},
     PRESET_WITHHELD_TESTIMONY: {"filter": None, "group_by": None,
                                 "only_withheld_testimony": True},
+    PRESET_KEPT_COPIES: {"filter": None, "group_by": None, "only_kept_copies": True},
     PRESET_PATH_HEADER_CONFLICT: {"filter": None, "group_by": None,
                                   "only_path_header_conflict": True},
     PRESET_TORN_WRITE: {"filter": None, "group_by": None, "only_torn_write": True},
@@ -409,6 +414,7 @@ _PRESET_LABELS = {
     PRESET_COPY_CONFLICT: "perspective.copy_conflict",
     PRESET_ORPHAN_TESTIMONY: "perspective.orphan_testimony",
     PRESET_WITHHELD_TESTIMONY: "perspective.withheld_testimony",
+    PRESET_KEPT_COPIES: "perspective.kept_copies",
     PRESET_PATH_HEADER_CONFLICT: "perspective.path_header_conflict",
     PRESET_TORN_WRITE: "perspective.torn_write",
     PRESET_PENDING_FINISH: "perspective.pending_finish",
@@ -454,6 +460,7 @@ _TRIMY = (
     ("_only_copy_conflict", "copy_conflict_frame_ids"),
     ("_only_orphan_testimony", "orphan_testimony_frame_ids"),
     ("_only_withheld_testimony", "withheld_testimony_frame_ids"),
+    ("_only_kept_copies", "kept_copy_frame_ids"),
     ("_only_path_header_conflict", "path_header_conflict_frame_ids"),
     ("_only_torn_write", "torn_write_frame_ids"),
     ("_only_pending_finish", "pending_finish_frame_ids"),

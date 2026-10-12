@@ -2058,6 +2058,23 @@ def withheld_testimony_frame_ids(con):
         "SELECT DISTINCT frame_id FROM withheld_write WHERE settled_at IS NULL").fetchall()}
 
 
+def kept_copy_frame_ids(con):
+    """KOPIE ZOSTAWIONE DO OKA (AR-64, 0038, C8): klatki, przy których rekoncyliacja przerwanej
+    podmiany zamknęła zamiar werdyktem `kept` i zostawiła pliki OBOK ścieżki (kopia wyparta,
+    zwrotna, tymczasowy - `replace_intent.kept_paths`), a któryś z nich nadal leży na dysku. Stan,
+    nie zdanie jednego wyniku: wiersz Porządków trwa, dopóki człowiek plików nie rozstrzygnie
+    (porówna i usunie zbędne) - skan ich nie widzi (sufiks kopii), więc bez tego wiersza nikt by
+    o nich nie wiedział. Ścieżek jest garstka, więc sprawdzenie dysku kosztuje tyle co nic. set[int]."""
+    wynik = set()
+    for r in con.execute(
+            "SELECT l.frame_id, ri.kept_paths FROM replace_intent ri "
+            "JOIN header_backups hb ON hb.id = ri.backup_id JOIN location l ON l.id = hb.location_id "
+            "WHERE ri.outcome = 'kept' AND ri.kept_paths <> '[]'").fetchall():
+        if any(os.path.exists(s) for s in json.loads(r[1])):
+            wynik.add(int(r[0]))
+    return wynik
+
+
 def torn_write_frame_ids(con):
     """PLIK PO PRZERWANYM ZAPISIE (0022, Q8): klatki, których kopia ma OTWARTĄ operację zapisu
     w miejscu (`inplace_op.phase` w `repo.INPLACE_OPEN_PHASES`) - nagłówek mógł zostać rozdarty,
@@ -3640,6 +3657,9 @@ def tasks_state(con):
         # Zapis z zeznaniem wstrzymanym (AR-82) - robota: plik zapisany, zeznanie przy innej kopii;
         # kopię wskazuje człowiek. Ten sam predykat co trim perspektywy i dostępność gestu.
         "withheld_testimony_frames": len(withheld_testimony_frame_ids(con)),
+        # Pliki zostawione obok ścieżki po przerwanej podmianie (AR-64) - robota: porównać i usunąć
+        # zbędne. Ten sam predykat co trim perspektywy.
+        "kept_copy_frames": len(kept_copy_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,
         "vanished_frames": len(vanished_frame_ids(con)),

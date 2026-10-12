@@ -3076,6 +3076,12 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, te
             "WHERE p.location_id = ? AND p.status = 'failed' AND p.inplace_op_id IS NULL "
             "AND p.withheld_id IS NULL "
             "AND hb.post_hash = ? AND hb.unreplaced_at IS NULL "
+            # C1 (AR-64): próba z NIEROZSTRZYGNIĘTĄ podmianą (backup niepotwierdzony, zamiar
+            # otwarty) należy do automatu rekoncyliacji - nagłówek N pod ścieżką nie dowodzi, że
+            # pod kopią nie leży cudza wersja do oddania.
+            "AND hb.pending_since IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM replace_intent ri WHERE ri.backup_id = hb.id "
+            "                AND ri.phase <> 'closed') "
             "AND NOT EXISTS (SELECT 1 FROM header_backups hb2 JOIN commits c2 ON c2.id = hb2.commit_id "
             "                WHERE c2.run_id = c.run_id AND hb2.location_id = p.location_id "
             "                AND hb2.commit_id <> hb.commit_id AND hb2.unreplaced_at IS NULL) "
@@ -3775,7 +3781,7 @@ def insert_commit(con, *, run_id, now, summary=None):
 
 
 def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text, post_hash,
-                         pending_since=None, pending_rows=None):
+                         pending_since=None, pending_rows=None, intent=None):
     """Zapisz backup pełnego nagłówka SPRZED commitu (undo). `post_hash` = header_hash PO commicie
     (kontrola undo). Append-only: nigdy nie kasowany. Transient - bez eventu. Zwraca id backupu
     (`mark_backup_unreplaced`, gdy pisarz potem pliku nie podmieni).
@@ -3792,15 +3798,73 @@ def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text,
     (bramka astra, A5).
 
     `hand_version` (0037, AR-82) = wersja decyzji ręki o obiekcie klatki (`hand_version`) liczona
-    w TEJ transakcji - przed pierwszym bajtem zapisu pliku; wstrzymanie zapisu ją dziedziczy."""
+    w TEJ transakcji - przed pierwszym bajtem zapisu pliku; wstrzymanie zapisu ją dziedziczy.
+
+    `intent` (0038, AR-64) = zamiar podmiany drogi atomowej (obiekt z polami `displaced_path`,
+    `return_path`, `prepared_path`, `prepared_sha1`, `prepared_size`) - utrwalony W TEJ transakcji
+    co backup, przed pierwszą podmianą (`replace_intent`, faza `prepared`). `None` = droga bez
+    podmiany systemowej (w miejscu) albo wołający bez zamiaru (testy, import)."""
     proba = None if pending_rows is None else json.dumps([_wpis_proby(r) for r in pending_rows])
+    if intent is not None and pending_since is None:
+        raise ValueError("zamiar podmiany bez backupu niepotwierdzonego - nie ma czego rekoncyliować")
     with con:
         reka = _hand_version_of_location(con, location_id)
         cur = con.execute(
             "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash, "
             "pending_since, pending_rows, hand_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (commit_id, location_id, hdu_index, header_text, post_hash, pending_since, proba, reka))
+        if intent is not None:
+            con.execute(
+                "INSERT INTO replace_intent(backup_id, displaced_path, return_path, prepared_path, "
+                "prepared_sha1, prepared_size, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (cur.lastrowid, intent.displaced_path, intent.return_path, intent.prepared_path,
+                 intent.prepared_sha1, intent.prepared_size, pending_since))
     return cur.lastrowid
+
+
+def replace_intent(con, backup_id):
+    """Zamiar podmiany backupu (0038) albo `None` (backup bez zamiaru - reguła dawna)."""
+    return con.execute("SELECT * FROM replace_intent WHERE backup_id = ?", (backup_id,)).fetchone()
+
+
+def mark_location_rescan(con, *, location_id, now, reason, actor="user:local"):
+    """TRWAŁY ZNACZNIK „PRZECZYTAJ OD NOWA” (AR-64, C7): `location.mtime` → NULL, więc brama
+    przyrostowa skanu nie pominie pliku (NULL nie równa się niczemu) - jak przy drodze powrotu
+    zapisu w miejscu (`revert_inplace_op`). Ślad `location.rescan_marked` z `mtime` sprzed i powodem.
+    Wołane PRZED werdyktem powrotu cudzej wersji: baza mogła przyjąć naszą wersję skanem po śmierci
+    procesu, a od werdyktu pod ścieżką stoi cudza."""
+    with _immediate(con):
+        row = con.execute("SELECT mtime FROM location WHERE id = ?", (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        if row["mtime"] is None:
+            return
+        con.execute("UPDATE location SET mtime = NULL WHERE id = ?", (location_id,))
+        emit_event(con, actor=actor, verb="location.rescan_marked", target=f"location:{location_id}",
+                   now=now, payload={"mtime_before": row["mtime"], "reason": reason})
+
+
+def mark_intent_returning(con, *, backup_id, displaced_sha1, displaced_size):
+    """FAZA `returning` (AR-64, Z11): rekoncyliacja utrwala pełny sha1 i rozmiar wersji innego pisarza
+    (B, zastanej pod nazwą kopii) PRZED powrotem jej pod ścieżkę. CAS z `prepared` (inaczej
+    `ValueError` - inny proces prowadzi powrót). Transient - bez eventu."""
+    with _immediate(con):
+        n = con.execute(
+            "UPDATE replace_intent SET phase = 'returning', displaced_sha1 = ?, displaced_size = ? "
+            "WHERE backup_id = ? AND phase = 'prepared'",
+            (displaced_sha1, displaced_size, backup_id)).rowcount
+        if n != 1:
+            raise ValueError(f"zamiar backupu {backup_id} nie jest w fazie 'prepared'")
+
+
+def mark_intent_returned(con, *, backup_id):
+    """FAZA `returned` (AR-64, Z11): powrót wykonany i sprawdzony pełnym sha1 (pod ścieżką B, pod kopią
+    zwrotną N) - zostaje sprzątnięcie kopii zwrotnej i werdykt. CAS z `returning`. Bez eventu."""
+    with _immediate(con):
+        n = con.execute("UPDATE replace_intent SET phase = 'returned' "
+                        "WHERE backup_id = ? AND phase = 'returning'", (backup_id,)).rowcount
+        if n != 1:
+            raise ValueError(f"zamiar backupu {backup_id} nie jest w fazie 'returning'")
 
 
 _POLA_PROBY = ("id", "keyword", "idx", "op", "new_value", "new_type", "new_comment")
@@ -3817,21 +3881,28 @@ def mark_backup_unreplaced(con, *, backup_id, now):
     samej podmianie znacznika nie daje (rename mógł zajść mimo błędu). `unreplaced_at` = `now`; cofnięcie commitu taki backup pomija, zamiast meldować
     blokadę o pliku, którego commit nie ruszył. Wiersz już oznaczony zostaje bez zmian (pierwsza
     chwila). Backup sam zostaje (append-only). Transient - bez eventu. Znacznik rozstrzyga też
-    backup niepotwierdzony (`pending_since` → NULL, 0030)."""
+    backup niepotwierdzony (`pending_since` → NULL, 0030). Zamiar podmiany (0038) w fazie
+    `prepared` zamyka się w tej samej transakcji jako `not_replaced` - podmiany nie było (C1)."""
     with con:
         con.execute("UPDATE header_backups SET unreplaced_at = ?, pending_since = NULL "
                     "WHERE id = ? AND unreplaced_at IS NULL", (now, backup_id))
+        con.execute("UPDATE replace_intent SET phase = 'closed', outcome = 'not_replaced', "
+                    "closed_at = ? WHERE backup_id = ? AND phase = 'prepared'", (now, backup_id))
 
 
-def confirm_backup_replaced(con, *, backup_id):
+def confirm_backup_replaced(con, *, backup_id, now):
     """PODMIANA POTWIERDZONA (0030, AR-40): pisarz drogi atomowej woła to w transakcji straży
     podmiany (`guard_file_replace`), zaraz po udanej podmianie systemowej i kontroli pliku
     wypartego - backup przestaje być niepotwierdzony. Zdejmuje też `unreplaced_at`: rekoncyliacja
     innego procesu mogła go postawić w oknie między utrwaleniem backupu a podmianą (widziała na
-    dysku nagłówek sprzed commitu), a pisarz wie lepiej - podmiana zaszła. Transient - bez eventu."""
+    dysku nagłówek sprzed commitu), a pisarz wie lepiej - podmiana zaszła. Transient - bez eventu.
+    Zamiar podmiany (0038) zamyka się w tej samej transakcji jako `replaced` (C1): otwarty zamiar
+    znaczy odtąd wyłącznie „podmiana nierozstrzygnięta”."""
     with _immediate(con):
         con.execute("UPDATE header_backups SET pending_since = NULL, unreplaced_at = NULL "
                     "WHERE id = ?", (backup_id,))
+        con.execute("UPDATE replace_intent SET phase = 'closed', outcome = 'replaced', "
+                    "closed_at = ? WHERE backup_id = ?", (now, backup_id))
 
 
 def pending_header_backups(con, location_id):
@@ -3851,7 +3922,33 @@ class BackupAlreadySettled(Exception):
     (pisarz albo rekoncyliacja) zdążył go rozstrzygnąć. Zero zapisu."""
 
 
-def settle_pending_backup(con, *, backup_id, replaced, now):
+def _zamknij_zamiar(con, *, backup_id, location_id, outcome, kept_paths, now):
+    """Zamknięcie zamiaru podmiany (0038) RAZEM z werdyktem backupu - w transakcji wołającego.
+    Backup z zamiarem wymaga `outcome` (EXPECT: werdykt ustala automat pełnego sha1, nie nagłówek),
+    backup bez zamiaru - nie dopuszcza go. `kept`: zdarzenie `location.displaced_kept` ze
+    ścieżkami plików, które zostają na dysku do oka (skan ich nie widzi - sufiks kopii), a pliki
+    leżące OBOK ścieżki lokacji idą do `replace_intent.kept_paths` - stan wiersza Porządków (C8)."""
+    zamiar = con.execute("SELECT phase FROM replace_intent WHERE backup_id = ?",
+                         (backup_id,)).fetchone()
+    if zamiar is None:
+        if outcome is not None:
+            raise ValueError(f"backup {backup_id} bez zamiaru podmiany, a werdykt {outcome!r}")
+        return
+    if outcome is None or zamiar["phase"] == "closed":
+        raise ValueError(f"zamiar backupu {backup_id}: werdykt {outcome!r} przy fazie "
+                         f"{zamiar['phase']!r}")
+    sciezka = con.execute("SELECT path FROM location WHERE id = ?", (location_id,)).fetchone()
+    obok = [s for s in kept_paths if sciezka is None or s != sciezka["path"]]
+    con.execute("UPDATE replace_intent SET phase = 'closed', outcome = ?, closed_at = ?, "
+                "kept_paths = ? WHERE backup_id = ?",
+                (outcome, now, json.dumps(obok if outcome == "kept" else []), backup_id))
+    if outcome == "kept":
+        emit_event(con, actor="user:local", verb="location.displaced_kept",
+                   target=f"location:{location_id}", now=now,
+                   payload={"backup_id": backup_id, "paths": list(kept_paths)})
+
+
+def settle_pending_backup(con, *, backup_id, replaced, now, intent_outcome=None, kept_paths=()):
     """REKONCYLIACJA BACKUPU NIEPOTWIERDZONEGO z dyskiem (0030, AR-40) - JEDNA transakcja, CAS na
     `pending_since IS NOT NULL` (inaczej `BackupAlreadySettled`, zero zapisu). Co jest na dysku,
     rozstrzyga wołający (`writeback`); tu zapisuje się werdykt:
@@ -3872,7 +3969,11 @@ def settle_pending_backup(con, *, backup_id, replaced, now):
         i cofnięcie tego commitu cofnęłoby tamten). Stąd też `unreplaced_at` - backup zostaje
         w tabeli (append-only), ze zwykłego cofnięcia wypada. Wpisy stagingu bez zmian.
     Transient (backup, staging) bez eventu. Zwraca listę `id` wpisów próby (pustą przy
-    `replaced` innym niż `True`)."""
+    `replaced` innym niż `True`).
+
+    ZAMIAR PODMIANY (0038, AR-64): backup z zamiarem zamyka go w TEJ transakcji z werdyktem
+    automatu pełnego sha1 (`intent_outcome`; `kept_paths` - pliki zostawione do oka, zdarzenie
+    `location.displaced_kept`)."""
     with _immediate(con):
         b = con.execute(
             "SELECT hb.commit_id, hb.location_id, hb.pending_rows, c.run_id FROM header_backups hb "
@@ -3880,6 +3981,8 @@ def settle_pending_backup(con, *, backup_id, replaced, now):
             "WHERE hb.id = ? AND hb.pending_since IS NOT NULL", (backup_id,)).fetchone()
         if b is None:
             raise BackupAlreadySettled(f"backup {backup_id} nie jest już niepotwierdzony")
+        _zamknij_zamiar(con, backup_id=backup_id, location_id=b["location_id"],
+                        outcome=intent_outcome, kept_paths=kept_paths, now=now)
         if replaced is not True:
             con.execute("UPDATE header_backups SET pending_since = NULL, unreplaced_at = ? "
                         "WHERE id = ?", (now, backup_id))

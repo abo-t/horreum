@@ -6,98 +6,355 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+Wydanie o **całej drodze jednego obiektu** - od nocy na dysku do gotowego stosu w archiwum. Dotąd
+Horreum był przede wszystkim katalogiem: materiał do obróbki składałeś z perspektyw, a wyniki WBPP
+przenosiłeś do archiwum sam. Teraz program startuje na ekranie Dom z czterema drogami: **Przyjmij**
+wpuszcza nową noc i mówi, co przyszło i czego nie rozpoznał; **Znajdź** jednym polem pokazuje klatki
+obiektu, nocy, filtra albo Twojej uwagi; **Wydaj do WBPP** układa komplet obiektu - lighty, mastery
+i surowe flaty - jako linki w folderze roboczym; **Popraw** prowadzi do zadań, których automat nie był
+pewny. Po obróbce **Wciągnij z WBPP…** kopiuje nowe mastery flat i stosy do archiwum pod porządną
+nazwą i z dokładnym rodowodem. Program ostrożniej pisze też do plików: kartę `OBJECT` podmienia
+w miejscu, pod blokadą i z kopią nagłówka, a gest **Zmień obiekt…** przenosi plik do folderu obiektu
+razem z kartą, z jednym cofnięciem. Schemat bazy rośnie z wersji 19 do 36 - migracje wjeżdżają same
+przy pierwszym otwarciu i nie ruszają klatek ani kopii; jedyna przebudowa przepisuje zapis powiązań
+stosów z klatkami. Dłużej potrwa pierwsze **Przyjmij** po aktualizacji: raz doczyta nagłówki plików
+XISF, klatek leżących w kilku kopiach i stosów.
+
+Bazy otwartej w tej wersji nie otwieraj już w 0.10.0 ani starszej: dopiero od tego wydania Horreum
+odmawia bazy z nowszego schematu, a starsze wydania otworzą ją bez słowa.
+
 ### Dodane
 
-- **Gotowy stos bez nazwy dostaje propozycję z folderu.** Stos leżący w drzewie
-  `STACKS\<obiekt>\<zestaw>\<filtr>`, którego plik nie zapisał obiektu, trafiał do kubełka „bez
-  nazwy, gotowe stosy" i każdy kosztował ręczne wpisanie nazwy. Teraz program czyta nazwę z folderu
-  obiektu i podaje ją jako propozycję: w Przeglądzie obiektów pod kubełkiem stosów stoi wiersz
-  „…z tego ze ścieżki", a „Zatwierdź ze ścieżki…" nadaje nazwę jednym gestem. Propozycja nigdy nie
-  zapisuje się sama, nie powstaje, gdy plik mówi coś o obiekcie albo gdy nazwę zdjąłeś ręką, i milknie,
-  gdy dwie kopie tego samego stosu leżą w folderach różnych obiektów. Potwierdzonej nazwy nie
-  przepisze później dopasowanie po współrzędnych. Dialog „Napraw nagłówek…" grupuje stosy po folderze
-  obiektu, a nie po folderze filtra.
+- **Przyjmij - po nocy widzisz, co przyszło, i od razu nazywasz to, czego program nie rozpoznał.**
+  Kafel „Przyjmij” na Domu uruchamia przyjęcie jednym kliknięciem (za pierwszym razem pyta
+  o katalog archiwum), a nad przyciskami Dostawy staje panel „Co przyszło”: nowe klatki według
+  rodzaju, kopie znanych klatek, obiekty z godzinami i czym skalibrujesz nowe lighty. Pod
+  „Nie rozpoznałem: N” każda nierozpoznana nazwa z nagłówka ma przycisk „Przypisz obiekt…”; po
+  zapisie pasek mówi „Zapamiętałem: … - następne dostawy rozpoznają same”. Kubełki bez nazwy
+  prowadzą prosto do swojej naprawy w Porządkach, a przebieg, który nie ruszył albo przerwał się
+  w połowie, mówi to wprost zamiast udawać pustą dostawę.
 
-- **Perspektywa „Wycofane, a plik wrócił".** Klatka, którą wycofałeś, a której plik znów jest na
-  dysku, ma własną listę i własne zdanie w kolumnie „Ścieżka" („wycofana, plik wrócił") z drogą
-  powrotu w podpowiedzi. Dotąd wiersz Porządków prowadził do wszystkich wycofanych naraz i nie dało
-  się odróżnić tej jednej od klatek, których pliku naprawdę nie ma.
+- **Znajdź - jedno pole zamiast przeklikiwania filtrów.** Wpisujesz nazwę obiektu (potoczną albo
+  katalogową) i warunki `noc:2026-08`, `filtr:Ha,OIII`, `teleskop:`, `zestaw:`, `uwagi:` (działają też
+  angielskie `night:`, `filter:`, `telescope:`, `setup:`, `notes:`), Enter - i masz klatki w tabeli
+  z prostym zestawem kolumn. Każdy warunek staje się chipem nad tabelą, który zdejmiesz jednym
+  kliknięciem, a część zapytania nieznaną archiwum program nazywa („Nie znam: … - reszta zapytania
+  działa.”). Pod tabelą stoi pasek czasowników na zaznaczeniu: „Wydaj do WBPP”, „Popraw nagłówki…”,
+  „Obiekt”, „Rodowód…”, „Uwagi…”, „Kolumny” i „Zbiory klasyczne”, który niesie ten sam zbiór do
+  pełnego widoku.
+
+- **Wydaj do WBPP - komplet obiektu na stół jednym gestem.** Kafel „Wydaj do WBPP” (w Zbiorach
+  klasycznych „Wydaj obiekt…”) otwiera listę obiektów z gotowością kalibracji: godziny, noce,
+  zestawy, procent lightów z master flatem, surowym flatem i darkiem oraz kropkę stanu. Wybrany
+  obiekt wyjeżdża do `OBJECTS\<obiekt>` w folderze roboczym: lighty, mastery z kalibracji i - gdzie
+  mastera flat brak - surowe flaty tej samej nastawy z najbliższej nocy w oknie 30 dni, w drzewie
+  rozdzielonym zestawem (teleskop i kamera), bo WBPP grupuje po filtrze i ekspozycji, a nie po
+  optyce. Podgląd liczy się sam i podaje braki z powodem; gdy folder roboczy leży na dysku archiwum,
+  wydanie to linki, które nie zajmują miejsca, a ponowne wydanie dokłada tylko to, czego na stole
+  brakuje. Folder roboczy wskazujesz raz („Plik → Folder roboczy WBPP…”), a po wydaniu wiersz
+  „Wyjście WBPP:” z przyciskiem „Kopiuj ścieżkę” podaje folder `out` dla WBPP.
+
+- **Wciągnij z WBPP… - nowe mastery i stosy wracają do archiwum z rodowodem.** W sekcji „Stosy”
+  Dostawy okno „Wciągnij wyniki WBPP” pokazuje listę wydań ze stanem („czeka na WBPP”, „do
+  wciągnięcia N”, „wciągnięte N”, „do przeglądu N”) i tabelę plików z nazwą i katalogiem docelowym.
+  Master flat trafia do `CALIBRATION\masters\flats\<zestaw>\<filtr>`, gdy historia integracji w pliku
+  wymienia surowe flaty znane bazie, a stos z wydania Horreum - do `STACKS\<obiekt>\<zestaw>\<filtr>`;
+  master dark i bias idą do przeglądu z powodem, bo archiwum nie ma surowych darków, z których
+  mogłyby powstać. Program nadaje nazwę z faktów, kopiuje bez nadpisywania i sprawdza bajty kopii,
+  a „Zamknij i przyjmij do archiwum” przyjmuje kopie i zapisuje stosom dokładny rodowód - klatki,
+  których WBPP naprawdę użył, a nie okno czasu. Gdy obiekt stosu różni się od obiektu wydania, pasek
+  proponuje „Przypisz obiekt wydania” z drogą powrotu, a lista wydań mówi, kiedy folder wydania
+  możesz już skasować.
+
+- **Zmień obiekt… - obiekt, folder i karta `OBJECT` zmieniają się razem.** W menu „Obiekt” na
+  zaznaczeniu nowa pozycja przepina obiekt w bazie, przenosi plik do folderu tego obiektu
+  w archiwum i wpisuje kartę `OBJECT` - per plik razem albo wcale. Okno najpierw pokazuje plan
+  (ścieżka dziś i po zmianie, karta przed i po, nowe katalogi, puste katalogi do usunięcia,
+  pominięte z powodem), a „Cofnij” przywraca karty, pliki, katalogi i obiekt (po zamknięciu okna -
+  `horreum object-change undo`). W nazwie pliku zmienia się wyłącznie człon obiektu na początku,
+  reszta zostaje znak w znak. Porządki mają wiersz „Plik nie zgadza się z obiektem” z gestem
+  „Uzgodnij pliki…” (obiekt w bazie zostaje, plik go dogania) oraz „Przerwane zmiany obiektu”,
+  który otwiera przerwany przebieg z „Dokończ” i „Cofnij”.
+
+- **Uwagi klatek - Twoje zdanie zostaje przy klatce.** Zaznacz klatki i kliknij „Uwagi…” (w Zbiorach
+  klasycznych: menu „Klatka”): jedno krótkie zdanie, do 300 znaków, np. „chmury po 2:00”. Uwaga żyje
+  wyłącznie w bazie, nigdy w pliku, i przeżywa każde kolejne przyjęcie. Znajdziesz ją w Znajdź słowem
+  z treści albo `uwagi:…`, a pomyłkę cofa „Cofnij uwagi” na pasku stanu albo w wierszu „Ostatnio” na
+  Domu.
+
+- **Kopie jednej klatki mówią, czym się różnią, a Ty wskazujesz, która prowadzi.** Gdy ta sama klatka
+  leży w kilku miejscach, Horreum zapisuje zeznanie nagłówka każdej kopii i - dla XISF - liczbę i role
+  obrazów w pliku. Kolumna „Obrazy” (w perspektywach kopii, do włączenia w „Polach”) i podpowiedź
+  „×N” pokazują, w czym kopie mówią inaczej, także grupę flatów, filtr w nazwie i folder filtra.
+  Porządki mają wiersze „Klatki z niezgodnymi kopiami” i „Zeznanie z nieobecnej kopii” (klatka mówi
+  głosem pliku, którego już nie ma); prawy klik → „Ta kopia prowadzi” wskazuje kopię, której nagłówek
+  ma mówić za klatkę, i Dostawa tego wyboru nie przestawi. Klatkę z jedną ocalałą kopią Dostawa
+  naprawia sama - czyta plik, sprawdza, że to te same dane, i przejmuje jego zeznanie - a fakty kopii
+  bez pełnego skanu zbiera przycisk „Zbierz fakty kopii (N)”.
+
+- **Rodowód widać w tabeli, a kalibrator klatki wskażesz ręką.** Kolumna i filtr „Rodowód” mówią
+  przy każdym gotowym obrazie, na czym stoi jego rodowód (dokładny, z historii pliku, częściowo
+  potwierdzony, z okna czasu, do potwierdzenia), a perspektywa „Gotowe obrazy” pokazuje stosy
+  pogrupowane według tego stanu. Dwuklik wiersza w panelu „Rodowód…” pokazuje te klatki w tabeli,
+  a werdykt wejść stosu cofa „Cofnij werdykt”. Dla klatki nieba panel ma „Wskaż kalibrator…”:
+  master dark albo flat wybierzesz także spoza przepisu - program nazywa wtedy niezgodność (filtr,
+  teleskop, binning, ekspozycja, temperatura, gain, offset) - a wybór przetrwa przeliczenia;
+  „Przywróć automat” oddaje decyzję programowi.
+
+- **Perspektywa „Wersje stosów” - ten sam materiał zintegrowany kilka razy.** Stosy jednego obiektu,
+  kamery, filtra, ekspozycji i okna czasu tworzą grupę, a każda para dostaje ocenę z dowodem: inna
+  integracja, pochodna tej samej integracji albo nieustalone. Kolumna „Wersja” podaje liczbę obrazów
+  w pliku i datę integracji. Prawy klik → „Zostaw tę wersję” kopiuje do schowka ścieżki pozostałych
+  wersji, a „Zostaw wszystkie wersje” zapisuje werdykt, który zdejmuje grupę z roboty w Porządkach
+  (cofniesz go w tym samym menu). Horreum niczego tu nie kasuje.
+
+- **Stanowisko wskażesz ręką klatkom bez GPS.** Zdjęcia z lustrzanki i inne klatki bez współrzędnych
+  w nagłówku dostają stanowisko w oknie „Wskaż stanowisko…” na osi obserwatorium: okno grupuje je po
+  folderach, a stanowisko wybierasz z listy albo zakładasz ze współrzędnych (punkt blisko istniejącego
+  trafia w nie, bez duplikatu). Wskazanie zmienisz („Zmień wskazanie…”) albo cofniesz („Cofnij
+  wskazanie…”), a automat go nie nadpisze. To okno i „Przypisz zestaw…” startują szersze, mają filtr
+  listy folderów, długą ścieżkę skracają w środku (licznik zostaje widoczny), a zapis bierze dokładnie
+  te zaznaczone foldery, które widać po filtrze.
+
+- **Gotowy stos bez nazwy dostaje propozycję z folderu.** Stos leżący w drzewie
+  `STACKS\<obiekt>\<zestaw>\<filtr>`, którego plik nie zapisał obiektu, trafiał do kubełka „bez nazwy,
+  gotowe stosy” i każdy kosztował ręczne wpisanie nazwy. Teraz program czyta nazwę z folderu obiektu
+  i podaje ją jako propozycję: w Przeglądzie obiektów pod kubełkiem stosów stoi wiersz „…z tego ze
+  ścieżki”, a „Zatwierdź ze ścieżki…” nadaje nazwę jednym gestem. Propozycja nigdy nie zapisuje się
+  sama, nie powstaje, gdy plik mówi coś o obiekcie albo gdy nazwę zdjąłeś ręką, i milknie, gdy dwie
+  kopie tego samego stosu leżą w folderach różnych obiektów; potwierdzonej nazwy nie przepisze
+  później dopasowanie po współrzędnych. Dialog „Napraw nagłówek…” grupuje stosy po folderze obiektu,
+  a nie po folderze filtra.
+
+- **Stos wie, który to kanał i czy jest tylko skadrowaną wersją innego.** Trzy stosy R, G i B jednej
+  integracji kamery kolorowej nie wyglądają już jak trzy kopie tego samego obrazu: kanał z nazwy pliku
+  ma własny filtr „Kanał”. „Wciągnij stosy…” bierze też skadrowany wariant `_autocrop` (dotąd pomijany
+  jako dalsza obróbka); taki wariant jest osobnym obrazem powiązanym z oryginałem, dziedziczy po nim
+  obiekt i zestaw (przy kadrowaniu znikają często karty `TELESCOP` i `OBJECT`) i nie udaje drugiej
+  integracji w „Wersjach stosów”.
 
 - **Stos z mieszanym materiałem mówi o RAW-ach, których nie umie umieścić w czasie.** Gdy obraz ma
   już rodowód z plików FITS, a obok leżą zdjęcia z lustrzanki bez znanego zegara, panel rodowodu
-  mówi „a tych N nie umiem umieścić w czasie" i podsuwa wskazanie odniesienia - tylko wtedy, gdy
-  to wskazanie naprawdę może je wciągnąć. Schemat bazy rośnie do wersji 20; migracja przy pierwszym
-  otwarciu, bez ruszania istniejących wierszy.
+  mówi „a tych N nie umiem umieścić w czasie” i podsuwa wskazanie odniesienia - tylko wtedy, gdy
+  to wskazanie naprawdę może je wciągnąć.
+
+- **Planer patrzy na kadr i rozumie lustrzanki.** Nowa kolumna „Wypełn.” mówi, jaką część kadru
+  wypełnia cel (komórka mozaiki jest przygaszona), a pola „Min. wypełnienie” i „Maks. paneli”
+  włączają filtr kadru, który chowa cele, jakich żaden zestaw parku nie zrobi w zadanym wypełnieniu
+  albo liczbie paneli - domyślnie wyłączony. Dla zdjęć z lustrzanki planer bierze z EXIF wymiary
+  kadru i - gdy plik go podaje - rozmiar piksela; już przyjęte RAW-y potrzebują jednego ponownego
+  odczytu (`horreum scan --reread-raw`), a piksel matrycy możesz też wpisać ręką (`horreum camera`).
 
 - **Recepta na pasku stanu da się kliknąć.** Po geście, który da się cofnąć (wycofanie klatki,
   cofnięcie albo przywrócenie przypisania obiektu), pasek nie tylko podpowiada drogę powrotu, ale
   ją wykonuje: klik odsłania klatki poza widokiem, a potem cofa gest - dokładnie na tych klatkach,
-  które gest zmienił, nie na całym zaznaczeniu. Recepta żyje tak długo, jak jest prawdą, i nie
-  wykonuje się w trakcie etapu Dostawy ani zapisu do plików.
+  które gest zmienił, nie na całym zaznaczeniu. Po wykonaniu zaznaczone klatki stoją na środku
+  tabeli, a nie przy dolnej krawędzi. Recepta żyje tak długo, jak jest prawdą, i nie wykonuje się
+  w trakcie etapu Dostawy ani zapisu do plików.
 
-- **Edycja pojedynczej komórki w Zbiorach.** Komórkę keyworda (dla klatki z jedną obecną kopią,
-  nie RAW-a) edytujesz w miejscu, z polem komentarza jak w makrze. Zmiana trafia do tej samej
+- **Edycja pojedynczej komórki w Zbiorach klasycznych.** Komórkę keyworda (dla klatki z jedną obecną
+  kopią, nie RAW-a) edytujesz w miejscu, z polem komentarza jak w makrze. Zmiana trafia do tej samej
   szuflady co makro: widzisz ją w podglądzie razem z innymi oczekującymi kartami tej klatki,
   zatwierdzasz albo odrzucasz i cofasz jak każdy zapis.
 
 - **Porządki pokazują klatki bez zestawu i bez stanowiska.** Dwa nowe wiersze z liczbą prowadzą
-  wprost do gestu („Przypisz zestaw…", „Wskaż stanowisko…"). Nowy wiersz „Fakt ręki zatrzymany na
-  zastąpionej klatce" pokazuje, co zostało przy klatce zastąpionej, a w perspektywie „Zastąpione"
-  menu tabeli ma gest „Przenieś fakty ręki".
+  wprost do gestu („Przypisz zestaw…”, „Wskaż stanowisko…”). Nowy wiersz „Fakt ręki zatrzymany na
+  zastąpionej klatce” pokazuje, co zostało przy klatce zastąpionej, a w perspektywie „Zastąpione”
+  menu tabeli ma gest „Przenieś fakty ręki”.
 
-- **Okna „Wskaż stanowisko" i „Przypisz zestaw" mają filtr listy folderów.** Okno startuje szersze,
-  długa ścieżka skraca się w środku (licznik zostaje widoczny), a zapis bierze dokładnie te
-  zaznaczone foldery, które widać po filtrze.
+- **Perspektywa „Wycofane, a plik wrócił”.** Klatka, którą wycofałeś, a której plik znów jest na
+  dysku, ma własną listę i własne zdanie w kolumnie „Ścieżka” („wycofana, plik wrócił”) z drogą
+  powrotu w podpowiedzi. Dotąd wiersz Porządków prowadził do wszystkich wycofanych naraz i nie dało
+  się odróżnić tej jednej od klatek, których pliku naprawdę nie ma.
 
-- **Biblioteka obiektów ma kolumnę „Godziny".** Suma ekspozycji lightów per obiekt pod bieżącym
+- **Biblioteka obiektów ma kolumnę „Godziny”.** Suma ekspozycji lightów per obiekt pod bieżącym
   filtrem, z dopiskiem, ile klatek nie ma czasu ekspozycji.
 
-- **Zapisana perspektywa pamięta wygląd.** Wybór kolumny „Obrazy" i szerokość kolumny ścieżki
+- **Zapisana perspektywa pamięta wygląd.** Wybór kolumny „Obrazy” i szerokość kolumny ścieżki
   wracają z perspektywą; wybór soczewki w planerze przeżywa restart programu.
+
+- **Nowe tokeny we wzorze nazw plików.** Panel „Uporządkuj nazwy plików…” zna token „grupa flatu
+  (FLATGRP)” - grupę flatu z mastera, którym klatkę skalibrowano, a `NOFLAT`, gdy go nie ma - oraz
+  „końcowe _ (ostatni)”, a token rodzaju klatki ma wybór wielkości liter.
+
+### Zmienione
+
+- **Program startuje na ekranie Dom z czterema drogami.** Po otwarciu bazy widzisz „Co chcesz
+  zrobić?” i kafle „Przyjmij”, „Znajdź”, „Wydaj do WBPP” i „Popraw · N” (ta sama liczba co przy
+  Porządkach), a pod nimi „Co mam:”, „Teczki - najwięcej godzin” i wiersz „Ostatnio” z przyciskiem,
+  który cofa Twój ostatni gest. Teczek jest do osiemnastu, każda z kropką stanu kalibracji; klik
+  pokazuje klatki obiektu w Znajdź, a wyższe okno odsłania więcej rzędów bez paska przewijania.
+  Pasek boczny ma Dom i Znajdź, a pod „Więcej” dawne strony: Dostawa, Zbiory klasyczne (dawne
+  „Zbiory”), Porządki i Planer - nic nie zniknęło, kafle prowadzą tam krótszą drogą. Rzadsze
+  narzędzia zbiera przycisk „Więcej…”, a instrukcja obsługi jest przepisana według czterech dróg.
+
+- **Karta `OBJECT` zapisuje się w miejscu, a nie przez przepisanie całego pliku.** „Napraw
+  nagłówek…” i „Zatwierdź ze ścieżki…” (który teraz także dopisuje kartę do pliku tam, gdzie plik na
+  to pozwala, z przyciskiem „Cofnij karty”) podmieniają samą kartę w nagłówku: plik nie wędruje
+  w całości po sieci, a linki do niego, np. w wydaniu dla WBPP, zostają. Na czas zapisu plik jest
+  zablokowany dla innych programów, nagłówek ma kopię zapasową sprzed pierwszego bajtu, a po zapisie
+  program sprawdza, że dane obrazu są te same; gdy w nagłówku nie ma miejsca (np. FITS bez karty
+  `OBJECT`), plik jest przepisany w całości i okno to mówi. Zapis przerwany w połowie odcina plik od
+  skanu i trafia do Porządków („Plik po przerwanym zapisie”, „Zapis czeka na dokończenie”) z gestami
+  pod prawym klikiem: „Dokończ zapis”, „Przywróć nagłówek sprzed zapisu” i „Zwolnij plik do skanu…”
+  (z obowiązkowym powodem).
+
+- **Jedna forma nazwy obiektu w pliku, aliasy na wierzchu.** Do karty `OBJECT` Horreum pisze zawsze
+  tę samą formę: oznaczenie katalogowe ze spacją, z numerem NGC tam, gdzie obiekt go ma - folder
+  `M82` daje kartę `NGC 3034`, a „Bubble Nebula” - `NGC 7635`; w bazie i w nazwach folderów zostaje
+  kanon bez spacji. Dotąd „Napraw nagłówek…” pisał do pliku formę folderu, teraz jest ona tylko
+  propozycją w polu edycji. Okno „Przypisz obiekt” pokazuje aliasy na liście, szuka po nich i podgląda
+  na żywo „wpisane → kanon · w nagłówku: …”; oznaczenie katalogowe trafia dokładnie (`C4` nie znajduje
+  już NGC4258), a w trakcie pisania - początkiem nazwy (`sh2 13` nie gubi Sh2-131), tak samo
+  w listwie filtrów i na liście obiektów do wydania. Nowy wiersz Porządków „Nagłówek inny niż
+  zatwierdzony folder” pokazuje klatki nazwane z folderu, których plik mówi co innego, a słownik zna
+  dwie nowe pary: M44 to NGC2632, Sh2-229 to IC405.
+
+- **Rodowód stosów liczy się przy każdym przyjęciu i trafia celniej.** Przeliczenie rodowodu stosów
+  jest teraz ostatnim etapem każdego „Przyjmij nowe” i gestów, które go ruszają - nie trzeba osobno
+  klikać „Policz rodowód stosów”, a przerwanie Dostawy zatrzymuje je od razu. Historię obróbki stosu
+  (listę klatek zapisaną przez PixInsight) skan zapamiętuje w bazie, więc kolejne przeliczenia nie
+  czytają nagłówków stosów z dysku. Klatki z tej historii program dopasowuje najpierw po nazwie - także
+  gdy plik przemianowałeś później w Horreum - a dopiero potem po temperaturze i liczbie; gdy plik nie
+  zapisał, których klatek użył, panel mówi „plik użył N z M klatek okna” i prosi o potwierdzenie na
+  liście.
+
+- **Zapis nagłówka pilnuje reguł karty FITS, zanim cokolwiek zapisze.** Wartość spoza drukowalnego
+  ASCII, dłuższa niż mieści karta albo nowa karta o niedozwolonej nazwie odpada już w podglądzie panelu
+  „Popraw nagłówki…” i edycji komórki, a nie dopiero przy zapisie. FITS nie zapisze już wartości
+  dłuższej niż 68 znaków (dotąd dzielił ją po cichu na karty kontynuacji). Zapis, który uciąłby
+  zastany komentarz karty, odmawia, a panel ma pole „komentarz (opc.)”, którym podasz krótszy. Nowy
+  nagłówek XISF przechodzi parser, zanim trafi do pliku.
+
+- **Planer stawia wyżej cele, które dobrze wypełniają kadr.** Po widoczności i brakach w materiale
+  kolejność bierze teraz kadr: najpierw cele wypełniające co najmniej 30 % kadru, potem mozaiki,
+  potem za małe, na końcu bez kadrowania - i dopiero w tych grupach rządzi koszt Księżyca. Przy
+  wybranej soczewce zestawu („Patrzę oczami zestawu:”) kolejność bierze kadr tego zestawu, a zestaw
+  „najlepszego dopasowania” wybierany jest po wypełnieniu kadru.
+
+- **Hamulec „Sprawdź obecność” da się świadomie zwolnić.** Gdy kandydatów do oznaczenia jako
+  zniknięte jest więcej niż próg hamulca, okno „Zapis ponad progiem hamulca” podaje liczbę kopii,
+  których zniknięcie sprawdzenie potwierdziło (domyślnie „Anuluj”). Zatwierdzenie oznaczy wyłącznie te
+  kopie, a jeśli przy zapisie dysk pokaże inny zbiór, nic nie zostanie zapisane.
+
+- **Obiektyw lustrzanki na kilku ogniskowych to kilka pozycji osi teleskopu.** Gdy zdjęcia RAW spod
+  jednej nazwy obiektywu mają w EXIF różne ogniskowe, oś teleskopu rozdziela je po ogniskowej, bo od
+  niej zależą kadr i skala; nazwa zostaje przy ogniskowej, którą teleskop już deklarował. Scalenie
+  ręką („Scal”) wstrzymuje ten podział.
+
+- **Baza z nowszej wersji Horreum nie otworzy się w starszej.** Gdy baza ma schemat, którego program
+  jeszcze nie zna, Horreum mówi to oknem komunikatu („Zaktualizuj Horreum. Baza zostaje nietknięta.”)
+  i zostaje przy dotychczasowej bazie albo startuje bez bazy - zamiast otworzyć ją po cichu i pisać
+  obok faktów, których nie widzi. Wiersz poleceń odmawia tym samym zdaniem. Ochrona działa od tej
+  wersji w przód: 0.10.0 i starsze jej nie mają.
 
 ### Naprawione
 
-- **Planer bez stanowiska mówi to u siebie, a nie na cudzym ekranie.** Komunikat o braku
-  stanowiska nie wyskakuje już na pasku Dostawy; planer pokazuje pusty stan z przyciskiem
-  „Ustaw stanowisko…", a po wskazaniu stanowiska plan liczy się sam. Inne błędy planera widać
-  tak jak dotąd.
+- **Okno nie zamiera przy pracy na dużym archiwum.** Zbiór klatek po kliknięciu filtra składa się
+  w tle - tabela nie staje już na sekundę przy każdym kliknięciu w listwie, a w czasie wczytywania
+  akcje widoku czekają z wyjaśnieniem. W tle liczą się też pokrycie kolumn w panelu „Pola” (dotąd
+  przeliczane po każdej Dostawie, nawet bez zmian w kartach) i sonda katalogu w „Wskaż katalog…”,
+  a widoki przeładowują się raz na koniec przebiegu Dostawy zamiast po każdym etapie. „Przyjmij
+  nowe”, „Skanuj”, „Sprawdź obecność” i „Wciągnij stosy…” sprawdzają źródło poza oknem, więc
+  odłączony dysk sieciowy nie wiesza programu - mówi „Źródło niedostępne: … - wskaż katalog.”
 
-- **Mapa stanowisk nie rysuje kresek przez cały ekran.** Stanowisko na drugim końcu świata
-  (np. Nowa Zelandia) psuło kontury lądów; punkt na skraju mapy nie leży już na krawędzi,
-  a po wskazaniu stanowiska jest ono zaznaczone na liście i na mapie.
+- **Master flat z kartą `IMAGETYP = FLAT` nie liczy się już jako surowy flat.** Program brał taki
+  plik za zwykłą klatkę flat, choć to gotowy master. Teraz plik XISF z historią integracji jest
+  masterem flat przy skanie i przy „Wciągnij z WBPP…”. Już przyjęte pliki przelicza
+  `horreum rederive-kind`, a kartę w samym pliku poprawia `horreum header-fix`.
 
-- **Podgląd nowych nazw stoi w kadrze.** Kolumna „nazwa →" stoi zaraz po kolumnach bazowych,
-  zamiast na końcu tabeli poza ekranem.
+- **Cofnięcie mówi, co się nie udało, i przywraca cały stan.** Cofnięcie zmiany nazw plików i zapisu
+  makra pokazuje porażki z pierwszym powodem, a „Cofnij” zostaje, dopóki jest co cofać; zapis, który
+  niczego w plikach nie zmienił, nie zapala „Cofnij” na pusto. Cofnięcie zapisu nagłówka składa plik
+  bajt w bajt, gdy to możliwe, a inaczej okno mówi „cofniętych semantycznie”; cofnięcie karty
+  `OBJECT`, która zdjęła Twoje wcześniejsze „Cofnij przypisanie”, przywraca też to cofnięcie. Zmiana
+  nazw przerwana w połowie (awaria, odłączony dysk) domyka się przy następnym skanie, a zapis
+  oznaczony jako nieudany, który jednak trafił do pliku, potwierdza najbliższy skan.
 
-- **Po wykonaniu recepty zaznaczone klatki są na środku tabeli**, a nie przy dolnej krawędzi.
+- **Zapis nagłówka nie nadpisze zmiany, którą w tym czasie zrobił inny program.** Plik podmieniany
+  jest razem z kopią wersji wypieranej i sprawdzany wobec odcisku sprzed zapisu: gdy inny program
+  zmienił go w trakcie, jego wersja wraca na miejsce, a zapis kończy się jako zablokowany z podaniem
+  ścieżek. Dopisanie karty do pliku XISF, którego karty mają postać z zamykającym znacznikiem, nie
+  zagnieżdża już nowej karty w starej; strukturę kart, której program nie rozumie, odrzuca bez zapisu.
 
-- **Zdanie osi stanowisk nie przykrywa statusu etapu** po przebiegu Dostawy - czeka na wejście
-  w Porządki.
+- **Klatka nie zostaje na stałe bez nagłówka.** Wpis klatki ze skanu trafia do bazy w całości albo
+  wcale - awaria w połowie nie zostawia klatki bez zeznania ani licznika raportu bez pokrycia. Gdy pod
+  znaną ścieżką leży nowa treść, nowa klatka i przepięcie kopii zapisują się razem, a odmowa cofa oba,
+  więc kolejny skan nagrywa nagłówek od nowa. Kopia nieczytelna dostaje rodzaj awarii (dysk czy plik)
+  już przy pierwszym nieudanym odczycie, z kodem błędu Windows w diagnozie.
+
+- **Planer liczy kadr osobno dla każdej kamery na tym samym teleskopie.** Teleskop z dwiema kamerami
+  o różnym polu widzenia nadpisywał sobie kadrowanie, więc część celów dostawała złą liczbę paneli
+  mozaiki. Teraz kadr należy do zestawu (teleskop i kamera), a zestawy jednej optyki mają w planerze
+  różne nazwy.
 
 - **Podpowiedź obiektu gotowego stosu pokazuje obiekt, nie filtr.** Dla stosu bez nazwy kolumna
-  „Obiekt" podpowiadała nazwę folderu rodzica, czyli w drzewie `STACKS` nazwę filtra (`⟨Ha⟩`,
-  `⟨NoFilter⟩`) - dotyczyłoby to 182 ze 193 stosów archiwum. Teraz podpowiada folder obiektu.
-
-- **„Brakujące kopie" pokazują także klatkę wycofaną**, której jedna z kopii zniknęła - to fakt
-  o pliku, prawdziwy niezależnie od wycofania. **„Duplikaty" nie pokazują klatki wycofanej ani
-  zastąpionej** - lista i gest scalania mówią teraz to samo.
-
-- **Perspektywa zapisana nowszą wersją nie udaje, że działa.** Otwarta w wersji, która nie zna
-  któregoś jej warunku, pokazywała szerszy zbiór pod tą samą nazwą. Teraz pasek kryteriów mówi
-  „zapisana w nowszej wersji - N warunków pominiętych" i nazywa je, a ponowny zapis tej samej
-  perspektywy ich nie kasuje.
-
-- **Plakietka „Porządki (N)" zmienia się od razu po geście.** Po „Przywróć" albo „Wycofaj"
-  w Zbiorach i po gestach panelu rodowodu liczba przy Porządkach zostawała stara, dopóki nie
-  wszedłeś w Porządki.
-
-- **„Przenieś" w planerze nie obiecuje gestu, który zaraz odmówi.** Gdy cel sieroty ma już własne
-  oznaczenie, przycisk jest wygaszony, a podpowiedź mówi dlaczego.
+  „Obiekt” podpowiadała nazwę folderu rodzica, czyli w drzewie `STACKS` nazwę filtra (`⟨Ha⟩`,
+  `⟨NoFilter⟩`). Teraz podpowiada folder obiektu.
 
 - **Propozycja rodowodu wskazuje materiał także przy karcie teleskopu do naprawy.** Stos, którego
   karta teleskopu jest przestarzała (albo niesie nazwę montażu), dostawał w propozycji pustkę -
   teraz widzi noc zapisaną jednym innym teleskopem, z ostrzeżeniem o rozjeździe, tak jak gotowy
   rodowód.
+
+- **„Brakujące kopie” pokazują także klatkę wycofaną**, której jedna z kopii zniknęła - to fakt
+  o pliku, prawdziwy niezależnie od wycofania. **„Duplikaty” nie pokazują klatki wycofanej ani
+  zastąpionej** - lista i gest scalania mówią teraz to samo.
+
+- **Perspektywa zapisana nowszą wersją nie udaje, że działa.** Otwarta w wersji, która nie zna
+  któregoś jej warunku, pokazywała szerszy zbiór pod tą samą nazwą. Teraz pasek kryteriów mówi
+  „zapisana w nowszej wersji - N warunków pominiętych” i nazywa je, a ponowny zapis tej samej
+  perspektywy ich nie kasuje.
+
+- **Plakietka „Porządki (N)” zmienia się od razu po geście.** Po „Przywróć” albo „Wycofaj”
+  w Zbiorach klasycznych, po gestach panelu rodowodu, po zapisie do plików i po cofnięciu makra
+  albo zmiany nazw liczba przy Porządkach zostawała stara, dopóki nie wszedłeś w Porządki.
+
+- **Komunikaty stoją na swoim ekranie.** Planer bez stanowiska nie zgłasza tego na pasku Dostawy,
+  tylko pokazuje u siebie pusty stan z przyciskiem „Ustaw stanowisko…”, a po wskazaniu stanowiska plan
+  liczy się sam; inne błędy planera widać tak jak dotąd. Zdanie osi stanowisk po przebiegu Dostawy nie
+  przykrywa statusu etapu - czeka na wejście w Porządki.
+
+- **Mapa stanowisk nie rysuje kresek przez cały ekran.** Stanowisko na drugim końcu świata
+  (np. Nowa Zelandia) psuło kontury lądów; punkt na skraju mapy nie leży już na krawędzi,
+  a po wskazaniu stanowiska jest ono zaznaczone na liście i na mapie.
+
+- **Podgląd nowych nazw stoi w kadrze.** Kolumna „nazwa →” stoi zaraz po kolumnach bazowych,
+  zamiast na końcu tabeli poza ekranem.
+
+- **„Przenieś” w planerze nie obiecuje gestu, który zaraz odmówi.** Gdy cel sieroty ma już własne
+  oznaczenie, przycisk jest wygaszony, a podpowiedź mówi dlaczego.
+
+- **Angielski interfejs mówi po angielsku także w opisie filtra i powodach obecności.** Opis drzewa
+  filtra na pasku kryteriów i powody zatrzymania „Sprawdź obecność” brały dotąd polski tekst
+  programu; teraz idą z katalogu języka.
+
+- **Okno mieści się na niższym ekranie.** Listwa filtrów w Zbiorach klasycznych przewija się zamiast
+  wymuszać wysokość okna, więc Horreum da się zmniejszyć w pionie znacznie bardziej niż dotąd.
+
+### Wiersz poleceń
+
+- **`horreum header-fix`** poprawia w plikach, w miejscu, kartę `IMAGETYP` mastera według historii
+  integracji i kartę `FILTER` według folderu filtra. Bez `--apply` tylko liczy i zapisuje plan;
+  `--apply --plan` wykonuje wyłącznie ten plan, a `--undo` cofa zapis po numerze z raportu.
+- **`horreum rederive-kind`** przelicza rodzaj już przyjętych plików XISF (master flat zapisany jako
+  FLAT); czyta nagłówki, pisze tylko bazę. Bez `--apply` tylko podgląd i plan.
+- **`horreum stack-versions`** kopiuje skadrowane warianty `_autocrop` ze starego drzewa obróbki do
+  biblioteki `STACKS` archiwum; bez `--apply` tylko pokazuje plan.
+- **`horreum object-change finish|undo`** dokańcza albo cofa przebieg „Zmień obiekt…” po numerze ze
+  zdania wyniku - także po zamknięciu okna albo awarii.
+- **`horreum streaks`** szuka śladów (meteor, satelita, samolot) w klatkach jednego katalogu, bez
+  bazy. Raport (CSV, wycinki PNG, manifest) pisze wyłącznie do nowego albo pustego katalogu `--out`,
+  poza katalogiem klatek i korzeniem archiwum, które tylko czyta; rodzaj śladu to propozycja.
+- **`horreum project --object`** wydaje obiekt do WBPP z wiersza poleceń (bez `--apply` tylko podgląd).
+- **`horreum observatory assign|clear`** wskazuje stanowisko klatkom bez GPS i cofa to wskazanie (bez
+  `--apply` tylko podgląd).
+- **`horreum camera`** listuje kamery i przyjmuje piksel matrycy wpisany ręką (`--pixel`) albo go
+  cofa (`--clear-pixel`).
+- **`horreum scan --reread-raw`** czyta ponownie wszystkie pliki RAW, żeby dociągnąć nowe fakty
+  z EXIF (wymiary kadru, piksel).
+- **`horreum plan --min-fill --max-panels`** - filtr kadru planera, a wypełnienie kadru trafia też do
+  wydruku i `--json`.
 
 ## [0.10.0] - 2026-09-26
 

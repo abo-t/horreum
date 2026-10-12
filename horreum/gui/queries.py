@@ -2047,6 +2047,17 @@ def path_header_conflict_frame_ids(con):
     return wynik
 
 
+def withheld_testimony_frame_ids(con):
+    """ZEZNANIE WSTRZYMANE (AR-82, 0037): klatki z OTWARTYM wstrzymaniem zapisu (`withheld_write`) -
+    plik kopii zapisany (albo przywrócony cofnięciem), a zeznanie klatki nie przyjęło jego nagłówka,
+    bo głosem mówi inna obecna kopia. Robota człowieka: wskazać kopię gestem „Ta kopia prowadzi”
+    (dokończa zapis) albo cofnąć commit. Predykat ze STANU - kopie bywają zgodne w polach, które
+    porównują „Kopie niezgodne”, więc tamten wiersz takiej klatki nie widzi. JEDEN właściciel dla
+    licznika Porządków, trimu gridu i dostępności gestu (`lead_copy.awaiting_hand`). set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT DISTINCT frame_id FROM withheld_write WHERE settled_at IS NULL").fetchall()}
+
+
 def torn_write_frame_ids(con):
     """PLIK PO PRZERWANYM ZAPISIE (0022, Q8): klatki, których kopia ma OTWARTĄ operację zapisu
     w miejscu (`inplace_op.phase` w `repo.INPLACE_OPEN_PHASES`) - nagłówek mógł zostać rozdarty,
@@ -3626,6 +3637,9 @@ def tasks_state(con):
         # wiodącą wskazuje człowiek (AR-4) przy ≥2 obecnych kopiach albo zeznaniu z ręki; resztę
         # naprawia etap Dostawy, ale tylko pod swoim korzeniem - więc liczone są wszystkie.
         "orphan_testimony_frames": len(orphan_testimony_frame_ids(con)),
+        # Zapis z zeznaniem wstrzymanym (AR-82) - robota: plik zapisany, zeznanie przy innej kopii;
+        # kopię wskazuje człowiek. Ten sam predykat co trim perspektywy i dostępność gestu.
+        "withheld_testimony_frames": len(withheld_testimony_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,
         "vanished_frames": len(vanished_frame_ids(con)),

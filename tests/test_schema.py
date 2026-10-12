@@ -23,6 +23,8 @@ EXPECTED_TABLES = {
     "frame_note",
     # 0036 - zmiana obiektu razem z plikiem (AR-17 krok 3)
     "object_change_run", "pending_object_change", "run_dir",
+    # 0037 - zapis z zeznaniem wstrzymanym (AR-82)
+    "withheld_write",
 }
 
 
@@ -99,8 +101,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v36_po_migracji(tmp_path):
-    """0036 podnosi user_version do 36 (świeża baza leci 0002→…→0036 sekwencyjnie; 0025 = wersja
+def test_user_version_v37_po_migracji(tmp_path):
+    """0037 podnosi user_version do 37 (świeża baza leci 0002→…→0037 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -110,13 +112,14 @@ def test_user_version_v36_po_migracji(tmp_path):
     0034 = historia stosu `stack_history`, aliasy `light_name_alias` i podstawa rodowodu;
     0035 = wariant kadru stosu `stack_variant`, AR-54; 0036 = przebieg gestu zmiany obiektu
     `object_change_run`, pozycje ze stanem sprzed `pending_object_change` i katalogi gestu `run_dir`,
-    AR-17 krok 3).
+    AR-17 krok 3; 0037 = zapis z zeznaniem wstrzymanym `withheld_write`, wiązanie
+    `pending_changes.withheld_id` i wersja decyzji ręki `header_backups.hand_version`, AR-82).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 36
-    assert db.SCHEMA_VERSION == 36
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 37
+    assert db.SCHEMA_VERSION == 37
     con.close()
 
 
@@ -142,7 +145,7 @@ def test_0036_zmiana_obiektu_przyrost_na_bazie_v35(tmp_path):
     con = _baza_v35_z_kopia(str(tmp_path / "h.db"))
     przed = {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
              for t in ("frame", "location", "object", "pending_renames", "event")}
-    assert db.migrate(con) == db.SCHEMA_VERSION == 36
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v37_po_migracji
     for t in ("object_change_run", "pending_object_change", "run_dir"):
         assert con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0
     assert {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in przed} == przed
@@ -211,6 +214,46 @@ def test_0036_CHECK_przebiegu_pozycji_i_katalogow(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             con.execute(zly)
     con.execute("UPDATE run_dir SET done_at = 't', undone_at = 't' WHERE id = 1")
+    con.close()
+
+
+def test_0037_wstrzymanie_przyrost_na_bazie_v36_i_CHECK(tmp_path):
+    """0037 na bazie v36 z danymi (AR-82): `withheld_write` wchodzi PUSTA, nowe kolumny NULL przy
+    wierszach sprzed migracji, istniejące wiersze nietknięte, druga migracja = no-op. CHECK-i:
+    rozliczenie razem z rodzajem rozliczenia, wstrzymanie cofnięcia bez nagrobka i bez wersji ręki,
+    rodzaj spoza słownika. Falsyfikator: zdejmij CHECK `settled_at`/`settled_how` → pierwszy zły
+    wiersz wchodzi."""
+    con = db.connect(str(tmp_path / "h.db"))
+    for version, filename in db.MIGRATIONS:
+        if version <= 36:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    con.execute("INSERT INTO frame(id, sha1_data, kind, first_seen_at) VALUES (1, 'a', 'light', 't')")
+    con.execute("INSERT INTO location(id, frame_id, volume, path) VALUES (1, 1, 'V', 'R:\\L\\a.fits')")
+    con.execute("INSERT INTO commits(id, run_id) VALUES (1, 'R')")
+    con.execute("INSERT INTO header_backups(id, commit_id, location_id, header_text, post_hash) "
+                "VALUES (1, 1, 1, 'x', 'p')")
+    con.execute("INSERT INTO pending_changes(id, run_id, location_id, keyword, op) "
+                "VALUES (1, 'R', 1, 'OBJECT', 'set')")
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    assert con.execute("SELECT count(*) FROM withheld_write").fetchone()[0] == 0
+    assert con.execute("SELECT hand_version FROM header_backups").fetchone()[0] is None
+    assert con.execute("SELECT withheld_id FROM pending_changes").fetchone()[0] is None
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    wstaw = ("INSERT INTO withheld_write(kind, location_id, frame_id, commit_id, header_hash, "
+             "object_written, hand_version, reason, actor, opened_at, settled_at, settled_how) "
+             "VALUES (?, 1, 1, 1, 'h', ?, ?, 'r', 'user:local', 't', ?, ?)")
+    con.execute(wstaw, ("commit", 1, 5, None, None))
+    con.execute(wstaw, ("undo", 0, None, "t", "undone"))
+    for zly in (("commit", 0, None, "t", None),            # rozliczone bez rodzaju rozliczenia
+                ("commit", 0, None, None, "completed"),    # rodzaj bez chwili
+                ("undo", 1, None, None, None),             # cofnięcie z nagrobkiem
+                ("undo", 0, 3, None, None),                # cofnięcie z wersją ręki
+                ("cofka", 0, None, None, None),
+                ("commit", 0, None, "t", "porzucone")):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(wstaw, zly)
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     con.close()
 
 

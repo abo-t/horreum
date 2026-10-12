@@ -1082,7 +1082,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       `event(header.refreshed)` `{header_hash_before, header_hash_after}`; w TEJ SAMEJ transakcji
       przeliczenie pochodnych frame'a (R3-b2): `frame.camera_id`/`kind` z nowego zeznania →
       UPDATE + `event(frame.rederived)` (inaczej config budowany na stęchłej kamerze).
-      Zeznanie odświeża WYŁĄCZNIE kopia wiodąca (AR-4, `_zeznanie_plynie_z`: kotwica ręki,
+      Zeznanie odświeża WYŁĄCZNIE kopia wiodąca (AR-4, `testimony_flows_from`: kotwica ręki,
       jedyna obecna kopia albo jednoznaczne źródło bieżącego `header`). Zmiana nagłówka innej
       kopii zostaje w jej faktach (`location.refreshed`) - rozjazd pokażą „Kopie niezgodne",
       a kopię wiodącą wskaże człowiek. Dawne „ostatni odczyt wygrywa" było automatyczną regułą
@@ -1159,7 +1159,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
         # zeznania, mówią jej fakty SPRZED zmiany nagłówka. Po UPDATE porównanie z `header`
         # widziałoby już nowy plik.
         przepisz = ("header_hash" in changed and raw_json is not None
-                    and _zeznanie_plynie_z(con, frame_id, location_id))
+                    and testimony_flows_from(con, frame_id, location_id))
         con.execute(
             "UPDATE location SET mtime = ?, file_sha1 = ?, header_hash = ?, hdu_index = ?, "
             "compressed = ?, size_bytes = ?, unreadable_since = ?, unreadable_kind = ?, "
@@ -1239,11 +1239,14 @@ def rederive_frame_kind(con, *, frame_id, expected_kind, kind, witnesses, now,
     return True
 
 
-def _zeznanie_plynie_z(con, frame_id, location_id):
+def testimony_flows_from(con, frame_id, location_id):
     """Czy zmiana nagłówka lokacji `location_id` ma przepisać zeznanie klatki (AR-4, jedna reguła
     z ręką i bez): klatka bez `header` (nic do ochrony) albo lokacja jest KOPIĄ WIODĄCĄ
     (`lead_location`: kotwica ręki, jedyna obecna kopia, jednoznaczne źródło `header`).
-    W każdym innym wypadku zmiana zostaje w faktach kopii, a rozjazd pokazują „Kopie niezgodne"."""
+    W każdym innym wypadku zmiana zostaje w faktach kopii, a rozjazd pokazują „Kopie niezgodne".
+
+    To jest BRAMKA WYBORU KOPII, nie dowód stanu zeznania (AR-82): o tym, czy zeznanie klatki
+    naprawdę opisuje plik, mówi `testimony_matches`."""
     if con.execute("SELECT 1 FROM header WHERE frame_id = ?", (frame_id,)).fetchone() is None:
         return True
     # Jedyna obecna to także kopia, która właśnie ODŻYWA (`present` 0 → 1 w tym zapisie) przy braku
@@ -1252,6 +1255,75 @@ def _zeznanie_plynie_z(con, frame_id, location_id):
                    (frame_id, location_id)).fetchone() is None:
         return True
     return lead_location(con, frame_id) == location_id
+
+
+def testimony_matches(con, *, frame_id, raw_json, hot_fields, cards):
+    """DOWÓD ZEZNANIA (AR-82): czy zeznanie klatki (`header.raw_json`, wszystkie pola gorące
+    `_HEADER_HOT` i lustro `cards`) jest DOKŁADNIE tym, co opisuje odczytany nagłówek pliku
+    (`raw_json`/`hot_fields`/`cards` z `scan.testimony_of`). Jedno porównanie dla przejęcia
+    (`adopt_testimony` - „zeznanie już identyczne”) i dla zapisu karty (`writeback._resync`):
+    sukces zapisu to zeznanie zgodne z plikiem, nie samo prawo kopii do przepisania go
+    (`testimony_flows_from`). Klatka bez `header` → `False`.
+
+    PORÓWNANIE W SQLITE, NIE W PYTHONIE (bramka bloku A, B7): koercja pól gorących daje `nan` dla
+    wartości `'NaN'` (XISF `CCD-TEMP`), a SQLite zapisuje NaN jako NULL - porównanie w Pythonie
+    (`nan != None`) uznawało zeznanie za niezgodne zawsze i zapis jedynej kopii wisiał wstrzymany
+    na zawsze. Wartości z rekordu idą jako parametry, więc przechodzą tę samą konwersję co przy
+    zapisie zeznania; `IS` porównuje NULL z NULL. Lustro kart - tak samo (`_cards_key`)."""
+    hot = dict(hot_fields or {})
+    zgodne = con.execute(
+        "SELECT raw_json = ? AND date_obs IS ? AND exptime IS ? AND filter_raw IS ? "
+        "AND instrume IS ? AND telescop IS ? AND focallen IS ? AND focratio_raw IS ? "
+        "AND xpixsz IS ? AND ypixsz IS ? AND gain IS ? AND offset_adu IS ? AND ccd_temp IS ? "
+        "AND usblimit IS ? AND xbinning IS ? AND ybinning IS ? AND bayerpat IS ? AND ra_deg IS ? "
+        "AND dec_deg IS ? AND object_raw IS ? FROM header WHERE frame_id = ?",
+        (raw_json, *(hot.get(k) for k in _HEADER_HOT), frame_id)).fetchone()
+    if zgodne is None or not zgodne[0]:
+        return False
+    return _cards_of(con, frame_id) == _cards_key(cards)
+
+
+def _cards_key(cards):
+    """Lustro kart jako posortowana lista krotek - postać porównania `testimony_matches`. Liczba
+    `nan` przechodzi w `None`: tak SQLite trzyma NaN w `cards.value_num` (B7)."""
+    return sorted((c.keyword, c.idx, c.value_raw,
+                   None if c.value_num is not None and c.value_num != c.value_num
+                   else c.value_num, c.value_type, c.comment)
+                  for c in (cards or ()))
+
+
+def _cards_of(con, frame_id):
+    return sorted(tuple(r) for r in con.execute(
+        "SELECT keyword, idx, value_raw, value_num, value_type, comment FROM cards "
+        "WHERE frame_id = ?", (frame_id,)).fetchall())
+
+
+def rewrite_testimony_from_copy(con, *, location_id, frame_id, sha1_data, header_hash, raw_json,
+                                cards, hot_fields, camera_id, kind, now, actor="user:local"):
+    """JAWNE PRZEPISANIE ZEZNANIA z kopii, którą bramka wyboru (`testimony_flows_from`) wybiera, gdy
+    zeznanie nie opisuje jej pliku (AR-82, Z7): po wstrzymanym zapisie odcisk lokacji jest już nowy,
+    więc `refresh_location` przy kolejnym odczycie nie widzi zmiany i zeznania nie przepisze - ta
+    klinga domyka to w transakcji wołającego (`writeback._resync`, skan przy otwartym wstrzymaniu).
+
+    CAS pod lockiem: lokacja należy do `frame_id`, klatka ma tożsamość `sha1_data`, lokacja jest
+    obecna i ma odcisk `header_hash` (rekord jest odczytem tego pliku), a bramka wyboru nadal wybiera
+    tę kopię. Rozjazd → `False`, zero zapisu. Przepisanie przez `_rewrite_testimony` (jeden rdzeń
+    z odświeżeniem i przejęciem) z eventem `header.refreshed` niosącym kopię i powód. Zwraca `True`
+    po przepisaniu."""
+    with _immediate(con):
+        loc = con.execute(
+            "SELECT l.frame_id, l.present, l.header_hash, f.sha1_data FROM location l "
+            "JOIN frame f ON f.id = l.frame_id WHERE l.id = ?", (location_id,)).fetchone()
+        if (loc is None or loc["frame_id"] != frame_id or loc["sha1_data"] != sha1_data
+                or not loc["present"] or loc["header_hash"] != header_hash
+                or not testimony_flows_from(con, frame_id, location_id)):
+            return False
+        _rewrite_testimony(
+            con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot_fields,
+            camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.refreshed",
+            payload={"location_id": location_id, "header_hash_after": header_hash,
+                     "reason": "zeznanie dociągnięte z kopii wiodącej (AR-82)"})
+    return True
 
 
 def hand_lead_location(con, frame_id):
@@ -1420,66 +1492,89 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
     w tej transakcji, zero zapisu. Kotwica odcisku sama tego nie łapie - zapis w miejscu przed
     re-synciem zostawia w bazie stary odcisk, a odczyt sprzed zapisu niesie ten sam.
 
+    DOKOŃCZENIE ZAPISU WSTRZYMANEGO (AR-82): przejęcie, potwierdzenie i zeznanie już zgodne to
+    dowód, że zeznanie klatki opisuje plik tej kopii - w tej samej transakcji rozliczają się otwarte
+    wstrzymania lokacji (`_settle_withheld_tx`). Tak gest „Ta kopia prowadzi” i etap Dostawy
+    dokańczają zapis karty, którego zeznanie zostało przy innej kopii.
+
     ZWRACA `'adopted'` | `'confirmed'` | `'unchanged'` | `'drift'` | `'raced'`."""
-    hot = dict(hot_fields or {})
     with _immediate(con):
-        loc = con.execute(
-            "SELECT l.frame_id, l.path, l.present, l.header_hash, f.sha1_data "
-            "FROM location l JOIN frame f ON f.id = l.frame_id WHERE l.id = ?",
-            (location_id,)).fetchone()
-        if loc is None:
-            raise ValueError(f"location:{location_id} nie istnieje")
-        _refuse_if_newer_inplace(con, location_id, inplace_gen)
-        if loc["sha1_data"] != sha1_data:
-            raise ValueError(f"location:{location_id}: tożsamość rekordu {sha1_data!r} != "
-                             f"tożsamość klatki {loc['sha1_data']!r} - to nie jest ta klatka")
-        if not loc["present"] or header_hash is None or loc["header_hash"] != header_hash:
-            return "drift"
-        frame_id = loc["frame_id"]
-        if expected_frame_id is not None and frame_id != expected_frame_id:
-            return "raced"
+        werdykt, frame_id = _adopt_testimony_tx(
+            con, location_id=location_id, sha1_data=sha1_data, header_hash=header_hash,
+            raw_json=raw_json, cards=cards, hot_fields=hot_fields, camera_id=camera_id, kind=kind,
+            now=now, actor=actor, inplace_gen=inplace_gen, expected_frame_id=expected_frame_id)
+        if werdykt in ("adopted", "confirmed", "unchanged"):
+            _settle_withheld_tx(con, location_id=location_id, frame_id=frame_id,
+                                sha1_data=sha1_data, header_hash=header_hash, testimony_ok=True,
+                                now=now, actor=actor)
+    return werdykt
+
+
+def _adopt_testimony_tx(con, *, location_id, sha1_data, header_hash, raw_json, cards, hot_fields,
+                        camera_id, kind, now, actor, inplace_gen, expected_frame_id):
+    """Ciało `adopt_testimony` w jego transakcji → `(werdykt, frame_id)`; kontrakt tam."""
+    hot = dict(hot_fields or {})
+    loc = con.execute(
+        "SELECT l.frame_id, l.path, l.present, l.header_hash, f.sha1_data "
+        "FROM location l JOIN frame f ON f.id = l.frame_id WHERE l.id = ?",
+        (location_id,)).fetchone()
+    if loc is None:
+        raise ValueError(f"location:{location_id} nie istnieje")
+    _refuse_if_newer_inplace(con, location_id, inplace_gen)
+    if loc["sha1_data"] != sha1_data:
+        raise ValueError(f"location:{location_id}: tożsamość rekordu {sha1_data!r} != "
+                         f"tożsamość klatki {loc['sha1_data']!r} - to nie jest ta klatka")
+    frame_id = loc["frame_id"]
+    if not loc["present"] or header_hash is None or loc["header_hash"] != header_hash:
+        return "drift", frame_id
+    if expected_frame_id is not None and frame_id != expected_frame_id:
+        return "raced", frame_id
+    if not str(actor).startswith("user:"):
+        obecne = con.execute("SELECT count(*) FROM location WHERE frame_id = ? AND present = 1",
+                             (frame_id,)).fetchone()[0]
+        if obecne != 1 or hand_lead_location(con, frame_id) is not None:
+            return "raced", frame_id
+    before = con.execute(
+        "SELECT raw_json, date_obs, exptime, filter_raw, instrume, telescop, focallen, "
+        "focratio_raw, xpixsz, ypixsz, gain, offset_adu, ccd_temp, usblimit, xbinning, "
+        "ybinning, bayerpat, ra_deg, dec_deg, object_raw FROM header WHERE frame_id = ?",
+        (frame_id,)).fetchone()
+    changed = {k: {"before": None if before is None else before[k], "after": hot.get(k)}
+               for k in _HEADER_HOT
+               if (None if before is None else before[k]) != hot.get(k)}
+    # „Zeznanie już identyczne” = ten sam dowód co sukces zapisu karty (`testimony_matches`:
+    # `raw_json`, pola gorące i lustro `cards`) - rozjechane `cards` przy tym samym `raw_json` to
+    # zeznanie do przepisania, nie „bez zmian”.
+    if before is not None and testimony_matches(con, frame_id=frame_id, raw_json=raw_json,
+                                                hot_fields=hot, cards=cards):
         if not str(actor).startswith("user:"):
-            obecne = con.execute("SELECT count(*) FROM location WHERE frame_id = ? AND present = 1",
-                                 (frame_id,)).fetchone()[0]
-            if obecne != 1 or hand_lead_location(con, frame_id) is not None:
-                return "raced"
-        before = con.execute(
-            "SELECT raw_json, date_obs, exptime, filter_raw, instrume, telescop, focallen, "
-            "focratio_raw, xpixsz, ypixsz, gain, offset_adu, ccd_temp, usblimit, xbinning, "
-            "ybinning, bayerpat, ra_deg, dec_deg, object_raw FROM header WHERE frame_id = ?",
-            (frame_id,)).fetchone()
-        changed = {k: {"before": None if before is None else before[k], "after": hot.get(k)}
-                   for k in _HEADER_HOT
-                   if (None if before is None else before[k]) != hot.get(k)}
-        if before is not None and before["raw_json"] == raw_json and not changed:
-            if not str(actor).startswith("user:"):
-                return "unchanged"
-            # WYBÓR RĘKI KOPII, KTÓRA JUŻ MÓWI: treść bez zmian, ale werdykt człowieka jest faktem
-            # (AR-4) - bez zdarzenia zeznanie zostałoby „z automatu" i pierwszy przebieg etapu albo
-            # odświeżenie innej kopii przestawiłoby je bez pytania. Strażnik idempotencji: najnowszy
-            # zapis zeznania tej klatki to już ręka wskazująca TĘ lokację i TEN odcisk → zero
-            # zdarzenia. Literał czasowników jak w `gui.queries.hand_testimony_frame_ids`.
-            ostatni = con.execute(
-                "SELECT actor, verb, json_extract(payload, '$.location_id') AS lid, "
-                "       json_extract(payload, '$.header_hash') AS hh "
-                "FROM event WHERE target = ? "
-                "  AND verb IN ('header.recorded', 'header.refreshed', 'header.adopted') "
-                "ORDER BY id DESC LIMIT 1", (f"frame:{frame_id}",)).fetchone()
-            if (ostatni is not None and ostatni["verb"] == "header.adopted"
-                    and str(ostatni["actor"]).startswith("user:")
-                    and ostatni["lid"] == location_id and ostatni["hh"] == header_hash):
-                return "unchanged"
-            emit_event(con, actor=actor, verb="header.adopted", target=f"frame:{frame_id}",
-                       now=now, payload={"location_id": location_id, "path": loc["path"],
-                                         "header_hash": header_hash, "changed": {},
-                                         "confirmed": True})
-            return "confirmed"
-        _rewrite_testimony(
-            con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot,
-            camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.adopted",
-            payload={"location_id": location_id, "path": loc["path"], "header_hash": header_hash,
-                     "changed": changed})
-    return "adopted"
+            return "unchanged", frame_id
+        # WYBÓR RĘKI KOPII, KTÓRA JUŻ MÓWI: treść bez zmian, ale werdykt człowieka jest faktem
+        # (AR-4) - bez zdarzenia zeznanie zostałoby „z automatu" i pierwszy przebieg etapu albo
+        # odświeżenie innej kopii przestawiłoby je bez pytania. Strażnik idempotencji: najnowszy
+        # zapis zeznania tej klatki to już ręka wskazująca TĘ lokację i TEN odcisk → zero
+        # zdarzenia. Literał czasowników jak w `gui.queries.hand_testimony_frame_ids`.
+        ostatni = con.execute(
+            "SELECT actor, verb, json_extract(payload, '$.location_id') AS lid, "
+            "       json_extract(payload, '$.header_hash') AS hh "
+            "FROM event WHERE target = ? "
+            "  AND verb IN ('header.recorded', 'header.refreshed', 'header.adopted') "
+            "ORDER BY id DESC LIMIT 1", (f"frame:{frame_id}",)).fetchone()
+        if (ostatni is not None and ostatni["verb"] == "header.adopted"
+                and str(ostatni["actor"]).startswith("user:")
+                and ostatni["lid"] == location_id and ostatni["hh"] == header_hash):
+            return "unchanged", frame_id
+        emit_event(con, actor=actor, verb="header.adopted", target=f"frame:{frame_id}",
+                   now=now, payload={"location_id": location_id, "path": loc["path"],
+                                     "header_hash": header_hash, "changed": {},
+                                     "confirmed": True})
+        return "confirmed", frame_id
+    _rewrite_testimony(
+        con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot,
+        camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.adopted",
+        payload={"location_id": location_id, "path": loc["path"], "header_hash": header_hash,
+                 "changed": changed})
+    return "adopted", frame_id
 
 
 def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copies",
@@ -2949,7 +3044,7 @@ def _clear_object_tombstone_tx(con, *, frame_id, now, actor, commit_id=None, loc
     return True
 
 
-def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, now,
+def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, testimony_ok, now,
                                   actor="user:local"):
     """SKAN POTWIERDZAJĄCY commit drogą atomową, który skończył się 'failed' po backupie (AR-38 (2)):
     weryfikacja po podmianie albo re-sync padły, więc baza nie przyjęła bajtów, choć mogły trafić
@@ -2967,13 +3062,19 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, no
     `commit_id`, więc nie da się powiedzieć, które należą do commitu z pasującym `post_hash`
     (bramka az, kimi Z1) - zostaje droga cofnięcia i ponownego commitu. Wołane przez skan w zakresie
     `atomic` wjazdu rekordu (`_tx` dołącza). Zwraca `commit_id` potwierdzonego commitu albo
-    `None` bez zapisu."""
+    `None` bez zapisu.
+
+    ZEZNANIE (AR-82): `testimony_ok` = dowód skanu, że zeznanie klatki jest odczytanym nagłówkiem
+    (`testimony_matches`). Bez niego potwierdzony zapis jest WSTRZYMANY (`withhold_write` z wersją
+    decyzji ręki z backupu commitu) zamiast 'applied' z gaszeniem nagrobka. Wpisy już wstrzymane
+    (`withheld_id`) tej klingi nie dotyczą - rozlicza je `_settle_withheld_tx`."""
     with _tx(con):
         row = con.execute(
-            "SELECT hb.commit_id, c.run_id FROM pending_changes p "
+            "SELECT hb.commit_id, hb.id AS backup_id, c.run_id FROM pending_changes p "
             "JOIN commits c ON c.run_id = p.run_id "
             "JOIN header_backups hb ON hb.commit_id = c.id AND hb.location_id = p.location_id "
             "WHERE p.location_id = ? AND p.status = 'failed' AND p.inplace_op_id IS NULL "
+            "AND p.withheld_id IS NULL "
             "AND hb.post_hash = ? AND hb.unreplaced_at IS NULL "
             "AND NOT EXISTS (SELECT 1 FROM header_backups hb2 JOIN commits c2 ON c2.id = hb2.commit_id "
             "                WHERE c2.run_id = c.run_id AND hb2.location_id = p.location_id "
@@ -2984,21 +3085,36 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, no
             return None
         commit_id = row["commit_id"]
         wpisy = con.execute(
-            "SELECT keyword FROM pending_changes WHERE run_id = ? AND location_id = ? "
-            "AND status = 'failed' AND inplace_op_id IS NULL",
+            "SELECT id, keyword FROM pending_changes WHERE run_id = ? AND location_id = ? "
+            "AND status = 'failed' AND inplace_op_id IS NULL AND withheld_id IS NULL",
             (row["run_id"], location_id)).fetchall()
-        con.execute(
-            "UPDATE pending_changes SET status = 'applied', reason = ? "
-            "WHERE run_id = ? AND location_id = ? AND status = 'failed' AND inplace_op_id IS NULL",
-            (f"potwierdzone skanem: nagłówek na dysku = zapisany w commicie {commit_id}",
-             row["run_id"], location_id))
+        if not testimony_ok:
+            _withhold_write_tx(con, kind="commit", location_id=location_id, commit_id=commit_id,
+                               header_hash=header_hash,
+                               reason=withheld_reason(con, location_id=location_id,
+                                                      commit_id=commit_id),
+                               now=now, pending_ids=[w["id"] for w in wpisy],
+                               backup_id=row["backup_id"])
+            return commit_id
         # Backupu niepotwierdzonego (0030, AR-40) ta klinga NIE rusza: jego jedynym właścicielem jest
         # rekoncyliacja pisarza (`settle_pending_backup`), która pyta o niego PRZED wjazdem rekordu
         # w tej samej transakcji. Dwóch właścicieli zdejmowało stan nawzajem, a CAS rekoncyliacji
         # cofał wtedy cały re-sync jako „cudzą pracę” (bramka astra, A4).
+        # Nagrobek - wyłącznie przy wersji decyzji ręki sprzed zapisu (B12): okno między zapisem
+        # a skanem bywa dniami, a w nim człowiek mógł wykluczyć obiekt ponownie.
+        uwaga = None
         if any(w["keyword"] == "OBJECT" for w in wpisy):
-            _clear_object_tombstone_tx(con, frame_id=frame_id, now=now, actor=actor,
-                                       commit_id=commit_id, location_id=location_id)
+            reka = con.execute("SELECT hand_version FROM header_backups WHERE id = ?",
+                               (row["backup_id"],)).fetchone()["hand_version"]
+            uwaga = _clear_tombstone_same_hand_tx(con, frame_id=frame_id, hand_version=reka,
+                                                  commit_id=commit_id, location_id=location_id,
+                                                  now=now, actor=actor)
+        powod = f"potwierdzone skanem: nagłówek na dysku = zapisany w commicie {commit_id}"
+        con.execute(
+            "UPDATE pending_changes SET status = 'applied', reason = ? "
+            "WHERE run_id = ? AND location_id = ? AND status = 'failed' AND inplace_op_id IS NULL "
+            "AND withheld_id IS NULL",
+            (powod if uwaga is None else f"{powod}; {uwaga}", row["run_id"], location_id))
     return commit_id
 
 
@@ -3673,13 +3789,17 @@ def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text,
     `pending_rows` (0030) = wiersze stagingu, które TA próba zapisuje (`pending_changes` z polami
     `id, keyword, idx, op, new_value, new_type, new_comment`): rekoncyliacja potwierdza wyłącznie
     wpisy zgodne z nimi co do `id` i treści, nie wpisy dodane później pod tym samym `run_id`
-    (bramka astra, A5)."""
+    (bramka astra, A5).
+
+    `hand_version` (0037, AR-82) = wersja decyzji ręki o obiekcie klatki (`hand_version`) liczona
+    w TEJ transakcji - przed pierwszym bajtem zapisu pliku; wstrzymanie zapisu ją dziedziczy."""
     proba = None if pending_rows is None else json.dumps([_wpis_proby(r) for r in pending_rows])
     with con:
+        reka = _hand_version_of_location(con, location_id)
         cur = con.execute(
             "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash, "
-            "pending_since, pending_rows) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (commit_id, location_id, hdu_index, header_text, post_hash, pending_since, proba))
+            "pending_since, pending_rows, hand_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (commit_id, location_id, hdu_index, header_text, post_hash, pending_since, proba, reka))
     return cur.lastrowid
 
 
@@ -3731,19 +3851,19 @@ class BackupAlreadySettled(Exception):
     (pisarz albo rekoncyliacja) zdążył go rozstrzygnąć. Zero zapisu."""
 
 
-def settle_pending_backup(con, *, backup_id, replaced, now, actor="user:local"):
+def settle_pending_backup(con, *, backup_id, replaced, now):
     """REKONCYLIACJA BACKUPU NIEPOTWIERDZONEGO z dyskiem (0030, AR-40) - JEDNA transakcja, CAS na
     `pending_since IS NOT NULL` (inaczej `BackupAlreadySettled`, zero zapisu). Co jest na dysku,
     rozstrzyga wołający (`writeback`); tu zapisuje się werdykt:
 
       * `replaced=True` - na dysku leży nagłówek zapisany przez commit (`post_hash`): podmiana
-        zaszła. Backup potwierdzony, a wpisy stagingu TEJ PRÓBY (`pending_rows`: `id` i treść, A5), które commit
-        zostawił bez rozstrzygnięcia ('pending' po śmierci procesu, 'failed' po błędzie samej
-        podmiany) → 'applied' z powodem; wpis dodany później pod tym samym `run_id` (ponowny
-        staging) zostaje, jaki był - do pliku nie trafił. Gdy któryś z potwierdzonych wpisał
-        `OBJECT` - zgaszenie nagrobka ręki tą klingą i parą commit/plik co commit udany (cofnięcie
-        go odtworzy). Wołane w transakcji re-syncu pliku (`repo.atomic`) PRZED wjazdem rekordu,
-        więc baza opisuje plik po commicie razem z tym werdyktem albo wcale;
+        zaszła. Backup potwierdzony; zwrot = `id` wpisów stagingu TEJ PRÓBY (`pending_rows`: `id`
+        i treść, A5), które commit zostawił bez rozstrzygnięcia ('pending' po śmierci procesu,
+        'failed' po błędzie samej podmiany); wpis dodany później pod tym samym `run_id` (ponowny
+        staging) do zwrotu nie wchodzi - do pliku nie trafił. Wołane w transakcji re-syncu pliku
+        (`repo.atomic`) PRZED wjazdem rekordu (CAS odmawia, zanim cokolwiek się stanie); status
+        wpisów i nagrobek rozlicza PO wjeździe `settle_backup_attempt` - dopiero wtedy wiadomo, czy
+        zeznanie przyjęło zapis (AR-82);
       * `replaced=False` - na dysku nagłówek sprzed commitu: podmiany nie było → `unreplaced_at`
         (cofnięcie pomija), wpisy stagingu bez zmian (ponowny commit je zapisze);
       * `replaced=None` - nagłówek ani jeden, ani drugi (plik zmienił się poza programem):
@@ -3751,7 +3871,8 @@ def settle_pending_backup(con, *, backup_id, replaced, now, actor="user:local"):
         commit, który zapisze ten sam nagłówek wynikowy, przepuściłby kontrolę `post_hash`
         i cofnięcie tego commitu cofnęłoby tamten). Stąd też `unreplaced_at` - backup zostaje
         w tabeli (append-only), ze zwykłego cofnięcia wypada. Wpisy stagingu bez zmian.
-    Transient (backup, staging) bez eventu; nagrobek emituje swój. Zwraca liczbę oznaczonych wpisów."""
+    Transient (backup, staging) bez eventu. Zwraca listę `id` wpisów próby (pustą przy
+    `replaced` innym niż `True`)."""
     with _immediate(con):
         b = con.execute(
             "SELECT hb.commit_id, hb.location_id, hb.pending_rows, c.run_id FROM header_backups hb "
@@ -3762,26 +3883,364 @@ def settle_pending_backup(con, *, backup_id, replaced, now, actor="user:local"):
         if replaced is not True:
             con.execute("UPDATE header_backups SET pending_since = NULL, unreplaced_at = ? "
                         "WHERE id = ?", (now, backup_id))
-            return 0
+            return []
         con.execute("UPDATE header_backups SET pending_since = NULL WHERE id = ?", (backup_id,))
         proba = json.loads(b["pending_rows"] or "[]")
         kandydaci = con.execute(
             "SELECT id, keyword, idx, op, new_value, new_type, new_comment FROM pending_changes "
             "WHERE id IN (SELECT value FROM json_each(?)) AND location_id = ? "
-            "AND status IN ('pending', 'failed') AND inplace_op_id IS NULL",
+            "AND status IN ('pending', 'failed') AND inplace_op_id IS NULL "
+            "AND withheld_id IS NULL",      # B9: wpisy wstrzymane rozlicza wyłącznie `_settle_withheld_tx`
             (json.dumps([w[0] for w in proba]), b["location_id"])).fetchall()
-        wpisy = [r for r in kandydaci if _wpis_proby(r) in proba]      # id I treść tej próby
-        con.execute(
-            "UPDATE pending_changes SET status = 'applied', reason = ? "
-            "WHERE id IN (SELECT value FROM json_each(?))",
-            (f"potwierdzone z dysku: nagłówek na dysku = zapisany w commicie {b['commit_id']} "
-             f"(przerwany przed potwierdzeniem podmiany)", json.dumps([r["id"] for r in wpisy])))
+        ids = [r["id"] for r in kandydaci if _wpis_proby(r) in proba]      # id I treść tej próby
+        # Wpisy próby są NIEROZSTRZYGNIĘTE do `settle_backup_attempt` po wjeździe: 'failed' po
+        # błędzie samej podmiany wraca do 'pending', żeby skan potwierdzający w tej samej
+        # transakcji (`confirm_failed_commit_by_scan`) nie rozliczył ich drugi raz (A4).
+        con.execute("UPDATE pending_changes SET status = 'pending' "
+                    "WHERE id IN (SELECT value FROM json_each(?)) AND status = 'failed'",
+                    (json.dumps(ids),))
+    return ids
+
+
+def settle_backup_attempt(con, *, backup_id, pending_ids, testimony_ok, now, withheld_reason=None,
+                          actor="user:local"):
+    """DRUGA POŁOWA rekoncyliacji backupu potwierdzonego z dysku (AR-40 + AR-82) - wołana w tej
+    samej transakcji re-syncu co `settle_pending_backup(replaced=True)`, ale PO wjeździe rekordu,
+    gdy wiadomo, czy zeznanie klatki przyjęło zapisany nagłówek (`testimony_ok`, dowód
+    `writeback._resync`). `pending_ids` = wpisy tej próby (zwrot `settle_pending_backup`).
+
+      * `testimony_ok=True` - wpisy → 'applied' z powodem potwierdzenia, a gdy któryś wpisał
+        `OBJECT` - zgaszenie nagrobka ręki z parą commit/plik (cofnięcie go odtworzy), wyłącznie
+        przy wersji decyzji ręki z backupu (`_clear_tombstone_same_hand_tx`, B12);
+      * `False` - zapis wstrzymany (`withhold_write`, powód `withheld_reason`): wpisy 'failed'
+        z wiązaniem, nagrobek nietknięty. Dawniej oba wypadki dawały 'applied' i zgaszenie.
+    Zwraca liczbę rozliczonych wpisów."""
+    with _immediate(con):
+        b = con.execute("SELECT commit_id, location_id, post_hash, hand_version FROM header_backups "
+                        "WHERE id = ?", (backup_id,)).fetchone()
+        if b is None:
+            raise ValueError(f"backup {backup_id} nie istnieje")
+        ids = json.dumps([int(i) for i in pending_ids])
+        if not testimony_ok:
+            _withhold_write_tx(con, kind="commit", location_id=b["location_id"],
+                               commit_id=b["commit_id"], header_hash=b["post_hash"],
+                               pending_ids=pending_ids, backup_id=backup_id,
+                               reason=withheld_reason, now=now)
+            return len(pending_ids)
+        wpisy = con.execute("SELECT keyword FROM pending_changes WHERE id IN "
+                            "(SELECT value FROM json_each(?))", (ids,)).fetchall()
+        # Nagrobek - wyłącznie przy wersji decyzji ręki sprzed zapisu (B12): proces zginął po
+        # podmianie, a do rekoncyliacji człowiek mógł wykluczyć obiekt ponownie.
+        uwaga = None
         if any(w["keyword"] == "OBJECT" for w in wpisy):
             loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
                               (b["location_id"],)).fetchone()
-            _clear_object_tombstone_tx(con, frame_id=loc["frame_id"], now=now, actor=actor,
-                                       commit_id=b["commit_id"], location_id=b["location_id"])
+            uwaga = _clear_tombstone_same_hand_tx(
+                con, frame_id=loc["frame_id"], hand_version=b["hand_version"],
+                commit_id=b["commit_id"], location_id=b["location_id"], now=now, actor=actor)
+        powod = (f"potwierdzone z dysku: nagłówek na dysku = zapisany w commicie {b['commit_id']} "
+                 f"(przerwany przed potwierdzeniem podmiany)")
+        con.execute(
+            "UPDATE pending_changes SET status = 'applied', reason = ? "
+            "WHERE id IN (SELECT value FROM json_each(?))",
+            (powod if uwaga is None else f"{powod}; {uwaga}", ids))
     return len(wpisy)
+
+
+# ============================================================ ZAPIS Z ZEZNANIEM WSTRZYMANYM (0037, AR-82)
+# Plik zapisany, a zeznanie klatki (`header`/`cards`) nie przyjęło jego nagłówka, bo głosem klatki
+# mówi inna obecna kopia (AR-4). Wiersz `withheld_write` czeka na dokończenie: dowód, że zeznanie
+# opisuje plik tej kopii (przejęcie gestem albo Dostawą, pełny odczyt przy kopii wiodącej, ponowny
+# re-sync) - wtedy wpisy stagingu 'applied', nagrobek ręki (tylko przy tej samej wersji decyzji
+# ręki, co przed zapisem) i pozycja gestu. Pełny odczyt, który dowodzi nowszego stanu lokacji (inny
+# nagłówek, inna klatka), zamyka go jako `superseded`; cofnięcie commitu - jako `undone`.
+
+
+def _hand_version(con, frame_id):
+    """WERSJA DECYZJI RĘKI o obiekcie klatki: `id` najnowszego zdarzenia, które ustanowiło nagrobek
+    (`object.cleared`, `object.tombstone_restored`), gdy klatka ma `user_cleared`; `0`, gdy klatka
+    nagrobka nie ma. Nowsza decyzja człowieka = inna wersja - późne dokończenie zapisu jej nie zgasi
+    (Z5). `None` zostaje dla stanu bez wersji: wiersz sprzed 0037 albo nagrobek bez zdarzenia."""
+    fr = con.execute("SELECT object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if fr is None or fr["object_source"] != "user_cleared":
+        return 0
+    return con.execute(
+        "SELECT MAX(id) FROM event WHERE target = ? "
+        "AND verb IN ('object.cleared', 'object.tombstone_restored')",
+        (f"frame:{frame_id}",)).fetchone()[0]
+
+
+def _hand_version_of_location(con, location_id):
+    loc = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
+    return None if loc is None else _hand_version(con, loc["frame_id"])
+
+
+_POWOD_NOWSZEJ_REKI = "nowsza decyzja ręki o obiekcie klatki zostaje"
+_POWOD_REKI_NIEZNANEJ = ("wersja decyzji ręki sprzed aktualizacji nieznana - nagrobek zostaje do "
+                         "oka")
+
+
+def _clear_tombstone_same_hand_tx(con, *, frame_id, hand_version, commit_id, location_id, now,
+                                  actor):
+    """ZGASZENIE NAGROBKA PRZY PÓŹNYM DOKOŃCZENIU ZAPISU `OBJECT` (Z5, B10, B12) - jeden właściciel
+    reguły dla trzech dróg: dokończenie wstrzymania (`_settle_withheld_tx`), skan potwierdzający
+    commit 'failed' (`confirm_failed_commit_by_scan`) i rekoncyliacja backupu
+    (`settle_backup_attempt`). Gasi wyłącznie, gdy wersja decyzji ręki utrwalona przed pierwszym
+    bajtem zapisu (`header_backups.hand_version`) jest wersją bieżącą - między zapisem a późnym
+    dokończeniem człowiek mógł wykluczyć obiekt ponownie, a automat nie odwołuje nowszej decyzji.
+    Zwraca `None` (zgaszone albo klatka bez nagrobka) albo dopisek powodu, czemu nagrobek zostaje:
+    nowsza decyzja ręki, albo wersja nieznana (backup sprzed 0037 - prawdy nie da się ustalić)."""
+    zrodlo = con.execute("SELECT object_source FROM frame WHERE id = ?",
+                         (frame_id,)).fetchone()["object_source"]
+    if zrodlo != "user_cleared":
+        return None
+    if hand_version is None:
+        return _POWOD_REKI_NIEZNANEJ
+    if _hand_version(con, frame_id) != hand_version:
+        return _POWOD_NOWSZEJ_REKI
+    _clear_object_tombstone_tx(con, frame_id=frame_id, now=now, actor=actor, commit_id=commit_id,
+                               location_id=location_id)
+    return None
+
+
+def clear_tombstone_after_write(con, *, frame_id, backup_id, commit_id, location_id, now,
+                                actor="user:local"):
+    """Zgaszenie nagrobka po zapisie karty `OBJECT` drogą atomową (`writeback._zapisz_lokacje`,
+    w transakcji re-syncu) - wyłącznie przy wersji decyzji ręki z backupu tej próby, utrwalonej
+    przed pierwszym bajtem (Z8, `_clear_tombstone_same_hand_tx`). Zwraca `None` albo dopisek
+    powodu, czemu nagrobek zostaje."""
+    with _immediate(con):
+        reka = con.execute("SELECT hand_version FROM header_backups WHERE id = ?",
+                           (backup_id,)).fetchone()["hand_version"]
+        return _clear_tombstone_same_hand_tx(con, frame_id=frame_id, hand_version=reka,
+                                             commit_id=commit_id, location_id=location_id,
+                                             now=now, actor=actor)
+
+
+def withhold_write(con, *, kind, location_id, commit_id, header_hash, reason, now, pending_ids=(),
+                   inplace_op_id=None, backup_id=None, actor="user:local"):
+    """ZAPIS WSTRZYMANY - jedna transakcja (albo transakcja wołającego w `atomic`): wiersz
+    `withheld_write` i wpisy stagingu `pending_ids` → 'failed' z `reason` i wiązaniem `withheld_id`.
+    Zwraca `id` wstrzymania. Kontrakt pól w `_withhold_write_tx`."""
+    with _immediate(con):
+        return _withhold_write_tx(con, kind=kind, location_id=location_id, commit_id=commit_id,
+                                  header_hash=header_hash, reason=reason, now=now,
+                                  pending_ids=pending_ids, inplace_op_id=inplace_op_id,
+                                  backup_id=backup_id, actor=actor)
+
+
+def _withhold_write_tx(con, *, kind, location_id, commit_id, header_hash, reason, now,
+                       pending_ids=(), inplace_op_id=None, backup_id=None, actor="user:local"):
+    """Rdzeń `withhold_write` BEZ własnej transakcji.
+
+      * `kind='commit'` wymaga `backup_id` (EXPECT): wersja decyzji ręki przychodzi z backupu,
+        utrwalona przed pierwszym bajtem zapisu (Z8) - liczona teraz widziałaby decyzję człowieka
+        z okna między zapisem a re-synciem jako starą i dokończenie by ją zgasiło;
+        `object_written` = któryś z wpisów wpisał `OBJECT`;
+      * `kind='undo'` - bez wpisów, bez nagrobka (cofnięcie odtwarza go samo).
+    `item_id` = pozycja gestu „Zmień obiekt”/„Uzgodnij” tej lokacji w przebiegu commitu (jedno
+    źródło: `run_id` commitu), żeby dokończenie domknęło też ją. Przy `kind='commit'` pozycja
+    dostaje 'failed' z tym samym powodem W TEJ transakcji (B4): status pozycji i wstrzymanie
+    powstają razem, więc dokończenie z innego połączenia nie trafi na pozycję jeszcze 'pending',
+    a sterownik gestu nie nadpisze potem pozycji już domkniętej. `actor` = aktor zapisu: pod nim
+    skan dociąga później zeznanie przy dokończeniu (B8), nie pod własnym."""
+    if kind not in ("commit", "undo"):
+        raise ValueError(f"rodzaj wstrzymania {kind!r} spoza ('commit', 'undo')")
+    loc = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
+    if loc is None:
+        raise ValueError(f"location:{location_id} nie istnieje")
+    ids = json.dumps([int(i) for i in pending_ids])
+    reka = None
+    zapisal_obiekt = 0
+    if kind == "commit":
+        if backup_id is None:
+            raise ValueError("wstrzymanie commitu bez backupu - brak wersji decyzji ręki sprzed zapisu")
+        reka = con.execute("SELECT hand_version FROM header_backups WHERE id = ?",
+                           (backup_id,)).fetchone()["hand_version"]
+        zapisal_obiekt = int(con.execute(
+            "SELECT EXISTS (SELECT 1 FROM pending_changes WHERE keyword = 'OBJECT' "
+            "AND id IN (SELECT value FROM json_each(?)))", (ids,)).fetchone()[0])
+    elif pending_ids:
+        raise ValueError("wstrzymanie cofnięcia nie niesie wpisów stagingu")
+    item = con.execute(
+        "SELECT p.id FROM pending_object_change p JOIN commits c ON c.run_id = p.run_id "
+        "WHERE c.id = ? AND p.location_id = ?", (commit_id, location_id)).fetchone()
+    wid = con.execute(
+        "INSERT INTO withheld_write(kind, location_id, frame_id, commit_id, inplace_op_id, item_id, "
+        "header_hash, object_written, hand_version, reason, actor, opened_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (kind, location_id, loc["frame_id"], commit_id, inplace_op_id,
+         None if item is None else item["id"], header_hash, zapisal_obiekt, reka, reason, actor,
+         now)).lastrowid
+    con.execute(
+        "UPDATE pending_changes SET status = 'failed', reason = ?, withheld_id = ? "
+        "WHERE id IN (SELECT value FROM json_each(?))", (reason, wid, ids))
+    if item is not None and kind == "commit":
+        con.execute("UPDATE pending_object_change SET status = 'failed', reason = ? "
+                    "WHERE id = ? AND status IN ('pending', 'failed')", (reason, item["id"]))
+    return wid
+
+
+def withheld_reason(con, *, location_id, commit_id, undo=False):
+    """ZDANIE DLA CZŁOWIEKA o zapisie wstrzymanym (jedno źródło dla pisarza i skanu): co leży na
+    dysku, czyj głos niesie zeznanie klatki i jak zapis się dokończy. `undo=True` - cofnięcie."""
+    loc = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
+    frame_id = loc["frame_id"]
+    n = con.execute("SELECT count(*) FROM location WHERE frame_id = ? AND present = 1",
+                    (frame_id,)).fetchone()[0]
+    wiodaca = lead_location(con, frame_id)
+    glos = "żadna kopia jednoznacznie"
+    if wiodaca is not None:
+        sciezka = con.execute("SELECT path FROM location WHERE id = ?", (wiodaca,)).fetchone()[0]
+        glos = f"kopia {sciezka}"
+    if n == 1:
+        kopie = "1 obecną kopię"
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        kopie = f"{n} obecne kopie"
+    else:
+        kopie = f"{n} obecnych kopii"
+    dokonczenie = ("dokończy się samo po wskazaniu tej kopii („Ta kopia prowadzi” w Zbiorach) albo "
+                   "gdy zostanie jedyną obecną kopią klatki")
+    if undo:
+        return (f"nagłówek PRZYWRÓCONY (commit {commit_id}), ale zeznanie klatki NIE wróciło - "
+                f"klatka ma {kopie}, a głosem klatki mówi {glos}; {dokonczenie}")
+    return (f"plik ZAPISANY (backup do cofnięcia w commicie {commit_id}), ale zeznanie klatki NIE "
+            f"przyjęło zapisu - klatka ma {kopie}, a głosem klatki mówi {glos}; zapis "
+            f"{dokonczenie}, inaczej „Cofnij”")
+
+
+def open_withheld(con, location_id):
+    """Otwarte wstrzymania lokacji (indeks częściowy - zwykły przebieg płaci jedno puste zapytanie)."""
+    return con.execute(
+        "SELECT id, kind, location_id, frame_id, commit_id, item_id, header_hash, object_written, "
+        "hand_version, actor FROM withheld_write WHERE location_id = ? AND settled_at IS NULL "
+        "ORDER BY id",
+        (location_id,)).fetchall()
+
+
+def location_by_path(con, *, volume, path):
+    """`(id, frame_id)` lokacji `(volume, path)`; brak → `ValueError` (EXPECT: wołający właśnie
+    wciągnął rekord tej ścieżki)."""
+    row = con.execute("SELECT id, frame_id FROM location WHERE volume = ? AND path = ?",
+                      (volume, path)).fetchone()
+    if row is None:
+        raise ValueError(f"lokacja {volume}:{path} nie istnieje")
+    return row
+
+
+def has_failed_atomic_rows(con, location_id):
+    """Czy lokacja ma wpisy stagingu drogi atomowej 'failed' bez wstrzymania - kandydatów
+    `confirm_failed_commit_by_scan` (skan liczy dowód zeznania tylko przy trafieniu)."""
+    return con.execute(
+        "SELECT EXISTS (SELECT 1 FROM pending_changes WHERE location_id = ? AND status = 'failed' "
+        "AND inplace_op_id IS NULL AND withheld_id IS NULL)", (location_id,)).fetchone()[0] == 1
+
+
+def open_undo_withheld_for_item(con, item_id):
+    """Otwarte wstrzymanie COFNIĘCIA związane z pozycją gestu (`id`, `reason`) albo `None` -
+    sterownik cofnięcia gestu czyta je z bazy, więc przeżywa wznowienie po fazie karty."""
+    return con.execute(
+        "SELECT id, reason FROM withheld_write WHERE item_id = ? AND kind = 'undo' "
+        "AND settled_at IS NULL ORDER BY id DESC LIMIT 1", (item_id,)).fetchone()
+
+
+def close_withheld_undone(con, *, commit_id, location_id, now):
+    """Cofnięcie commitu zamyka jego OTWARTE wstrzymanie na tej lokacji jako `undone` (zeznanie
+    nigdy nie przyjęło zapisu, więc nie ma czego z niego cofać) - w transakcji re-syncu cofnięcia,
+    PRZED wjazdem rekordu (inaczej rozliczenie skanu nazwałoby je `superseded`). Wpisy stagingu
+    zostają 'failed' z dopiskiem. Zwraca `True`, gdy coś zamknięto."""
+    with _immediate(con):
+        rows = con.execute(
+            "SELECT id FROM withheld_write WHERE commit_id = ? AND location_id = ? "
+            "AND kind = 'commit' AND settled_at IS NULL", (commit_id, location_id)).fetchall()
+        for r in rows:
+            _zamknij_wstrzymanie(con, r["id"], "undone", now,
+                                 "commit cofnięty, zanim zeznanie klatki przyjęło zapis")
+    return bool(rows)
+
+
+def _zamknij_wstrzymanie(con, withheld_id, jak, now, dopisek):
+    con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = ? WHERE id = ?",
+                (now, jak, withheld_id))
+    con.execute(
+        "UPDATE pending_changes SET reason = COALESCE(reason || '; ', '') || ? "
+        "WHERE withheld_id = ?", (dopisek, withheld_id))
+
+
+def _settle_withheld_tx(con, *, location_id, frame_id, sha1_data, header_hash, testimony_ok, now,
+                        actor):
+    """ROZLICZENIE otwartych wstrzymań lokacji wobec ŚWIEŻEGO ODCZYTU jej pliku - w transakcji
+    wołającego, po zapisie zeznania. Wołający: re-sync zapisu (`writeback._resync` przez wjazd
+    rekordu), pełny odczyt skanu przy otwartym wstrzymaniu, przejęcie zeznania (`adopt_testimony`).
+    `frame_id`/`sha1_data` = klatka i tożsamość odczytanego rekordu, `header_hash` = jego odcisk,
+    `testimony_ok` = dowód, że zeznanie klatki jest TYM odczytem (`testimony_matches`).
+
+    Per wstrzymanie, pierwsza odpowiedź wygrywa:
+      1. CAS TOŻSAMOŚCI (Z9): wstrzymanie, lokacja i wołający mówią o tej samej klatce, a klatka
+         ma tożsamość rekordu - inaczej lokację przepięto (zmiana danych obrazu) → `superseded`;
+      2. odcisk odczytu ≠ odcisk zapisu → nowszy stan pliku (kolejny zapis albo zmiana poza
+         programem, widziana pełnym odczytem) → `superseded` (Z10); wpisy zostają 'failed';
+      3. dowód zeznania → `completed`: wpisy 'applied', pozycja gestu 'failed' → 'applied',
+         nagrobek ręki gaśnie WYŁĄCZNIE, gdy wersja decyzji ręki jest ta sama, co przed zapisem
+         (Z5/Z8, `_clear_tombstone_same_hand_tx`) - nowsza albo nieznana decyzja człowieka
+         zostaje, a powód to mówi;
+      4. brak dowodu → zostaje otwarte.
+    Zwraca listę `(withheld_id, settled_how)` rozliczonych."""
+    loc = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
+    wynik = []
+    for w in open_withheld(con, location_id):
+        tozsamosc = con.execute("SELECT sha1_data FROM frame WHERE id = ?",
+                                (w["frame_id"],)).fetchone()
+        if (loc is None or w["frame_id"] != frame_id or loc["frame_id"] != w["frame_id"]
+                or tozsamosc is None or tozsamosc["sha1_data"] != sha1_data):
+            _zamknij_wstrzymanie(con, w["id"], "superseded", now,
+                                 "zapis zastąpiony: lokacja należy już do innej klatki")
+            _zastap_pozycje(con, w)
+            wynik.append((w["id"], "superseded"))
+        elif header_hash != w["header_hash"]:
+            _zamknij_wstrzymanie(con, w["id"], "superseded", now,
+                                 "zapis zastąpiony nowszym stanem pliku (inny nagłówek na dysku)")
+            _zastap_pozycje(con, w)
+            wynik.append((w["id"], "superseded"))
+        elif testimony_ok:
+            powod = "dokończone: zeznanie klatki przyjęło zapisany nagłówek"
+            if w["object_written"]:
+                uwaga = _clear_tombstone_same_hand_tx(
+                    con, frame_id=frame_id, hand_version=w["hand_version"],
+                    commit_id=w["commit_id"], location_id=location_id, now=now, actor=actor)
+                if uwaga is not None:
+                    powod += f"; {uwaga}"
+            con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = 'completed' "
+                        "WHERE id = ?", (now, w["id"]))
+            con.execute("UPDATE pending_changes SET status = 'applied', reason = ? "
+                        "WHERE withheld_id = ? AND status = 'failed'", (powod, w["id"]))
+            if w["item_id"] is not None and w["kind"] == "commit":
+                con.execute("UPDATE pending_object_change SET status = 'applied', reason = ? "
+                            "WHERE id = ? AND status = 'failed'", (powod, w["item_id"]))
+            wynik.append((w["id"], "completed"))
+    return wynik
+
+
+def _zastap_pozycje(con, w):
+    """Pozycja gestu, której karta została zastąpiona nowszym stanem pliku: kroki gestu (baza,
+    przeniesienie, zapis karty) zaszły, a dokończenie zeznania już nie zajdzie - pozycja przestaje
+    być „stanem częściowym” w Porządkach, a powód mówi prawdę o karcie. Cofnięcie przebiegu działa
+    dalej jak dla pozycji zapisanej."""
+    if w["item_id"] is not None and w["kind"] == "commit":
+        con.execute(
+            "UPDATE pending_object_change SET status = 'applied', reason = ? "
+            "WHERE id = ? AND status = 'failed'",
+            ("karta zapisana, potem zastąpiona nowszym stanem pliku - zeznanie z niej nie przeszło",
+             w["item_id"]))
+
+
+def settle_withheld(con, *, location_id, frame_id, sha1_data, header_hash, testimony_ok, now,
+                    actor="user:local"):
+    """`_settle_withheld_tx` we własnej transakcji (albo w `atomic` wołającego)."""
+    with _immediate(con):
+        return _settle_withheld_tx(con, location_id=location_id, frame_id=frame_id,
+                                   sha1_data=sha1_data, header_hash=header_hash,
+                                   testimony_ok=testimony_ok, now=now, actor=actor)
 
 
 # ============================================================ DZIENNIK ZAPISU W MIEJSCU (0022, O5/Q8)
@@ -3938,9 +4397,10 @@ def begin_inplace_commit(con, *, run_id, commit_id, location_id, hdu_index, head
                 "INSERT INTO commits(run_id, applied_at, summary) VALUES (?, ?, ?)",
                 (run_id, now, f"run {run_id}")).lastrowid
         con.execute(
-            "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (commit_id, location_id, hdu_index, header_text, spec.post_hash))
+            "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash, "
+            "hand_version) VALUES (?, ?, ?, ?, ?, ?)",
+            (commit_id, location_id, hdu_index, header_text, spec.post_hash,
+             _hand_version_of_location(con, location_id)))      # 0037: przed pierwszym bajtem
         op_id = con.execute(_INSERT_INPLACE_OP,
                             _inplace_op_values(location_id, commit_id, "commit", spec, now)).lastrowid
         if ids:
@@ -4003,19 +4463,21 @@ def set_inplace_op_phase(con, *, op_id, phase, now, reason=None, expect_phase=No
 
 def _op_in_phase(con, op_id, phase):
     """Wiersz operacji w fazie `phase` (pod transakcją wołającego) albo `ValueError`."""
-    op = con.execute("SELECT id, kind, location_id, commit_id, phase FROM inplace_op WHERE id = ?",
-                     (op_id,)).fetchone()
+    op = con.execute("SELECT id, kind, location_id, commit_id, phase, post_hash FROM inplace_op "
+                     "WHERE id = ?", (op_id,)).fetchone()
     if op is None or op["phase"] != phase:
         raise ValueError(f"operacja {op_id} nie jest w fazie {phase!r} "
                          f"({None if op is None else op['phase']}) - nie ma czego zamykać")
     return op
 
 
-def finish_inplace_op(con, *, op_id, now, actor="user:local"):
+def finish_inplace_op(con, *, op_id, now, testimony_ok, withheld_reason=None,
+                      closed_commit_withheld=False, actor="user:local"):
     """DOKOŃCZENIE operacji zapisu w miejscu - JEDNA transakcja (astra, 2026-09-27): faza `written`
     → `synced` (CAS), wpisy stagingu związane z operacją (`pending_changes.inplace_op_id`, 0023) →
-    'applied' bez powodu, a gdy któryś z nich wpisał `OBJECT` - zgaszenie nagrobka ręki klatki tej
-    lokacji tą samą klingą co commit drogą atomową (`_clear_object_tombstone_tx`).
+    'applied', a gdy któryś z nich wpisał `OBJECT` - zgaszenie nagrobka ręki klatki tej lokacji tą
+    samą klingą co commit drogą atomową, wyłącznie przy wersji decyzji ręki z backupu operacji
+    (`_clear_tombstone_same_hand_tx`, Z8); inaczej nagrobek zostaje, a powód wpisów mówi czemu.
 
     Wołane przez pisarza (`writeback._dokoncz`) pod blokadą pliku, PO udanej kontroli danych
     i re-syncu. Dawniej faza, statusy i nagrobek szły trzema osobnymi transakcjami, a dokończenie
@@ -4024,29 +4486,65 @@ def finish_inplace_op(con, *, op_id, now, actor="user:local"):
     wszystkich wierszy przebiegu. Operacja nie w fazie `written` → `ValueError`, zero zapisu.
     Operacja `undo` w tej samej transakcji ODTWARZA nagrobek zgaszony przez cofany commit
     (`_restore_object_tombstone_tx`, AR-38).
-    Transient (faza, staging) bez eventu; nagrobek emituje swój. Zwraca liczbę oznaczonych wpisów."""
+    Transient (faza, staging) bez eventu; nagrobek emituje swój. Zwraca `id` założonego
+    wstrzymania (AR-82) albo `None`.
+
+    `testimony_ok` (AR-82, wymagany) - dowód re-syncu, że zeznanie klatki przyjęło nagłówek pliku
+    (`writeback._resync`). `False`: faza i tak `synced` (plik zgodny, izolacja schodzi), ale zapis
+    operacji `commit` jest WSTRZYMANY (`withhold_write`, powód `withheld_reason`, wersja decyzji ręki
+    z backupu tej operacji) - wpisy 'failed' z wiązaniem, nagrobek nietknięty; operacja `undo`
+    odtwarza nagrobek jak zawsze i zakłada wstrzymanie cofnięcia (nagłówek wrócił, zeznanie nie) -
+    chyba że `closed_commit_withheld`: TO cofnięcie zamknęło jako `undone` OTWARTE wstrzymanie
+    cofanego commitu (zeznanie nigdy go nie przyjęło, więc nie ma czego z niego cofać). Samo
+    istnienie historii wstrzymań (`completed`, `superseded`) tego nie znaczy (B2).
+
+    Wołane w transakcji re-syncu dokończenia (`writeback._dokoncz`, `w_transakcji`, B1): dowód
+    zeznania, faza, staging i wstrzymanie wchodzą razem - inne połączenie nie przestawi zeznania
+    między dowodem a rozliczeniem."""
     with _immediate(con):
         op = _op_in_phase(con, op_id, "written")
         con.execute("UPDATE inplace_op SET phase = 'synced', reason = NULL, closed_at = ? "
                     "WHERE id = ? AND phase = 'written'", (now, op_id))
-        rows = con.execute("SELECT keyword FROM pending_changes WHERE inplace_op_id = ?",
+        rows = con.execute("SELECT id, keyword FROM pending_changes WHERE inplace_op_id = ?",
                            (op_id,)).fetchall()
-        con.execute("UPDATE pending_changes SET status = 'applied', reason = NULL "
-                    "WHERE inplace_op_id = ?", (op_id,))
+        if not testimony_ok and op["kind"] == "commit":
+            backup = con.execute(
+                "SELECT id FROM header_backups WHERE commit_id = ? AND location_id = ? "
+                "ORDER BY id DESC LIMIT 1", (op["commit_id"], op["location_id"])).fetchone()
+            return _withhold_write_tx(con, kind="commit", location_id=op["location_id"],
+                                      commit_id=op["commit_id"], header_hash=op["post_hash"],
+                                      reason=withheld_reason, now=now,
+                                      pending_ids=[r["id"] for r in rows], inplace_op_id=op_id,
+                                      backup_id=backup["id"], actor=actor)
+        wstrzymanie = None
+        if not testimony_ok and op["commit_id"] is not None and not closed_commit_withheld:
+            wstrzymanie = _withhold_write_tx(
+                con, kind="undo", location_id=op["location_id"], commit_id=op["commit_id"],
+                header_hash=op["post_hash"], reason=withheld_reason, now=now,
+                inplace_op_id=op_id, actor=actor)
+        uwaga = None
         if op["kind"] == "commit" and any(r["keyword"] == "OBJECT" for r in rows):
+            # Z8: nagrobek gaśnie wyłącznie przy wersji decyzji ręki z backupu tej operacji
+            # (utrwalonej przed pierwszym bajtem) - decyzja człowieka z okna zapis → dokończenie
+            # zostaje, a powód wpisów to mówi.
             loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
                               (op["location_id"],)).fetchone()
-            _clear_object_tombstone_tx(con, frame_id=loc["frame_id"], now=now, actor=actor,
-                                       commit_id=op["commit_id"],
-                                       location_id=op["location_id"])
-        elif op["kind"] == "undo" and op["commit_id"] is not None:
+            reka = con.execute(
+                "SELECT hand_version FROM header_backups WHERE commit_id = ? AND location_id = ? "
+                "ORDER BY id DESC LIMIT 1", (op["commit_id"], op["location_id"])).fetchone()
+            uwaga = _clear_tombstone_same_hand_tx(
+                con, frame_id=loc["frame_id"], hand_version=None if reka is None else reka[0],
+                commit_id=op["commit_id"], location_id=op["location_id"], now=now, actor=actor)
+        con.execute("UPDATE pending_changes SET status = 'applied', reason = ? "
+                    "WHERE inplace_op_id = ?", (uwaga, op_id))
+        if op["kind"] == "undo" and op["commit_id"] is not None:
             # Cofnięcie w miejscu odtwarza nagrobek zgaszony przez cofany commit (AR-38) - w tej
             # samej transakcji co faza `synced`, więc nie wyprzedzi ani nie zgubi dokończenia.
             loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
                               (op["location_id"],)).fetchone()
             _restore_object_tombstone_tx(con, frame_id=loc["frame_id"], commit_id=op["commit_id"],
                                          location_id=op["location_id"], now=now, actor=actor)
-    return len(rows)
+    return wstrzymanie
 
 
 def revert_inplace_op(con, *, op_id, now, reason, expect_phase="written", actor="user:local"):

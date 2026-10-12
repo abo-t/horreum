@@ -126,6 +126,10 @@ class WriteResult:
 # przepisany; `reason` zaczyna się wtedy od `PREFIKS_DROGI_ATOMOWEJ`.
 CODE_CHANGED_SINCE_SCAN = "changed_since_scan"
 CODE_INPLACE_FALLBACK = "inplace_fallback"
+# `CODE_ZEZNANIE_WSTRZYMANE` (AR-82): plik zapisany (albo przywrócony cofnięciem), a zeznanie klatki
+# NIE przyjęło jego nagłówka - głosem klatki mówi inna obecna kopia. Status zapisu 'withheld',
+# cofnięcia 'restored' z tym kodem; dokończenie po przejęciu zeznania tej kopii (`repo.withheld_write`).
+CODE_ZEZNANIE_WSTRZYMANE = "testimony_withheld"
 PREFIKS_DROGI_ATOMOWEJ = "droga dotychczasowa"
 
 
@@ -2109,7 +2113,7 @@ def pending_for_run(con, run_id):
     """Wpisy stagingu przebiegu (do commitu i do szuflady GUI). Kolejność `id` = kolejność stagingu."""
     return con.execute(
         "SELECT id, location_id, keyword, idx, op, old_value, new_value, new_type, new_comment, "
-        "       expected_header_hash, status, reason "
+        "       expected_header_hash, status, reason, withheld_id "
         "FROM pending_changes WHERE run_id = ? ORDER BY id",
         (run_id,),
     ).fetchall()
@@ -2144,7 +2148,10 @@ def _location(con, location_id):
 class FileResult:
     location_id: int
     path: str
-    status: str  # 'applied' | 'blocked' | 'failed' | 'skipped' | 'restored' | 'released' | 'reconciled'
+    # 'applied' | 'withheld' | 'blocked' | 'failed' | 'skipped' | 'restored' | 'released' | 'reconciled'
+    # 'withheld' (AR-82) = plik ZAPISANY, a zeznanie klatki nie przyjęło jego nagłówka (inna kopia
+    # mówi głosem klatki) - `code` = `CODE_ZEZNANIE_WSTRZYMANE`, dokończenie w `repo`.
+    status: str
     reason: str | None = None
     code: str | None = None      # `CODE_*` powodu (patrz `WriteResult.code`)
 
@@ -2165,6 +2172,9 @@ class CommitResult:
     in_place: list[FileResult] = dataclasses.field(default_factory=list)
     # Rename: wynik `reconcile_renames` na wejściu (przerwane próby wszystkich przebiegów, AR-29).
     reconciled: list[FileResult] = dataclasses.field(default_factory=list)
+    # Pliki ZAPISANE z zeznaniem wstrzymanym (AR-82, status 'withheld') - osobny kubeł, nie podzbiór
+    # `failed`: zapis się dokonał, a „Cofnij” go cofa (`commit_id` jest).
+    withheld: list[FileResult] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2178,6 +2188,9 @@ class UndoResult:
     # Podzbiór `restored` cofnięty SEMANTYCZNIE (AR-19): nagłówek wrócił, ale bajty pliku są inne niż
     # przed commitem - powód w `FileResult.reason` mówi, czym (bliźniak `CommitResult.in_place`).
     semantic: list[FileResult] = dataclasses.field(default_factory=list)
+    # Podzbiór `restored`, którego nagłówek wrócił, a zeznanie klatki NIE (AR-82) - głosem klatki
+    # mówi inna kopia; `FileResult.code` = `CODE_ZEZNANIE_WSTRZYMANE`.
+    withheld: list[FileResult] = dataclasses.field(default_factory=list)
 
 
 def _group_by_location(rows) -> list[tuple[int, list]]:
@@ -2194,7 +2207,7 @@ def _group_by_location(rows) -> list[tuple[int, list]]:
 
 
 def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None, kontrola=None,
-            w_transakcji=None, przed_wciagnieciem=None):
+            w_transakcji=None, przed_wciagnieciem=None) -> "_Resync":
     """RE-SYNC bazy po mutacji pliku - REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
     (read-only, świeże hasze/nagłówek/karty) → `ingest_record`: `refresh_location` odświeża fakty
     kopii + zeznanie + `cards` + `frame.camera_id/kind` z eventami (actor="user:local"). Wymaga
@@ -2204,7 +2217,7 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     `expect_sha1_data` (zapis w miejscu): tożsamość danych, którą plik MA mieć po zapisie. Re-sync
     i tak czyta cały plik, więc to pełny dowód nietkniętych danych za darmo. Rozjazd → zwraca powód
     i NIE wciąga rekordu: `ingest_record` uznałby go za podmianę treści i rozdwoił klatkę
-    (nowy frame + osierocony stary z zeznaniem i obiektem). Zwraca `None`, gdy wciągnął.
+    (nowy frame + osierocony stary z zeznaniem i obiektem).
 
     `kontrola` (zapis w miejscu, `_KontrolaDanych`, astra 2026-09-27): `sha1_data` obejmuje tylko
     wybrane HDU / pierwszy obraz, więc przed wciągnięciem rekordu dwa kolejne warunki - nagłówek
@@ -2216,7 +2229,7 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     Z kontrolą plik jest czytany w całości RAZ (`_skan_kontrolny`): sha1 pliku, danych i pliku
     z podstawionym starym regionem liczy jeden przebieg (AR-24).
 
-    `w_transakcji` (bez argumentów): zapis bazy, który ma wejść RAZEM z wciągnięciem rekordu -
+    `w_transakcji(zeznanie)`: zapis bazy, który ma wejść RAZEM z wciągnięciem rekordu -
     jedna transakcja `repo.atomic`, odczyt pliku przed nią (blokada zapisu bazy nie trwa przez
     pełny odczyt). Cofnięcie odtwarza tak nagrobek ręki (AR-38): baza opisuje plik sprzed commitu
     z nagrobkiem albo żadne z dwojga.
@@ -2224,23 +2237,51 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     `przed_wciagnieciem` (bez argumentów): zapis w TEJ SAMEJ transakcji, ale PRZED wjazdem rekordu -
     rekoncyliacja backupu niepotwierdzonego (AR-40) bierze tak stan na własność, zanim klingi skanu
     (`confirm_failed_commit_by_scan`) zobaczą plik; jego odmowa (CAS) cofa transakcję, w której
-    jeszcze nic się nie stało."""
+    jeszcze nic się nie stało.
+
+    DOWÓD ZEZNANIA (AR-82): po wjeździe rekordu, w tej samej transakcji, `scan.zeznanie_kopii`
+    (z dociągnięciem, Z7) mówi, czy zeznanie klatki JEST odczytanym nagłówkiem - nie czy kopia ma
+    prawo je przepisać. `w_transakcji(zeznanie)` dostaje ten dowód: zapis karty przy `False` jest
+    wstrzymany, nie 'applied'. Cofnięcie zamyka OTWARTE wstrzymanie cofanego commitu jako `undone`
+    w `przed_wciagnieciem` (`repo.close_withheld_undone`) - rozliczenie wstrzymań przy wjeździe
+    (`repo._settle_withheld_tx`) zobaczyłoby inny nagłówek i nazwało je zastąpionym - a wynik tego
+    zamknięcia rozstrzyga, czy cofnięcie bez dowodu zeznania samo zakłada wstrzymanie (B2).
+
+    Zwraca `_Resync`: `niezgodne` (kontrola danych - nic nie wciągnięto, `zeznanie` `None`) albo
+    `zeznanie`."""
     rec = _skan_kontrolny(path, kontrola)
     niezgodne = _kontrola_danych(rec, expect_sha1_data, kontrola)
     if niezgodne is not None:
-        return niezgodne
-    if w_transakcji is None and przed_wciagnieciem is None:
-        scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(),
-                           actor=actor)
-        return None
+        return _Resync(niezgodne, None)
     with repo.atomic(con):
         if przed_wciagnieciem is not None:
             przed_wciagnieciem()
         scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(),
                            actor=actor)
+        zeznanie = _dowod_zeznania(con, rec, volume, now=now, actor=actor)
         if w_transakcji is not None:
-            w_transakcji()
-    return None
+            w_transakcji(zeznanie)
+    return _Resync(None, zeznanie)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Resync:
+    """Wynik `_resync`: `niezgodne` - powód odmowy kontroli danych (rekord NIE wciągnięty);
+    `zeznanie` - dowód, że zeznanie klatki jest odczytanym nagłówkiem pliku (AR-82)."""
+    niezgodne: str | None
+    zeznanie: bool | None
+
+
+def _dowod_zeznania(con, rec, volume, *, now, actor) -> bool:
+    """`scan.zeznanie_kopii` z dociągnięciem dla świeżo wciągniętego rekordu znanej kopii -
+    w transakcji re-syncu. Rekord nieczytelny nie niesie zeznania → `False`."""
+    if rec.header is None:
+        return False
+    loc = repo.location_by_path(con, volume=volume, path=rec.path)
+    kind, _zrodlo, _ident, camera_id = scan._derive_axes(con, rec, now=now, actor=actor)
+    return scan.zeznanie_kopii(con, rec, location_id=loc["id"], frame_id=loc["frame_id"],
+                               sha1_data=scan._record_identity(rec)[0], camera_id=camera_id,
+                               kind=kind, now=now, actor=actor, dociagnij=True)
 
 
 def _skan_kontrolny(path, kontrola):
@@ -2352,7 +2393,9 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
     ZAMKNIĘCIE JEDNĄ TRANSAKCJĄ (`repo.finish_inplace_op`, astra 2026-09-27): faza `synced`, wpisy
     stagingu związane z operacją → 'applied' i zgaszenie nagrobka ręki przy wpisanym `OBJECT` -
     razem albo wcale. Dawniej robił to commit po powrocie stąd, a crash w środku zostawiał wiersze
-    'pending', których ponowienie nie znajdowało."""
+    'pending', których ponowienie nie znajdowało. Od AR-82 (B1) ta transakcja to transakcja
+    RE-SYNCU (`_resync(w_transakcji=)`): wjazd rekordu, dowód zeznania i zamknięcie operacji wchodzą
+    razem - porażka zamknięcia cofa też wjazd, a ponowienie liczy wszystko od nowa."""
     op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
     if op is None:
         return WriteResult("failed", f"brak operacji {op_id}", None)
@@ -2385,23 +2428,53 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
             return WriteResult("blocked", f"region nagłówka na dysku nie jest wynikiem operacji "
                                           f"{op_id} - plik zmienił się od zapisu; {droga}", None)
         ponow = f"ponów: {_droga(_GEST_DOKONCZ, f'finish_inplace({op_id})')}"
+        cofany = op["commit_id"] if op["kind"] == "undo" else None
+        zamkniete: list[bool] = []         # B2: TO cofnięcie zamknęło otwarte wstrzymanie commitu
+        zamkniecie: list = []              # (id wstrzymania | None, powód) z transakcji re-syncu
+        padlo_zamkniecie: list[Exception] = []
+
+        def _przed():
+            if cofany is not None:
+                zamkniete.append(repo.close_withheld_undone(
+                    con, commit_id=cofany, location_id=loc["id"], now=now))
+
+        def _zamknij(zeznanie):
+            # B1: dowód zeznania, faza, staging i wstrzymanie - JEDNA transakcja re-syncu; inne
+            # połączenie nie przestawi zeznania między dowodem a rozliczeniem operacji.
+            powod = None
+            if not zeznanie and op["commit_id"] is not None:
+                powod = repo.withheld_reason(con, location_id=loc["id"],
+                                             commit_id=op["commit_id"], undo=cofany is not None)
+            try:
+                zamkniecie.append((repo.finish_inplace_op(
+                    con, op_id=op_id, now=now, testimony_ok=zeznanie, withheld_reason=powod,
+                    closed_commit_withheld=bool(zamkniete and zamkniete[0])), powod))
+            except Exception as exc:
+                padlo_zamkniecie.append(exc)
+                raise
         try:
-            niezgodne = _resync(con, loc["path"], loc["volume"], now=now,
-                                expect_sha1_data=loc["sha1_data"], kontrola=kontrola)
+            wynik = _resync(con, loc["path"], loc["volume"], now=now,
+                            expect_sha1_data=loc["sha1_data"], kontrola=kontrola,
+                            przed_wciagnieciem=_przed, w_transakcji=_zamknij)
         except Exception as exc:  # noqa: BLE001 - wsad idzie dalej, operacja zostaje `written`
+            if padlo_zamkniecie:
+                return WriteResult("failed", f"faza 'synced' NIE zapisana ({type(exc).__name__}: "
+                                             f"{exc}), a z nią re-sync bazy - jedna transakcja "
+                                             f"cofnięta w całości; {ponow}", None)
             return WriteResult("failed", f"plik ZMIENIONY, ale re-sync padł - "
                                          f"{type(exc).__name__}: {exc}; {ponow}", None)
-        if niezgodne is not None:
-            return WriteResult("failed", f"{niezgodne}; kontrola danych NIE przeszła - droga "
+        if wynik.niezgodne is not None:
+            return WriteResult("failed", f"{wynik.niezgodne}; kontrola danych NIE przeszła - droga "
                                          f"powrotu: {_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}"
                                          f" przywraca stary nagłówek w miejscu i zwalnia plik do "
                                          f"pełnego skanu", None)
-        try:
-            repo.finish_inplace_op(con, op_id=op_id, now=now)
-        except Exception as exc:  # noqa: BLE001
-            return WriteResult("failed", f"baza zsynchronizowana, ale faza 'synced' NIE zapisana "
-                                         f"({type(exc).__name__}: {exc}); {ponow}", None)
-        return WriteResult("applied", None, spec.post_hash)
+        wstrzymanie, powod = zamkniecie[0]
+        if wstrzymanie is not None:            # AR-82: plik zgodny, zeznanie przy innej kopii
+            return WriteResult("applied", powod, spec.post_hash, code=CODE_ZEZNANIE_WSTRZYMANE)
+        # Z8: powód wpisów niesie prawdę o nagrobku, który został mimo karty `OBJECT`.
+        uwaga = con.execute("SELECT reason FROM pending_changes WHERE inplace_op_id = ? "
+                            "AND reason IS NOT NULL LIMIT 1", (op_id,)).fetchone()
+        return WriteResult("applied", None if uwaga is None else uwaga[0], spec.post_hash)
     return _pod_blokada(loc["path"], _dzialanie)
 
 
@@ -2411,7 +2484,8 @@ def finish_inplace(con, op_id, *, now) -> FileResult:
     lokacja izolowana). `_dokoncz` pod blokadą: kontrola danych od nowa wobec kotwicy operacji,
     re-sync i JEDNA transakcja zamknięcia (faza `synced`, wpisy stagingu ZWIĄZANE z operacją →
     'applied', zgaszenie nagrobka ręki, gdy łata wpisała `OBJECT` - `repo.finish_inplace_op`).
-    Zwraca `FileResult` ('applied' | 'blocked' | 'failed')."""
+    Zwraca `FileResult` ('applied' | 'withheld' | 'blocked' | 'failed'); 'withheld' (AR-82) - faza
+    domknięta, plik zgodny, a zeznanie klatki nie przyjęło zapisu operacji `commit`."""
     op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
     if op is None:
         return FileResult(0, "", "failed", f"brak operacji {op_id}")
@@ -2419,7 +2493,9 @@ def finish_inplace(con, op_id, *, now) -> FileResult:
     if loc is None:
         return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
     res = _dokoncz(con, op_id, now=now)
-    return FileResult(loc["id"], loc["path"], res.status, res.reason)
+    status = ("withheld" if res.code == CODE_ZEZNANIE_WSTRZYMANE and op["kind"] == "commit"
+              else res.status)
+    return FileResult(loc["id"], loc["path"], status, res.reason, code=res.code)
 
 
 def _rekoncyliuj_backupy(con, zalegle, loc, *, now) -> str | None:
@@ -2453,19 +2529,30 @@ def _rekoncyliuj_backup(con, b, loc, *, now) -> str | None:
     CAS odmawia, zanim cokolwiek się stanie, więc `repo.BackupAlreadySettled` znaczy wyłącznie
     pracę innego procesu → `None`. Po odmowie backup jest sprawdzany jeszcze raz - nadal
     niepotwierdzony to błąd, nie sukces. Re-sync z niezgodną tożsamością → powód, backup zostaje
-    niepotwierdzony."""
+    niepotwierdzony.
+
+    Wpisy próby rozlicza PO wjeździe `repo.settle_backup_attempt` (AR-82): 'applied' z nagrobkiem
+    wyłącznie przy dowodzie zeznania, inaczej zapis wstrzymany."""
     path = loc["path"]
     pre = _backup_pre_hash(path, b["header_text"])
     dysk = _post_hash(path)
+    proba: list[int] = []
+
+    def _potwierdz():
+        proba.extend(repo.settle_pending_backup(con, backup_id=b["id"], replaced=True, now=now))
+
+    def _rozlicz(zeznanie):
+        repo.settle_backup_attempt(
+            con, backup_id=b["id"], pending_ids=proba, testimony_ok=zeznanie, now=now,
+            withheld_reason=None if zeznanie else repo.withheld_reason(
+                con, location_id=loc["id"], commit_id=b["commit_id"]))
     try:
         if dysk == b["post_hash"]:
-            niezgodne = _resync(
-                con, path, loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
-                przed_wciagnieciem=lambda: repo.settle_pending_backup(
-                    con, backup_id=b["id"], replaced=True, now=now))
-            if niezgodne is not None:
+            wynik = _resync(con, path, loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
+                            przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz)
+            if wynik.niezgodne is not None:
                 return (f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na dysku "
-                        f"leży nagłówek tego commitu, ale {niezgodne}")
+                        f"leży nagłówek tego commitu, ale {wynik.niezgodne}")
         else:
             repo.settle_pending_backup(con, backup_id=b["id"],
                                        replaced=False if dysk == pre else None, now=now)
@@ -2541,7 +2628,15 @@ def commit(con, run_id, *, now, clock=None,
     podmiana zaszła (re-sync, wpisy stagingu 'applied', nagrobek); nagłówek sprzed commitu →
     `unreplaced_at`; inny → nierozstrzygnięte, też `unreplaced_at` (backup bez dowodu wykonania nie
     cofa). Potwierdzone z dysku zostają wyłącznie wpisy stagingu tej próby (`pending_rows`). Dopiero
-    wtedy zapis."""
+    wtedy zapis.
+
+    ZEZNANIE WSTRZYMANE (AR-82, 0037): sukces zapisu to DOWÓD, że zeznanie klatki jest odczytanym
+    nagłówkiem pliku (`_resync` → `scan.zeznanie_kopii`), nie samo prawo kopii do przepisania go.
+    Gdy głosem klatki mówi inna obecna kopia, plik zostaje zapisany, ale wynik to 'withheld'
+    (`CommitResult.withheld`, `commit_id` do cofnięcia jest): wpisy 'failed' z wiązaniem
+    wstrzymania, nagrobek ręki żyje. Wszystkie trzy drogi (atomowa, w miejscu, rekoncyliacja
+    backupu) rozliczają się tym samym dowodem; dokończenie - w `repo` (przejęcie zeznania tej kopii
+    gestem albo Dostawą, pełny odczyt przy kopii wiodącej)."""
     pending = [r for r in pending_for_run(con, run_id) if r["status"] == "pending"]
     groups = _group_by_location(pending)
     total = len(groups)
@@ -2551,7 +2646,9 @@ def commit(con, run_id, *, now, clock=None,
     failed: list[FileResult] = []
     skipped: list[FileResult] = []
     in_place: list[FileResult] = []
-    kubly = {"applied": applied, "blocked": blocked, "failed": failed, "skipped": skipped}
+    withheld: list[FileResult] = []
+    kubly = {"applied": applied, "blocked": blocked, "failed": failed, "skipped": skipped,
+             "withheld": withheld}
     stan = _StanCommitu(run_id, clock or (lambda: now))
     cancelled = False
     done = 0
@@ -2576,7 +2673,7 @@ def commit(con, run_id, *, now, clock=None,
     # `commit_id` wyłącznie przy pliku podmienionym (kontrakt `CommitResult.commit_id`): commit bez
     # podmiany nie ma czego cofać, a jego wiersz z backupem zostaje w bazie (append-only).
     return CommitResult(run_id, stan.commit_id if stan.podmieniono else None, applied, blocked,
-                        failed, skipped, cancelled, in_place)
+                        failed, skipped, cancelled, in_place, withheld=withheld)
 
 
 @dataclasses.dataclass
@@ -2637,8 +2734,13 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
             _mark(rows, "blocked", reason)
             return _ZapisLokacji(FileResult(location_id, path, "blocked", reason))
         loc = _location(con, location_id)
-        statusy = {r["id"]: r["status"] for r in pending_for_run(con, stan.run_id)}
-        rows = [r for r in rows if statusy.get(r["id"]) == "pending"]
+        teraz = {r["id"]: r for r in pending_for_run(con, stan.run_id)}
+        wstrzymane = [teraz[r["id"]] for r in rows
+                      if r["id"] in teraz and teraz[r["id"]]["withheld_id"] is not None]
+        rows = [r for r in rows if r["id"] in teraz and teraz[r["id"]]["status"] == "pending"]
+        if not rows and wstrzymane:     # dysk potwierdził zapis, zeznanie go nie przyjęło (AR-82)
+            return _ZapisLokacji(FileResult(location_id, path, "withheld", wstrzymane[0]["reason"],
+                                            code=CODE_ZEZNANIE_WSTRZYMANE), dotknieto=True)
         if not rows:                    # przerwany commit TEGO przebiegu potwierdził dysk
             reason = ("zapis potwierdzony z dysku po przerwanym commicie "
                       f"{', '.join(str(z['commit_id']) for z in zalegle)} - nic do zapisania")
@@ -2758,8 +2860,16 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
                       f"{stan.commit_id}; lokacja IZOLOWANA od skanu{droga_dalej}")
             _mark(rows, "failed", reason)
             return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
-        # Wpisy stagingu i nagrobek zamknęło dokończenie, atomowo z fazą.
-        return _ZapisLokacji(FileResult(location_id, path, "applied", droga), w_miejscu=True,
+        if koniec.code == CODE_ZEZNANIE_WSTRZYMANE:
+            # AR-82: faza domknięta, plik zgodny, a zeznanie klatki nie przyjęło zapisu - wpisy
+            # 'failed' z wiązaniem wstrzymania i nagrobek zostawiło dokończenie, atomowo z fazą.
+            return _ZapisLokacji(FileResult(location_id, path, "withheld",
+                                            _dopisz(koniec.reason, droga),
+                                            code=CODE_ZEZNANIE_WSTRZYMANE), dotknieto=True)
+        # Wpisy stagingu i nagrobek zamknęło dokończenie, atomowo z fazą (powód Z8, gdy nagrobek
+        # został mimo karty `OBJECT`).
+        return _ZapisLokacji(FileResult(location_id, path, "applied",
+                                        _dopisz(droga, koniec.reason)), w_miejscu=True,
                              dotknieto=True)
     # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
     # `object_source='user_cleared'` i drabina ją POMIJA - bez tego gestu zostałaby poza osią na
@@ -2771,15 +2881,35 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
     # Zgaszenie niesie commit i plik (AR-38) - cofnięcie TEGO commitu odtworzy nagrobek.
     # Wciągnięcie rekordu, zgaszenie i wpisy 'applied' idą JEDNĄ transakcją (AR-38 (2)):
     # awaria między nimi zostawiała kartę w bazie przy żywym nagrobku i wpisach 'pending'.
-    def _zamknij():
+    # ZEZNANIE WSTRZYMANE (AR-82): bez dowodu, że zeznanie klatki przyjęło zapisany nagłówek, ta
+    # sama transakcja zakłada wstrzymanie (wpisy 'failed' z wiązaniem, wersja decyzji ręki z backupu)
+    # i nagrobek zostaje - zgasi go dopiero dokończenie przy tej samej wersji decyzji ręki.
+    wstrzymanie: list[str] = []
+    nagrobek: list[str] = []          # powód, czemu nagrobek ręki został mimo karty `OBJECT` (Z8)
+
+    def _zamknij(zeznanie):
+        if not zeznanie:
+            powod = repo.withheld_reason(con, location_id=location_id, commit_id=stan.commit_id)
+            repo.withhold_write(con, kind="commit", location_id=location_id,
+                                commit_id=stan.commit_id, header_hash=res.post_hash,
+                                reason=powod, now=now, pending_ids=[r["id"] for r in rows],
+                                backup_id=backup_pliku[0])
+            wstrzymanie.append(powod)
+            return
+        uwaga = None
         if any(op.keyword == "OBJECT" for op in ops):
-            repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now,
-                                        commit_id=stan.commit_id, location_id=location_id)
-        _mark(rows, "applied", None)
+            # Z8: tylko przy wersji decyzji ręki z backupu (sprzed pierwszego bajtu) - decyzja
+            # człowieka z okna zapis → re-sync zostaje, a powód wpisów i wyniku to mówi.
+            uwaga = repo.clear_tombstone_after_write(
+                con, frame_id=loc["frame_id"], backup_id=backup_pliku[0],
+                commit_id=stan.commit_id, location_id=location_id, now=now)
+        _mark(rows, "applied", uwaga)
+        if uwaga is not None:
+            nagrobek.append(uwaga)
 
     try:                              # droga atomowa: PLIK→DB (T8); pełny odczyt pliku
         niezgodne = _resync(con, path, loc["volume"], now=now,
-                            expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij)
+                            expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij).niezgodne
     except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
         # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
         # przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej naprawi ponowny
@@ -2789,7 +2919,13 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {stan.commit_id}"
         _mark(rows, "failed", reason)
         return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
-    return _ZapisLokacji(FileResult(location_id, path, "applied", _dopisz(droga, res.reason),
+    if wstrzymanie:
+        return _ZapisLokacji(FileResult(location_id, path, "withheld",
+                                        _dopisz(wstrzymanie[0], droga),
+                                        code=CODE_ZEZNANIE_WSTRZYMANE), dotknieto=True)
+    return _ZapisLokacji(FileResult(location_id, path, "applied",
+                                    _dopisz(_dopisz(droga, res.reason),
+                                            nagrobek[0] if nagrobek else None),
                                     code=CODE_INPLACE_FALLBACK if droga is not None else None),
                          dotknieto=True)
 
@@ -3356,6 +3492,7 @@ def undo(con, commit_id, *, now,
     blocked: list[FileResult] = []
     failed: list[FileResult] = []
     semantic: list[FileResult] = []
+    withheld: list[FileResult] = []
     kubly = {"restored": restored, "blocked": blocked, "failed": failed}
     cancelled = False
     done = 0
@@ -3374,9 +3511,12 @@ def undo(con, commit_id, *, now,
         kubly[cofniecie.wynik.status].append(cofniecie.wynik)
         if cofniecie.semantycznie:
             semantic.append(cofniecie.wynik)
+        if cofniecie.wstrzymane:
+            withheld.append(cofniecie.wynik)
         _report(cofniecie.wynik.path, cofniecie.wynik.status)
 
-    return UndoResult(commit_id, restored, blocked, failed, cancelled, semantic=semantic)
+    return UndoResult(commit_id, restored, blocked, failed, cancelled, semantic=semantic,
+                      withheld=withheld)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3384,10 +3524,12 @@ class _CofniecieLokacji:
     """Wynik cofnięcia JEDNEGO backupu commitu. `semantycznie` - plik wrócił cofnięciem semantycznym
     (`UndoResult.semantic`). `juz` - stan sprzed commitu już leży na dysku i w bazie ('blocked' „już
     cofnięte” albo commit, który tego pliku nie podmienił): nie ma czego cofać, a ponowienie
-    cofnięcia zmiany obiektu wolno uznać za domknięte."""
+    cofnięcia zmiany obiektu wolno uznać za domknięte. `wstrzymane` - nagłówek wrócił, zeznanie
+    klatki nie (AR-82, `UndoResult.withheld`)."""
     wynik: FileResult
     semantycznie: bool = False
     juz: bool = False
+    wstrzymane: bool = False
 
 
 def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
@@ -3397,24 +3539,55 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
     def _sync(loc, path, expect, powod, semantycznie=False):
         """Re-sync drogi atomowej (bez operacji w dzienniku) - w jego transakcji odtworzenie
         nagrobka zgaszonego przez ten commit na tym pliku (AR-38). `semantycznie` - plik wrócił
-        cofnięciem semantycznym (AR-19), wynik trafia też do `semantic`."""
-        def _nagrobek():
+        cofnięciem semantycznym (AR-19), wynik trafia też do `semantic`.
+
+        ZEZNANIE (AR-82): OTWARTE wstrzymanie cofanego commitu zamyka się jako `undone` przed
+        wjazdem rekordu, a cofnięcie, którego nagłówka zeznanie nie przyjęło, zakłada wstrzymanie
+        cofnięcia - chyba że TO cofnięcie zamknęło otwarte wstrzymanie commitu (zeznanie nigdy go
+        nie przyjęło, więc nie ma czego cofać). Rozliczona historia wstrzymań (`completed`,
+        `superseded`) tego nie znaczy: zeznanie przyjęło zapis, a teraz nie przyjęło powrotu (B2)."""
+        wstrzymanie: list[str] = []
+        zamkniete: list[bool] = []
+
+        def _przed():
+            zamkniete.append(repo.close_withheld_undone(con, commit_id=commit_id,
+                                                        location_id=loc["id"], now=now))
+
+        def _nagrobek(zeznanie):
             repo.restore_object_tombstone(con, frame_id=loc["frame_id"], commit_id=commit_id,
                                           location_id=loc["id"], now=now)
+            if zeznanie or zamkniete[0]:
+                return
+            powod_w = repo.withheld_reason(con, location_id=loc["id"], commit_id=commit_id,
+                                           undo=True)
+            naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?",
+                                   (loc["id"],)).fetchone()[0]
+            repo.withhold_write(con, kind="undo", location_id=loc["id"], commit_id=commit_id,
+                                header_hash=naglowek, reason=powod_w, now=now)
+            wstrzymanie.append(powod_w)
         try:
             niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect,
-                                w_transakcji=_nagrobek)
+                                przed_wciagnieciem=_przed, w_transakcji=_nagrobek).niezgodne
         except Exception as exc:  # noqa: BLE001 - nagłówek przywrócony, pętla idzie dalej
             niezgodne = (f"nagłówek PRZYWRÓCONY, ale re-sync padł - {type(exc).__name__}: {exc}; "
                          f"ponowne undo dokończy samą synchronizację")
         if niezgodne is not None:
             return _pad(loc, path, niezgodne)
+        if wstrzymanie:
+            return _CofniecieLokacji(
+                FileResult(loc["id"], path, "restored", _dopisz(powod, wstrzymanie[0]),
+                           code=CODE_ZEZNANIE_WSTRZYMANE),
+                semantycznie=semantycznie, wstrzymane=True)
         return _CofniecieLokacji(FileResult(loc["id"], path, "restored", powod),
                                  semantycznie=semantycznie)
 
     def _dokoncz_undo(loc, path, op_id, powod):
         """Dokończenie operacji cofnięcia w miejscu (`_dokoncz`) z wynikiem undo."""
         wynik = _dokoncz(con, op_id, now=now)
+        if wynik.status == "applied" and wynik.code == CODE_ZEZNANIE_WSTRZYMANE:
+            return _CofniecieLokacji(FileResult(loc["id"], path, "restored",
+                                                _dopisz(powod, wynik.reason),
+                                                code=CODE_ZEZNANIE_WSTRZYMANE), wstrzymane=True)
         if wynik.status == "applied":
             return _CofniecieLokacji(FileResult(loc["id"], path, "restored", powod))
         if wynik.status == "blocked":
@@ -3603,7 +3776,7 @@ def recover_torn(con, op_id, *, now) -> FileResult:
                  f"{_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}")
         try:
             niezgodne = _resync(con, path, loc["volume"], now=now,
-                                expect_sha1_data=loc["sha1_data"], kontrola=kontrola)
+                                expect_sha1_data=loc["sha1_data"], kontrola=kontrola).niezgodne
         except Exception as exc:  # noqa: BLE001 - czkawka odczytu nie jest werdyktem
             return WriteResult("failed", f"region przywrócony, ale re-sync padł - "
                                          f"{type(exc).__name__}: {exc}; {ponow}", None)
@@ -3809,7 +3982,11 @@ class ObjectChangeResult:
     `dirs_created` (zapis: założone katalogi celu, cofnięcie: odtworzone stare), `dirs_removed`
     (zapis: źródłowe opróżnione przez gest i własne puste po odmowie, cofnięcie: założone przez
     gest), `dirs_uncertain` (zamiar założenia bez potwierdzenia przy istniejącym katalogu - nigdy nie
-    usuwany automatycznie, ścieżki w `warnings`). `warnings` - zdania dla człowieka bez blokady."""
+    usuwany automatycznie, ścieżki w `warnings`). `warnings` - zdania dla człowieka bez blokady.
+
+    `withheld` (AR-82): przy zapisie - osobny kubeł pozycji, których karta jest ZAPISANA, a zeznanie
+    klatki jej nie przyjęło (pozycja 'failed' do dokończenia); przy cofnięciu - podzbiór `applied`,
+    którego karta wróciła do pliku, a zeznanie klatki nie (czytane z bazy, przeżywa wznowienie)."""
     run_id: str
     applied: list[FileResult]
     blocked: list[FileResult]
@@ -3821,6 +3998,7 @@ class ObjectChangeResult:
     dirs_uncertain: int = 0
     cancelled: bool = False
     warnings: tuple[str, ...] = ()
+    withheld: list[FileResult] = dataclasses.field(default_factory=list)
 
 
 def _przebieg_zmiany(con, run_id):
@@ -3843,7 +4021,7 @@ def _karty_lokacji(con, run_id, location_id):
     """Wpisy stagingu karty pozycji (przebieg + lokacja), w kolejności stagingu."""
     return con.execute(
         "SELECT id, location_id, keyword, idx, op, old_value, new_value, new_type, new_comment, "
-        "       expected_header_hash, status, reason "
+        "       expected_header_hash, status, reason, withheld_id "
         "FROM pending_changes WHERE run_id = ? AND location_id = ? ORDER BY id",
         (run_id, location_id)).fetchall()
 
@@ -4173,6 +4351,13 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
     uwaga = kod = None
     if oczekujace:
         zapis = _zapisz_lokacje(con, stan, lid, oczekujace, now=now, inplace=True, fallback=True)
+        if zapis.wynik.status == "withheld":
+            # AR-82: karta ZAPISANA, zeznanie klatki jej nie przyjęło - pozycja ma już 'failed'
+            # (stan częściowy w Porządkach) z prawdziwym powodem, nadany W TRANSAKCJI wstrzymania
+            # (`repo._withhold_write_tx`, B4). Sterownik jej nie przestawia: dokończenie z innego
+            # połączenia mogło ją już domknąć ('applied') i nadpisanie cofnęłoby ten stan.
+            return FileResult(lid, zapis.wynik.path, "withheld", zapis.wynik.reason,
+                              code=CODE_ZEZNANIE_WSTRZYMANE)
         if zapis.wynik.status != "applied":
             if not zapis.dotknieto:
                 return _odmowa("blocked", f"karta odbita bez zapisu: {zapis.wynik.reason}",
@@ -4187,6 +4372,10 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
     elif karty and any(r["status"] != "applied" for r in karty):
         # Wpisy karty rozliczone przed awarią bez zapisu pozycji: 'failed' mógł ruszyć bajty.
         zly = next(r for r in karty if r["status"] != "applied")
+        if zly["withheld_id"] is not None:     # AR-82: karta zapisana, zeznanie wstrzymane
+            # Status pozycji nadało wstrzymanie (B4) - bez ponownego rozliczenia.
+            return FileResult(lid, loc["path"], "withheld", zly["reason"],
+                              code=CODE_ZEZNANIE_WSTRZYMANE)
         if zly["status"] == "failed":
             powod = f"karta z poprzedniej próby: {zly['reason']}"
             repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
@@ -4256,7 +4445,9 @@ def commit_object_change(con, run_id, *, now,
     blocked: list[FileResult] = []
     failed: list[FileResult] = []
     skipped: list[FileResult] = []
-    kubly = {"applied": applied, "blocked": blocked, "failed": failed, "skipped": skipped}
+    withheld: list[FileResult] = []
+    kubly = {"applied": applied, "blocked": blocked, "failed": failed, "skipped": skipped,
+             "withheld": withheld}
     stan = _StanCommitu(run_id, lambda: now)
     liczniki = {"created": 0}
     cancelled = False
@@ -4283,7 +4474,7 @@ def commit_object_change(con, run_id, *, now,
                        f"własność niepewna, zostaje do oka" for k in niepewne)
     return ObjectChangeResult(run_id, applied, blocked, failed, skipped,
                               _commity_przebiegu(con, run_id), liczniki["created"], usuniete,
-                              len(niepewne), cancelled, tuple(ostrzezenia))
+                              len(niepewne), cancelled, tuple(ostrzezenia), withheld=withheld)
 
 
 def _bez_sladu(con, p) -> bool:
@@ -4335,7 +4526,14 @@ def _cofnij_pozycje(con, p, *, now, liczniki) -> FileResult:
         repo.set_object_change_undo_phase(con, item_id=p["id"], phase="file")
     uwaga = repo.undo_object_change_db(con, item_id=p["id"], now=now)
     teraz = _location_rename(con, lid)
-    return FileResult(lid, "" if teraz is None else teraz["path"], "restored", uwaga)
+    sciezka = "" if teraz is None else teraz["path"]
+    # AR-82: karta wróciła do pliku, a zeznanie klatki nie - z BAZY (wstrzymanie cofnięcia związane
+    # z pozycją), nie z wyniku fazy karty: wznowienie po fazie `card`/`file` go nie ma.
+    wstrzymanie = repo.open_undo_withheld_for_item(con, p["id"])
+    if wstrzymanie is not None:
+        return FileResult(lid, sciezka, "restored", _dopisz(uwaga, wstrzymanie["reason"]),
+                          code=CODE_ZEZNANIE_WSTRZYMANE)
+    return FileResult(lid, sciezka, "restored", uwaga)
 
 
 def undo_object_change(con, run_id, *, now,
@@ -4368,6 +4566,7 @@ def undo_object_change(con, run_id, *, now,
     blocked: list[FileResult] = []
     failed: list[FileResult] = []
     skipped: list[FileResult] = []
+    withheld: list[FileResult] = []
     kubly = {"restored": applied, "blocked": blocked, "failed": failed, "skipped": skipped}
     liczniki = {"created": 0}
     cancelled = False
@@ -4387,6 +4586,8 @@ def undo_object_change(con, run_id, *, now,
         else:
             wynik = _cofnij_pozycje(con, p, now=now, liczniki=liczniki)
         kubly[wynik.status].append(wynik)
+        if wynik.code == CODE_ZEZNANIE_WSTRZYMANE:
+            withheld.append(wynik)
         done += 1
         if progress is not None:
             progress(done, total, wynik.path, wynik.status)
@@ -4403,5 +4604,5 @@ def undo_object_change(con, run_id, *, now,
                        f"własność niepewna, zostaje do oka" for k in niepewne)
     return ObjectChangeResult(run_id, applied, blocked, failed, skipped,
                               _commity_przebiegu(con, run_id), liczniki["created"], usuniete,
-                              len(niepewne), cancelled, tuple(ostrzezenia))
+                              len(niepewne), cancelled, tuple(ostrzezenia), withheld=withheld)
 

@@ -1897,6 +1897,7 @@ CATALOG = {
                                   "en": "Frames with disagreeing copies"},
     "perspective.orphan_testimony": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
+    "perspective.withheld_testimony": {"pl": "Zeznanie wstrzymane", "en": "Testimony withheld"},
     "perspective.torn_write": {
         "pl": "Plik po przerwanym zapisie", "en": "File after an interrupted write"},
     "perspective.pending_finish": {
@@ -2931,6 +2932,8 @@ CATALOG = {
         "pl": "tylko klatki z niezgodnymi kopiami", "en": "only frames with disagreeing copies"},
     "grid.criteria.only_orphan_testimony": {
         "pl": "tylko zeznanie z nieobecnej kopii", "en": "only testimony from a missing copy"},
+    "grid.criteria.only_withheld_testimony": {
+        "pl": "tylko zapisy z zeznaniem wstrzymanym", "en": "only writes with testimony withheld"},
     "grid.criteria.only_torn_write": {
         "pl": "tylko pliki po przerwanym zapisie", "en": "only files after an interrupted write"},
     "grid.criteria.only_pending_finish": {
@@ -2963,6 +2966,10 @@ CATALOG = {
     "grid.wb.restored": {"pl": "{n} przywróconych", "en": "{n} restored"},
     "grid.wb.semantic": {"pl": "{n} cofniętych semantycznie (bajty pliku inne niż przed zapisem)",
                          "en": "{n} restored semantically (file bytes differ from before the write)"},
+    "grid.wb.withheld": {"pl": "{n} zapisanych z zeznaniem wstrzymanym (głosem klatki mówi inna kopia)",
+                         "en": "{n} written with testimony withheld (another copy speaks for the frame)"},
+    "grid.wb.undo_withheld": {"pl": "{n} przywróconych bez powrotu zeznania (głosem klatki mówi inna kopia)",
+                              "en": "{n} restored without testimony (another copy speaks for the frame)"},
     "grid.wb.blocked": {"pl": "{n} zablokowanych", "en": "{n} blocked"},
     "grid.wb.errors": {"pl": "{n} błędów", "en": "{n} errors"},
     "grid.wb.skipped": {"pl": "{n} pominiętych", "en": "{n} skipped"},
@@ -4699,6 +4706,9 @@ CATALOG = {
     # już zajęte przez sąsiada wyżej, a tu obecne kopie bywają zgodne ze sobą).
     "tasks.orphan_testimony_frames": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
+    # AR-82: plik kopii zapisany, zeznanie klatki przy innej kopii.
+    "tasks.withheld_testimony_frames": {
+        "pl": "Zeznanie wstrzymane", "en": "Testimony withheld"},
     # Człon drugi dwóch wierszy wyżej, gdy ich zero znaczy „nie wiem": kopia bez zebranego zeznania
     # w porównaniu nie bierze udziału. „?" mówi, że liczby nie ma, reszta - dlaczego. Człon mówi
     # STAN, nie drogę: „czeka na Dostawę" było nieprawdą przy kopii, której pliku już nie ma
@@ -5093,6 +5103,12 @@ CATALOG = {
         "en": "The frame speaks with the voice of a file that is gone.\nIn Collections: "
               "right-click the frame → “{lead}” and a present copy. A frame with one copy is also "
               "fixed by Intake on that copy's folder."},
+    "tasks.withheld_testimony_tip": {
+        "pl": "Plik kopii zapisany, ale klatka mówi głosem innej kopii.\nW Zbiorach: prawy klik na "
+              "klatce → „{lead}” i zapisana kopia - zapis się dokończy. Albo „Cofnij” zapisu.",
+        "en": "The copy's file was written, but the frame speaks with another copy's voice.\nIn "
+              "Collections: right-click the frame → “{lead}” and the written copy - the write "
+              "completes. Or “Undo” the write."},
     # Dopisek podpowiedzi „Kopii niezgodnych", gdy część klatek ma kopię wskazaną ręką: rozjazd
     # kopii zostaje faktem (lista go pokazuje), ale robotą nie jest.
     "tasks.copy_conflict_led_tip": {
@@ -5412,6 +5428,8 @@ CATALOG = {
     "objchg.st.undone": {"pl": "cofnięte", "en": "undone"},
     "objchg.st.blocked": {"pl": "zablokowane", "en": "blocked"},
     "objchg.st.failed": {"pl": "błąd", "en": "error"},
+    "objchg.st.withheld": {"pl": "karta zapisana, zeznanie wstrzymane",
+                           "en": "card written, testimony withheld"},
     "objchg.st.skipped": {"pl": "pominięte", "en": "skipped"},
     "objchg.st.untouched": {"pl": "nie ruszone (bieg przerwany przed tą pozycją)",
                             "en": "untouched (the run stopped before this item)"},

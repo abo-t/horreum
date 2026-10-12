@@ -459,7 +459,7 @@ def test_zdanie_commitu_stawia_powod_bledu_przed_blokada():
     res = NS(applied=[NS(reason=None)],
              blocked=[NS(reason="cel już istnieje na dysku (anty-clobber)")],
              failed=[NS(reason="plik PRZENIESIONY na x.fits, ale baza NIE przepięta")],
-             skipped=[])
+             skipped=[], withheld=[])
     zdanie = zdanie_wyniku_zapisu(res, "grid.wb.renamed")
     assert zdanie.endswith("plik PRZENIESIONY na x.fits, ale baza NIE przepięta"), zdanie
     assert "1 zablokowanych" in zdanie and "1 błędów" in zdanie, zdanie

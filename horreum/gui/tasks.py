@@ -36,7 +36,8 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_FILE_OBJ
                               PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
                               PRESET_PATH_HEADER_CONFLICT, PRESET_PENDING_FINISH, PRESET_RETIRED,
                               PRESET_TORN_WRITE, PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS,
-                              PRESET_SUPERSEDED, PRESET_VANISHED, zdanie_kopii_bez_zeznania)
+                              PRESET_SUPERSEDED, PRESET_VANISHED, PRESET_WITHHELD_TESTIMONY,
+                              zdanie_kopii_bez_zeznania)
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -132,6 +133,13 @@ _TASKS = [
     # którym chodzi - więc wiersz liczy wszystkie (`queries.orphan_testimony_frame_ids`), żeby żadna
     # nie czekała niewidoczna; gest działa i na nich.
     ("orphan_testimony_frames", "tasks.orphan_testimony_frames", PRESET_ORPHAN_TESTIMONY),
+    # Wiersz AKCYJNY i ROBOTA (AR-82) - ta sama rodzina pytań o kopię wiodącą, trzeci stan: plik
+    # kopii ZAPISANY (karta albo cofnięcie), a zeznanie klatki nie przyjęło jego nagłówka, bo głosem
+    # mówi inna obecna kopia. Kopie bywają zgodne w polach, które porównują dwa wiersze wyżej, więc
+    # bez tego wiersza zapis czekałby niewidoczny. Gest „Ta kopia prowadzi" na zapisanej kopii
+    # dokańcza zapis (wpisy, nagrobek, pozycja gestu). Liczba, lista i dostępność gestu czytają
+    # jeden predykat (`queries.withheld_testimony_frame_ids`).
+    ("withheld_testimony_frames", "tasks.withheld_testimony_frames", PRESET_WITHHELD_TESTIMONY),
     # Wiersz AKCYJNY (0022, Q8): kopia po przerwanym zapisie nagłówka w miejscu, izolowana od skanu.
     # Robota człowieka: odzysk z dziennika operacji albo zwolnienie po własnym rozstrzygnięciu.
     ("torn_write_frames", "tasks.torn_write_frames", PRESET_TORN_WRITE),
@@ -256,6 +264,7 @@ _PODPOWIEDZI_OSI = {
     # AR-23: gest „Ta kopia prowadzi" mieszka w menu prawego kliku w Zbiorach - wiersz mówi, gdzie.
     "copy_conflict_frames": ("tasks.copy_conflict_tip", {"lead": "grid.lead.menu"}),
     "orphan_testimony_frames": ("tasks.orphan_testimony_tip", {"lead": "grid.lead.menu"}),
+    "withheld_testimony_frames": ("tasks.withheld_testimony_tip", {"lead": "grid.lead.menu"}),
     # AR-17 krok 3: „Uzgodnij pliki…" mieszka w menu prawego kliku perspektywy.
     "file_object_mismatch_frames": ("tasks.file_object_mismatch_tip",
                                     {"align": "grid.sel.object_change_align"}),

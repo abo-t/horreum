@@ -1151,10 +1151,14 @@ def test_nieutrwalona_faza_written_to_operacja_nieukonczona(tmp_path, monkeypatc
 
 
 def test_nieutrwalona_faza_synced_zostawia_izolacje(tmp_path, monkeypatch):
-    """Re-sync udany, ale transakcja zamknięcia (`synced` + wpisy stagingu) nie zapisała się:
-    dawniej 'applied' przy lokacji bez zamkniętej operacji. Teraz 'failed', faza `written`
-    (izolowana), wpis stagingu NIE 'applied', a `finish_inplace` kończy - kontrola danych liczona
-    od nowa wobec kotwicy operacji przechodzi, choć baza opisuje już plik po zapisie."""
+    """Zamknięcie operacji (`synced` + wpisy stagingu) nie zapisało się: dawniej 'applied' przy
+    lokacji bez zamkniętej operacji. Teraz 'failed', faza `written` (izolowana), wpis stagingu NIE
+    'applied', a `finish_inplace` kończy - kontrola danych liczona od nowa wobec kotwicy operacji.
+
+    AR-82 (B1): zamknięcie idzie w TEJ SAMEJ transakcji co re-sync i dowód zeznania, więc jego
+    porażka cofa też wjazd rekordu - baza opisuje plik SPRZED zapisu, aż ponowienie zrobi wszystko
+    razem. Falsyfikator: zamknięcie w osobnej transakcji po re-syncu - baza ma już odcisk po zapisie,
+    a między dowodem a rozliczeniem inne połączenie mogło przestawić zeznanie."""
     p = _fits(tmp_path / "y.fits")
     con, _ = _baza_z_plikiem(tmp_path, p)
 
@@ -1166,8 +1170,9 @@ def test_nieutrwalona_faza_synced_zostawia_izolacje(tmp_path, monkeypatch):
     assert not res.applied and "'synced' NIE zapisana" in res.failed[0].reason
     op_id = _operacje(con)[0]["id"]
     assert _operacje(con)[0]["phase"] == "written" and scan._isolated(con, str(p))
-    assert _loc(con, p)["header_hash"] == _hash(p)                  # re-sync przeszedł
+    assert _loc(con, p)["header_hash"] != _hash(p)                  # re-sync cofnięty razem z nim
     assert writeback.finish_inplace(con, op_id, now=NOW).status == "applied"
+    assert _loc(con, p)["header_hash"] == _hash(p)
     assert _operacje(con)[0]["phase"] == "synced"
     assert [r["status"] for r in writeback.pending_for_run(con, "R")] == ["applied"]
     con.close()
@@ -1428,8 +1433,11 @@ def test_przerwa_po_written_dokonczenie_domyka_staging_i_nagrobek(tmp_path, monk
     con, loc = _baza_z_plikiem(tmp_path, p)
     _scan_in(con, q)
     _stage(con, "R", _loc(con, q)["id"], "M 42", "zly-odcisk")      # druga lokacja przebiegu
-    con.execute("UPDATE frame SET object_source = 'user_cleared' WHERE id = ?", (loc["frame_id"],))
-    con.commit()
+    # Nagrobek gestem ręki (zdarzenie `object.cleared` = wersja decyzji ręki, AR-82 Z8): goły
+    # UPDATE dawał nagrobek bez wersji, którego dokończenie słusznie nie gasi („nieznana”).
+    repo.user_assign_object(con, alias_norm=None, canon="COS", catalog=None, kind="own",
+                            frame_ids=[loc["frame_id"]], now=NOW)
+    repo.clear_object_assignment(con, frame_ids=[loc["frame_id"]], now=NOW)
 
     def _przerwij(*a, **kw):
         raise _Przerwa()

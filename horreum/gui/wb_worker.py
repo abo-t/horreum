@@ -247,6 +247,12 @@ def zdanie_wyniku_zapisu(res, noun_key):
     bywa rozjazdem, który trzeba naprawić („plik PRZENIESIONY…, baza NIE przepięta - zamiar renamu
     zapisany: ponowienie albo cofnięcie przebiegu dokończy przepięcie"). Przy odwrotnej kolejności jedna blokada w tym samym wsadzie chowała go za sobą."""
     parts = [i18n.t(noun_key, n=len(res.applied))]
+    # AR-82: plik ZAPISANY, a zeznanie klatki go nie przyjęło - osobny człon, nie „0 zapisanych”.
+    # Przy cofnięciu gestu `withheld` jest podzbiorem `applied` (karta wróciła) - tamto zdanie mówi
+    # o nim własnym członem (`zdanie_wyniku_zmiany`), tu liczą się tylko pliki spoza `applied`.
+    wstrzymane = [fr for fr in res.withheld if fr not in res.applied]
+    if wstrzymane:
+        parts.append(i18n.t("grid.wb.withheld", n=len(wstrzymane)))
     if res.blocked:
         parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
     if res.failed:
@@ -254,7 +260,7 @@ def zdanie_wyniku_zapisu(res, noun_key):
     if res.skipped:
         parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
     summary = " · ".join(parts)
-    detail = next((fr.reason for fr in (res.failed + res.blocked) if fr.reason), None)
+    detail = next((fr.reason for fr in (res.failed + wstrzymane + res.blocked) if fr.reason), None)
     if detail:
         summary += i18n.t("grid.wb.detail_sep", detail=detail)
     return summary
@@ -326,6 +332,8 @@ def zdanie_undo_kart(res):
     msg = i18n.t("grid.wb.restored", n=len(res.restored))
     if res.semantic:
         msg += " · " + i18n.t("grid.wb.semantic", n=len(res.semantic))
+    if res.withheld:                                     # AR-82: nagłówek wrócił, zeznanie nie
+        msg += " · " + i18n.t("grid.wb.undo_withheld", n=len(res.withheld))
     if res.blocked:
         msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
     if res.failed:

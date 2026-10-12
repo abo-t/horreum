@@ -174,6 +174,9 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         # AR-5: ten sam powód, co wyżej - bez zebranych faktów kopii predykat mówi „nie wiem",
         # nie „zeznanie z nieobecnej kopii". Stan z rozjazdem pinuje `test_orphan_testimony.py`.
         "orphan_testimony_frames": 0,
+        # AR-82: fikstura nie zna zapisu karty - zero z braku populacji; predykat na prawdziwym
+        # zapisie wstrzymanym pinuje `test_writeback_wstrzymane.py`.
+        "withheld_testimony_frames": 0,
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
         "vanished_frames": 1,

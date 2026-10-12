@@ -215,12 +215,13 @@ def test_commit_sprzed_AR38_cofa_sie_jak_dawniej(tmp_path, monkeypatch):
     """Dane wsadu zrobionego kodem sprzed AR-38: zgaszenie bez `commit_id` w payloadzie. Cofnięcie
     przywraca plik i NIE wywraca się; nagrobka nie odtwarza, bo nie wie, czy to ten commit go zgasił."""
     con, p, lid, fid, _cos = _baza_z_nagrobkiem(tmp_path)
-    prawdziwy = repo.clear_object_tombstone
-    monkeypatch.setattr(repo, "clear_object_tombstone",
-                        lambda con_, *, frame_id, now, **_kw: prawdziwy(con_, frame_id=frame_id,
-                                                                         now=now))
+    # Klinga zapisu karty (od AR-82 `clear_tombstone_after_write`, z wersją decyzji ręki) podmieniona
+    # na gaszenie sprzed AR-38: bez pary commit/plik w zdarzeniu.
+    monkeypatch.setattr(repo, "clear_tombstone_after_write",
+                        lambda con_, *, frame_id, now, **_kw: repo.clear_object_tombstone(
+                            con_, frame_id=frame_id, now=now) and None)
     res = _commit_karty(con, lid, "R")
-    monkeypatch.setattr(repo, "clear_object_tombstone", prawdziwy)
+    monkeypatch.undo()
 
     ures = writeback.undo(con, res.commit_id, now=NOW)
     assert len(ures.restored) == 1 and not ures.failed, ures
@@ -260,7 +261,7 @@ def _commit_failed(con, lid, run, monkeypatch, *, awaria):
 
     def _pad(*a, **kw):
         raise OSError(5, "zerwany udział") if awaria == "odczyt" else RuntimeError("w połowie")
-    cel = (scan, "scan_file") if awaria == "odczyt" else (repo, "clear_object_tombstone")
+    cel = (scan, "scan_file") if awaria == "odczyt" else (repo, "clear_tombstone_after_write")
     with monkeypatch.context() as m:
         m.setattr(*cel, _pad)
         res = writeback.commit(con, run, now=NOW)

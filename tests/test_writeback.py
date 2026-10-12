@@ -496,14 +496,20 @@ def test_xisf_awaria_io_to_failed_nie_blocked(tmp_path):
 # 'failed', ciche CONTINUE, ciche ucięcie komentarza, karta HIERARCH), a XISF zapisywał znak
 # sterujący surowo - czytnik Horreum go neutralizuje, więc odczyt po zapisie tego nie widział.
 
-def _plik(tmp_path, fmt, name="r"):
+def _plik(tmp_path, fmt, name="r", wariant=0):
     """Plik testowy w danym formacie z kartą TELESCOP (z atrybutem komentarza w XISF) i rezerwą
-    na dłuższy nagłówek - bramka ma odmawiać z powodu REGUŁY, nie braku miejsca."""
+    na dłuższy nagłówek - bramka ma odmawiać z powodu REGUŁY, nie braku miejsca. `wariant` > 0 =
+    inna sekcja danych (inna klatka): dwa pliki z tym samym wariantem to DWIE KOPIE jednej klatki,
+    a wtedy zapis karty jednej z nich nie przechodzi do zeznania (AR-82)."""
     if fmt == "fits":
         p = tmp_path / f"{name}.fits"
-        _write_fits(p, TELESCOP="RC8", IMAGETYP="Light")
+        hdu = fits.PrimaryHDU(data=np.full((4, 4), wariant, dtype=np.int16))
+        hdu.header["TELESCOP"] = "RC8"
+        hdu.header["IMAGETYP"] = "Light"
+        hdu.writeto(p, overwrite=True)
         return p
-    return _xisf(tmp_path, f"{name}.xisf", props="", pad=512)
+    return _xisf(tmp_path, f"{name}.xisf", props="", pad=512,
+                 payload=bytes([0x07 + wariant]) * 32)
 
 
 @pytest.mark.parametrize("fmt", ["fits", "xisf"])
@@ -817,7 +823,7 @@ def test_undo_commitu_mieszanego_pomija_plik_bez_podmiany(tmp_path, monkeypatch,
     Falsyfikator: zdejmij `mark_backup_unreplaced` z `commit` albo warunek `unreplaced_at IS NULL`
     z `backups_for_commit` - cofnięcie znów melduje blokadę pliku B."""
     con = db.open_db(str(tmp_path / "h.db"))
-    pa, pb = _plik(tmp_path, fmt, name="a"), _plik(tmp_path, fmt, name="b")
+    pa, pb = _plik(tmp_path, fmt, name="a"), _plik(tmp_path, fmt, name="b", wariant=1)
     for p in (pa, pb):
         _scan_in(con, p)
         lid = _loc_id(con, p)
@@ -860,7 +866,7 @@ def test_wyjatek_samej_podmiany_nie_oznacza_backupu_i_undo_cofa(tmp_path, monkey
     Falsyfikator: oznaczaj backup przy KAŻDYM wyniku bez `backup_text` - cofnięcie pomija plik B,
     który ma na dysku nagłówek commitu, i zostawia go zmienionego."""
     con = db.open_db(str(tmp_path / "h.db"))
-    pa, pb = _plik(tmp_path, fmt, name="a"), _plik(tmp_path, fmt, name="b")
+    pa, pb = _plik(tmp_path, fmt, name="a"), _plik(tmp_path, fmt, name="b", wariant=1)
     przed = {}
     for p in (pa, pb):
         _scan_in(con, p)

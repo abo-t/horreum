@@ -188,10 +188,12 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
         bez_prefiksu_spadku, spadek_na_droge_atomowa, zdanie_wyniku_zapisu)
     msg = (zdanie_wyniku_zapisu(res, "objchg.res.undone") if cofniecie
            else zdanie_wyniku_zapisu(res, "objchg.res.applied"))
-    z_powodem = [fr for fr in res.applied if fr.reason]
+    z_powodem = [fr for fr in res.applied if fr.reason and fr not in res.withheld]
     atomowe = ([] if cofniecie
                else [fr for fr in z_powodem if spadek_na_droge_atomowa(fr)])
     uwagi = [fr for fr in z_powodem if fr not in atomowe]
+    if cofniecie and res.withheld:                       # AR-82: karta wróciła, zeznanie nie
+        msg += " · " + i18n.t("grid.wb.undo_withheld", n=len(res.withheld))
     if atomowe:
         msg += i18n.t("wb.inplace_fallback", n=len(atomowe),
                       reason=bez_prefiksu_spadku(atomowe[0].reason))
@@ -217,7 +219,7 @@ def ruszyl_cokolwiek(res):
     rozjazdem po częściowym kroku (plik przeniesiony, karta nie). Katalogi - wyłącznie gdy zostały
     założone ponad te, które ten sam przebieg sprzątnął (odmowa po założeniu katalogu zostawia
     przebieg bez zmian na dysku, a „Cofnij” byłoby obietnicą bez pokrycia)."""
-    return bool(res.applied or res.failed or res.commit_ids
+    return bool(res.applied or res.failed or res.withheld or res.commit_ids
                 or res.dirs_created > res.dirs_removed)
 
 
@@ -621,10 +623,12 @@ class ObjectChangeDialog(QDialog):
                        "failed": "objchg.st.failed", "skipped": "objchg.st.skipped"}
         else:
             statusy = {"applied": "objchg.st.done", "blocked": "objchg.st.blocked",
-                       "failed": "objchg.st.failed", "skipped": "objchg.st.skipped"}
+                       "failed": "objchg.st.failed", "skipped": "objchg.st.skipped",
+                       "withheld": "objchg.st.withheld"}
         wyniki = {fr.location_id: (klucz, fr) for klucz, lista in (
             ("applied", res.applied), ("blocked", res.blocked), ("failed", res.failed),
-            ("skipped", res.skipped)) for fr in lista}
+            ("skipped", res.skipped),
+            ("withheld", [] if cofniecie else res.withheld)) for fr in lista}
         self._naglowki(po_biegu=True)
         self.items_tree.setColumnHidden(_COL_STATUS, False)
         for lid, w in self._wiersze.items():
@@ -794,7 +798,8 @@ class ObjectChangeDialog(QDialog):
         self._pokaz_wynik(res, cofniecie=False)
         self._wynik_na_liscie = True
         self._do_cofniecia = self._do_cofniecia or ruszyl_cokolwiek(res)
-        przetworzone = len(res.applied) + len(res.blocked) + len(res.failed) + len(res.skipped)
+        przetworzone = (len(res.applied) + len(res.blocked) + len(res.failed) + len(res.skipped)
+                        + len(res.withheld))
         if res.cancelled:
             # „Dokończ (N)” liczy pozycje, których przerwany bieg nie dotknął - z liczby, z którą
             # ten bieg ruszył (cały plan albo reszta po poprzednim przerwaniu).

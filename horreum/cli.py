@@ -2069,7 +2069,8 @@ def _cmd_object_change(args, parser):
     sterownikiem co okno (`writeback.commit_object_change` / `undo_object_change`) - przebieg
     odtwarzany z bazy, ponowienie wznawia pierwszą niedomkniętą fazę, drugie cofnięcie to „nic do
     zrobienia”. Przebieg nieznany albo cofnięty (zapis cofniętego nie wznawia) → kod 2 z powodem.
-    Kod wyjścia 1, gdy którakolwiek pozycja zablokowana albo nieudana. ASCII - konsola cp1250."""
+    Kod wyjścia 1, gdy którakolwiek pozycja zablokowana, nieudana albo (`finish`) zapisana
+    z zeznaniem wstrzymanym (AR-82). ASCII - konsola cp1250."""
     if args.oc_cmd is None:
         parser.print_help()
         return 2
@@ -2088,21 +2089,31 @@ def _cmd_object_change(args, parser):
     finally:
         con.close()
     zrobione = "zmienione" if args.oc_cmd == "finish" else "cofniete"
+    # AR-82: `finish` - karta ZAPISANA, zeznanie klatki wstrzymane (osobny kubeł, kod 1: robota
+    # czeka); `undo` - karta wróciła, zeznanie nie (podzbiór cofniętych).
+    wstrzymane = ("z zeznaniem wstrzymanym" if args.oc_cmd == "finish"
+                  else "bez powrotu zeznania")
     lines = [f"Horreum object-change {args.oc_cmd} {args.db} (przebieg {args.run_id}): "
-             f"{zrobione} {len(res.applied)}, zablokowane {len(res.blocked)}, nieudane "
-             f"{len(res.failed)}, pominiete {len(res.skipped)}; katalogi zalozone "
-             f"{res.dirs_created}, usuniete {res.dirs_removed}"]
+             f"{zrobione} {len(res.applied)}, {wstrzymane} {len(res.withheld)}, zablokowane "
+             f"{len(res.blocked)}, nieudane {len(res.failed)}, pominiete {len(res.skipped)}; "
+             f"katalogi zalozone {res.dirs_created}, usuniete {res.dirs_removed}"]
     if res.dirs_uncertain:
         lines.append(f"  katalogi o niepewnej wlasnosci (zostaja do oka): {res.dirs_uncertain}")
     if res.cancelled:
         lines.append("  przerwano - pozycje oczekujace dokonczy ponowne `finish`")
-    z_powodem = res.blocked + res.failed + [fr for fr in res.applied if fr.reason]
+    if res.withheld:
+        lines.append("  zeznanie wstrzymane: wskaz zapisana kopie gestem \"Ta kopia prowadzi\" "
+                     "w Zbiorach (dokonczy zapis) albo cofnij przebieg (`object-change undo`)")
+    z_powodem = (res.blocked + res.failed
+                 + [fr for fr in res.withheld if fr not in res.applied]
+                 + [fr for fr in res.applied if fr.reason])
     lines += [f"    {fr.status}: {fr.path} - {fr.reason}" for fr in z_powodem[:args.limit]]
     if len(z_powodem) > args.limit:
         lines.append(f"    ... i {len(z_powodem) - args.limit} wiecej")
     lines += [f"  uwaga: {w}" for w in res.warnings]
     print("\n".join(lines))
-    return 1 if (res.blocked or res.failed) else 0
+    zaleglosc = res.withheld if args.oc_cmd == "finish" else []
+    return 1 if (res.blocked or res.failed or zaleglosc) else 0
 
 
 def _cmd_header_fix(args):
@@ -2117,7 +2128,8 @@ def _cmd_header_fix(args):
     sprzeczność = odmowa w całości, zero zapisu). Zapis: staging (`repo.stage_pending_many`) +
     `writeback.commit(..., inplace=True)` (droga ujednolicenia karty `OBJECT`, kotwica nagłówka każdej
     kopii, backup pod `--undo`). Po zapisie i po cofnięciu - łańcuch pochodnych (filtr, przepis,
-    rodowód). Kod wyjścia APPLY/UNDO: 1, gdy którykolwiek plik zablokowany albo nieudany."""
+    rodowód). Kod wyjścia APPLY/UNDO: 1, gdy którykolwiek plik zablokowany, nieudany albo (APPLY)
+    zapisany z zeznaniem wstrzymanym (AR-82: głosem klatki mówi inna kopia)."""
     from . import macro, repo, writeback
     now = datetime.now(timezone.utc).isoformat()
     con = db.open_db(args.db)
@@ -2125,9 +2137,10 @@ def _cmd_header_fix(args):
         if args.undo is not None:
             res = writeback.undo(con, args.undo, now=now)
             lines = [f"Horreum header-fix {args.db} (UNDO commit {args.undo}): przywrocone "
-                     f"{len(res.restored)}, zablokowane {len(res.blocked)}, nieudane {len(res.failed)}"]
+                     f"{len(res.restored)} (bez powrotu zeznania {len(res.withheld)}), "
+                     f"zablokowane {len(res.blocked)}, nieudane {len(res.failed)}"]
             lines += [f"    {fr.status}: {fr.path} - {fr.reason}"
-                      for fr in (res.blocked + res.failed)[:args.limit]]
+                      for fr in (res.withheld + res.blocked + res.failed)[:args.limit]]
             if res.restored:
                 _pochodne(con, now, lines)
             print("\n".join(lines))
@@ -2193,17 +2206,17 @@ def _cmd_header_fix(args):
             return 1
         repo.stage_pending_many(con, run_id=plan.run.run_id, previews=plan.run.touched)
         res = writeback.commit(con, plan.run.run_id, now=now, inplace=True)
-        lines.append(f"  zapisane {len(res.applied)} (w miejscu {len(res.in_place)}), zablokowane "
-                     f"{len(res.blocked)}, nieudane {len(res.failed)}, pominiete {len(res.skipped)}"
-                     f"; commit {res.commit_id}")
-        for fr in (res.blocked + res.failed + res.skipped)[:args.limit]:
+        lines.append(f"  zapisane {len(res.applied)} (w miejscu {len(res.in_place)}), z zeznaniem "
+                     f"wstrzymanym {len(res.withheld)}, zablokowane {len(res.blocked)}, nieudane "
+                     f"{len(res.failed)}, pominiete {len(res.skipped)}; commit {res.commit_id}")
+        for fr in (res.withheld + res.blocked + res.failed + res.skipped)[:args.limit]:
             lines.append(f"    {fr.status}: {fr.path} - {fr.reason}")
         if res.applied:
             _pochodne(con, now, lines)
         if res.commit_id is not None:
             lines.append(f'  cofniecie: horreum header-fix "{args.db}" --undo {res.commit_id}')
         print("\n".join(lines))
-        return 1 if (res.blocked or res.failed) else 0
+        return 1 if (res.blocked or res.failed or res.withheld) else 0
     finally:
         con.close()
 

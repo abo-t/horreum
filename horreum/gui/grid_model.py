@@ -326,6 +326,11 @@ PRESET_COPY_CONFLICT = "Kopie niezgodne"
 # o jednej kopii i zeznaniu spoza ręki naprawia Dostawa, więc tu ich nie ma. Stała współdzielona
 # z TasksView po nazwie, jak dziewięciu sąsiadów.
 PRESET_ORPHAN_TESTIMONY = "Zeznanie z nieobecnej kopii"
+# PRESET_WITHHELD_TESTIMONY - bliźniak AR-82. Plik kopii zapisany, a zeznanie klatki nie przyjęło
+# jego nagłówka (głosem mówi inna obecna kopia) - zapis czeka na wskazanie kopii gestem „Ta kopia
+# prowadzi”. Kopie bywają zgodne w polach „Kopii niezgodnych”, więc ten stan nie miał powierzchni.
+# Predykat `queries.withheld_testimony_frame_ids`. Stała współdzielona z TasksView po nazwie.
+PRESET_WITHHELD_TESTIMONY = "Zeznanie wstrzymane"
 # PRESET_PATH_HEADER_CONFLICT - jedenasty bliźniak (E5-2). Obiekt klatki zatwierdził człowiek
 # z folderu (`object_source='path'`), a karta `OBJECT` w pliku mówi co innego albo coś, czego
 # drabina nie zna. „Do przeglądu" tego nie widzi (klatka MA obiekt), więc bez tej perspektywy
@@ -377,6 +382,8 @@ PRESETS = {
     PRESET_STACK_VERSIONS: {"filter": None, "group_by": _GRUPA_WERSJI, "only_stack_versions": True},
     PRESET_COPY_CONFLICT: {"filter": None, "group_by": None, "only_copy_conflict": True},
     PRESET_ORPHAN_TESTIMONY: {"filter": None, "group_by": None, "only_orphan_testimony": True},
+    PRESET_WITHHELD_TESTIMONY: {"filter": None, "group_by": None,
+                                "only_withheld_testimony": True},
     PRESET_PATH_HEADER_CONFLICT: {"filter": None, "group_by": None,
                                   "only_path_header_conflict": True},
     PRESET_TORN_WRITE: {"filter": None, "group_by": None, "only_torn_write": True},
@@ -401,6 +408,7 @@ _PRESET_LABELS = {
     PRESET_STACK_VERSIONS: "perspective.stack_versions",
     PRESET_COPY_CONFLICT: "perspective.copy_conflict",
     PRESET_ORPHAN_TESTIMONY: "perspective.orphan_testimony",
+    PRESET_WITHHELD_TESTIMONY: "perspective.withheld_testimony",
     PRESET_PATH_HEADER_CONFLICT: "perspective.path_header_conflict",
     PRESET_TORN_WRITE: "perspective.torn_write",
     PRESET_PENDING_FINISH: "perspective.pending_finish",
@@ -445,6 +453,7 @@ _TRIMY = (
     ("_only_stack_versions", "stack_version_frame_ids"),
     ("_only_copy_conflict", "copy_conflict_frame_ids"),
     ("_only_orphan_testimony", "orphan_testimony_frame_ids"),
+    ("_only_withheld_testimony", "withheld_testimony_frame_ids"),
     ("_only_path_header_conflict", "path_header_conflict_frame_ids"),
     ("_only_torn_write", "torn_write_frame_ids"),
     ("_only_pending_finish", "pending_finish_frame_ids"),
@@ -478,10 +487,11 @@ _RECEPTY_ZAPISU = {
 # to znakiem „?" (`_images_cell`).
 # Wybór ręki w „Polach" bije domyślną (`FramesView._obrazy_reka`). Klucz = flaga z `_TRIMY`.
 _FLAGI_OBRAZOW = ("_only_dups", "_only_copy_conflict", _FLAGA_WERSJI)
-# Dwie perspektywy, w których każda klatka czeka na wskazanie kopii wiodącej (AR-4, AR-23): menu
+# Perspektywy, w których każda klatka czeka na wskazanie kopii wiodącej (AR-4, AR-23, AR-82): menu
 # tabeli pokazuje w nich podmenu „Ta kopia prowadzi" zawsze - przy złym zaznaczeniu wygaszone
 # z powodem. Klucz = flaga z `_TRIMY`.
-_FLAGI_KOPII_WIODACEJ = ("_only_copy_conflict", "_only_orphan_testimony")
+_FLAGI_KOPII_WIODACEJ = ("_only_copy_conflict", "_only_orphan_testimony",
+                         "_only_withheld_testimony")
 # Perspektywy, w których komórka ścieżki niesie prefiks „×N" albo ścieżkę jako przedmiot decyzji
 # (duplikaty, ich podzbiór niezgodnych, wersje stosów, dwie perspektywy izolacji zapisu): tam
 # kolumna bierze szerokość z treści z sufitem i elizją w środku (`kolumna_z_tresci`). Gdzie indziej
@@ -777,15 +787,20 @@ def _zdanie_gestu_zapisu(op, res):
     klucz, sukces = _GESTY_ZAPISU[op]
     wyniki = list(res.results)
     msg = i18n.t_plural(klucz, sum(1 for w in wyniki if w.status == sukces))
+    # AR-82: dokończenie domknęło fazę, plik jest zapisany, a zeznanie klatki nie przyjęło zapisu -
+    # osobny człon, nie „błąd” (`grid.wb.withheld`, ta sama fraza co wynik commitu).
+    wstrzymane = [w for w in wyniki if w.status == "withheld"]
     zablokowane = [w for w in wyniki if w.status == "blocked"]
-    bledy = [w for w in wyniki if w.status not in (sukces, "blocked")]
+    bledy = [w for w in wyniki if w.status not in (sukces, "blocked", "withheld")]
+    if wstrzymane:
+        msg += " · " + i18n.t("grid.wb.withheld", n=len(wstrzymane))
     if zablokowane:
         msg += i18n.t_plural("grid.inplace.blocked", len(zablokowane))
     if bledy:
         msg += i18n.t_plural("grid.inplace.failed", len(bledy))
     if res.cancelled:
         msg += i18n.t("grid.inplace.cancelled")
-    for powod in (next((w for w in zablokowane + bledy if w.reason), None),
+    for powod in (next((w for w in zablokowane + bledy + wstrzymane if w.reason), None),
                   next((w for w in wyniki if w.status == sukces and w.reason), None)):
         if powod is not None:
             msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path),

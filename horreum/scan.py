@@ -1602,9 +1602,9 @@ def _record_testimony_and_flags(con, rec, *, frame_id, sha1_data, readable, iden
                                actor=actor)
         summary.frame_review += 1
         return
-    repo.record_header(
-        con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
-        cards=rec.cards, now=now, actor=actor, **extract_header(rec.header))
+    raw_json, hot, cards = testimony_of(rec)
+    repo.record_header(con, frame_id=frame_id, raw_json=raw_json, cards=cards, now=now,
+                       actor=actor, **hot)
     summary.headers += 1
     if ident is None:
         repo.flag_camera_review(
@@ -1718,6 +1718,40 @@ def rederive_kinds(con, *, now, actor="rederive-kind"):
         except repo.KindWitnessStale as exc:
             s.refused.append((z["frame_id"], f"odmowa klingi: {exc}"))
     return s
+
+
+def testimony_of(rec):
+    """ZEZNANIE Z REKORDU - `(raw_json, hot_fields, cards)` - jedno wyrażenie dla nagrania zeznania
+    (`record_header`), odświeżenia (`refresh_location`), przejęcia (`adopt_testimony`) i dowodu
+    zeznania (`repo.testimony_matches`, AR-82): dowód porównuje bajt w bajt `raw_json`, więc każda
+    droga musi serializować nagłówek tak samo. Rekord czytelny (EXPECT: `rec.header` nie `None`)."""
+    return json.dumps(rec.header, ensure_ascii=False), extract_header(rec.header), rec.cards
+
+
+def zeznanie_kopii(con, rec, *, location_id, frame_id, sha1_data, camera_id, kind, now, actor,
+                   dociagnij):
+    """DOWÓD ZEZNANIA po wjeździe rekordu znanej kopii (AR-82), w transakcji wołającego: `True`, gdy
+    zeznanie klatki jest odczytem tego pliku (`repo.testimony_matches`).
+
+    `dociagnij=True` (Z7): przy braku zgodności, gdy bramka wyboru kopii (`repo.testimony_flows_from`)
+    wybiera tę kopię, zeznanie jest JAWNIE przepisane z rekordu (`repo.rewrite_testimony_from_copy`)
+    i dowód liczony drugi raz. Bez tego kopia, której zapis zeznanie wstrzymało, nie dociągnie go
+    nigdy: jej odcisk w bazie jest już nowy, więc `refresh_location` nie widzi zmiany. Skan woła to
+    z `dociagnij=True` wyłącznie przy otwartym wstrzymaniu lokacji - zwykły przebieg nie przepisuje
+    zeznania z pliku bez zmiany odcisku (to robota Dostawy, AR-4)."""
+    raw_json, hot, cards = testimony_of(rec)
+    if repo.testimony_matches(con, frame_id=frame_id, raw_json=raw_json, hot_fields=hot,
+                              cards=cards):
+        return True
+    if not dociagnij or not repo.testimony_flows_from(con, frame_id, location_id):
+        return False
+    if not repo.rewrite_testimony_from_copy(
+            con, location_id=location_id, frame_id=frame_id, sha1_data=sha1_data,
+            header_hash=rec.header_hash, raw_json=raw_json, cards=cards, hot_fields=hot,
+            camera_id=camera_id, kind=kind, now=now, actor=actor):
+        return False
+    return repo.testimony_matches(con, frame_id=frame_id, raw_json=raw_json, hot_fields=hot,
+                                  cards=cards)
 
 
 def _derive_axes(con, rec, *, now, actor):
@@ -1989,24 +2023,44 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
 
     # ta sama tożsamość pod znaną ścieżką → refresh faktów (+ zeznania przy zmianie header_hash)
     summary.frames_existing += 1
+    # Zeznanie z rekordu jednym wyrażeniem (`testimony_of`, B11) - to samo porównuje dowód AR-82.
+    raw_json, hot, cards = testimony_of(rec) if readable else (None, None, rec.cards)
     refreshed = repo.refresh_location(
         con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
         file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
         compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
         unreadable_kind=kind_after, unreadable_reason=reason_after,
-        present=1, now=now, actor=actor,
-        raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
-        cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
+        present=1, now=now, actor=actor, raw_json=raw_json, cards=cards, hot_fields=hot,
         camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
     _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
     if readable:
-        # Commit drogą atomową, który padł po backupie ('failed' bez re-syncu), dokańcza się tu,
-        # gdy na dysku leży dokładnie zapisany nagłówek (AR-38 (2)). Wejście po indeksie lokacji
-        # w stagingu - zwykły skan płaci jedno zapytanie bez trafień.
-        repo.confirm_failed_commit_by_scan(con, location_id=loc["id"], frame_id=frame_id,
-                                           header_hash=rec.header_hash, now=now, actor=actor)
+        # Zapis z zeznaniem wstrzymanym (AR-82) rozlicza się przy pełnym odczycie: zeznanie
+        # dociągnięte z tej kopii, gdy ją wybiera bramka wyboru (Z7), nowszy stan pliku - zastąpienie
+        # (Z10). Commit drogą atomową, który padł po backupie ('failed' bez re-syncu), dokańcza się
+        # tu, gdy na dysku leży dokładnie zapisany nagłówek (AR-38 (2)) - 'applied' wyłącznie przy
+        # dowodzie zeznania, inaczej wstrzymany. Wejście po indeksach lokacji - zwykły skan płaci
+        # dwa zapytania bez trafień, dowód zeznania liczy się tylko przy trafieniu.
+        # DOCIĄGNIĘCIE NIE PRZEGŁOSOWUJE RĘKI (AR-4, B8): zeznanie napisane gestem „Ta kopia
+        # prowadzi” zostaje, nawet gdy jego kopia zniknęła - wybór należy do człowieka (wiersz
+        # Porządków „Zeznanie wstrzymane”), jak w etapie Dostawy (`adopt_candidates`). Przepisanie
+        # przy dokończeniu idzie pod aktorem wstrzymanego zapisu, nie skanu.
+        wstrzymane = repo.open_withheld(con, loc["id"])
+        if wstrzymane or repo.has_failed_atomic_rows(con, loc["id"]):
+            from .gui import queries          # leniwie - jak `_adopt_candidates_under`
+            reka = bool(queries.hand_testimony_frame_ids(con, [frame_id]))
+            aktor = wstrzymane[0]["actor"] if wstrzymane else actor
+            zgodne = zeznanie_kopii(con, rec, location_id=loc["id"], frame_id=frame_id,
+                                    sha1_data=sha1_data, camera_id=camera_id, kind=kind, now=now,
+                                    actor=aktor, dociagnij=bool(wstrzymane) and not reka)
+            if wstrzymane:
+                repo.settle_withheld(con, location_id=loc["id"], frame_id=frame_id,
+                                     sha1_data=sha1_data, header_hash=rec.header_hash,
+                                     testimony_ok=zgodne, now=now, actor=aktor)
+            repo.confirm_failed_commit_by_scan(con, location_id=loc["id"], frame_id=frame_id,
+                                               header_hash=rec.header_hash, testimony_ok=zgodne,
+                                               now=now, actor=actor)
     if loc["present"] == 0 and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
         # DRUGA DROGA POWROTU TREŚCI (R4): kopia była nieobecna (`present=0`) i właśnie odżyła —
         # bez przepięcia, bo `sha1_data` się zgadza. Tożsamość oznaczona jako zastąpiona ma znów
@@ -2750,10 +2804,10 @@ def _adopt_one(con, frame_id, kopia, rec, *, now, actor, inplace_gen=None):
         return "raced"
     _odmow_staremu_odczytowi(con, kopia["location_id"], inplace_gen)
     kind, _kind_source, _ident, camera_id = _derive_axes(con, rec, now=now, actor=actor)
+    raw_json, hot, cards = testimony_of(rec)
     return repo.adopt_testimony(
         con, location_id=kopia["location_id"], sha1_data=sha1_data, header_hash=rec.header_hash,
-        raw_json=json.dumps(rec.header, ensure_ascii=False), cards=rec.cards,
-        hot_fields=extract_header(rec.header), camera_id=camera_id, kind=kind, now=now,
+        raw_json=raw_json, cards=cards, hot_fields=hot, camera_id=camera_id, kind=kind, now=now,
         actor=actor, inplace_gen=inplace_gen)
 
 

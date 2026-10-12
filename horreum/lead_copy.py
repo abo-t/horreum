@@ -27,7 +27,7 @@ import json
 from dataclasses import dataclass
 
 from . import derive, repo, scan
-from .resolve.headers import FAKTY_BIEZACE, copy_facts_state, copy_testimony, extract_header
+from .resolve.headers import FAKTY_BIEZACE, copy_facts_state, copy_testimony
 
 HAND_ACTOR = "user:local"
 
@@ -110,10 +110,13 @@ def awaiting_hand(con, frame_id):
     (`queries.copy_conflict_frame_ids`, `queries.orphan_testimony_frame_ids`), więc gest żyje
     dokładnie tam, gdzie liczba wiersza - razem z guardami żywotności (wycofana i zastąpiona
     wypadają). Klatka z decyzją ręki zostaje w „Kopiach niezgodnych" (kopie dalej się różnią):
-    tam gest jest drogą zmiany zdania."""
+    tam gest jest drogą zmiany zdania. Trzeci wiersz (AR-82): zapis z zeznaniem wstrzymanym
+    (`queries.withheld_testimony_frame_ids`) - kopie bywają zgodne w polach dwóch pozostałych
+    predykatów, a gest na zapisanej kopii jest drogą dokończenia zapisu."""
     from .gui import queries
     return (frame_id in queries.copy_conflict_frame_ids(con)
-            or frame_id in queries.orphan_testimony_frame_ids(con))
+            or frame_id in queries.orphan_testimony_frame_ids(con)
+            or frame_id in queries.withheld_testimony_frame_ids(con))
 
 
 def adopt_lead_copy(con, *, location_id, now, actor=HAND_ACTOR, expected_frame_id=None):
@@ -177,10 +180,10 @@ def _przejmij(con, frame_id, location_id, rec, *, now, actor, inplace_gen, expec
         return "stale"
     scan._odmow_staremu_odczytowi(con, location_id, inplace_gen)
     kind, _kind_source, _ident, camera_id = scan._derive_axes(con, rec, now=now, actor=actor)
+    raw_json, hot, cards = scan.testimony_of(rec)
     return repo.adopt_testimony(
         con, location_id=location_id, sha1_data=sha1_data, header_hash=rec.header_hash,
-        raw_json=json.dumps(rec.header, ensure_ascii=False), cards=rec.cards,
-        hot_fields=extract_header(rec.header), camera_id=camera_id, kind=kind, now=now,
+        raw_json=raw_json, cards=cards, hot_fields=hot, camera_id=camera_id, kind=kind, now=now,
         actor=actor, inplace_gen=inplace_gen, expected_frame_id=expected_frame_id)
 
 

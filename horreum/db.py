@@ -125,6 +125,11 @@ from importlib import resources
 # `pending_object_change` (pozycja: CAS ręki, stan sprzed zmiany obiektu, faza cofnięcia) i `run_dir`
 # (katalogi założone i usunięte przez gest, zamiar przed mutacją). Wchodzą PUSTE - wypełnia staging
 # i sterownik gestu.
+# 0037 to PRZYROST (nowa tabela + ADD COLUMN, AR-82): `withheld_write` - zapis pliku, którego nagłówka
+# zeznanie klatki nie przyjęło (głosem mówi inna kopia), do dokończenia albo rozliczenia;
+# `pending_changes.withheld_id` (wiązanie wpisów takiej próby) i `header_backups.hand_version` (wersja
+# decyzji ręki o obiekcie sprzed pierwszego bajtu zapisu). Wchodzi PUSTE - SQL nie wie, które commity
+# sprzed migracji zgłosiły sukces przy wstrzymanym zeznaniu.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -161,6 +166,7 @@ MIGRATIONS = [
     (34, "0034_stack_history.sql"),
     (35, "0035_stack_variant.sql"),
     (36, "0036_object_change.sql"),
+    (37, "0037_withheld_write.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

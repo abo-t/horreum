@@ -6052,3 +6052,49 @@ def test_pusta_perspektywa_kopii_przy_czekajacych_faktach_mowi_zdaniem_Porzadkow
     view.empty_btn.click()
     assert wezwania == [1, 1]
     assert view.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY)
+
+
+def _model_exptime(qapp, karty):
+    """Model gridu z samą kolumną EXPTIME: `karty` = [(frame_id, zapis karty, liczba)]."""
+    from horreum.gui.grid import GridTableModel
+    base = [{"frame_id": fid, "path": f"/a/{fid}", "_telescope": "", "_object": "", "kind": "light",
+             "camera_model": None, "filter_canon": None, "present": 1, "n_present": 1}
+            for fid, _raw, _num in karty]
+    pv = pivot_mod.build_pivot([fid for fid, _r, _n in karty], ["EXPTIME"],
+                               [(fid, "EXPTIME", 0, raw, num) for fid, raw, num in karty])
+    m = GridTableModel()
+    m.set_data(base, pv, ["EXPTIME"])
+    return m
+
+
+def test_kolumna_exptime_jedna_precyzja_na_kolumne(qapp):
+    """AR-115: kolumna EXPTIME stawiała zapis karty programu, który ją wpisał („1800.00”, „600.000”,
+    „15.000” jeden pod drugim - stosy WBPP). Teraz jedna precyzja na kolumnę: najmniej miejsc, które
+    pokazują dokładnie każdą jej wartość, nie więcej niż trzy (reguła z rozkładu na kopii archiwum,
+    komentarz przy `grid_model.miejsca_ekspozycji`). Wartość ucięta do trzech miejsc mówi pełnym
+    zapisem karty w podpowiedzi; pole edycji i sort zostają przy karcie i liczbie.
+
+    Falsyfikator: precyzja per komórka (`:g`, surowy zapis) → „0.08” obok „600.000”."""
+    from horreum.gui.grid import BASE_COLS
+    from horreum.gui.grid_model import miejsca_ekspozycji
+    col = len(BASE_COLS)
+
+    stosy = _model_exptime(qapp, [(1, "1800.00", 1800.0), (2, "600.000", 600.0), (3, "15.000", 15.0)])
+    assert [stosy.data(stosy.index(r, col)) for r in range(3)] == ["1800", "600", "15"]
+    assert stosy.data(stosy.index(1, col), Qt.ToolTipRole) is None
+    assert stosy.data(stosy.index(1, col), Qt.EditRole) == "600.000"      # edycja od zapisu karty
+
+    z_flatami = _model_exptime(qapp, [(1, "600.0", 600.0), (2, "0.08", 0.08),
+                                      (3, "4.03329572835443", 4.03329572835443)])
+    z_flatami.sort(col, Qt.AscendingOrder)
+    assert [z_flatami.data(z_flatami.index(r, col)) for r in range(3)] == [
+        "0.080", "4.033", "600.000"]
+    assert z_flatami.data(z_flatami.index(1, col), Qt.ToolTipRole) == "4.03329572835443"
+    assert z_flatami.data(z_flatami.index(0, col), Qt.ToolTipRole) is None
+    assert z_flatami.data(z_flatami.index(0, col), Qt.TextAlignmentRole) == int(
+        Qt.AlignRight | Qt.AlignVCenter)
+
+    # reguła: 1/160, 1/125, 1/100, 1/80 s przy dwóch miejscach zlałyby się w „0.01”
+    assert miejsca_ekspozycji([0.00625, 0.008, 0.01, 0.0125]) == 3
+    assert len({f"{v:.3f}" for v in (0.00625, 0.008, 0.01, 0.0125)}) == 4
+    assert miejsca_ekspozycji([300.0, 0.5]) == 1 and miejsca_ekspozycji([]) == 0

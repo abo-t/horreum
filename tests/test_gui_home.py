@@ -162,7 +162,10 @@ def _pokazane(win):
     return win
 
 
-def _czekaj_na_watek(home, limit_s=10.0):
+def _czekaj_na_watek(home, limit_s=30.0):
+    # Limit jest BEZPIECZNIKIEM, nie pomiarem (ten sam co `_BEZPIECZNIK_S` w `test_gui_pola_w_tle`):
+    # rachunek teczek na bazie `_TRZY` trwa 1,4-2,6 s, a pod obciążeniem CPU (24 procesy pętli,
+    # 2026-10-13) 8,6-9,6 s - dawne 10 s czerwieniło test przy kilku czekaniach z rzędu.
     koniec = time.monotonic() + limit_s
     while home._thread is not None and time.monotonic() < koniec:
         QTest.qWait(20)
@@ -965,8 +968,8 @@ def test_menu_wiecej_prowadzi_do_istniejacych_drog(qapp, tmp_path):
         h, g = win.home_view, win.grid_view
         akcje = h.akcje_wiecej
         assert [a.text() for a in h.btn_wiecej.menu().actions()] == [
-            "Planer", "Mapa stanowisk", "Nazwy plików…", "Makra nagłówków…", "Perspektywy",
-            "Tryb zaawansowany dostawy", "Zbiory klasyczne"]
+            "Wciągnij z WBPP…", "Planer", "Mapa stanowisk", "Nazwy plików…", "Makra nagłówków…",
+            "Perspektywy", "Tryb zaawansowany dostawy", "Zbiory klasyczne"]
         akcje[home_mod.WIECEJ_PLANER].trigger()
         assert win.stack.currentIndex() == STRONA_PLANER and win.nav.currentRow() == NAV_PLANER
         akcje[home_mod.WIECEJ_STANOWISKA].trigger()
@@ -987,6 +990,55 @@ def test_menu_wiecej_prowadzi_do_istniejacych_drog(qapp, tmp_path):
         assert win.stack.currentIndex() == STRONA_DOSTAWA and win.nav.currentRow() == NAV_DOSTAWA
         akcje[home_mod.WIECEJ_KLASYCZNE].trigger()
         assert win.nav.currentRow() == NAV_ZBIORY and win.znajdz_view.prezentacja == "klasyczna"
+    finally:
+        win.close()
+
+
+def test_wiecej_wciagnij_z_wbpp_ta_sama_droga_co_przycisk_Dostawy(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-109: „Więcej… → Wciągnij z WBPP…” na Domu otwiera okno żniw TĄ SAMĄ drogą, co przycisk sekcji
+    Stosy Dostawy (`_on_open_harvest`): te same wejścia okna i ten sam napis (jeden klucz katalogu).
+    Okno zamknięte bez przyjęcia zostawia człowieka na Domu i niczego nie uruchamia; „Zamknij
+    i przyjmij” przenosi na Dostawę (tam biegnie łańcuch i staje raport „co przyszło”) i uruchamia
+    łańcuch na korzeniu kopii. Okno żniw podstawione w `sys.modules` - gospodarz importuje je leniwie.
+
+    Falsyfikatory: trasa menu obok `_on_open_harvest` → inne wejścia okna niż z Dostawy; przyjęcie
+    bez przejścia → strona Domu nad biegiem, którego raport stoi gdzie indziej."""
+    import sys
+    import types
+    from PySide6.QtWidgets import QDialog
+    from horreum.gui.pipeline import PipelineView
+    ustawienia.setValue("work/root", str(tmp_path / "praca"))
+    okna, biegi = [], []
+    wyniki = [("", None), ("Wciągnięto 1", "X:/archiwum/CALIBRATION/masters/flats"), ("", None)]
+
+    class _OknoZniw:
+        def __init__(self, con, *, now_fn, archive_root, work_root=None, release_roots=(), parent=None):
+            okna.append((con, archive_root, work_root, list(release_roots), parent))
+            self.summary, self.harvested_root = wyniki.pop(0)
+            self.harvested_stacks = []
+
+        def exec(self):
+            return QDialog.Accepted
+
+    modul = types.ModuleType("horreum.gui.harvest_dialog")
+    modul.HarvestDialog = _OknoZniw
+    monkeypatch.setitem(sys.modules, "horreum.gui.harvest_dialog", modul)
+    monkeypatch.setattr(PipelineView, "run_all_on", lambda self, root: biegi.append(root))
+    win = MainWindow(_s8(tmp_path))
+    try:
+        akcja = win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA]
+        assert akcja.text() == win.pipeline_view.btn_harvest.text() == "Wciągnij z WBPP…"
+        assert win.stack.currentIndex() == STRONA_DOM
+        akcja.trigger()                                              # zwykłe „Zamknij”
+        assert len(okna) == 1 and biegi == []
+        assert win.stack.currentIndex() == STRONA_DOM and win.nav.currentRow() == NAV_DOM
+        akcja.trigger()                                              # „Zamknij i przyjmij”
+        assert biegi == ["X:/archiwum/CALIBRATION/masters/flats"]
+        assert win.stack.currentIndex() == STRONA_DOSTAWA and win.nav.currentRow() == NAV_DOSTAWA
+        assert win.report_label.text() == "Wciągnięto 1"
+        win.pipeline_view.btn_harvest.click()                        # ta sama droga z Dostawy
+        assert okna[0][0] is win.con and okna[0][4] is win
+        assert okna[2] == okna[0] == okna[1]
     finally:
         win.close()
 

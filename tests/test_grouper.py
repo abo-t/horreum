@@ -8,7 +8,7 @@ import struct
 import numpy as np
 from astropy.io import fits
 
-from horreum import db, repo
+from horreum import audit, db, repo, resolver
 from horreum.grouper import run_grouper
 from horreum.scan import scan_tree
 
@@ -83,6 +83,25 @@ def test_grouper_config_link_inwariant_i_bez_telescop_review(tmp_path):
                       "WHERE c.camera_id != f.camera_id").fetchone()[0]
     assert bad == 0
     assert con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0] == 1
+    con.close()
+
+
+def test_drugi_przebieg_nie_dopisuje_przegladu_configu(tmp_path):
+    """AR-88: drugi przebieg bez zmiany danych dopisuje ZERO `config.review` - zdarzenie pada tylko
+    przy wejściu klatki do kolejki. Licznik przebiegu (`config_review`) i kolejka ze STANU stoją,
+    a każda klatka bez configu dalej ma powód w bieżącym epizodzie (`audit`, AR-65)."""
+    con = _scanned_tree(tmp_path)
+
+    def ile():
+        return con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0]
+
+    s1 = run_grouper(con, now=NOW)
+    stan1, ev1 = resolver.review_state(con), ile()
+    s2 = run_grouper(con, now=NOW)
+    assert (ev1, ile()) == (1, 1)
+    assert s1.config_review == s2.config_review == 1          # licznik przebiegu to STAN
+    assert resolver.review_state(con) == stan1 and stan1.no_config == 1
+    assert audit.config_review_reason_gap(con) == 0
     con.close()
 
 

@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 from .resolve.catalog import folder_form   # forma systemu plików kanonu (token obiektu, D-1011-5)
 from .resolve.channel import channel_from_name
 from .resolve.frames import LIGHT_KINDS   # jedyne z obiektem (kind-aware) — właściciel w liściu
+from .resolve.recipe import parse_master_path   # jedyny właściciel tokenu FLATGRP w nazwie mastera (AR-86)
 
 # ============================================================ ekstraktory daty-godziny (§2)
 
@@ -96,9 +97,8 @@ _DISC_LEN = 12                                         # hex prefiksu sha1_data 
 _UNSAFE = re.compile(r"[^0-9A-Za-z+._-]+")             # spacje/separatory/śmieć → '_'
 # Tokeny bez argumentu — WSTECZNIE zgodne z v1 (goły string w liście szablonu).
 BARE_TOKENS = frozenset({"datetime", "object", "kind", "filter", "exp", "disc"})
-# Grupa flatu w nazwie mastera (`MASTERFLAT_FLATGRP_202511010_FILTER_OIII_.xisf` → `202511010`) i znacznik
-# braku podpiętego flatu - ten sam, który archiwum już niesie w nazwach lightów (`FLATGRP_NOFLAT_`).
-_FLATGRP = re.compile(r"FLATGRP_([^_]+)")
+# Znacznik braku podpiętego flatu - ten sam, który archiwum już niesie w nazwach lightów
+# (`FLATGRP_NOFLAT_`). Grupę flatu z nazwy mastera czyta `recipe.parse_master_path` (`_flatgrp_segment`).
 _NOFLAT = "NOFLAT"
 _KIND_CASES = ("upper", "lower")                       # parametr `case` tokenu kind (brak = jak w bazie)
 
@@ -157,8 +157,15 @@ def _orig_segment(path, pattern):
 def _flatgrp_segment(facts):
     """Segment `FLATGRP_<grupa>` z nazwy OBECNEJ kopii mastera flat podpiętego w `calibration`. Zwraca
     `(segment, problem)`. Brak podpiętego flatu → `FLATGRP_NOFLAT` (znacznik konwencji archiwum, nie
-    dziura). Flat podpięty, ale grupy nie da się odczytać (brak obecnej kopii, nazwa bez `FLATGRP_`,
-    kopie o różnych grupach) → problem: klatka pominięta z powodem, nigdy nazwa z pustym segmentem."""
+    dziura). Flat podpięty, ale grupy nie da się odczytać (brak obecnej kopii, nazwa poza wzorcem
+    masterflatu, kopie o różnych grupach) → problem: klatka pominięta z powodem, nigdy nazwa z pustym
+    segmentem.
+
+    Grupę czyta JEDEN właściciel tokenu (AR-86): wzorzec `masterflat_flatgrp_filter`
+    z `resolve/data/master_paths.json` przez `recipe.parse_master_path`, z tym samym wejściem (pełna
+    ścieżka kopii), co porównanie kopii jednej klatki (`gui.queries.copy_name_facts`) - jeden plik,
+    jedna grupa w obu miejscach. `_sanitize` zostaje: wzorzec to DANE, które inny użytkownik dokłada
+    bez Pythona, więc grupa z jego wyrażenia może nieść znak niedozwolony w nazwie pliku."""
     if facts.get("flat_master_id") is None:
         return f"FLATGRP_{_NOFLAT}", None
     paths = facts.get("flat_paths") or []
@@ -166,10 +173,10 @@ def _flatgrp_segment(facts):
         return None, "flat podpięty, ale master bez obecnej kopii"
     groups = set()
     for p in paths:
-        m = _FLATGRP.search(os.path.splitext(os.path.basename(p))[0])
-        if m is None:
+        grupa = parse_master_path(p).get("flatgrp")
+        if grupa is None:
             return None, f"brak FLATGRP w nazwie mastera flat: {os.path.basename(p)}"
-        grupa = _sanitize(m.group(1))
+        grupa = _sanitize(grupa)
         if not grupa:
             return None, f"pusta grupa FLATGRP w nazwie mastera flat: {os.path.basename(p)}"
         groups.add(grupa)
@@ -184,11 +191,12 @@ _NIGHT8 = re.compile(r"[0-9]{8}")
 def master_flat_name(night8, filter_segment, seq):
     """Nazwa NOWEGO mastera flat w konwencji archiwum: `MASTERFLAT_FLATGRP_<noc><cyfra>_FILTER_<filtr>_.xisf`
     (`MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf`). Nie `compose_name`: jej wzór to konwencja
-    LIGHTÓW (data i godzina na początku), a nazwę mastera czytają dwie inne reguły - wzorzec
-    `masterflat_flatgrp_filter` z `resolve/data/master_paths.json` i `_flatgrp_segment` (grupa flatu
-    w nazwie lighta). Grupa = noc `YYYYMMDD` + cyfra kolejności grupy tej nocy (zmierzone w archiwum:
-    `202308230` i `202308231` w jednym folderze `76EDPH_2600MC\\OSC`). Rozszerzenie STAŁE `.xisf`:
-    żniwa wciągają wyłącznie XISF, a nazwa `.fits` na pliku XISF kłamałaby skanowi o formacie.
+    LIGHTÓW (data i godzina na początku), a nazwę mastera czyta inna reguła - wzorzec
+    `masterflat_flatgrp_filter` z `resolve/data/master_paths.json`, przez który idzie także
+    `_flatgrp_segment` (grupa flatu w nazwie lighta, AR-86). Grupa = noc `YYYYMMDD` + cyfra
+    kolejności grupy tej nocy (zmierzone w archiwum: `202308230` i `202308231` w jednym folderze
+    `76EDPH_2600MC\\OSC`). Rozszerzenie STAŁE `.xisf`: żniwa wciągają wyłącznie XISF, a nazwa `.fits`
+    na pliku XISF kłamałaby skanowi o formacie.
 
     EXPECT: `night8` to dokładnie 8 cyfr i prawdziwa data kalendarza, `seq` jedna cyfra `0..9`,
     segment filtru niepusty, równy sobie po `_sanitize` (żadnej cichej poprawki: `CLS_` nie staje się

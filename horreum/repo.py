@@ -2000,11 +2000,32 @@ def unassign_config(con, *, frame_id, now, actor="grouper"):
 
 
 def flag_config_review(con, *, frame_id, reason, now, actor="grouper"):
-    """`frame.config_id` nierozstrzygalny (brak teleskopu/kamery/focratio — np. master bez FOCRATIO,
-    W4) → `event(config.review)`. config_id zostaje NULL; ZERO cichego NULL (każdy ma powód)."""
+    """`frame.config_id` nierozstrzygalny (brak teleskopu/kamery/focratio - np. master bez FOCRATIO,
+    W4) → `event(config.review)`. config_id zostaje NULL; ZERO cichego NULL (każdy ma powód).
+
+    ZDARZENIE TYLKO PRZY WEJŚCIU DO KOLEJKI (AR-88). Przebieg pyta o każdą klatkę bez osi przy każdej
+    Dostawie, a dziennik jest append-only - bezwarunkowa emisja dopisywała 424 zdarzenia na przebieg
+    bez żadnej zmiany danych. Wejście = klatka nie ma jeszcze `config.review` w BIEŻĄCYM epizodzie,
+    czyli późniejszego niż jej ostatnie `config.assigned` albo `config.unassigned` (każde z nich
+    zmienia oś, więc otwiera nowy epizod). Idempotentny jak `assign_config`: powód już zapisany →
+    False bez eventu; inaczej event i True. Bramka stoi w klindze, nie w pętli groupera, żeby
+    obejmowała każdego wołającego.
+
+    Konsumenci liczą ze STANU albo po DISTINCT target (`resolver.review_state`, akceptacja §5.6),
+    więc żaden licznik nie drgnie. `audit.config_review_reason_gap` (AR-65) mierzy epizod od
+    ostatniego `config.assigned` - granica tej bramki nie jest od niej wcześniejsza, więc pominięty
+    event zawsze ma w dzienniku powód, który ta formuła widzi."""
+    target = f"frame:{frame_id}"
+    if con.execute(
+            "SELECT 1 FROM event e WHERE e.verb = 'config.review' AND e.target = ? "
+            "AND e.id > COALESCE((SELECT max(a.id) FROM event a "
+            "                     WHERE a.verb IN ('config.assigned', 'config.unassigned') "
+            "                     AND a.target = ?), 0) LIMIT 1",
+            (target, target)).fetchone() is not None:
+        return False
     with con:
-        emit_event(con, actor=actor, verb="config.review", target=f"frame:{frame_id}", now=now,
-                   reason=reason)
+        emit_event(con, actor=actor, verb="config.review", target=target, now=now, reason=reason)
+    return True
 
 
 @dataclass

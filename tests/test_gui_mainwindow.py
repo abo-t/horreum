@@ -703,6 +703,64 @@ def test_gest_osi_obiektu_odswieza_plakietke_JEDEN_raz(qapp, tmp_path):
         win.close()
 
 
+def test_gest_osi_przy_niewidocznej_osi_obiektu_przeladowuje_ja_przy_pokazaniu(qapp, tmp_path,
+                                                                              monkeypatch):
+    """AR-84: gest osi obiektu pada w Zbiorach, a kolejka przeglądu osi obiektu (~0,4 s na wątku GUI
+    na kopii pf4) jest wtedy niewidoczna - przy geście się NIE przeładowuje, dostaje znacznik.
+    Pokazanie podstrony (tu: wiersz zadania Porządków) przeładowuje ją RAZ, a kolejka jest ta
+    sama, co w widoku zbudowanym od nowa na bazie po geście. Ponowne wejście bez nowego gestu
+    już nie liczy.
+
+    Falsyfikator: podepnij `grid.object_axis_changed` wprost pod `object_view.refresh` → przy
+    geście jedno przeładowanie; zdejmij `showEvent` → po wejściu kolejka sprzed gestu."""
+    path = _seeded_db(tmp_path, object_axis=True)
+    con = db.open_db(path)
+    # cel: klatka grupy przeglądu (ma `object_raw`), nadana ręką - po cofnięciu wraca do kolejki
+    raw = queries.review_queue(con)["object_review"][0]["object_raw"]
+    fid = queries.object_review_frames(con, raw)[0]["frame_id"]
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[fid], now=NOW)
+    con.close()
+    win = _pokazane(MainWindow(path))
+    try:
+        win._show_view(NAV_ZBIORY)
+        grid, v = win.grid_view, win.object_view
+        grid.refresh()
+        wiersz = next(i for i, r in enumerate(grid.model._rows)
+                      if isinstance(r, dict) and r.get("frame_id") == fid)
+        grid.table.selectRow(wiersz)
+
+        def _kolejka(widok):                          # nazwa i liczba (człon drugi) każdej pozycji
+            from horreum.gui import rows
+            return [(widok.review.item(i).text(), widok.review.item(i).data(rows.SECONDARY))
+                    for i in range(widok.review.count())]
+        przed = _kolejka(v)
+        odswiezenia = []
+        oryginal = ObjectAxisView.refresh
+        monkeypatch.setattr(ObjectAxisView, "refresh",
+                            lambda self, **kw: odswiezenia.append(1) or oryginal(self, **kw))
+        grid._on_object_clear()
+        assert win.con.execute("SELECT object_source FROM frame WHERE id = ?",
+                               (fid,)).fetchone()[0] == "user_cleared", "gest się odbył"
+        assert odswiezenia == [] and v._nieaktualny, "niewidoczna oś nie liczy się przy geście"
+        win._show_view(NAV_PORZADKI)
+        win.tasks_view.tasks.itemClicked.emit(_task_item(win, "unresolved_lights"))
+        QApplication.processEvents()
+        assert v.isVisible() and odswiezenia == [1], odswiezenia
+        assert not v._nieaktualny
+        win.tasks_view._on_back()
+        win.tasks_view.tasks.itemClicked.emit(_task_item(win, "unresolved_lights"))
+        QApplication.processEvents()
+        assert odswiezenia == [1], "wejście bez nowego gestu nie przeładowuje"
+        swiezy = ObjectAxisView(win.con)
+        try:
+            assert _kolejka(v) == _kolejka(swiezy) != przed, "kolejka po wejściu = stan po geście"
+        finally:
+            swiezy.deleteLater()
+    finally:
+        win.close()
+
+
 def test_zadanie_zniknietych_otwiera_perspektywe(qapp, tmp_path):
     """P5c: klik w „Zniknięte z dysku" prowadzi do Zbiorów z perspektywą `PRESET_VANISHED`, a grid
     pokazuje DOKŁADNIE klatki bez ani jednej obecnej kopii. Bez tego licznik byłby liczbą, której

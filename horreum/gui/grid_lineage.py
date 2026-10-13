@@ -111,7 +111,7 @@ class LineageBar(QWidget):
         _dir_lbl = QLabel(i18n.t("grid.lin.common_dir"))
         _dir_lbl.setProperty("role", "secondary")
         dr.addWidget(_dir_lbl)
-        self.dir_path = _SciezkaLabel()
+        self.dir_path = SciezkaLabel()
         self.dir_path.setProperty("role", "secondary")
         dr.addWidget(self.dir_path, 1)
         self.dir_row.setVisible(False)
@@ -699,7 +699,7 @@ def _wspolny_katalog(sciezki):
     return katalog or None
 
 
-class _SciezkaLabel(ElidedLabel):
+class SciezkaLabel(ElidedLabel):
     """Etykieta ścieżki elidowana OD LEWEJ - koniec katalogu (obiekt, zestaw, filtr) niesie sens,
     a początek (`R:\\ASTRO_\\LIGHTS\\`) jest wspólny dla całego archiwum. Pełna ścieżka w tooltipie."""
 

@@ -222,7 +222,7 @@ def test_review_queue_headerless_rozlaczny_od_config_review(s8_obj):
 
 
 def test_review_queue_idempotentny_po_re_resolve(s8_obj):
-    """R4: ponowny przebieg resolvera (mnoży eventy object.review_summary/config.review) NIE zmienia
+    """R4: ponowny przebieg resolvera (mnoży eventy object.review_summary) NIE zmienia
     kolejki — derywacja ze STANU, nie ze zliczania eventów."""
     from horreum import resolver
     con, ids = s8_obj

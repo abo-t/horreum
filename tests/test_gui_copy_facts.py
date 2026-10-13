@@ -213,7 +213,7 @@ def test_linia_raportu_faktow_kopii(qapp, tmp_path):
     v = PipelineView(path, now_fn=lambda: NOW)
     try:
         czysto = v._format_result("copy_facts", scan.CopyFactsSummary(rows=5, read=5, written=5))
-        assert czysto == "Fakty kopii: uzupełniono 5 z 5"
+        assert czysto == "[fakty kopii] uzupełniono 5 z 5"     # nagłówek `[etap]` (AR-115)
         brudno = v._format_result("copy_facts", scan.CopyFactsSummary(
             rows=5, read=4, written=3, stale=1, failed=1, remaining=2))
         assert "zmienione na dysku od skanu 1" in brudno and "nieczytelne 1" in brudno
@@ -224,7 +224,7 @@ def test_linia_raportu_faktow_kopii(qapp, tmp_path):
         # Dwa kroki z nazwami z katalogu: „Oznacz zniknięte” pojawia się dopiero pod wynikiem
         # „Sprawdź obecność”, i to tylko po potwierdzonym zniknięciu (bliźniak `pipeline.tip.presence`).
         assert skasowane == (
-            f"Fakty kopii: uzupełniono 548 z 550 · brak pliku 2 - "
+            f"[fakty kopii] uzupełniono 548 z 550 · brak pliku 2 - "
             f"„{i18n.t('pipeline.btn.presence')}” → „{i18n.t('pipeline.btn.mark_vanished')}” "
             f"(pojawi się, gdy sprawdzenie potwierdzi zniknięcie) · czeka 2")
         assert "nieczytelne" not in skasowane
@@ -305,7 +305,7 @@ def test_linia_raportu_przejecia_zeznania(qapp, tmp_path):
     v = PipelineView(path, now_fn=lambda: NOW)
     try:
         czysto = v._format_result("adopt_testimony", scan.AdoptSummary(rows=2, read=2, adopted=2))
-        assert czysto == "Zeznanie z nieobecnej kopii: przejęte od ocalałej kopii 2 z 2"
+        assert czysto == "[zeznanie z nieobecnej kopii] przejęte od ocalałej kopii 2 z 2"
         brudno = v._format_result("adopt_testimony", scan.AdoptSummary(
             rows=4, read=3, adopted=1, identity=1, stale=1, failed=1, remaining=3))
         assert "plik to inna klatka 1" in brudno and "zmienione na dysku od skanu 1" in brudno

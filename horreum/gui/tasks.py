@@ -19,15 +19,16 @@ w podstronach piszą wstrzykniętym zegarem, asercja tożsamości `_now` w testa
 
 Świadomy cykl odświeżania: licznik NIE odświeża się na żywo w trakcie pracy w podstronie —
 `refresh_counts()` woła gospodarz przy montażu / po przebiegu Dostawy / na wejściu w Porządki,
-a sam widok przy powrocie „← Porządki" (user mógł nazwać teleskopy w podstronie)."""
-from PySide6.QtCore import Qt, Signal
+a sam widok przy powrocie „← Porządki" (user mógł nazwać teleskopy w podstronie). Po gestach
+Zbiorów gospodarz woła `refresh_counts(w_tle=True)` - stan liczy wątek tła (`_LicznikiWorker`)."""
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QStackedWidget, QVBoxLayout,
     QWidget,
 )
 
-from horreum import resolver, scan, supersede
+from horreum import db, resolver, scan, supersede
 from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     _REVIEW_TAG, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
@@ -274,6 +275,50 @@ def _liczniki_osi(con):
     }
 
 
+def _stan_licznikow(con):
+    """Komplet faktów listy zadań ze STANU bazy: `(liczniki, kandydaci)` - liczniki `tasks_state`
+    z licznikami osi (`_liczniki_osi`) i kopie czekające na fakty, które mogą zmienić wiersze
+    `_CZEKA_NA_FAKTY_KOPII`. Bez widżetów: ten sam kod liczy wątek GUI (`refresh_counts`) i wątek
+    tła (`_LicznikiWorker`) na własnym połączeniu. Predykat kopii ma jednego właściciela (ten sam
+    SELECT steruje etapem Dostawy), tryb `porownywalne` odcina kandydatów, których fakty żadnego
+    porównania kopii nie ruszą."""
+    state = queries.tasks_state(con)
+    state.update(_liczniki_osi(con))       # AR-59/AR-41 - od właścicieli predykatów
+    return state, scan.copy_facts_candidates(con, porownywalne=True)
+
+
+class _LicznikiWorker(QObject):
+    """Liczniki Porządków POZA wątkiem GUI (AR-84) - bliźniak `home.TeczkiWorker`, ten sam cykl.
+
+    Zmierzone przed tą zmianą: ogon gestu kopii w Zbiorach stał w `refresh_counts` 557 ms
+    (wizytator, kopia pf4), bo plakietka sidebara liczy się po KAŻDYM geście gridu
+    (`stan_porzadkow_changed`). Tu `_stan_licznikow` idzie na WŁASNYM połączeniu otwartym w tym
+    wątku (sqlite `check_same_thread`), a slot widoku tylko przykłada wynik do listy."""
+
+    done = Signal(int, object)     # generacja, `(liczniki, kandydaci)`
+    failed = Signal(int, str)      # generacja, komunikat
+    finished = Signal()            # run() wrócił KAŻDĄ drogą → quit wątku
+
+    def __init__(self, gen, db_path):
+        super().__init__()
+        self._gen = gen
+        self._db_path = db_path
+
+    @Slot()
+    def run(self):
+        try:
+            con = db.connect(self._db_path)
+            try:
+                wynik = _stan_licznikow(con)
+            finally:
+                con.close()                # PRZED emisją - wątek GUI czyta przez swoje połączenie
+            self.done.emit(self._gen, wynik)
+        except Exception as exc:           # szczerze do widoku, nie cicha śmierć wątku
+            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+        finally:
+            self.finished.emit()
+
+
 # Wiersz, którego podstrona ma kilka kubełków: klik ZAZNACZA właściwy, żeby lista klatek i gest
 # stały gotowe (klucz wiersza → tag kubełka kolejki przeglądu `ObjectAxisView`).
 _KUBELEK_PODSTRONY = {"config_review_frames": "config_review",
@@ -340,6 +385,14 @@ class TasksView(QWidget):
         super().__init__(parent)
         self.con = con
         self._niewiadome = set()    # klucze wierszy w stanie „?" z ostatniego `refresh_counts`
+        # Liczniki w wątku tła (`refresh_counts(w_tle=True)`, AR-84): jeden bieg naraz, generacja
+        # wyrzuca wynik wyprzedzony odczytem nowszym; `:memory:` nie ma ścieżki - liczy inline.
+        self._db_path = queries.db_path_of(con)
+        self._liczniki_gen = 0
+        self._liczniki_worker = None
+        self._liczniki_thread = None
+        self._liczniki_ponow = False
+        self._liczniki_stop = False
         # pod-widoki osi z FORWARDOWANYM now_fn (F5R#2) — wystawione dla aliasów MainWindow
         self.axis_view = TelescopeAxisView(con, now_fn=now_fn)
         self.observatory_view = ObservatoryAxisView(con, now_fn=now_fn)
@@ -438,16 +491,87 @@ class TasksView(QWidget):
 
     # ---------------------------------------------------------------- odczyt → widok
 
-    def refresh_counts(self):
+    def refresh_counts(self, *, w_tle=False):
         """Przeładuj liczniki zadań ze stanu (`queries.tasks_state`) i wyemituj badge
         (`counts_changed` = liczba pozycji akcyjnych z n>0). Woła gospodarz (montaż / po przebiegu
-        Dostawy / wejście w Porządki / sygnał stanu Porządków z gestu Zbiorów) i powrót z podstrony."""
-        state = queries.tasks_state(self.con)
-        state.update(_liczniki_osi(self.con))       # AR-59/AR-41 - od właścicieli predykatów
-        # Kopie czekające na fakty, które mogą zmienić te wiersze - WOŁANE, nie powielane: predykat
-        # ma jednego właściciela (ten sam SELECT steruje etapem Dostawy), tryb `porownywalne`
-        # odcina kandydatów, których fakty żadnego porównania kopii nie ruszą.
-        kandydaci = scan.copy_facts_candidates(self.con, porownywalne=True)
+        Dostawy / wejście w Porządki / sygnał stanu Porządków z gestu Zbiorów) i powrót z podstrony.
+        Zwraca badge (tryb synchroniczny).
+
+        `w_tle=True` (gest Zbiorów, AR-84) liczy stan w `_LicznikiWorker` i wraca od razu: lista
+        i plakietka trzymają stan poprzedni do przyłożenia wyniku (`_on_liczniki`). Zlecenie w trakcie
+        biegu zamawia jeden bieg więcej po nim, na stanie z TAMTEJ chwili. Odczyt synchroniczny
+        (wejście w Porządki, powrót z podstrony) podbija generację, więc wynik biegu sprzed niego
+        idzie do kosza - nie nadpisze nowszego stanu starszym."""
+        self._liczniki_gen += 1
+        if w_tle and self._db_path and not self._liczniki_stop:
+            if self._liczniki_thread is not None:
+                self._liczniki_ponow = True
+            else:
+                self._start_licznikow()
+            return None
+        return self._przyloz_liczniki(*_stan_licznikow(self.con))
+
+    def _start_licznikow(self):
+        worker = _LicznikiWorker(self._liczniki_gen, self._db_path)
+        worker.done.connect(self._on_liczniki)
+        worker.failed.connect(self._on_liczniki_failed)
+        self._liczniki_worker = worker
+        self._liczniki_thread = QThread(self)
+        worker.moveToThread(self._liczniki_thread)
+        self._liczniki_thread.started.connect(worker.run)
+        worker.finished.connect(self._liczniki_thread.quit)
+        self._liczniki_thread.finished.connect(self._sprzataj_liczniki)
+        self._liczniki_thread.start()
+
+    @Slot(int, object)
+    def _on_liczniki(self, gen, wynik):
+        if gen != self._liczniki_gen:
+            return                          # wyprzedzony nowszym odczytem - do kosza
+        self._przyloz_liczniki(*wynik)
+
+    @Slot(int, str)
+    def _on_liczniki_failed(self, gen, msg):
+        """Bieg w tle padł: drugie podejście na wątku GUI (wzór `FramesView._on_zbior_failed`) -
+        błąd, który nie jest przypadłością wątku, wychodzi stamtąd, zamiast plakietki zamrożonej
+        bez słowa."""
+        if gen != self._liczniki_gen:
+            return
+        self.refresh_counts()
+
+    def _sprzataj_liczniki(self):
+        """Koniec wątku liczników. ŚWIĘTA KOLEJNOŚĆ jak w `FramesView._sprzataj_pola` (deadlock AB-BA
+        GIL × ~QThread): worker.deleteLater → wait → thread.deleteLater."""
+        if self._liczniki_thread is None:
+            return
+        self._liczniki_worker.deleteLater()
+        self._liczniki_thread.wait()
+        self._liczniki_thread.deleteLater()
+        self._liczniki_worker = None
+        self._liczniki_thread = None
+        if self._liczniki_ponow and not self._liczniki_stop:
+            self._liczniki_ponow = False
+            self._start_licznikow()          # generacja ostatniego zlecenia
+
+    def zatrzymaj_pola(self):
+        """Widok znika (zmiana bazy, zamknięcie okna - `MainWindow._zatrzymaj_watki_widokow` woła tę
+        metodę po nazwie u każdej strony stosu): ZBIERZ wątek liczników, zanim rodzic go skasuje
+        (`~QThread` w biegu to twardy abort). Generacja w górę, więc wynik, który zdążył wyjść
+        z wątku, nie dotknie listy ani zamkniętego połączenia. Rachunek nie ma punktu przerwania -
+        `wait` czeka na jego koniec (wzór teczek Domu). Idempotentne."""
+        self._liczniki_stop = True
+        self._liczniki_ponow = False
+        self._liczniki_gen += 1
+        if self._liczniki_thread is None:
+            return
+        self._liczniki_thread.quit()
+        self._liczniki_worker.deleteLater()
+        self._liczniki_thread.wait()
+        self._liczniki_thread.deleteLater()
+        self._liczniki_worker = None
+        self._liczniki_thread = None
+
+    def _przyloz_liczniki(self, state, kandydaci):
+        """Fakty `_stan_licznikow` → wiersze listy, podpowiedzi i badge (wątek GUI)."""
         czeka = len(kandydaci)
         badge = 0
         self._niewiadome = set()

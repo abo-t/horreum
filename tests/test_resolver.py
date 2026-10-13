@@ -185,9 +185,10 @@ def test_delta_report_procent_nie_maskuje_spadku_klatka_bez_nazwy(tmp_path):
 # --- kolejka przeglądu ze STANU, nie ze zliczania eventów (#12) ---
 
 def test_review_ze_stanu_nie_rosnie_przy_powtornej_dostawie(tmp_path):
-    """SEDNO #12: `flag_config_review` emituje BEZWARUNKOWO co przebieg, więc `count(event)` rósł
-    liniowo przy powtórnej dostawie bez żadnej realnej zmiany. Ten test trzyma OBA końce: eventy
-    mnożą się (dowód, że licznik ich NIE liczy), a stan stoi w miejscu."""
+    """SEDNO #12: `flag_config_review` emitowało BEZWARUNKOWO co przebieg, więc `count(event)` rósł
+    liniowo przy powtórnej dostawie bez żadnej realnej zmiany. Od AR-88 zdarzenie pada tylko przy
+    wejściu klatki do kolejki - test trzyma OBA końce: dziennik nie rośnie bez zmiany danych, a stan
+    stoi w miejscu (licznik liczy STAN, nie zdarzenia)."""
     con = _scanned_tree(tmp_path)
     run_grouper(con, now=NOW)
     run_resolver(con, now=NOW)
@@ -199,7 +200,7 @@ def test_review_ze_stanu_nie_rosnie_przy_powtornej_dostawie(tmp_path):
     drugi = delta_report(con).review
     ev2 = con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0]
 
-    assert ev1 > 0 and ev2 == 2 * ev1                  # eventy się MNOŻĄ — dawne źródło licznika
+    assert ev1 > 0 and ev2 == ev1                      # powód zapisany RAZ na epizod (AR-88)
     assert drugi == pierwszy                           # stan jest idempotentny
     assert pierwszy.total == 5                         # drzewo bez TELESCOP: 5 klatek czeka na config
     con.close()

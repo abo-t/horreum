@@ -1,13 +1,21 @@
 {
   "_doc": "Równoważność międzykatalogowa (polityka NGC-wins). Messier/Caldwell/nazwy potoczne = alias-only -> rozwiązują się do klucza NGC/IC. Klucze i wartości w formie catalog_canon: M{int}, C{int} (Caldwell), NGC/IC bez zer wiodących. Rośnie PO potwierdzeniu realnych kolizji w danych — bez wpisów na zapas. Edge: M45/M24/M40 nie mają NGC -> zostają kluczem Messier (brak wpisu = brak mapowania).",
+  "_zrodlo_messier": "messier_to_ngc: pary z VizieR VII/118 (NGC 2000.0, Sinnott 1988), tabela `names`, pobranie 2026-10-13; zgodne z kolumną M OpenNGC wszędzie, gdzie niesie ją `horreum/data/targets_core.json`. Wpis dostaje Messier, którego obiekt NGC/IC jest w archiwum (AR-132). Bez NGC/IC w VII/118: M24, M40, M45, M102 - bez wpisu.",
   "messier_to_ngc": {
+    "M27": "NGC6853",
     "M31": "NGC224",
+    "M33": "NGC598",
     "M42": "NGC1976",
     "M44": "NGC2632",
     "M51": "NGC5194",
+    "M63": "NGC5055",
+    "M64": "NGC4826",
+    "M65": "NGC3623",
+    "M78": "NGC2068",
     "M81": "NGC3031",
     "M82": "NGC3034",
     "M92": "NGC6341",
+    "M94": "NGC4736",
     "M101": "NGC5457",
     "M106": "NGC4258"
   },

@@ -1,19 +1,19 @@
-"""Współdzielone fixture'y pytest. `s8` = deterministyczna baza §8 (PLAN_gui §8) — jeden builder
+"""Współdzielone fixture'y pytest. `s8` = deterministyczna baza §8 (PLAN_gui §8) - jeden builder
 dla testów logiki read-modelu (5.2) i przyszłych testów GUI; bez Qt, bez plików na dysku."""
 import pytest
 
 from fixture_s8 import seed, seed_object_axis
 
 from horreum import db
-from horreum.gui import i18n   # Qt-wolny (słownik) — import bezpieczny bez PySide6
+from horreum.gui import i18n   # Qt-wolny (słownik) - import bezpieczny bez PySide6
 
 
 @pytest.fixture(autouse=True)
 def _reset_i18n_lang():
     """`i18n._LANG` to jedyny PROCESOWO-GLOBALNY stan wpływający na czyste funkcje prezentacji
     (`t`/`t_plural`); test z `set_lang('en')` bez resetu skaziłby kolejne (porażki zależne od
-    KOLEJNOŚCI — łamią determinizm baterii). Reset PRZED każdym testem (R-i18n #4). `_missing`
-    (zbiór już-zalogowanych braków — log raz) też zerowany: przyszły test „warn raz na klucz"
+    KOLEJNOŚCI - łamią determinizm baterii). Reset PRZED każdym testem (R-i18n #4). `_missing`
+    (zbiór już-zalogowanych braków - log raz) też zerowany: przyszły test „warn raz na klucz"
     inaczej stałby się order-dependent (recenzja fundamentu #1)."""
     i18n.set_lang(i18n.DEFAULT)
     i18n._missing.clear()
@@ -50,11 +50,47 @@ def _izoluj_qsettings(tmp_path_factory, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _przywroc_wyglad_aplikacji():
+    """Wygląd CAŁEJ aplikacji - arkusz QSS, styl i paleta, czyli to, co stawia `app.apply_theme` -
+    wraca po teście do stanu sprzed niego (AR-79). `main()` i `_on_theme` stawiają motyw na
+    `QApplication`, która żyje całą sesję, więc motyw zostawał testom z kolejnych plików.
+    Dowód 2026-10-13: po `test_gui_mainwindow.py` (`main()` w teście startu z nowszą bazą) zostawał
+    arkusz motywu (821 znaków), a przy arkuszu aplikacji `setFont` rodzica nie schodzi do list
+    dzieci (listwa 14,4 pt, lista grupy 9,0 pt) - bramka listwy facetów mierzyła dwa razy ten sam
+    wiersz 12 px. Para plików zieleniała od samego zdjęcia arkusza; styl i paletę przywracamy, bo
+    stawia je ta sama funkcja.
+
+    Arkusz wraca pierwszy: przy czynnym arkuszu `style().name()` zwraca pusty napis (styl
+    opakowany), więc styl porównujemy dopiero po nim. Aplikacja powstała W teście - stan zastany
+    to świeża aplikacja: pusty arkusz i paleta bazowa (`QPalette()` bez ustawionych ról rozwiązuje
+    się do niej); styl zostaje, bo nazwy stylu domyślnego nie znamy przed powstaniem aplikacji."""
+    try:
+        from PySide6.QtGui import QPalette
+        from PySide6.QtWidgets import QApplication
+    except ImportError:                 # `.venv` bez Qt - nie ma czego przywracać
+        yield
+        return
+    app = QApplication.instance()
+    zastany = None if app is None else (app.styleSheet(), app.style().name(), app.palette())
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    arkusz, styl, paleta = zastany or ("", "", QPalette())
+    if app.styleSheet() != arkusz:
+        app.setStyleSheet(arkusz)
+    if styl and app.style().name() != styl:
+        app.setStyle(styl)
+    if zastany is None or app.palette() != paleta:
+        app.setPalette(paleta)
+
+
 _LIMIT_WATKU_MS = 10_000
 
 
 @pytest.fixture(autouse=True)
-def _skasuj_okna_testu(_izoluj_qsettings):
+def _skasuj_okna_testu(_izoluj_qsettings, _przywroc_wyglad_aplikacji):
     """Okna najwyższego poziomu, które test zostawił, kasujemy po nim (AR-11). `win.close()` tylko
     chowa okno, a `gc` go nie zbierze: sloty-lambdy trzymają `self` przez połączenia Qt, których
     cykl jest poza zasięgiem Pythona. Dowód 2026-10-03: przed `test_main_NIE_rusza_rejestru_usera`
@@ -64,7 +100,9 @@ def _skasuj_okna_testu(_izoluj_qsettings):
     motywu przy 0,24 s dla jednego okna. To koszt baterii, nie produktu (jedno okno, ~750 widgetów).
 
     Zależność od `_izoluj_qsettings` ustawia kolejność: sprzątanie biegnie PRZED zdjęciem podmiany
-    ustawień, więc kasowane okno nie ma jak sięgnąć rejestru usera. `~QThread` w biegu to `qFatal`
+    ustawień, więc kasowane okno nie ma jak sięgnąć rejestru usera. Zależność od
+    `_przywroc_wyglad_aplikacji` stawia przywrócenie motywu PO kasowaniu okien - przepolerowanie
+    nie idzie po widgetach, które i tak giną. `~QThread` w biegu to `qFatal`
     (0xC0000409 - zmierzone na planerze, który liczy noc w tle od montażu). Worker kończy rachunek
     w milisekundach, ale `finished -> QThread.quit` idzie KOLEJKĄ do wątku głównego, a test nie
     kręci pętli - wątek wisi w `exec()` bez końca. Stąd jawne `quit()` (bezpieczne z innego wątku;

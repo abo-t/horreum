@@ -32,7 +32,7 @@ from typing import NamedTuple
 from horreum.gui import facet_model, i18n, queries
 from horreum.repo import normalize_note
 from horreum.resolve._text import norm_alnum
-from horreum.resolve.catalog import catalog_canon
+from horreum.resolve.catalog import catalog_canon, xref
 
 # Prefiks (bez wielkości liter) → oś zapytania. Oś to nazwa WEWNĘTRZNA, nie facet: `zestaw` i `uwagi`
 # facetów listwy nie mają.
@@ -223,7 +223,9 @@ def _obiekty_frazy(fraza, catalog):
     if not klucz:
         return []          # „żółć": szukajka zna tylko ASCII, pusta igła trafiłaby wszystko
     kanon = catalog_canon(fraza, split=False)
-    klucze = {klucz} | ({norm_alnum(kanon)} if kanon else set())
+    # Kanon PO `xref` też jest dokładnym trafieniem (AR-132): `m64` to `NGC4826`, choć obiekt nie
+    # niesie aliasu `M64` - inaczej fraza schodzi do prefiksów szukajki i łapie cudze aliasy.
+    klucze = {klucz} | ({norm_alnum(kanon), norm_alnum(xref(kanon))} if kanon else set())
     dokladne = [(oid, canon) for oid, canon in catalog.objects
                 if norm_alnum(canon) in klucze or klucze & set(catalog.aliases.get(canon, ()))]
     return dokladne or [(oid, canon) for oid, canon in catalog.objects

@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (
 
 from horreum import db, derive, presence, scan
 from horreum.gui import i18n, queries
-from horreum.gui.grid import PRESET_VANISHED
+from horreum.gui.grid import PRESET_LINEAGE, PRESET_VANISHED
+from horreum.gui.grid_lineage import SciezkaLabel
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
@@ -401,6 +402,20 @@ _STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks"
                 "stack_history": "pipeline.stage.stack_history",
                 "adopt_testimony": "pipeline.stage.adopt_testimony"}
 
+# ETAPY „Przyjmij nowe” W KOLEJNOŚCI BIEGU `PipelineWorker._run_all` - jedyny właściciel listy, z której
+# składa się napis złotej akcji (AR-115; dawny literał gubił historię stosów, rodowód i rodowód
+# stosów, choć biegły). Pochodne bierze z `derive.DERIVED_STAGES` (właściciel ich kolejności), więc
+# nowy etap pochodny wchodzi do napisu sam. Przed nimi uzupełnienia `derive.adopt_stages` (biegną,
+# gdy mają kandydatów - wtedy w tej kolejności), po nich delta i obecność (zawsze DRY). Kolejność
+# całości przypina test pełnego łańcucha z kandydatami każdego etapu uzupełnień.
+ETAPY_PRZYJMIJ_NOWE = ("scan", "copy_facts", "adopt_testimony", "stack_history",
+                       *(nazwa for nazwa, _fn in derive.DERIVED_STAGES), "delta", "presence")
+
+# Ile ścieżek nieprzeczytanych katalogów sekcja niekompletnego przebiegu wylicza z imienia (E4-7).
+# Reszta idzie członem „i N innych”: zerwany udział potrafi dać setki katalogów, a strona Dostawy nie
+# przewija się - lista bez sufitu wypchnęłaby okno ponad ekran.
+_WIDOCZNE_NIEPRZECZYTANE = 5
+
 # Kolejność i klucze powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
 _REVIEW_REASONS = [("no_config", "pipeline.reason.no_config"),
@@ -435,6 +450,15 @@ def _stage_label(name):
     return i18n.t(key) if key else name
 
 
+def etykieta_przyjmij_nowe():
+    """Napis złotej akcji: nazwa „Przyjmij nowe” i łańcuch `ETAPY_PRZYJMIJ_NOWE` nazwami etapów
+    z katalogu (te same słowa co „… w toku” i pasek stanu), od małej litery w środku zdania.
+    Nazwa bez łańcucha (`pipeline.receive`) zostaje dla zdań, które wskazują akcję."""
+    lancuch = " → ".join(e[:1].lower() + e[1:]
+                         for e in (_stage_label(n) for n in ETAPY_PRZYJMIJ_NOWE))
+    return i18n.t("pipeline.receive_chain", name=i18n.t("pipeline.receive"), chain=lancuch)
+
+
 def unreadable_kinds_text(counts):
     """Zdanie rozbicia kopii nieczytelnych po RODZAJU (P4-2, P4-5) z
     `resolver.unreadable_kind_counts`. Które rodzaje pokazać, rozstrzyga rdzeń
@@ -465,6 +489,13 @@ def _review_line(st):
         for attr, key in _REVIEW_REASONS if (n := getattr(st, attr)))
     return i18n.t("pipeline.review.line",
                   frames=i18n.t_plural("grid.frames", st.total), reasons=powody)
+
+
+def _czekajace_na_reke(s):
+    """Człon „czeka na Ciebie” wyniku rodowodu stosów: obrazy bez wejść z powodem. Jeden rachunek
+    dla linii raportu i dla wiersza z drogą do perspektywy (sekcja 4d), który pojawia się tylko
+    przy tym członie."""
+    return sum(s.reasons.values())
 
 
 class PipelineView(QWidget):
@@ -499,7 +530,7 @@ class PipelineView(QWidget):
     # etap anulowany, błąd. Emitowany PO `running_changed(False)`, więc słuchacz (raport „co
     # przyszło” drogi Przyjmij) czyta bazę już po zapisie workera i po odświeżeniu widoków gospodarza.
     run_finished = Signal(object)
-    open_harvest = Signal()                # „Wciągnij mastery…” - okno żniw otwiera gospodarz
+    open_harvest = Signal()                # „Wciągnij z WBPP…” - okno żniw otwiera gospodarz
 
     def __init__(self, db_path, *, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
@@ -519,6 +550,9 @@ class PipelineView(QWidget):
         self._etap_bez_zrodla = None       # etap, którego źródła wątek tła nie zobaczył („Wskaż katalog…")
         self._copy_facts_waiting = 0       # kopie czekające na fakty (`_sync_copy_facts`)
         self._reason = None                # powód wejścia z innej powierzchni (`show_reason`)
+        self._parametry_przebiegu = None   # (etap, parametry) przebiegu w toku albo ostatniego
+        self._parametry_ponowienia = None  # zamrożone przy liście nieprzeczytanych („Skanuj ponownie”)
+        self._czeka_rodowod = 0            # „czeka na Ciebie” z rodowodu stosów TEGO logu (AR-115)
         # Zapis OSTATNIEGO przebiegu dla powierzchni spoza widoku (`run_finished`): raport Przyjmij
         # liczy „co przyszło” od `since`, a liczby skanu bierze z `results["scan"]`.
         self.last_run = self._pusty_zapis_przebiegu()
@@ -553,7 +587,7 @@ class PipelineView(QWidget):
         # źródle (QSettings pipeline/last_source; pierwsza dostawa pyta o katalog). Waga wizualna
         # przejęta od dawnego „Przetwórz wszystko" (jedna złota akcja na miejsce, wzorzec F3 #3).
         rec = QHBoxLayout()
-        self.btn_receive = QPushButton(i18n.t("pipeline.receive"))
+        self.btn_receive = QPushButton(etykieta_przyjmij_nowe())
         _f = self.btn_receive.font()
         _f.setBold(True)
         self.btn_receive.setFont(_f)
@@ -718,6 +752,60 @@ class PipelineView(QWidget):
         self.box_vanished.setVisible(False)
         v.addWidget(self.box_vanished)
 
+        # 4c. PRZEBIEG NIEKOMPLETNY - KTÓRE KATALOGI (E4-7). Linia raportu mówi ILE („katalogi
+        # nieprzeczytane N”), a ścieżki miało tylko CLI, którego wydanie onefile nie ma. Nośnik jak
+        # sekcja zniknięć: ukryta bez listy, zdanie z akcją, oddech nad sobą. Jeden właściciel treści
+        # dla obu dróg wciągających pliki (skan Dostawy i „Stosy”): `_pokaz_nieprzeczytane`.
+        # Ścieżki elidowane od lewej (koniec katalogu niesie sens, pełna w podpowiedzi) i z sufitem
+        # `_WIDOCZNE_NIEPRZECZYTANE`: długa ścieżka nie rozpycha okna wszerz, długa lista - wzwyż.
+        self.box_unreadable = QWidget()
+        bu = QVBoxLayout(self.box_unreadable)
+        bu.setContentsMargins(0, 10, 0, 0)
+        bu.setSpacing(0)
+        glowa = QHBoxLayout()
+        self.lbl_unreadable = QLabel("")
+        _fu = self.lbl_unreadable.font()
+        _fu.setBold(True)                # drugi komunikat Dostawy o ZAKRESIE - waży jak zniknięcia
+        self.lbl_unreadable.setFont(_fu)
+        glowa.addWidget(self.lbl_unreadable)
+        # „Skanuj ponownie” powtarza TEN przebieg na TYM korzeniu (parametry zamrożone przy
+        # wyniku, `_parametry_ponowienia`): brama przyrostowa pomija pliki bez zmian, więc drugi
+        # bieg czyta głównie to, czego pierwszy nie zobaczył - niekompletność naprawia się sama.
+        self.btn_rescan = QPushButton(i18n.t("pipeline.btn.rescan"))
+        self.btn_rescan.clicked.connect(self._on_rescan)
+        glowa.addWidget(self.btn_rescan)
+        glowa.addStretch(1)
+        bu.addLayout(glowa)
+        self._wiersze_nieprzeczytanych = []
+        for _ in range(_WIDOCZNE_NIEPRZECZYTANE):
+            wiersz = SciezkaLabel()
+            wiersz.setVisible(False)
+            bu.addWidget(wiersz)
+            self._wiersze_nieprzeczytanych.append(wiersz)
+        self.lbl_unreadable_more = QLabel("")
+        self.lbl_unreadable_more.setVisible(False)
+        bu.addWidget(self.lbl_unreadable_more)
+        self.box_unreadable.setVisible(False)
+        v.addWidget(self.box_unreadable)
+
+        # 4d. „CZEKA NA CIEBIE N” Z LINII RODOWODU STOSÓW PROWADZI DO GESTU (AR-115): perspektywa
+        # Zbiorów „Rodowód do potwierdzenia” - ta sama, którą otwiera wiersz Porządków „Obrazy bez
+        # rodowodu” (`open_collection`, droga „Pokaż w Zbiorach” zniknięć). Liczba ze STANU
+        # (`queries.lineage_pending_frame_ids`, właściciel zbioru tej perspektywy), nie z wyniku
+        # przebiegu: gest w panelu rodowodu zmienia ją między przebiegami. Widoczny wyłącznie, gdy
+        # ostatni przebieg meldował „czeka na Ciebie” i stan wciąż ma co pokazać (`_sync_rodowod`).
+        self.box_lineage = QWidget()
+        bl = QHBoxLayout(self.box_lineage)
+        bl.setContentsMargins(0, 10, 0, 0)
+        self.lbl_lineage = QLabel("")
+        bl.addWidget(self.lbl_lineage)
+        self.btn_show_lineage = QPushButton(i18n.t("pipeline.btn.show_collections"))
+        self.btn_show_lineage.clicked.connect(lambda: self.open_collection.emit(PRESET_LINEAGE))
+        bl.addWidget(self.btn_show_lineage)
+        bl.addStretch(1)
+        self.box_lineage.setVisible(False)
+        v.addWidget(self.box_lineage)
+
         # 5. Pasek + liczniki (wspólne: skan = uczciwy %; etapy masowe = busy spinner). Pasek UKRYTY
         # w spoczynku — wizytator P2: „0%" w idle kłamie, że coś ruszyło. Pojawia się w _begin_run.
         self.bar = QProgressBar()
@@ -740,6 +828,17 @@ class PipelineView(QWidget):
         v.addWidget(self.lbl_error)
 
         # 7. Panel podsumowania — akumuluje wiersz per (pod)etap (handoff delty do import-legacy)
+        # NAD NIM PODPIS CZASU, GDY STAN ODSZEDŁ OD LOGU (AR-99). Log to zapis przebiegu, prawdziwy
+        # w chwili przebiegu; po geście (nazwa przypisana w „Co przyszło”, zapis w Zbiorach) panel
+        # nad Dostawą liczy się ze stanu i mówi „Wszystko rozpoznane”, a log pod nim dalej
+        # „nierozpoznane: …” - bez podpisu czytał się jak stan bieżący. Podpis zamiast zwinięcia
+        # w „Szczegóły przebiegu”: do treści logu zero interakcji (zwinięcie kosztowało klik przy
+        # każdym zajrzeniu), a do rozstrzygnięcia, co jest stanem - jedno zdanie, też bez kliku.
+        # Treść i widoczność ustawia WYŁĄCZNIE `naglowek_przebiegu`; gaśnie z nowym przebiegiem.
+        self.lbl_summary_head = QLabel("")
+        self.lbl_summary_head.setProperty("role", "warn")
+        self.lbl_summary_head.setVisible(False)
+        v.addWidget(self.lbl_summary_head)
         self.lbl_summary = QLabel("")
         self.lbl_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_summary.setWordWrap(True)
@@ -859,6 +958,22 @@ class PipelineView(QWidget):
             tip = i18n.t("pipeline.stacks_counts_tip", no_copy=n["no_copy"])
         self.lbl_stacks_memo.setText(memo)
         self.lbl_stacks_memo.setToolTip(tip)
+
+    def _sync_rodowod(self):
+        """JEDYNY właściciel wiersza „czeka na Ciebie” (sekcja 4d): widoczny, gdy log meldował
+        rodowód stosów czekający na rękę I stan wciąż ma obrazy w perspektywie. Zbiór perspektywy
+        liczy tylko wtedy, gdy log ma ten człon - bez niego nie ma czego prowadzić. Krótkie WŁASNE
+        połączenie jak `_sync_stacks_memo`; wołane po przebiegu piszącym i przy wejściu w widok."""
+        n = 0
+        if self._czeka_rodowod and self._db_path is not None:
+            con = db.connect(self._db_path)
+            try:
+                n = len(queries.lineage_pending_frame_ids(con))
+            finally:
+                con.close()
+        self.lbl_lineage.setText(i18n.t_plural("pipeline.lineage_waiting", n,
+                                               where=i18n.t("perspective.lineage")) if n else "")
+        self.box_lineage.setVisible(n > 0)
 
     def _on_stack_lineage(self):
         """Przelicz rodowód gotowych stosów — BEZ skanu i BEZ pytania o korzeń.
@@ -981,6 +1096,7 @@ class PipelineView(QWidget):
         if self._thread is None:
             self._sync_copy_facts()
             self._sync_stacks_memo()       # gest w panelu rodowodu zmienia liczniki stosów
+            self._sync_rodowod()           # …i zbiór „czeka na Ciebie”
 
     def _on_copy_facts(self):
         """„Zbierz fakty kopii (N)": fakty kopii, przejęcie zeznania i - wyłącznie po realnym
@@ -1082,6 +1198,12 @@ class PipelineView(QWidget):
         się odnosi, wisiałoby nad wynikiem zupełnie innego etapu (wizytator P5 #9)."""
         self._summary_lines = []
         self._forget_vanished()
+        # Sekcje wyniku TEGO logu gasną z nim: lista nieprzeczytanych, „czeka na Ciebie” i podpis
+        # „stan sprzed Twoich zmian” mówią o przebiegu, którego raport właśnie znika.
+        self._pokaz_nieprzeczytane(())
+        self._czeka_rodowod = 0
+        self.box_lineage.setVisible(False)
+        self.lbl_summary_head.setVisible(False)
         self._etap_bez_zrodla = None
         self.last_run = self._pusty_zapis_przebiegu()
         self.lbl_summary.setText("")
@@ -1272,6 +1394,9 @@ class PipelineView(QWidget):
         if stage not in ETAPY_BEZ_BAZY:
             self.last_run["stage"] = stage
             self.last_run["since"] = self._now()
+            # Parametry ZAMROŻONE przy starcie dla powtórki („Skanuj ponownie”): korzeń, litera
+            # dysku i poziom. Serialu nie niosą - powtórka mierzy go świeżo w wątku tła (R#7).
+            self._parametry_przebiegu = (stage, dict(params))
         self._worker = PipelineWorker(self._db_path, now_fn=self._now)
         self._worker.configure(stage, **params)
         self._thread = QThread(self)
@@ -1354,6 +1479,10 @@ class PipelineView(QWidget):
         self._append_summary(self._format_result(name, result))
         if name == "presence":
             self._update_vanished_box(result)
+        if name in ("scan", "stacks"):
+            self._pokaz_nieprzeczytane(result.unreadable_dirs)
+        if name == "stack_lineage":
+            self._czeka_rodowod = _czekajace_na_reke(result)    # wiersz liczy `_sync_rodowod` po biegu
         self.stage_status.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
         self.stage_finished.emit(name)                  # widoki odświeża koniec przebiegu, nie etap
 
@@ -1371,6 +1500,9 @@ class PipelineView(QWidget):
         if name == "scan":
             self._append_summary(i18n.t("pipeline.scan_cancelled", n=summary.files))
         self._append_summary(self._format_result(name, summary))
+        if name in ("scan", "stacks"):
+            # Przerwany przebieg też mówi KTÓRE: linia raportu wyżej liczy te same katalogi.
+            self._pokaz_nieprzeczytane(summary.unreadable_dirs)
         self.status_message.emit(i18n.t("pipeline.stage_interrupted", stage=etykieta))
         self.stage_finished.emit(name)                  # częściowy zapis odświeży koniec przebiegu
 
@@ -1527,7 +1659,7 @@ class PipelineView(QWidget):
             czesci.append(i18n.t("pipeline.fmt.slin.outside_window", n=s.outside_window))
         if s.by_assert.get("harvest"):
             czesci.append(i18n.t("pipeline.fmt.slin.harvest", n=s.by_assert["harvest"]))
-        czekaja = sum(s.reasons.values())
+        czekaja = _czekajace_na_reke(s)
         if czekaja:
             czesci.append(i18n.t("pipeline.fmt.slin.waiting", n=czekaja))
         if s.ambiguous:
@@ -1679,6 +1811,61 @@ class PipelineView(QWidget):
             self._presence_params = None
             self.box_vanished.setVisible(False)
         self._sync_actions()
+
+    def _pokaz_nieprzeczytane(self, katalogi):
+        """Sekcja 4c - KTÓRE katalogi przebieg pominął (E4-7); jeden właściciel dla skanu Dostawy
+        i drogi „Stosy” (linie `_format_scan`/`_format_stacks` mówią ILE). Pusta lista chowa
+        sekcję (QUIET). Z imienia pierwsze `_WIDOCZNE_NIEPRZECZYTANE` ścieżek w kolejności
+        listingu, reszta członem „i N innych”. Parametry „Skanuj ponownie” ZAMRAŻANE teraz,
+        z bieżącego przebiegu: przycisk znaczy ten bieg na tym korzeniu, nie to, co okno wskaże
+        później (wzorzec `_presence_params`)."""
+        katalogi = [str(k) for k in katalogi]
+        n = len(katalogi)
+        self._parametry_ponowienia = self._parametry_przebiegu if n else None
+        self.lbl_unreadable.setText(i18n.t_plural("pipeline.unreadable_head", n) if n else "")
+        korzen = (self._parametry_ponowienia[1].get("root")
+                  if self._parametry_ponowienia is not None else None)
+        self.btn_rescan.setToolTip(i18n.t("pipeline.tip.rescan", root=korzen) if korzen else "")
+        for i, wiersz in enumerate(self._wiersze_nieprzeczytanych):
+            wiersz.set_full_text(katalogi[i] if i < n else "")
+            wiersz.setVisible(i < n)
+        reszta = n - _WIDOCZNE_NIEPRZECZYTANE
+        self.lbl_unreadable_more.setText(i18n.t_plural("pipeline.unreadable_more", reszta)
+                                         if reszta > 0 else "")
+        self.lbl_unreadable_more.setVisible(reszta > 0)
+        self.box_unreadable.setVisible(bool(n))
+        self._sync_actions()
+
+    def _on_rescan(self):
+        """„Skanuj ponownie” pod listą nieprzeczytanych katalogów: TEN SAM etap („Przyjmij nowe”,
+        „Przetwórz wszystko”, „Skanuj”, „Stosy”) z parametrami zamrożonymi przy liście, bez pytania
+        o katalog - korzeń był wskazany przy pierwszym biegu. Bramki jak `_on_copy_facts` (przycisk
+        jest wtedy wygaszony, slot wraca przy wołaniu wprost). Droga „Stosy” sprawdza jeszcze folder
+        roboczy, bo mógł zostać ustawiony po pierwszym biegu - test leksykalny, bez dysku; odmowa
+        jak w `_on_stacks`. Slot nie dotyka dysku: korzeń sonduje wątek tła (`_zrodlo`)."""
+        if (self._db_path is None or self._thread is not None or self._writeback_busy
+                or self._parametry_ponowienia is None):
+            return
+        etap, parametry = self._parametry_ponowienia      # zdejmij PRZED _begin_run (ono je zapomina)
+        if etap == "stacks" and self._under_work_root(parametry["root"]):
+            self._pokaz_odmowe(i18n.t("pipeline.stacks_in_work_root"))
+            return
+        self._begin_run()
+        self._start_stage(etap, **parametry)
+
+    def naglowek_przebiegu(self, godzina):
+        """PUBLICZNE wejście strony Przyjmij (AR-99): stan bazy odszedł od logu przebiegu
+        rozpoczętego o `godzina` (`HH:MM`), więc log dostaje podpis „Przebieg z HH:MM (stan sprzed
+        Twoich zmian)”; `None` go zdejmuje. W trakcie przebiegu nic nie stawia (log jest w budowie,
+        a zapisy wątku tła to nie gest człowieka), pusty log też nie (nie ma czego podpisać).
+        O tym, CZY stan odszedł, rozstrzyga wołający - widok nie trzyma połączenia z bazą."""
+        if godzina is None:
+            self.lbl_summary_head.setVisible(False)
+            return
+        if self._thread is not None or not self._summary_lines:
+            return
+        self.lbl_summary_head.setText(i18n.t("pipeline.log_before_changes", time=godzina))
+        self.lbl_summary_head.setVisible(True)
 
     def _format_scan(self, s):
         linia = i18n.t(
@@ -1850,6 +2037,7 @@ class PipelineView(QWidget):
         # mutex zapisu nagłówków co resztę Dostawy - zbieranie czyta nagłówki kopii, które pisarz
         # właśnie przepisuje.
         self.btn_copy_facts.setEnabled(idle and has_db and self._copy_facts_waiting > 0)
+        self.btn_rescan.setEnabled(idle and has_db and self._parametry_ponowienia is not None)
         self.btn_mark_vanished.setEnabled(idle and self._presence_params is not None)
         self.btn_pick_source.setEnabled(idle and has_db)
         self.btn_cancel.setEnabled(running and cancellable)
@@ -1862,6 +2050,7 @@ class PipelineView(QWidget):
             if self._bieg_pisze:
                 self._sync_copy_facts()    # każdy przebieg piszący mógł dodać albo zebrać fakty kopii
                 self._sync_stacks_memo()   # …i policzyć rodowód stosów (liczniki memo)
+                self._sync_rodowod()       # …i obrazy czekające na rękę (wiersz „czeka na Ciebie”)
         self._cancellable = cancellable if running else False
         self._refresh_buttons(running, self._cancellable)
         # Etap bez bazy gasi same przyciski Dostawy: gospodarz czyta `running_changed` jako „worker
@@ -1874,8 +2063,3 @@ class PipelineView(QWidget):
 
     def _sync_actions(self):
         self._refresh_buttons(self._thread is not None, self._cancellable)
-
-# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(E4-7): raport niekompletnego przebiegu mówi ILE, nie KTÓRE - ścieżki nieprzeczytanych
-#   katalogów ma tylko CLI, a wydanie onefile CLI nie ma. Nośnik jak box_vanished: sekcja przy
-#   niezerowej liście + akcja „skanuj ponownie"; jeden właściciel dla GUI i _format_stacks.

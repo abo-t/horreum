@@ -81,7 +81,7 @@ class GroupSummary:
     telescop_missing: int = 0      # klatki z nagłówkiem BEZ TELESCOP (→ config.review, stan)
     configs_proposed: int = 0
     configs_assigned: int = 0
-    config_review: int = 0
+    config_review: int = 0         # klatki bez osi do configu (STAN; event tylko przy wejściu, AR-88)
     calibration_off_axis: int = 0  # dark/bias pominięte na osi teleskopu (kind-scoping, NIE review)
     configs_unassigned: int = 0    # stęchłe przypisania kalibracji zdjęte (dane sprzed kind-scopingu)
     config_by_hand: int = 0        # zestaw wskazany RĘKĄ — przebieg go mija (R1b, NIE review)
@@ -326,10 +326,10 @@ def run_grouper(con, now):
             if r["cfg"] is not None and repo.unassign_config(con, frame_id=r["fid"], now=now):
                 s.configs_unassigned += 1
             continue
-        # RĘKA ROZSTRZYGNĘŁA — PRZEBIEG MILCZY (R1b). Wyjście z pętli stoi PRZED flagą przeglądu
-        # świadomie: `flag_config_review` strzelało dotąd BEZWARUNKOWO przy każdym przebiegu, więc
-        # klatka z zestawem od człowieka meldowałaby się do przeglądu w nieskończoność, a licznik
-        # kubełka nigdy nie spadał po geście — kolejka roboty mówiłaby o robocie już wykonanej.
+        # RĘKA ROZSTRZYGNĘŁA - PRZEBIEG MILCZY (R1b). Wyjście z pętli stoi PRZED flagą przeglądu
+        # świadomie: `flag_config_review` nie patrzy na bieżący zestaw (AR-65), więc klatka z zestawem
+        # od człowieka dostałaby w dzienniku powód przeglądu roboty już wykonanej (przed AR-88 - przy
+        # każdym przebiegu, a licznik kubełka liczony wtedy ze zdarzeń nigdy nie spadał po geście).
         # Drugi powód jest cięższy: dla tej populacji (RAW przez teleskop) automat NIE MA racji
         # z definicji formatu — `TELESCOP` z EXIF-u niesie nazwę OBIEKTYWU (E3-3), więc przypisanie
         # z nagłówka nadpisałoby fakt człowieka wartością WPROST fałszywą. Klinga broni tego samego

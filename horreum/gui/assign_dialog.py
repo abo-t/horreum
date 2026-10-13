@@ -13,14 +13,10 @@ from PySide6.QtWidgets import (
 
 from horreum import resolver
 from horreum.gui import facet_model, i18n, queries
-from horreum.resolve._text import norm_alnum
+from horreum.resolve._text import LITERY_BEZ_ROZKLADU, norm_alnum
 from horreum.resolve.catalog import catalog_canon, header_form, xref_aliases
 from horreum.resolve.objects import common_name_form, load_own_objects
 from horreum.resolve.solar import solar_form
-
-# Litery bez rozkładu NFKD: dla Unicode „ł" nie jest „l z kreską", tylko osobną literą, więc
-# `unicodedata.normalize` jej nie rusza i bez tej tablicy „Obłok" zostałby przy „Obok".
-_LITERY_BEZ_ROZKLADU = str.maketrans({"ł": "l", "Ł": "L"})
 
 # Ile pozycji listy obiektów naraz. Styl Fusion domyślnie ignoruje `maxVisibleItems` i rozwija
 # listę na wysokość ekranu (zmierzone: 1778 px przy kilkuset obiektach); `combobox-popup: 0`
@@ -31,7 +27,7 @@ _POZYCJI_NARAZ = 10
 def bez_diakrytykow(text):
     """`Księżyc` → `Ksiezyc`, `Obłok` → `Oblok`: znaki diakrytyczne złożone do liter bazowych.
     Czysta funkcja, wyłącznie po stronie okna."""
-    rozlozone = unicodedata.normalize("NFKD", str(text or "").translate(_LITERY_BEZ_ROZKLADU))
+    rozlozone = unicodedata.normalize("NFKD", str(text or "").translate(LITERY_BEZ_ROZKLADU))
     return "".join(z for z in rozlozone if not unicodedata.combining(z))
 
 

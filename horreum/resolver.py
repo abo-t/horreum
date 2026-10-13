@@ -761,8 +761,8 @@ def resolve_observatory(con, now):
 class ReviewState:
     """Kolejka przeglądu wyprowadzona ze STANU tabel — NIE ze zliczania eventów (#12).
 
-    `flag_config_review` i pokrewne emitują BEZWARUNKOWO przy każdym przebiegu (grouper iteruje
-    WSZYSTKIE klatki z nagłówkiem), więc `count(event)` mnożył licznik przez liczbę dostaw: 7 klatek
+    Flagi przeglądu emitowały BEZWARUNKOWO przy każdym przebiegu (`flag_config_review` do AR-88;
+    `object.review_summary` dalej tak), więc `count(event)` mnożył licznik przez liczbę dostaw: 7 klatek
     czekających na decyzję pokazywało się jako 35 po pięciu przebiegach. Stan jest idempotentny —
     ta sama derywacja, co kolejka osi obiektu w `gui.queries.review_queue`.
 

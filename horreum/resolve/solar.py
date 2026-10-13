@@ -54,9 +54,9 @@ _BODY_OGONKI = {"KSIEZYC": "Księżyc", "SLONCE": "Słońce"}
 _COMET_IAU = re.compile(r"(?<![A-Z0-9])([CPDX])[ /_-]?(\d{4})[ _-]?([A-Z]\d{1,3})\b")
 
 
-def _comet_identity(canon, raw):
+def _comet_identity(canon, alias_norm):
     return ObjectIdentity(canon=canon, catalog="comet", kind="comet",
-                          source="comet", alias_norm=norm_alnum(raw))
+                          source="comet", alias_norm=alias_norm)
 
 
 def solar_form(alias_norm):
@@ -83,21 +83,25 @@ def resolve_solar(object_raw):
     if raw is None:
         return None
     u = norm_ascii(raw)              # UPPER + fold ASCII (Księżyc→KSIEZYC, c/2023 a3→C/2023 A3)
+    # Klucz aliasu z formy PO fold-zie (AR-126): `norm_alnum` wprost na surowym zeznaniu wycina
+    # litery z ogonkami („Księżyc" → `KSIYC`), więc alias nie spotykał zastanego `KSIEZYC`.
+    # Dla zeznania w ASCII klucz jest ten sam co dotąd.
+    klucz = norm_alnum(u)
 
     # (1) oznaczenie IAU komety — canon z mapy znanych, inaczej sam desig
     m = _COMET_IAU.search(u)
     if m:
         desig = f"{m.group(1)}/{m.group(2)} {m.group(3)}"
-        return _comet_identity(_COMET_CANON.get(desig, desig), raw)
+        return _comet_identity(_COMET_CANON.get(desig, desig), klucz)
 
     # (2) token potoczny komety (Lemmon/Comet Lemmon) — granica słowa, nie substring
     for tok, desig in _COMET_TOKEN.items():
         if re.search(rf"(?<![A-Z]){re.escape(tok)}(?![A-Z])", u):
-            return _comet_identity(_COMET_CANON.get(desig, desig), raw)
+            return _comet_identity(_COMET_CANON.get(desig, desig), klucz)
 
     # (3) ciało US — EXACT (całe object_raw == token). „Saturn Nebula" tu NIE trafia (bezpiecznik F2)
     if u in _BODIES:
         return ObjectIdentity(canon=_BODIES[u], catalog="solar", kind="solar_system",
-                              source="solar", alias_norm=norm_alnum(raw))
+                              source="solar", alias_norm=klucz)
 
     return None

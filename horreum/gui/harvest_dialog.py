@@ -50,10 +50,13 @@ Wynik dla gospodarza to trzy atrybuty: `summary` (zdanie na pasek stanu), `harve
 bez wiedzy bazy i znane bazie bez rodowodu dokładnego). Dwa
 ostatnie ustawia WYŁĄCZNIE gest „Zamknij i przyjmij do archiwum” i tylko wtedy, gdy kopie leżą
 w bibliotekach archiwum okna (`CALIBRATION`, `STACKS`) - stąd archiwum zamrożone od pierwszej kopii
-do przyjęcia: dwa archiwa w jednym oknie dałyby korzeń, którego Dostawa nie powinna skanować.
-Zwykłe „Zamknij” zostawia kopie na dysku i mówi w `summary`, kiedy baza je pozna, a przy stosach -
-że rodowód dokładny zapisze wyłącznie „Zamknij i przyjmij” (Dostawa daje im rodowód okna czasu);
-instrukcja przed ścieżką, bo pasek stanu ucina koniec zdania.
+wciągniętej W TYM OKNIE (`_placed_dirs`): dwa archiwa w jednym oknie dałyby korzeń, którego Dostawa
+nie powinna skanować. Kopie zastane w archiwum bez wiedzy bazy i stosy bez rodowodu dokładnego z listy
+to fakty o BIEŻĄCYM archiwum, nie o tym oknie: „Zmień…” je zeruje, a sonda i lista liczą je dla
+nowego - zajrzenie do innego archiwum nie zamyka drogi powrotu (AR-107). Zwykłe „Zamknij”
+zostawia kopie na dysku i mówi w `summary`, kiedy baza je pozna, a przy stosach - że rodowód
+dokładny zapisze wyłącznie „Zamknij i przyjmij” (Dostawa daje im rodowód okna czasu); instrukcja
+przed ścieżką, bo pasek stanu ucina koniec zdania.
 
 Prawda o biegu przychodzi z POSTĘPU, nie z wyniku: katalogi wciągniętych kopii i liczniki
 kłopotów zbiera `_on_apply_progress`, więc wyjątek rdzenia po kopiach (gałąź `failed`, bez
@@ -580,6 +583,7 @@ class HarvestDialog(QDialog):
         self._placed_keys = set()        # `norm_path` celów wciągniętych kopii - wszystkie biegi okna
         self._placed_n = 0               # ile plików wciągnęły wszystkie biegi okna (z postępu)
         self._placed_stacks = {}         # sha1_data → (frame_ids, kanon wydania) stosów wciągniętych w tym oknie
+        # Cztery fakty o BIEŻĄCYM archiwum okna - zeruje je zmiana archiwum (`_set_archive`, AR-107).
         self._unknown = {}               # `norm_path` → ścieżka kopii w archiwum, której baza nie zna
         self._unknown_stacks = {}        # sha1_data → (frame_ids, kanon) stosów w archiwum bez wiedzy bazy
         self._lineage = {}               # `norm_path` → kopia stosu pod STACKS bez rodowodu dokładnego (lista)
@@ -697,11 +701,20 @@ class HarvestDialog(QDialog):
         self.btn_archive.clicked.connect(self._on_pick_archive)
         row_a.addWidget(self.btn_archive)
         v.addLayout(row_a)
+        row_w = QHBoxLayout()
         self.archive_warn = QLabel("")               # archiwum okna ≠ archiwum bazy (`_show_archive`)
         self.archive_warn.setProperty("role", "warn")
         self.archive_warn.setWordWrap(True)
         self.archive_warn.setVisible(False)
-        v.addWidget(self.archive_warn)
+        row_w.addWidget(self.archive_warn, 1)
+        # Powrót jednym klikiem (AR-107): ostrzeżenie mówi, że pliki trafią gdzie indziej, więc droga
+        # do archiwum bazy stoi obok niego, a nie za oknem wyboru katalogu. Blokada jak „Zmień…”.
+        self.btn_archive_back = QPushButton(i18n.t("harvest.btn_archive_back"))
+        self.btn_archive_back.setAutoDefault(False)
+        self.btn_archive_back.clicked.connect(self._on_archive_back)
+        self.btn_archive_back.setVisible(False)
+        row_w.addWidget(self.btn_archive_back, 0, Qt.AlignTop)
+        v.addLayout(row_w)
 
         self.head_label = QLabel("")
         _fh = self.head_label.font(); _fh.setBold(True); self.head_label.setFont(_fh)
@@ -784,6 +797,7 @@ class HarvestDialog(QDialog):
         self.archive_warn.setText(i18n.t("harvest.archive_differs", db=self._db_archive)
                                   if differs else "")
         self.archive_warn.setVisible(differs)
+        self.btn_archive_back.setVisible(differs)
 
     def _archive_differs(self):
         """Archiwum okna inne niż archiwum, które zna baza (bez archiwum bazy - nie ma z czym porównać)."""
@@ -878,26 +892,38 @@ class HarvestDialog(QDialog):
 
     def _on_pick_archive(self):
         """„Zmień…” archiwum. Okno wyboru kręci WŁASNĄ pętlę zdarzeń, a w niej może dobiec podgląd
-        z kopiami do przyjęcia (AR-100) - przycisk był aktywny przy kliku, a po powrocie archiwum
-        jest już zamrożone. Ponowne sprawdzenie po powrocie: zdanie o blokadzie, archiwum bez zmian
-        (asercja `_set_archive` zostaje strażnikiem obejścia, nie odpowiedzią na wyścig)."""
+        z kopiami zastanymi w archiwum (AR-100) - te archiwum już nie zamrażają (AR-107), więc
+        wynik z pętli niczego tu nie blokuje. Blokadę niesie wyłącznie kopia wciągnięta w tym oknie,
+        a bieg, który ją kładzie, trzyma „Zmień…” wygaszone do swojego końca i nie rusza przy
+        otwartym (modalnym) oknie wyboru - strażnikiem obejścia jest asercja `_set_archive`."""
         path = QFileDialog.getExistingDirectory(self, i18n.t("harvest.dlg.pick_archive"),
                                                 self._archive_root)
-        if not path:
-            return
-        if self._receivable_dirs():
-            self._show_notice(i18n.t("harvest.archive_locked"), "warn")
-            self._sync_buttons()
-            return
-        self._set_archive(path)
+        if path:
+            self._set_archive(path)
+
+    def _on_archive_back(self):
+        """„Wróć do archiwum bazy” przy ostrzeżeniu o innym archiwum (AR-107) - ta sama zmiana
+        archiwum co „Zmień…”, z celem z bazy zamiast z okna wyboru."""
+        self._set_archive(self._db_archive)
 
     def _set_archive(self, path):
         """Zmiana archiwum TYLKO dla tego okna: źródło Dostawy (`pipeline/last_source`) należy do
         strony Dostawy, a okno żniw nie przestawia jej po cichu następnej dostawy. Po pierwszej
-        kopii archiwum jest zamrożone (`_sync_buttons`) - EXPECT, gdy ktoś obejdzie wygaszony
-        przycisk. Seam testowy."""
-        assert not self._receivable_dirs(), "archiwum zamrożone od pierwszej kopii do przyjęcia"
+        kopii wciągniętej w tym oknie archiwum jest zamrożone (`_sync_buttons`) - EXPECT, gdy ktoś
+        obejdzie wygaszony przycisk. Seam testowy.
+
+        Kopie zastane bez wiedzy bazy i stosy bez rodowodu dokładnego to fakty o archiwum, które
+        okno właśnie opuszcza (AR-107): zerowane tu, liczy je od nowa sonda (`_on_dry_done`) i lista
+        (`_take_lineage`) wobec nowego archiwum. Bez tego wróciłyby do korzenia przyjęcia spoza
+        bibliotek archiwum okna (odmowa `_receivable_root`) albo trzymały przycisk przyjęcia."""
+        assert not self._placed_dirs, "archiwum zamrożone od pierwszej kopii wciągniętej w tym oknie"
         self._archive_root = os.path.normpath(path)
+        self._unknown.clear()
+        self._unknown_stacks.clear()
+        self._lineage.clear()
+        self._lineage_stacks.clear()
+        self._refresh_summary()
+        self._sync_buttons()                         # przyjęcie gaśnie, zanim sonda i lista powiedzą swoje
         self._show_archive()
         self._fresh.clear()                          # podglądy wierszy liczone wobec poprzedniego archiwum
         self._trigger_releases()                     # stan listy zależy od archiwum (AR-105)
@@ -954,7 +980,9 @@ class HarvestDialog(QDialog):
         i wyjściem z biegu). „Wciągnij N”: świeży plan bieżących parametrów z czymś do wciągnięcia,
         pole zgodne z podglądem, nic w biegu; po biegu nazywa jego skutek. „Zamknij i przyjmij”:
         od pierwszej rzeczy do przyjęcia (`_receivable_dirs` - kopia wciągnięta albo zastana w archiwum
-        bez wiedzy bazy, stos bez rodowodu dokładnego z listy). Archiwum zamrożone od tej samej chwili."""
+        bez wiedzy bazy, stos bez rodowodu dokładnego z listy). Archiwum zamrożone WYŁĄCZNIE od
+        pierwszej kopii wciągniętej w tym oknie (`_placed_dirs`, AR-107) - rzeczy zastane w archiwum
+        to fakty o nim, które „Zmień…” liczy od nowa."""
         running = self._apply_worker is not None
         n = status_counts(self._plan.items).get("would-place", 0) if self._plan is not None else 0
         if self._plan is None and self._outcome is not None:
@@ -976,8 +1004,10 @@ class HarvestDialog(QDialog):
             font.setBold(heavy)
             btn.setFont(font)
             btn.setMinimumHeight(34 if heavy else 0)
-        self.btn_archive.setEnabled(not receivable and not running)
-        self.btn_archive.setToolTip(i18n.t("harvest.archive_locked") if receivable else "")
+        locked = bool(self._placed_dirs)
+        for btn in (self.btn_archive, self.btn_archive_back):
+            btn.setEnabled(not locked and not running)
+            btn.setToolTip(i18n.t("harvest.archive_locked") if locked else "")
 
     # ---- sonda (auto-DRY) ----
     def _set_probing(self, on):
@@ -1072,7 +1102,7 @@ class HarvestDialog(QDialog):
         self._probed = wbpp_dir
         self._shown_out = wbpp_dir                   # wynik biegu z tego planu liczy pliki względem tego samego wyjścia
         # Kopie, które leżą w archiwum, a baza ich nie zna (wciągnięte w innym oknie bez przyjęcia):
-        # fakt o archiwum, nie o tym wyjściu - zostaje do końca okna, jak katalogi wciągniętych kopii.
+        # fakt o archiwum, nie o tym wyjściu - zostaje do zmiany archiwum (`_set_archive`, AR-107).
         unknown = {norm_path(it.exists_path): it.exists_path for it in plan.items
                    if it.status == "exists" and not it.known_to_db and it.exists_path}
         if unknown.keys() - self._unknown.keys():
@@ -1277,8 +1307,8 @@ class HarvestDialog(QDialog):
     def _take_lineage(self, rows):
         """Stosy z listy, których rodowodu dokładnego baza nie ma (AR-104: zwykłe „Zamknij”, potem
         osobna Dostawa - zbiór wejść leży tylko w zeznaniu żniw w folderze wydania). Fakt o archiwum
-        okna, nie o wybranym wierszu - zostaje do końca okna jak kopie nieznane bazie: odsłania
-        „Zamknij i przyjmij”, blokuje archiwum, a przyjęcie oddaje te stosy gospodarzowi."""
+        okna, nie o wybranym wierszu - zostaje do zmiany archiwum jak kopie nieznane bazie: odsłania
+        „Zamknij i przyjmij”, a przyjęcie oddaje te stosy gospodarzowi; archiwum nie blokuje (AR-107)."""
         nowe = {norm_path(path): path for row in rows for _sha1, _ids, path, _kanon in row.lineage}
         self._lineage_stacks.update((sha1, (tuple(ids), kanon))
                                     for row in rows for sha1, ids, _path, kanon in row.lineage)
@@ -1451,7 +1481,8 @@ class HarvestDialog(QDialog):
         self.edit_output.setEnabled(on)
         self.btn_pick.setEnabled(on)
         self.rel_table.setEnabled(on)
-        self.btn_archive.setEnabled(on and not self._receivable_dirs())
+        self.btn_archive.setEnabled(on and not self._placed_dirs)
+        self.btn_archive_back.setEnabled(on and not self._placed_dirs)
 
     def _on_cancel_apply(self):
         if self._apply_worker is not None:
@@ -1618,7 +1649,7 @@ class HarvestDialog(QDialog):
     def _receivable_dirs(self):
         """Katalogi do przyjęcia: kopie, których baza nie zna (`_copy_dirs`) ∪ katalogi stosów bez
         rodowodu dokładnego z listy (`_lineage`, AR-104). Ten zbiór niesie widoczność „Zamknij
-        i przyjmij”, blokadę archiwum, korzeń, `done()` i zdanie paska."""
+        i przyjmij”, korzeń, `done()` i zdanie paska; blokadę archiwum - tylko `_placed_dirs` (AR-107)."""
         return self._copy_dirs() | {os.path.dirname(p) for p in self._lineage.values()}
 
     def _receivable_root(self):

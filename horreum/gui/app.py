@@ -1677,9 +1677,33 @@ class ObjectAxisView(QWidget):
         # bramkowanej drogi (`PipelineView.run_stage`). None = widok bez gospodarza (testy samego
         # widoku) → okno naprawy powie wprost, że taktu 3 nie ma stąd jak uruchomić.
         self.run_stage_fn = None
+        # Stan bazy zmienił się poza tym widokiem, gdy go nie było widać (`odswiez_gdy_widoczny`):
+        # przeładowanie czeka na pokazanie (`showEvent`), a każde `refresh` znacznik zdejmuje.
+        self._nieaktualny = False
         self._build_ui()
         self._load_facets()
         self.refresh()
+
+    def odswiez_gdy_widoczny(self):
+        """Gest Zbiorów zmienił oś obiektu (`FramesView.object_axis_changed`): widoczny widok
+        przeładowuje się od razu, niewidoczny dostaje znacznik i przeładowuje się przy pokazaniu.
+
+        LENIWIE, BO TO BYŁ NAJWIĘKSZY PRZESTÓJ PO GEŚCIE (AR-84): po przeniesieniu składu zbioru
+        i liczników Porządków w tło zostało tu ~0,4 s na wątku GUI po każdym geście osi obiektu
+        (zmierzone na kopii pf4), a widoku w tym czasie nie widać - gest pada w Zbiorach.
+        Punktem odświeżenia jest `showEvent`, nie wejście z listy Porządków: na podstronę prowadzi
+        kilka dróg (wiersz zadania, kubełek z raportu Dostawy `_on_kubelek_porzadkow`, powrót przez
+        sidebar na stronę, która już stała na tej podstronie), a pokazanie łapie każdą z nich -
+        ekran nie pokaże stanu sprzed gestu żadną drogą."""
+        if self.isVisible():
+            self.refresh()
+        else:
+            self._nieaktualny = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._nieaktualny:
+            self.refresh()
 
     # ---------------------------------------------------------------- budowa UI
 
@@ -1850,6 +1874,7 @@ class ObjectAxisView(QWidget):
         """Przeładuj bibliotekę i kolejkę z read-modelu (źródło prawdy = baza; brak cache). Zachowuje
         zaznaczenie obiektu po `object_id`; po zapisie `select_canon` wybiera jawny cel akcji.
         `select_first=False` zostawia jednoznaczny pusty wybór po operacji, która nic nie przypisała."""
+        self._nieaktualny = False                     # stan z bazy - znacznik `odswiez_gdy_widoczny` schodzi
         prev = self._selected_object_id() if select_canon is None else None
         flt = self._filters()
         self._loading = True
@@ -3769,7 +3794,7 @@ class MainWindow(QMainWindow):
         # (`running_changed(False)`), nie koniec etapu - patrz `_odswiez_widoki_po_przebiegu`.
         pipeline.running_changed.connect(self._on_pipeline_running)
         pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
-        # „Wciągnij mastery…”: okno żniw potrzebuje połączenia z bazą, którego Dostawa nie trzyma.
+        # „Wciągnij z WBPP…”: okno żniw potrzebuje połączenia z bazą, którego Dostawa nie trzyma.
         pipeline.open_harvest.connect(self._on_open_harvest)
         pipeline.set_work_root(self._work_wbpp())   # widok powstaje z każdą bazą, folder roboczy jest jeden
         self.pipeline_view = pipeline
@@ -3809,7 +3834,8 @@ class MainWindow(QMainWindow):
         # CZWARTA POWIERZCHNIA gestu osi obiektu (S2b, §4/14c-f): gest z paska Zbiorów zmienia
         # kolejkę przeglądu w oknie osi — a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna
         # obie strony, więc to on je łączy (grid nie importuje osi, oś nie importuje gridu).
-        grid.object_axis_changed.connect(tasks.object_view.refresh)
+        # Leniwie (AR-84): niewidoczna oś przeładuje się przy pokazaniu - gest pada w Zbiorach.
+        grid.object_axis_changed.connect(tasks.object_view.odswiez_gdy_widoczny)
         grid.observatory_axis_changed.connect(tasks.observatory_view.refresh)   # przeniesione stanowisko
         # …i PIĄTA: badge sidebara, widoczny CAŁY CZAS. Liczy `review_frame_ids`, czyli dokładnie
         # populację, którą oba gesty zmieniają — bez tej linii licznik zadań pokazywał stan sprzed
@@ -3819,7 +3845,10 @@ class MainWindow(QMainWindow):
         # przy gestach osi żywotności klatki („Przywróć"/„Wycofaj"), więc plakietka zostawała przy
         # starej liczbie. Jeden sygnał z ogona każdego gestu gridu, jedno podpięcie tutaj - bez
         # drugiego podpięcia pod `object_axis_changed`, które odświeżałoby plakietkę dwa razy.
-        grid.stan_porzadkow_changed.connect(tasks.refresh_counts)
+        # W TLE (AR-84): liczniki po geście stały w ogonie gestu 557 ms na kopii pf4 - liczy je
+        # wątek tła, ten sam przełącznik co skład zbioru (test bez wątków tła liczy inline).
+        grid.stan_porzadkow_changed.connect(
+            lambda: tasks.refresh_counts(w_tle=self._pola_poza_watkiem))
         # OSIE PORZĄDKÓW MÓWIĄ PRZY ODŚWIEŻENIU („Brak stanowisk na osi…”, „Brak obiektów dla tego
         # filtra…”), a odświeżają się też po przebiegu Dostawy - zdanie przykrywało wtedy status
         # etapu (AR-43), a odmowę kafla Przyjmij wypierało razem z czekającym „gotowe” (AR-97). Ta
@@ -3876,8 +3905,9 @@ class MainWindow(QMainWindow):
         # Gest „Przypisz obiekt…” z raportu dostawy zmienia tę samą oś, co gest Zbiorów - te same
         # powierzchnie liczą się od nowa: kolejka osi, plakietka Porządków, teczki Domu i grid
         # (facet Obiekt liczy się w `_refresh`, więc przeładowanie facetów niepotrzebne).
-        przyjmij.object_axis_changed.connect(tasks.object_view.refresh)
-        przyjmij.object_axis_changed.connect(tasks.refresh_counts)
+        przyjmij.object_axis_changed.connect(tasks.object_view.odswiez_gdy_widoczny)
+        przyjmij.object_axis_changed.connect(   # liczniki w tle (AR-84), jak po geście Zbiorów
+            lambda: tasks.refresh_counts(w_tle=self._pola_poza_watkiem))
         przyjmij.object_axis_changed.connect(home.odswiez_teczki)
         przyjmij.object_axis_changed.connect(lambda: grid.refresh(w_tle=True))
 
@@ -4007,7 +4037,9 @@ class MainWindow(QMainWindow):
         makra) otwieramy KLIKIEM ich przycisku, tylko gdy panel jest zamknięty: przycisk jest
         przełącznikiem, więc drugi klik schowałby to, po co człowiek przyszedł."""
         from horreum.gui import home as home_mod     # lazy jak `HomeView` w `_mount_views`
-        if klucz == home_mod.WIECEJ_PLANER:
+        if klucz == home_mod.WIECEJ_ZNIWA:
+            self._on_open_harvest()                  # ta sama droga, co przycisk sekcji Stosy Dostawy
+        elif klucz == home_mod.WIECEJ_PLANER:
             self._show_view(NAV_PLANER)
         elif klucz == home_mod.WIECEJ_STANOWISKA:
             self._on_open_sites()
@@ -4054,7 +4086,11 @@ class MainWindow(QMainWindow):
             self.object_view.refresh()
 
     def _on_open_harvest(self):
-        """„Wciągnij mastery…” → okno żniw nad połączeniem okna. Korzeń archiwum najpierw z bazy
+        """„Wciągnij z WBPP…” → okno żniw nad połączeniem okna. Dwa wejścia, jedna droga: przycisk
+        sekcji Stosy Dostawy (`PipelineView.open_harvest`) i pozycja „Więcej…” Domu (AR-109,
+        `_on_wiecej_domu`). Przyjęcie („Zamknij i przyjmij”) przenosi na stronę Dostawy, jak kafel
+        Przyjmij: tam biegnie łańcuch, który ono uruchamia, i staje raport „co przyszło” - z Domu
+        człowiek patrzyłby na ekran, którego bieg nie dotyczy. Korzeń archiwum najpierw z bazy
         (`harvest.archive_root_from_db` - tam, gdzie leży biblioteka kalibracji), dopiero bez niego
         ostatnie źródło Dostawy: ono bywa podkatalogiem nocy, a wtedy mastery lądowałyby w drugiej,
         równoległej bibliotece. Po oknie: gdy coś wciągnięto - łańcuch Dostawy na wspólnym rodzicu
@@ -4077,6 +4113,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
         zdania = [dlg.summary] if dlg.summary else []
         if dlg.harvested_root:
+            self._show_view(NAV_DOSTAWA)                 # z Dostawy - bez zmiany (ten sam wiersz)
             reason = self.pipeline_view.run_all_on(dlg.harvested_root)
             if reason is not None:
                 zdania.append(reason)
@@ -4305,7 +4342,7 @@ class MainWindow(QMainWindow):
         """Gest zmienił oś obiektu stosów - te same powierzchnie, co po geście „Przypisz obiekt…”
         z raportu Dostawy (kolejka osi, plakietka Porządków, teczki Domu, grid) i panel rodowodu."""
         self.object_view.refresh()
-        self.tasks_view.refresh_counts()
+        self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)   # liczniki w tle (AR-84)
         if self.home_view is not None:
             self.home_view.odswiez_teczki()
         self.grid_view.refresh(w_tle=True)

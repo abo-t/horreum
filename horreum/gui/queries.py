@@ -631,8 +631,8 @@ def _po_nazwie_naturalnie(wiersze, pole):
 
 
 def review_queue(con):
-    """Kolejka przeglądu osi obiektu ze STANU (NIE z `count(event)` — R#2/R#4: `flag_config_review`/
-    `object.review_summary` mnożą eventy przy re-skanie, stan jest idempotentny). Kanały:
+    """Kolejka przeglądu osi obiektu ze STANU (NIE z `count(event)` - R#2/R#4: `object.review_summary`
+    mnoży eventy przy re-skanie (`flag_config_review` do AR-88), stan jest idempotentny). Kanały:
       - `object_review`: light/master_light z `object_id IS NULL` i obecnym `object_raw` (JOIN header,
         `GROUP BY object_raw, cleared`) — co user zostawił nierozpoznane, rozszczepione po ŹRÓDLE:
         klatka z nagrobkiem dostaje własny wiersz, bo jest WERDYKTEM, a nie brakiem wiedzy (S3);

@@ -1,62 +1,70 @@
-"""§7.2 izolacja Qt od rdzenia (PLAN_gui §4) — STRUKTURALNIE, statycznym AST, BEZ importu PySide6.
+"""§7.2 izolacja Qt od rdzenia (PLAN_gui §4) - STRUKTURALNIE, statycznym AST, BEZ importu PySide6.
 
-Ten plik NIE robi `importorskip` — działa też w izolowanym clone bez `[gui]` (§5.11). To mocniejszy
+Ten plik NIE robi `importorskip` - działa też w izolowanym clone bez `[gui]` (§5.11). To mocniejszy
 dowód niż „pełny pytest przechodzi bez Qt": dowodzi, że ŻADEN moduł rdzenia ani read-model nie ma
 nawet `import PySide6`, więc `import horreum.db/repo/queries/cli` nie wciągnie Qt niezależnie od tego,
-co już siedzi w `sys.modules`. Qt wolno tknąć WYŁĄCZNIE warstwie widżetów (`app.py`, `__main__.py`)."""
+co już siedzi w `sys.modules`. Qt wolno tknąć WYŁĄCZNIE warstwie widżetów - plikom wymienionym
+w `QT_WIDGET_FILES` ścieżką względną od pakietu, nie samą nazwą."""
 import ast
 from pathlib import Path
 
 import horreum
 
 PKG = Path(horreum.__file__).parent
-# Jedyne pliki, którym wolno importować PySide6. `pipeline.py` (widok Pipeline + worker QThread —
-# PLAN_gui_pipeline §5) DOŁĄCZONY w etapie 2; `grid.py` (widok „Klatki" + model tabeli — PLAN_gui_grid,
+# Jedyne pliki, którym wolno importować PySide6. `pipeline.py` (widok Pipeline + worker QThread -
+# PLAN_gui_pipeline §5) DOŁĄCZONY w etapie 2; `grid.py` (widok „Klatki" + model tabeli - PLAN_gui_grid,
 # krok 3 scalenia) DOŁĄCZONY w kroku 3: warstwy widżetów, import Qt uprawniony. Rdzeń, read-model
 # (`queries.py`), silnik filtra/pivot (`filter_engine.py`/`pivot.py`) i progres (`progress.py`) zostają BEZ Qt.
-QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projection_dialog.py",
+# AR-110: wpis to ścieżka względna od pakietu (`p.relative_to(PKG).as_posix()`), nie nazwa bazowa -
+# sama nazwa uprawniała też przyszły `horreum/core/busy.py`. Każdy wpis musi istnieć i realnie
+# importować PySide6 (`test_widgety_realnie_importuja_qt`): martwy wpis rozluźnia granicę bez śladu.
+# `gui/__main__.py` nie ma wpisu, bo Qt bierze pośrednio przez `app.main`, sam PySide6 nie importuje.
+QT_WIDGET_FILES = {"gui/app.py", "gui/pipeline.py", "gui/grid.py", "gui/projection_dialog.py",
                    # WO-6: `grid.py` = fasada z `FramesView` nad pięcioma modułami widoku „Klatki"
-                   "grid_model.py", "grid_panels.py", "grid_lineage.py", "grid_selection.py",
-                   "grid_workers.py",
-                   "facets.py",   # F4: listwa facetów (FacetRail) — warstwa widżetów
-                   "tasks.py",    # F5: Porządki (TasksView) — warstwa widżetów
-                   "map_view.py",  # F8: mapa stanowisk (SitesMapView, QPainter) — warstwa widżetów
-                   "rows.py",     # P1: delegat wiersza wieloczłonowego — warstwa widżetów
-                   "planner.py",  # T5: ekran planera celów (PlannerView + PlanWorker) — widżety
-                   "wb_worker.py",  # P-D: wspólny wykonawca writebacku (QThread) — warstwa widżetów
+                   "gui/grid_model.py", "gui/grid_panels.py", "gui/grid_lineage.py",
+                   "gui/grid_selection.py", "gui/grid_workers.py",
+                   "gui/facets.py",   # F4: listwa facetów (FacetRail) - warstwa widżetów
+                   "gui/tasks.py",    # F5: Porządki (TasksView) - warstwa widżetów
+                   "gui/map_view.py",  # F8: mapa stanowisk (SitesMapView, QPainter) - warstwa widżetów
+                   "gui/rows.py",     # P1: delegat wiersza wieloczłonowego - warstwa widżetów
+                   "gui/planner.py",  # T5: ekran planera celów (PlannerView + PlanWorker) - widżety
+                   "gui/wb_worker.py",  # P-D: wspólny wykonawca writebacku (QThread) - warstwa widżetów
                    # S2b: okno przypisania obiektu wydzielone z `app.py`, bo od paska Zbiorów ma
-                   # DWÓCH wołających, a `grid` nie sięgnie do `app` bez cyklu. Warstwa widżetów —
+                   # DWÓCH wołających, a `grid` nie sięgnie do `app` bez cyklu. Warstwa widżetów -
                    # wpis jest tu PRZESUNIĘCIEM granicy, nie jej rozluźnieniem: rdzeń i read-model
                    # zostają bez Qt, a lista dalej wymienia każdy uprawniony plik z imienia.
                    # F-1: wskaźnik zajętości z nazwaną fazą (kursor + wymuszone przemalowanie).
-                   # Własny plik, bo sięgają po niego OBAJ — `app.py` i `grid.py` — a grid nie może
+                   # Własny plik, bo sięgają po niego OBAJ - `app.py` i `grid.py` - a grid nie może
                    # importować `app` (cykl: `app` importuje grid). Ten sam powód, co przy
                    # `assign_dialog.py`: PRZESUNIĘCIE granicy, nie jej rozluźnienie.
-                   "busy.py",
-                   "assign_dialog.py",
+                   "gui/busy.py",
+                   "gui/assign_dialog.py",
                    # R1: okno „Przypisz zestaw…" (oś SPRZĘTU wskazana ręką). Wydzielone od pierwszej
                    # linii wzorem `assign_dialog.py`, bo pyta o INNĄ oś niż reszta ekranu, a jego
                    # kontrakt („teleskop wskazuje ręka, kamerę zna plik") jest inwariantem DDL.
                    # Wpis PRZESUWA granicę, nie rozluźnia jej: read-model kubełka
                    # (`queries.config_review_frames`/`config_review_groups`) zostaje Qt-wolny
                    # i pilnuje tego asercja pozytywna w `test_readmodel_i_init_gui_qt_free`.
-                   "config_dialog.py",
+                   "gui/config_dialog.py",
                    # 0027: okno „Wskaż stanowisko…" (oś OBSERWATORIUM wskazana ręką) - bliźniak
                    # `config_dialog.py` w konwencji i z tego samego powodu wydzielony. Read-model
                    # grup (`queries.observatory_review_groups`) i walidator współrzędnych
                    # (`resolve.observatory.user_site_coords`) zostają Qt-wolne.
-                   "observatory_dialog.py",
+                   "gui/observatory_dialog.py",
                    # Znajdź: kontener strony zbiorów (pasek zapytania nad tym samym `FramesView`).
                    # Parser zapytania (`gui/flows/znajdz.py`) zostaje Qt-wolny.
-                   "znajdz_view.py",
+                   "gui/flows/znajdz_view.py",
                    # 0032: okno „Uwagi…” - nie dotyka bazy; klinga uwag zostaje w Qt-wolnym `repo`.
-                   "note_dialog.py",
-                   "home.py",     # Dom: ekran startu (kafle, teczki w wątku tła); sumy w Qt-wolnym `queries`
-                   "harvest_dialog.py",  # okno żniw masterów (plan i kopie w wątku tła); rdzeń `harvest` Qt-wolny
-                   "przyjmij.py",  # raport „co przyszło” nad Dostawą; liczby w Qt-wolnym `queries`
+                   "gui/note_dialog.py",
+                   # Dom: ekran startu (kafle, teczki w wątku tła); sumy w Qt-wolnym `queries`
+                   "gui/home.py",
+                   # okno żniw masterów (plan i kopie w wątku tła); rdzeń `harvest` Qt-wolny
+                   "gui/harvest_dialog.py",
+                   # raport „co przyszło” nad Dostawą; liczby w Qt-wolnym `queries`
+                   "gui/flows/przyjmij.py",
                    # AR-17 krok 3: okno „Zmień obiekt…”/„Uzgodnij pliki…” (plan w wątku tła); planer
                    # `object_change.py` i read-model zostają Qt-wolne
-                   "object_change_dialog.py",
+                   "gui/object_change_dialog.py",
                    }
 
 
@@ -73,24 +81,35 @@ def _imports_pyside6(path):
 
 
 def test_pyside6_tylko_w_warstwie_widzetow():
-    """Cały pakiet `horreum/` poza `gui/app.py` i `gui/__main__.py` jest Qt-free. Gdyby ktoś wstawił
-    `import PySide6` w rdzeniu (albo w `queries.py`/`gui/__init__.py`), izolacja §7.2 by padła."""
+    """Cały pakiet `horreum/` poza plikami `QT_WIDGET_FILES` jest Qt-free. Gdyby ktoś wstawił
+    `import PySide6` w rdzeniu (albo w `queries.py`/`gui/__init__.py`), izolacja §7.2 by padła.
+    Porównanie idzie po ścieżce względnej od pakietu (AR-110): plik o nazwie z listy w innym
+    katalogu (`core/busy.py` obok uprawnionego `gui/busy.py`) jest intruzem.
+
+    Falsyfikator: kopia pakietu z `core/busy.py` importującym PySide6 → czerwień z tą ścieżką;
+    porównanie po `p.name` przepuszcza go po cichu."""
     offenders = [
-        str(p.relative_to(PKG)) for p in sorted(PKG.rglob("*.py"))
-        if p.name not in QT_WIDGET_FILES and _imports_pyside6(p)
+        p.relative_to(PKG).as_posix() for p in sorted(PKG.rglob("*.py"))
+        if p.relative_to(PKG).as_posix() not in QT_WIDGET_FILES and _imports_pyside6(p)
     ]
-    assert not offenders, f"PySide6 zaimportowany poza warstwą widżetów (app/__main__): {offenders}"
+    assert not offenders, f"PySide6 zaimportowany poza warstwą widżetów (QT_WIDGET_FILES): {offenders}"
 
 
 def test_widgety_realnie_importuja_qt():
-    """Asercja pozytywna: warstwa widżetów REALNIE używa PySide6 (inaczej powyższy test byłby
-    pusty — np. po przeniesieniu Qt do innego pliku — i przestałby cokolwiek pilnować)."""
-    assert _imports_pyside6(PKG / "gui" / "app.py"), "app.py nie importuje PySide6 — lista plików Qt nieaktualna"
+    """Asercja pozytywna: KAŻDY wpis `QT_WIDGET_FILES` istnieje i REALNIE importuje PySide6 (AR-110).
+    Wpis bez pliku (po przeniesieniu albo zmianie nazwy) albo bez importu Qt (po wyniesieniu Qt do
+    innego pliku) to martwe uprawnienie: rozluźnia granicę bez śladu i czeka na przyszły plik o tej
+    ścieżce. Pusta lista martwych wpisów dowodzi też, że powyższy test pilnuje realnej warstwy.
+
+    Falsyfikator: wpis `gui/nie_ma.py` albo `gui/busy.py` bez importu PySide6 → czerwień z wpisem."""
+    martwe = sorted(w for w in QT_WIDGET_FILES
+                    if not (PKG / w).is_file() or not _imports_pyside6(PKG / w))
+    assert not martwe, f"wpisy QT_WIDGET_FILES bez pliku albo bez importu PySide6: {martwe}"
 
 
 def test_readmodel_i_init_gui_qt_free():
     """Read path (`queries.py`), logika progresu (`progress.py`), `gui/__init__.py` oraz TRZECIA KLINGA
-    `projection.py` MUSZĄ być Qt-free — `from horreum.gui import queries`/`progress` nie może wciągać Qt
+    `projection.py` MUSZĄ być Qt-free - `from horreum.gui import queries`/`progress` nie może wciągać Qt
     (testy logiki Qt-wolnej chodzą bez PySide6). `projection.py` importuje `gui.queries`, więc to twardy
     dowód, że klinga plików nie wciąga Qt mimo tego importu (`gui/__init__.py` pusty → import bezpieczny)."""
     assert not _imports_pyside6(PKG / "gui" / "queries.py")
@@ -98,27 +117,27 @@ def test_readmodel_i_init_gui_qt_free():
     assert not _imports_pyside6(PKG / "gui" / "__init__.py")
     assert not _imports_pyside6(PKG / "projection.py")
     # F4: model/składacz listwy facetów MUSI zostać Qt-wolny (widżet `facets.py` go importuje;
-    # logika cyklu/compose testowana bez PySide6) — jawna asercja obok rglob (F4R#11).
+    # logika cyklu/compose testowana bez PySide6) - jawna asercja obok rglob (F4R#11).
     assert not _imports_pyside6(PKG / "gui" / "facet_model.py")
-    # F6: motyw (paleta/kolory jako hex + generator QSS) MUSI zostać Qt-wolny — grid.py/facets.py/app.py
+    # F6: motyw (paleta/kolory jako hex + generator QSS) MUSI zostać Qt-wolny - grid.py/facets.py/app.py
     # go importują i SKŁADAJĄ QColor/QPalette; `theme.py` samo Qt nie tyka (test_theme chodzi bez Qt).
     assert not _imports_pyside6(PKG / "gui" / "theme.py")
     # F7: agregat portfela naświetleń (godziny/tooltip = czysta prezentacja) MUSI zostać Qt-wolny
-    # (`grid.py` go importuje; testy formatowania chodzą bez PySide6) — jawna asercja obok rglob (F4R#11).
+    # (`grid.py` go importuje; testy formatowania chodzą bez PySide6) - jawna asercja obok rglob (F4R#11).
     assert not _imports_pyside6(PKG / "gui" / "portfolio.py")
     # F8: rzut/parser/URL mapy (equirect + GeoJSON + osm_url) MUSI zostać Qt-wolny (widżet `map_view.py`
-    # go importuje; testy rzutu chodzą bez PySide6) — jawna asercja obok rglob (F4R#11).
+    # go importuje; testy rzutu chodzą bez PySide6) - jawna asercja obok rglob (F4R#11).
     assert not _imports_pyside6(PKG / "gui" / "mapproj.py")
-    # #1: i18n (słownik lekki — `t`/`t_plural`/`set_lang`) + katalog DANYCH MUSZĄ zostać Qt-wolne:
+    # #1: i18n (słownik lekki - `t`/`t_plural`/`set_lang`) + katalog DANYCH MUSZĄ zostać Qt-wolne:
     # widoki i pomocniki prezentacji (`portfolio`) je importują, a stan języka ustawia widok z QSettings
     # PRZED oknem (i18n QSettings nie tyka). Testy `t`/`t_plural` chodzą bez PySide6.
     assert not _imports_pyside6(PKG / "gui" / "i18n.py")
     assert not _imports_pyside6(PKG / "gui" / "i18n_catalog.py")
     # PLANER (T1/T3): `sky.py` i `targets.py` importują `gui.queries` (SPOT: stanowiska, godziny
-    # per obiekt×filtr), a mimo to MUSZĄ zostać Qt-wolne — CLI `horreum plan` ma dawać pełną
+    # per obiekt×filtr), a mimo to MUSZĄ zostać Qt-wolne - CLI `horreum plan` ma dawać pełną
     # odpowiedź bez GUI, a ekran T5 dopiero je skonsumuje.
     assert not _imports_pyside6(PKG / "sky.py")
     assert not _imports_pyside6(PKG / "targets.py")
-    # T5: view-model ekranu planera (komórki, soczewka chipa, noty nagłówka) MUSI zostać Qt-wolny —
+    # T5: view-model ekranu planera (komórki, soczewka chipa, noty nagłówka) MUSI zostać Qt-wolny -
     # widżet `planner.py` go importuje, a testy prezentacji chodzą bez PySide6 (F4R#11).
     assert not _imports_pyside6(PKG / "gui" / "planner_model.py")

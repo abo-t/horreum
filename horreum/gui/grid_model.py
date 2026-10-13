@@ -1354,6 +1354,36 @@ def szerokosc_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
     return min(szer, sufit)
 
 
+# KOLUMNA EXPTIME - JEDNA PRECYZJA NA KOLUMNĘ (AR-115). Karta niesie liczbę w zapisie programu, który
+# ją wpisał (NINA „600.0”, WBPP w stosie „600.00” albo „600.000”, aparat 1/160 s jako „0.00625”, flat
+# z automatu ekspozycji „4.03329572835443”), więc surowy zapis stawiał „1800.00”, „600.000” i „15.000”
+# jeden pod drugim. Reguła z rozkładu na kopii archiwum (pf4, 2026-10-13: 16 888 klatek z EXPTIME,
+# 278 różnych wartości): wartość całkowita 13 743 klatki (81 %), jedno miejsce 647, dwa 2 315, trzy
+# 41, więcej 142 (flaty z automatu, migawka 1/30 i 1/13 s). Przy dwóch miejscach zlewa się 23 z 278
+# różnych wartości (1/160, 1/125, 1/100 i 1/80 s → „0.01”), przy trzech - żadna. Kolumna bierze więc
+# NAJMNIEJ miejsc, które pokazują dokładnie każdą jej wartość, i nie więcej niż trzy: lighty z całymi
+# sekundami mówią „600”, kolumna z flatami „0.080” i „600.000”. Wartość uciętą do trzech miejsc
+# komórka podaje w podpowiedzi pełnym zapisem karty; pole edycji startuje od zapisu karty.
+_EXPTIME = "EXPTIME"
+_EXPTIME_MAKS_MIEJSC = 3
+
+
+def _dokladnie(v, miejsca):
+    return abs(round(v, miejsca) - v) < 1e-9
+
+
+def miejsca_ekspozycji(wartosci):
+    """Miejsca po przecinku kolumny EXPTIME dla jej wartości liczbowych - reguła w komentarzu
+    wyżej; pusta kolumna - 0."""
+    miejsca = 0
+    for v in wartosci:
+        while miejsca < _EXPTIME_MAKS_MIEJSC and not _dokladnie(v, miejsca):
+            miejsca += 1
+        if miejsca == _EXPTIME_MAKS_MIEJSC:
+            break
+    return miejsca
+
+
 class GridTableModel(QAbstractTableModel):
     """Model danych read-only: kolumny bazowe + dynamiczne kolumny-keywordy. 3 stany komórki keyworda;
     sort numeryczny (po `PivotCell.num`) / tekstowy, MISSING na końcu; grupowanie = nagłówki grup
@@ -1383,7 +1413,9 @@ class GridTableModel(QAbstractTableModel):
         self._sort_desc = False
         self._obrazy_pytajnik = False   # perspektywa kopii: brak liczby obrazów = „?" (`_images_cell`)
         self._numeric_kw = set() # keywordy z większością wartości liczbowych → cała kolumna w prawo (AR-77)
-        self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
+        self._miejsca_exptime = 0  # jedna precyzja kolumny EXPTIME (`miejsca_ekspozycji`, AR-115)
+        self._miejsca_czasu = 0    # ta sama reguła dla kolumny „Czas” widoku Znajdź (`row["exptime"]`)
+        self._preview = {}      # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
         self._preview_label = i18n.t("grid.preview.macro")   # etykieta efemerycznej kolumny (klinga-zależna, R1 #4)
         self._version_col_on = False   # kolumna „Wersja" - perspektywa „Wersje stosów" albo wybór w Znajdź
         # Kolumny bazowe BIEŻĄCEJ prezentacji: `BASE_COLS` (klasyczna) albo `FIND_COLS` (Znajdź).
@@ -1462,6 +1494,12 @@ class GridTableModel(QAbstractTableModel):
                     break
             if liczby > teksty:
                 self._numeric_kw.add(kw)
+        self._miejsca_exptime = miejsca_ekspozycji(
+            c.num for d in self._data_rows
+            if (c := d["cells"].get(_EXPTIME, pivot_mod.MISSING)) is not pivot_mod.MISSING
+            and c.num is not None) if _EXPTIME in self._keywords else 0
+        self._miejsca_czasu = miejsca_ekspozycji(
+            float(d["exptime"]) for d in self._data_rows if d.get("exptime") is not None)
         self._group_by = group_by
         self._rebuild()
 
@@ -1880,11 +1918,13 @@ class GridTableModel(QAbstractTableModel):
                     f = QFont(); f.setItalic(True); return f
             return None
         if key == "exptime":
-            # Czas ekspozycji Znajdź: liczba bez ogona zer („300 s", nie „300.0"), do prawej jak
-            # każda kolumna liczb; sort liczbowy w `_sort_key`.
+            # Czas ekspozycji Znajdź: jedna precyzja na kolumnę (`miejsca_ekspozycji`, jak EXPTIME) -
+            # „300 s" przy samych pełnych sekundach, do prawej jak każda kolumna liczb; sort liczbowy
+            # w `_sort_key`.
             v = row.get("exptime")
             if role == Qt.DisplayRole:
-                return "" if v is None else i18n.t("find.cell.exposure", s=f"{v:g}")
+                return "" if v is None else i18n.t("find.cell.exposure",
+                                                   s=f"{float(v):.{self._miejsca_czasu}f}")
             if role == Qt.TextAlignmentRole and v is not None:
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             return None
@@ -1951,6 +1991,12 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.ToolTipRole:
                 return "brak karty"
             return None
+        if kw == _EXPTIME and cell.num is not None:
+            # Jedna precyzja kolumny zamiast zapisu karty (AR-115, reguła przy `miejsca_ekspozycji`).
+            if role == Qt.DisplayRole:
+                return f"{cell.num:.{self._miejsca_exptime}f}"
+            if role == Qt.ToolTipRole and not _dokladnie(cell.num, self._miejsca_exptime):
+                return str(cell.raw)
         if role == Qt.DisplayRole:
             return "" if cell.raw is None else str(cell.raw)
         if role == Qt.TextAlignmentRole and kw in self._numeric_kw:

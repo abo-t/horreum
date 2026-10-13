@@ -716,3 +716,292 @@ def test_start_okna_mowi_wczytuje_mimo_raportu_przed_podpieciem(qapp, tmp_path, 
     finally:
         brama.set()
         win.close()
+
+
+# ---------------------------------------------------------------- AR-84: ogony gestów zapisu w tle
+# Gest zapisu przeładowuje zbiór W TLE, a kroki czytające model po przeładowaniu (cel w zaznaczeniu,
+# „poza widokiem", zdanie, recepta) niesie ogon `potem`. Na czas składu gesty zaznaczenia odmawiają,
+# a zaznaczenie stoi - inaczej trafiałyby w zbiór, który zaraz zniknie (lekcja AR-27, 3 P1).
+
+def _baza_obiektu(tmp_path):
+    """Trzy lighty z obiektem ze ŚCIEŻKI (źródło słabe - „Cofnij przypisanie" je zdejmie)."""
+    path = str(tmp_path / "obj.db")
+    con = db.open_db(path)
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (5,'NGC6960','NGC','deep_sky')")
+    for i in (1, 2, 3):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, object_id, "
+                    "object_source) VALUES (?, 'light', 'raw', ?, ?, 5, 'path')", (i, f"sha{i}", NOW))
+        con.execute("INSERT INTO header(frame_id, raw_json) VALUES (?, '{}')", (i,))
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?,'V',?,1)",
+                    (i, rf"R:\ASTRO_\LIGHTS\NGC6960\f{i}.ARW"))
+    con.commit()
+    con.close()
+    return path
+
+
+def _brama_na_skladzie(monkeypatch):
+    """`base_rows` liczone POZA wątkiem GUI czeka na bramę (bieg w drodze); wątek GUI liczy od razu."""
+    brama, wszedl = threading.Event(), threading.Event()
+    glowny = threading.get_ident()
+    prawdziwe = queries.base_rows
+
+    def _br(con, ids):
+        if threading.get_ident() != glowny:
+            wszedl.set()
+            brama.wait(_BEZPIECZNIK_S)
+        return prawdziwe(con, ids)
+    monkeypatch.setattr(queries, "base_rows", _br)
+    return brama, wszedl
+
+
+def _zaznaczone(view):
+    return sorted(r["frame_id"] for r in view._selected_data_rows())
+
+
+def test_gest_osi_wraca_od_razu_a_ogon_odklada_cel_zdanie_i_recepte(qapp, tmp_path, monkeypatch):
+    """„Cofnij przypisanie" w widoku gospodarza: zapis od razu, skład zbioru w tle (slot wraca, choć
+    brama trzyma workera). Na czas składu: zdanie gestu jeszcze nie pada (przykryłby je raport
+    wczytania), drugi gest odmawia bez zapisu, a klik w tabeli nie zmienia zaznaczenia - ogon
+    odłożyłby cel gestu na wybór, którego człowiek by nie zobaczył. Po przyłożeniu: cel
+    w zaznaczeniu, JEDNO zdanie gestu, recepta „Przywróć" ze znacznikiem gestu z chwili zapisu
+    (zdarzenie ręki dopisane w trakcie składu go nie podmienia).
+
+    Falsyfikator: `self.refresh()` zamiast `refresh(w_tle=True, potem=…)` w `_po_gescie_osi` →
+    zbiór nie jest w drodze po geście (pierwsza asercja `_zbior_w_drodze`)."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QAbstractItemView
+    from horreum import repo
+    view, con = _widok_w_tle(_baza_obiektu(tmp_path))
+    try:
+        view.resize(1200, 600)
+        view.show()
+        QApplication.processEvents()
+        view._przywroc_zaznaczenie([1, 2])
+        assert _zaznaczone(view) == [1, 2]
+        msg = []
+        view.status_message.connect(msg.append)
+        brama, wszedl = _brama_na_skladzie(monkeypatch)
+        t0 = time.monotonic()
+        view._on_object_clear()
+        assert time.monotonic() - t0 < _BEZPIECZNIK_S / 2, "gest nie czekał na skład"
+        assert wszedl.wait(_BEZPIECZNIK_S), "skład ruszył w tle"
+        assert view._zbior_w_drodze()
+        assert con.execute("SELECT count(*) FROM frame WHERE object_source = 'user_cleared'"
+                           ).fetchone()[0] == 2, "zapis gestu jest w bazie od razu"
+        assert msg == [], "zdanie gestu czeka na przyłożenie"
+        assert view.table.selectionMode() == QAbstractItemView.NoSelection
+        wiersz_3 = next(i for i, r in enumerate(view.model._rows) if r.get("frame_id") == 3)
+        rect = view.table.visualRect(view.model.index(wiersz_3, 0))
+        QTest.mouseClick(view.table.viewport(), Qt.LeftButton, Qt.NoModifier,
+                         QPoint(rect.center()))
+        assert _zaznaczone(view) == [1, 2], "klik w trakcie składu nie zmienia zaznaczenia"
+        view._on_object_restore()                     # drugi gest na zbiorze w drodze
+        assert msg == [i18n.t("grid.sel.loading_refused")], msg
+        assert con.execute("SELECT count(*) FROM frame WHERE object_source = 'user_cleared'"
+                           ).fetchone()[0] == 2, "odmowa niczego nie zapisała"
+        ts_gestu = con.execute("SELECT ts FROM event WHERE actor LIKE 'user%' "
+                               "ORDER BY id DESC LIMIT 1").fetchone()[0]
+        repo.set_frame_note(con, frame_ids=[3], body="obok", now="2026-07-03T15:00:00")
+        brama.set()
+        _czekaj_na_pola(view)
+        assert _zaznaczone(view) == [1, 2], "cel gestu wrócił w zaznaczeniu"
+        assert view.table.selectionMode() == QAbstractItemView.ExtendedSelection
+        assert len(msg) == 2 and msg[1].startswith(
+            i18n.t("grid.sel.object_cleared", assigned=2, total=2)), msg
+        assert view._recepta_gestu is not None and sorted(view._recepta_gestu[0]) == [1, 2]
+        assert view._ts_recepty == ts_gestu, "recepta niesie znacznik gestu, nie późniejszego zdarzenia"
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_ogon_gestu_mierzy_poza_widokiem_na_zbiorze_przylozonym(qapp, tmp_path, monkeypatch):
+    """Ogon gestu leci po przyłożeniu zbioru, więc człon „poza widokiem" jest pomiarem na zbiorze,
+    który widać: przy facecie `Obiekt=NGC6960` cofnięcie wypycha cel z widoku (2 z 2 poza widokiem).
+
+    Falsyfikator: licz człon zaraz po zleceniu (przed przyłożeniem) → na starym zbiorze cel jest
+    na ekranie, człon milczy."""
+    view, con = _widok_w_tle(_baza_obiektu(tmp_path))
+    try:
+        view._on_facet_change({"object": {"in": [[5, "NGC6960"]]}})
+        _czekaj_na_pola(view)
+        assert view.model.rowCount() == 3
+        view._przywroc_zaznaczenie([1, 2])
+        msg = []
+        view.status_message.connect(msg.append)
+        view._on_object_clear()
+        _czekaj_na_pola(view)
+        assert view.model.rowCount() == 1
+        assert msg[-1].endswith(i18n.t("grid.sel.out_of_view", n=2)), msg
+        assert sorted(view._cel_gestu) == [1, 2], "recepta odsłonięcia odda cel w zaznaczeniu"
+    finally:
+        _zamknij(view, con)
+
+
+def test_porazka_skladu_w_tle_czeka_na_edytor_i_nie_zatwierdza_polowy_wpisu(qapp, tmp_path,
+                                                                            monkeypatch):
+    """AR-83: skład w tle pada (błąd SQL w workerze), gdy edytor komórki jest otwarty z połową
+    wpisu. Drugie podejście na wątku GUI czeka na zamknięcie edytora jak wynik udany: edytor żyje,
+    w szufladzie nic, a po dokończeniu wpisu Enterem ląduje pełny wpis i dopiero wtedy zbiór
+    przeładowuje się synchronicznie.
+
+    Falsyfikator: `self.refresh()` w `_on_zbior_failed` bez pytania o edytor → reset modelu domyka
+    edytor z zapisem, w szufladzie „EQ"."""
+    import sqlite3
+    from PySide6.QtTest import QTest
+    from horreum import writeback
+    from test_gui_drogi_reki import _baza_z_fitsem, _otworz_edytor
+    view, con = _widok_w_tle(_baza_z_fitsem(tmp_path, "porazka"))
+    view._writeback_async = False
+    try:
+        przylozone = _szpieg_przylozen(monkeypatch)
+        glowny = threading.get_ident()
+        prawdziwe = queries.cards_pivot
+
+        def _cp(c, ids, kws):
+            if threading.get_ident() != glowny:
+                raise sqlite3.OperationalError("awaria składu w tle")
+            return prawdziwe(c, ids, kws)
+        monkeypatch.setattr(queries, "cards_pivot", _cp)
+        idx, ed, inny = _otworz_edytor(qapp, view, "TELESCOP")
+        ed.wartosc.selectAll()
+        QTest.keyClicks(ed.wartosc, "EQ")
+        view._on_facet_change({})
+        _czekaj(lambda: view._zbior_worker is None, "skład w tle nie skończył")
+        for _ in range(5):
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        assert view.table.indexWidget(idx) is ed, "edytor żyje mimo porażki składu"
+        assert przylozone == [] and view._zbior_w_drodze(), "przeładowanie czeka na edytor"
+        assert view._pending_count() == 0, "nic nie zatwierdzone w połowie"
+        QTest.keyClicks(ed.wartosc, "6")
+        QTest.keyClick(ed.wartosc, Qt.Key_Return)
+        for _ in range(5):
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        (w,) = writeback.pending_for_run(con, view._run_id)
+        assert (w["keyword"], w["new_value"]) == ("TELESCOP", "EQ6")
+        assert len(przylozone) == 1 and not view._zbior_w_drodze(), "przeładowanie po zamknięciu"
+    finally:
+        _zamknij(view, con)
+
+
+# ---- liczniki Porządków po geście Zbiorów - w wątku tła (AR-84) ----
+
+def _brama_na_licznikach(monkeypatch):
+    """`tasks_state` liczone POZA wątkiem GUI czeka na bramę; zapisuje wątek KAŻDEGO wywołania."""
+    brama, wszedl = threading.Event(), threading.Event()
+    glowny = threading.get_ident()
+    watki = []
+    prawdziwe = queries.tasks_state
+
+    def _ts(con):
+        watki.append(threading.get_ident())
+        if threading.get_ident() != glowny:
+            wszedl.set()
+            brama.wait(_BEZPIECZNIK_S)
+        return prawdziwe(con)
+    monkeypatch.setattr(queries, "tasks_state", _ts)
+    return brama, wszedl, watki
+
+
+def _liczba_wiersza(tasks, klucz):
+    from horreum.gui import tasks as tasks_mod
+    row = next(i for i, (k, _l, _a) in enumerate(tasks_mod._TASKS) if k == klucz)
+    return tasks.tasks.item(row).data(rows.SECONDARY)
+
+
+def test_gest_zbiorow_liczy_liczniki_porzadkow_w_tle(qapp, tmp_path, monkeypatch):
+    """Gest Zbiorów (`stan_porzadkow_changed`) nie liczy liczników Porządków na wątku GUI: lista
+    i plakietka trzymają stan poprzedni, póki worker liczy (brama), a wynik przykłada slot.
+
+    Falsyfikator: podepnij `stan_porzadkow_changed` pod `tasks.refresh_counts` bez `w_tle` →
+    `tasks_state` woła wątek GUI, a gest czeka na bramę (bezpiecznik)."""
+    path = _baza_obiektu(tmp_path)
+    win = MainWindow(path)
+    try:
+        grid, tasks = win.grid_view, win.tasks_view
+        _czekaj_na_pola(grid)
+        przed = _liczba_wiersza(tasks, "unresolved_lights")
+        badge = []
+        tasks.counts_changed.connect(badge.append)
+        brama, wszedl, watki = _brama_na_licznikach(monkeypatch)
+        grid._przywroc_zaznaczenie([1, 2])
+        t0 = time.monotonic()
+        grid._on_object_clear()
+        assert time.monotonic() - t0 < _BEZPIECZNIK_S / 2, "gest nie czekał na liczniki"
+        assert wszedl.wait(_BEZPIECZNIK_S), "liczniki ruszyły w tle"
+        assert _liczba_wiersza(tasks, "unresolved_lights") == przed and badge == [], \
+            "w trakcie - stan poprzedni"
+        brama.set()
+        _czekaj(lambda: tasks._liczniki_thread is None, "wątek liczników nie skończył")
+        _czekaj_na_pola(grid)
+        assert watki and threading.get_ident() not in watki, "liczył wątek tła"
+        con = db.connect(path)
+        try:
+            teraz = queries.tasks_state(con)["unresolved_lights"]
+        finally:
+            con.close()
+        assert _liczba_wiersza(tasks, "unresolved_lights") == f"{teraz}  ›" != przed
+        assert len(badge) == 1, "plakietka dostała wynik raz"
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_odczyt_synchroniczny_wyprzedza_wynik_licznikow_w_drodze(qapp, tmp_path, monkeypatch):
+    """Wejście w Porządki (odczyt synchroniczny) w trakcie biegu w tle: lista dostaje stan od razu,
+    a spóźniony wynik biegu sprzed wejścia NIE jest przykładany drugi raz (mógłby być starszy).
+
+    Falsyfikator: zdejmij `self._liczniki_gen += 1` z `refresh_counts` → dwa przyłożenia."""
+    from horreum.gui import tasks as tasks_mod
+    win = MainWindow(_baza_obiektu(tmp_path))
+    try:
+        tasks = win.tasks_view
+        _czekaj_na_pola(win.grid_view)
+        przylozenia = []
+        oryginal = tasks_mod.TasksView._przyloz_liczniki
+        monkeypatch.setattr(tasks_mod.TasksView, "_przyloz_liczniki",
+                            lambda self, s, k: przylozenia.append(1) or oryginal(self, s, k))
+        brama, wszedl, _ = _brama_na_licznikach(monkeypatch)
+        tasks.refresh_counts(w_tle=True)
+        assert wszedl.wait(_BEZPIECZNIK_S)
+        tasks.refresh_counts()                        # wejście w Porządki
+        assert przylozenia == [1]
+        brama.set()
+        _czekaj(lambda: tasks._liczniki_thread is None, "wątek liczników nie skończył")
+        for _ in range(10):
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        assert przylozenia == [1], "wynik biegu sprzed odczytu do kosza"
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_zamkniecie_okna_w_trakcie_licznikow_zbiera_watek(qapp, tmp_path, monkeypatch):
+    """Zamknięcie okna w trakcie liczenia w tle: wątek liczników zebrany przed skasowaniem widoku
+    (`zatrzymaj_pola` po nazwie, jak teczki Domu), a wynik nie trafia do listy.
+
+    Falsyfikator: zdejmij `zatrzymaj_pola` z `TasksView` → `QThread` niszczony w biegu (abort)
+    albo wątek żyje po zamknięciu."""
+    from horreum.gui import tasks as tasks_mod
+    win = MainWindow(_baza_obiektu(tmp_path))
+    tasks = win.tasks_view
+    _czekaj_na_pola(win.grid_view)
+    przylozenia = []
+    oryginal = tasks_mod.TasksView._przyloz_liczniki
+    monkeypatch.setattr(tasks_mod.TasksView, "_przyloz_liczniki",
+                        lambda self, s, k: przylozenia.append(1) or oryginal(self, s, k))
+    brama, wszedl, _ = _brama_na_licznikach(monkeypatch)
+    tasks.refresh_counts(w_tle=True)
+    assert wszedl.wait(_BEZPIECZNIK_S)
+    zegar = threading.Timer(0.3, brama.set)          # rachunek bez punktu przerwania - kończy się sam
+    zegar.start()
+    try:
+        win.close()
+        assert tasks._liczniki_thread is None and tasks._liczniki_worker is None
+        for _ in range(10):
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        assert przylozenia == [], "wynik po zamknięciu nie dotknął listy"
+    finally:
+        zegar.cancel()
+        brama.set()

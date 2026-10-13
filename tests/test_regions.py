@@ -215,7 +215,7 @@ def test_licznik_regionu_w_podsumowaniu(tmp_path):
 
 def test_region_idempotentny(tmp_path):
     """Drugi przebieg nie mnoży ANI obiektu, ANI przypisań regionu (werby regionu — `event`
-    `config.review` mnoży się z założenia, zob. `test_resolver.py`)."""
+    `config.review` od AR-88 też się nie mnoży, zob. `test_resolver.py`)."""
     ra, dec = VEIL_FRAME
     con = _tree(tmp_path, [("v1", [("OBJECT", "veil"), ("RA", ra), ("DEC", dec)]),
                            ("v2", [("RA", ra), ("DEC", dec)])])

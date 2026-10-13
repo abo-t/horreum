@@ -1012,6 +1012,8 @@ def _format_presence(db_path, s, *, apply, limit):
                      f"(traktowane jak prune -- nie sa znikniecami)")
         for d in s.unreadable_dirs[:limit]:
             lines.append(f"    {d}")
+        if len(s.unreadable_dirs) > limit:
+            lines.append(f"    ... i {len(s.unreadable_dirs) - limit} wiecej")
     if s.out_of_reach:
         lines.append(f"  poza zasiegiem: {s.out_of_reach} kopii (istnieja, ale pod odcietym drzewem)")
     potwierdzone = (f"potwierdzone znikniecia: {s.confirmed_gone}" if s.confirmed

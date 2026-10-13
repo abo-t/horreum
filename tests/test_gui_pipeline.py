@@ -1062,19 +1062,101 @@ def test_powod_wejscia_z_Porzadkow_linia_nad_akcjami(qapp, tmp_path):
         view.close()
 
 
-def test_etykieta_zlotej_akcji_wymienia_fakty_kopii(qapp):
-    """Łańcuch w etykiecie „Przyjmij nowe" wymienia etap faktów kopii (nazwą etapu z katalogu,
+def test_etykieta_zlotej_akcji_wymienia_fakty_kopii(qapp, tmp_path):
+    """Łańcuch na przycisku „Przyjmij nowe" wymienia etap faktów kopii (nazwą etapu z katalogu,
     w obu językach) - przed zmianą jedyną wskazówką, że złota akcja zbiera fakty, był kod."""
     for jezyk in ("pl", "en"):
         i18n.set_lang(jezyk)
+        view = PipelineView(_fresh_db(tmp_path, f"etykieta_{jezyk}.db"), now_fn=lambda: NOW)
         try:
             assert (i18n.t("pipeline.stage.copy_facts").lower()
-                    in i18n.t("pipeline.receive").lower()), jezyk
+                    in view.btn_receive.text().lower()), jezyk
         finally:
+            view.close()
             i18n.set_lang("pl")
 
 
-# --- szwy drogi Przyjmij i żniw: `receive`, `run_all_on`, `last_run`/`run_finished`, „Wciągnij mastery…" ---
+def test_etykieta_zlotej_akcji_skladana_z_listy_etapow_nie_z_literalu(qapp, tmp_path):
+    """AR-115: napis „Przyjmij nowe (…)” wymienia KAŻDY etap łańcucha w kolejności biegu, nazwami
+    etapów z katalogu - także historię stosów, rodowód i rodowód stosów, które dawny literał gubił.
+    Lista ma jednego właściciela (`ETAPY_PRZYJMIJ_NOWE`, pochodne z `derive.DERIVED_STAGES`), więc
+    etap pochodny dopisany do rdzenia wchodzi na przycisk bez ruszania katalogu.
+
+    Falsyfikator: literał łańcucha w katalogu albo lista pochodnych przepisana zamiast wzięta
+    z rdzenia → rozjazd przy następnym etapie pochodnym."""
+    from horreum import derive
+    from horreum.gui import pipeline as pipeline_mod
+    i18n.set_lang("pl")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        assert view.btn_receive.text() == (
+            "Przyjmij nowe  (skan → fakty kopii → przejęcie zeznania → historia stosów → grupowanie "
+            "→ rozwiązywanie → kalibracja → rodowód → rodowód stosów → delta → obecność)")
+        assert i18n.t("pipeline.receive") == "Przyjmij nowe"      # nazwa do zdań, bez łańcucha
+    finally:
+        view.close()
+    pochodne = tuple(n for n, _f in derive.DERIVED_STAGES)
+    etapy = pipeline_mod.ETAPY_PRZYJMIJ_NOWE
+    i = etapy.index(pochodne[0])
+    assert etapy[i:i + len(pochodne)] == pochodne                  # pochodne w kolejności rdzenia
+    i18n.set_lang("en")
+    try:
+        assert pipeline_mod.etykieta_przyjmij_nowe() == (
+            "Take new  (scan → copy facts → testimony adoption → stack history → grouping "
+            "→ resolving → calibration → lineage → stack lineage → delta → presence)")
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_lista_etapow_przyjmij_nowe_to_kolejnosc_pelnego_lancucha(qapp, tmp_path, monkeypatch):
+    """`ETAPY_PRZYJMIJ_NOWE` = kolejność, w jakiej „Przyjmij nowe” naprawdę melduje etapy, gdy każdy
+    etap uzupełnień ma kandydatów (fakty kopii, przejęcie zeznania, historia stosów biegną wtedy
+    w łańcuchu przed pochodnymi). Prawdziwy wykonawca na prawdziwej bazie; podmienione są tylko
+    predykaty kandydatów i same uzupełnienia (bez plików do uzupełnienia).
+
+    Falsyfikator: przestawienie etapu w `derive.adopt_stages` albo w `_run_all` bez listy → rozjazd."""
+    from horreum import scan as scan_mod
+    from horreum.gui.pipeline import ETAPY_PRZYJMIJ_NOWE
+    for nazwa in ("copy_facts_candidates", "adopt_candidates", "stack_history_candidates"):
+        monkeypatch.setattr(scan_mod, nazwa, lambda con, root=None: [1])
+    monkeypatch.setattr(scan_mod, "backfill_copy_facts",
+                        lambda con, **k: scan_mod.CopyFactsSummary())
+    monkeypatch.setattr(scan_mod, "adopt_orphan_testimony", lambda con, **k: scan_mod.AdoptSummary())
+    monkeypatch.setattr(scan_mod, "backfill_stack_history",
+                        lambda con, **k: scan_mod.StackHistorySummary())
+    w = PipelineWorker(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    w.configure("all", root=_tree(tmp_path, 1), volume="?", drive_letter=None, tier=None)
+    kolejnosc = []
+    w.stage_done.connect(lambda n, r: kolejnosc.append(n))
+    w.run()
+    assert tuple(kolejnosc) == ETAPY_PRZYJMIJ_NOWE
+
+
+def test_kazda_linia_raportu_ma_naglowek_etapu(qapp, tmp_path):
+    """AR-115: jeden format linii raportu - `[etap]` na początku. Fakty kopii i przejęcie zeznania
+    zaczynały się od „Fakty kopii:” i „Zeznanie z nieobecnej kopii:”, jako jedyne w logu."""
+    from horreum import scan as scan_mod
+    i18n.set_lang("pl")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        linie = {
+            "copy_facts": view._format_result("copy_facts", scan_mod.CopyFactsSummary(rows=1, written=1)),
+            "adopt_testimony": view._format_result("adopt_testimony",
+                                                   scan_mod.AdoptSummary(rows=1, adopted=1)),
+            "stack_history": view._format_result("stack_history", scan_mod.StackHistorySummary()),
+            "stacks": view._format_result("stacks", scan_mod.StackScanSummary()),
+            "scan": view._format_result("scan", scan_mod.ScanSummary()),
+        }
+        assert linie["copy_facts"] == "[fakty kopii] uzupełniono 1 z 1"
+        assert linie["adopt_testimony"] == (
+            "[zeznanie z nieobecnej kopii] przejęte od ocalałej kopii 1 z 1")
+        for etap, linia in linie.items():
+            assert linia.startswith("["), (etap, linia)
+    finally:
+        view.close()
+
+
+# --- szwy drogi Przyjmij i żniw: `receive`, `run_all_on`, `last_run`/`run_finished`, „Wciągnij z WBPP…" ---
 
 def test_receive_publiczne_zwraca_powod_albo_startuje(qapp, tmp_path, ustawienia):
     """`receive()` = ta sama złota akcja co `_on_receive`, ale z POWODEM odmowy dla wołającego spoza
@@ -1201,7 +1283,7 @@ def test_run_finished_niesie_migawke_zakonczonego_przebiegu(qapp, tmp_path, usta
 
 
 def test_przycisk_zniw_emituje_sygnal_i_gasnie_jak_stosy(qapp, tmp_path):
-    """„Wciągnij mastery…" stoi w sekcji „Stosy" (ta sama granica: drzewo obróbki) i tylko
+    """„Wciągnij z WBPP…" stoi w sekcji „Stosy" (ta sama granica: drzewo obróbki) i tylko
     SYGNALIZUJE - okno żniw otwiera gospodarz, bo widok Dostawy nie trzyma połączenia z bazą.
     Wygaszany jak „Wciągnij stosy…": w biegu i bez bazy."""
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
@@ -1334,3 +1416,220 @@ def test_raport_rodowodu_i_sprzetu_mowi_o_zdjetych_ogniwach_i_wariantach_kadru()
         PipelineView._format_group(PipelineView, s)
     s.variants = LinkSummary()
     assert "warianty" not in PipelineView._format_group(PipelineView, s)
+
+
+# --- E4-7: przebieg niekompletny mówi KTÓRE katalogi i umie się powtórzyć ---
+
+def _nieprzeczytane_w_biegu(monkeypatch, nazwa, klasa, listy):
+    """Skan widoku (`scan_tree` albo `scan_stacks`, nazwa czytana z modułu `pipeline`) podmieniony:
+    każdy bieg zwraca kolejną listę nieprzeczytanych katalogów i zapisuje korzeń wywołania."""
+    from horreum.gui import pipeline as pipeline_mod
+    wolane, kolejne = [], iter(listy)
+
+    def _skan(con, root, **kw):
+        wolane.append(str(root))
+        if klasa.__name__ == "StackScanSummary":
+            return klasa(unreadable_dirs=list(next(kolejne)))
+        return klasa(files=1, unreadable_dirs=list(next(kolejne)))
+
+    monkeypatch.setattr(pipeline_mod, nazwa, _skan)
+    return wolane
+
+
+def test_przebieg_niekompletny_mowi_ktore_katalogi_i_skanuje_ponownie(qapp, tmp_path, monkeypatch):
+    """E4-7: linia raportu liczy nieprzeczytane katalogi (ILE), a sekcja pod nią wylicza KTÓRE -
+    pierwsze pięć z imienia (pełna ścieżka w podpowiedzi), reszta „i N innych”. „Skanuj ponownie”
+    powtarza TEN etap na TYM korzeniu bez pytania o katalog; kompletny drugi bieg gasi sekcję.
+
+    Falsyfikator: sekcja tylko z licznikiem (bez ścieżek) albo powtórka na bieżącym `_root`
+    zamiast korzenia biegu, którego listę widać."""
+    from horreum.scan import ScanSummary
+    i18n.set_lang("pl")
+    katalogi = [rf"R:\ASTRO_\LIGHTS\OBJ{i}\RC8_2600MM\2024-03-0{i}" for i in range(7)]
+    wolane = _nieprzeczytane_w_biegu(monkeypatch, "scan_tree", ScanSummary, [katalogi, []])
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        assert view.box_unreadable.isHidden() and not view.btn_rescan.isEnabled()
+        root = _tree(tmp_path, 1)
+        view._root = root
+        view._on_scan()
+        _czekaj_na_etap(view)
+        assert "katalogi nieprzeczytane 7" in view.lbl_summary.text()      # linia mówi ILE
+        assert not view.box_unreadable.isHidden()
+        assert view.lbl_unreadable.text() == (
+            "Nie przeczytałem 7 katalogów - liczby raportu mogą być niższe niż stan drzewa:")
+        widoczne = [w for w in view._wiersze_nieprzeczytanych if not w.isHidden()]
+        assert [w.full_text() for w in widoczne] == katalogi[:5]
+        assert [w.toolTip() for w in widoczne] == katalogi[:5]
+        assert view.lbl_unreadable_more.text() == "i 2 inne"
+        assert view.btn_rescan.isEnabled() and root in view.btn_rescan.toolTip()
+        view._root = str(tmp_path)                       # wskazany katalog zmieniony po biegu
+        view.btn_rescan.click()
+        assert view._thread is not None                  # ruszył od razu, bez dialogu katalogu
+        _czekaj_na_etap(view)
+        assert wolane == [root, root]
+        assert view.last_run["stage"] == "scan"
+        assert view.box_unreadable.isHidden() and not view.btn_rescan.isEnabled()
+    finally:
+        view.close()
+
+
+def test_stosy_niekompletne_skanuja_ponownie_ten_korzen_bez_dialogu(qapp, tmp_path, monkeypatch,
+                                                                   ustawienia):
+    """Druga droga wciągająca pliki („Stosy”) ma TEN SAM nośnik listy (jeden właściciel sekcji) i tę
+    samą powtórkę: bez dialogu korzenia, na korzeniu biegu. Folder roboczy ustawiony po pierwszym
+    biegu zamyka powtórkę tą samą odmową co dialog „Wciągnij stosy…”."""
+    from PySide6.QtWidgets import QFileDialog
+    from horreum.scan import StackScanSummary
+    i18n.set_lang("pl")
+    korzen = _stack_tree(tmp_path)
+    dialogi = []
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: dialogi.append(1) or korzen))
+    wolane = _nieprzeczytane_w_biegu(monkeypatch, "scan_stacks", StackScanSummary,
+                                     [[r"R:\WBPP\NGC7000"], [r"R:\WBPP\NGC7000"]])
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view._on_stacks()
+        _czekaj_na_etap(view)
+        assert "[stosy]" in view.lbl_summary.text() and not view.box_unreadable.isHidden()
+        assert view.lbl_unreadable.text().startswith("Nie przeczytałem 1 katalogu")
+        assert view.lbl_unreadable_more.isHidden()
+        view.btn_rescan.click()
+        _czekaj_na_etap(view)
+        assert wolane == [korzen, korzen] and dialogi == [1]
+        assert view.last_run["stage"] == "stacks"
+        view.set_work_root(str(Path(korzen).parent))     # korzeń leży teraz w folderze roboczym
+        view.btn_rescan.click()
+        assert view._thread is None and wolane == [korzen, korzen]
+        assert i18n.t("pipeline.stacks_in_work_root") in view.lbl_error.text()
+    finally:
+        view.close()
+
+
+def test_lista_nieprzeczytanych_nie_rozpycha_okna(qapp, tmp_path):
+    """Strona Dostawy się nie przewija (kanon: podłoga 1920×1080 logicznych), więc sekcja nie może
+    rosnąć z listą ani z długością ścieżki: 500 katalogów o ścieżkach po ~400 znaków daje TĘ SAMĄ
+    podłogę okna co 6 krótkich, a szerokość - tę samą co bez sekcji."""
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        bez = view.minimumSizeHint()
+        view._pokaz_nieprzeczytane([rf"R:\K{i}" for i in range(6)])
+        qapp.processEvents()
+        krotkie = view.minimumSizeHint()
+        view._pokaz_nieprzeczytane(["R:\\" + "\\".join(["katalog_o_dlugiej_nazwie"] * 16) + str(i)
+                                    for i in range(500)])
+        qapp.processEvents()
+        dlugie = view.minimumSizeHint()
+        assert dlugie == krotkie, (krotkie, dlugie)
+        assert dlugie.width() == bez.width(), (bez, dlugie)
+        assert sum(not w.isHidden() for w in view._wiersze_nieprzeczytanych) == 5
+        assert view.lbl_unreadable_more.text() == "i 495 innych"
+    finally:
+        view.close()
+
+
+# --- AR-115: „czeka na Ciebie N” prowadzi do perspektywy rodowodu ---
+
+def test_czeka_na_ciebie_prowadzi_do_perspektywy_rodowodu_liczba_ze_stanu(qapp, tmp_path,
+                                                                         monkeypatch):
+    """Człon „czeka na Ciebie N” rodowodu stosów dostaje drogę do gestu: wiersz z liczbą ze STANU
+    (zbiór perspektywy „Rodowód do potwierdzenia” - ten sam, który liczy wiersz Porządków „Obrazy
+    bez rodowodu”) i „Pokaż w Zbiorach” → `open_collection(PRESET_LINEAGE)`. Gest w panelu
+    rodowodu zmienia liczbę bez nowego przebiegu; zero w stanie chowa wiersz. Log bez tego członu
+    nie pyta o zbiór perspektywy wcale.
+
+    Falsyfikator: liczba z wyniku przebiegu → po geście wiersz dalej mówi 3."""
+    from horreum import stacks as stacks_mod
+    from horreum.gui import queries as queries_mod
+    from horreum.gui.grid import PRESET_LINEAGE
+    i18n.set_lang("pl")
+    wynik = {"reasons": {"no_candidates": 3}}
+    monkeypatch.setattr(stacks_mod, "run_stack_lineage",
+                        lambda con, now=None, should_cancel=None: stacks_mod.StackLineageSummary(
+                            stacks=4, linked=1, reasons=dict(wynik["reasons"])))
+    stan, pytania = {"ids": {11, 12, 13}}, []
+    monkeypatch.setattr(queries_mod, "lineage_pending_frame_ids",
+                        lambda con: pytania.append(1) or set(stan["ids"]))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view._on_stack_lineage()
+        _czekaj_na_etap(view)
+        assert "czeka na Ciebie 3" in view.lbl_summary.text()
+        assert not view.box_lineage.isHidden()
+        assert view.lbl_lineage.text() == (
+            "3 obrazy czekają na Ciebie w perspektywie „Rodowód do potwierdzenia”")
+        perspektywy = []
+        view.open_collection.connect(perspektywy.append)
+        view.btn_show_lineage.click()
+        assert perspektywy == [PRESET_LINEAGE]
+        stan["ids"] = {11}                               # gest w panelu rodowodu, bez przebiegu
+        view._sync_rodowod()
+        assert view.lbl_lineage.text() == (
+            "1 obraz czeka na Ciebie w perspektywie „Rodowód do potwierdzenia”")
+        stan["ids"] = set()
+        view._sync_rodowod()
+        assert view.box_lineage.isHidden()
+        wynik["reasons"], stan["ids"] = {}, {11}
+        pytania.clear()
+        view._on_stack_lineage()                         # log bez członu „czeka na Ciebie”
+        _czekaj_na_etap(view)
+        assert view.box_lineage.isHidden() and pytania == []
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize("n, glowa, reszta, rodowod", [
+    (1, "Nie przeczytałem 1 katalogu", "i 1 inny", "1 obraz czeka"),
+    (2, "Nie przeczytałem 2 katalogów", "i 2 inne", "2 obrazy czekają"),
+    (4, "Nie przeczytałem 4 katalogów", "i 4 inne", "4 obrazy czekają"),
+    (5, "Nie przeczytałem 5 katalogów", "i 5 innych", "5 obrazów czeka"),
+    (12, "Nie przeczytałem 12 katalogów", "i 12 innych", "12 obrazów czeka"),
+    (14, "Nie przeczytałem 14 katalogów", "i 14 innych", "14 obrazów czeka"),
+    (22, "Nie przeczytałem 22 katalogów", "i 22 inne", "22 obrazy czekają"),
+])
+def test_odmiana_liczebnikow_sekcji_wyniku(n, glowa, reszta, rodowod):
+    """Odmiana przez `t_plural`: 1, 2-4, 5, -naście (12-14 zawsze „wiele”) i 22."""
+    i18n.set_lang("pl")
+    assert i18n.t_plural("pipeline.unreadable_head", n).startswith(glowa + " - ")
+    assert i18n.t_plural("pipeline.unreadable_more", n) == reszta
+    assert i18n.t_plural("pipeline.lineage_waiting", n, where="X").startswith(rodowod + " na Ciebie")
+
+
+def test_sekcje_wyniku_po_angielsku():
+    i18n.set_lang("en")
+    try:
+        assert i18n.t_plural("pipeline.unreadable_head", 1).startswith("1 folder could not be read")
+        assert i18n.t_plural("pipeline.unreadable_head", 3).startswith("3 folders could not be read")
+        assert i18n.t_plural("pipeline.unreadable_more", 2) == "and 2 more"
+        assert i18n.t_plural("pipeline.lineage_waiting", 2, where="Lineage to confirm") == (
+            "2 images are waiting for you in the “Lineage to confirm” perspective")
+        assert i18n.t("pipeline.log_before_changes", time="21:05") == (
+            "Run at 21:05 (state before your changes)")
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_podpis_logu_tylko_nad_gotowym_logiem_i_gasnie_z_nowym_biegiem(qapp, tmp_path):
+    """AR-99, strona widoku: podpis „Przebieg z HH:MM (stan sprzed Twoich zmian)” stawia wołający
+    (strona Przyjmij wie, czy stan odszedł). Pusty log podpisu nie dostaje, nowy przebieg go zdejmuje
+    (log jest znów stanem z tej chwili)."""
+    i18n.set_lang("pl")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view.naglowek_przebiegu("21:05")
+        assert view.lbl_summary_head.isHidden()          # nie ma czego podpisać
+        view._root = _tree(tmp_path, 1)
+        view._on_scan()
+        _czekaj_na_etap(view)
+        view.naglowek_przebiegu("21:05")
+        assert not view.lbl_summary_head.isHidden()
+        assert view.lbl_summary_head.text() == "Przebieg z 21:05 (stan sprzed Twoich zmian)"
+        view._on_scan()
+        assert view.lbl_summary_head.isHidden()          # bieg w toku: log w budowie
+        view.naglowek_przebiegu("21:05")
+        assert view.lbl_summary_head.isHidden()
+        _czekaj_na_etap(view)
+        assert view.lbl_summary_head.isHidden()
+    finally:
+        view.close()

@@ -76,6 +76,11 @@ class PrzyjmijView(QWidget):
         # przebiegu (droga „Stosy”, skan trybu zaawansowanego) pod nagłówek tej dostawy.
         self._zapis = None
         self._until = None
+        # Odcisk stanu bazy z chwili końca OSTATNIEGO przebiegu Dostawy (każdego etapu - to jego log
+        # stoi pod panelem) i godzina jego startu: odcisk inny niż teraz = log mówi o stanie sprzed
+        # zmian (AR-99, `_sync_podpis_logu`). `None` - w tej sesji nie było przebiegu.
+        self._odcisk_przebiegu = None
+        self._godzina_przebiegu = None
         self._wiersze_nazw = []         # pula wierszy nazw - dokładana, nigdy kasowana
         self._build_ui()
         pipeline_view.run_finished.connect(self._on_run_finished)
@@ -206,9 +211,28 @@ class PrzyjmijView(QWidget):
     def odswiez_raport(self):
         """Przelicz raport ze stanu bazy z TĄ SAMĄ granicą okna - gest na tej stronie, w Porządkach
         albo w Zbiorach zmienia populację „nie rozpoznałem”, a liczby skanu zostają przy przebiegu.
-        Bez raportu (żaden przebieg „all” w tej sesji) nic nie robi."""
+        Bez raportu (żaden przebieg „all” w tej sesji) nic nie robi - poza podpisem logu, który
+        dotyczy przebiegu każdego etapu (`_sync_podpis_logu`)."""
+        self._sync_podpis_logu()
         if self._zapis is not None:
             self._render()
+
+    def _odcisk_stanu(self):
+        """Para liczników SQLite tego połączenia - ten sam klucz zmiany co pamięć korzenia
+        archiwum (`resolver.library_root_from_db`): `total_changes` widzi zapisy TYM połączeniem
+        (gesty Zbiorów i tej strony idą przez nie), `PRAGMA data_version` - zatwierdzone przez
+        KAŻDE inne (wątki zapisu, Dostawa). Odczyt <0,1 ms, bez zaufania do eventów."""
+        return (self.con.total_changes, self.con.execute("PRAGMA data_version").fetchone()[0])
+
+    def _sync_podpis_logu(self):
+        """Log przebiegu pod panelem dostaje podpis „Przebieg z HH:MM (stan sprzed Twoich zmian)”,
+        gdy stan bazy odszedł od chwili końca przebiegu (AR-99): panel liczy się ze stanu, log jest
+        zapisem przebiegu, i bez podpisu dwa sąsiednie zdania przeczyły sobie. Wołane przy każdym
+        przeliczeniu raportu - po geście tej strony i przy wejściu na Dostawę (gest w Porządkach
+        albo Zbiorach). Podpis raz postawiony zostaje do następnego przebiegu (`_begin_run` widoku
+        go zdejmuje); bez zmiany stanu log zostaje bez podpisu."""
+        if self._odcisk_przebiegu is not None and self._odcisk_stanu() != self._odcisk_przebiegu:
+            self.pipeline_view.naglowek_przebiegu(self._godzina_przebiegu)
 
     def pokaz_odmowe(self, msg):
         """Odmowa kafla Przyjmij w treści strony - gaśnie z końcem biegu, który ją spowodował."""
@@ -221,8 +245,11 @@ class PrzyjmijView(QWidget):
         """Koniec przebiegu Dostawy (po odświeżeniu widoków gospodarza). Przebieg „all” stawia nowy
         raport; każdy inny etap tylko go przelicza - `Rozwiąż` po naprawie nagłówka zmienia, które
         klatki tej dostawy mają obiekt, ale dostawą nie jest. Odmowa kafla gaśnie: bieg, który ją
-        spowodował, właśnie się skończył."""
+        spowodował, właśnie się skończył. Odcisk stanu bierze się TU, po zapisach wątku tła
+        i po odświeżeniu widoków gospodarza - od tej chwili zmiana stanu to gest po przebiegu."""
         self.lbl_odmowa.setVisible(False)
+        self._odcisk_przebiegu = self._odcisk_stanu()
+        self._godzina_przebiegu = godzina_dostawy(zapis["since"])
         if zapis["stage"] == "all":
             self._zapis = zapis
             self._until = self._now()

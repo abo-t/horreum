@@ -56,6 +56,10 @@ RZEDY_TECZEK = 6
 TECZKI_NA_DOMU = KOLUMNY_TECZEK * RZEDY_TECZEK
 
 # Pozycje menu „Więcej…" - klucze sygnału `wiecej`; trasę każdej z nich zna gospodarz.
+# „Wciągnij z WBPP…” (krok cyklu po obróbce, AR-109) stoi tu, a nie na kaflu Przyjmij: kafel to JEDNA
+# interakcja do raportu dostawy, a menu na kaflu zamieniłoby jego klik w rozwinięcie listy; żniwa
+# robi się przy siadaniu do obróbki, rzadziej niż cztery kafle - tak jak reszta tego menu.
+WIECEJ_ZNIWA = "zniwa"
 WIECEJ_PLANER = "planer"
 WIECEJ_STANOWISKA = "stanowiska"
 WIECEJ_NAZWY = "nazwy"
@@ -285,7 +289,9 @@ class HomeView(QWidget):
         self.btn_wiecej = QPushButton(i18n.t("home.more"))
         menu = QMenu(self.btn_wiecej)
         self.akcje_wiecej = {}
-        for klucz, tekst in ((WIECEJ_PLANER, i18n.t("home.more.planner")),
+        # Napis żniw z klucza przycisku Dostawy: nazwa gestu ma w katalogu jednego właściciela.
+        for klucz, tekst in ((WIECEJ_ZNIWA, i18n.t("pipeline.btn.harvest")),
+                             (WIECEJ_PLANER, i18n.t("home.more.planner")),
                              (WIECEJ_STANOWISKA, i18n.t("home.more.sites")),
                              (WIECEJ_NAZWY, i18n.t("home.more.rename")),
                              (WIECEJ_MAKRA, i18n.t("home.more.macro")),

@@ -4,8 +4,9 @@ Czyste testy `resolve_solar(object_raw)` — ciała EXACT, komety IAU/token, kan
 tej samej komety → JEDEN canon), bezpieczniki recenzji (F2 „Saturn Nebula"≠planeta, F5 lowercase).
 Integracja z `run_resolver` (kind-aware, delta) w `test_resolver.py`.
 """
+from horreum.resolve._text import norm_alnum, norm_ascii
 from horreum.resolve.objects import ObjectIdentity
-from horreum.resolve.solar import resolve_solar
+from horreum.resolve.solar import resolve_solar, solar_form
 
 
 # ---- ciała US: dopasowanie EXACT ----
@@ -16,6 +17,35 @@ def test_ciala_bare_lapia():
         ident = resolve_solar(raw)
         assert ident is not None and ident.canon == canon, raw
         assert ident.catalog == "solar" and ident.kind == "solar_system" and ident.source == "solar"
+
+
+def test_slonce_z_ogonkami_rozpoznane():
+    """AR-126: „ł" nie ma rozkładu NFKD, więc `norm_ascii("Słońce")` dawało `SONCE` i ciało
+    przepadało (klucz `_BODIES` to `SLONCE`). Fold „ł"/„Ł" w `norm_ascii` - pokaz aliasu wraca
+    do pisowni z ogonkami."""
+    for raw in ("Słońce", "SŁOŃCE", "słońce"):
+        ident = resolve_solar(raw)
+        assert ident is not None and ident.canon == "Sun", raw
+        assert ident.alias_norm == "SLONCE", raw
+    assert solar_form(resolve_solar("Słońce").alias_norm) == "Słońce"
+    assert norm_ascii("Słońce") == "SLONCE" and norm_ascii("Łódź") == "LODZ"
+
+
+def test_ksiezyc_z_ogonkami_daje_klucz_zastanego_aliasu():
+    """AR-126: klucz aliasu liczony z formy PO fold-zie. `norm_alnum("Księżyc")` wycina litery
+    z ogonkami (`KSIYC`), więc alias nie spotykał zastanego `KSIEZYC` i `solar_form` go nie
+    nazywał."""
+    ident = resolve_solar("Księżyc")
+    assert ident.canon == "Moon" and ident.alias_norm == "KSIEZYC"
+    assert ident.alias_norm == resolve_solar("ksiezyc").alias_norm
+    assert solar_form(ident.alias_norm) == "Księżyc"
+
+
+def test_zeznanie_ascii_zachowuje_klucz_aliasu():
+    """Fold nie rusza zeznań w ASCII - klucz jak dotąd `norm_alnum(raw)`, więc zastane aliasy
+    archiwum (same ASCII) nie zmieniają się od AR-126."""
+    for raw in ("ksiezyc", "Jupiter", "MOON", "C/2023 A3", "c/2023 a3", "Lemmon", "Comet Lemmon"):
+        assert resolve_solar(raw).alias_norm == norm_alnum(raw), raw
 
 
 def test_saturn_nebula_NIE_jest_planeta():

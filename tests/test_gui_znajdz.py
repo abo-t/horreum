@@ -156,6 +156,21 @@ def test_kolumny_Znajdz_mowia_noca_czasem_zestawem_i_uwaga(strona, con):
     assert v.table.columnWidth(m.base_col("note")) == grid_mod._SZEROKOSC_UWAG
 
 
+def test_kolumna_Czas_Znajdz_jedna_precyzja_na_kolumne(strona, con):
+    """Kolumna „Czas” idzie regułą kolumny EXPTIME (`grid_model.miejsca_ekspozycji`): najmniej miejsc,
+    które pokazują dokładnie każdą wartość widoku, nie więcej niż trzy. Falsyfikator: format per
+    komórka (`:g`) - „4.0333 s” pod „300 s”."""
+    con.execute("UPDATE header SET exptime = 4.03329572835443 WHERE frame_id = 3")
+    con.commit()
+    v = strona.frames_view
+    v.refresh()
+    strona.show_find()
+    m = v.model
+    czas = {r["frame_id"]: m.data(m.index(i, m.base_col("exptime")), Qt.DisplayRole)
+            for i, r in enumerate(m._rows) if r.get("frame_id") in (1, 3, 5)}
+    assert czas == {1: "300.000 s", 3: "4.033 s", 5: "600.000 s"}
+
+
 def test_etykiety_kolumn_Znajdz_sa_w_katalogu(strona):
     from horreum.gui.i18n_catalog import CATALOG
     assert not [k for k, _ in grid_mod.FIND_COLS if k not in CATALOG]

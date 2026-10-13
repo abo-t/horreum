@@ -453,3 +453,16 @@ def test_cli_apply_awaria_ogona_nie_polyka_raportu_obecnosci(tree, capsys, monke
     assert raport < etap < blad
     with pytest.raises(Exception, match="closed"):
         otwarte[0].execute("SELECT 1")
+
+
+def test_raport_cli_obecnosci_mowi_ile_nieprzeczytanych_ucial():
+    """Lista nieprzeczytanych katalogów w raporcie CLI jest ucięta do `limit`, a ogon mówi, ile
+    zostało - jak lista tego samego rodzaju w raporcie skanu (liczba w nagłówku nie wystarcza, gdy
+    ktoś czyta samą listę)."""
+    from horreum.cli import _format_presence
+    s = presence.PresenceSummary(root="R:/A", volume="V", unreadable_dirs=[f"R:/A/k{i}" for i in range(7)])
+    tekst = _format_presence("x.db", s, apply=False, limit=5)
+    assert "R:/A/k4" in tekst and "R:/A/k5" not in tekst
+    assert tekst.count("... i 2 wiecej") == 1
+    pelna = _format_presence("x.db", s, apply=False, limit=7)
+    assert "R:/A/k6" in pelna and "wiecej" not in pelna

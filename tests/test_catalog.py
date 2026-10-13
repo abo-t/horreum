@@ -215,3 +215,53 @@ def test_xref_aliases_czyta_rownowaznosc_wstecz():
     assert xref_aliases("IC1805") == ("Sh2-190",)
     assert xref_aliases("M45") == ()                   # brak wpisu = brak aliasu, nie błąd
     assert all(xref(a) == "NGC7023" for a in xref_aliases("NGC7023"))
+
+
+# --- AR-132: Messier → NGC/IC z katalogu, wpis pod obiekt obecny w archiwum ---
+
+def test_xref_M64_na_NGC4826():
+    """Zgłoszenie „m64 nie ma w bazie": obiekt `NGC4826` jest w archiwum (190 lightów, 4 stosy),
+    a `M64` nie miał równoważności. Zapis Messiera dochodzi do kanonu NGC tą samą drogą, którą
+    idzie resolver (`catalog_canon` → `xref`)."""
+    from horreum.resolve.objects import resolve_object
+    assert xref("M64") == "NGC4826"
+    assert "M64" in xref_aliases("NGC4826")
+    assert xref(catalog_canon("m 64")) == "NGC4826"
+    assert xref(catalog_canon("Messier 64")) == "NGC4826"
+    ident = resolve_object("M 64")
+    assert (ident.canon, ident.source, ident.alias_norm) == ("NGC4826", "catalog_xref", "M64")
+
+
+def test_messier_xref_forma_wyjatki_i_zgodnosc_z_assetem_celow():
+    """Klucz `M<n>` i wartość NGC/IC w formie kanonu gramatyki; Messier bez NGC/IC w VII/118
+    (M24, M40, M45, M102) bez wpisu. Para nie przeczy assetowi celów (kolumna M OpenNGC) - dwa
+    źródła tej samej równoważności nie rozjadą się po cichu."""
+    import json
+    from importlib import resources
+    messier = load_catalog_xref()["messier_to_ngc"]
+    for m, cel in messier.items():
+        assert catalog_canon(m, split=False) == m and catalog_label(m) == "Messier", m
+        assert catalog_canon(cel, split=False) == cel and catalog_label(cel) in ("NGC", "IC"), cel
+    assert not {"M24", "M40", "M45", "M102"} & set(messier)
+    surowe = json.loads(resources.files("horreum.data")
+                        .joinpath("targets_core.json").read_text(encoding="utf-8"))
+    pary = {(c, r["c"]) for r in surowe["targets"] for a in r.get("n") or ()
+            for c in [catalog_canon(a, split=False)] if c in messier}
+    assert ("M64", "NGC4826") in pary                  # porównanie nie jest puste
+    assert [(m, cel) for m, cel in pary if messier[m] != cel] == []
+
+
+def test_szukanie_M64_z_ekranu_trafia_NGC4826():
+    """Szukajka listwy facetu „Obiekt” (`facet_model.search_hit`, ten sam predykat w oknie
+    „Przypisz obiekt”) i fraza Znajdź (`flows.znajdz.resolve`) rozumieją „M64” przez `xref`, choć
+    obiekt w bazie nosi wyłącznie alias `NGC4826` (stan archiwum ze zgłoszenia)."""
+    from horreum.gui import facet_model
+    from horreum.gui.flows import znajdz
+    aliasy = {"NGC4826": {"NGC4826"}, "NGC4736": {"NGC4736"}}
+    assert facet_model.search_hit("M64", "NGC4826", aliasy) == "M64"
+    assert facet_model.search_hit("m 64", "NGC4826", aliasy) == "M64"
+    assert facet_model.search_hit("M64", "NGC4736", aliasy) is None
+    kat = znajdz.FindCatalog(objects=((1, "NGC4826"), (2, "NGC4736"), (3, "M45")), aliases=aliasy)
+    stan = znajdz.resolve(znajdz.parse("m64"), kat)
+    assert stan.facets == {"object": {"in": [[1, "NGC4826"]]}}
+    assert stan.note_query is None and stan.unmatched == ()

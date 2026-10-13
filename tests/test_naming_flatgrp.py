@@ -61,12 +61,45 @@ def test_flatgrp_nazwa_mastera_bez_tokenu_problem():
     assert name is None and "brak FLATGRP" in prob and "MasterFlat_OIII.xisf" in prob
 
 
-def test_flatgrp_pusta_grupa_po_sanityzacji_problem():
-    """Grupa złożona z samych znaków niedozwolonych znika w sanityzacji - to problem z powodem, nie
-    nazwa z segmentem `FLATGRP_` bez wartości."""
+def test_flatgrp_grupa_poza_wzorcem_problem():
+    """Grupa, której wzorzec masterflatu nie czyta (nie cyfry), to brak tokenu - problem z powodem,
+    nie nazwa z segmentem `FLATGRP_` bez wartości."""
     seg, problem = naming._flatgrp_segment(
         {"flat_master_id": 9, "flat_paths": ["/m/MASTERFLAT_FLATGRP_<>_FILTER_OIII.xisf"]})
+    assert seg is None and "brak FLATGRP" in problem
+
+
+def test_flatgrp_czyta_jedyny_wlasciciel_tokenu(monkeypatch):
+    """AR-86: grupę czyta `recipe.parse_master_path` z pełną ścieżką kopii - podmiana właściciela
+    zmienia wynik, więc drugiego parsera w `naming` nie ma. Grupa z wzorca użytkownika (dane, nie
+    kod) złożona z samych znaków niedozwolonych znika w sanityzacji - problem, nie pusty segment."""
+    widziane = []
+
+    def wlasciciel(path):
+        widziane.append(path)
+        return {"flatgrp": "777"}
+
+    monkeypatch.setattr(naming, "parse_master_path", wlasciciel)
+    assert naming._flatgrp_segment({"flat_master_id": 1, "flat_paths": [MASTER]}) == ("FLATGRP_777", None)
+    assert widziane == [MASTER]
+    monkeypatch.setattr(naming, "parse_master_path", lambda path: {"flatgrp": "<>"})
+    seg, problem = naming._flatgrp_segment({"flat_master_id": 1, "flat_paths": [MASTER]})
     assert seg is None and "pusta grupa" in problem
+
+
+@pytest.mark.parametrize("path", [
+    MASTER,
+    r"F:\backup\OSC\MASTERFLAT_FLATGRP_202203240_FILTER_OSC_.xisf",
+    r"R:\M\masterflat_flatgrp_202209010_filter_LPRO_.xisf",
+    r"R:\M\MasterFlat_OIII.xisf",
+    r"R:\M\MASTERFLAT_FLATGRP_<>_FILTER_OIII.xisf",
+])
+def test_flatgrp_zgodny_z_porownaniem_kopii(path):
+    """Jeden plik - jedna grupa w obu miejscach: token renamu i porównanie kopii jednej klatki
+    (`queries.copy_name_facts`) czytają tę samą ścieżkę tym samym wzorcem, także gdy grupy nie ma."""
+    grupa = queries.copy_name_facts(path)[queries.COPY_FLATGRP]
+    seg, problem = naming._flatgrp_segment({"flat_master_id": 1, "flat_paths": [path]})
+    assert (seg, problem is None) == ((f"FLATGRP_{grupa}", True) if grupa else (None, False))
 
 
 def test_flatgrp_kopie_o_roznych_grupach_problem():
@@ -119,9 +152,9 @@ def test_validate_template_case():
 @pytest.mark.parametrize("night8, segment, seq", [("20230507", "CLS", 0), ("20251101", "L-Pro", 9),
                                                   ("20220324", "OSC", 3)])
 def test_master_flat_name_round_trip_z_wzorcem_archiwum(night8, segment, seq):
-    """Nazwa nowego mastera czyta się z powrotem obiema regułami archiwum: wzorcem
-    `masterflat_flatgrp_filter` z `master_paths.json` (grupa = noc + cyfra, filtr = segment) i grupą
-    `FLATGRP_` w nazwie lighta. Zmiana konwencji w JSON zaczerwieni ten test."""
+    """Nazwa nowego mastera czyta się z powrotem wzorcem `masterflat_flatgrp_filter`
+    z `master_paths.json` (grupa = noc + cyfra, filtr = segment) - wprost i przez token `flatgrp`
+    w nazwie lighta, który czyta tym samym wzorcem (AR-86). Zmiana konwencji w JSON zaczerwieni ten test."""
     name = naming.master_flat_name(night8, segment, seq)
     assert name == f"MASTERFLAT_FLATGRP_{night8}{seq}_FILTER_{segment}_.xisf"
     rx = next(r for n, _cls, r, _sign in recipe.load_patterns() if n == "masterflat_flatgrp_filter")

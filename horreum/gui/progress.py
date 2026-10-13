@@ -2,8 +2,8 @@
 liczników. Worker woła to w wątku tła; samą emisję sygnału Qt robi warstwa widżetów (`pipeline.py`).
 Wydzielone, by testować bez PySide6 (skill `test-isolation-optional-dependencies`).
 
-Ten plik MUSI zostać Qt-free (test izolacji `test_gui_isolation.py` pilnuje, że tylko `app.py`/
-`__main__.py`/`pipeline.py` tykają PySide6)."""
+Ten plik MUSI zostać Qt-free (test izolacji `test_gui_isolation.py` pilnuje, że PySide6 tykają
+wyłącznie pliki z `QT_WIDGET_FILES`)."""
 from dataclasses import asdict
 
 

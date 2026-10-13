@@ -46,7 +46,7 @@ Cykl pracy z jednym obiektem wygląda tak:
     2. Znajdź            co mam z tego obiektu?             (kafel Znajdź)
     3. Wydaj do WBPP     komplet obiektu na stół            (kafel Wydaj do WBPP)
     4. WBPP              obróbka w PixInsight               (poza Horreum)
-    5. Wciągnij z WBPP   nowe mastery i stosy do archiwum   (Dostawa, sekcja Stosy)
+    5. Wciągnij z WBPP   nowe mastery i stosy do archiwum   (Więcej… na Domu albo Dostawa, sekcja Stosy)
     6. Popraw            to, czego automat nie był pewny    (kafel Popraw)
 
 Kroki 1, 2 i 6 robisz po każdej sesji. Kroki 3-5 wtedy, gdy siadasz do obróbki.
@@ -83,7 +83,7 @@ Po otwarciu bazy widzisz ekran **Dom** z pytaniem **Co chcesz zrobić?** i czter
 | **Co mam:** | ile masz obiektów, lightów, godzin i nocy oraz datę ostatniej nocy |
 | **Teczki - najwięcej godzin** | do osiemnastu kart obiektów z największym dorobkiem; klik w kartę pokazuje klatki tego obiektu w **Znajdź** |
 | **Ostatnio** | Twój ostatni gest (np. przypisanie obiektu, uwaga) i przycisk, który go cofa |
-| **Więcej…** | planer, mapa stanowisk, nazwy plików, makra nagłówków, perspektywy, tryb zaawansowany, **Zbiory klasyczne** |
+| **Więcej…** | **Wciągnij z WBPP…**, planer, mapa stanowisk, nazwy plików, makra nagłówków, perspektywy, tryb zaawansowany, **Zbiory klasyczne** |
 
 Karta teczki ma **kropkę stanu kalibracji**: zielona - każdy light ma master flat i master dark,
 bursztynowa - części brakuje, czerwona - żaden light nie ma ani flatu, ani darka. Pod nazwą stoi
@@ -344,13 +344,16 @@ do plików archiwum. Archiwum zostaje nietknięte, a skasowanie stołu nie kasuj
 **Po co:** WBPP zbudował nowe mastery flat i stosy. Chcesz, żeby trafiły do archiwum pod porządną
 nazwą, a archiwum wiedziało, z czego powstały.
 
-1. Wejdź na stronę **Dostawa** (pasek boczny albo kafel **Przyjmij**) i w sekcji **Stosy** kliknij
-   **Wciągnij z WBPP…**.
+1. Na Domu wybierz **Więcej… → Wciągnij z WBPP…** (albo na stronie **Dostawa** w sekcji **Stosy**
+   kliknij **Wciągnij z WBPP…**).
 2. Okno **Wciągnij wyniki WBPP** pokazuje na górze listę wydań: **Obiekt**, **Karta**, **Data wydania**,
    **Stan** („czeka na WBPP", „do wciągnięcia N", „wciągnięte N", „do przeglądu N"). Najnowsze wydanie
    z czymś do wciągnięcia jest już zaznaczone, a pole **Wyjście WBPP:** wskazuje jego `out`.
 3. Przeczytaj tabelę: **Plik**, **Rodzaj**, **Stan**, **Nazwa docelowa**, **Katalog docelowy**,
-   **Wydanie**, **Powód**. Linia **Archiwum:** mówi, dokąd pójdą kopie (zmienisz ją przyciskiem **Zmień…**).
+   **Wydanie**, **Powód**. Linia **Archiwum:** mówi, dokąd pójdą kopie (zmienisz ją przyciskiem
+   **Zmień…**) - zajrzenie do innego archiwum nie blokuje powrotu; archiwum zamyka się dopiero po
+   pierwszej kopii wciągniętej w tym oknie. Gdy archiwum okna różni się od archiwum bazy, pod linią
+   stoi ostrzeżenie i przycisk **Wróć do archiwum bazy**.
 4. Kliknij **Wciągnij N plików**.
 5. Kliknij **Zamknij i przyjmij do archiwum**.
 
@@ -564,6 +567,7 @@ Przycisk **Więcej…** na Domu zbiera narzędzia rzadsze niż cztery kafle:
 
 | Pozycja | Co otwiera |
 |---|---|
+| **Wciągnij z WBPP…** | okno **Wciągnij wyniki WBPP** - to samo, co przycisk w sekcji **Stosy** strony **Dostawa** |
 | **Planer** | co da się dziś sfotografować i ile materiału już masz |
 | **Mapa stanowisk** | **Oś obserwatorium**: tabela stanowisk z mapą; **Otwórz w OpenStreetMap…** pokaże miejsce w przeglądarce |
 | **Nazwy plików…** | **Zbiory klasyczne** z panelem **Uporządkuj nazwy plików…** |
@@ -718,7 +722,7 @@ bo znane pliki są pomijane, a „Ameryka” w nagłówku rozpoznaje się już s
 | Znaleźć klatki po uwadze | **Znajdź**: słowo z uwagi albo `uwagi:chmury` |
 | Przygotować obiekt do WBPP | **Dom → Wydaj do WBPP → obiekt → Dalej → Utwórz N linków** |
 | Wziąć ścieżkę wyjścia dla WBPP | okno wydania → **Kopiuj ścieżkę** |
-| Przenieść mastery i stosy z WBPP do archiwum | **Dostawa → Wciągnij z WBPP… → Wciągnij N plików → Zamknij i przyjmij do archiwum** |
+| Przenieść mastery i stosy z WBPP do archiwum | **Więcej… → Wciągnij z WBPP… → Wciągnij N plików → Zamknij i przyjmij do archiwum** |
 | Zobaczyć, co czeka na mnie | **Dom → Popraw** |
 | Nazwać teleskop | **Porządki → Teleskopy bez etykiety → dwuklik w Etykieta** |
 | Nazwać miejsce | **Porządki → Stanowiska bez nazwy → dwuklik w Nazwa** |
@@ -831,7 +835,8 @@ QSettings `work/root`, `projection.work_wbpp_root` (dokłada `_WBPP`), karta „
 z `frame_ids`, układy `po-obiektach` / `wbpp-feed`.
 
 **Wciągnij z WBPP… (żniwa)**: przycisk `pipeline.btn.harvest` w sekcji Stosy →
-`PipelineView.open_harvest` → `MainWindow._on_open_harvest` → `HarvestDialog`
+`PipelineView.open_harvest` albo pozycja `WIECEJ_ZNIWA` menu „Więcej…” Domu
+(`MainWindow._on_wiecej_domu`) → `MainWindow._on_open_harvest` → `HarvestDialog`
 (`horreum/gui/harvest_dialog.py`) nad rdzeniem `horreum/harvest.py` (plan bez mutacji; kopia
 `projection.copy_master`; zeznanie `_ZNIWA_<ts>.json`). Master flat →
 `CALIBRATION\masters\flats\<zestaw>\<filtr>` (świadek: nazwy wejść `ProcessingHistory` rozstrzygane bazą); stos →

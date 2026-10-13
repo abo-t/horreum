@@ -3148,8 +3148,10 @@ CATALOG = {
     "pipeline.stage.adopt_testimony": {"pl": "Przejęcie zeznania", "en": "Testimony adoption"},
     # Linia raportu przejęcia zeznania (AR-5). Odmowy tylko, gdy są (QUIET); każda nazywa przyczynę,
     # bo „przejęto 1 z 3" bez niej zatajałoby, dlaczego dwie klatki dalej mówią głosem nieobecnej kopii.
+    # Nagłówek `[etap]` jak w każdej linii raportu (AR-115); w nawiasie nazwa wiersza Porządków
+    # i perspektywy tej samej roboty, bo to ją przebieg właśnie zmniejsza.
     "pipeline.fmt.adopt.prefix": {
-        "pl": "Zeznanie z nieobecnej kopii: ", "en": "Testimony from a missing copy: "},
+        "pl": "[zeznanie z nieobecnej kopii] ", "en": "[testimony from a missing copy] "},
     "pipeline.fmt.adopt.adopted": {
         "pl": "przejęte od ocalałej kopii {n} z {rows}",
         "en": "adopted from the surviving copy {n} of {rows}",
@@ -3176,7 +3178,7 @@ CATALOG = {
     # Linia raportu uzupełnienia faktów kopii (0021) - człony odmów tylko, gdy są (QUIET), ale gdy
     # są, stoją obok liczby uzupełnionych: „uzupełniono 540 z 550" bez „zmienione na dysku 10"
     # zatajałoby, dlaczego reszta czeka.
-    "pipeline.fmt.copy_facts.prefix": {"pl": "Fakty kopii: ", "en": "Copy facts: "},
+    "pipeline.fmt.copy_facts.prefix": {"pl": "[fakty kopii] ", "en": "[copy facts] "},   # AR-115
     "pipeline.fmt.copy_facts.written": {
         "pl": "uzupełniono {n} z {rows}", "en": "filled in {n} of {rows}",
     },
@@ -3225,12 +3227,13 @@ CATALOG = {
 
     # --- panel budowy UI ---
     "pipeline.db_none": {"pl": "Baza: (brak)", "en": "Database: (none)"},
-    # Łańcuch w etykiecie wymienia fakty kopii: bez nich człowiek z 550 kopiami „?" w Porządkach
-    # nie miał skąd wiedzieć, że złota akcja jest jedną z dwóch dróg do tej roboty.
-    "pipeline.receive": {
-        "pl": "Przyjmij nowe  (skan → fakty kopii → grupuj → rozwiąż → kalibracja → delta)",
-        "en": "Take new  (scan → copy facts → group → resolve → calibrate → delta)",
-    },
+    # Nazwa złotej akcji - sama, do zdań, które ją wskazują. Napis przycisku dokłada łańcuch etapów
+    # (`pipeline.receive_chain`) składany z `pipeline.ETAPY_PRZYJMIJ_NOWE` nazwami `pipeline.stage.*`
+    # (AR-115): dawny literał łańcucha gubił etapy, które biegły. Łańcuch wymienia fakty kopii: bez
+    # nich człowiek z 550 kopiami „?" w Porządkach nie miał skąd wiedzieć, że złota akcja jest jedną
+    # z dwóch dróg do tej roboty.
+    "pipeline.receive": {"pl": "Przyjmij nowe", "en": "Take new"},
+    "pipeline.receive_chain": {"pl": "{name}  ({chain})", "en": "{name}  ({chain})"},
     # Gest „Zbierz fakty kopii (N)" (`PipelineView._on_copy_facts`): dwa etapy łańcucha złotej
     # akcji bez skanu. Liczba w nawiasie nie odmienia rzeczownika - odmiana żyje w podpowiedzi
     # i w linii powodu.
@@ -3407,6 +3410,12 @@ CATALOG = {
         "en": {"one": "Mark {n} copy", "other": "Mark {n} copies"},
     },
     "pipeline.btn.show_collections": {"pl": "Pokaż w Zbiorach", "en": "Show in Collections"},
+    # Podpis logu przebiegu, gdy stan bazy odszedł od niego po geście (AR-99,
+    # `PipelineView.naglowek_przebiegu`) - log mówi o chwili przebiegu, panel nad nim o stanie.
+    "pipeline.log_before_changes": {
+        "pl": "Przebieg z {time} (stan sprzed Twoich zmian)",
+        "en": "Run at {time} (state before your changes)",
+    },
     # Źródło, którego wątek tła nie zobaczył jako katalogu (odłączony udział, katalog skasowany) -
     # wspólne dla „Sprawdź obecność” i sekwencji skanu („Przyjmij nowe”, „Skanuj”, „Przetwórz
     # wszystko”, AR-31 (3)). Stan wraca Z WĄTKU TŁA: sprawdzenie w oknie zamrażało je do timeoutu
@@ -3585,6 +3594,15 @@ CATALOG = {
     "pipeline.fmt.slin.waiting": {
         "pl": "czeka na Ciebie {n}", "en": "waiting for you {n}",
     },
+    # Wiersz z drogą do gestu przy tym członie (AR-115, `PipelineView._sync_rodowod`); liczba ze
+    # STANU (zbiór perspektywy), nie z przebiegu - gest w panelu rodowodu zmienia ją między biegami.
+    "pipeline.lineage_waiting": {
+        "pl": {"one": "{n} obraz czeka na Ciebie w perspektywie „{where}”",
+               "few": "{n} obrazy czekają na Ciebie w perspektywie „{where}”",
+               "many": "{n} obrazów czeka na Ciebie w perspektywie „{where}”"},
+        "en": {"one": "{n} image is waiting for you in the “{where}” perspective",
+               "other": "{n} images are waiting for you in the “{where}” perspective"},
+    },
     "pipeline.fmt.slin.ambiguous": {
         "pl": "wspólne klatki z innym obrazem: {n}", "en": "frames shared with another image: {n}",
     },
@@ -3643,6 +3661,31 @@ CATALOG = {
     "pipeline.fmt.scan_unreadable": {
         "pl": "PRZEBIEG NIEKOMPLETNY: katalogi nieprzeczytane {n}",
         "en": "RUN INCOMPLETE: unreadable directories {n}",
+    },
+    # Sekcja pod linią „PRZEBIEG NIEKOMPLETNY” (E4-7, `PipelineView._pokaz_nieprzeczytane`) mówi
+    # KTÓRE katalogi, nie tylko ile. „Mogą”, nie „są” - nieprzeczytany katalog bywa pusty (jak CLI).
+    "pipeline.unreadable_head": {
+        "pl": {"one": "Nie przeczytałem {n} katalogu - liczby raportu mogą być niższe niż stan "
+                      "drzewa:",
+               "few": "Nie przeczytałem {n} katalogów - liczby raportu mogą być niższe niż stan "
+                      "drzewa:",
+               "many": "Nie przeczytałem {n} katalogów - liczby raportu mogą być niższe niż stan "
+                       "drzewa:"},
+        "en": {"one": "{n} folder could not be read - the report's numbers may be lower than the "
+                      "tree holds:",
+               "other": "{n} folders could not be read - the report's numbers may be lower than "
+                        "the tree holds:"},
+    },
+    "pipeline.unreadable_more": {
+        "pl": {"one": "i {n} inny", "few": "i {n} inne", "many": "i {n} innych"},
+        "en": {"one": "and {n} more", "other": "and {n} more"},
+    },
+    "pipeline.btn.rescan": {"pl": "Skanuj ponownie", "en": "Scan again"},
+    "pipeline.tip.rescan": {
+        "pl": "Ten sam przebieg na {root}, bez pytania o katalog. Pliki bez zmian pomija brama "
+              "przyrostowa, więc czyta głównie to, czego zabrakło.",
+        "en": "The same run on {root}, with no folder prompt. The incremental gate skips unchanged "
+              "files, so it mostly reads what was missing.",
     },
     "pipeline.fmt.group": {
         "pl": "[grupuj] nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
@@ -4245,6 +4288,7 @@ CATALOG = {
     "harvest.btn_pick": {"pl": "Wskaż…", "en": "Browse…"},
     "harvest.dlg.pick_output": {"pl": "Wskaż katalog wyjścia WBPP", "en": "Choose the WBPP output folder"},
     "harvest.btn_archive": {"pl": "Zmień…", "en": "Change…"},
+    "harvest.btn_archive_back": {"pl": "Wróć do archiwum bazy", "en": "Back to the database archive"},
     "harvest.dlg.pick_archive": {
         "pl": "Wskaż archiwum (źródło Dostawy)", "en": "Choose the archive (Intake source)",
     },
@@ -4476,10 +4520,10 @@ CATALOG = {
               "archive will not see them.",
     },
     "harvest.archive_locked": {
-        "pl": "Archiwum zablokowane: w tym oknie są już kopie do przyjęcia - drugie archiwum dałoby korzeń, "
-              "którego Dostawa nie powinna skanować.",
-        "en": "Archive locked: this window already has copies to receive - a second archive would give a root "
-              "Intake should not scan.",
+        "pl": "Archiwum zablokowane: w tym oknie wciągnięto już kopie do tego archiwum - drugie archiwum "
+              "dałoby korzeń, którego Dostawa nie powinna skanować.",
+        "en": "Archive locked: this window has already taken copies into this archive - a second archive "
+              "would give a root Intake should not scan.",
     },
     "harvest.accept_refused": {
         "pl": "Nie przyjmę: {root} nie leży pod {cal} ani pod {stacks}",

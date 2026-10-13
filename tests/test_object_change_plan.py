@@ -147,7 +147,7 @@ def test_wiersze_policzone_dla_innego_celu_to_EXPECT(arch):
     fid = arch.klatka(r"LIGHTS\M31\cam\a.fits", canon="NGC224")
     rows = queries.object_change_rows(arch.con, [fid])
     with pytest.raises(ValueError, match="policzony dla celu"):
-        plan_object_change(rows, target=queries.object_target(arch.con, "M33"),
+        plan_object_change(rows, target=queries.object_target(arch.con, "M45"),
                            library_root=None, location_at=lambda v, p: frozenset())
 
 
@@ -307,12 +307,12 @@ def test_karta_odbita_bramka_zostawia_caly_plik_a_RAW_i_region_jada_bez_karty(ar
                        extra_cards=[Card("CHECKSUM", 0, "abc", None, "str", None)])
     raw = arch.klatka(r"LIGHTS\X\cam\2.ARW", canon="NGC224", filetype="raw",
                       date_obs="2022-03-25T00:00:00")
-    plan = arch.plan([suma, raw], target=queries.object_target(arch.con, "M33"))
+    plan = arch.plan([suma, raw], target=queries.object_target(arch.con, "M45"))
     assert "CHECKSUM/DATASUM" in _powody(plan)[suma]
     assert "karta i folder idą razem" in _powody(plan)[suma]
     it = _jedna(plan)
     assert it.frame_id == raw and it.card_op is None and it.card_new is None
-    assert it.new_path == arch.sciezka(r"LIGHTS\M33\cam\2.ARW")
+    assert it.new_path == arch.sciezka(r"LIGHTS\M45\cam\2.ARW")
 
     region = arch.klatka(r"LIGHTS\Petla\cam\3.fits", canon="Veil", okind="region", source="region",
                          card=None, date_obs="2022-03-26T00:00:00")
@@ -355,7 +355,7 @@ def test_stan_klatki_mtime_kopie_kalibracja_wycofana_bez_obiektu(arch):
 def test_cel_w_drzewie_roboczym_jest_niemozliwy_z_konstrukcji(arch):
     fid = arch.klatka(r"_WBPP\proba\LIGHTS\M31\cam\1.fits", canon="NGC224")
     with pytest.raises(AssertionError, match="drzewie roboczym"):
-        arch.plan([fid], target=queries.object_target(arch.con, "M33"))
+        arch.plan([fid], target=queries.object_target(arch.con, "M45"))
 
 
 # ═══════════════════════════════════════════════════════════════════ stosy
@@ -414,7 +414,7 @@ def test_przeniesienie_czesci_wejsc_stosu_ostrzega(arch):
     for f in lights:
         repo.link_integration(arch.con, integration_id=iid, input_frame_id=f, asserted_by="user",
                               now=NOW)
-    cel = queries.object_target(arch.con, "M33")
+    cel = queries.object_target(arch.con, "M45")
     plan = arch.plan(lights[:2], target=cel)
     assert len(plan.items) == 2 and len(plan.warnings) == 1
     w = plan.warnings[0]
@@ -434,7 +434,7 @@ def test_przeniesienie_czesci_wejsc_stosu_ostrzega(arch):
         sciezki = [nowe.get(f) or arch.sciezka(rf"LIGHTS\M31\cam\L\{n}.fits")
                    for n, f in enumerate(lights, start=1)]
         return {tuple(s.lower() for s in _light_tail(p)) for p in sciezki}
-    assert ogony(calosc) == {("m33", "cam", "l")}
+    assert ogony(calosc) == {("m45", "cam", "l")}
     assert len(ogony(plan)) == 2
 
 
@@ -472,9 +472,9 @@ def test_pusta_karta_nie_zeznaje_ale_stoi_w_naglowku_a_brak_karty_to_dopisanie(a
     assert rows[pusta]["card"] is None and rows[pusta]["card_present"] is True
     assert rows[brak]["card_present"] is False
     assert all(r["card_skip"] is None for r in rows.values())
-    plan = arch.plan([pusta, brak], target=queries.object_target(arch.con, "M33"))
+    plan = arch.plan([pusta, brak], target=queries.object_target(arch.con, "M45"))
     karty = {i.frame_id: (i.card_op, i.card_old, i.card_new) for i in plan.items}
-    assert karty == {pusta: ("set", None, "M 33"), brak: ("add", None, "M 33")}
+    assert karty == {pusta: ("set", None, "M 45"), brak: ("add", None, "M 45")}
 
 
 # ═══════════════════════════════════════════════════════════════════ predykat Porządków
@@ -494,7 +494,7 @@ def test_predykat_folder_karta_i_bramki(arch):
     dwie = arch.klatka(r"LIGHTS\Zly\cam\8.fits", canon="NGC224")
     repo.add_location(arch.con, frame_id=dwie, volume="VOL", path=arch.sciezka(r"LIGHTS\Q\c\8.fits"),
                       mtime="m", now=NOW)
-    zgodna = arch.klatka(r"LIGHTS\M33\cam\9.fits", canon="M33")
+    zgodna = arch.klatka(r"LIGHTS\M45\cam\9.fits", canon="M45")
     stos = _stos(arch, r"STACKS\IC405\c\Ha\IC405_2025-08-23_c_Ha_60s_mono.xisf")
     przed = arch.con.total_changes
     ids = queries.file_object_mismatch_frame_ids(arch.con)
@@ -592,8 +592,8 @@ def test_nazwa_lightu_kometa_najdluzszy_czlon_i_idempotencja():
 def test_stary_czlon_z_obiektu_w_bazie_gdy_folder_inny(arch):
     """Plik w folderze innego obiektu niosący w nazwie obiekt z bazy: człon z bazy też jest stary."""
     fid = arch.klatka(r"LIGHTS\Q\cam\NGC224_x.fits", canon="NGC224")
-    it = _jedna(arch.plan([fid], target=queries.object_target(arch.con, "M33")))
-    assert it.new_path == arch.sciezka(r"LIGHTS\M33\cam\M33_x.fits")
+    it = _jedna(arch.plan([fid], target=queries.object_target(arch.con, "M45")))
+    assert it.new_path == arch.sciezka(r"LIGHTS\M45\cam\M45_x.fits")
 
 
 def test_proba_fali_10_b_i_c_bez_ruchu_pliku(arch):

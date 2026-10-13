@@ -1,4 +1,4 @@
-"""Okno „Wciągnij mastery…” - testy STERUJĄCE realnym oknem Qt (offscreen) na PRAWDZIWYM planie
+"""Okno „Wciągnij z WBPP…” - testy STERUJĄCE realnym oknem Qt (offscreen) na PRAWDZIWYM planie
 i apply rdzenia (`harvest.plan`/`harvest.apply` + klinga `projection.copy_master`) na syntetycznej
 bazie. Czytnik mastera jest wstrzykiwany (`harvest.read_master` podmieniany w module rdzenia,
 skąd worker go bierze): testy nie czytają XISF, ale kopia, audyt bajtów, publikacja i zeznanie
@@ -484,6 +484,31 @@ def test_archiwum_inne_niz_w_bazie_ostrzega(qapp, tmp_path, ustawienia, monkeypa
     con3.close()
 
 
+def test_ar107_wroc_do_archiwum_bazy_jednym_klikiem_i_blokada_jak_zmien(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-107: okno na archiwum innym niż archiwum bazy ma przy ostrzeżeniu „Wróć do archiwum bazy” -
+    klik to zmiana archiwum jak „Zmień…”, z celem z bazy: ostrzeżenie i przycisk znikają, podgląd
+    liczy się wobec archiwum bazy. Po kopii wciągniętej w tym oknie przycisk zostaje (archiwum dalej
+    inne), ale wygaszony z podpowiedzią blokady - jak „Zmień…”."""
+    db_arch, scratch = tmp_path / "ARCH_DB", tmp_path / "SCRATCH"
+    con, _profile, _flats = _baza(tmp_path, db_archive=db_arch)
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, scratch)
+    dlg._set_output(str(out))
+    assert not dlg.archive_warn.isHidden() and not dlg.btn_archive_back.isHidden()
+    assert dlg.btn_archive_back.isEnabled() and dlg.btn_archive_back.text() == "Wróć do archiwum bazy"
+    dlg.btn_archive_back.click()
+    assert dlg._archive_root == str(db_arch)
+    assert dlg.archive_warn.isHidden() and dlg.btn_archive_back.isHidden()
+    assert dlg.table.item(0, COL_DIR).toolTip() == str(_cel(db_arch).parent)
+    dlg2 = _dlg(con, scratch)
+    dlg2._set_output(str(out))
+    dlg2._on_apply()
+    assert not dlg2.btn_archive_back.isHidden() and not dlg2.btn_archive_back.isEnabled()
+    assert dlg2.btn_archive_back.toolTip().startswith("Archiwum zablokowane: w tym oknie wciągnięto już kopie")
+    con.close()
+
+
 def test_pamiec_wyjscia_otwiera_z_podgladem(qapp, tmp_path, ustawienia, monkeypatch):
     """Wyjście, które istniało, wraca w następnym otwarciu i od razu ma podgląd (1 klik do „Wciągnij”)."""
     con, _profile, _flats = _baza(tmp_path)
@@ -882,7 +907,7 @@ def test_apply_zamraza_parametry_a_archiwum_od_pierwszej_kopii(qapp, tmp_path, u
     assert frozen == [(False, False, False, True, False, False)] * 2
     assert dlg.edit_output.isEnabled() and dlg.btn_pick.isEnabled()
     assert not dlg.btn_archive.isEnabled()
-    assert dlg.btn_archive.toolTip().startswith("Archiwum zablokowane: w tym oknie są już kopie do przyjęcia")
+    assert dlg.btn_archive.toolTip().startswith("Archiwum zablokowane: w tym oknie wciągnięto już kopie")
     con.close()
 
 
@@ -1508,9 +1533,9 @@ def test_przyjecie_samego_stosu_korzen_archiwum_zwykle_zamknij_bez_stosow(qapp, 
 def test_ar100_kopie_nieznane_bazie_bez_placed_daja_przyjecie(qapp, tmp_path, ustawienia, monkeypatch):
     """AR-100: kopie, które leżą w archiwum (master flat w siedzibie, stos w `STACKS`), a których baza
     nie zna - plan mówi `exists` bez nowej kopii. „Zamknij i przyjmij” jest widoczny, archiwum
-    zablokowane, korzeń = korzeń archiwum (jest stos), a stos położony w innym oknie dostaje rodowód
-    dokładny (zbiór wejść z planu); zwykłe „Zamknij” mówi, ile kopii czeka i którędy baza do nich
-    dojdzie, i stosów nie oddaje."""
+    NIE zablokowane (kopie zastane, nie wciągnięte w tym oknie - AR-107), korzeń = korzeń archiwum
+    (jest stos), a stos położony w innym oknie dostaje rodowód dokładny (zbiór wejść z planu);
+    zwykłe „Zamknij” mówi, ile kopii czeka i którędy baza do nich dojdzie, i stosów nie oddaje."""
     con, _profile, _flats = _baza(tmp_path)
     archive = tmp_path / "ARCH"
     work, _root, out, ids, zeznania = _wydanie_ic1795(tmp_path, con, archive)
@@ -1524,7 +1549,7 @@ def test_ar100_kopie_nieznane_bazie_bez_placed_daja_przyjecie(qapp, tmp_path, us
     dlg = _dlg(con, archive, work_root=str(work))
     assert dlg.head_label.text() == "Do wciągnięcia 1 · już w archiwum 2 · do przeglądu 0"
     assert not dlg.btn_accept.isHidden() and dlg.btn_accept.isEnabled()
-    assert not dlg.btn_archive.isEnabled()
+    assert dlg.btn_archive.isEnabled() and dlg.btn_archive.toolTip() == ""
     assert dlg.summary == f"W archiwum leżą 2 kopie nieznane bazie → {archive}"
     dlg2 = _dlg(con, archive, work_root=str(work))
     dlg2.reject()
@@ -1571,8 +1596,8 @@ def test_ar104_zwykle_zamknij_dostawa_ponowne_okno_oddaje_zbior_dokladny(qapp, t
     dokładny zapisze tylko „Zamknij i przyjmij”; potem osobna Dostawa (stosy znane bazie, rodowód okna
     rozjechany z historią). Ponowne okno OD OTWARCIA: wiersz „wciągnięte 3 · rodowód do zapisania 2”,
     zdanie o „Zamknij i przyjmij” zamiast „folder możesz skasować”, bez „Otwórz”, przycisk przyjęcia
-    widoczny, archiwum zablokowane, a przyjęcie oddaje korzeń archiwum (łańcuch) i zbiór dokładny obu
-    stosów. Po zapisie rodowodu trzecie okno: „wciągnięte 3”, zdanie o kasowaniu i „Otwórz” (otwiera,
+    widoczny, archiwum otwarte (stosy z listy nie powstały w tym oknie - AR-107), a przyjęcie oddaje
+    korzeń archiwum (łańcuch) i zbiór dokładny obu stosów. Po zapisie rodowodu trzecie okno: „wciągnięte 3”, zdanie o kasowaniu i „Otwórz” (otwiera,
     nie kasuje), bez przyjęcia i bez zdania na pasku."""
     con, _profile, _flats = _baza(tmp_path)
     archive = tmp_path / "ARCH"
@@ -1595,7 +1620,7 @@ def test_ar104_zwykle_zamknij_dostawa_ponowne_okno_oddaje_zbior_dokladny(qapp, t
     assert not dlg2.rel_done_note.isHidden() and dlg2.btn_open_release.isHidden()
     assert dlg2.rel_done_note.text().startswith("Stosy z tego wydania czekają na rodowód dokładny")
     assert dlg2.rel_done_note.property("role") == "warn"                 # wstrzymuje kasowanie (wizytator Z12)
-    assert not dlg2.btn_accept.isHidden() and dlg2.btn_accept.isEnabled() and not dlg2.btn_archive.isEnabled()
+    assert not dlg2.btn_accept.isHidden() and dlg2.btn_accept.isEnabled() and dlg2.btn_archive.isEnabled()
     # waga za jedyną robotą (wizytator Z11): przyjęcie grube, „Wciągnij 0” bez wagi; Enter nie przyjmuje
     assert dlg2.btn_accept.font().bold() and not dlg2.btn_accept.isDefault() and not dlg2.btn_accept.autoDefault()
     assert not dlg2.btn_apply.font().bold() and not dlg2.btn_apply.isDefault()
@@ -1707,7 +1732,8 @@ def test_ar105_wciagniete_do_innego_archiwum_nie_sa_wciagniete_w_archiwum_okna(q
 
 def test_ar100_sam_master_flat_korzen_z_calibration(qapp, tmp_path, ustawienia, monkeypatch):
     """AR-100 bez stosu: jedyna kopia do przyjęcia leży pod `CALIBRATION` → korzeń = jej katalog
-    (jak przy wciągniętym masterze), „Wciągnij” zgaszony, bo nic nowego do skopiowania."""
+    (jak przy wciągniętym masterze), „Wciągnij” zgaszony, bo nic nowego do skopiowania. Zajrzenie do
+    innego archiwum i powrót (AR-107) nie gubi tej kopii: fakt liczy się od nowa przy powrocie."""
     con, _profile, _flats = _baza(tmp_path)
     archive = tmp_path / "ARCH"
     out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
@@ -1718,8 +1744,10 @@ def test_ar100_sam_master_flat_korzen_z_calibration(qapp, tmp_path, ustawienia, 
     dlg._set_output(str(out))
     assert _kol(dlg, 0, COL_STATUS) == "już w archiwum" and not dlg.btn_apply.isEnabled()
     assert not dlg.btn_accept.isHidden()
-    with pytest.raises(AssertionError):
-        dlg._set_archive(str(tmp_path / "INNE"))
+    dlg._set_archive(str(tmp_path / "INNE"))
+    assert dlg.btn_accept.isHidden() and dlg.summary is None and dlg.btn_apply.isEnabled()
+    dlg._set_archive(str(archive))
+    assert not dlg.btn_accept.isHidden() and not dlg.btn_apply.isEnabled()
     dlg.btn_accept.click()
     assert dlg.harvested_root == str(_cel(archive).parent) and dlg.harvested_stacks == []
     assert dlg.summary == f"W archiwum leży 1 kopia nieznana bazie → {_cel(archive).parent}"
@@ -1980,13 +2008,14 @@ def test_zatrzymaj_pola_czeka_na_watek_listy_i_jest_idempotentne(qapp, tmp_path,
     con.close()
 
 
-def test_zmien_archiwum_gdy_podglad_w_petli_okna_wyboru_dal_kopie_do_przyjecia(qapp, tmp_path, ustawienia,
-                                                                               monkeypatch):
+def test_zmien_archiwum_gdy_podglad_w_petli_okna_wyboru_dal_kopie_zastane(qapp, tmp_path, ustawienia,
+                                                                          monkeypatch):
     """„Zmień…” klikane, gdy podgląd jeszcze biegnie; okno wyboru kręci własną pętlę, w niej dochodzi
-    podgląd z kopią do przyjęcia (AR-100) - po powrocie archiwum zostaje, pada zdanie o blokadzie,
-    zamiast asercji w slocie."""
+    podgląd z kopią zastaną w archiwum (AR-100). Taka kopia archiwum nie zamraża (AR-107): po powrocie
+    archiwum się zmienia, fakt o starym archiwum znika (przyjęcie gaśnie), a nowy podgląd liczy się
+    wobec nowego archiwum - bez asercji w slocie i bez zdania o blokadzie."""
     con, _profile, _flats = _baza(tmp_path)
-    archive = tmp_path / "ARCH"
+    archive, inne = tmp_path / "ARCH", tmp_path / "INNE"
     out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
     _cel(archive).parent.mkdir(parents=True)
     _cel(archive).write_bytes(b"A")                                      # kopia nieznana bazie
@@ -1997,13 +2026,87 @@ def test_zmien_archiwum_gdy_podglad_w_petli_okna_wyboru_dal_kopie_do_przyjecia(q
 
     def wybierz(parent, title, start=""):
         assert _wait_until(lambda: dlg._dry_thread is None)            # podgląd dobiega w pętli okna wyboru
-        return str(tmp_path / "INNE")
+        assert not dlg.btn_accept.isHidden() and dlg.btn_archive.isEnabled()
+        return str(inne)
 
     monkeypatch.setattr(hd_mod.QFileDialog, "getExistingDirectory", staticmethod(wybierz))
     dlg.btn_archive.click()
-    assert dlg._archive_root == str(archive)
-    assert dlg.notice.text().startswith("Archiwum zablokowane: w tym oknie są już kopie do przyjęcia")
-    assert not dlg.btn_archive.isEnabled() and not dlg.btn_accept.isHidden()
+    assert dlg._archive_root == str(inne) and dlg.btn_accept.isHidden() and dlg.summary is None
+    assert _wait_until(lambda: dlg._dry_thread is None and dlg._plan is not None)
+    assert dlg.btn_apply.text() == "Wciągnij 1 plik" and dlg.btn_accept.isHidden()
+    assert dlg.btn_archive.isEnabled() and dlg.summary is None
+    assert not dlg.notice.text().startswith("Archiwum zablokowane")
+    con.close()
+
+
+def test_ar107_zmien_archiwum_tam_i_z_powrotem_blokada_dopiero_od_kopii_tego_okna(qapp, tmp_path, ustawienia,
+                                                                                 monkeypatch, wybor_katalogu):
+    """AR-107 (wizytacja ogona fali 9, W2): okno na archiwum A → „Zmień…” na B, w którym leży kopia
+    nieznana bazie (wciągnięta w innym oknie bez przyjęcia) → B podsuwa jej przyjęcie, ale archiwum
+    zostaje otwarte, a powrót na A to jeden „Zmień…”: fakt o B znika (przycisk przyjęcia, zdanie
+    paska), podgląd liczy się wobec A. Dopiero kopia wciągnięta W TYM oknie zamraża archiwum (AR-100:
+    dwa archiwa w jednym korzeniu przyjęcia) - „Zmień…” wygaszone z podpowiedzią, obejście to EXPECT,
+    a przyjęcie oddaje korzeń pod A, bez kopii z B.
+
+    Falsyfikatory: blokada z `_receivable_dirs` → „Zmień…” wygaszone na B; `_set_archive` bez zerowania
+    `_unknown` → po powrocie na A przyjęcie widoczne, a zdanie paska mówi o kopii w B."""
+    con, _profile, _flats = _baza(tmp_path)
+    a, b = tmp_path / "ARCH", tmp_path / "SCRATCH"
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _cel(b).parent.mkdir(parents=True)
+    _cel(b).write_bytes(b"A")                                            # kopia w B nieznana bazie
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, a)
+    dlg._set_output(str(out))
+    assert dlg.btn_apply.text() == "Wciągnij 1 plik" and dlg.btn_accept.isHidden()
+
+    wybor_katalogu.odpowiedz = str(b)
+    dlg.btn_archive.click()
+    assert dlg._archive_root == str(b) and wybor_katalogu.wywolania[-1][1] == str(a)
+    assert _kol(dlg, 0, COL_STATUS) == "już w archiwum" and not dlg.btn_accept.isHidden()
+    assert dlg.btn_archive.isEnabled() and dlg.btn_archive.toolTip() == ""   # zajrzenie nie zamyka powrotu
+    assert dlg.summary == f"W archiwum leży 1 kopia nieznana bazie → {_cel(b).parent}"
+
+    wybor_katalogu.odpowiedz = str(a)
+    dlg.btn_archive.click()
+    assert dlg._archive_root == str(a)
+    assert dlg.btn_accept.isHidden() and dlg.summary is None
+    assert dlg.btn_apply.isEnabled() and dlg.btn_apply.text() == "Wciągnij 1 plik"
+
+    dlg._on_apply()
+    assert _cel(a).read_bytes() == b"A"
+    assert not dlg.btn_archive.isEnabled()
+    assert dlg.btn_archive.toolTip().startswith("Archiwum zablokowane: w tym oknie wciągnięto już kopie")
+    with pytest.raises(AssertionError):
+        dlg._set_archive(str(b))
+    dlg.btn_accept.click()
+    assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(_cel(a).parent)
+    con.close()
+
+
+def test_ar107_stosy_bez_rodowodu_z_listy_nie_blokuja_archiwum_i_wracaja_z_nim(qapp, tmp_path, ustawienia,
+                                                                              monkeypatch):
+    """AR-107 przy AR-104: okno nad stosami bez rodowodu dokładnego (zwykłe „Zamknij”, osobna Dostawa)
+    odsłania przyjęcie od otwarcia, a archiwum zostaje otwarte. „Zmień…” na archiwum bez tych stosów:
+    przyjęcie gaśnie, zdania paska nie ma - zbiory dokładne należą do archiwum, które okno opuściło.
+    Powrót: lista liczy stosy od nowa, a przyjęcie oddaje korzeń archiwum i oba zbiory dokładne."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive, scratch = tmp_path / "ARCH", tmp_path / "SCRATCH"
+    work, _root, _out, ids, zeznania = _wydanie_ic1795(tmp_path, con, archive)
+    _czytnik(monkeypatch, zeznania)
+    _dlg(con, archive, work_root=str(work))._on_apply()
+    _dostawa_po_zwyklym_zamknij(con, archive)
+    dlg = _dlg(con, archive, work_root=str(work))
+    assert _stan(dlg, 0) == "wciągnięte 3 · rodowód do zapisania 2"
+    assert not dlg.btn_accept.isHidden() and dlg.btn_archive.isEnabled()
+    dlg._set_archive(str(scratch))
+    assert dlg.btn_accept.isHidden() and dlg.summary is None and dlg.btn_archive.isEnabled()
+    dlg._set_archive(str(archive))
+    assert _stan(dlg, 0) == "wciągnięte 3 · rodowód do zapisania 2" and not dlg.btn_accept.isHidden()
+    dlg.btn_accept.click()
+    assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(archive)
+    assert sorted(dlg.harvested_stacks) == [("stos-crop", tuple(ids[:2]), "IC1795"),
+                                            ("stos-ha", tuple(ids[:2]), "IC1795")]
     con.close()
 
 

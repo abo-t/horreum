@@ -315,6 +315,78 @@ def test_odpiete_reka_to_nie_wszystko_rozpoznane(strona, tmp_path, monkeypatch):
     assert _wiersze(strona) == []
 
 
+# ---------------------------------------------------------------- AR-99: log przebiegu po geście
+
+def test_log_przebiegu_po_gescie_dostaje_podpis_czasu_a_bez_gestu_nie(strona, tmp_path,
+                                                                     monkeypatch):
+    """AR-99: po „Przypisz obiekt…” panel liczy się ze stanu („Wszystko rozpoznane”), a log etapów
+    pod nim dalej mówi o nierozpoznanej nazwie - log dostaje podpis „Przebieg z HH:MM (stan sprzed
+    Twoich zmian)” z godziną startu przebiegu. Samo przeliczenie raportu (wejście na stronę) bez
+    zmiany stanu podpisu nie stawia; nowy przebieg go zdejmuje; zapis INNYM połączeniem (wątek
+    zapisu, inny widok) też jest zmianą po przebiegu.
+
+    Falsyfikator: podpis przy każdym przeliczeniu raportu → pierwsze `odswiez_raport()` go stawia."""
+    i18n.set_lang("pl")
+    pv = strona.pipeline_view
+    tree = _drzewo(tmp_path, "d1", [(1, PLAMA), (2, PLAMA)])
+    zapis = _przebieg(pv, lambda: pv.run_all_on(tree))
+    assert "Plama Zdzicha" in pv.lbl_summary.text() and pv.lbl_summary_head.isHidden()
+    strona.odswiez_raport()                             # wejście na stronę, stan bez zmian
+    assert pv.lbl_summary_head.isHidden()
+    monkeypatch.setattr(przyjmij_mod, "AssignObjectDialog", _OknoPrzypisania)
+    _wiersze(strona)[0].btn.click()
+    assert strona.lbl_unresolved.text() == "Wszystko rozpoznane"
+    assert not pv.lbl_summary_head.isHidden()
+    assert pv.lbl_summary_head.text() == (
+        f"Przebieg z {godzina_dostawy(zapis['since'])} (stan sprzed Twoich zmian)")
+    _przebieg(pv, lambda: pv.run_all_on(tree))          # log znów jest stanem z tej chwili
+    assert pv.lbl_summary_head.isHidden()
+    strona.odswiez_raport()
+    assert pv.lbl_summary_head.isHidden()
+    ids = [fid for (fid,) in strona.con.execute(
+        "SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id WHERE h.object_raw = ?",
+        (PLAMA,))]
+    inne = db.connect(str(tmp_path / "przyjmij.db"))
+    try:
+        repo.clear_object_assignment(inne, frame_ids=ids, now="2026-10-10T13:00:00+00:00")
+    finally:
+        inne.close()
+    strona.odswiez_raport()
+    assert not pv.lbl_summary_head.isHidden()
+
+
+def test_log_bez_gestu_po_przebiegu_zostaje_bez_podpisu_w_oknie(qapp, tmp_path):
+    """AR-99 w oknie aplikacji: odświeżenie widoków po przebiegu i wędrówka między stronami (Dom,
+    Porządki, Zbiory, powrót na Dostawę) nie są gestem - log zostaje bez podpisu. Gest w Zbiorach
+    (połączenie okna) przy powrocie na Dostawę podpis stawia.
+
+    Falsyfikator: odcisk stanu wzięty przed odświeżeniem widoków gospodarza albo widok, który pisze
+    przy odczycie → podpis po samym powrocie na Dostawę."""
+    from horreum.gui.app import NAV_PORZADKI, NAV_ZBIORY
+    i18n.set_lang("pl")
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        pv = win.pipeline_view
+        tree = _drzewo(tmp_path, "d1", [(1, PLAMA), (2, None)])
+        win._show_view(NAV_DOSTAWA)
+        _przebieg(pv, lambda: pv.run_all_on(tree))
+        for nav in (NAV_DOM, NAV_PORZADKI, NAV_ZBIORY, NAV_DOSTAWA, NAV_DOM, NAV_DOSTAWA):
+            win._show_view(nav)
+            qapp.processEvents()
+        assert pv.lbl_summary_head.isHidden()
+        ids = [fid for (fid,) in win.con.execute(
+            "SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id WHERE h.object_raw = ?",
+            (PLAMA,))]
+        win._show_view(NAV_ZBIORY)
+        g = repo.user_assign_object(win.con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                                    kind="deep_sky", frame_ids=ids, now="2026-10-10T13:00:00+00:00")
+        assert g.assigned == 1
+        win._show_view(NAV_DOSTAWA)
+        assert not pv.lbl_summary_head.isHidden()
+    finally:
+        win.close()
+
+
 # ---------------------------------------------------------------- przebiegi bez pełnej dostawy
 
 def test_przebieg_anulowany_mowi_przerwana_i_to_co_weszlo(strona, tmp_path, monkeypatch):
@@ -445,7 +517,7 @@ def test_kafel_przyjmij_to_jedna_interakcja_do_dostawy(qapp, tmp_path, monkeypat
 
 def test_wciagnij_mastery_otwiera_okno_zniw_i_przyjmuje_korzen(qapp, tmp_path, ustawienia,
                                                                monkeypatch):
-    """„Wciągnij mastery…” w Dostawie → okno żniw nad połączeniem okna. Archiwum najpierw z bazy
+    """„Wciągnij z WBPP…” w Dostawie → okno żniw nad połączeniem okna. Archiwum najpierw z bazy
     (`harvest.archive_root_from_db`), bez niego ostatnie źródło Dostawy - ono bywa podkatalogiem
     nocy. Po oknie łańcuch Dostawy na korzeniu wciągniętych kopii (`run_all_on`, bieg ma jednego
     właściciela), a zdanie wyniku i odmowa łańcucha idą JEDNYM komunikatem: odmowa nie zastępuje
@@ -916,7 +988,7 @@ def _zdarzenia(win):
 
 
 def _zniwa_i_przebieg(win):
-    """„Wciągnij mastery…” (okno żniw podstawione) i koniec przebiegu Dostawy, który ono uruchomiło."""
+    """„Wciągnij z WBPP…” (okno żniw podstawione) i koniec przebiegu Dostawy, który ono uruchomiło."""
     win.pipeline_view.btn_harvest.click()
     win.pipeline_view.run_finished.emit(_zapis_przebiegu())
 

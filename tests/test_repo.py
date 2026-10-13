@@ -598,6 +598,42 @@ def test_flag_config_review(tmp_path):
     con.close()
 
 
+def test_flag_config_review_tylko_przy_wejsciu_do_kolejki(tmp_path):
+    """AR-88: powód zapisany w BIEŻĄCYM epizodzie klatki → kolejne wołanie False bez eventu. Nowy
+    epizod otwiera każda zmiana osi (`config.assigned`, `config.unassigned`) - wtedy event wraca;
+    powód jednej klatki nie kryje drugiej (`frame:1` ≠ `frame:10`)."""
+    con = _fresh(tmp_path)
+    cam, _ = repo.upsert_camera(con, model_canon="ASI2600MM", pixel_um=3.76, is_mono=1,
+                                is_mono_source="model", raw_instrume="x", now=NOW)
+    tel, _ = repo.propose_telescope(con, telescop_canon="A140R", f_ratio_nominal=5.6,
+                                    focal_nominal=784, now=NOW)
+    fid, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                               camera_id=cam, now=NOW)
+    powod = "brak osi do config (TELESCOP lub kamera)"
+
+    def ile():
+        return con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0]
+
+    assert repo.flag_config_review(con, frame_id=fid, reason=powod, now=NOW) is True
+    assert repo.flag_config_review(con, frame_id=fid, reason=powod, now=NOW) is False
+    assert ile() == 1
+    cfg, _ = repo.propose_config(con, telescope_id=tel, camera_id=cam, now=NOW)
+    assert repo.assign_config(con, frame_id=fid, config_id=cfg, now=NOW) is True
+    assert repo.flag_config_review(con, frame_id=fid, reason=powod, now=NOW) is True
+    assert repo.flag_config_review(con, frame_id=fid, reason=powod, now=NOW) is False
+    assert repo.unassign_config(con, frame_id=fid, now=NOW) is True
+    assert repo.flag_config_review(con, frame_id=fid, reason=powod, now=NOW) is True
+    assert ile() == 3
+
+    for i in range(2, 11):                      # dziesiąta klatka: target `frame:10` obok `frame:1`
+        inna, _ = repo.upsert_frame(con, sha1_data=f"x{i}", kind="light", filetype="fits",
+                                    camera_id=cam, now=NOW)
+    assert inna == 10 and fid == 1
+    assert repo.flag_config_review(con, frame_id=inna, reason=powod, now=NOW) is True
+    assert ile() == 4
+    con.close()
+
+
 # --- obiekt / alias / filtr ---
 
 def test_upsert_object_idempotentny_i_event(tmp_path):

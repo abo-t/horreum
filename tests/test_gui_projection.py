@@ -1786,6 +1786,41 @@ def test_okno_nie_rosnie_od_dlugiej_nazwy_pliku_w_postepie(qapp, tmp_path, ustaw
     con.close()
 
 
+def test_nota_postepu_dostaje_wolne_miejsce_rzedu(qapp, tmp_path, ustawienia, monkeypatch):
+    """Nota w biegu wydania (1310 pozycji, jak wizytacja natywna `B2_pl_nota_postepu_1310.png`)
+    jest szeroka co najmniej na licznik z ETA - obok `addStretch(1)` dostawała minimum 40 px
+    i pokazywała „123/…". Szerokość tekstu liczona metrykami fontu SAMEJ noty, nie stałą. Przyciski
+    stoją przy prawej krawędzi rzędu przed biegiem i w biegu, a widoczny tekst noty zaczyna się
+    od licznika z ETA (ucina się co najwyżej nazwa pliku)."""
+    import time
+
+    from PySide6.QtWidgets import QPushButton
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "nota.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    root = tmp_path / _SESJA / "_WBPP" / "feed"
+    _target(ustawienia, root)
+    dlg = _dlg(con, ids)
+    _pokazany(dlg, qapp)
+    zamknij = next(b for b in dlg.findChildren(QPushButton) if b.text() == "Zamknij")
+    prawa = dlg.rect().right() - dlg.layout().contentsMargins().right()
+    assert zamknij.geometry().right() == prawa             # przed biegiem: przyciski przy krawędzi
+    dlg._apply_begin(1310, str(root))
+    dlg._apply_started = time.monotonic() - 60.0           # 60 s na 123 pliki - ETA deterministyczne
+    dlg._on_apply_progress(123, 1310, str(root / "Cr464" / "R" / _NAZWA_PF4), "linked")
+    qapp.processEvents()
+    licznik = "123/1310" + pd_mod.eta_text(123, 1310, 60.0)
+    assert licznik == "123/1310 · pozostało ~10 min"        # 1187 plików × 60/123 s = 579 s
+    fm = dlg.progress_note.fontMetrics()
+    assert dlg.progress_note.width() >= fm.horizontalAdvance(licznik)
+    assert dlg.progress_note.text().startswith(licznik)
+    assert zamknij.geometry().right() == prawa             # w biegu też
+    dlg._apply_end()
+    dlg.close()
+    con.close()
+
+
 def test_okno_nie_rosnie_od_nierozbijalnej_sciezki_wyjscia(qapp, tmp_path, ustawienia, monkeypatch):
     """„Wyjście WBPP" (najdłuższy kanon z kopii `pf4`, karta o długości ścieżki wizytacji bm) nie
     dyktuje minimum ani wiersza, ani okna: minimum wiersza i okna jest to samo przy ścieżce długiej

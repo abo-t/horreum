@@ -1142,18 +1142,26 @@ class FramesView(QWidget):
         TEKST UWAG JEST ZAWĘŻENIEM, jak facet i zestaw (AR-95): każdy składnik zapytania Znajdź zawęża
         „Przegląd" bez sufiksu „(zmieniona)". Dawniej uwagi liczyły się jako zmiana stanu (FH-12), więc
         dwa zapytania Znajdź dostawały różne etykiety („Przegląd" przy facecie, „Przegląd (zmieniona)"
-        przy uwagach), a ta szła do manifestu wydania. Tekst uwag stawia wyłącznie Znajdź
-        (`apply_find`, powrót „×" chipu), a żadna perspektywa go nie niesie, więc nie rusza też
-        definicji presetu - sufiks zostaje dla filtra i flag zmienionych poza Znajdź."""
+        przy uwagach), a ta szła do manifestu wydania.
+
+        ZAWĘŻENIE UWAGAMI WYŁĄCZNIE NAD WBUDOWANYM „PRZEGLĄDEM" (`_PRESET_CZYSTY`, preset, od którego
+        startuje Znajdź - `apply_find`). Dla każdej innej definicji tekst uwag jest ZMIANĄ: zapis
+        bieżącego widoku jako perspektywy (`_save_perspective`) uwag nie serializuje, więc zapisana
+        nazwa bez sufiksu udawałaby zbiór z uwagami - ponowne otwarcie pokazałoby szerszy zbiór,
+        a manifest wydania przypisałby tę nazwę zbiorowi zawężonemu. Porównanie po TOŻSAMOŚCI
+        presetu (`_spec_pozycji` oddaje obiekt z `PRESETS`), nie po treści: zapisana perspektywa
+        z pustą definicją ma tę samą treść, a uwag nie niesie tak samo."""
         flagi_spec = {atrybut for atrybut, _ in _TRIMY if spec.get(_klucz_spec(atrybut))}
         flagi_stanu = {atrybut for atrybut, _ in _TRIMY if getattr(self, atrybut)}
         # Filtr złożony WYŁĄCZNIE z liści facetowych (warunek zestawu z Znajdź: teleskop + kamera)
         # jest zawężeniem jak klik w listwie - nad definicją bez filtra nie zmienia perspektywy.
         filtr_zgodny = (spec.get("filter") == self._filter_tree
                         or (spec.get("filter") is None and _zawezenie_facetowe(self._filter_tree)))
+        uwagi_zmieniaja = self.note_query is not None and spec is not PRESETS[_PRESET_CZYSTY]
         # KLATKI WSKAZANE Z PANELU: żadna perspektywa ich nie niesie, a 190 wejść jednego stosu nie
         # jest „Przeglądem" - to nie zawężenie zapytania, tylko inny zbiór.
-        if flagi_spec != flagi_stanu or not filtr_zgodny or self._wskazane is not None:
+        if (flagi_spec != flagi_stanu or not filtr_zgodny or uwagi_zmieniaja
+                or self._wskazane is not None):
             return False
         return all(self._facet_state.get(facet) == wybor
                    for facet, wybor in (spec.get("facets") or {}).items())
@@ -1474,7 +1482,7 @@ class FramesView(QWidget):
         numer podbija - ogon starszego gestu nie nadpisze wtedy zdania, recepty ani zaznaczenia
         nowszego. Podbijają gesty stawiające albo zdejmujące receptę (`_zacznij_gest`,
         `_ustaw_recepte_gestu`) i gesty mówiące własnym zdaniem, które ruszają, gdy zbiór jest
-        w drodze (panel Rodowód, edycja komórki, zapis perspektywy)."""
+        w drodze (panel Rodowód, edycja komórki, zapis perspektywy, „Odrzuć" obu szuflad)."""
         self._gest_nr += 1
 
     def _przeladuj_po_gescie(self, msg, cel=(), **kw):
@@ -1768,9 +1776,17 @@ class FramesView(QWidget):
         są dwa i różne: lista perspektyw (przez `apply_perspective`, więc pozycja listy idzie za
         stanem) i przycisk zbioru.
 
-        Klatki ostatniego gestu osi wracają po wykonaniu SAME: oba gesty kończą się `refresh()`,
-        który odkłada `_cel_gestu` w zaznaczeniu (FC-2) - bez tego odsłonięty zbiór topiłby je."""
+        CEL RECEPTY WRACA W ZAZNACZENIU, Z KADREM (FC-2): oba gesty kończą się przeładowaniem
+        zbioru, a jego przyłożenie (`_zastosuj_zbior`, także w tle - zbiór bywa w drodze) odkłada
+        `_cel_gestu` w zaznaczeniu i przewija do pierwszej klatki. Cel stawiamy TU, z recepty paska,
+        a nie z chwili gestu: `_czlon_poza_widokiem` odkłada go jednorazowo, więc każde przeładowanie
+        między gestem a klikiem (inne zapytanie Znajdź, zmiana kolumn) go konsumowało - recepta
+        „odsłonisz 43 klatki NGC3623" pokazywała wtedy cały zbiór bez zaznaczenia, a następny człon
+        („Obiekt → Przywróć…") stał wygaszony. Pusty stan (`_CEL_WIDOK`) celu nie ma - odsłania widok."""
         rodzaj = self._rodzaj_recepty_powrotu(cel=cel)
+        if rodzaj in (_POWROT_PERSPEKTYWA, _POWROT_ZBIOR) and cel == _CEL_GEST \
+                and self._recepta_gestu is not None:
+            self._cel_gestu = list(self._recepta_gestu[0])
         if rodzaj == _POWROT_PERSPEKTYWA:
             self.apply_perspective(_PRESET_CZYSTY)
         elif rodzaj == _POWROT_ZBIOR:
@@ -4802,6 +4818,8 @@ class FramesView(QWidget):
             return
         if self._run_id is None:
             return
+        # Zdanie odrzucenia - nie ogona starszego gestu, gdy zbiór jest w drodze (AR-84).
+        self._podbij_zeton()
         n = self._pending_count()
         repo.clear_pending_for_run(self.con, self._run_id)
         self._run_id = None
@@ -4998,6 +5016,8 @@ class FramesView(QWidget):
     def _on_reject_rename(self):
         if self._rename_run_id is None:
             return
+        # Zdanie odrzucenia - nie ogona starszego gestu, gdy zbiór jest w drodze (AR-84).
+        self._podbij_zeton()
         n = self._rename_pending_count()
         repo.clear_renames_for_run(self.con, self._rename_run_id)
         self._rename_run_id = None

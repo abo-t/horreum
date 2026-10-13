@@ -1018,6 +1018,13 @@ class ConfirmPathObjectsDialog(QDialog):
         close_btn.clicked.connect(self.reject)
         actions.addWidget(close_btn)
         lay.addLayout(actions)
+        # ENTER NIE PISZE DO PLIKÓW: `QDialog` robi przycisk z fokusem domyślnym (`autoDefault`), więc
+        # Enter na zaznaczonym polu wyboru uruchamiał „Zatwierdź wszystko” (baza i karty w plikach).
+        # Domyślny jest „Zamknij” - ten sam wzór co `RepairHeaderDialog._build_ui`.
+        for btn in (self.confirm_btn, self.undo_btn, self.resolve_btn):
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
+        close_btn.setDefault(True)
 
     def _checked(self):
         return [it for it in self._items if it["check"].isChecked()]
@@ -1155,7 +1162,7 @@ class ConfirmPathObjectsDialog(QDialog):
         (ta sama umowa co w „Napraw nagłówek…"). Commit, który NIE podmienił żadnego pliku (same
         `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty.
         Zapis w miejscu (`commit_inplace`) mówi o drodze zapisu tylko przy spadku na atomową."""
-        from horreum.gui.object_change_dialog import podpowiedz_spadku   # lazy jak `wb_worker`
+        from horreum.gui.wb_worker import podpowiedz_spadku     # dom zdań wspólnych okien zapisu
         summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied",
                                               w_miejscu=op == "commit_inplace")
         # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem.
@@ -1178,7 +1185,8 @@ class ConfirmPathObjectsDialog(QDialog):
         self._porzuc_staging()
         self._domkniety = self._commit_id is not None
         self._end_progress()
-        self.error.setText(i18n.t("grid.wb.error", msg=msg))
+        from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
+        self.error.setText(i18n.t("grid.wb.error", msg=czytelny_powod(msg)))
         self.changed.emit()
 
     def _porzuc_staging(self):
@@ -1525,6 +1533,13 @@ class RepairHeaderDialog(QDialog):
         actions.addWidget(close_btn)
         lay.addLayout(actions)
         self._actions, self._close_btn = actions, close_btn
+        # ENTER NIE PISZE DO PLIKÓW: `QDialog` robi przycisk z fokusem domyślnym (`autoDefault`),
+        # więc Enter w polu nazwy grupy uruchamiał „Zapisz karty (N)”.
+        # Domyślny jest „Zamknij” - wzór `object_change_dialog.ObjectChangeDialog._build_ui`.
+        for btn in (self.save_btn, self.undo_btn, self.resolve_btn):
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
+        close_btn.setDefault(True)
 
     # ---------------------------------------------------------------- podgląd „co wpiszemy"
     def _sync_preview(self):
@@ -1630,7 +1645,7 @@ class RepairHeaderDialog(QDialog):
         teraz"; `commit_id` WIDOCZNY, bo po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki.
         Zdanie i regułę „kiedy wolno cofnąć" daje `zdanie_commitu_kart` - wspólne z oknem
         „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij")."""
-        from horreum.gui.object_change_dialog import podpowiedz_spadku   # lazy jak `wb_worker`
+        from horreum.gui.wb_worker import podpowiedz_spadku     # dom zdań wspólnych okien zapisu
         self.bar.setVisible(False)
         summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied",
                                               w_miejscu=op == "commit_inplace")
@@ -1657,7 +1672,8 @@ class RepairHeaderDialog(QDialog):
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
         self._sync_preview()                     # PRZED `_fail`: podgląd czyści pole błędu
-        self._fail(i18n.t("grid.wb.error", msg=msg))
+        from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
+        self._fail(i18n.t("grid.wb.error", msg=czytelny_powod(msg)))
         self.changed.emit()
 
     def _porzuc_staging(self):

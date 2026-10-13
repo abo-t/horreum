@@ -707,10 +707,12 @@ class ProjectionDialog(QDialog):
         act.addWidget(self.busy)
         # „12/131 · plik.fits" - postęp NAZWANY, nie sam słupek. Elizja w prawo z pełną notą
         # w tooltipie: nazwa pliku archiwum (do 79 znaków na kopii `pf4`) rozpychała okno z 701
-        # do 1011 px i zostawiała je takie po biegu.
+        # do 1011 px i zostawiała je takie po biegu. Współczynnik 1 i ŻADNEGO osobnego stretchu
+        # w rzędzie (wzorzec `harvest_dialog`): nota bierze całe wolne miejsce i spycha przyciski
+        # do prawej krawędzi. Obok `addStretch(1)` dostawała tylko minimum 40 px - „1/3 · …".
         self.progress_note = ElidedLabel()
         self.progress_note.setProperty("role", "secondary")
-        act.addWidget(self.progress_note)
+        act.addWidget(self.progress_note, 1)
         self.btn_dry = QPushButton(i18n.t("proj.btn_refresh"))
         self.btn_dry.setAutoDefault(False)           # ręczny re-DRY (np. po zmianie na dysku poza apką)
         self.btn_dry.setEnabled(False)               # bez celu nie ma czego sondować (wiz K5)
@@ -736,7 +738,6 @@ class ProjectionDialog(QDialog):
         btn_close = QPushButton(i18n.t("proj.btn_close"))
         btn_close.setAutoDefault(False)
         btn_close.clicked.connect(self.reject)
-        act.addStretch(1)
         act.addWidget(self.btn_dry)
         act.addWidget(self.btn_apply)
         act.addWidget(self.btn_cancel)

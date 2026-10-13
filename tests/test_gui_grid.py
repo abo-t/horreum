@@ -3661,6 +3661,42 @@ def test_recepta_NAZYWA_cel_gestu_takze_poza_zbiorem_gestu(obj_view):
     assert {1, 2} <= {r["frame_id"] for r in v.model._rows if isinstance(r, dict)}
 
 
+@pytest.mark.parametrize("rodzaj", ["zbior", "perspektywa"])
+def test_klik_odslonienia_ODDAJE_cel_w_zaznaczeniu_po_obcym_przeladowaniu(obj_view, rodzaj):
+    """Recepta nazywa cel („odsłonisz 2 klatki NGC6960"), więc klik ma go ODDAĆ: cel w zaznaczeniu,
+    kadr na nim, następny człon („przywrócisz: Obiekt → …") czynny. Jednorazowy cel gestu
+    (`_czlon_poza_widokiem`) zjadało każde przeładowanie między gestem a klikiem - po kliku widok
+    pokazywał cały zbiór bez zaznaczenia. Oba rodzaje odsłonięcia: przycisk zbioru i „Przegląd".
+
+    Falsyfikator: zdejmij odłożenie `_cel_gestu` z `wykonaj_recepte_powrotu` → zaznaczenie puste."""
+    v, con = obj_view
+    if rodzaj == "zbior":
+        v.apply_object_facet([(5, "NGC6960")])
+        _zaznacz(v, [1, 2])
+        raporty, recepty = _sluchaj_paska(v)
+        v._on_object_clear()
+        obce = {"kind": {"in": [["dark", "dark"]]}}          # inny zbiór - cel dalej poza widokiem
+    else:
+        v.refresh()
+        _zaznacz(v, [1, 2])
+        v._on_object_clear()
+        v.apply_perspective("Do przeglądu")
+        _zaznacz(v, [1, 2])
+        raporty, recepty = _sluchaj_paska(v)
+        v._on_object_restore()                              # przywrócone wypadają z kolejki
+        obce = {"kind": {"in": [["light", "light"]]}}
+    v._facet_state = obce
+    v.refresh()                                             # przeładowanie między gestem a klikiem
+    assert not v._selected_data_rows() and v._cel_gestu == []
+    odslon = recepty[-1].czlony[0]
+    assert odslon.tekst.startswith("odsłonisz 2 klatki"), odslon.tekst
+    odslon.wykonaj()
+    assert {r["frame_id"] for r in v._selected_data_rows()} == {1, 2}, "cel recepty nie wrócił"
+    assert v.model._rows[v.table.currentIndex().row()].get("frame_id") in (1, 2), "kadr poza celem"
+    assert v.sel_bar.btn_object.isEnabled()
+    assert recepty[-1].czlony[0].wykonaj is not None, "następny człon recepty wygaszony"
+
+
 @pytest.mark.parametrize("n, pl, en", [
     (1, "odsłonisz 1 klatkę: X", "to reveal 1 frame: X"),
     (3, "odsłonisz 3 klatki: X", "to reveal 3 frames: X"),

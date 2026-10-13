@@ -19,6 +19,7 @@ osobnym faktem i mieszka w gospodarzu (`MainWindow`) — patrz `app.py`.
 from __future__ import annotations
 
 import dataclasses
+import re
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -273,7 +274,7 @@ def zdanie_wyniku_zapisu(res, noun_key):
     summary = " · ".join(parts)
     detail = next((fr.reason for fr in (res.failed + wstrzymane + res.blocked) if fr.reason), None)
     if detail:
-        summary += i18n.t("grid.wb.detail_sep", detail=detail)
+        summary += i18n.t("grid.wb.detail_sep", detail=czytelny_powod(detail))
     return summary
 
 
@@ -304,21 +305,103 @@ def bez_prefiksu_spadku(reason):
     return reason
 
 
+def podziel_powod_spadku(reason):
+    """Powód pliku zapisanego drogą atomową → `(szczegół, uwaga | None)`. Rdzeń skleja go
+    (`writeback._dopisz`, separator `; `) z prefiksu drogi, szczegółu odmowy zapisu w miejscu
+    („operacja add/str na OBJECT…” - żargon, idzie do podpowiedzi) i uwag dopisanych za nim
+    (kopia pliku sprzed podmiany zostawiona na dysku, nagrobek ręki - to są fakty dla człowieka
+    i zostają w zdaniu). JEDEN podział dla trzech okien: „Zmień obiekt…”, „Napraw nagłówek…”,
+    „Zatwierdź ze ścieżki…” (okna kart gubiły uwagę o kopii `*.horreum-kopia`)."""
+    szczegol, _, uwaga = bez_prefiksu_spadku(reason or "").partition("; ")
+    return szczegol, (uwaga or None)
+
+
 def zdanie_drogi_zapisu(res):
     """Człon o SPADKU na drogę atomową przy zapisie w miejscu (AR-117) albo `""`.
 
     Okna kart piszą w miejscu (`commit_inplace`), bo pełne przepisanie pliku po SMB zrywa
     dowiązania `_WBPP`. Plik, w którym zapis w miejscu się nie kwalifikuje (FITS umie w miejscu
-    wyłącznie podmienić istniejącą kartę), rdzeń zapisuje drogą atomową, znaczy kodem
-    (`spadek_na_droge_atomowa`) i mówi dlaczego. `applied` bez tego kodu to co innego (np. zapis
-    potwierdzony z dysku po przerwanym commicie - nic nie przepisano). Droga zapisu jest szczegółem,
-    dopóki wszystko poszło w miejscu, więc człon mówi wyłącznie o spadku: ile plików przepisano
-    w całości i pierwszy powód."""
+    wyłącznie podmienić istniejącą kartę), rdzeń zapisuje drogą atomową i znaczy kodem
+    (`spadek_na_droge_atomowa`). `applied` bez tego kodu to co innego (np. zapis potwierdzony
+    z dysku po przerwanym commicie - nic nie przepisano). Droga zapisu jest szczegółem, dopóki
+    wszystko poszło w miejscu, więc człon mówi wyłącznie o spadku: ile plików przepisano w całości
+    i dlaczego - językiem człowieka (`wb.inplace_fallback`; szczegół rdzenia w podpowiedzi okna,
+    `podpowiedz_spadku`) - oraz uwagi rdzenia dopisane za spadkiem (`podziel_powod_spadku`):
+    liczba i pierwsza."""
     spadek = [fr for fr in res.applied if spadek_na_droge_atomowa(fr)]
     if not spadek:
         return ""
-    return i18n.t("wb.inplace_fallback", n=len(spadek),
-                  reason=bez_prefiksu_spadku(spadek[0].reason))
+    czlon = i18n.t("wb.inplace_fallback", n=len(spadek))
+    uwagi = [u for u in (podziel_powod_spadku(fr.reason)[1] for fr in spadek) if u]
+    if uwagi:
+        czlon += i18n.t("objchg.res.notes", n=len(uwagi), note=czytelny_powod(uwagi[0]))
+    return czlon
+
+
+def podpowiedz_spadku(res):
+    """Podpowiedź zdania wyniku okna piszącego karty: szczegół rdzenia pierwszego spadku na drogę
+    atomową - zdanie mówi go językiem człowieka (`zdanie_drogi_zapisu`), więc szczegół nie ginie,
+    tylko schodzi pod kursor - albo `""`."""
+    spadek = next((fr for fr in res.applied if spadek_na_droge_atomowa(fr) and fr.reason), None)
+    if spadek is None:
+        return ""
+    return i18n.t("objchg.st.detail_tip", detail=podziel_powod_spadku(spadek.reason)[0])
+
+
+def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
+    """`(status, podpowiedź)` wiersza listy okna zmiany obiektu: `stan` (tekst z katalogu) i powód
+    rdzenia (`czytelny_powod`). SPADEK KARTY NA DROGĘ ATOMOWĄ mówi tym samym zdaniem człowieka, co
+    wynik okna (`objchg.st.rewritten`, bliźniak `wb.inplace_fallback`), a nie żargonem rdzenia -
+    szczegół schodzi do podpowiedzi, uwaga dopisana przez rdzeń za spadkiem zostaje w statusie
+    (`podziel_powod_spadku`). Spadek rozpoznaje KOD wyniku (`CODE_INPLACE_FALLBACK`, jak zdanie
+    wyniku); wiersz z bazy (`z_bazy`, wejście z Porządków) kodu nie niesie, więc tam rozpoznaje go
+    prefiks rdzenia (`PREFIKS_DROGI_ATOMOWEJ`)."""
+    if not powod:
+        return stan, stan
+    szczegol = None
+    if (kod == writeback.CODE_INPLACE_FALLBACK
+            or (z_bazy and powod.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ))):
+        szczegol, uwaga = podziel_powod_spadku(powod)
+        powod = i18n.t("objchg.st.rewritten") + (f"; {uwaga}" if uwaga else "")
+    status = stan + i18n.t("objchg.st.reason", reason=czytelny_powod(powod))
+    if szczegol is None:
+        return status, status
+    return status, status + "\n" + i18n.t("objchg.st.detail_tip", detail=szczegol)
+
+
+# Plik zajęty przez inny program w powodzie rdzenia (`f"{type(exc).__name__}: {exc}"`):
+# ERROR_SHARING_VIOLATION 32 i ERROR_LOCK_VIOLATION 33 - te same kody, przy których rdzeń ponawia
+# przeniesienie i mówi „plik zajęty przez inny program” (AR-125). Komunikat systemu do KROPKI,
+# którą go kończy (`ctypes.WinError`), albo do ścieżki (`str(OSError)` CPythona kropkę zdejmuje
+# i dokleja `: 'ścieżka'`, przy przeniesieniu `'źródło' -> 'cel'`); nigdy dalej niż do członu
+# zdania (`;`, ` · `, ` - `), więc dalsza część zdania („przerwano na żądanie”) zostaje.
+_OS_ZAJETY = re.compile(
+    r"\b\w*Error: \[WinError 3[23]\] (?:(?! · | - )[^.:;\n])*\.?"
+    r"(?:: '(?P<sciezka>(?:[^'\\]|\\.)*)'(?: -> '(?:[^'\\]|\\.)*')?)?")
+# Ścieżka w zapisie `repr` z podwojonymi ukośnikami (`'R:\\ASTRO_\\…'` z `str(OSError)`).
+_REPR_SCIEZKI = re.compile(r"'((?:[^'\\]|\\.)*\\\\(?:[^'\\]|\\.)*)'")
+
+
+def _bez_repr(sciezka):
+    return sciezka.replace("\\\\", "\\")
+
+
+def czytelny_powod(tekst):
+    """Powód rdzenia w zdaniu dla człowieka: plik zajęty przez inny program słowami okna
+    (`objchg.reason.busy`, bliźniak powodu przeniesienia rdzenia po AR-125) zamiast surowego
+    `PermissionError: [WinError 32] …` - ścieżka zajętego pliku zostaje w nawiasie - a ścieżka
+    z zapisu `repr` bez podwojonych ukośników. Reszta zdania znak w znak: powód rdzenia jest
+    zdaniem dla człowieka, a przekład innych błędów systemu to robota rdzenia, nie ekranu. Jedna
+    funkcja dla okien zapisu (zdanie wyniku `zdanie_wyniku_zapisu`, statusy okna zmiany obiektu)."""
+    if not tekst:
+        return tekst
+
+    def _zajety(m):
+        sciezka = m.group("sciezka")
+        return i18n.t("objchg.reason.busy") + (f" ({_bez_repr(sciezka)})" if sciezka else "")
+
+    tekst = _OS_ZAJETY.sub(_zajety, tekst)
+    return _REPR_SCIEZKI.sub(lambda m: "'" + _bez_repr(m.group(1)) + "'", tekst)
 
 
 def zdanie_commitu_kart(res, applied_key, *, w_miejscu=False):

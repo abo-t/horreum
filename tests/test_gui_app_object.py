@@ -1573,6 +1573,29 @@ def test_okno_grupuje_PO_NAZWIE_i_oznacza_nowa(sciezka):
     dlg.reject()
 
 
+def test_okno_sciezki_Enter_na_polu_wyboru_NIE_zatwierdza(sciezka, monkeypatch):
+    """Enter na zaznaczonym polu wyboru pozycji NIE uruchamia „Zatwierdź wszystko” (zapis do bazy
+    i karty w plikach): `QDialog` robił przycisk z fokusem domyślnym (`autoDefault`). Domyślny
+    jest „Zamknij”, jak w „Napraw nagłówek…”. Falsyfikator: bez `setAutoDefault(False)` na
+    przyciskach zapisu Enter wołał `_on_confirm`."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v, con = sciezka
+    wolania = []
+    monkeypatch.setattr(ConfirmPathObjectsDialog, "_on_confirm", lambda self, *a: wolania.append(1))
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_S2, parent=v)
+    try:
+        assert not dlg.confirm_btn.autoDefault() and not dlg.confirm_btn.isDefault()
+        dlg.show()
+        pole = dlg._items[0]["check"]
+        pole.setFocus()
+        QTest.keyClick(pole, Qt.Key_Return)
+        assert wolania == [], "Enter na polu wyboru zatwierdził zapis"
+    finally:
+        dlg.reject()
+
+
 def test_zatwierdz_wszystko_POMIJA_odznaczone(sciezka):
     """„Zatwierdź wszystko" znaczy „wszystko, co zostawiłeś zaznaczone" — odznaczenie jednej z pozycji
     ma zostawić jej klatki nietknięte, a nie zapisać je „przy okazji"."""
@@ -2649,7 +2672,10 @@ def test_AR98_preselekcja_nie_zostaje_poza_lista(aliasy):
         def cel():
             dane = dlg.combo.currentData()
             assert dane is None or dane[1] in _pozycje(dlg), "wybór spoza listy"
-            assert dlg.accept_btn.isEnabled() == (dane is not None)
+            # Pole nazwy z frazą przeniesioną przez okno (Z37: pełne oznaczenie bez trafienia
+            # dokładnego, np. „NGC 70”) nadpisuje listę - OK idzie wtedy za nazwą, nie za combo.
+            if not dlg.designation.text():
+                assert dlg.accept_btn.isEnabled() == (dane is not None)
             return dane[1] if dane else None
 
         dlg.search.setText("M106")
@@ -2660,6 +2686,7 @@ def test_AR98_preselekcja_nie_zostaje_poza_lista(aliasy):
         assert len(_pozycje(dlg)) > 1
         dlg.search.setText("NGC 70")                   # dwa trafienia bez NGC4258 - zero
         assert sorted(_pozycje(dlg)) == ["NGC7000", "NGC7023"] and cel() is None
+        assert dlg.designation.text() == "NGC 70"      # NGC70 nie ma na liście (Z37)
         dlg.search.setText("NGC 7023")                 # jedno trafienie - preselekcja
         assert cel() == "NGC7023"
         dlg.search.setText("xyz 123")                  # bez trafień - zero
@@ -3207,8 +3234,11 @@ def test_okna_kart_startuja_zapis_w_miejscu_a_FITS_bez_karty_SPADA_i_MOWI_to(
     assert spadek and all(fr.code == writeback.CODE_INPLACE_FALLBACK
                           and fr.reason.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ)
                           for fr in spadek)
-    assert i18n.t("wb.inplace_fallback", n=len(spadek),
-                  reason=bez_prefiksu_spadku(spadek[0].reason)) in dlg.status.text()
+    # Zdanie mówi o spadku językiem człowieka, szczegół rdzenia jest w podpowiedzi zdania.
+    szczegol = bez_prefiksu_spadku(spadek[0].reason).partition("; ")[0]
+    assert i18n.t("wb.inplace_fallback", n=len(spadek)) in dlg.status.text()
+    assert szczegol not in dlg.status.text()
+    assert dlg.status.toolTip() == i18n.t("objchg.st.detail_tip", detail=szczegol)
     dlg.reject()
 
 
@@ -3258,18 +3288,48 @@ def test_XISF_dopisuje_karte_W_MIEJSCU_i_Cofnij_wraca_bajt_w_bajt(qapp, tmp_path
     con.close()
 
 
-def test_spadek_na_droge_atomowa_MOWI_powod_w_oknie_kart(sciezka_karty):
-    """AR-117: plik, w którym karta się nie mieści, rdzeń zapisuje atomowo z powodem
-    (`FileResult.reason`) - okno mówi to zdaniem, inaczej pełne przepisanie po SMB byłoby ciche."""
+@pytest.mark.parametrize("ktore", ["sciezka", "naprawa"])
+def test_spadek_na_droge_atomowa_MOWI_szczegol_w_podpowiedzi_a_UWAGE_w_zdaniu(ktore, request):
+    """AR-117: plik, w którym karta się nie mieści, rdzeń zapisuje
+    atomowo z powodem `prefiks: szczegół; uwaga`. Okno mówi spadek językiem człowieka
+    (`wb.inplace_fallback`), szczegół rdzenia daje w podpowiedzi zdania (`objchg.st.detail_tip`),
+    a UWAGĘ dopisaną za spadkiem - kopia pliku sprzed podmiany zostawiona na dysku usera - w zdaniu
+    („z uwagą: …”). Falsyfikator: podział powodu gubi resztę po `; ` → uwagi nie ma w zdaniu."""
     from horreum import writeback
-    v, con, pliki, fid = sciezka_karty
-    dlg = _okno_sciezki(v, con)
+    if ktore == "sciezka":
+        v, con, pliki, fid = request.getfixturevalue("sciezka_karty")
+        dlg = _okno_sciezki(v, con)
+    else:
+        v, con, files, _open = request.getfixturevalue("repair")
+        dlg = _open()
+    uwaga = r"kopia pliku sprzed podmiany została pod R:\A\b.fits.horreum-kopia - można ją skasować"
     a = writeback.FileResult(1, "a.fits", "applied")
     b = writeback.FileResult(2, "b.fits", "applied",
-                             f"{writeback.PREFIKS_DROGI_ATOMOWEJ}: brak miejsca w nagłówku",
+                             f"{writeback.PREFIKS_DROGI_ATOMOWEJ}: brak miejsca w nagłówku; {uwaga}",
                              code=writeback.CODE_INPLACE_FALLBACK)
     dlg._after_commit("commit_inplace", writeback.CommitResult(
         run_id="r", commit_id=7, applied=[a, b], blocked=[], failed=[], skipped=[], in_place=[a]))
-    assert i18n.t("wb.inplace_fallback", n=1, reason="brak miejsca w nagłówku") in dlg.status.text()
+    zdanie = dlg.status.text()
+    assert i18n.t("wb.inplace_fallback", n=1) + i18n.t("objchg.res.notes", n=1, note=uwaga) \
+        in zdanie, zdanie
+    assert "brak miejsca w nagłówku" not in zdanie and writeback.PREFIKS_DROGI_ATOMOWEJ not in zdanie
+    assert dlg.status.toolTip() == i18n.t("objchg.st.detail_tip", detail="brak miejsca w nagłówku")
     dlg._commit_id = None                                  # nie cofamy atrapy przy zamknięciu
+    dlg.reject()
+
+
+def test_okna_kart_mowia_PLIK_ZAJETY_slowami_okna_ze_sciezka(sciezka_karty):
+    """„Napraw nagłówek…” i „Zatwierdź ze ścieżki…” pokazywały surowe
+    `PermissionError: [WinError 32]` - zdanie wyniku (wspólne, `zdanie_wyniku_zapisu`) przepuszcza
+    powód przez `czytelny_powod`: plik zajęty słowami okna, ścieżka w nawiasie, bez podwojeń."""
+    from horreum import writeback
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    exc = PermissionError(None, "Proces nie może uzyskać dostępu do pliku", r"R:\A\b.fits", 32)
+    b = writeback.FileResult(2, "b.fits", "failed", f"{type(exc).__name__}: {exc}")
+    dlg._after_commit("commit_inplace", writeback.CommitResult(
+        run_id="r", commit_id=None, applied=[], blocked=[], failed=[b], skipped=[]))
+    zdanie = dlg.status.text()
+    assert i18n.t("objchg.reason.busy") + r" (R:\A\b.fits)" in zdanie, zdanie
+    assert "PermissionError" not in zdanie and "\\\\" not in zdanie
     dlg.reject()

@@ -484,6 +484,27 @@ def test_AR95_EN(strona):
     assert "(modified)" not in v.combo_persp.currentText(), v.combo_persp.currentText()
 
 
+def test_AR95_zapisana_perspektywa_NIE_udaje_zbioru_z_uwagami(strona, con, monkeypatch):
+    """Zawężenie uwagami jest dozwolone wyłącznie nad wbudowanym „Przeglądem" (preset Znajdź). Zapis
+    bieżącego widoku jako perspektywy nie serializuje uwag, więc zapisana nazwa bez sufiksu udawałaby
+    zbiór z uwagami - ponowne otwarcie pokaże szerszy zbiór, a manifest przypisałby tę nazwę zbiorowi
+    zawężonemu. Po zapisie etykieta i manifest mówią „(zmieniona)"; zdjęcie uwag ją oddaje.
+
+    Falsyfikator: zdejmij warunek `uwagi_zmieniaja` z `_stan_zgodny_z` → etykieta „★ Moja" bez
+    sufiksu przy zbiorze z uwagami."""
+    from PySide6.QtWidgets import QInputDialog
+    repo.set_frame_note(con, frame_ids=[1, 3], body="x", now=NOW)
+    v = _z_uwagami(strona)
+    assert v.combo_persp.currentText() == i18n.t("perspective.review"), "nad Przeglądem - zawężenie"
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Moja", True)))
+    v._save_perspective()
+    assert v.combo_persp.currentData() == ("saved", "Moja")
+    assert v.combo_persp.currentText().endswith("(zmieniona)"), v.combo_persp.currentText()
+    assert _etykieta_manifestu(v, monkeypatch).endswith("(zmieniona)")
+    v.zdejmij_skladnik(("uwagi",))
+    assert "(zmieniona)" not in v.combo_persp.currentText(), v.combo_persp.currentText()
+
+
 def test_AR95_sufiks_zostaje_dla_zmiany_definicji_presetu_poza_Znajdz(strona):
     """Druga połowa decyzji: zmiana definicji presetu POZA Znajdź (filtr nad „Kalibracją") dalej
     mówi sufiksem - tekst uwag przestał być zmianą, filtr nie."""

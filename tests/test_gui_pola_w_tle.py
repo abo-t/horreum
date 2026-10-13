@@ -968,6 +968,83 @@ def test_ogon_starszego_gestu_nie_nadpisuje_werdyktu_panelu_rodowodu(qapp, tmp_p
         _zamknij(view, con)
 
 
+@pytest.mark.parametrize("szuflada", ["makro", "nazwy"])
+def test_ogon_starszego_gestu_nie_nadpisuje_odrzucenia_szuflady(qapp, tmp_path, monkeypatch,
+                                                                szuflada):
+    """Żeton gestu przy „Odrzuć" w szufladzie (makro i nazwy plików): gest A zleca skład w tle, a
+    odrzucenie pada, zanim zbiór dojedzie. Po przyłożeniu zostaje zdanie odrzucenia, a ogon gestu A
+    nie stawia swojej recepty jako ostatniej - ta sama klasa, co werdykt panelu Rodowód.
+
+    Falsyfikator: zdejmij `_podbij_zeton()` z `_on_reject` / `_on_reject_rename` → ostatnie zdanie
+    to „zdanie A", a recepta - ta z gestu A."""
+    view, con = _widok_w_tle(_baza_obiektu(tmp_path))
+    try:
+        if szuflada == "makro":
+            view._run_id, slot, klucz = "przebieg-makra", view._on_reject, "grid.wb.rejected"
+        else:
+            view._rename_run_id, slot, klucz = ("przebieg-nazw", view._on_reject_rename,
+                                                "grid.rename.rejected")
+        msg = []
+        view.status_message.connect(msg.append)
+        brama, wszedl = _brama_na_skladzie(monkeypatch)
+        view._po_gescie_zapisu("zdanie A", [1, 2])          # gest A - ogon czeka na przyłożenie
+        assert wszedl.wait(_BEZPIECZNIK_S) and view._zbior_w_drodze()
+        slot()                                              # „Odrzuć" w trakcie składu
+        odrzucenie = i18n.t(klucz, n=0)
+        assert msg[-1] == odrzucenie
+        brama.set()
+        _czekaj_na_pola(view)
+        for _ in range(5):
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        assert "zdanie A" not in msg and msg[-1] == odrzucenie, msg
+        assert view._recepta_gestu is None, "recepta gestu A po odrzuceniu"
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_recepta_odslaniania_oddaje_cel_w_zaznaczeniu_po_skladzie_w_tle(qapp, tmp_path,
+                                                                        monkeypatch):
+    """Klik członu odsłonięcia („odsłonisz 2 klatki NGC6960: „× Wyczyść zbiór””) po przeładowaniu,
+    które zjadło jednorazowy cel gestu (zmiana kolumn między gestem a klikiem): zbiór składa się
+    w tle, a po przyłożeniu cel stoi w zaznaczeniu z kadrem, a następny człon recepty jest czynny.
+    Dawniej - cały zbiór, 0 zaznaczonych, „Obiekt → Przywróć…" wygaszone.
+
+    Falsyfikator: zdejmij odłożenie celu z `wykonaj_recepte_powrotu` → zaznaczenie puste."""
+    view, con = _widok_w_tle(_baza_obiektu(tmp_path))
+    try:
+        view.resize(1200, 600)
+        view.show()
+        view._on_facet_change({"object": {"in": [[5, "NGC6960"]]}})
+        _czekaj_na_pola(view)
+        view._przywroc_zaznaczenie([1, 2])
+        recepty = []
+        view.status_recipe.connect(recepty.append)
+        view._on_object_clear()
+        _czekaj_na_pola(view)
+        view._on_columns([])                               # przeładowanie między gestem a klikiem
+        _czekaj_na_pola(view)
+        assert _zaznaczone(view) == [] and view._cel_gestu == []
+        odslon = recepty[-1].czlony[0]
+        assert odslon.tekst.startswith("odsłonisz 2 klatki NGC6960"), odslon.tekst
+        brama, wszedl = _brama_na_skladzie(monkeypatch)
+        odslon.wykonaj()
+        assert wszedl.wait(_BEZPIECZNIK_S) and view._zbior_w_drodze(), "odsłonięcie składa się w tle"
+        brama.set()
+        _czekaj_na_pola(view)
+        for _ in range(5):
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        assert _zaznaczone(view) == [1, 2], "cel recepty wrócił w zaznaczeniu"
+        assert view.table.currentIndex().row() == min(
+            i for i, r in enumerate(view.model._rows) if r.get("frame_id") in (1, 2)), "kadr na celu"
+        assert view.sel_bar.btn_object.isEnabled()
+        nastepny = recepty[-1].czlony[0]
+        assert nastepny.tekst.startswith("przywrócisz") and nastepny.wykonaj is not None, nastepny
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
 def test_zdanie_okna_zmiany_obiektu_czeka_na_przylozenie_zbioru(qapp, tmp_path, monkeypatch):
     """Okno zmiany obiektu zapisało (sygnał `changed`) i zamyka się, gdy zbiór po zapisie składa
     się jeszcze w tle: jego zdanie idzie ogonem po przyłożeniu - wyemitowane od razu przykryłby je

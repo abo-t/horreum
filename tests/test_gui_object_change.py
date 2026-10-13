@@ -478,7 +478,7 @@ def test_CYKL_na_PRAWDZIWYM_sterowniku_lista_wynik_Cofnij_bajty_jak_przed(qapp, 
     assert all(p.exists() for p in nowe) and not pa.exists() and not pb.exists()
     assert [fits.getheader(str(p))["OBJECT"] for p in nowe] == ["NGC 2632", "NGC 2632"]
     assert dlg.status.text().startswith(i18n.t("objchg.res.applied", n=2))
-    assert i18n.t("wb.inplace_fallback", n=1, reason="x").split(":")[0] in dlg.status.text()
+    assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()
     assert not dlg.undo_btn.isHidden()
     dlg.undo_btn.click()
     assert {p: _sha1(p) for p in (pa, pb)} == przed
@@ -765,6 +765,45 @@ def test_zamkniecie_w_trakcie_planu_NIE_czeka_okno_znika_a_zamyka_sie_po_planie(
     assert dlg._plan is None                              # wynik spóźniony poszedł do kosza
 
 
+def test_exec_zamkniety_w_trakcie_planu_NIE_kasuje_okna_z_zywym_watkiem(qapp, con, rdzen):
+    """zamknięcie w trakcie planu chowa okno, a schowanie modalnego okna
+    kończy `exec` przy ŻYWYM wątku planu; kasacja w `exec` niszczyła dziecko `QThread` w biegu
+    (`qFatal`). PRAWDZIWY `exec`: po powrocie okno żyje, dopóki żyje wątek; po końcu wątku -
+    skasowane. Falsyfikator: `deleteLater` bezwarunkowo w `exec` → okno ginie w pierwszym
+    `DeferredDelete` z wątkiem w biegu."""
+    import shiboken6
+    from PySide6.QtCore import QTimer
+    rdzen.opoznienie = 0.6
+    dlg = _okno(qapp, con, off_thread=True)
+    QTimer.singleShot(0, dlg.reject)
+    dlg.exec()
+    watek = dlg._plan_thread
+    assert watek is not None and watek.isRunning()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert shiboken6.isValid(dlg)                                # wątek w biegu trzyma okno
+    assert _czekaj(lambda: dlg._plan_thread is None)
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not shiboken6.isValid(dlg)                            # wątek skończył - okno skasowane
+
+
+def test_zatrzymaj_pola_zbiera_watek_planu_zamknietego_okna(qapp, con, rdzen):
+    """Okno po `exec` z wątkiem planu w biegu żyje pod gospodarzem; przy wyjściu z aplikacji
+    gospodarz woła `zatrzymaj_pola` (`MainWindow._zatrzymaj_watki_widokow`): czeka do końca wątku,
+    zbiera go i wraca - idempotentnie, a spóźniony wynik planu nie dotyka okna."""
+    from PySide6.QtCore import QTimer
+    rdzen.opoznienie = 0.4
+    dlg = _okno(qapp, con, off_thread=True)
+    QTimer.singleShot(0, dlg.reject)
+    dlg.exec()
+    watek = dlg._plan_thread
+    assert watek is not None and watek.isRunning()
+    dlg.zatrzymaj_pola()
+    assert dlg._plan_thread is None and not watek.isRunning()
+    dlg.zatrzymaj_pola()
+    QCoreApplication.processEvents()
+    assert dlg._plan is None
+
+
 def test_dlugie_sciezki_NIE_rozpychaja_okna_ponad_kanon_1920(qapp, con, rdzen):
     """Kanon minimalnego ekranu: 1920×1080 logicznych. Ścieżka dłuższa niż ekran jest elidowana
     w środku (pełna w podpowiedzi), a nie zawijana ani rozpychająca okno."""
@@ -831,8 +870,7 @@ def test_zdanie_drogi_zapisu_mowi_TYLKO_o_spadku_na_atomowa():
     wszystko_w_miejscu = writeback.CommitResult("r", 3, [a], [], [], [], in_place=[a])
     assert zdanie_drogi_zapisu(wszystko_w_miejscu) == ""
     spadek = writeback.CommitResult("r", 3, [a, b], [], [], [], in_place=[a])
-    assert zdanie_drogi_zapisu(spadek) == i18n.t(
-        "wb.inplace_fallback", n=1, reason="karta się nie mieści w nagłówku")
+    assert zdanie_drogi_zapisu(spadek) == i18n.t("wb.inplace_fallback", n=1)    # bez żargonu
     # zapis potwierdzony z dysku po przerwanym commicie: poza `in_place`, ale niczego nie
     # przepisano - to nie spadek na drogę atomową
     potwierdzony = _fr(3, "applied", "zapis potwierdzony z dysku po przerwanym commicie 4 - nic "
@@ -1426,6 +1464,65 @@ def test_wybierak_pusty_wynik_PROWADZI_do_pola_nazwy_i_mowi_ze_zalozy_obiekt(qap
     dlg.reject()
 
 
+def test_Enter_w_szukajce_po_przeniesieniu_NIE_zaklada_obiektu_prawdziwym_klawiszem(qapp, con):
+    """Zmierzone natywnie: „NGC 1952” + Enter → 43 klatki przypisane, obiekt założony.
+    Fraza przeniesiona do pola nazwy, która ZAŁOŻY obiekt: Enter w szukajce przenosi
+    fokus do pola nazwy z zaznaczoną treścią - zero zapisu; przycisk mówi, że założy obiekt; Enter
+    w polu nazwy zatwierdza. Jedno trafienie listy + Enter (AR-98) zatwierdza jak dotąd."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    _obiekt_z_klatka(con, "NGC3034", "sha-e-1")
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2)
+    akcja = dlg.accept_btn.text()
+    dlg.show()
+    dlg.search.setFocus()
+    QTest.keyClicks(dlg.search, "M 44")
+    assert dlg.designation.text() == "M 44"
+    assert dlg.accept_btn.text() == i18n.t("assign.create_btn", canon="NGC2632", action=akcja)
+    QTest.keyClick(dlg.search, Qt.Key_Return)
+    assert dlg.result() != QDialog.Accepted and dlg.selected is None and dlg.isVisible()
+    assert dlg.focusWidget() is dlg.designation and dlg.designation.selectedText() == "M 44"
+    QTest.keyClick(dlg.designation, Qt.Key_Return)
+    assert dlg.result() == QDialog.Accepted and dlg.selected[0] == "NGC2632"
+    dlg.close()
+
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2)
+    dlg.show()
+    dlg.search.setFocus()
+    QTest.keyClicks(dlg.search, "M 44")
+    QTest.keyClick(dlg.search, Qt.Key_Backspace)        # „M 4” - bez trafień, dalej przeniesiona
+    dlg.search.clear()                                  # pole oddane - napis przycisku wraca
+    assert dlg.designation.text() == "" and dlg.accept_btn.text() == akcja
+    QTest.keyClicks(dlg.search, "NGC 3034")             # AR-98: jedno trafienie + Enter
+    QTest.keyClick(dlg.search, Qt.Key_Return)
+    assert dlg.result() == QDialog.Accepted and dlg.selected[0] == "NGC3034"
+    dlg.close()
+
+
+def test_pelne_oznaczenie_bez_trafienia_DOKLADNEGO_przechodzi_do_pola_nazwy(qapp, con):
+    """„M 1” trafiało prefiksem cudzy obiekt (alias M106 przy NGC4258), fraza
+    nie szła do pola, a jedno trafienie stawało się preselekcją - wybór obiektu, którego nikt nie
+    nazwał. Pełne oznaczenie bez trafienia dokładnego: zdanie „nie ma na liście”, fraza w polu
+    nazwy, trafienia prefiksem zostają na liście BEZ wyboru; wybór z listy ręką oddaje pole."""
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    _obiekt_z_klatka(con, "NGC4258", "sha-p-1")
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2)
+    dlg.search.setText("M 1")
+    assert [dlg.combo.itemData(i)[1] for i in range(1, dlg.combo.count())] == ["NGC4258"]
+    assert dlg.combo.currentIndex() == 0                       # prefiks bez preselekcji
+    assert dlg.designation.text() == "M 1" and not dlg.search_hint.isHidden()
+    assert dlg.search_hint.text() == i18n.t("assign.search_moved")
+    assert dlg.canon_preview.text().endswith(i18n.t("assign.creates_object"))
+    dlg.combo.setCurrentIndex(1)
+    dlg.combo.activated.emit(1)                                # wybór ręką z listy
+    assert dlg.designation.text() == "" and dlg.combo.currentData()[1] == "NGC4258"
+    dlg.search.setText("M 106")                                # trafienie dokładne - bez przeniesienia
+    assert dlg.designation.text() == "" and dlg.search_hint.isHidden()
+    assert dlg.combo.currentData()[1] == "NGC4258"
+    dlg.reject()
+
+
 # ═══════════════════════════════════════════════ elizja listy: rozróżnialna część zostaje
 
 # Realne ścieżki z kopii żywej bazy (v36, 2026-10-13): mediana długości lightów pod LIGHTS to 99
@@ -1567,6 +1664,8 @@ def test_status_spadku_mowi_JEZYKIEM_CZLOWIEKA_a_szczegol_rdzenia_w_podpowiedzi(
                   detail="operacja add/str na OBJECT - układ karty zostaje przy astropy") \
         in w.toolTip(3)
     assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()
+    # uwaga rdzenia za spadkiem zostaje w zdaniu (Z27, jeden podział z oknami kart)
+    assert i18n.t("objchg.res.notes", n=1, note="nagrobek ręki został") in dlg.status.text()
     assert prefiks not in dlg.status.text() and "add/str" not in dlg.status.text()
     dlg.reject()
 
@@ -1574,7 +1673,7 @@ def test_status_spadku_mowi_JEZYKIEM_CZLOWIEKA_a_szczegol_rdzenia_w_podpowiedzi(
 def test_status_spadku_z_BAZY_rozpoznaje_prefiks_rdzenia():
     """Wiersz przebiegu z bazy (wejście z Porządków) nie niesie kodu wyniku - spadek rozpoznaje
     prefiks rdzenia; wynik biegu bez kodu zostaje uwagą (jak zdanie wyniku)."""
-    from horreum.gui.object_change_dialog import status_pozycji
+    from horreum.gui.wb_worker import status_pozycji
     prefiks = writeback.PREFIKS_DROGI_ATOMOWEJ
     stan = i18n.t("objchg.st.done")
     status, tip = status_pozycji(stan, f"{prefiks}: karta OBJECT występuje 2 razy", z_bazy=True)
@@ -1596,17 +1695,26 @@ def test_czytelny_powod_plik_zajety_slowami_a_sciezki_bez_podwojnych_ukosnikow(l
     """Wizytacja bt/bv: surowy `PermissionError: [WinError 32]` z podwojonymi ukośnikami w zdaniu
     i statusie. Po AR-125 przeniesienie mówi już „plik zajęty przez inny program”, ale zapis karty
     w pliku zajętym dalej oddawał surowy wyjątek (sonda na prawdziwym rdzeniu). Plik zajęty -
-    zdaniem okna; ścieżka z `repr` - bez podwojeń; reszta zdania (` · przebieg …`) nietknięta."""
-    from horreum.gui.object_change_dialog import czytelny_powod
+    zdaniem okna, ścieżka zajętego pliku w nawiasie; ścieżka z `repr` - bez podwojeń; reszta
+    zdania (` · przebieg …`, ` - przerwano na żądanie`) nietknięta - komunikat systemu kończy
+    kropka (`ctypes.WinError`) albo ścieżka (`str(OSError)`), nie najbliższy separator (Z28)."""
+    from horreum.gui.wb_worker import czytelny_powod
     i18n.set_lang(lang)
+    zajety_txt = i18n.t("objchg.reason.busy")
     zajety = _blad_os(PermissionError, 32, "Proces nie może uzyskać dostępu do pliku, ponieważ jest "
                                            "on używany przez inny proces", r"R:\ASTRO_\LIGHTS\a.fits")
     assert "\\\\" in zajety and "[WinError 32]" in zajety           # surowy zapis z rdzenia
     zdanie = f"karta odbita bez zapisu: {zajety} · przebieg abc"
-    assert czytelny_powod(zdanie) == (f"karta odbita bez zapisu: {i18n.t('objchg.reason.busy')}"
-                                      f" · przebieg abc")
-    bez_sciezki = _blad_os(PermissionError, 33, "Proces nie ma dostępu do pliku.")
-    assert czytelny_powod(f"{bez_sciezki}; dalej") == f"{i18n.t('objchg.reason.busy')}; dalej"
+    assert czytelny_powod(zdanie) == (f"karta odbita bez zapisu: {zajety_txt} "
+                                      f"(R:\\ASTRO_\\LIGHTS\\a.fits) · przebieg abc")
+    # forma `ctypes.WinError` (rdzeń: podmiana pliku) - bez ścieżki, komunikat kończy kropka
+    ctypes_ = "PermissionError: [WinError 32] Proces nie może uzyskać dostępu do pliku."
+    assert czytelny_powod(f"{ctypes_} - przerwano na żądanie") == (
+        f"{zajety_txt} - przerwano na żądanie")
+    bez_sciezki = _blad_os(PermissionError, 33, "Proces nie ma dostępu do pliku")
+    assert czytelny_powod(f"{bez_sciezki}; dalej") == f"{zajety_txt}; dalej"
+    assert czytelny_powod(f"{bez_sciezki} - przerwano na żądanie") == (
+        f"{zajety_txt} - przerwano na żądanie")
     inny = _blad_os(FileNotFoundError, 2, "Nie można odnaleźć określonego pliku",
                     r"R:\ASTRO_\LIGHTS\b.fits")
     assert czytelny_powod(inny) == inny.replace("\\\\", "\\")
@@ -1760,7 +1868,7 @@ def test_KAZDY_kod_pominiecia_ma_zdanie_PL_i_EN_z_parametrami_planera():
 @pytest.mark.parametrize("lang", ["en", "pl"])
 def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_path, monkeypatch,
                                                                      lang):
-    """Recenzent fali 10: powody pominięć tylko po polsku w UI EN. Prawdziwy planer na fixture
+    """Powody pominięć były tylko po polsku w UI EN. Prawdziwy planer na fixture
     planera: każdy rodzaj pominięcia, który da się zbudować, mówi zdaniem `objchg.skip.<kod>`
     w języku UI z parametrami planera (para stosu - z pominiętą połową też w języku UI); szczegół
     błędu systemu bez podwojonych ukośników. W oknie - lista pominięć tym samym zdaniem."""
@@ -1859,7 +1967,7 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
 
 
 def czytelny(tekst):
-    from horreum.gui.object_change_dialog import czytelny_powod
+    from horreum.gui.wb_worker import czytelny_powod
     return czytelny_powod(tekst)
 
 
@@ -1883,7 +1991,7 @@ def _okno_do_exec(ktore, con, host):
 @pytest.mark.parametrize("ktore", ["zmiana", "wybierak", "naprawa", "sciezka"])
 def test_okno_KASUJE_sie_po_exec_a_gospodarz_czyta_je_jeszcze_po_powrocie(
         qapp, con, rdzen, ktore):
-    """Recenzent fali 10: okno nie kasowane po `exec` - każde zamknięte zostawało dzieckiem
+    """Okno nie było kasowane po `exec` - każde zamknięte zostawało dzieckiem
     gospodarza do końca sesji. Po `exec` okno żyje do pętli zdarzeń gospodarza (gospodarz czyta
     `summary`/`selected`/zdanie stanu), potem znika. Falsyfikator: bez kasacji w `exec` okno
     zostaje dzieckiem gospodarza po `DeferredDelete`."""
@@ -1921,6 +2029,30 @@ def _bezimienne(root, con, foldery):
             hdu.writeto(str(p))
             scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
                                summary=scan.ScanSummary())
+
+
+def test_Napraw_naglowek_Enter_w_polu_grupy_NIE_pisze_kart_prawdziwym_klawiszem(qapp, tmp_path):
+    """„Zapisz karty (N)” był przyciskiem domyślnym, więc Enter
+    w polu nazwy grupy pisał karty do PLIKÓW. Domyślny jest „Zamknij” (wzór okna zmiany obiektu):
+    Enter w polu grupy nie startuje zapisu. Falsyfikator: `autoDefault` zapisu → `start` wołany."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from horreum.gui.app import RepairHeaderDialog
+    con = db.open_db(str(tmp_path / "z.db"))
+    _bezimienne(tmp_path / "ASTRO_", con, ["NGC7635"])
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    starty = []
+    dlg._runner.start = lambda op, *a, **k: starty.append(op)
+    dlg.show()
+    pole = dlg._groups[0]["edit"]
+    pole.setFocus()
+    assert dlg.save_btn.isEnabled() and not dlg.save_btn.isDefault()
+    assert dlg._close_btn.isDefault()
+    QTest.keyClick(pole, Qt.Key_Return)
+    assert starty == [] and dlg.result() == QDialog.Rejected
+    dlg.reject()
+    con.close()
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])

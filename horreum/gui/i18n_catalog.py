@@ -1027,6 +1027,9 @@ CATALOG = {
         "pl": "Nie ma go na liście - nazwę spoza listy wpisz w polu niżej.",
         "en": "Not on the list - type a name from outside the list in the field below.",
     },
+    # Przycisk akcji przy nazwie, która ZAŁOŻY obiekt: `{action}` = napis wołającego
+    # („Przypisz N klatek”, w wybieraku „Dalej - podgląd…”).
+    "assign.create_btn": {"pl": "Załóż {canon} · {action}", "en": "Create {canon} · {action}"},
     # Kanon spoza bazy: zapis ZAŁOŻY obiekt - mówione przed kliknięciem, przy zdaniu na żywo.
     "assign.creates_object": {
         "pl": " · nowy obiekt: zapis założy go w bazie",
@@ -3232,6 +3235,11 @@ CATALOG = {
     # Etap uzupełnień (fakty kopii, przejęcie zeznania, historia stosów) bez kandydatów: rdzeń go
     # pomija w ciszy, a log mówi, że etap biegł i nie miał czego zrobić (`PipelineView._uzupelnienia`).
     "pipeline.fmt.nothing_to_do": {"pl": "nic do zrobienia", "en": "nothing to do"},
+    # To samo na drodze „Stosy”: uzupełnienia biegną tam zawężone do drzewa obróbki, więc zdanie
+    # mówi o zakresie - samo „nic do zrobienia” czytało się jak stan archiwum (Porządki liczą całe).
+    "pipeline.fmt.nothing_to_do_tree": {
+        "pl": "nic do zrobienia w drzewie obróbki", "en": "nothing to do in the processing tree",
+    },
     # Etap, który nie ruszył (źródło niedostępne, hamulec obecności) - jedna treść dla każdego etapu.
     "pipeline.fmt.not_done": {"pl": "NIE WYKONANO - {reason}", "en": "NOT DONE - {reason}"},
     "pipeline.fmt.stack_history.written": {

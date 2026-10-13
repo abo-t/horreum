@@ -7,6 +7,7 @@ drugie wejście ten układ unieważnia (R-S4-9), więc kontrakt przenosi się TU
 """
 import unicodedata
 
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout,
 )
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
 from horreum import resolver
 from horreum.gui import facet_model, i18n, queries
 from horreum.resolve._text import LITERY_BEZ_ROZKLADU, norm_alnum
-from horreum.resolve.catalog import catalog_canon, header_form, xref_aliases
+from horreum.resolve.catalog import catalog_canon, header_form, xref, xref_aliases
 from horreum.resolve.objects import common_name_form, load_own_objects
 from horreum.resolve.solar import solar_form
 
@@ -316,6 +317,11 @@ class AssignObjectDialog(QDialog):
         # Fraza, którą okno SAMO wpisało w pole nazwy (None = pole należy do usera): tylko taką
         # wolno zdjąć, gdy szukajka znów trafia, i tylko taką nadpisać nową frazą bez trafień.
         self._przeniesiona = None
+        # Nazwa z pola ZAŁOŻY obiekt (kanon spoza bazy) - przycisk mówi to wprost, a Enter
+        # z szukajki prowadzi do pola zamiast zapisu (`eventFilter`). `_tekst_akcji` = napis
+        # przycisku sprzed trybu zakładania (wołający ustawia własny, np. „Dalej - podgląd…”).
+        self._zalozy = False
+        self._tekst_akcji = None
 
         lay.addWidget(QLabel(i18n.t("assign.new_designation")))
         self.designation = QLineEdit()
@@ -360,7 +366,9 @@ class AssignObjectDialog(QDialog):
         self.designation.textChanged.connect(self._sync_accept_enabled)
         # Edycja RĘKĄ (nie `setText` okna) zabiera polu status frazy przeniesionej.
         self.designation.textEdited.connect(self._on_designation_edited)
+        self.combo.activated.connect(self._on_combo_activated)
         self.search.textChanged.connect(self._on_search)
+        self.search.installEventFilter(self)
         self._sync_accept_enabled()
 
     def exec(self):
@@ -378,7 +386,7 @@ class AssignObjectDialog(QDialog):
         aliasy = self._aliasy.get(o["canon"])
         return f"{tekst}  ·  {', '.join(aliasy)}" if aliasy else tekst
 
-    def _fill_combo(self, text):
+    def _fill_combo(self, text, wybor=True):
         """Przeładuj listę do obiektów trafionych frazą `text` (pusta fraza = cała biblioteka).
 
         Wybór PRZEŻYWA zawężenie, gdy wybrany obiekt nadal jest na liście; gdy fraza go chowa,
@@ -391,8 +399,10 @@ class AssignObjectDialog(QDialog):
         - jedyny obiekt biblioteki to nie jest trafienie szukajki.
         Sygnały zablokowane na czas przeładunku: `clear()` emituje zmianę indeksu dla każdej
         pozycji po drodze, a stan akcji liczy wołający raz, po wszystkim. Zwraca liczbę trafień
-        (zero przy niepustej frazie prowadzi do pola nazwy - `_on_search`)."""
-        wybrany = self.combo.currentData()
+        (zero przy niepustej frazie prowadzi do pola nazwy - `_on_search`). `wybor=False` = fraza
+        przechodzi do pola nazwy mimo trafień prefiksem (`_on_search`, Z37): combo stoi na zerze -
+        pole nazwy i tak nadpisuje listę, a zaznaczony obiekt obok niego kłamałby o celu."""
+        wybrany = self.combo.currentData() if wybor else None
         # Igła BEZ OGONKÓW: predykat liczy `norm_alnum`, który litery diakrytyczne wycina,
         # więc złożenie musi nastąpić przed nim (`klucz_szukania`). Predykat zostaje wspólny
         # z listwą facetów; składanie jest własnością tego okna.
@@ -410,21 +420,38 @@ class AssignObjectDialog(QDialog):
                 self.combo.addItem(self._item_text(o), (o["id"], o["canon"], o["catalog"]))
                 if wybrany is not None and wybrany[0] == o["id"]:
                     indeks = self.combo.count() - 1
-            if indeks == 0 and fraza and len(trafione) == 1:
+            if indeks == 0 and fraza and len(trafione) == 1 and wybor:
                 indeks = 1                                  # jedno trafienie = preselekcja (AR-98)
             self.combo.setCurrentIndex(indeks)
         finally:
             self.combo.blockSignals(False)
         return len(trafione)
 
+    def _bez_dokladnego(self, fraza):
+        """Czy fraza to PEŁNE oznaczenie katalogowe (`catalog_canon`), którego obiektu nie ma na
+        liście - ani kanonem (przed i po `xref`), ani aliasem (reguła dokładności
+        `facet_model.search_hit`). Szukajka pokazuje wtedy obiekty, których kanon zaczyna się od
+        frazy („M 1” → M101, M106), a nazwanego obiektu nie ma (Z37)."""
+        cc = catalog_canon(fraza, split=False) if fraza else None
+        if cc is None:
+            return False
+        cele, klucz = {cc, xref(cc)}, norm_alnum(cc)
+        return not any(o["canon"] in cele or klucz in self._szukaj.get(o["canon"], ())
+                       for o in self._objects)
+
     def _on_search(self, text):
-        """Zawężenie listy; fraza BEZ TRAFIEŃ przechodzi do pola nazwy, jeśli pole jest puste albo
-        niesie poprzednią frazę przeniesioną przez okno - wpisu usera okno nie nadpisuje, tylko
-        mówi, gdzie go dać. Fraza znów z trafieniami (albo pusta) zdejmuje z pola to, co okno samo
-        tam wpisało. Pole nazwy z treścią nadpisuje wybór z listy, a zdanie na żywo pod nim mówi,
-        co zapisze zapis - przeniesiona nazwa jest więc widoczna, zanim cokolwiek pójdzie dalej."""
+        """Zawężenie listy; fraza BEZ TRAFIEŃ - albo pełne oznaczenie katalogowe bez trafienia
+        dokładnego, przy samych trafieniach prefiksem (`_bez_dokladnego`: „M 1” → M101, M106) -
+        przechodzi do pola nazwy, jeśli pole jest puste albo niesie poprzednią frazę przeniesioną
+        przez okno; wpisu usera okno nie nadpisuje, tylko mówi, gdzie go dać. Trafienia prefiksem
+        zostają na liście, ale bez wyboru. Fraza znów z trafieniem dokładnym (albo pusta) zdejmuje
+        z pola to, co okno samo tam wpisało. Pole nazwy z treścią nadpisuje wybór z listy, a zdanie
+        na żywo pod nim mówi, co zrobi zapis - przeniesiona nazwa jest widoczna, zanim cokolwiek
+        pójdzie dalej, a Enter w szukajce przy nazwie, która ZAŁOŻY obiekt, prowadzi do pola nazwy
+        zamiast zapisu (`eventFilter`)."""
         fraza = (text or "").strip()
-        bez_trafien = self._fill_combo(text) == 0 and bool(fraza)
+        prefiksem = self._bez_dokladnego(fraza)
+        bez_trafien = (self._fill_combo(text, wybor=not prefiksem) == 0 or prefiksem) and bool(fraza)
         if bez_trafien and (not self.designation.text().strip() or self._przeniesiona is not None):
             self._przeniesiona = fraza
             self.designation.setText(fraza)
@@ -438,6 +465,31 @@ class AssignObjectDialog(QDialog):
 
     def _on_designation_edited(self, _text):
         self._przeniesiona = None
+
+    def _on_combo_activated(self, _index):
+        """Wybór z listy RĘKĄ zdejmuje z pola nazwy frazę przeniesioną przez okno - inaczej pole
+        nadpisałoby obiekt, który człowiek właśnie wskazał (trafienia prefiksem stoją na liście
+        obok przeniesionej frazy, Z37). Wpisu usera wybór nie rusza."""
+        if self._przeniesiona is not None:
+            self._przeniesiona = None
+            self.designation.clear()
+            self.search_hint.setText(i18n.t("assign.search_to_field"))
+
+    def eventFilter(self, obj, event):
+        """ENTER W SZUKAJCE NIE ZAKŁADA OBIEKTU (Z26/Z36, wizytacja natywna: „NGC 1952” + Enter →
+        43 klatki przypisane, obiekt założony, alias ręki zapisany). Gdy fraza przeszła do pola
+        nazwy, a nazwa nie wskazuje obiektu z bazy (założy nowy albo się nie rozwiązuje), Enter
+        z szukajki przenosi fokus do pola nazwy z zaznaczoną treścią - zapis dopiero Enterem
+        w polu nazwy albo przyciskiem, który mówi, że założy obiekt. Jedno trafienie listy + Enter
+        (AR-98) idzie dalej zwykłą drogą przycisku domyślnego."""
+        if (obj is self.search and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and self._przeniesiona is not None
+                and (self._zalozy or not self.accept_btn.isEnabled())):
+            self.designation.setFocus()
+            self.designation.selectAll()
+            return True
+        return super().eventFilter(obj, event)
 
     def _fail(self, msg):
         self.error.setText(msg)
@@ -465,6 +517,7 @@ class AssignObjectDialog(QDialog):
             self.accept_btn.setEnabled(False)
             self.own_note.setVisible(False)
             self.canon_preview.setVisible(False)
+            self._ustaw_zakladanie(None)
             return self._fail(i18n.t("assign.dictionary_broken"))
         self.accept_btn.setEnabled(valid_name if text else self.combo.currentData() is not None)
         if text and not valid_name:
@@ -477,12 +530,13 @@ class AssignObjectDialog(QDialog):
         # przed kliknięciem. Id po kanonie tą samą frazą co pre-check i klinga
         # (`queries.object_id_by_canon`), nie z listy: obiekt bez klatek jest w bazie, choć lista
         # (`library_objects`, `JOIN frame`) go nie pokazuje.
+        nowy = podglad and queries.object_id_by_canon(self.con, ident.canon) is None
         self.canon_preview.setText(
             i18n.t("assign.canon_preview", text=text, canon=ident.canon,
                    header=header_form(ident.canon))
-            + (i18n.t("assign.creates_object")
-               if queries.object_id_by_canon(self.con, ident.canon) is None else "")
+            + (i18n.t("assign.creates_object") if nowy else "")
             if podglad else "")
+        self._ustaw_zakladanie(ident.canon if nowy else None)
         # Nota po RODZAJU, nie po pustym katalogu: `catalog IS NULL` mają też obiekty z REGIONU
         # (`Veil`), a nazwanie ich „obiektem własnym" byłoby nieprawdą o pochodzeniu kanonu.
         wlasny = ident is not None and ident.kind == "own"
@@ -492,6 +546,19 @@ class AssignObjectDialog(QDialog):
         self.own_note.setVisible(wlasny)
         if wlasny:
             self.own_note.setText(i18n.t("assign.own_object_note", canon=ident.canon))
+
+    def _ustaw_zakladanie(self, canon):
+        """Przycisk akcji mówi WPROST, że zapis założy obiekt `canon` („Załóż NGC1952 · Przypisz
+        2 klatki”, w wybieraku „… · Dalej - podgląd…”); `None` przywraca napis wołającego."""
+        self._zalozy = canon is not None
+        if canon is not None:
+            if self._tekst_akcji is None:
+                self._tekst_akcji = self.accept_btn.text()
+            self.accept_btn.setText(i18n.t("assign.create_btn", canon=canon,
+                                           action=self._tekst_akcji))
+        elif self._tekst_akcji is not None:
+            self.accept_btn.setText(self._tekst_akcji)
+            self._tekst_akcji = None
 
     def _alias_key(self, canon):
         """Klucz równoważności dla TEGO gestu — reguła i jej uzasadnienie: `alias_key` (moduł).

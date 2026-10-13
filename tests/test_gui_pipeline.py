@@ -1682,6 +1682,42 @@ def test_naglowki_logu_tymi_slowami_co_przycisk_i_kazdy_etap_lancucha_mowi(qapp,
         i18n.set_lang("pl")
 
 
+@pytest.mark.parametrize("jezyk", ["pl", "en"])
+def test_uzupelnienia_drogi_stosy_bez_kandydatow_mowia_o_drzewie_obrobki(qapp, tmp_path, monkeypatch,
+                                                                       ustawienia, jezyk):
+    """Droga „Stosy” puszcza uzupełnienia zawężone do korzenia drzewa obróbki - etap bez kandydatów
+    w tym drzewie mówi „nic do zrobienia w drzewie obróbki”, nie gołe „nic do zrobienia”, które
+    czytało się jak stan archiwum (Porządki liczą kandydatów całego archiwum). Bieg „all” mówi jak
+    dotąd (`test_naglowki_logu_tymi_slowami_co_przycisk_i_kazdy_etap_lancucha_mowi`).
+
+    Falsyfikator: klucz bez zakresu na drodze „Stosy” - linie kończą się samym „nic do zrobienia”."""
+    from PySide6.QtWidgets import QFileDialog
+    from horreum.gui.pipeline import ETAPY_UZUPELNIEN, _nazwa_etapu
+    i18n.set_lang(jezyk)
+    tree = _stack_tree(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view._on_stacks()
+        _czekaj_na_etap(view)
+        linie = view.lbl_summary.text().split("\n")
+        w_drzewie, golo = i18n.t("pipeline.fmt.nothing_to_do_tree"), i18n.t("pipeline.fmt.nothing_to_do")
+        assert [linia for linia in linie if linia.endswith("] " + w_drzewie)] == [
+            f"[{_nazwa_etapu(n)}] {w_drzewie}" for n in ETAPY_UZUPELNIEN], linie
+        assert not [linia for linia in linie if linia.endswith("] " + golo)], linie
+        assert w_drzewie == {"pl": "nic do zrobienia w drzewie obróbki",
+                             "en": "nothing to do in the processing tree"}[jezyk]
+        view._root = _tree(tmp_path, 1)                  # następny bieg „all” - zdanie bez zakresu
+        view._on_all()
+        _czekaj_na_etap(view)
+        linie = view.lbl_summary.text().split("\n")
+        assert [linia for linia in linie if linia.endswith("] " + golo)] == [
+            f"[{_nazwa_etapu(n)}] {golo}" for n in ETAPY_UZUPELNIEN], linie
+    finally:
+        view.close()
+        i18n.set_lang("pl")
+
+
 def test_gest_fakty_kopii_bez_przejecia_mowi_o_kazdym_etapie_uzupelnien(qapp, tmp_path):
     """„Zbierz fakty kopii (N)” bez przejęcia zeznania kończy się po faktach kopii - pochodne nie
     biegną, a przejęcie i historia stosów nie miały kandydatów. Log mówi o obu („nic do

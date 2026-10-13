@@ -602,6 +602,7 @@ class PipelineView(QWidget):
         self._parametry_ponowienia = None  # zamrożone przy liście nieprzeczytanych („Skanuj ponownie”)
         self._czeka_rodowod = 0            # „czeka na Ciebie” z rodowodu stosów TEGO logu (AR-115)
         self._uzupelnienia = None          # etapy uzupełnień, które ten bieg ma jeszcze przed sobą
+        self._uzupelnienia_w_drzewie = False   # uzupełnienia zawężone do drzewa obróbki (droga „Stosy”)
         # Zapis OSTATNIEGO przebiegu dla powierzchni spoza widoku (`run_finished`): raport Przyjmij
         # liczy „co przyszło” od `since`, a liczby skanu bierze z `results["scan"]`.
         self.last_run = self._pusty_zapis_przebiegu()
@@ -1480,6 +1481,7 @@ class PipelineView(QWidget):
             self._parametry_przebiegu = (stage, dict(params))
         if stage == "copy_facts":                  # gest bez skanu: uzupełnienia od pierwszego etapu
             self._uzupelnienia = list(ETAPY_UZUPELNIEN)
+            self._uzupelnienia_w_drzewie = False   # gest bez korzenia - całe archiwum
         self._worker = PipelineWorker(self._db_path, now_fn=self._now)
         self._worker.configure(stage, **params)
         self._thread = QThread(self)
@@ -1574,6 +1576,10 @@ class PipelineView(QWidget):
         if ((name, bieg) in (("scan", "all"), ("stacks", "stacks"))
                 or (name, bieg) == ("presence", "presence-apply") and result.aborted is None):
             self._uzupelnienia = list(ETAPY_UZUPELNIEN)
+            # Droga „Stosy” zawęża uzupełnienia do korzenia drzewa obróbki (`PipelineWorker._stacks`),
+            # więc ich „nic do zrobienia” mówi o tym drzewie - Porządki liczą kandydatów całego
+            # archiwum, a zdanie bez zakresu czytało się jak stan archiwum.
+            self._uzupelnienia_w_drzewie = bieg == "stacks"
         if name == "stack_lineage":
             self._czeka_rodowod = _czekajace_na_reke(result)    # wiersz liczy `_sync_rodowod` po biegu
         self.stage_status.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
@@ -1916,13 +1922,16 @@ class PipelineView(QWidget):
         nie miały kandydatów (Z18) - przed etapem `nastepny`, w kolejności `ETAPY_UZUPELNIEN`.
         Etap uzupełnień jako `nastepny` biegnie naprawdę (jego linię da wynik), etap spoza nich
         albo `None` (koniec biegu) domyka cały blok. Bez otwartego bloku nic nie robi: przerwanie
-        i błąd zamykają go bez linii, bo dalsze etapy wtedy nie biegły."""
+        i błąd zamykają go bez linii, bo dalsze etapy wtedy nie biegły. Na drodze „Stosy” linia
+        mówi o zakresie („w drzewie obróbki”) - tam uzupełnienia nie chodzą po archiwum."""
         if self._uzupelnienia is None:
             return
         biegnie = nastepny in self._uzupelnienia
+        zero = i18n.t("pipeline.fmt.nothing_to_do_tree" if self._uzupelnienia_w_drzewie
+                      else "pipeline.fmt.nothing_to_do")
         while self._uzupelnienia and self._uzupelnienia[0] != nastepny:
             etap = self._uzupelnienia.pop(0)
-            self._append_summary(naglowek_etapu(etap) + i18n.t("pipeline.fmt.nothing_to_do"))
+            self._append_summary(naglowek_etapu(etap) + zero)
         if biegnie:
             self._uzupelnienia.pop(0)
         if not biegnie or not self._uzupelnienia:

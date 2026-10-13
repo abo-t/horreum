@@ -51,6 +51,9 @@ from PySide6.QtWidgets import (
 from horreum import db, object_change, repo, resolver
 from horreum.gui import i18n, queries
 from horreum.gui.i18n_catalog import CATALOG
+# Zdania wspólne okien zapisu mieszkają w `wb_worker` (jeden dom: czytelny powód rdzenia, status
+# wiersza ze spadkiem na drogę atomową, podział powodu spadku); `grid` importuje go i tak.
+from horreum.gui.wb_worker import czytelny_powod, podziel_powod_spadku, status_pozycji
 from horreum.resolve.paths import STACK_KIND, object_folder
 
 # Kolumny listy pozycji: plik dziś, plik po zmianie, karta `OBJECT` stara → nowa i - po biegu
@@ -80,62 +83,6 @@ _MIN_ZNAKOW_NAZWY = 12
 _WIELOKROPEK = "…"
 # Ile obiektów „Uzgodnij” nagłówek wymienia z nazwy, reszta liczbą.
 _OBIEKTOW_W_NAGLOWKU = 3
-# Plik zajęty przez inny program w powodzie rdzenia (`f"{type(exc).__name__}: {exc}"`):
-# ERROR_SHARING_VIOLATION 32 i ERROR_LOCK_VIOLATION 33 - te same kody, przy których rdzeń ponawia
-# przeniesienie i mówi „plik zajęty przez inny program” (AR-125). Komunikat systemu do separatora
-# zdania (`;`, `:`, ` · `), ścieżka w zapisie `repr` opcjonalnie.
-_OS_ZAJETY = re.compile(r"\b\w*Error: \[WinError 3[23]\] (?:(?! · )[^;:\n])*(?:: '(?:[^'\\]|\\.)*')?")
-# Ścieżka w zapisie `repr` z podwojonymi ukośnikami (`'R:\\ASTRO_\\…'` z `str(OSError)`).
-_REPR_SCIEZKI = re.compile(r"'((?:[^'\\]|\\.)*\\\\(?:[^'\\]|\\.)*)'")
-
-
-def czytelny_powod(tekst):
-    """Powód rdzenia w zdaniu dla człowieka: plik zajęty przez inny program jego słowami
-    (`objchg.reason.busy`, bliźniak powodu przeniesienia rdzenia po AR-125) zamiast surowego
-    `PermissionError: [WinError 32] …`, a ścieżka z zapisu `repr` bez podwojonych ukośników. Reszta
-    zdania znak w znak: powód rdzenia jest zdaniem dla człowieka, a przekład innych błędów systemu
-    to robota rdzenia, nie ekranu."""
-    if not tekst:
-        return tekst
-    tekst = _OS_ZAJETY.sub(lambda _m: i18n.t("objchg.reason.busy"), tekst)
-    return _REPR_SCIEZKI.sub(lambda m: "'" + m.group(1).replace("\\\\", "\\") + "'", tekst)
-
-
-def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
-    """`(status, podpowiedź)` wiersza listy: `stan` (tekst z katalogu) i powód rdzenia
-    (`czytelny_powod`). SPADEK KARTY NA DROGĘ ATOMOWĄ mówi tym samym zdaniem człowieka, co wynik okna
-    (`objchg.st.rewritten`, bliźniak `wb.inplace_fallback`), a nie żargonem rdzenia („droga
-    dotychczasowa: operacja add/str…”) - szczegół rdzenia schodzi do podpowiedzi, uwaga dopisana
-    przez rdzeń za spadkiem (`; …`) zostaje w statusie. Spadek rozpoznaje KOD wyniku
-    (`CODE_INPLACE_FALLBACK`, jak zdanie wyniku); wiersz z bazy (`z_bazy`, wejście z Porządków) kodu
-    nie niesie, więc tam rozpoznaje go prefiks rdzenia (`PREFIKS_DROGI_ATOMOWEJ`)."""
-    from horreum import writeback          # lazy: `writeback` ciągnie astropy
-    if not powod:
-        return stan, stan
-    szczegol = None
-    if (kod == writeback.CODE_INPLACE_FALLBACK
-            or (z_bazy and powod.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ))):
-        from horreum.gui.wb_worker import bez_prefiksu_spadku
-        szczegol, _, reszta = bez_prefiksu_spadku(powod).partition("; ")
-        powod = i18n.t("objchg.st.rewritten") + (f"; {reszta}" if reszta else "")
-    status = stan + i18n.t("objchg.st.reason", reason=czytelny_powod(powod))
-    if szczegol is None:
-        return status, status
-    return status, status + "\n" + i18n.t("objchg.st.detail_tip", detail=szczegol)
-
-
-def podpowiedz_spadku(res):
-    """Podpowiedź zdania wyniku okna piszącego karty („Napraw nagłówek…”, „Zatwierdź ze
-    ścieżki…”): szczegół rdzenia pierwszego spadku na drogę atomową - zdanie mówi go językiem
-    człowieka (`wb.inplace_fallback`), więc szczegół nie ginie, tylko schodzi pod kursor - albo `""`."""
-    from horreum.gui.wb_worker import bez_prefiksu_spadku, spadek_na_droge_atomowa
-    spadek = next((fr for fr in res.applied if spadek_na_droge_atomowa(fr) and fr.reason), None)
-    if spadek is None:
-        return ""
-    return i18n.t("objchg.st.detail_tip",
-                  detail=bez_prefiksu_spadku(spadek.reason).partition("; ")[0])
-
-
 def tekst_pominiecia(kod, params, powod):
     """Zdanie pominięcia planera w języku UI: kod (`object_change.SKIP_CODES`) → `objchg.skip.<kod>`
     z parametrami pominięcia; kod bez zdania w katalogu (i pominięcie bez kodu) zostaje przy zdaniu
@@ -380,7 +327,8 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
       * pozycje `applied` z powodem: przy zapisie karta SPADŁA na drogę atomową - liczba zdaniem
         człowieka („cały plik przepisany”, `wb.inplace_fallback`; szczegół rdzenia niesie podpowiedź
         wiersza, `status_pozycji`), każdy inny powód to uwaga (przy cofnięciu np. nowsza decyzja
-        ręki w bazie) - liczba i pierwszy powód, bo sama liczba zmienionych by to ukryła;
+        ręki w bazie), tak samo uwaga dopisana przez rdzeń za spadkiem - liczba i pierwsza uwaga,
+        bo sama liczba zmienionych by to ukryła;
       * katalogi założone i usunięte, katalogi o niepewnej własności (zostają do oka);
       * blokada pliku zmienionego od ostatniego skanu - z receptą (skan w Dostawie, potem ponów);
       * numer przebiegu - po zamknięciu okna jedyny uchwyt do dokończenia albo cofnięcia
@@ -394,13 +342,16 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
     z_powodem = [fr for fr in res.applied if fr.reason and fr not in res.withheld]
     atomowe = ([] if cofniecie
                else [fr for fr in z_powodem if spadek_na_droge_atomowa(fr)])
-    uwagi = [fr for fr in z_powodem if fr not in atomowe]
+    # Uwagi: powody spoza spadku i to, co rdzeń dopisał ZA spadkiem (kopia pliku sprzed podmiany
+    # zostawiona na dysku, nagrobek ręki - `podziel_powod_spadku`, jeden podział z oknami kart).
+    uwagi = ([u for u in (podziel_powod_spadku(fr.reason)[1] for fr in atomowe) if u]
+             + [fr.reason for fr in z_powodem if fr not in atomowe])
     if cofniecie and res.withheld:                       # AR-82: karta wróciła, zeznanie nie
         msg += " · " + i18n.t_plural("grid.wb.undo_withheld", len(res.withheld))
     if atomowe:
         msg += i18n.t("wb.inplace_fallback", n=len(atomowe))
     if uwagi:
-        msg += i18n.t("objchg.res.notes", n=len(uwagi), note=uwagi[0].reason)
+        msg += i18n.t("objchg.res.notes", n=len(uwagi), note=uwagi[0])
     if res.dirs_created or res.dirs_removed:
         msg += i18n.t("objchg.res.dirs", created=res.dirs_created, removed=res.dirs_removed)
     if res.dirs_uncertain:
@@ -500,6 +451,8 @@ class ObjectChangeDialog(QDialog):
         self._jest = {}
         self._wiersze = {}           # location_id → wiersz listy pozycji
         self._pipeline_busy = False
+        self._po_exec = False        # `exec` wrócił - okno do kasacji, gdy wolne (`_zwolnij_gdy_wolne`)
+        self._zwolnione = False      # `deleteLater` już zlecone
         self.summary = ""
         self._runner = WritebackRunner(self._db_path, now_fn=now_fn, parent=self)
         self._runner.async_ok = off_thread
@@ -707,9 +660,11 @@ class ObjectChangeDialog(QDialog):
         self._plan_worker.deleteLater(); self._plan_thread.wait(); self._plan_thread.deleteLater()
         self._plan_worker = None; self._plan_thread = None
         if self._zamknij_po_planie is not None:
-            # Zamknięcie zażądane w trakcie planu (okno już schowane) - wątek skończył, więc teraz.
+            # Zamknięcie zażądane w trakcie planu (okno już schowane) - wątek skończył, więc teraz;
+            # okno po `exec` czekało na ten wątek z kasacją (`_zwolnij_gdy_wolne`).
             wynik, self._zamknij_po_planie = self._zamknij_po_planie, None
             self.done(wynik)
+            self._zwolnij_gdy_wolne()
             return
         self._sync_akcji()
 
@@ -1103,7 +1058,8 @@ class ObjectChangeDialog(QDialog):
         PLAN W BIEGU: okno znika od razu, a zamyka się, gdy wątek planu skończy
         (`_cleanup_plan_thread`). Czekanie tu na wątek zamroziłoby okno na czas odczytu katalogów
         po SMB (bez limitu), a zabicie go pod kasowanym rodzicem to twardy abort. Wynik planu, który
-        jeszcze przyjdzie, idzie do kosza (nowa generacja)."""
+        jeszcze przyjdzie, idzie do kosza (nowa generacja). Schowanie kończy `exec` gospodarza przy
+        żywym wątku - dlatego kasacja okna czeka na wątek (`_zwolnij_gdy_wolne`)."""
         if self._runner.refuse_close(self.error.setText):
             return
         if self._plan_thread is not None:
@@ -1114,13 +1070,47 @@ class ObjectChangeDialog(QDialog):
         super().done(r)
 
     def exec(self):
-        """Modalny bieg okna i jego KASACJA. Każde wejście buduje nowe okno z rodzicem-gospodarzem,
-        więc bez kasacji każde zamknięte okno zostawało dzieckiem gospodarza (z wątkami i uchwytem
-        zapisu) do końca sesji. `deleteLater`, nie `WA_DeleteOnClose`: gospodarz czyta okno PO
-        `exec` (`summary`, zdanie stanu), a odroczona kasacja przychodzi dopiero w pętli zdarzeń
-        gospodarza, po jego slocie. `exec` wraca wyłącznie przez `done` po biegu (`refuse_close`,
-        zamknięcie po planie), więc kasowane okno nie ma już żywego wątku."""
+        """Modalny bieg okna i jego KASACJA, gdy wolne (`_zwolnij_gdy_wolne`). Każde wejście buduje
+        nowe okno z rodzicem-gospodarzem, więc bez kasacji każde zamknięte okno zostawało dzieckiem
+        gospodarza (z wątkami i uchwytem zapisu) do końca sesji. `deleteLater`, nie
+        `WA_DeleteOnClose`: gospodarz czyta okno PO `exec` (`summary`, zdanie stanu), a odroczona
+        kasacja przychodzi w pętli zdarzeń gospodarza, po jego slocie.
+
+        `exec` wraca TAKŻE przy żywym wątku planu: zamknięcie w trakcie planu chowa okno (`done`),
+        a ukrycie modalnego okna kończy pętlę `exec` (Qt: `setVisible(false)` → `exit`). Kasacja
+        z dzieckiem `QThread` w biegu to `qFatal` („Destroyed while thread is still running”), więc
+        okno czeka na koniec wątku - kasuje je wtedy `_cleanup_plan_thread`; do tego czasu wątek
+        zbiera gospodarz przy wyjściu (`zatrzymaj_pola`). Wzorzec
+        `harvest_dialog.HarvestDialog._zwolnij_gdy_wolne`."""
         try:
             return super().exec()
         finally:
+            self._po_exec = True
+            self._zwolnij_gdy_wolne()
+
+    def _zwolnij_gdy_wolne(self):
+        """Okno po `exec` bez żywego wątku (plan, zapis) kasuje się samo (`deleteLater`); z wątkiem
+        w biegu - robi to sprzątanie wątku planu. Raz na okno. Okno bez `exec` (testy, osadzenie)
+        nie kasuje się samo."""
+        if (self._po_exec and not self._zwolnione and self._plan_thread is None
+                and not self._runner.is_busy):
+            self._zwolnione = True
             self.deleteLater()
+
+    def zatrzymaj_pola(self):
+        """Okno znika razem z gospodarzem (zamknięcie aplikacji, przełączenie bazy -
+        `MainWindow._zatrzymaj_watki_widokow` woła tę metodę po nazwie): ZBIERZ wątek planu, zanim
+        rodzic go skasuje - `QThread` niszczony w biegu to twardy abort. Planer nie ma punktu
+        przerwania (odczyt katalogów po SMB), więc czekanie bez limitu żyje tu, poza gestem
+        człowieka. Generacja w górę: wynik, który zdążył wyjść z wątku, nie dotknie okna.
+        Idempotentne."""
+        self._gen += 1
+        watek, worker = self._plan_thread, self._plan_worker
+        if watek is None:
+            return
+        self._plan_thread = self._plan_worker = None
+        watek.quit()
+        worker.deleteLater()
+        while not watek.wait(100):
+            pass
+        watek.deleteLater()

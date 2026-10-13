@@ -289,6 +289,8 @@ class HomeView(QWidget):
         self.btn_wiecej = QPushButton(i18n.t("home.more"))
         menu = QMenu(self.btn_wiecej)
         self.akcje_wiecej = {}
+        self._zniwa_bieg = False    # dwa powody wygaszenia „Wciągnij z WBPP…” (`_sync_zniwa`)
+        self._zniwa_zapis = False
         # Napis żniw z klucza przycisku Dostawy: nazwa gestu ma w katalogu jednego właściciela.
         for klucz, tekst in ((WIECEJ_ZNIWA, i18n.t("pipeline.btn.harvest")),
                              (WIECEJ_PLANER, i18n.t("home.more.planner")),
@@ -301,6 +303,9 @@ class HomeView(QWidget):
             akcja = menu.addAction(tekst)
             akcja.triggered.connect(lambda _c=False, k=klucz: self.wiecej.emit(k))
             self.akcje_wiecej[klucz] = akcja
+        # Podpowiedź wygaszonej pozycji mówi DLACZEGO (`set_busy`); pozycje bez jawnej podpowiedzi
+        # milczą (QMenu pokazuje wyłącznie ustawioną podpowiedź akcji).
+        menu.setToolTipsVisible(True)
         self.btn_wiecej.setMenu(menu)
         naglowek.addWidget(self.btn_wiecej)
         v.addLayout(naglowek)
@@ -631,10 +636,30 @@ class HomeView(QWidget):
         """Przebieg Dostawy: „Wydaj do WBPP" gaśnie jak „Wydaj obiekt…" paska Zbiorów - etap
         przepisuje `calibration` i rodowód, więc plan policzony w środku wydałby mastery sprzed i po
         przeliczeniu naraz. Reszta kafli to nawigacja i zostaje czynna; Przyjmij prowadzi wtedy na
-        Dostawę z widocznym postępem, a nie do drugiego biegu."""
+        Dostawę z widocznym postępem, a nie do drugiego biegu.
+
+        „Wciągnij z WBPP…” z menu „Więcej…” gaśnie tak samo: „Zamknij i przyjmij” okna żniw
+        uruchamia łańcuch Dostawy, który w biegu odmówi, a wtedy rodowód dokładny wciągniętych
+        stosów zostaje tylko w folderze wydania. Podpowiedź to zdanie odmowy złotej akcji;
+        bramkę przed oknem trzyma i tak gospodarz (`PipelineView.powod_odmowy_biegu`)."""
         self.tile_wydaj.setEnabled(not busy)
         self.tile_wydaj.setToolTip(i18n.t("home.tile.release_busy") if busy
                                    else i18n.t("home.tile.release_tip"))
+        self._zniwa_bieg = bool(busy)
+        self._sync_zniwa()
+
+    def set_writeback_busy(self, busy):
+        """Zapis nagłówków do plików: „Wciągnij z WBPP…” gaśnie z tego samego powodu co w biegu
+        Dostawy - łańcuch po „Zamknij i przyjmij” odmówiłby (`PipelineView.powod_odmowy_biegu`).
+        Osobny stan, nie `set_busy`: koniec zapisu nie może zapalić pozycji w trwającym biegu."""
+        self._zniwa_zapis = bool(busy)
+        self._sync_zniwa()
+
+    def _sync_zniwa(self):
+        zniwa = self.akcje_wiecej[WIECEJ_ZNIWA]
+        zniwa.setEnabled(not (self._zniwa_bieg or self._zniwa_zapis))
+        zniwa.setToolTip(i18n.t("pipeline.refuse.delivery_running") if self._zniwa_bieg
+                         else i18n.t("pipeline.refuse.writeback") if self._zniwa_zapis else "")
 
     def ustaw_popraw(self, n):
         """Licznik kafla Popraw - ta sama liczba, co plakietka Porządków (gospodarz podaje ją z tego

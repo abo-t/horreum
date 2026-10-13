@@ -4149,6 +4149,15 @@ def db_path_of(con):
     return None
 
 
+def odcisk_bazy(con):
+    """Para liczników SQLite połączenia `con` - klucz „czy baza się zmieniła" bez zaufania do
+    eventów: `total_changes` widzi zapisy TYM połączeniem (gesty widoków idą przez nie),
+    `PRAGMA data_version` - zatwierdzone przez KAŻDE inne (wątki zapisu, Dostawa). Ten sam klucz
+    co pamięć korzenia archiwum (`resolver.library_root_from_db`) i podpis logu przebiegu
+    (`PrzyjmijView._odcisk_stanu`). Odczyt <0,1 ms."""
+    return (con.total_changes, con.execute("PRAGMA data_version").fetchone()[0])
+
+
 # --- WYDANIE OBIEKTU: teczki gotowości (okno wyboru „Wydaj obiekt…") ---
 
 def readiness_pct(n, total):

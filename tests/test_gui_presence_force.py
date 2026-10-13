@@ -264,7 +264,7 @@ def test_raport_hamulca_w_jezyku_ui_z_recepta_po_zlotej_akcji(lang):
         pusty = presence.PresenceSummary(root="X:\t", scoped=0, brake="zakres pusty (0 lokacji)",
                                          aborted="zakres pusty (0 lokacji)")
         assert PipelineView._format_presence(PipelineView, pusty) == i18n.t(
-            "pipeline.fmt.presence.not_done",
+            "pipeline.fmt.not_done",
             reason=i18n.t("pipeline.fmt.presence.brake.empty_scope"))
     finally:
         i18n.set_lang("pl")

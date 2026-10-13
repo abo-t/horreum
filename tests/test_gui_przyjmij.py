@@ -387,6 +387,100 @@ def test_log_bez_gestu_po_przebiegu_zostaje_bez_podpisu_w_oknie(qapp, tmp_path):
         win.close()
 
 
+def test_przebieg_ktory_nie_ruszyl_nie_dostaje_podpisu_po_gescie(strona, tmp_path):
+    """Z3: przebieg odmówiony przed pierwszym plikiem (źródło niedostępne) ma log „NIE WYKONANO”,
+    który nie opisuje żadnego stanu - gest po nim nie stawia nad nim „Przebieg z HH:MM (stan
+    sprzed Twoich zmian)”, a podpis po wcześniejszym przebiegu gaśnie razem z tamtym logiem.
+
+    Falsyfikator: odcisk stanu brany także przy `refused` → po geście podpis nad „nie wykonano”."""
+    i18n.set_lang("pl")
+    pv = strona.pipeline_view
+    _przebieg(pv, lambda: pv.run_all_on(_drzewo(tmp_path, "d1", [(1, PLAMA)])))
+    ids = [fid for (fid,) in strona.con.execute(
+        "SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id WHERE h.object_raw = ?",
+        (PLAMA,))]
+
+    def gest(zmiana):
+        inne = db.connect(str(tmp_path / "przyjmij.db"))
+        try:
+            zmiana(inne)
+        finally:
+            inne.close()
+        strona.odswiez_raport()
+
+    gest(lambda c: repo.user_assign_object(c, alias_norm=None, canon="NGC7000", catalog="NGC",
+                                           kind="deep_sky", frame_ids=ids,
+                                           now="2026-10-10T13:00:00+00:00"))
+    assert not pv.lbl_summary_head.isHidden()            # gest po przebiegu, który ruszył
+    zapis = _przebieg(pv, lambda: pv.run_all_on(str(tmp_path / "odlaczony_udzial")))
+    assert zapis["refused"] and "[skan] NIE WYKONANO - " in pv.lbl_summary.text()
+    assert pv.lbl_summary_head.isHidden()
+    gest(lambda c: repo.clear_object_assignment(c, frame_ids=ids, now="2026-10-10T13:01:00+00:00"))
+    assert pv.lbl_summary_head.isHidden()
+
+
+def test_wciagnij_z_domu_w_biegu_albo_przy_zapisie_nie_otwiera_okna(qapp, tmp_path, ustawienia,
+                                                                   monkeypatch):
+    """Z6: „Wciągnij z WBPP…” z menu „Więcej…” Domu w trakcie biegu Dostawy albo zapisu nagłówków
+    otwierało okno żniw, a „Zamknij i przyjmij” kończyło się odmową łańcucha - rodowód dokładny
+    wciągniętych stosów zostawał tylko w folderze wydania. Bramka `powod_odmowy_biegu` stoi PRZED
+    oknem (odmowa na pasku), a pozycja menu gaśnie w biegu z podpowiedzią - zdaniem odmowy.
+
+    Falsyfikator: bramka dopiero przy `run_all_on` → okno otwiera się w biegu (`okna` niepuste)."""
+    import sys
+    import types
+    from horreum.gui import home as home_mod
+    i18n.set_lang("pl")
+    okna = []
+
+    class _OknoZniw:
+        def __init__(self, con, **_kw):
+            okna.append(con)
+            self.summary, self.harvested_root, self.harvested_stacks = "", None, []
+
+        def exec(self):
+            return QDialog.Accepted
+
+    modul = types.ModuleType("horreum.gui.harvest_dialog")
+    modul.HarvestDialog = _OknoZniw
+    monkeypatch.setitem(sys.modules, "horreum.gui.harvest_dialog", modul)
+    brama = threading.Event()                     # bieg trzymany na sondzie źródła, jak w teście mutexu
+    prawdziwa_sonda = PipelineWorker._zrodlo
+
+    def sonda_za_brama(self, *a, **k):
+        brama.wait(10)
+        return prawdziwa_sonda(self, *a, **k)
+
+    monkeypatch.setattr(PipelineWorker, "_zrodlo", sonda_za_brama)
+    tree = _drzewo(tmp_path, "d1", [(1, PLAMA)])
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        pv = win.pipeline_view
+        win._zegar_priorytetu.setInterval(60000)
+        zniwa = win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA]
+        w_biegu = i18n.t("pipeline.refuse.delivery_running")
+        assert zniwa.isEnabled()
+
+        def start():
+            assert pv.run_all_on(tree) is None
+            assert not zniwa.isEnabled() and zniwa.toolTip() == w_biegu
+            win._on_wiecej_domu(home_mod.WIECEJ_ZNIWA)            # wejście wprost, mimo wygaszenia
+            assert okna == [] and win.report_label.text() == w_biegu
+            brama.set()
+
+        _przebieg(pv, start)
+        assert zniwa.isEnabled()
+        win._on_writeback_busy(True)
+        win._on_wiecej_domu(home_mod.WIECEJ_ZNIWA)
+        assert okna == [] and win.report_label.text() == i18n.t("pipeline.refuse.writeback")
+        win._on_writeback_busy(False)
+        win._on_wiecej_domu(home_mod.WIECEJ_ZNIWA)
+        assert okna == [win.con]
+    finally:
+        brama.set()
+        win.close()
+
+
 # ---------------------------------------------------------------- przebiegi bez pełnej dostawy
 
 def test_przebieg_anulowany_mowi_przerwana_i_to_co_weszlo(strona, tmp_path, monkeypatch):

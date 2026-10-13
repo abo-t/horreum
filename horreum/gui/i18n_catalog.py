@@ -3135,8 +3135,17 @@ CATALOG = {
     "pipeline.stage.stack_lineage": {"pl": "Rodowód stosów", "en": "Stack lineage"},
     "pipeline.stage.copy_facts": {"pl": "Fakty kopii", "en": "Copy facts"},
     "pipeline.stage.stack_history": {"pl": "Historia stosów", "en": "Stack history"},
+    # NAGŁÓWEK KAŻDEJ LINII LOGU DOSTAWY: nazwa etapu `pipeline.stage.*` od małej litery - te same
+    # słowa, którymi przycisk „Przyjmij nowe (…)” wymienia łańcuch (`pipeline.naglowek_etapu`, Z18).
+    # Klucze linii niżej niosą samą treść, bez nawiasu.
+    "pipeline.fmt.head": {"pl": "[{stage}] ", "en": "[{stage}] "},
+    # Etap uzupełnień (fakty kopii, przejęcie zeznania, historia stosów) bez kandydatów: rdzeń go
+    # pomija w ciszy, a log mówi, że etap biegł i nie miał czego zrobić (`PipelineView._uzupelnienia`).
+    "pipeline.fmt.nothing_to_do": {"pl": "nic do zrobienia", "en": "nothing to do"},
+    # Etap, który nie ruszył (źródło niedostępne, hamulec obecności) - jedna treść dla każdego etapu.
+    "pipeline.fmt.not_done": {"pl": "NIE WYKONANO - {reason}", "en": "NOT DONE - {reason}"},
     "pipeline.fmt.stack_history.written": {
-        "pl": "[historia stosów] zapisana {n} z {rows}", "en": "[stack history] stored {n} of {rows}"},
+        "pl": "zapisana {n} z {rows}", "en": "stored {n} of {rows}"},
     "pipeline.fmt.stack_history.stale": {
         "pl": "zmienione na dysku od skanu: {n}", "en": "changed on disk since the scan: {n}"},
     "pipeline.fmt.stack_history.failed": {"pl": "błąd odczytu: {n}", "en": "read error: {n}"},
@@ -3148,10 +3157,6 @@ CATALOG = {
     "pipeline.stage.adopt_testimony": {"pl": "Przejęcie zeznania", "en": "Testimony adoption"},
     # Linia raportu przejęcia zeznania (AR-5). Odmowy tylko, gdy są (QUIET); każda nazywa przyczynę,
     # bo „przejęto 1 z 3" bez niej zatajałoby, dlaczego dwie klatki dalej mówią głosem nieobecnej kopii.
-    # Nagłówek `[etap]` jak w każdej linii raportu (AR-115); w nawiasie nazwa wiersza Porządków
-    # i perspektywy tej samej roboty, bo to ją przebieg właśnie zmniejsza.
-    "pipeline.fmt.adopt.prefix": {
-        "pl": "[zeznanie z nieobecnej kopii] ", "en": "[testimony from a missing copy] "},
     "pipeline.fmt.adopt.adopted": {
         "pl": "przejęte od ocalałej kopii {n} z {rows}",
         "en": "adopted from the surviving copy {n} of {rows}",
@@ -3178,7 +3183,6 @@ CATALOG = {
     # Linia raportu uzupełnienia faktów kopii (0021) - człony odmów tylko, gdy są (QUIET), ale gdy
     # są, stoją obok liczby uzupełnionych: „uzupełniono 540 z 550" bez „zmienione na dysku 10"
     # zatajałoby, dlaczego reszta czeka.
-    "pipeline.fmt.copy_facts.prefix": {"pl": "[fakty kopii] ", "en": "[copy facts] "},   # AR-115
     "pipeline.fmt.copy_facts.written": {
         "pl": "uzupełniono {n} z {rows}", "en": "filled in {n} of {rows}",
     },
@@ -3527,8 +3531,8 @@ CATALOG = {
     "pipeline.stage_running": {"pl": "{stage} w toku…", "en": "{stage} in progress…"},
     "pipeline.stage_done_status": {"pl": "{stage}: gotowe.", "en": "{stage}: done."},
     "pipeline.scan_cancelled": {
-        "pl": "[skan] przerwano po {n} plikach — baza spójna, ponowny skan dokończy.",
-        "en": "[scan] interrupted after {n} files — database consistent, a rescan will finish.",
+        "pl": "przerwano po {n} plikach - baza spójna, ponowny skan dokończy.",
+        "en": "interrupted after {n} files - database consistent, a rescan will finish.",
     },
     "pipeline.stage_interrupted": {
         "pl": "Etap „{stage}” przerwany.", "en": "Stage „{stage}” interrupted.",
@@ -3552,27 +3556,19 @@ CATALOG = {
 
     # --- raport dostawy: linie per etap (szkielet konkatenacji zostaje, wkład z katalogu) ---
     "pipeline.fmt.scan": {
-        "pl": "[skan] pliki {files} · nowe {new} · istniejące {existing} · pominięte {skipped} · "
+        "pl": "pliki {files} · nowe {new} · istniejące {existing} · pominięte {skipped} · "
               "wykluczone katalogi {excluded} · lokalizacje {loc_new} · odświeżone {loc_ref} "
               "(zeznania {hdr_ref}, przepięte {rebound}) · nagłówki {headers} · "
               "przegląd f/{frame_review} k/{camera_review} rodzaj/{kind}",
-        "en": "[scan] files {files} · new {new} · existing {existing} · skipped {skipped} · "
+        "en": "files {files} · new {new} · existing {existing} · skipped {skipped} · "
               "excluded folders {excluded} · locations {loc_new} · refreshed {loc_ref} "
               "(testimonies {hdr_ref}, rebound {rebound}) · headers {headers} · "
               "review f/{frame_review} c/{camera_review} kind/{kind}",
     },
-    # Skan, który nie ruszył, bo wątek tła nie zobaczył źródła jako katalogu (AR-31 (3)) - lustro
-    # `pipeline.fmt.presence.not_done`: brak linii czytałby się jak „nic nie przybyło".
-    "pipeline.fmt.scan_not_done": {
-        "pl": "[skan] NIE WYKONANO - {reason}", "en": "[scan] NOT DONE - {reason}",
-    },
-    # To samo dla drogi „Stosy": sondę korzenia stosów robi wątek tła (AR-31 (3)), więc korzeń
-    # nieosiągalny wraca jej własną linią, a nie linią skanu archiwum ani obecności.
-    "pipeline.fmt.stacks_not_done": {
-        "pl": "[stosy] NIE WYKONANO - {reason}", "en": "[stacks] NOT DONE - {reason}",
-    },
-    # Rodowód stosów (I-2d) — człony składane w `PipelineView._format_stack_lineage`.
-    "pipeline.fmt.slin.prefix": {"pl": "[rodowód stosów] ", "en": "[stack lineage] "},
+    # Skan albo droga „Stosy”, które nie ruszyły, bo wątek tła nie zobaczył korzenia jako katalogu
+    # (AR-31 (3)), mówią `pipeline.fmt.not_done` pod nagłówkiem SWOJEGO etapu
+    # (`PipelineView._on_source_unreachable`) - brak linii czytałby się jak „nic nie przybyło".
+    # Rodowód stosów (I-2d) - człony składane w `PipelineView._format_stack_lineage`.
     "pipeline.fmt.slin.linked": {
         "pl": "wiadomo z czego: {n} z {total} obrazów ({inputs} klatek)",
         "en": "source known: {n} of {total} images ({inputs} frames)",
@@ -3630,8 +3626,7 @@ CATALOG = {
         "pl": "pominięto, zapisany dowód mocniejszy: {n}",
         "en": "skipped, recorded evidence is stronger: {n}",
     },
-    # Droga „Stosy" — człony składane w `PipelineView._format_stacks`; odmowy TYLKO gdy niezerowe.
-    "pipeline.fmt.stacks.prefix": {"pl": "[stosy] ", "en": "[stacks] "},
+    # Droga „Stosy" - człony składane w `PipelineView._format_stacks`; odmowy TYLKO gdy niezerowe.
     "pipeline.fmt.stacks.taken": {
         "pl": "wciągnięte {n} z {cand} kandydatów", "en": "taken {n} of {cand} candidates",
     },
@@ -3688,10 +3683,10 @@ CATALOG = {
               "files, so it mostly reads what was missing.",
     },
     "pipeline.fmt.group": {
-        "pl": "[grupuj] nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
+        "pl": "nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
               "kalibracja poza osią {off_axis}{unassigned}{by_hand} · "
               "konfiguracje {conf_prop}/{conf_assign} · konfig. do przeglądu {conf_review}",
-        "en": "[group] headers {headers} · telescopes {telescopes} · no TELESCOP {no_tel} · "
+        "en": "headers {headers} · telescopes {telescopes} · no TELESCOP {no_tel} · "
               "off-axis calibration {off_axis}{unassigned}{by_hand} · "
               "configs {conf_prop}/{conf_assign} · configs to review {conf_review}",
     },
@@ -3702,10 +3697,10 @@ CATALOG = {
     # coś sam. QUIET — doklejka wchodzi wyłącznie przy niezerowej liczbie, jak „odpięte" obok.
     "pipeline.fmt.group_by_hand": {"pl": " (zestaw ręką {n})", "en": " (setup by hand {n})"},
     "pipeline.fmt.resolve": {
-        "pl": "[rozwiąż] klatki {frames} · klatki light {lights} · obiekty nowe {obj_new} · "
+        "pl": "klatki {frames} · klatki light {lights} · obiekty nowe {obj_new} · "
               "przypisane {obj_assign} · przegląd {obj_review} (różnych {obj_distinct}) · "
               "filtry {filters}",
-        "en": "[resolve] frames {frames} · light frames {lights} · new objects {obj_new} · "
+        "en": "frames {frames} · light frames {lights} · new objects {obj_new} · "
               "assigned {obj_assign} · review {obj_review} (distinct {obj_distinct}) · "
               "filters {filters}",
     },
@@ -3751,15 +3746,15 @@ CATALOG = {
                "other": "  (the header confirmed the approved folder: {n} frames - same object, "
                         "source now the header)"}},
     "pipeline.fmt.calibrate": {
-        "pl": "[kalibracja] klatki {frames} · przepisy {prof_prop}/{prof_assign} · "
+        "pl": "klatki {frames} · przepisy {prof_prop}/{prof_assign} · "
               "fakty ze ścieżki {facts} · bez kompletu {incomplete}",
-        "en": "[calibrate] frames {frames} · recipes {prof_prop}/{prof_assign} · "
+        "en": "frames {frames} · recipes {prof_prop}/{prof_assign} · "
               "facts from path {facts} · incomplete {incomplete}",
     },
     "pipeline.fmt.calibrate_gaps": {"pl": "\n   braki: {gaps}", "en": "\n   gaps: {gaps}"},
     "pipeline.fmt.lineage": {
-        "pl": "[rodowód] lighty {lights} · powiązane: {linked}",
-        "en": "[lineage] lights {lights} · linked: {linked}",
+        "pl": "lighty {lights} · powiązane: {linked}",
+        "en": "lights {lights} · linked: {linked}",
     },
     "pipeline.fmt.lineage_gaps": {"pl": "\n   luki: {gaps}", "en": "\n   gaps: {gaps}"},
     "pipeline.fmt.lineage_unlinked": {
@@ -3774,10 +3769,10 @@ CATALOG = {
     # delty (nie ma nazwy, pod którą byłaby „nierozpoznana"), a bez tej pozycji raport dostawy jest
     # na całą klasę ślepy — i pierwsza nowa dostawa bez `OBJECT` przeszłaby bez śladu.
     "pipeline.fmt.delta": {
-        "pl": "[delta] obiekt {resolved}/{total} ({pct:.1f}%){no_raw} · filtry {filters}\n"
+        "pl": "obiekt {resolved}/{total} ({pct:.1f}%){no_raw} · filtry {filters}\n"
               "   nierozpoznane: {top}\n   bez nazwy w nagłówku: {nameless}\n"
               "   do przeglądu: {review}",
-        "en": "[delta] object {resolved}/{total} ({pct:.1f}%){no_raw} · filters {filters}\n"
+        "en": "object {resolved}/{total} ({pct:.1f}%){no_raw} · filters {filters}\n"
               "   unrecognized: {top}\n   no name in header: {nameless}\n"
               "   to review: {review}",
     },
@@ -3806,12 +3801,9 @@ CATALOG = {
         "en": "  (+{n} finished stacks — repair with a card in Housekeeping)"},
 
     # --- raport passa obecności: części składane przez ` · ` ---
-    "pipeline.fmt.presence.not_done": {
-        "pl": "[obecność] NIE WYKONANO — {reason}", "en": "[presence] NOT DONE — {reason}",
-    },
     "pipeline.fmt.presence.cancelled": {
-        "pl": "[obecność] przerwane przez użytkownika — nic nie zapisano",
-        "en": "[presence] cancelled by user — nothing was written",
+        "pl": "przerwane przez użytkownika - nic nie zapisano",
+        "en": "cancelled by user - nothing was written",
     },
     "pipeline.fmt.presence.scope": {
         "pl": "zakres {scoped} · na dysku {walked}", "en": "scope {scoped} · on disk {walked}",
@@ -3828,7 +3820,6 @@ CATALOG = {
     "pipeline.fmt.presence.drifted": {
         "pl": "pominięte przez rename {n}", "en": "skipped by rename {n}",
     },
-    "pipeline.fmt.presence.prefix": {"pl": "[obecność] ", "en": "[presence] "},
     # Hamulec obecności w języku UI (AR-50 (1)) - rdzeń `presence._brake_reason` mówi po polsku dla CLI.
     "pipeline.fmt.presence.brake.limit": {
         "pl": "HAMULEC: kandydatów {candidates} > próg {limit} (zakres {scoped})",

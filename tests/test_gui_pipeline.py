@@ -293,8 +293,8 @@ def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
     view._on_all()
     loop.exec()
     txt = view.lbl_summary.text()
-    assert "[skan]" in txt and "[grupuj]" in txt and "[rozwiąż]" in txt and "[delta]" in txt
-    assert "[kalibracja]" in txt
+    assert "[skan]" in txt and "[grupowanie]" in txt and "[rozwiązywanie]" in txt
+    assert "[kalibracja]" in txt and "[delta]" in txt
     assert running[0] is True and running[-1] is False and view._thread is None
 
 
@@ -537,7 +537,7 @@ def test_en_render_pipeline_z_katalogu(qapp, tmp_path):
     view._on_all()
     loop.exec()
     txt = view.lbl_summary.text()
-    assert "[scan]" in txt and "[group]" in txt and "[delta]" in txt   # tagi raportu EN
+    assert "[scan]" in txt and "[grouping]" in txt and "[delta]" in txt   # tagi raportu EN
     assert "files 2" in txt and "object" in txt                       # wkład tekstowy EN
 
 
@@ -791,8 +791,10 @@ def test_stosy_na_niedostepnym_korzeniu_wracaja_stanem_i_pytaja_znow_o_korzen(
     try:
         view._on_stacks()
         _czekaj_na_etap(view)
-        linia = i18n.t("pipeline.fmt.stacks_not_done",
-                       reason=i18n.t("pipeline.source.unreachable", root=brak))
+        from horreum.gui.pipeline import naglowek_etapu
+        linia = naglowek_etapu("stacks") + i18n.t(
+            "pipeline.fmt.not_done", reason=i18n.t("pipeline.source.unreachable", root=brak))
+        assert linia.startswith("[stosy] NIE WYKONANO - ")
         assert view.lbl_summary.text() == linia, view.lbl_summary.text()
         assert not view.btn_pick_source.isHidden() and view.btn_pick_source.isEnabled()
         view.btn_pick_source.click()
@@ -1149,7 +1151,7 @@ def test_kazda_linia_raportu_ma_naglowek_etapu(qapp, tmp_path):
         }
         assert linie["copy_facts"] == "[fakty kopii] uzupełniono 1 z 1"
         assert linie["adopt_testimony"] == (
-            "[zeznanie z nieobecnej kopii] przejęte od ocalałej kopii 1 z 1")
+            "[przejęcie zeznania] przejęte od ocalałej kopii 1 z 1")
         for etap, linia in linie.items():
             assert linia.startswith("["), (etap, linia)
     finally:
@@ -1631,5 +1633,75 @@ def test_podpis_logu_tylko_nad_gotowym_logiem_i_gasnie_z_nowym_biegiem(qapp, tmp
         assert view.lbl_summary_head.isHidden()
         _czekaj_na_etap(view)
         assert view.lbl_summary_head.isHidden()
+    finally:
+        view.close()
+
+
+# --- Z18: jedno słowo etapu w przycisku i w logu, etap uzupełnień bez roboty też mówi ---
+
+@pytest.mark.parametrize("jezyk", ["pl", "en"])
+def test_naglowki_logu_tymi_slowami_co_przycisk_i_kazdy_etap_lancucha_mowi(qapp, tmp_path,
+                                                                          jezyk):
+    """Z18: log „Przyjmij nowe” mówił „[grupuj]”, a przycisk „grupowanie” (EN „[group]” obok
+    „grouping”). Nagłówki linii i łańcuch na przycisku biorą słowo etapu z jednego miejsca
+    (`_nazwa_etapu`), a etapy uzupełnień bez kandydatów - rdzeń pomija je w ciszy - dostają linię
+    „nic do zrobienia”: prawdziwy przebieg na świeżej bazie daje nagłówki DOKŁADNIE w kolejności
+    i słowach przycisku.
+
+    Falsyfikator: nagłówek z osobnego klucza linii → „[grupuj]” ≠ „grupowanie”; brak linii
+    zerowej → w logu nie ma „[fakty kopii]”."""
+    from horreum.gui.pipeline import ETAPY_PRZYJMIJ_NOWE, ETAPY_UZUPELNIEN, _nazwa_etapu
+    i18n.set_lang(jezyk)
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view._root = _tree(tmp_path, 2)
+        view._on_all()
+        _czekaj_na_etap(view)
+        linie = view.lbl_summary.text().split("\n")
+        naglowki = [linia.split("] ", 1)[0] + "]" for linia in linie if linia.startswith("[")]
+        slowa = [_nazwa_etapu(n) for n in ETAPY_PRZYJMIJ_NOWE]
+        assert naglowki == [f"[{s}]" for s in slowa], linie
+        assert f"({' → '.join(slowa)})" in view.btn_receive.text()
+        zero = i18n.t("pipeline.fmt.nothing_to_do")
+        assert [linia for linia in linie if linia.endswith("] " + zero)] == [
+            f"[{_nazwa_etapu(n)}] {zero}" for n in ETAPY_UZUPELNIEN]
+    finally:
+        view.close()
+        i18n.set_lang("pl")
+
+
+def test_gest_fakty_kopii_bez_przejecia_mowi_o_kazdym_etapie_uzupelnien(qapp, tmp_path):
+    """„Zbierz fakty kopii (N)” bez przejęcia zeznania kończy się po faktach kopii - pochodne nie
+    biegną, a przejęcie i historia stosów nie miały kandydatów. Log mówi o obu („nic do
+    zrobienia”), także gdy po nich nie ruszył już żaden etap (domknięcie przy końcu biegu)."""
+    i18n.set_lang("pl")
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        view.btn_copy_facts.click()
+        _czekaj_na_etap(view)
+        assert view.lbl_summary.text().split("\n") == [
+            "[fakty kopii] uzupełniono 2 z 2",
+            "[przejęcie zeznania] nic do zrobienia",
+            "[historia stosów] nic do zrobienia"]
+    finally:
+        view.close()
+
+
+def test_przerwane_uzupelnienia_nie_udaja_etapow_ktore_nie_biegly(qapp, tmp_path, monkeypatch):
+    """Przerwanie w faktach kopii kończy łańcuch: przejęcie i historia stosów NIE biegły, więc log
+    nie mówi o nich „nic do zrobienia” (to byłoby zdanie o etapie, którego nie było)."""
+    from horreum import scan
+    i18n.set_lang("pl")
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    monkeypatch.setattr(scan, "backfill_copy_facts",
+                        lambda con, **kw: scan.CopyFactsSummary(rows=2, cancelled=True))
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        view.btn_copy_facts.click()
+        _czekaj_na_etap(view)
+        linie = view.lbl_summary.text().split("\n")
+        assert [linia.split("] ", 1)[0] for linia in linie] == ["[fakty kopii"], linie
+        assert i18n.t("pipeline.fmt.nothing_to_do") not in view.lbl_summary.text()
     finally:
         view.close()

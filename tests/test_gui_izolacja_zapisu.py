@@ -830,8 +830,8 @@ def test_sekwencja_skanu_na_niedostepnym_zrodle_nie_dotyka_dysku_w_oknie(
         assert not view.box_vanished.isHidden() and view.lbl_vanished.text() == zdanie
         assert not view.btn_pick_source.isHidden() and view.btn_pick_source.isEnabled()
         assert view.btn_mark_vanished.isHidden() and view.lbl_error.isHidden()
-        linia = i18n.t("pipeline.fmt.scan_not_done",
-                       reason=i18n.t("pipeline.source.unreachable", root=brak))
+        linia = pipeline_mod.naglowek_etapu("scan") + i18n.t(
+            "pipeline.fmt.not_done", reason=i18n.t("pipeline.source.unreachable", root=brak))
         assert view.lbl_summary.text() == linia, view.lbl_summary.text()
         assert view._root == (None if wejscie == "przyjmij_nowe" else brak)
         assert w_oknie == [] and dialogi == [], w_oknie

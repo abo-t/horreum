@@ -764,7 +764,8 @@ def test_gest_osi_wraca_od_razu_a_ogon_odklada_cel_zdanie_i_recepte(qapp, tmp_pa
     wczytania), drugi gest odmawia bez zapisu, a klik w tabeli nie zmienia zaznaczenia - ogon
     odłożyłby cel gestu na wybór, którego człowiek by nie zobaczył. Po przyłożeniu: cel
     w zaznaczeniu, JEDNO zdanie gestu, recepta „Przywróć" ze znacznikiem gestu z chwili zapisu
-    (zdarzenie ręki dopisane w trakcie składu go nie podmienia).
+    (zdarzenie ręki dopisane w trakcie składu go nie podmienia). Recepta poprzednia schodzi od
+    razu (pusta - Dom nie pokazuje wykonanej jako czynnej), a nad tabelą stoi kursor zajętości.
 
     Falsyfikator: `self.refresh()` zamiast `refresh(w_tle=True, potem=…)` w `_po_gescie_osi` →
     zbiór nie jest w drodze po geście (pierwsza asercja `_zbior_w_drodze`)."""
@@ -779,8 +780,9 @@ def test_gest_osi_wraca_od_razu_a_ogon_odklada_cel_zdanie_i_recepte(qapp, tmp_pa
         QApplication.processEvents()
         view._przywroc_zaznaczenie([1, 2])
         assert _zaznaczone(view) == [1, 2]
-        msg = []
+        msg, recepty = [], []
         view.status_message.connect(msg.append)
+        view.status_recipe.connect(recepty.append)
         brama, wszedl = _brama_na_skladzie(monkeypatch)
         t0 = time.monotonic()
         view._on_object_clear()
@@ -790,7 +792,9 @@ def test_gest_osi_wraca_od_razu_a_ogon_odklada_cel_zdanie_i_recepte(qapp, tmp_pa
         assert con.execute("SELECT count(*) FROM frame WHERE object_source = 'user_cleared'"
                            ).fetchone()[0] == 2, "zapis gestu jest w bazie od razu"
         assert msg == [], "zdanie gestu czeka na przyłożenie"
+        assert recepty and str(recepty[-1]) == "", "recepta poprzednia zeszła od razu"
         assert view.table.selectionMode() == QAbstractItemView.NoSelection
+        assert view.table.viewport().cursor().shape() == Qt.BusyCursor
         wiersz_3 = next(i for i, r in enumerate(view.model._rows) if r.get("frame_id") == 3)
         rect = view.table.visualRect(view.model.index(wiersz_3, 0))
         QTest.mouseClick(view.table.viewport(), Qt.LeftButton, Qt.NoModifier,
@@ -807,6 +811,8 @@ def test_gest_osi_wraca_od_razu_a_ogon_odklada_cel_zdanie_i_recepte(qapp, tmp_pa
         _czekaj_na_pola(view)
         assert _zaznaczone(view) == [1, 2], "cel gestu wrócił w zaznaczeniu"
         assert view.table.selectionMode() == QAbstractItemView.ExtendedSelection
+        assert not view.table.viewport().testAttribute(Qt.WA_SetCursor), "kursor zajętości zdjęty"
+        assert str(recepty[-1]) != "", "recepta gestu po przyłożeniu"
         assert len(msg) == 2 and msg[1].startswith(
             i18n.t("grid.sel.object_cleared", assigned=2, total=2)), msg
         assert view._recepta_gestu is not None and sorted(view._recepta_gestu[0]) == [1, 2]
@@ -885,6 +891,152 @@ def test_porazka_skladu_w_tle_czeka_na_edytor_i_nie_zatwierdza_polowy_wpisu(qapp
         _zamknij(view, con)
 
 
+def test_menu_tabeli_i_zostaw_wersje_odmawiaja_nad_zbiorem_w_drodze(qapp, tmp_path, monkeypatch):
+    """Prawy klik poza zaznaczeniem, gdy zbiór jest w drodze: `NoSelection` nie przestawia
+    zaznaczenia na wiersz pod kursorem, więc pozycje menu liczyłyby stan starego zaznaczenia
+    („Zostaw tę wersję" kopiowała ścieżki wersji wskazanej do zostawienia). Menu nie powstaje,
+    schowek nietknięty, a slot gestu (druga linia) odmawia tak samo.
+
+    Falsyfikator: zdejmij odmowę z `_on_table_menu` → menu otwarte nad starym zaznaczeniem."""
+    view, con = _widok_w_tle(_baza_obiektu(tmp_path))
+    try:
+        view.resize(1200, 600)
+        view.show()
+        QApplication.processEvents()
+        view._przywroc_zaznaczenie([1])
+        schowek = QApplication.clipboard()
+        schowek.setText("przed")
+        msg = []
+        view.status_message.connect(msg.append)
+        brama, wszedl = _brama_na_skladzie(monkeypatch)
+        view._on_columns([])
+        assert wszedl.wait(_BEZPIECZNIK_S) and view._zbior_w_drodze()
+        wiersz_3 = next(i for i, r in enumerate(view.model._rows) if r.get("frame_id") == 3)
+        view._on_table_menu(view.table.visualRect(view.model.index(wiersz_3, 0)).center())
+        QApplication.processEvents()
+        assert not view._menu_tabeli.isVisible(), "menu nad zbiorem w drodze nie powstaje"
+        view._on_keep_version()
+        assert msg == [i18n.t("grid.sel.loading_refused")] * 2, msg
+        assert schowek.text() == "przed" and _zaznaczone(view) == [1]
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_ogon_starszego_gestu_nie_nadpisuje_werdyktu_panelu_rodowodu(qapp, tmp_path, monkeypatch):
+    """Żeton gestu: ogon gestu A (zbiór w drodze) nie nadpisuje zdania, recepty ani zaznaczenia
+    gestu, który padł po nim - tu werdyktu panelu Rodowód (panel gaśnie na czas składu, ale slot
+    wołany wprost to druga linia). Po przyłożeniu zostaje zdanie i recepta werdyktu.
+
+    Falsyfikator: zdejmij sprawdzenie żetonu z `_ogon_gestu` → ostatnie zdanie to „zdanie A",
+    a recepta - ta z gestu A."""
+    from test_gui_rodowod_tabela import _seed
+    from horreum.gui import grid_model
+    path = str(tmp_path / "r.db")
+    c = db.open_db(path)
+    _seed(c)
+    c.close()
+    view, con = _widok_w_tle(path)
+    try:
+        view.resize(1400, 900)
+        view.show()
+        QApplication.processEvents()
+        view._przywroc_zaznaczenie([10])
+        view._toggle_panel("lineage")
+        view._date_timer.stop()
+        view._refresh_lineage()
+        assert view.lineage_bar.integration_id() == 5
+        msg = []
+        view.status_message.connect(msg.append)
+        brama, wszedl = _brama_na_skladzie(monkeypatch)
+        view._po_gescie_zapisu("zdanie A", [1, 2])          # gest A - ogon czeka na przyłożenie
+        assert wszedl.wait(_BEZPIECZNIK_S) and view._zbior_w_drodze()
+        assert view.lineage_bar._busy, "panel Rodowód gaśnie na czas składu"
+        view._on_lineage_judged([1], True)                  # nowszy gest
+        werdykt = i18n.t("grid.lin.judged_excluded", n=1)
+        assert msg[-1] == werdykt
+        brama.set()
+        _czekaj_na_pola(view)
+        for _ in range(5):
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        assert "zdanie A" not in msg and msg[-1] == werdykt, msg
+        assert view._recepta_gestu == ((10,), grid_model._ODWROT_WERDYKTU)
+        assert _zaznaczone(view) == [10], "zaznaczenie werdyktu, nie celu gestu A"
+        assert not view.lineage_bar._busy
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_zdanie_okna_zmiany_obiektu_czeka_na_przylozenie_zbioru(qapp, tmp_path, monkeypatch):
+    """Okno zmiany obiektu zapisało (sygnał `changed`) i zamyka się, gdy zbiór po zapisie składa
+    się jeszcze w tle: jego zdanie idzie ogonem po przyłożeniu - wyemitowane od razu przykryłby je
+    raport wczytania.
+
+    Falsyfikator: emituj `summary` od razu po `exec` → zdanie pada, zanim zbiór dojedzie."""
+    from PySide6.QtCore import QObject, Signal
+
+    class _Okno(QObject):
+        changed = Signal()
+        busy_changed = Signal(bool)
+
+        def __init__(self):
+            super().__init__()
+            self.summary = ""
+
+        def exec(self):
+            self.changed.emit()
+            self.summary = "Zmieniono obiekt 1 klatki"
+            return 1
+
+    view, con = _widok_w_tle(_baza_obiektu(tmp_path))
+    try:
+        msg = []
+        view.status_message.connect(msg.append)
+        brama, wszedl = _brama_na_skladzie(monkeypatch)
+        view._pokaz_okno_zmiany_obiektu(_Okno(), [1])
+        assert wszedl.wait(_BEZPIECZNIK_S) and view._zbior_w_drodze()
+        assert msg == [], "zdanie czeka na przyłożenie"
+        brama.set()
+        _czekaj_na_pola(view)
+        assert msg == ["Zmieniono obiekt 1 klatki"], msg
+        assert _zaznaczone(view) == [1]
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_wyjatek_skladu_synchronicznego_nie_zostawia_tabeli_w_drodze(qapp, tmp_path, monkeypatch):
+    """Skład synchroniczny pada w trakcie, gdy zbiór był w drodze: tabela wraca do zwykłego stanu
+    (zaznaczenie i wyzwalacze edycji), zamiast zostać w `NoSelection` bez przyłożenia, które by to
+    zdjęło.
+
+    Falsyfikator: zdejmij `try/finally` z gałęzi synchronicznej `refresh` → `NoSelection` zostaje."""
+    from PySide6.QtWidgets import QAbstractItemView
+    view, con = _widok_w_tle(_baza_obiektu(tmp_path))
+    try:
+        brama, wszedl = _brama_na_skladzie(monkeypatch)
+        view._on_columns([])
+        assert wszedl.wait(_BEZPIECZNIK_S) and view._zbior_w_drodze()
+        assert view.table.selectionMode() == QAbstractItemView.NoSelection
+        glowny = threading.get_ident()
+        w_tle = queries.base_rows
+
+        def _pada(c, ids):
+            if threading.get_ident() == glowny:
+                raise RuntimeError("awaria składu")
+            return w_tle(c, ids)
+        monkeypatch.setattr(queries, "base_rows", _pada)
+        with pytest.raises(RuntimeError):
+            view.refresh()
+        assert view.table.selectionMode() == QAbstractItemView.ExtendedSelection
+        assert view.table.editTriggers() == view._edit_triggers
+        assert not view.table.viewport().testAttribute(Qt.WA_SetCursor)
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
 # ---- liczniki Porządków po geście Zbiorów - w wątku tła (AR-84) ----
 
 def _brama_na_licznikach(monkeypatch):
@@ -943,6 +1095,38 @@ def test_gest_zbiorow_liczy_liczniki_porzadkow_w_tle(qapp, tmp_path, monkeypatch
             con.close()
         assert _liczba_wiersza(tasks, "unresolved_lights") == f"{teraz}  ›" != przed
         assert len(badge) == 1, "plakietka dostała wynik raz"
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_koniec_przebiegu_liczy_liczniki_w_tle_a_niewidoczna_os_czeka(qapp, tmp_path, monkeypatch):
+    """Koniec przebiegu Dostawy (`_odswiez_widoki_po_przebiegu`): liczniki Porządków liczy wątek
+    tła (odświeżenie widoków nie czeka na bramę), a niewidoczna kolejka osi obiektu dostaje
+    znacznik zamiast przeładowania - przeładuje się przy pokazaniu.
+
+    Falsyfikator: `refresh_counts()` bez `w_tle` w `_odswiez_widoki_po_przebiegu` → odświeżenie
+    czeka na bramę (bezpiecznik) i `tasks_state` woła wątek GUI."""
+    from horreum.gui.app import ObjectAxisView
+    win = MainWindow(_baza_obiektu(tmp_path))
+    try:
+        tasks = win.tasks_view
+        _czekaj_na_pola(win.grid_view)
+        odswiezenia = []
+        oryginal = ObjectAxisView.refresh
+        monkeypatch.setattr(ObjectAxisView, "refresh",
+                            lambda self, **kw: odswiezenia.append(1) or oryginal(self, **kw))
+        brama, wszedl, watki = _brama_na_licznikach(monkeypatch)
+        win._on_pipeline_running(True)
+        t0 = time.monotonic()
+        win._on_pipeline_running(False)
+        assert time.monotonic() - t0 < _BEZPIECZNIK_S / 2, "odświeżenie nie czekało na liczniki"
+        assert wszedl.wait(_BEZPIECZNIK_S), "liczniki ruszyły w tle"
+        assert odswiezenia == [] and win.object_view._nieaktualny, "niewidoczna oś czeka"
+        brama.set()
+        _czekaj(lambda: tasks._liczniki_thread is None, "wątek liczników nie skończył")
+        _czekaj_na_pola(win.grid_view)
+        assert watki and threading.get_ident() not in watki, "liczył wątek tła"
     finally:
         brama.set()
         win.close()

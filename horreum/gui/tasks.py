@@ -393,6 +393,10 @@ class TasksView(QWidget):
         self._liczniki_thread = None
         self._liczniki_ponow = False
         self._liczniki_stop = False
+        # Odcisk bazy (`queries.odcisk_bazy`) ostatniego PRZYŁOŻONEGO rachunku i biegu w drodze -
+        # wejście w Porządki pomija rachunek, gdy baza się od niego nie zmieniła (`odswiez_przy_wejsciu`).
+        self._odcisk_licznikow = None
+        self._odcisk_biegu = None
         # pod-widoki osi z FORWARDOWANYM now_fn (F5R#2) — wystawione dla aliasów MainWindow
         self.axis_view = TelescopeAxisView(con, now_fn=now_fn)
         self.observatory_view = ObservatoryAxisView(con, now_fn=now_fn)
@@ -509,9 +513,27 @@ class TasksView(QWidget):
             else:
                 self._start_licznikow()
             return None
-        return self._przyloz_liczniki(*_stan_licznikow(self.con))
+        # Odcisk PRZED rachunkiem: zapis w jego trakcie zmieni odcisk, więc wejście policzy jeszcze
+        # raz - odwrotna kolejność mogłaby przypisać staremu rachunkowi stan nowszy od niego.
+        odcisk = queries.odcisk_bazy(self.con)
+        badge = self._przyloz_liczniki(*_stan_licznikow(self.con))
+        self._odcisk_licznikow = odcisk
+        return badge
+
+    def odswiez_przy_wejsciu(self):
+        """Wejście w Porządki (gospodarz, `_on_nav_changed`): liczniki ze stanu, ale BEZ rachunku,
+        gdy odcisk bazy (`queries.odcisk_bazy`) nie zmienił się od ostatniego przyłożonego - lista
+        mówi wtedy prawdę, a rachunek kosztował na wejściu 0,7-1,9 s na kopii pf4, choć tło po
+        geście już go zrobiło (AR-84). Przy zmianie - pełny rachunek, jak dotąd (prawda na wejściu).
+        Wysokość listy mierzy się i tak: metryki fontu są prawdziwe dopiero po pokazaniu."""
+        if (self._odcisk_licznikow is not None
+                and queries.odcisk_bazy(self.con) == self._odcisk_licznikow):
+            self._fit_task_list()
+            return
+        self.refresh_counts()
 
     def _start_licznikow(self):
+        self._odcisk_biegu = queries.odcisk_bazy(self.con)   # przed odczytem w wątku - jak wyżej
         worker = _LicznikiWorker(self._liczniki_gen, self._db_path)
         worker.done.connect(self._on_liczniki)
         worker.failed.connect(self._on_liczniki_failed)
@@ -528,6 +550,7 @@ class TasksView(QWidget):
         if gen != self._liczniki_gen:
             return                          # wyprzedzony nowszym odczytem - do kosza
         self._przyloz_liczniki(*wynik)
+        self._odcisk_licznikow = self._odcisk_biegu
 
     @Slot(int, str)
     def _on_liczniki_failed(self, gen, msg):

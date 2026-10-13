@@ -1701,8 +1701,16 @@ class ObjectAxisView(QWidget):
             self._nieaktualny = True
 
     def showEvent(self, event):
+        """Pokazanie przy postawionym znaczniku przeładowuje widok PO OBROCIE PĘTLI: droga wejścia,
+        która sama przeładowuje kolejkę (kubełek z wiersza Porządków albo z raportu Dostawy,
+        `_zaznacz_kubelek`), robi to zaraz po przełączeniu strony i znacznik schodzi - bez
+        drugiego przeładowania tego samego stanu."""
         super().showEvent(event)
         if self._nieaktualny:
+            QTimer.singleShot(0, self, self._odswiez_jesli_nieaktualny)
+
+    def _odswiez_jesli_nieaktualny(self):
+        if self._nieaktualny and self.isVisible():
             self.refresh()
 
     # ---------------------------------------------------------------- budowa UI
@@ -3681,7 +3689,7 @@ class MainWindow(QMainWindow):
             else:
                 self._odswiez_dom()
         if strona == STRONA_PORZADKI:   # wejście w Porządki = świeży stan liczników zadań
-            self.tasks_view.refresh_counts()
+            self.tasks_view.odswiez_przy_wejsciu()   # bez rachunku, gdy baza bez zmian (AR-84)
         if strona == STRONA_DOSTAWA:
             # Raport „co przyszło” liczy się ze stanu, a nazwę mogła nadać ręka w Porządkach albo
             # w Zbiorach - wiersz „nie rozpoznałem” po powrocie kłamałby o niej (jedno zapytanie
@@ -3973,12 +3981,16 @@ class MainWindow(QMainWindow):
                     self.axis_view.refresh()
                     self.observatory_view.refresh()
                     self.object_view._load_facets()
-                    self.object_view.refresh()
+                    # Kolejka osi obiektu ~0,4 s na kopii pf4 - niewidoczna przeładuje się przy
+                    # pokazaniu (AR-84), a człowiek stoi teraz w Dostawie.
+                    self.object_view.odswiez_gdy_widoczny()
                     self.grid_view._load_facets()
                     # Skład zbioru w wątku tła (AR-27: 1,4-1,5 s na żywej bazie stało tu w oknie);
                     # wraca od razu, tabela dostaje zbiór, gdy ten dojedzie.
                     self.grid_view.refresh(w_tle=True)
-                    self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
+                    # Liczniki zadań + badge ze świeżego stanu (F5) - w wątku tła (AR-84: 1,2-1,9 s
+                    # stało tu w oknie na kopii pf4).
+                    self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)
                     # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc
                     # plan nocy policzony przed dostawą pokazywałby stare luki.
                     self.planner_view.refresh()
@@ -4101,7 +4113,16 @@ class MainWindow(QMainWindow):
 
         Okno dostaje folder roboczy WBPP (stąd bierze wyniki wydań) i korzenie wszystkich kart
         wydań. Gdy wciągnęło stosy, a łańcuch ruszył, rodowód zapisujemy dopiero PO nim
-        (`_zapisz_rodowod_po_przebiegu`): wiersz integracji stawia sam łańcuch."""
+        (`_zapisz_rodowod_po_przebiegu`): wiersz integracji stawia sam łańcuch.
+
+        BRAMKA PRZED OKNEM (`PipelineView.powod_odmowy_biegu`, ta sama co `run_all_on`): w biegu
+        Dostawy albo przy zapisie nagłówków okno otwarte z Domu kończyło się odmową łańcucha PO
+        „Zamknij i przyjmij”, a rodowód dokładny wciągniętych stosów zostawał tylko w folderze
+        wydania. Odmowa pada na pasek, okno się nie otwiera."""
+        powod = self.pipeline_view.powod_odmowy_biegu()
+        if powod is not None:
+            self._flash(powod)
+            return
         from horreum import harvest
         from horreum.gui import projection_dialog
         from horreum.gui.harvest_dialog import HarvestDialog
@@ -4341,7 +4362,7 @@ class MainWindow(QMainWindow):
     def _odswiez_po_obiekcie_wydania(self):
         """Gest zmienił oś obiektu stosów - te same powierzchnie, co po geście „Przypisz obiekt…”
         z raportu Dostawy (kolejka osi, plakietka Porządków, teczki Domu, grid) i panel rodowodu."""
-        self.object_view.refresh()
+        self.object_view.odswiez_gdy_widoczny()          # niewidoczna oś - przy pokazaniu (AR-84)
         self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)   # liczniki w tle (AR-84)
         if self.home_view is not None:
             self.home_view.odswiez_teczki()
@@ -4398,6 +4419,8 @@ class MainWindow(QMainWindow):
         self.object_view.set_writeback_busy(busy)
         self.pipeline_view.set_writeback_busy(busy)
         self.przyjmij_view.set_writeback_busy(busy)
+        if self.home_view is not None:
+            self.home_view.set_writeback_busy(busy)    # „Wciągnij z WBPP…” gaśnie jak w biegu
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
@@ -4711,9 +4734,11 @@ class MainWindow(QMainWindow):
         którą gasi każdy cudzy raport. Bez argumentu - człony z paska. Keyword-only, bo `clicked`
         przycisku paska podałby tu `checked: bool`.
 
-        PODWÓJNY KLIK TO JEDEN GEST MOTORYCZNY (Z5). Wykonanie członu składa receptę odwrotną
-        synchronicznie (odświeżenie → `ponow_recepte`), więc drugi klik tego samego ruchu ręki
-        wykonałby odwrót odwrotu - masowo i bez potwierdzenia. Po wykonaniu przycisk stoi więc
+        PODWÓJNY KLIK TO JEDEN GEST MOTORYCZNY (Z5). Wykonanie członu zleca gest, który od razu
+        zdejmuje swoją receptę z paska i Domu (`FramesView._zacznij_gest`), a receptę odwrotną
+        składa ogon po przyłożeniu zbioru w tle (AR-84) - gdy ten zdąży przed drugim klikiem tego
+        samego ruchu ręki, klik wykonałby odwrót odwrotu, masowo i bez potwierdzenia, a w trakcie
+        składu odbiłby się od odmowy „Wczytuję zbiór…". Po wykonaniu przycisk stoi więc
         wygaszony przez systemowy odstęp podwójnego kliku (`doubleClickInterval`), a nie do
         następnego obrotu pętli: drugi klik dwukliku przychodzi z systemu do ~500 ms później,
         więc blokada na jeden obrót niczego by nie złapała. Blokada jest JEDNA dla paska i Domu -

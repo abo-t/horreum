@@ -1043,6 +1043,27 @@ def test_wiecej_wciagnij_z_wbpp_ta_sama_droga_co_przycisk_Dostawy(qapp, tmp_path
         win.close()
 
 
+def test_wciagnij_z_wbpp_gasnie_w_biegu_i_przy_zapisie_niezaleznie(qapp, tmp_path):
+    """„Wciągnij z WBPP…” w „Więcej…” gaśnie z dwóch powodów - bieg Dostawy (`set_busy`) i zapis
+    nagłówków (`set_writeback_busy` przez `_on_writeback_busy`) - a podpowiedź mówi, który trwa.
+    Falsyfikator: jedno pole stanu → koniec zapisu w trwającym biegu zapala pozycję."""
+    win = MainWindow(_s8(tmp_path))
+    try:
+        akcja = win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA]
+        odmowy = {i18n.t("pipeline.refuse.writeback"), i18n.t("pipeline.refuse.delivery_running")}
+        assert akcja.isEnabled() and akcja.toolTip() not in odmowy     # bez podpowiedzi = tekst akcji
+        win._on_writeback_busy(True)
+        assert not akcja.isEnabled() and akcja.toolTip() == i18n.t("pipeline.refuse.writeback")
+        win.home_view.set_busy(True)
+        win._on_writeback_busy(False)
+        assert not akcja.isEnabled()
+        assert akcja.toolTip() == i18n.t("pipeline.refuse.delivery_running")
+        win.home_view.set_busy(False)
+        assert akcja.isEnabled() and akcja.toolTip() not in odmowy
+    finally:
+        win.close()
+
+
 # ---------------------------------------------------------------- przejścia przy zajętości
 
 @pytest.fixture

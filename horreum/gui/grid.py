@@ -208,6 +208,7 @@ class FramesView(QWidget):
         self._recepta_gestu = None  # `(cel, _Odwrot|None)` ostatniego gestu osi - recepta paska
                                     # składa się z tego STANU przy każdym odświeżeniu (FH-2e)
         self._ts_recepty = None     # `event.ts` gestu tej recepty - tożsamość dla Domu (AR-94)
+        self._gest_nr = 0           # żeton gestu: ogon starszego gestu milknie po nowszym (AR-84)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -1300,6 +1301,7 @@ class FramesView(QWidget):
         if not ok or not name.strip():
             return
         name = name.strip()
+        self._podbij_zeton()                # zdanie zapisu - nie ogona starszego gestu (AR-84)
         klucze_obce, facety_obce = self._warunki_nowszej_wersji_do_przeniesienia(name)
         spec = {
             "filter": self._filter_tree, "columns": self._columns,
@@ -1421,7 +1423,7 @@ class FramesView(QWidget):
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
         # Recepta poprzedniego gestu przestaje obowiązywać w chwili nowego - `refresh()` niżej
         # nie ma jej już składać (FH-2e: składa ją ze stanu, którego za moment nie będzie).
-        self._recepta_gestu = None
+        self._zacznij_gest()
         msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
         # Rozbicie pominięć i gotowe obrazy składa JEDEN dom (`zdanie_pominiec`), wspólny z dwiema
         # powierzchniami osi w `gui.app` - `nothing_key` idzie za gestem (FC-6), jak `canons_key`.
@@ -1449,14 +1451,34 @@ class FramesView(QWidget):
             # (patrz `_ogon_gestu`).
             self.object_axis_changed.emit()
             self.stan_porzadkow_changed.emit()     # plakietka Porządków (patrz definicja sygnału)
-            self.refresh(w_tle=True, potem=partial(
-                self._ogon_gestu, msg, zaznaczone, recepta=gest.frame_ids, odwrot=odwrot,
-                ts=queries.last_hand_ts(self.con)))
+            self._przeladuj_po_gescie(msg, zaznaczone, recepta=gest.frame_ids, odwrot=odwrot,
+                                      ts=queries.last_hand_ts(self.con))
             return
         self.status_message.emit(msg)
         self._ustaw_recepte_gestu(gest.frame_ids, odwrot)
 
-    def _ogon_gestu(self, msg, cel, *, poza=True, recepta=None, odwrot=None, ts=None):
+    def _zacznij_gest(self):
+        """Nowy gest z receptą: recepta poprzedniego przestaje obowiązywać i schodzi z paska i Domu
+        OD RAZU - ogon tego gestu poda nową dopiero po przyłożeniu zbioru, a do tego czasu Dom
+        pokazywałby wykonaną receptę jako czynną. Żeton w górę (`_podbij_zeton`)."""
+        self._podbij_zeton()
+        self._recepta_gestu = None
+        self._emituj_recepte_gestu()
+
+    def _podbij_zeton(self):
+        """ŻETON GESTU (AR-84): ogon gestu niesie numer z chwili zlecenia, a gest, który padł po nim,
+        numer podbija - ogon starszego gestu nie nadpisze wtedy zdania, recepty ani zaznaczenia
+        nowszego. Podbijają gesty stawiające albo zdejmujące receptę (`_zacznij_gest`,
+        `_ustaw_recepte_gestu`) i gesty mówiące własnym zdaniem, które ruszają, gdy zbiór jest
+        w drodze (panel Rodowód, edycja komórki, zapis perspektywy)."""
+        self._gest_nr += 1
+
+    def _przeladuj_po_gescie(self, msg, cel=(), **kw):
+        """Zbiór od nowa W TLE z ogonem gestu (`_ogon_gestu`) i żetonem z TEJ chwili. `cel=()` -
+        gest bez zaznaczenia do odłożenia (zapis szuflady, cofnięcie)."""
+        self.refresh(w_tle=True, potem=partial(self._ogon_gestu, msg, cel, nr=self._gest_nr, **kw))
+
+    def _ogon_gestu(self, msg, cel, *, nr, poza=True, recepta=None, odwrot=None, ts=None):
         """Ogon gestu zapisu PO PRZYŁOŻENIU zbioru (`refresh(w_tle=True, potem=…)`, AR-84): cel
         w zaznaczeniu, człon „poza widokiem", JEDNO zdanie i recepta - wspólny dla gestów obu osi
         zaznaczenia, uwag, izolacji zapisu, werdyktu wersji i przeniesienia faktów.
@@ -1491,11 +1513,16 @@ class FramesView(QWidget):
 
         `recepta` = cel recepty (`None` - gest jej nie rusza), `odwrot` jak w `_po_gescie_osi`,
         `ts` = znacznik gestu w dzienniku z CHWILI ZAPISU (AR-94): ogon leci później, a recepta
-        ma nieść tożsamość tego gestu, nie zdarzenia ręki, które mogło dojść w międzyczasie."""
+        ma nieść tożsamość tego gestu, nie zdarzenia ręki, które mogło dojść w międzyczasie.
+        `nr` = żeton z chwili zlecenia (`_podbij_zeton`): inny znaczy, że po zleceniu padł nowszy
+        gest i to jego zdanie, recepta i zaznaczenie zostają. Pusty `msg` - ogon bez zdania."""
+        if nr != self._gest_nr:
+            return
         wrocilo = self._przywroc_zaznaczenie(cel)
         if poza:
             msg += self._czlon_poza_widokiem(len(cel) - wrocilo, cel)
-        self.status_message.emit(msg)
+        if msg:
+            self.status_message.emit(msg)
         if recepta is not None:
             self._ustaw_recepte_gestu(recepta, odwrot, ts=ts)
 
@@ -1513,6 +1540,7 @@ class FramesView(QWidget):
         zapisie gestu, więc to jest `ts` właśnie zapisanego gestu (klinga pisze gest jednym `now`).
         Ogon po składzie w tle (`_ogon_gestu`) leci później i podaje `ts` złapany w chwili zapisu;
         bez niego czytamy TERAZ. Recepta niesie go dalej, a Dom opisuje nim „Ostatnio”."""
+        self._podbij_zeton()
         self._recepta_gestu = (tuple(cel), odwrot) if cel else None
         self._ts_recepty = (ts or queries.last_hand_ts(self.con)) if cel else None
         self._emituj_recepte_gestu()
@@ -2130,7 +2158,14 @@ class FramesView(QWidget):
             dlg.exec()
         finally:
             self._okno_zmiany_obiektu = None
-        if dlg.summary:
+        if not dlg.summary:
+            return
+        if self._zbior_w_drodze():
+            # Zbiór po zapisie okna składa się jeszcze w tle - zdanie po przyłożeniu, inaczej raport
+            # wczytania by je przykrył (AR-84). Ogon czeka w kolejce zlecenia, które jest w drodze.
+            self._zbior_ogony.append(partial(self._ogon_gestu, dlg.summary, (), nr=self._gest_nr,
+                                             poza=False))
+        else:
             self.status_message.emit(dlg.summary)
 
     def _po_zmianie_obiektu(self, zaznaczone):
@@ -2140,7 +2175,7 @@ class FramesView(QWidget):
         wraca ogonem po składzie w tle (AR-84), sygnały przed zleceniem składu (`_ogon_gestu`)."""
         self.object_axis_changed.emit()
         self.stan_porzadkow_changed.emit()
-        self.refresh(w_tle=True, potem=partial(self._przywroc_zaznaczenie, zaznaczone))
+        self._przeladuj_po_gescie("", zaznaczone, poza=False)
 
     # ---- panele kling (F3, PLAN_ux_redesign §4) ----
     def _toggle_panel(self, which):
@@ -2337,6 +2372,7 @@ class FramesView(QWidget):
         iid = self.lineage_bar.integration_id()
         if iid is None:
             return
+        self._podbij_zeton()                # zdanie tego gestu - nie ogona starszego (AR-84)
         # ILE KLATEK CZEKAŁO NA TEN ZEGAR (G2-3d) - CZYTANE PRZED ZAPISEM, nie po. Zakres offsetu
         # jest bramką na NONSENS, nie na pomyłkę: wskazanie o dobę obok przechodzi walidację,
         # a jedynym śladem był potem powód `no_candidates` bez słowa o przyczynie. Człon stoi
@@ -2378,6 +2414,7 @@ class FramesView(QWidget):
 
         PRZELICZENIA TU NIE MA i nie jest potrzebne: wskazanie ręki jest stanem samo w sobie,
         a przebieg rodowodu go omija (`run_lineage`)."""
+        self._podbij_zeton()                # zdanie tego gestu - nie ogona starszego (AR-84)
         klasa = calibration_class_name(relation)
         try:
             zmiana = repo.link_calibration(
@@ -2406,6 +2443,7 @@ class FramesView(QWidget):
         PRZEPIS BEZ KANDYDATA: odpowiedź bierzemy ze STANU po zdjęciu (`explain_light`) - relacja
         nieliczona (`pending`) dostaje przeliczenie, luka zdanie „klatka została bez kalibratora”;
         uruchamianie etapu, który niczego nie odtworzy, obiecywałoby powrót, którego nie będzie."""
+        self._podbij_zeton()                # zdanie tego gestu - nie ogona starszego (AR-84)
         klasa = calibration_class_name(relation)
         try:
             zdjete = repo.unlink_calibration(
@@ -2429,9 +2467,11 @@ class FramesView(QWidget):
         """Bramka gestów panelu Rodowód (werdykt stosu, odniesienie, gesty osi kalibracji): etap
         Dostawy w tle ALBO zapis do plików z tej lub drugiej powierzchni (`_powod_zajetosci`) -
         każdy z nich trzyma blokadę zapisu bazy, a gest w tym czasie czekałby `busy_timeout`
-        i wracał błędem zamiast zdaniem."""
+        i wracał błędem zamiast zdaniem. Zbiór w drodze też gasi panel (AR-84): panel pokazuje stos
+        zaznaczenia, które przyłożenie zaraz zastąpi, a ogon gestu odłoży w nim cel."""
         self.lineage_bar.set_busy(bool(self._etap_w_biegu or self._foreign_wb
-                                       or getattr(self, "_zapis_wlasny", False)))
+                                       or getattr(self, "_zapis_wlasny", False)
+                                       or self._zbior_w_drodze()))
 
     def _on_wlasny_zapis_plikow(self, busy):
         self._zapis_wlasny = bool(busy)
@@ -2475,7 +2515,7 @@ class FramesView(QWidget):
             self.con, integration_id=iid, input_frame_ids=list(frame_ids), excluded=excluded,
             now=self._now())
         n = len(zmiany)
-        self._recepta_gestu = None          # recepta poprzedniego gestu przestaje obowiązywać
+        self._zacznij_gest()                # recepta poprzedniego gestu przestaje obowiązywać
         self._migawka_werdyktu = (iid, stos, tuple(zmiany)) if zmiany else None
         self._po_werdykcie(stos, list(frame_ids), zmienione=bool(n))
         if n:
@@ -2509,7 +2549,7 @@ class FramesView(QWidget):
         go automat). Migawka schodzi PRZED zapisem: drugi klik nie ma czego cofać. Zaznaczenie stosu
         postawił już `_wykonaj_odwrot`; panel wraca z zaznaczonymi wierszami cofniętego gestu."""
         migawka, self._migawka_werdyktu = self._migawka_werdyktu, None
-        self._recepta_gestu = None
+        self._zacznij_gest()
         if migawka is None:
             self.status_message.emit(i18n.t("grid.lin.undo_nothing"))
             return
@@ -2882,8 +2922,13 @@ class FramesView(QWidget):
         self._zbior_ponow = False
         if self._zbior_worker is not None:
             self._zbior_worker.request_cancel()   # wynik i tak do kosza - nie liczmy go do końca
-        with busy.busy(self.load_report.emit, i18n.t("busy.read_frames")):
-            self._refresh()
+        try:
+            with busy.busy(self.load_report.emit, i18n.t("busy.read_frames")):
+                self._refresh()
+        finally:
+            # Wyjątek składu nie zostawia tabeli w stanie „w drodze" (`NoSelection`, bez wyzwalaczy
+            # edycji): przyłożenie, które to zdejmuje, nie doszło do skutku.
+            self._sync_zbioru_w_drodze()
         # RECEPTA GESTU SKŁADA SIĘ ZE STANU PO KAŻDYM PRZEŁADOWANIU (FH-2e). Raport wczytania
         # gasi na pasku receptę (każdy raport ją gasi), więc bez tej emisji dwuczłonowa recepta
         # umierała po wykonaniu pierwszego członu - dokładnie wtedy, gdy drugi stawał się
@@ -2950,11 +2995,19 @@ class FramesView(QWidget):
         geście ogon odkłada w nim cel gestu (`_ogon_gestu`) - wybór zrobiony w tym oknie przepadłby
         bez śladu, a następny gest trafiłby w cel, którego człowiek nie wskazał. `NoSelection` trzyma
         zaznaczenie, które widać, i nie przyjmuje nowego (klik, Shift, Ctrl+A); kod stawia zaznaczenie
-        dalej (`_przywroc_zaznaczenie` idzie przez model zaznaczenia, nie przez tryb widoku)."""
+        dalej (`_przywroc_zaznaczenie` idzie przez model zaznaczenia, nie przez tryb widoku).
+        Kursor zajętości nad tabelą mówi, że klik w tym oknie nic nie zaznaczy - bez niego klik
+        przepadał bez sygnału. Panel Rodowód gaśnie tą samą drogą (`_sync_lineage_busy`)."""
         self._sync_edycji()
         self._sync_akcji_zbioru()
-        self.table.setSelectionMode(QAbstractItemView.NoSelection if self._zbior_w_drodze()
+        self._sync_lineage_busy()
+        w_drodze = self._zbior_w_drodze()
+        self.table.setSelectionMode(QAbstractItemView.NoSelection if w_drodze
                                     else QAbstractItemView.ExtendedSelection)
+        if w_drodze:
+            self.table.viewport().setCursor(Qt.BusyCursor)
+        else:
+            self.table.viewport().unsetCursor()
 
     def _sync_akcji_zbioru(self):
         """Akcje na CAŁYM widoku (Podgląd/Do stagingu makra i renamu, „Wydaj na stół…") ze stanu:
@@ -3317,7 +3370,7 @@ class FramesView(QWidget):
         wypchnięcie celu jest wręcz REGUŁĄ, bo wycofanie zdejmuje klatkę z kubełków roboczych -
         a zdanie, które „bywa jedynym śladem", milczało o tym, gdzie te klatki się podziały."""
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
-        self._recepta_gestu = None          # recepta poprzedniego gestu przestaje obowiązywać
+        self._zacznij_gest()                # recepta poprzedniego gestu przestaje obowiązywać
         msg = i18n.t(klucz, done=gest.done, total=gest.done + gest.skipped)
         for sufiks, n in gest.skipped_breakdown:
             if n:
@@ -3332,9 +3385,8 @@ class FramesView(QWidget):
             # „a plik wrócił", zniknięte, brakujące kopie) - plakietka ma to wiedzieć bez wejścia
             # w Porządki. `refresh_counts` nie mówi na pasek stanu.
             self.stan_porzadkow_changed.emit()
-            self.refresh(w_tle=True, potem=partial(
-                self._ogon_gestu, msg, zaznaczone, recepta=gest.frame_ids, odwrot=odwrot,
-                ts=queries.last_hand_ts(self.con)))
+            self._przeladuj_po_gescie(msg, zaznaczone, recepta=gest.frame_ids, odwrot=odwrot,
+                                      ts=queries.last_hand_ts(self.con))
             return
         self.status_message.emit(msg)
         self._ustaw_recepte_gestu(gest.frame_ids, odwrot)
@@ -3385,7 +3437,7 @@ class FramesView(QWidget):
         `(before, after)` z klingi obok recepty, a `_Odwrot` uwag wskazuje metody, które z niej
         czytają. Gest, który niczego nie zmienił (treść już była), recepty nie dostaje."""
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
-        self._recepta_gestu = None
+        self._zacznij_gest()
         klucz = "grid.notes.set_done" if after is not None else "grid.notes.cleared_done"
         msg = i18n.t(klucz, changed=len(gest.changed),
                      total=len(gest.changed) + len(gest.unchanged))
@@ -3393,9 +3445,8 @@ class FramesView(QWidget):
             self._migawka_uwag = (dict(gest.before), after)
             # Uwaga bywa składnikiem zbioru (`note_query`), więc gest potrafi wypchnąć cel z widoku
             # - ten sam pomiar i człon, co na osiach zaznaczenia, w tym samym ogonie po składzie.
-            self.refresh(w_tle=True, potem=partial(
-                self._ogon_gestu, msg, zaznaczone, recepta=gest.changed, odwrot=_ODWROT_UWAG,
-                ts=queries.last_hand_ts(self.con)))
+            self._przeladuj_po_gescie(msg, zaznaczone, recepta=gest.changed, odwrot=_ODWROT_UWAG,
+                                      ts=queries.last_hand_ts(self.con))
             return
         self.status_message.emit(msg)
         self._ustaw_recepte_gestu(())
@@ -3427,7 +3478,7 @@ class FramesView(QWidget):
             self._ustaw_recepte_gestu(())
             return
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
-        self._recepta_gestu = None
+        self._zacznij_gest()
         try:
             # Odczyt wyżej jest PREZENTACJĄ (zdanie „nie ma czego cofać"); prawdę rozstrzyga klinga
             # pod blokadą - `expected` zatrzymuje cofnięcie na klatce, którą w międzyczasie zmieniło
@@ -3440,7 +3491,7 @@ class FramesView(QWidget):
             return
         msg = i18n.t("grid.notes.restored", changed=len(gest.changed))
         if gest.changed:
-            self.refresh(w_tle=True, potem=partial(self._ogon_gestu, msg, zaznaczone, recepta=()))
+            self._przeladuj_po_gescie(msg, zaznaczone, recepta=())
             return
         self.status_message.emit(msg)
         self._ustaw_recepte_gestu(())
@@ -3585,7 +3636,14 @@ class FramesView(QWidget):
         wiersz pod kursorem), ZANIM cokolwiek zaznaczy - prawy klik na zwykłej klatce ma zostać
         niczym, a nie przestawiać zaznaczenia. Tak samo pyta, czy wskazana JEDNA klatka czeka na
         kopię wiodącą (podmenu „Ta kopia prowadzi", AR-23); w perspektywach kopii podmenu stoi
-        zawsze."""
+        zawsze.
+
+        ZBIÓR W DRODZE - MENU NIE POWSTAJE (AR-84). Zaznaczenie stoi wtedy w `NoSelection`, więc
+        „wiersz pod kursorem staje się zaznaczeniem" nic nie robi, a pozycje liczyłyby stan ze
+        starego zaznaczenia: „Zostaw tę wersję" kopiowała do schowka ścieżki wersji, którą człowiek
+        właśnie wskazał do zostawienia. Odmowa mówi to zdaniem na pasku."""
+        if self._odmowa_w_drodze():
+            return
         idx = self.table.indexAt(pos)
         sm = self.table.selectionModel()
         pod_kursorem = (self.model._rows[idx.row()] if idx.isValid() else None)
@@ -3692,8 +3750,7 @@ class FramesView(QWidget):
         if g.observatory_moved:
             self.observatory_axis_changed.emit()
         self.stan_porzadkow_changed.emit()
-        self.refresh(w_tle=True, potem=partial(
-            self._ogon_gestu, supersede.zdanie_przeniesienia(g), ids, poza=False))
+        self._przeladuj_po_gescie(supersede.zdanie_przeniesienia(g), ids, poza=False)
 
     # ---- KOPIA WIODĄCA (AR-4, AR-23): „Ta kopia prowadzi" ----
     # Gdy obecne kopie klatki mówią różnie albo klatka mówi głosem kopii, której już nie ma, kopię
@@ -3900,8 +3957,8 @@ class FramesView(QWidget):
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
         klucz = "grid.version.kept_done" if keep else "grid.version.reopened_done"
         self.stan_porzadkow_changed.emit()
-        self.refresh(w_tle=True, potem=partial(
-            self._ogon_gestu, i18n.t_plural(klucz, len(grupa["frame_ids"])), zaznaczone, poza=False))
+        self._przeladuj_po_gescie(i18n.t_plural(klucz, len(grupa["frame_ids"])), zaznaczone,
+                                  poza=False)
 
     def _zdanie_blokady_werdyktem(self):
         """Powód wygaszenia „Zostaw tę wersję" w grupie z werdyktem - z nazwą drogi wyjścia."""
@@ -3919,6 +3976,8 @@ class FramesView(QWidget):
         zostawianego (`queries.keep_version_plan`); pochodne tej wersji i członkowie bez dowodu
         zostają, a zdanie liczy tych drugich, żeby cisza schowka o nich nie udawała, że ich nie ma.
         Separator `\\n` - Qt zamienia go w schowku Windows na CRLF."""
+        if self._odmowa_w_drodze():                      # druga linia za menu (`_on_table_menu`)
+            return
         wiersze = self._selected_data_rows()
         if len(wiersze) != 1:
             self.status_message.emit(i18n.t("grid.version.select_one"))
@@ -4095,14 +4154,13 @@ class FramesView(QWidget):
 
         Szuflada nie czyta zbioru - dostaje wynik od razu; zaznaczenie, człon, zdanie i recepta idą
         ogonem po składzie w tle (`_ogon_gestu`, AR-84)."""
-        self._recepta_gestu = None          # recepta poprzedniego gestu przestaje obowiązywać
+        self._zacznij_gest()                # recepta poprzedniego gestu przestaje obowiązywać
         self._refresh_drawer()
         self.drawer.set_result(msg)
         przed = self._wynik_gestu_zapisu[0] if self._wynik_gestu_zapisu is not None else ""
         self._wynik_gestu_zapisu = (przed, msg)
         self.stan_porzadkow_changed.emit()
-        self.refresh(w_tle=True, potem=partial(self._ogon_gestu, msg, cel, recepta=cel,
-                                               ts=queries.last_hand_ts(self.con)))
+        self._przeladuj_po_gescie(msg, cel, recepta=cel, ts=queries.last_hand_ts(self.con))
 
     def _zdejmij_wynik_gestu_zapisu(self):
         """Zmiana perspektywy zdejmuje z szuflady wynik gestu izolacji (AR-30 (5)) i oddaje jej tekst
@@ -4407,7 +4465,10 @@ class FramesView(QWidget):
         łapie `_install_undo` w chwili commitu (`_undo_commit_id`) - edycja nie zakłada trzeciego trybu.
 
         Odmowa (zajętość, staging nazw, bramka celu albo karty) mówi powód na pasku i niczego nie
-        zapisuje. Druga edycja tej samej karty ZASTĘPUJE pierwszą (także wpis makra tej karty)."""
+        zapisuje. Druga edycja tej samej karty ZASTĘPUJE pierwszą (także wpis makra tej karty).
+        Edytor otwarty przed składem w tle zatwierdza w jego trakcie - żeton (`_podbij_zeton`)
+        chroni to zdanie przed ogonem starszego gestu."""
+        self._podbij_zeton()
         zajety = self._powod_zajetosci()
         if zajety is not None:
             self.status_message.emit(i18n.t(zajety))
@@ -4588,8 +4649,7 @@ class FramesView(QWidget):
         self.drawer.end_progress()
         self.drawer.set_count(self._active_pending_count(), result=i18n.t("grid.wb.error", msg=msg))
         # Zdanie po przyłożeniu zbioru składanego w tle - raport wczytania by je przykrył (AR-84).
-        self.refresh(w_tle=True, potem=partial(
-            self.status_message.emit, i18n.t("grid.wb.failed", op=op, msg=msg)))
+        self._przeladuj_po_gescie(i18n.t("grid.wb.failed", op=op, msg=msg), poza=False)
         self._refresh_drawer()
         # Wyjątek w ŚRODKU operacji nie mówi, ile plików zdążyło się zmienić (każdy plik to osobny
         # zapis), a przerwany zapis w miejscu sam jest wierszem Porządków (kopia izolowana) - więc
@@ -4635,8 +4695,7 @@ class FramesView(QWidget):
         self.model.set_preview({})
         # Baza odświeżona - grid pokaże nowe wartości po składzie w tle; zdanie po przyłożeniu,
         # inaczej raport wczytania by je przykrył (AR-84).
-        self.refresh(w_tle=True, potem=partial(
-            self.status_message.emit, i18n.t("grid.wb.status", summary=summary)))
+        self._przeladuj_po_gescie(i18n.t("grid.wb.status", summary=summary), poza=False)
         self._refresh_drawer()
         # Karta w pliku to zeznanie klatki (`header`, `cards`), a z niego liczą się wiersze Porządków
         # („Nagłówek inny niż folder", kopie niezgodne…) - więc commit, który COKOLWIEK podmienił,
@@ -4706,8 +4765,7 @@ class FramesView(QWidget):
             self._undo_mode = None
             self.drawer.set_commit_actions_visible(True)  # przywróć akcje po cofnięciu (#5)
             self.drawer.set_count(0, result=msg)
-        self.refresh(w_tle=True, potem=partial(               # zdanie po przyłożeniu (AR-84)
-            self.status_message.emit, i18n.t("grid.wb.undo_status", msg=msg)))
+        self._przeladuj_po_gescie(i18n.t("grid.wb.undo_status", msg=msg), poza=False)   # AR-84
         self._refresh_drawer()                           # honest: odbij pending drugiej klingi (wiz #3b)
         # Lustro commitu: zeznanie wróciło (patrz `_after_commit`). `failed` też rusza plakietkę -
         # cofnięcie w miejscu kończy się nim przy kopii izolowanej, a wtedy zmienia się wiersz
@@ -4863,8 +4921,8 @@ class FramesView(QWidget):
         self.model.set_preview({})
         self._preview_owner = None
         # Baza odświeżona - grid pokaże nowe ścieżki po składzie w tle, zdanie po przyłożeniu (AR-84).
-        self.refresh(w_tle=True, potem=partial(
-            self.status_message.emit, i18n.t("grid.rename.status_summary", summary=summary)))
+        self._przeladuj_po_gescie(i18n.t("grid.rename.status_summary", summary=summary),
+                                  poza=False)
         self._refresh_drawer()
         if res.applied:                                  # ogon zapisu → plakietka (definicja sygnału)
             self.stan_porzadkow_changed.emit()
@@ -4909,8 +4967,7 @@ class FramesView(QWidget):
             self._undo_btn.setVisible(False)
             self.drawer.set_commit_actions_visible(True)  # przywróć akcje po cofnięciu (#5)
             self.drawer.set_count(0, result=msg)
-        self.refresh(w_tle=True, potem=partial(               # zdanie po przyłożeniu (AR-84)
-            self.status_message.emit, i18n.t("grid.rename.undo_status", msg=msg)))
+        self._przeladuj_po_gescie(i18n.t("grid.rename.undo_status", msg=msg), poza=False)  # AR-84
         self._refresh_drawer()
         if res.restored or res.failed:                   # lustro commitu renamu; błąd mógł przenieść plik
             self.stan_porzadkow_changed.emit()

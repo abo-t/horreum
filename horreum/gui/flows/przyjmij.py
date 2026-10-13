@@ -218,11 +218,9 @@ class PrzyjmijView(QWidget):
             self._render()
 
     def _odcisk_stanu(self):
-        """Para liczników SQLite tego połączenia - ten sam klucz zmiany co pamięć korzenia
-        archiwum (`resolver.library_root_from_db`): `total_changes` widzi zapisy TYM połączeniem
-        (gesty Zbiorów i tej strony idą przez nie), `PRAGMA data_version` - zatwierdzone przez
-        KAŻDE inne (wątki zapisu, Dostawa). Odczyt <0,1 ms, bez zaufania do eventów."""
-        return (self.con.total_changes, self.con.execute("PRAGMA data_version").fetchone()[0])
+        """Odcisk bazy tego połączenia (`queries.odcisk_bazy` - jeden właściciel klucza zmiany;
+        gesty Zbiorów i tej strony idą przez to połączenie, wątki zapisu widzi `data_version`)."""
+        return queries.odcisk_bazy(self.con)
 
     def _sync_podpis_logu(self):
         """Log przebiegu pod panelem dostaje podpis „Przebieg z HH:MM (stan sprzed Twoich zmian)”,
@@ -246,10 +244,18 @@ class PrzyjmijView(QWidget):
         raport; każdy inny etap tylko go przelicza - `Rozwiąż` po naprawie nagłówka zmienia, które
         klatki tej dostawy mają obiekt, ale dostawą nie jest. Odmowa kafla gaśnie: bieg, który ją
         spowodował, właśnie się skończył. Odcisk stanu bierze się TU, po zapisach wątku tła
-        i po odświeżeniu widoków gospodarza - od tej chwili zmiana stanu to gest po przebiegu."""
+        i po odświeżeniu widoków gospodarza - od tej chwili zmiana stanu to gest po przebiegu.
+
+        Przebieg, który NIE RUSZYŁ (`refused`: źródło niedostępne, guard serialu), odcisku nie
+        dostaje: jego log mówi „nie wykonano” i nie opisuje żadnego stanu, więc podpis „stan sprzed
+        Twoich zmian” nad nim byłby nieprawdą - gest po nim podpisu nie stawia."""
         self.lbl_odmowa.setVisible(False)
-        self._odcisk_przebiegu = self._odcisk_stanu()
-        self._godzina_przebiegu = godzina_dostawy(zapis["since"])
+        if zapis["refused"]:
+            self._odcisk_przebiegu = self._godzina_przebiegu = None
+            self.pipeline_view.naglowek_przebiegu(None)
+        else:
+            self._odcisk_przebiegu = self._odcisk_stanu()
+            self._godzina_przebiegu = godzina_dostawy(zapis["since"])
         if zapis["stage"] == "all":
             self._zapis = zapis
             self._until = self._now()

@@ -20,7 +20,7 @@ def _linia(**pola):
 
 def _nie_wykonano(powod):
     """Rama linii z katalogu (bieżący język) - test sprawdza zdanie powodu, nie ramę."""
-    return i18n.t("pipeline.fmt.presence.not_done", reason=powod)
+    return i18n.t("pipeline.fmt.not_done", reason=powod)
 
 
 _PRZYPADKI = [

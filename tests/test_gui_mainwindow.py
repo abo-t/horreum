@@ -757,6 +757,52 @@ def test_gest_osi_przy_niewidocznej_osi_obiektu_przeladowuje_ja_przy_pokazaniu(q
             assert _kolejka(v) == _kolejka(swiezy) != przed, "kolejka po wejściu = stan po geście"
         finally:
             swiezy.deleteLater()
+        # Droga z KUBEŁKIEM sama przeładowuje kolejkę (`_zaznacz_kubelek`) - pokazanie po obrocie
+        # pętli widzi zdjęty znacznik i nie liczy drugi raz tego samego stanu.
+        win.tasks_view._on_back()
+        win._show_view(NAV_ZBIORY)
+        grid.refresh()
+        grid._przywroc_zaznaczenie([fid])
+        grid._on_object_restore()
+        assert v._nieaktualny
+        przed_kubelkiem = len(odswiezenia)
+        win._show_view(NAV_PORZADKI)
+        win.tasks_view.tasks.itemClicked.emit(_task_item(win, "config_review_frames"))
+        QApplication.processEvents()
+        assert len(odswiezenia) == przed_kubelkiem + 1, odswiezenia
+    finally:
+        win.close()
+
+
+def test_wejscie_w_Porzadki_bez_zmiany_bazy_nie_liczy_licznikow(qapp, tmp_path, monkeypatch):
+    """AR-84: wejście w Porządki liczyło liczniki synchronicznie (0,7-1,9 s na kopii pf4), choć tło
+    po geście już je przeliczyło. Odcisk bazy (`queries.odcisk_bazy`) bez zmiany od ostatniego
+    przyłożonego rachunku = lista bez rachunku; zapis z DRUGIEGO połączenia (jak worker Dostawy)
+    zmienia odcisk i wejście liczy od nowa - prawda na wejściu.
+
+    Falsyfikator: `_on_nav_changed` woła `refresh_counts()` wprost → rachunek przy każdym wejściu."""
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    try:
+        rachunki = []
+        prawdziwe = queries.tasks_state
+        monkeypatch.setattr(queries, "tasks_state", lambda c: rachunki.append(1) or prawdziwe(c))
+        przed = _task_row(win, "unresolved_lights")
+        win._show_view(NAV_PORZADKI)
+        assert rachunki == [], "baza bez zmian od montażu - bez rachunku"
+        win._show_view(NAV_DOM)
+        con = db.connect(path)
+        try:
+            fid = con.execute(
+                "SELECT id FROM frame WHERE object_id IS NULL AND kind = 'light' ORDER BY id LIMIT 1"
+            ).fetchone()[0]
+            repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                                    kind="deep_sky", frame_ids=[fid], now=NOW)
+        finally:
+            con.close()
+        win._show_view(NAV_PORZADKI)
+        assert rachunki == [1], "zapis drugiego połączenia - wejście liczy od nowa"
+        assert _task_row(win, "unresolved_lights") != przed, "lista mówi o stanie po zapisie"
     finally:
         win.close()
 

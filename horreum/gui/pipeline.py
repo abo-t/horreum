@@ -408,7 +408,10 @@ _STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks"
 # nowy etap pochodny wchodzi do napisu sam. Przed nimi uzupełnienia `derive.adopt_stages` (biegną,
 # gdy mają kandydatów - wtedy w tej kolejności), po nich delta i obecność (zawsze DRY). Kolejność
 # całości przypina test pełnego łańcucha z kandydatami każdego etapu uzupełnień.
-ETAPY_PRZYJMIJ_NOWE = ("scan", "copy_facts", "adopt_testimony", "stack_history",
+# ETAPY UZUPEŁNIEŃ w kolejności `derive.adopt_stages`: rdzeń pomija w ciszy etap bez kandydatów,
+# a log mówi wtedy „[etap] nic do zrobienia” (`PipelineView._domknij_uzupelnienia`, Z18).
+ETAPY_UZUPELNIEN = ("copy_facts", "adopt_testimony", "stack_history")
+ETAPY_PRZYJMIJ_NOWE = ("scan", *ETAPY_UZUPELNIEN,
                        *(nazwa for nazwa, _fn in derive.DERIVED_STAGES), "delta", "presence")
 
 # Ile ścieżek nieprzeczytanych katalogów sekcja niekompletnego przebiegu wylicza z imienia (E4-7).
@@ -450,12 +453,25 @@ def _stage_label(name):
     return i18n.t(key) if key else name
 
 
+def _nazwa_etapu(name):
+    """Nazwa etapu w środku zdania - `_stage_label` od małej litery. JEDNO słowo etapu dla napisu
+    „Przyjmij nowe (…)” i dla nagłówka `[etap]` linii logu: dawniej log mówił „[grupuj]”, a przycisk
+    „grupowanie” (Z18)."""
+    etykieta = _stage_label(name)
+    return etykieta[:1].lower() + etykieta[1:]
+
+
+def naglowek_etapu(name):
+    """`[etap] ` - nagłówek każdej linii logu Dostawy (`pipeline.fmt.head`, AR-115). Klucze linii
+    niosą samą treść; nagłówek dokleja wyłącznie ta funkcja."""
+    return i18n.t("pipeline.fmt.head", stage=_nazwa_etapu(name))
+
+
 def etykieta_przyjmij_nowe():
-    """Napis złotej akcji: nazwa „Przyjmij nowe” i łańcuch `ETAPY_PRZYJMIJ_NOWE` nazwami etapów
-    z katalogu (te same słowa co „… w toku” i pasek stanu), od małej litery w środku zdania.
-    Nazwa bez łańcucha (`pipeline.receive`) zostaje dla zdań, które wskazują akcję."""
-    lancuch = " → ".join(e[:1].lower() + e[1:]
-                         for e in (_stage_label(n) for n in ETAPY_PRZYJMIJ_NOWE))
+    """Napis złotej akcji: nazwa „Przyjmij nowe” i łańcuch `ETAPY_PRZYJMIJ_NOWE` słowami etapów
+    z `_nazwa_etapu` - tymi samymi, które stoją w nagłówkach linii logu. Nazwa bez łańcucha
+    (`pipeline.receive`) zostaje dla zdań, które wskazują akcję."""
+    lancuch = " → ".join(_nazwa_etapu(n) for n in ETAPY_PRZYJMIJ_NOWE)
     return i18n.t("pipeline.receive_chain", name=i18n.t("pipeline.receive"), chain=lancuch)
 
 
@@ -553,6 +569,7 @@ class PipelineView(QWidget):
         self._parametry_przebiegu = None   # (etap, parametry) przebiegu w toku albo ostatniego
         self._parametry_ponowienia = None  # zamrożone przy liście nieprzeczytanych („Skanuj ponownie”)
         self._czeka_rodowod = 0            # „czeka na Ciebie” z rodowodu stosów TEGO logu (AR-115)
+        self._uzupelnienia = None          # etapy uzupełnień, które ten bieg ma jeszcze przed sobą
         # Zapis OSTATNIEGO przebiegu dla powierzchni spoza widoku (`run_finished`): raport Przyjmij
         # liczy „co przyszło” od `since`, a liczby skanu bierze z `results["scan"]`.
         self.last_run = self._pusty_zapis_przebiegu()
@@ -1152,13 +1169,10 @@ class PipelineView(QWidget):
         ta sama sekwencja co `_on_receive`, ale z POWODEM ODMOWY (string z katalogu) zamiast
         ciszy - kafel, który nic nie zrobił, musi powiedzieć dlaczego. `None` = sekwencja ruszyła
         albo okno zapytało o katalog (pierwsza dostawa; decyzja należy do człowieka). Bramki
-        te same, co w `run_stage`, w tej samej kolejności."""
-        if self._db_path is None:
-            return i18n.t("pipeline.refuse.no_db")
-        if self._thread is not None:
-            return i18n.t("pipeline.refuse.delivery_running")
-        if self._writeback_busy:
-            return i18n.t("pipeline.refuse.writeback")
+        z `powod_odmowy_biegu`."""
+        powod = self.powod_odmowy_biegu()
+        if powod is not None:
+            return powod
         source = self._settings().value("pipeline/last_source", None)
         if not source:
             self._pick_and_scan("all")
@@ -1169,15 +1183,26 @@ class PipelineView(QWidget):
     def run_all_on(self, root):
         """Sekwencja „all” na PODANYM korzeniu BEZ zapamiętania go jako źródła „Przyjmij nowe”:
         żniwa masterów skanują poddrzewo biblioteki kalibracji, a źródłem Dostawy ma zostać
-        archiwum. Powód odmowy (jak `run_stage`) albo `None`, gdy ruszyło; sonda źródła i serial
-        jak zawsze w wątku tła."""
+        archiwum. Powód odmowy (`powod_odmowy_biegu`) albo `None`, gdy ruszyło; sonda źródła
+        i serial jak zawsze w wątku tła."""
+        powod = self.powod_odmowy_biegu()
+        if powod is not None:
+            return powod
+        self._start_scan_sequence("all", root)
+        return None
+
+    def powod_odmowy_biegu(self):
+        """JEDYNY właściciel bramki złotej akcji dla wejść spoza widoku: powód, dla którego
+        sekwencja „all” nie może ruszyć TERAZ (brak bazy, bieg Dostawy w toku, zapis nagłówków do
+        plików), albo `None`. Woła ją `receive`, `run_all_on` i gospodarz PRZED gestem, który
+        kończy się biegiem - okno żniw: „Zamknij i przyjmij” to `run_all_on`, a odmowa po
+        przyjęciu gubiła rodowód dokładny wciągniętych stosów (zostaje tylko w folderze wydania)."""
         if self._db_path is None:
             return i18n.t("pipeline.refuse.no_db")
         if self._thread is not None:
             return i18n.t("pipeline.refuse.delivery_running")
         if self._writeback_busy:
             return i18n.t("pipeline.refuse.writeback")
-        self._start_scan_sequence("all", root)
         return None
 
     def _pick_and_scan(self, stage):
@@ -1202,6 +1227,7 @@ class PipelineView(QWidget):
         # „stan sprzed Twoich zmian” mówią o przebiegu, którego raport właśnie znika.
         self._pokaz_nieprzeczytane(())
         self._czeka_rodowod = 0
+        self._uzupelnienia = None
         self.box_lineage.setVisible(False)
         self.lbl_summary_head.setVisible(False)
         self._etap_bez_zrodla = None
@@ -1397,6 +1423,8 @@ class PipelineView(QWidget):
             # Parametry ZAMROŻONE przy starcie dla powtórki („Skanuj ponownie”): korzeń, litera
             # dysku i poziom. Serialu nie niosą - powtórka mierzy go świeżo w wątku tła (R#7).
             self._parametry_przebiegu = (stage, dict(params))
+        if stage == "copy_facts":                  # gest bez skanu: uzupełnienia od pierwszego etapu
+            self._uzupelnienia = list(ETAPY_UZUPELNIEN)
         self._worker = PipelineWorker(self._db_path, now_fn=self._now)
         self._worker.configure(stage, **params)
         self._thread = QThread(self)
@@ -1428,6 +1456,9 @@ class PipelineView(QWidget):
         self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        # Bieg skończony bez błędu i przerwania: uzupełnienia, do których nikt już nie doszedł
+        # (gest „Zbierz fakty kopii” bez przejęcia, zapis „Oznacz zniknięte”), też biegły.
+        self._domknij_uzupelnienia(None)
         # MIGAWKA PRZED `running_changed(False)`: gospodarz odświeża pod nią widoki fazą, która
         # doręcza zdarzenia (`processEvents`), więc do chwili emisji mógł już ruszyć NOWY przebieg
         # i wyzerować `last_run` - słuchacz dostałby pusty zapis cudzego biegu zamiast swojego.
@@ -1467,6 +1498,7 @@ class PipelineView(QWidget):
     @Slot(str)
     def _on_stage_started(self, name):
         # skan: pasek nieokreślony do 1. progresu; etap masowy: busy spinner (bez progresu per-wiersz)
+        self._domknij_uzupelnienia(name)
         self.bar.setRange(0, 0)
         self.lbl_counts.setText(i18n.t("pipeline.stage_running", stage=_stage_label(name)))
 
@@ -1481,6 +1513,12 @@ class PipelineView(QWidget):
             self._update_vanished_box(result)
         if name in ("scan", "stacks"):
             self._pokaz_nieprzeczytane(result.unreadable_dirs)
+        # Po etapie, za którym rdzeń puszcza uzupełnienia (`derive.adopt_stages`): skan „Przyjmij
+        # nowe”, droga „Stosy”, zapis „Oznacz zniknięte” (tylko zapis, który doszedł do końca).
+        bieg = self.last_run["stage"]
+        if ((name, bieg) in (("scan", "all"), ("stacks", "stacks"))
+                or (name, bieg) == ("presence", "presence-apply") and result.aborted is None):
+            self._uzupelnienia = list(ETAPY_UZUPELNIEN)
         if name == "stack_lineage":
             self._czeka_rodowod = _czekajace_na_reke(result)    # wiersz liczy `_sync_rodowod` po biegu
         self.stage_status.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
@@ -1497,8 +1535,10 @@ class PipelineView(QWidget):
         etykieta = _stage_label(name)
         self.last_run["results"][name] = summary
         self.last_run["cancelled"] = name
+        self._uzupelnienia = None                       # dalsze etapy łańcucha nie biegły
         if name == "scan":
-            self._append_summary(i18n.t("pipeline.scan_cancelled", n=summary.files))
+            self._append_summary(naglowek_etapu("scan")
+                                 + i18n.t("pipeline.scan_cancelled", n=summary.files))
         self._append_summary(self._format_result(name, summary))
         if name in ("scan", "stacks"):
             # Przerwany przebieg też mówi KTÓRE: linia raportu wyżej liczy te same katalogi.
@@ -1527,10 +1567,8 @@ class PipelineView(QWidget):
         powod = i18n.t("pipeline.source.unreachable", root=root)
         # Przebieg, który nie ruszył, nie może wyglądać w zapisie jak pusty sukces (zero klatek).
         self.last_run["refused"] = powod
-        klucz = {"scan": "pipeline.fmt.scan_not_done", "all": "pipeline.fmt.scan_not_done",
-                 "stacks": "pipeline.fmt.stacks_not_done"}.get(
-                     stage, "pipeline.fmt.presence.not_done")
-        self._append_summary(i18n.t(klucz, reason=powod))
+        etap = {"all": "scan"}.get(stage, stage if stage in ("scan", "stacks") else "presence")
+        self._append_summary(naglowek_etapu(etap) + i18n.t("pipeline.fmt.not_done", reason=powod))
         zdanie = i18n.t("pipeline.source.unreachable_pick", root=root)
         self._presence_params = None
         self.lbl_vanished.setText(zdanie)
@@ -1553,6 +1591,7 @@ class PipelineView(QWidget):
 
     @Slot(str, str)
     def _on_failed(self, name, msg):
+        self._uzupelnienia = None                       # dalsze etapy łańcucha nie biegły
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
@@ -1568,6 +1607,11 @@ class PipelineView(QWidget):
         self.lbl_summary.setText("\n".join(self._summary_lines))
 
     def _format_result(self, name, r):
+        """Linia logu etapu: nagłówek `[etap]` (`naglowek_etapu`) i treść formatera etapu
+        (`_tresc_wyniku`) - formatery nie doklejają nagłówka same, więc forma jest jedna."""
+        return naglowek_etapu(name) + self._tresc_wyniku(name, r)
+
+    def _tresc_wyniku(self, name, r):
         if name == "scan":
             return self._format_scan(r)
         if name == "group":
@@ -1608,7 +1652,7 @@ class PipelineView(QWidget):
             czesci.append(i18n.t("pipeline.fmt.adopt.failed", n=s.failed))
         if s.remaining:
             czesci.append(i18n.t("pipeline.fmt.adopt.remaining", n=s.remaining))
-        return i18n.t("pipeline.fmt.adopt.prefix") + " · ".join(czesci)
+        return " · ".join(czesci)
 
     def _format_stack_history(self, s):
         """Linia uzupełnienia historii stosów (0034): ile nagłówków stosów przeczytano i zapisano do
@@ -1642,7 +1686,7 @@ class PipelineView(QWidget):
             czesci.append(i18n.t("pipeline.fmt.copy_facts.failed", n=s.failed))
         if s.remaining:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.remaining", n=s.remaining))
-        return i18n.t("pipeline.fmt.copy_facts.prefix") + " · ".join(czesci)
+        return " · ".join(czesci)
 
     def _format_stack_lineage(self, s):
         """Linia raportu rodowodu stosów (I-2d). Mówi TRZY rzeczy naraz i żadnej nie da się pominąć:
@@ -1682,7 +1726,7 @@ class PipelineView(QWidget):
         # stosu dawałby przebieg o zerowej delcie i milczącym oknie — nieodróżnialny od bezczynności.
         if s.kept_proven:
             czesci.append(i18n.t("pipeline.fmt.slin.kept_proven", n=s.kept_proven))
-        return i18n.t("pipeline.fmt.slin.prefix") + " · ".join(czesci)
+        return " · ".join(czesci)
 
     def _format_stacks(self, s):
         """Linia raportu drogi „Stosy". ODMOWY mają własne człony i pojawiają się TYLKO, gdy są
@@ -1704,7 +1748,7 @@ class PipelineView(QWidget):
         # wyłącznie w konsoli nie naprawia niczego dla człowieka, który patrzy na ekran.
         if s.unreadable_dirs:
             czesci.append(i18n.t("pipeline.fmt.stacks.unreadable", n=len(s.unreadable_dirs)))
-        return i18n.t("pipeline.fmt.stacks.prefix") + " · ".join(czesci)
+        return " · ".join(czesci)
 
     def _format_presence(self, s):
         """Linia raportu passa obecności. Zero zniknięć MUSI być zdaniem („nic nie znikło"), nie
@@ -1717,7 +1761,7 @@ class PipelineView(QWidget):
                 powod = self._abort_text(s)
             else:
                 powod = s.aborted        # zdanie złożone już w GUI z katalogu (pominięty bez woluminu)
-            return i18n.t("pipeline.fmt.presence.not_done", reason=powod)
+            return i18n.t("pipeline.fmt.not_done", reason=powod)
         if s.cancelled:
             return i18n.t("pipeline.fmt.presence.cancelled")
         czesci = [i18n.t("pipeline.fmt.presence.scope", scoped=s.scoped, walked=s.walked)]
@@ -1740,7 +1784,7 @@ class PipelineView(QWidget):
                 # Złota akcja pod hamulcem progowym nie liczy potwierdzeń (bez kosztu `stat`) -
                 # recepta mówi, który gest je policzy i otworzy drogę zapisu (AR-50 (2)).
                 czesci.append(i18n.t("pipeline.fmt.presence.brake_recipe"))
-        return i18n.t("pipeline.fmt.presence.prefix") + " · ".join(czesci)
+        return " · ".join(czesci)
 
     @staticmethod
     def _brake_text(s):
@@ -1811,6 +1855,23 @@ class PipelineView(QWidget):
             self._presence_params = None
             self.box_vanished.setVisible(False)
         self._sync_actions()
+
+    def _domknij_uzupelnienia(self, nastepny):
+        """Linie „[etap] nic do zrobienia” dla etapów uzupełnień, które rdzeń pominął w ciszy, bo
+        nie miały kandydatów (Z18) - przed etapem `nastepny`, w kolejności `ETAPY_UZUPELNIEN`.
+        Etap uzupełnień jako `nastepny` biegnie naprawdę (jego linię da wynik), etap spoza nich
+        albo `None` (koniec biegu) domyka cały blok. Bez otwartego bloku nic nie robi: przerwanie
+        i błąd zamykają go bez linii, bo dalsze etapy wtedy nie biegły."""
+        if self._uzupelnienia is None:
+            return
+        biegnie = nastepny in self._uzupelnienia
+        while self._uzupelnienia and self._uzupelnienia[0] != nastepny:
+            etap = self._uzupelnienia.pop(0)
+            self._append_summary(naglowek_etapu(etap) + i18n.t("pipeline.fmt.nothing_to_do"))
+        if biegnie:
+            self._uzupelnienia.pop(0)
+        if not biegnie or not self._uzupelnienia:
+            self._uzupelnienia = None
 
     def _pokaz_nieprzeczytane(self, katalogi):
         """Sekcja 4c - KTÓRE katalogi przebieg pominął (E4-7); jeden właściciel dla skanu Dostawy

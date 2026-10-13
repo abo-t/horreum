@@ -305,7 +305,7 @@ def test_linia_raportu_przejecia_zeznania(qapp, tmp_path):
     v = PipelineView(path, now_fn=lambda: NOW)
     try:
         czysto = v._format_result("adopt_testimony", scan.AdoptSummary(rows=2, read=2, adopted=2))
-        assert czysto == "[zeznanie z nieobecnej kopii] przejęte od ocalałej kopii 2 z 2"
+        assert czysto == "[przejęcie zeznania] przejęte od ocalałej kopii 2 z 2"
         brudno = v._format_result("adopt_testimony", scan.AdoptSummary(
             rows=4, read=3, adopted=1, identity=1, stale=1, failed=1, remaining=3))
         assert "plik to inna klatka 1" in brudno and "zmienione na dysku od skanu 1" in brudno

@@ -750,6 +750,28 @@ def test_portfolio_summarize_i_formatowanie():
     assert portfolio.object_tooltip(summ[2]) == "OIII: 2.0 h"
 
 
+@pytest.mark.parametrize("secs, tekst", [
+    (None, "0.0 h"), (0, "0.0 h"),                   # zero = brak czasu, jak dotąd
+    (1, "< 1 min"), (59, "< 1 min"),                 # materiał krótszy niż minuta - nie „0 min"
+    (60, "1 min"), (240, "4 min"), (359, "6 min"),   # poniżej 0,1 h minutami (Moon/Jupiter)
+    (360, "0.1 h"), (3600, "1.0 h"), (45000, "12.5 h"),
+])
+def test_AR75_format_godzin_ponizej_dziesiatej_godziny_mowi_minutami(secs, tekst):
+    """„0.0 h" przy 503 klatkach Księżyca czytało się jak brak materiału. Poniżej 0,1 h (6 min,
+    najmniejsza niezerowa wartość formatu godzin) czas mówi minutami, poniżej minuty „< 1 min";
+    zero zostaje „0.0 h" - na nim stoi sufiks lightów bez EXPTIME („0.0 h (+3 bez exptime)").
+
+    Falsyfikator: wróć do samego `f"{secs / 3600:.1f} h"` - 240 s daje „0.1 h", 59 s „0.0 h"."""
+    assert portfolio.format_hours(secs) == tekst
+
+
+def test_AR75_minuty_maja_brzmienie_EN():
+    from horreum.gui import i18n
+    i18n.set_lang("en")
+    assert portfolio.format_hours(240) == "4 min"
+    assert portfolio.format_hours(30) == "< 1 min"
+
+
 def test_en_render_portfolio():
     """§5 (rollout drobne): `set_lang('en')` → słownictwo portfela (Qt-wolny) z katalogu — `_NO_FILTER`
     i ogony „bez exptime" trzymają KLUCZE, nie zamrożony PL. Autouse-fixture wraca na PL."""

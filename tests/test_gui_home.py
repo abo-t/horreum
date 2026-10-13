@@ -826,12 +826,61 @@ def test_cofniecie_uwag_z_Domu_mowi_prawde_bez_wychodzenia(qapp, tmp_path, monke
         assert win.stack.currentIndex() == STRONA_DOM, "cofnięcie nie wyprowadza z Domu"
         assert h.last_label.text() == po
         assert h.btn_recepta.isHidden()
-        assert win.statusBar().currentMessage().startswith(
+        assert win.report_label.text().startswith(
             i18n.t("grid.notes.restored", changed=3).split(" · ")[0])
         ostatni = queries.last_hand_gesture(win.con)
         assert ostatni["verbs"] == {"note.cleared": 3}
         assert {r[0] for r in win.con.execute("SELECT reason FROM event WHERE ts = ?",
                                               (ostatni["ts"],))} == {"cofnięcie"}
+    finally:
+        win.close()
+
+
+def test_AR94_Ostatnio_opisuje_gest_RECEPTY_nie_pozniejszy_gest_gdzie_indziej(qapp, tmp_path,
+                                                                             monkeypatch):
+    """AR-94. Dwa gesty w dwóch miejscach przy żywej recepcie: „Uwagi…” w Zbiorach (recepta
+    „Cofnij uwagi”), potem gest ręki zapisany inną drogą (2 pliki przemianowane, jak z Porządków).
+    Dom stawiał przy przycisku zdanie o OSTATNIM geście, a przycisk cofał gest ze Zbiorów. Recepta
+    niesie `ts` swojego gestu, Dom opisuje zdarzenie o tym znaczniku; po zdjęciu recepty zdanie
+    wraca do dziennika (ostatni gest w ogóle).
+
+    Falsyfikator: zdejmij `ts=` z `HomeView._gest_ostatnio` albo z emisji recepty gridu → przy
+    przycisku „Cofnij uwagi” stoi zdanie o przemianowaniu."""
+    from horreum.gui.note_dialog import NoteIntent
+
+    class _OknoUwag:
+        def __init__(self, *, current, frame_count, parent=None):
+            self.intent = None
+
+        def exec(self):
+            self.intent = NoteIntent("set", "chmury")
+            return 1
+
+    i18n.set_lang("pl")
+    monkeypatch.setattr(grid_mod, "NoteDialog", _OknoUwag)
+    path = _s8(tmp_path)
+    win = _pokazane(MainWindow(path, now_fn=_zegar_rosnacy()))
+    try:
+        g, h = win.grid_view, win.home_view
+        win.show_classic()
+        g._przywroc_zaznaczenie(sorted(g._frame_ids)[:3])
+        g._on_notes()
+        assert win._recepta_strumienia.ts is not None, "recepta bez tożsamości gestu"
+        gest_recepty = queries.last_hand_gesture(win.con)
+        assert win._recepta_strumienia.ts == gest_recepty["ts"]
+        _zdarzenia(path, [("2026-10-10T08:00:00+00:00", "user:local", "location.renamed",
+                           f"location:{i}") for i in range(2)])
+        assert queries.last_hand_gesture(win.con)["verbs"] == {"location.renamed": 2}
+
+        _klik_wiersz(win, NAV_DOM)
+        QApplication.processEvents()
+        assert win.stack.currentIndex() == STRONA_DOM
+        assert h.last_label.text() == "Ostatnio (09.10): 3 klatkom zapisano uwagę ·", \
+            "zdanie przy recepcie opisuje gest, którego przycisk nie cofa"
+        assert not h.btn_recepta.isHidden()
+
+        win.grid_view.status_recipe.emit(Recepta([]))        # recepta zdjęta - zdanie z dziennika
+        assert h.last_label.text() == "Ostatnio (10.10): 2 pliki przemianowano"
     finally:
         win.close()
 
@@ -1007,7 +1056,7 @@ def test_przejscia_przy_biegu_Dostawy_i_otwartym_stagingu(okno_ze_stagingiem, mo
         h.tile_przyjmij.click()
         assert win.stack.currentIndex() == STRONA_DOSTAWA
         assert win.pipeline_view._thread is None, "kafel nie startuje biegu"
-        assert win.statusBar().currentMessage() == i18n.t("pipeline.refuse.delivery_running")
+        assert win.report_label.text() == i18n.t("pipeline.refuse.delivery_running")
     finally:
         win._on_pipeline_running(False)
     assert h.tile_wydaj.isEnabled()

@@ -390,12 +390,27 @@ def observatory_axis_events(con, observatory_id=None, limit=200):
 # druga połowa - klatki, którym stanowisko wskazała ręka (tryb ZMIANY i COFNIĘCIA). Lustro pary
 # `config_review_frames`/`config_by_hand_frames`: populacje rozłączne, jedna droga zapisu.
 # Klatka ZASTĄPIONA i WYCOFANA wypadają z obu list z powodu jak tam (robota przeszła na następczynię
-# albo ręka pliku już nie szuka). Rodzaju nie odsiewamy - oś jest KIND-AGNOSTIC.
+# albo ręka pliku już nie szuka).
+#
+# RODZAJ (AR-80, decyzja właściciela 2026-10-07): lista ROBOTY pomija dark i bias z masterami - one
+# nie widzą nieba, więc stanowisko ich nie opisuje i nie ma czego wskazywać. Klinga gestu
+# (`repo.user_assign_observatory`) rodzaju nie odsiewa: wskazanie ręką dalej wolno (CLI `observatory
+# assign`), a lista RĘKI (`observatory_by_hand_frames`) zostaje kind-agnostic, żeby takie wskazanie
+# dało się zmienić i cofnąć. Flaty zostają na liście (sesja z panelem albo niebem o zmierzchu).
+#
+# Zbiór rodzajów idzie od jedynego właściciela `grouper.NO_TELESCOPE_KINDS` (wyprowadzonego
+# z `calibration.KIND_RECIPE`), nie z literału. „Bez osi teleskopu" i „bez nieba" to JEDNA populacja
+# z jednego faktu fizycznego: dark i bias powstają przy zamkniętej migawce albo zaślepionej optyce,
+# więc do matrycy nie dociera światło z optyki ani z miejsca - ani teleskop, ani stanowisko ich nie
+# opisuje. Flat światło z optyki niesie (`on_axis=True`), dlatego stoi na obu osiach naraz. Rodzaj
+# z przepisem, który kiedyś dojdzie do `KIND_RECIPE` z `on_axis=False`, zejdzie z obu osi razem.
 
 
 def observatory_review_frames(con):
-    """Klatki bez stanowiska - jeden wiersz na klatkę: frame_id, kind, filetype, path (pierwsza
-    OBECNA kopia albo NULL), observatory_label (zawsze NULL - kolumna dla wspólnego składacza)."""
+    """Klatki bez stanowiska do wskazania ręką - jeden wiersz na klatkę: frame_id, kind, filetype,
+    path (pierwsza OBECNA kopia albo NULL), observatory_label (zawsze NULL - kolumna dla wspólnego
+    składacza). Bez rodzajów `NO_TELESCOPE_KINDS` (AR-80, zob. nagłówek sekcji). Długość listy jest
+    licznikiem wiersza Porządków „Klatki bez stanowiska" i przycisku „Wskaż stanowisko…"."""
     return con.execute(
         "SELECT f.id AS frame_id, f.kind, f.filetype, l.path, NULL AS observatory_label "
         "FROM frame f "
@@ -404,7 +419,9 @@ def observatory_review_frames(con):
         "WHERE f.observatory_id IS NULL "
         "  AND f.superseded_by IS NULL "
         "  AND f.retired_at IS NULL "
-        "ORDER BY l.path, f.id").fetchall()
+        "  AND f.kind NOT IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.path, f.id",
+        (json.dumps(sorted(NO_TELESCOPE_KINDS)),)).fetchall()
 
 
 def observatory_by_hand_frames(con):
@@ -4506,8 +4523,22 @@ def home_summary(con):
             "nights": r["nights"], "last_night": r["last_night"]}
 
 
-def last_hand_gesture(con):
+def last_hand_ts(con):
+    """Znacznik `ts` ostatniego zdarzenia RĘKI w dzienniku (`actor LIKE 'user%'`, jak
+    `last_hand_gesture`) albo `None`. Tożsamość gestu, który właśnie się zapisał - widok bierze ją
+    po zapisie gestu i wkłada do jego recepty (AR-94). Jeden SELECT po `id DESC LIMIT 1`."""
+    r = con.execute(
+        "SELECT ts FROM event WHERE actor LIKE 'user%' ORDER BY id DESC LIMIT 1").fetchone()
+    return None if r is None else r["ts"]
+
+
+def last_hand_gesture(con, *, ts=None):
     """Ostatni gest RĘKI z dziennika - zdanie Domu „Ostatnio (…): …", gdy w sesji nie ma recepty.
+
+    `ts` ZAWĘŻA do gestu o tym znaczniku (AR-94): przy żywej recepcie Dom opisuje gest, który ona
+    cofa (`Recepta.ts`), a nie ostatni gest w ogóle - po geście w Zbiorach i drugim w Porządkach
+    zdanie mówiłoby o Porządkach obok przycisku, który cofa gest ze Zbiorów. Bez zdarzenia
+    o tym znaczniku - `None`.
 
     GEST TO NIE JEDEN EVENT. Klinga zapisuje gest jednym `now`, więc wszystkie jego eventy mają
     wspólny `ts`; gest na wielu klatkach albo cofnięcie uwag mieszanego zaznaczenia emituje ich
@@ -4535,8 +4566,14 @@ def last_hand_gesture(con):
     Zwraca `None` (dziennik bez gestów ręki) albo dict: ts, actor, verbs (`{verb: liczba}`,
     alfabetycznie), n (wszystkie eventy gestu) i - gdy są - reasons (`{verb: {reason: liczba}}`)
     oraz relocated_dirs (`{reason: liczba}`)."""
-    last = con.execute(
-        "SELECT ts, actor FROM event WHERE actor LIKE 'user%' ORDER BY id DESC LIMIT 1").fetchone()
+    if ts is None:
+        last = con.execute(
+            "SELECT ts, actor FROM event WHERE actor LIKE 'user%' "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+    else:
+        last = con.execute(
+            "SELECT ts, actor FROM event WHERE actor LIKE 'user%' AND ts = ? "
+            "ORDER BY id DESC LIMIT 1", (ts,)).fetchone()
     if last is None:
         return None
     # Grupowanie JAWNYM wyrażeniem, nie aliasem: `event` ma własną kolumnę `reason`, a nazwa

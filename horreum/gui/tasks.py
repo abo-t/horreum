@@ -240,8 +240,10 @@ def _liczniki_osi(con):
         z definicji; klatka bez zeznania i zastąpiona/wycofana poza). Lista pod klikiem
         (`queries.config_review_frames`) jest jego lustrem pinowanym testem.
       * `observatory_review_frames` = długość wejścia gestu „Wskaż stanowisko…"
-        (`queries.observatory_review_frames`) - oś stanowiska jest KIND-AGNOSTIC, więc liczba
-        obejmuje każdy rodzaj, dokładnie tyle, ile okno gestu pokaże.
+        (`queries.observatory_review_frames`) - dokładnie tyle, ile okno gestu pokaże. Dark i bias
+        z masterami (`grouper.NO_TELESCOPE_KINDS`) są poza liczbą i poza oknem (AR-80): nie widzą
+        nieba, więc stanowisko nie jest dla nich robotą; ten sam predykat liczy licznik na
+        przycisku gestu (`ObservatoryAxisView`), więc trzy liczby nie mogą się rozjechać.
       * `object_kept_frames` = `supersede.kept_object_facts` (AR-41).
       * `copy_conflict_open` = klatki „Kopii niezgodnych" BEZ decyzji ręki (AR-23) - robota
         wiersza (`_ROBOTA_Z_PODZBIORU`). Decyzję czyta `queries.hand_testimony_frame_ids` (jeden
@@ -254,7 +256,8 @@ def _liczniki_osi(con):
         (AR-121) - ta sama lista, z której klik bierze przebieg do okna.
 
     Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
-    1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów."""
+    1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów. Po AR-80 (kopia v36,
+    2026-10-13): 1185 bez stanowiska - z 1223 zeszło 38 `master_dark`."""
     niezgodne = queries.copy_conflict_frame_ids(con)
     stan = resolver.review_state(con)
     return {
@@ -539,12 +542,17 @@ class TasksView(QWidget):
             self.pages.setCurrentIndex(action)         # podstrona osi
             if key in _KUBELEK_PODSTRONY:
                 self._zaznacz_kubelek(_KUBELEK_PODSTRONY[key])
+            elif key == "observatory_review_frames":
+                # AR-74: ta sama droga dla osi stanowiska - baza od nowa i gest gotowy pod ręką.
+                self.observatory_view.wejdz_po_wskazanie()
         else:
             self.open_collection.emit(action)          # Zbiory z perspektywą (np. Duplikaty)
 
     def otworz_stanowiska(self):
-        """Podstrona osi obserwatorium - wejście gospodarza (pusty stan planera „bez stanowiska”)."""
+        """Podstrona osi obserwatorium - wejście gospodarza (pusty stan planera „bez stanowiska”).
+        Ta sama robota co wiersz Porządków, więc ta sama droga wejścia: licznik i fokus na geście."""
         self.pages.setCurrentIndex(_PAGE_OBSERVATORY)
+        self.observatory_view.wejdz_po_wskazanie()
 
     def _zaznacz_kubelek(self, tag):
         """Zaznacz kubełek kolejki przeglądu o tagu `tag` - zaznaczenie drąży jego klatki i zapala

@@ -207,6 +207,7 @@ class FramesView(QWidget):
                                     # zaznaczenia przy najbliższym przeładowaniu zbioru (FC-2)
         self._recepta_gestu = None  # `(cel, _Odwrot|None)` ostatniego gestu osi - recepta paska
                                     # składa się z tego STANU przy każdym odświeżeniu (FH-2e)
+        self._ts_recepty = None     # `event.ts` gestu tej recepty - tożsamość dla Domu (AR-94)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -394,6 +395,10 @@ class FramesView(QWidget):
         self.rename_bar.stage.connect(self._on_rename_stage)
         self.rename_bar.cleared.connect(self._on_rename_clear)
         self.rename_bar.sourceChanged.connect(self._refresh_date_echo)
+        self.rename_bar.template_editor.expandedChanged.connect(
+            lambda on: self._settings().setValue(self._KLUCZ_WZORU_RENAMU, on))
+        self.rename_bar.preview.connect(lambda _p: self._zapamietaj_uzycie_wzoru())
+        self.rename_bar.stage.connect(lambda _p: self._zapamietaj_uzycie_wzoru())
 
         self.lineage_bar = LineageBar()                   # trzeci panel stacku (I-2d)
         self.lineage_bar.judged.connect(self._on_lineage_judged)
@@ -1446,12 +1451,12 @@ class FramesView(QWidget):
             # obiecywać kliknięcia, które akurat tego zbioru nie odsłoni.
             msg += self._czlon_poza_widokiem(len(zaznaczone) - wrocilo, zaznaczone)
         # ZDANIE IDZIE PO ODŚWIEŻENIU, nie przed (adjudykacja recenzji S2b). `refresh()` kończy się
-        # własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jeden `showMessage`
-        # paska stanu — emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
+        # własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jedna etykieta
+        # raportu paska stanu - emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
         # dokładnie odwrotny do zamierzonego: rozbicie per fakt user widział WYŁĄCZNIE wtedy, gdy
         # gest niczego nie zapisał (bo wtedy `refresh()` nie leci), a po udanym zapisie — nigdy.
         # KAŻDY FAKT GESTU JEDZIE W TYM JEDNYM ZDANIU, nie drugą emisją. Ta sama pułapka, co wyżej,
-        # tylko od drugiej strony: dwa `emit` w jednym obrocie pętli trafiają w jeden `showMessage`,
+        # tylko od drugiej strony: dwa `emit` w jednym obrocie pętli trafiają w jedną etykietę raportu,
         # więc drugie wymazuje pierwsze (bramka pakietu 0810). Dlatego nagrobek bez pamięci jest
         # członem rozbicia (FC-6), a nie osobnym zdaniem doklejanym przez wołającego.
         self.status_message.emit(msg)
@@ -1472,8 +1477,13 @@ class FramesView(QWidget):
         własny raport i gasił ją dokładnie wtedy, gdy człon drugi stawał się wykonalny. Teraz
         widok pamięta CEL i DROGĘ POWROTU, a `refresh()` składa z nich receptę od nowa - człon
         odsłonięcia znika, gdy cel jest na ekranie, a człon powrotu, gdy nie ma już czego odwracać.
-        `cel=None` zdejmuje receptę (pusta gasi tę z poprzedniego gestu)."""
+        `cel=None` zdejmuje receptę (pusta gasi tę z poprzedniego gestu).
+
+        TOŻSAMOŚĆ GESTU (AR-94) - znacznik ostatniego zdarzenia ręki w dzienniku, czytany TERAZ:
+        wołają nas ogony gestów zaraz po ich zapisie, więc to jest `ts` właśnie zapisanego gestu
+        (klinga pisze gest jednym `now`). Recepta niesie go dalej, a Dom opisuje nim „Ostatnio”."""
         self._recepta_gestu = (tuple(cel), odwrot) if cel else None
+        self._ts_recepty = queries.last_hand_ts(self.con) if cel else None
         self._emituj_recepte_gestu()
 
     def ponow_recepte(self):
@@ -1488,7 +1498,7 @@ class FramesView(QWidget):
         czlony = self._czlony_recepty_gestu()
         if not czlony:
             self._recepta_gestu = None
-        self.status_recipe.emit(_zlacz_recepty(czlony))
+        self.status_recipe.emit(_zlacz_recepty(czlony, self._ts_recepty if czlony else None))
 
     def _czlony_recepty_gestu(self):
         """Człony recepty ostatniego gestu, w KOLEJNOŚCI W CZASIE, policzone ze stanu w chwili pytania.
@@ -1526,12 +1536,26 @@ class FramesView(QWidget):
         Dostawy albo zapis nagłówków pisze w tym czasie do tej samej bazy z innego połączenia:
         klik dostałby blokadę do `busy_timeout` albo `database is locked`. Odmowa mówi na pasku
         DLACZEGO; recepta zostaje, bo po końcu zajętości jest dalej prawdziwa."""
-        powod = self._powod_zajetosci()
-        if powod is not None:
-            self.status_message.emit(i18n.t(_RECEPTA_ZAJETA[powod]))
-            self.ponow_recepte()            # raport gasi receptę na pasku, a ona dalej obowiązuje
+        if self._odmowa_zajetosci():
             return
         wykonaj()
+
+    def _odmowa_zajetosci(self):
+        """Bramka zajętości gestów zapisu osi zaznaczenia, które recepta nazywa - wspólna dla
+        recepty (`_wykonaj_czlon`) i pozycji menu („Cofnij przypisanie”, „Przywróć cofnięte
+        przypisanie”, „Przywróć klatkę”, AR-70). `True` = odmowa wypowiedziana, gest nie rusza.
+
+        Pozycje menu omijały ją do AR-70: zapis osi szedł połączeniem GUI obok workera etapu albo
+        zapisu do plików (blokada do `busy_timeout`). Pozycje NIE gasną na czas zajętości: menu tego
+        repo nie pokazuje podpowiedzi pozycji, a wygaszona pozycja odebrałaby jedyną drogę do
+        powodu - klik dostaje zdanie z `_RECEPTA_ZAJETA`. Odmowa nie zmienia stanu, więc recepta
+        poprzedniego gestu dalej obowiązuje: raport zdjął ją z paska, więc podajemy ją ponownie."""
+        powod = self._powod_zajetosci()
+        if powod is None:
+            return False
+        self.status_message.emit(i18n.t(_RECEPTA_ZAJETA[powod]))
+        self.ponow_recepte()
+        return True
 
     def _wykonaj_odwrot(self, cel, odwrot):
         """Wykonaj drogę powrotu z recepty: zaznacz CEL gestu i wywołaj slot pozycji menu, którą
@@ -1789,6 +1813,8 @@ class FramesView(QWidget):
         które emituje `checked: bool`, więc parametr pozycyjny łapałby `False` jako nazwę obiektu
         — cicho, bo pętla po bibliotece po prostu by go nie znalazła. Gwiazdka zamienia tę klasę
         pomyłki w błąd wywołania (EXPECT), a testem pinujemy, że sam sygnał wchodzi bez argumentu."""
+        if self._odmowa_zajetosci():
+            return
         ids = self._object_gesture_ids()
         if not ids:
             return
@@ -1847,6 +1873,8 @@ class FramesView(QWidget):
         Kontrakt `AssignObjectDialog` stawia to zdanie na DRODZE KLIKNIĘCIA, nie w tooltipie —
         więc dwa kliknięcia nie mogą po cichu skasować werdyktu człowieka. Gdy nie ma czego gasić
         (zwykły przypadek: świeże klatki), skrót pisze wprost i zostaje przy obiecanych 2 gestach."""
+        if self._odmowa_zajetosci():
+            return
         ids = self._object_gesture_ids()
         if not ids:
             return
@@ -1882,6 +1910,8 @@ class FramesView(QWidget):
 
         SAMĄ RECEPTĘ SKŁADA `_po_gescie_osi`, a ten gest tylko deklaruje, że jest odwracalny -
         bo jej treść zależy od tego, czy cel gestu został na ekranie (tam jest ten pomiar)."""
+        if self._odmowa_zajetosci():
+            return
         ids = self._object_gesture_ids()
         if not ids:
             return
@@ -1923,11 +1953,17 @@ class FramesView(QWidget):
         rozbicia z read-modelu i mówi ZAWSZE przez `_po_gescie_osi`, także przy zerze grup: osobne
         zdanie „nie ma czego przywrócić" było drugą gramatyką tej samej osi, podczas gdy sąsiad
         w tej samej sytuacji mówi „Cofnięto … 0 z N · nie było czego cofać: N"."""
+        if self._odmowa_zajetosci():
+            return
         ids = self._object_gesture_ids()
         if not ids:
             return
         grupy, pominiete = queries.restore_targets(self.con, ids)
         gest = repo.ObjectGesture(**pominiete)
+        # JEDEN GEST = JEDEN `now` dla wszystkich grup: tożsamością gestu w dzienniku jest `ts`
+        # (recepta i „Ostatnio” Domu, AR-94) - `now` per grupa rozbijał gest na kilka znaczników,
+        # a Dom opisywał wtedy tylko ostatnią grupę.
+        now = self._now()
         if grupy:                            # faza „0 z 0" zapowiadałaby robotę, której nie ma
             with busy.busy(self.status_message.emit,
                            i18n.t("busy.restoring", done=0, total=len(grupy))) as faza:
@@ -1935,7 +1971,7 @@ class FramesView(QWidget):
                     try:
                         gest += repo.user_assign_object(
                             self.con, alias_norm=None, canon=g["canon"], catalog=g["catalog"],
-                            kind=g["kind"], frame_ids=g["frame_ids"], now=self._now(),
+                            kind=g["kind"], frame_ids=g["frame_ids"], now=now,
                             overwrite_weak=True, expected_source="user_cleared",
                             expected_cleared_id=g["object_id"])
                     except ValueError as e:  # dryf do nieistniejącej klatki / konflikt aliasu
@@ -2080,21 +2116,38 @@ class FramesView(QWidget):
             self.panel_stack.setVisible(False)           # zamknięcie: podgląd ZOSTAJE
             self.sel_bar.set_active_panel(None)
             self._zapamietaj_panel_rodowodu()
+            self._wroc_do_stagingu()
             return
         if (self._preview_owner and self._preview_owner != which
                 and self.model._preview_active()):
             if self._preview_owner == "macro":
                 self._on_macro_clear()
             else:
-                self._on_rename_clear()
+                self._on_rename_clear(oddaj_staging=(which == "macro"))
+        if which == "rename":                            # wzór zwinięty albo nie - pamięć (AR-78)
+            self.rename_bar.template_editor.set_expanded(
+                self._settings().value(self._KLUCZ_WZORU_RENAMU, True, type=bool))
         self.panel_stack.setCurrentWidget(target)
         self.panel_stack.setVisible(True)
         self.sel_bar.set_active_panel(which)
         self._zapamietaj_panel_rodowodu()
+        if which == "macro":
+            self._wroc_do_stagingu()
         if which == "rename":
             self._refresh_date_echo()                    # PO pokazaniu strony (F3R#4)
         elif which == "lineage":
             self._refresh_lineage()                      # jw. — panel czyta zaznaczenie po pokazaniu
+
+    def _wroc_do_stagingu(self):
+        """Kolumna podglądu wraca do stagingu, gdy NIC jej nie trzyma, a w szufladzie czekają karty
+        (AR-72, druga droga): samo otwarcie panelu nazw zdejmuje podgląd makra (R#9), a bez podglądu
+        nazw nic go potem nie oddawało - 176 kart czekało do commitu bez kolumny. Zamknięcie panelu
+        i powrót do panelu makra oddają kolumnę temu, co zapisze commit. Cudzy żywy podgląd zostaje."""
+        if self.model._preview_active() or self._pending_count() <= 0:
+            return
+        self._preview_owner = "macro"
+        self.model.set_preview(self._podglad_ze_stagingu())
+        self._pokaz_kolumne_podgladu()
 
     # OTWARTY PANEL RODOWODU PRZEŻYWA ZAMKNIĘCIE PROGRAMU (wizytacja 0802). Pytanie „czym skalibrowano / z czego
     # powstał” zadaje się seriami, a każda seria zaczynała od kliknięcia „Rodowód…” (pierwsza
@@ -2109,6 +2162,17 @@ class FramesView(QWidget):
         if (self._settings().value(self._KLUCZ_PANELU_RODOWODU, False, type=bool)
                 and not self._lineage_panel_open()):
             self._toggle_panel("lineage")
+
+    # WZÓR NAZWY ZWINIĘTY PO PIERWSZYM UŻYCIU (AR-78). Pierwsze otwarcie panelu pokazuje wzór
+    # rozwinięty - tam człowiek dowiaduje się, że nazwę składa się z tokenów. Pierwszy podgląd albo
+    # staging zapisuje „zwinięty", więc każde następne otwarcie zostawia tabeli wiersze, a wzór mówi
+    # streszczeniem. Gest ręki (zwiń/rozwiń) nadpisuje pamięć i od tej pory ona decyduje.
+    _KLUCZ_WZORU_RENAMU = "grid/rename_pattern_open"
+
+    def _zapamietaj_uzycie_wzoru(self):
+        ustawienia = self._settings()
+        if not ustawienia.contains(self._KLUCZ_WZORU_RENAMU):
+            ustawienia.setValue(self._KLUCZ_WZORU_RENAMU, False)
 
     def _rename_panel_open(self):
         return (not self.panel_stack.isHidden()
@@ -3150,6 +3214,8 @@ class FramesView(QWidget):
         Cel = ZAZNACZENIE, jak wszystkie gesty pasków w tym widoku. Klatki żywe, zastąpione
         i już wycofane odsiewa KLINGA (`repo._retire_verdict`), nie ten slot: filtr w read-modelu
         stałby POZA transakcją, więc plik, który wrócił między oknem a zapisem, przeszedłby."""
+        if self._odmowa_zajetosci():
+            return
         ids = self._object_gesture_ids()
         if not ids:
             return
@@ -3167,6 +3233,8 @@ class FramesView(QWidget):
         """„Przywróć klatkę" — DROGA POWROTU z wycofania. Bez potwierdzenia, bo gest jest
         NIEDESTRUKCYJNY i odwraca cudzy skutek: pytanie o zgodę na naprawę pomyłki byłoby
         kolejną przeszkodą dokładnie tam, gdzie człowiek już raz się pomylił."""
+        if self._odmowa_zajetosci():
+            return
         ids = self._object_gesture_ids()
         if not ids:
             return
@@ -3200,8 +3268,8 @@ class FramesView(QWidget):
             # w Porządki. Przed zdaniem: `refresh_counts` nie mówi na pasek stanu.
             self.stan_porzadkow_changed.emit()
         # ZDANIE PO ODŚWIEŻENIU I TYLKO JEDNO — repo dostało tę klasę już DWA RAZY na sąsiedniej
-        # osi: `refresh()` kończy własnym `status_message`, a odbiornikiem obu jest jeden
-        # `showMessage`, więc emisja przed odświeżeniem ginie w tym samym obrocie pętli zdarzeń.
+        # osi: `refresh()` kończy własnym `status_message`, a odbiornikiem obu jest jedna
+        # etykieta raportu paska, więc emisja przed odświeżeniem ginie w tym samym obrocie pętli zdarzeń.
         # Waży to tu podwójnie: po udanym wycofaniu klatka ZNIKA z perspektywy, więc to zdanie
         # bywa jedynym śladem, że gest się odbył.
         self.status_message.emit(msg)
@@ -4673,9 +4741,20 @@ class FramesView(QWidget):
         self.status_message.emit(i18n.t(
             "grid.rename.staged", t=len(run.touched), s=len(run.skipped), target=target))
 
-    def _on_rename_clear(self):
+    def _on_rename_clear(self, oddaj_staging=True):
+        """Zdjęcie podglądu nazw. Rename PRZEJMUJE podgląd, gdy w szufladzie czekają karty makra
+        (podgląd nie jest stagingiem - mutex trzyma tylko „Do stagingu"), więc przy zdjęciu ODDAJE
+        go: kolumna wraca do tego, co zapisze commit (AR-72) - inaczej oczekujące karty stałyby bez
+        podglądu aż do następnej edycji. `oddaj_staging=False` woła otwarcie panelu rodowodu: tam
+        podgląd żadnej klingi nie zostaje (R#9), więc i staging nie wraca."""
         self.model.set_preview({})
         self._preview_owner = None
+        if oddaj_staging and self._pending_count() > 0:
+            self._preview_owner = "macro"
+            self.model.set_preview(self._podglad_ze_stagingu())
+            self._pokaz_kolumne_podgladu()
+            self.status_message.emit(i18n.t("grid.rename.preview_cleared_staging_back"))
+            return
         self.status_message.emit(i18n.t("grid.rename.preview_cleared"))
 
     def _on_commit_rename(self):

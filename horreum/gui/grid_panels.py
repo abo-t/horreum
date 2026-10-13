@@ -10,7 +10,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QToolButton, QVBoxLayout, QWidget,
 )
 
 from horreum import naming
@@ -401,6 +401,17 @@ class _TokenRow(QWidget):
             self.case.setCurrentIndex(j if j >= 0 else 0)
         self._sync_args()
 
+    def opis(self):
+        """Token słowami do streszczenia zwiniętego wzoru: etykieta typu i argument, gdy go ma."""
+        tok, tekst = self.combo.currentData(), self.combo.currentText()
+        if tok == "folder":
+            return f"{tekst} {self.level.value()}"
+        if tok == "orig" and self.regex.text():
+            return f"{tekst} ({self.regex.text()})"
+        if tok == "kind" and self.case.currentData() is not None:
+            return f"{tekst} ({self.case.currentText()})"
+        return tekst
+
     def spec(self):
         tok = self.combo.currentData()
         if tok == "folder":
@@ -415,16 +426,37 @@ class _TokenRow(QWidget):
 class _TemplateEditor(QWidget):
     """Edytor wzoru nazwy (§5): lista `_TokenRow` + [+ Token][Przywróć domyślny]. `template()` = lista
     specyfikacji (DANE dla `naming.run_rename`). Domyślny preset = `DEFAULT_TEMPLATE` (Z `disc` — D-I4
-    bezpieczny domyśl; czyste nazwy = user RĘCZNIE usuwa rząd `disc`, kolizja → warning+skip)."""
+    bezpieczny domyśl; czyste nazwy = user RĘCZNIE usuwa rząd `disc`, kolizja → warning+skip).
+
+    ZWIJANY (AR-78): rozwinięty wzór z domyślnymi sześcioma tokenami zabierał tabeli dwie trzecie
+    pionu (firsthand: 11 wierszy pod otwartym panelem). Zwinięty zostawia JEDEN wiersz nagłówka ze
+    streszczeniem wzoru słowami - widać, jaki wzór pójdzie do podglądu, a edycja jest jeden klik
+    dalej. Tokeny w jednym wierszu odpadły: rząd tokenu ma stałą kolumnę typu (170 px), argument
+    i trzy przyciski, więc sześć tokenów to ~1600 px przy ~1100 px panelu - wiersz musiałby się
+    przewijać w bok albo tracić strzałki kolejności. O tym, kiedy wzór startuje zwinięty, decyduje
+    wołający (`set_expanded`, pamięć w `FramesView`); `expandedChanged` niesie wyłącznie gest ręki."""
 
     changed = Signal()
+    expandedChanged = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         head = QHBoxLayout()
-        lbl = QLabel(i18n.t("grid.tmpl.title")); lbl.setProperty("role", "secondary")
-        head.addWidget(lbl); head.addStretch(1)
+        self.btn_toggle = QToolButton()
+        self.btn_toggle.setText(i18n.t("grid.tmpl.title"))
+        self.btn_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_toggle.setAutoRaise(True)
+        self.btn_toggle.setCheckable(True)
+        self.btn_toggle.setChecked(True)
+        self.btn_toggle.setArrowType(Qt.DownArrow)
+        self.btn_toggle.setToolTip(i18n.t("grid.tmpl.toggle_tip"))
+        head.addWidget(self.btn_toggle)
+        # Streszczenie wzoru (pełne w podpowiedzi): puste przy rozwiniętym, ale zawsze w układzie -
+        # jest wypełniaczem, który trzyma przyciski przy prawej krawędzi.
+        self._summary = ElidedLabel()
+        self._summary.setProperty("role", "secondary")
+        head.addWidget(self._summary, 1)
         btn_add = QPushButton(i18n.t("grid.tmpl.add_token")); btn_def = QPushButton(i18n.t("grid.tmpl.restore"))
         head.addWidget(btn_add); head.addWidget(btn_def)
         outer.addLayout(head)
@@ -438,15 +470,50 @@ class _TemplateEditor(QWidget):
         self._scroll.setFrameShape(QFrame.NoFrame); self._scroll.setMaximumHeight(200)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(self._scroll)
-        btn_add.clicked.connect(lambda: (self._add_row("kind"), self.changed.emit()))
+        # „+ Token" przy zwiniętym wzorze najpierw go rozwija: nowy rząd czeka na wybór typu.
+        btn_add.clicked.connect(lambda: (self._rozwin_gestem(), self._add_row("kind"), self.changed.emit()))
         btn_def.clicked.connect(lambda: self._restore_default())
+        self.btn_toggle.toggled.connect(self._on_toggle)
+        self.changed.connect(self._odswiez_streszczenie)
         self.set_template(naming.DEFAULT_TEMPLATE)
 
     def _rows(self):
         return [self._rows_lay.itemAt(i).widget() for i in range(self._rows_lay.count())]
 
     def _refresh_empty(self):
-        self._empty_hint.setVisible(len(self._rows()) == 0)
+        rozwiniety = self.is_expanded()
+        self._empty_hint.setVisible(rozwiniety and len(self._rows()) == 0)
+        self._scroll.setVisible(rozwiniety)
+        self._odswiez_streszczenie()
+
+    # ---- zwijanie (AR-78) ----
+    def is_expanded(self):
+        return self.btn_toggle.isChecked()
+
+    def set_expanded(self, on):
+        """Stan z zewnątrz (pamięć wołającego) - bez `expandedChanged`, to nie jest gest ręki."""
+        self.btn_toggle.blockSignals(True)
+        self.btn_toggle.setChecked(bool(on))
+        self.btn_toggle.blockSignals(False)
+        self._pokaz_stan()
+
+    def _on_toggle(self, on):
+        self._pokaz_stan()
+        self.expandedChanged.emit(bool(on))
+
+    def _rozwin_gestem(self):
+        if not self.is_expanded():
+            self.btn_toggle.setChecked(True)            # przez `toggled` - to gest, pamięć go zapisze
+
+    def _pokaz_stan(self):
+        self.btn_toggle.setArrowType(Qt.DownArrow if self.is_expanded() else Qt.RightArrow)
+        self._refresh_empty()
+
+    def _odswiez_streszczenie(self):
+        """Wzór słowami przy zwiniętym edytorze, pusty przy rozwiniętym (rzędy mówią same)."""
+        opisy = [row.opis() for row in self._rows()]
+        tekst = " · ".join(opisy) if opisy else i18n.t("grid.tmpl.summary_empty")
+        self._summary.set_full_text("" if self.is_expanded() else tekst)
 
     def _add_row(self, spec):
         row = _TokenRow(spec)

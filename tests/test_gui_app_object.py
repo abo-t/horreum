@@ -2539,12 +2539,80 @@ def test_szukajka_zaweza_liste_po_aliasie_i_zachowuje_wybor(aliasy):
     assert dlg.accept_btn.isEnabled()
     dlg.search.setText("NGC")                          # szersza fraza - wybór zostaje
     assert dlg.combo.currentData()[1] == "NGC7023"
-    dlg.search.setText("LMC")                          # fraza chowa wybór - combo wraca na zero
+    dlg.search.setText("M")                            # fraza chowa wybór - combo wraca na zero
+    assert len(_pozycje(dlg)) > 1 and "NGC7023" not in _pozycje(dlg)
     assert dlg.combo.currentData() is None
     assert not dlg.accept_btn.isEnabled()
+    # AR-98: fraza chowająca wybór, która zostawia JEDNO trafienie, staje na nim, nie na zerze.
+    dlg.search.setText("LMC")
+    assert dlg.combo.currentData()[1] == "LMC"
     dlg.search.setText("")
     assert len(_pozycje(dlg)) == 6                     # M42, NGC7000 + cztery dopisane
     dlg.close()
+
+
+def test_AR98_jedno_trafienie_szukajki_preselekcja_i_Enter_zatwierdza(aliasy, qapp):
+    """AR-98: „M106" zawęża listę do jednego obiektu - combo staje na nim, OK się zapala, a Enter
+    wciśnięty w szukajce zatwierdza okno (3 interakcje zamiast 5). Falsyfikator: zdejmij gałąź
+    `len(trafione) == 1` z `_fill_combo` → combo zostaje na zerze i OK zgaszone."""
+    from PySide6.QtTest import QTest
+    v, con, ids = aliasy
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2, parent=v)
+    try:
+        dlg.show()
+        assert dlg.combo.currentData() is None and not dlg.accept_btn.isEnabled()
+        dlg.search.setFocus()
+        QTest.keyClicks(dlg.search, "M106")
+        assert list(_pozycje(dlg)) == ["NGC4258"]
+        assert dlg.combo.currentData()[1] == "NGC4258"
+        assert dlg.accept_btn.isEnabled() and dlg.accept_btn.isDefault()
+        QTest.keyClick(dlg.search, Qt.Key_Return)
+        assert dlg.result() == QDialog.Accepted
+        assert dlg.selected[0] == "NGC4258"
+    finally:
+        dlg.close()
+
+
+def test_AR98_preselekcja_nie_zostaje_poza_lista(aliasy):
+    """Preselekcja z jednego trafienia to zwykły wybór: fraza z wieloma trafieniami, która ją
+    pokazuje, ją zostawia; fraza, która ją chowa, cofa combo na zero; fraza bez trafień też;
+    wyczyszczona szukajka (cała biblioteka - obiekt dalej na liście) zostawia ją widoczną
+    w combo. Combo NIGDY nie stoi na obiekcie spoza swojej listy, a OK idzie za stanem combo."""
+    v, con, ids = aliasy
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2, parent=v)
+    try:
+        def cel():
+            dane = dlg.combo.currentData()
+            assert dane is None or dane[1] in _pozycje(dlg), "wybór spoza listy"
+            assert dlg.accept_btn.isEnabled() == (dane is not None)
+            return dane[1] if dane else None
+
+        dlg.search.setText("M106")
+        assert cel() == "NGC4258"
+        dlg.search.setText("NGC")                      # więcej trafień, NGC4258 wśród nich
+        assert len(_pozycje(dlg)) > 1 and cel() == "NGC4258"
+        dlg.search.setText("M")                        # więcej trafień - NGC4258 też (alias M106)
+        assert len(_pozycje(dlg)) > 1
+        dlg.search.setText("NGC 70")                   # dwa trafienia bez NGC4258 - zero
+        assert sorted(_pozycje(dlg)) == ["NGC7000", "NGC7023"] and cel() is None
+        dlg.search.setText("NGC 7023")                 # jedno trafienie - preselekcja
+        assert cel() == "NGC7023"
+        dlg.search.setText("xyz 123")                  # bez trafień - zero
+        assert cel() is None
+        dlg.search.setText("M106")
+        dlg.search.setText("")                         # cała biblioteka - obiekt na liście, widoczny
+        assert len(_pozycje(dlg)) == 6 and cel() == "NGC4258"
+        assert dlg.combo.currentText().startswith("NGC4258")
+    finally:
+        dlg.close()
+
+
+def test_AR98_etykieta_pola_mowi_o_oznaczeniu_PL_i_EN():
+    """Pole przyjmuje też oznaczenia obiektów obecnych w bibliotece - etykieta nie obiecuje NOWEGO."""
+    from horreum.gui.i18n_catalog import CATALOG
+    wpis = CATALOG["assign.new_designation"]
+    assert wpis["pl"].startswith("albo wpisz oznaczenie") and "nowa" not in wpis["pl"]
+    assert wpis["en"].startswith("or type a designation") and "new" not in wpis["en"]
 
 
 def test_szukajka_sklada_ogonki_a_lista_nie_dubluje_nazwy_z_ogonkami_i_bez(aliasy):

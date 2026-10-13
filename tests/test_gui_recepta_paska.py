@@ -387,20 +387,61 @@ def test_AR43_os_stanowisk_po_przebiegu_NIE_przykrywa_statusu_etapu(okno):
     Falsyfikator: podepnij `observatory_view.status_message` wprost pod `_flash` → zdanie osi
     stoi na pasku Dostawy po statusie etapu."""
     from horreum.gui.app import NAV_DOSTAWA, NAV_PORZADKI
-    from test_gui_mainwindow import _przebieg_w_watku
+    from test_gui_mainwindow import _przebieg_w_watku, _zapis_paska
     win = okno
     pusta_os = i18n.t("axis.obs.empty_status")
     win._show_view(NAV_DOSTAWA)
-    pasek = []
-    win.statusBar().messageChanged.connect(pasek.append)
+    pasek = _zapis_paska(win)
     _przebieg_w_watku(win, lambda: win.pipeline_view.run_stage("group"))
     status_etapu = i18n.t("pipeline.stage_done_status", stage=i18n.t("pipeline.stage.group"))
     assert status_etapu in pasek, pasek
     assert pusta_os not in pasek[pasek.index(status_etapu):], pasek
-    assert win.statusBar().currentMessage() != pusta_os
+    assert win.report_label.text() != pusta_os
 
     win._show_view(NAV_PORZADKI)
-    assert win.statusBar().currentMessage() == pusta_os, "zdanie osi nie czekało na Porządki"
+    assert win.report_label.text() == pusta_os, "zdanie osi nie czekało na Porządki"
+
+
+def test_zdjecie_recepty_zdejmuje_ja_z_podpowiedzi_paska_i_oddaje_miejsce_raportowi(okno):
+    """Zdjęcie recepty (pusta recepta strumienia) przelicza pasek: podpowiedź nie niesie już martwej
+    recepty - ani przy żywym raporcie, ani po jego wygaśnięciu.
+
+    Falsyfikator: przywróć w `_pokaz_recepte` przeliczenie tylko przy niepustej recepcie → podpowiedź
+    paska dalej cytuje receptę, której przycisku już nie ma."""
+    from horreum.gui.grid_model import CzlonRecepty, Recepta
+    win = okno
+    recepta = Recepta([CzlonRecepty("Cofnij", lambda: None)])
+    win._flash("raport gestu")
+    win._pokaz_recepte(recepta)
+    assert "Cofnij" in win.statusBar().toolTip()
+    win._pokaz_recepte("")
+    assert "Cofnij" not in win.statusBar().toolTip()
+    assert win.report_label.text() == "raport gestu"
+
+    win._pokaz_recepte(recepta)
+    win._wygas_raport()
+    assert win.statusBar().toolTip() == str(recepta)
+    win._pokaz_recepte("")
+    assert win.statusBar().toolTip() == ""
+
+
+@pytest.mark.parametrize("widok", ["axis_view", "object_view", "observatory_view"])
+def test_osie_porzadkow_poza_porzadkami_NIE_wypieraja_odmowy_kafla(okno, widok):
+    """Odświeżenie po przebiegu przeładowuje KAŻDĄ oś Porządków, a oś obiektów mówi wtedy „Brak
+    obiektów dla tego filtra…" - zdanie wypierało odmowę kafla Przyjmij na pasku Dostawy razem
+    z czekającym „gotowe” (AR-97). Wszystkie trzy osie idą drogą miejsca (AR-43): poza Porządkami
+    czekają na wejście w nie.
+
+    Falsyfikator: podepnij `status_message` której osi wprost pod `_flash` → odmowa znika."""
+    from horreum.gui.app import NAV_DOSTAWA, NAV_PORZADKI
+    win = okno
+    win._show_view(NAV_DOSTAWA)
+    odmowa = i18n.t("pipeline.refuse.delivery_running")
+    win._flash(odmowa)
+    getattr(win.tasks_view, widok).status_message.emit("zdanie osi")
+    assert win.report_label.text() == odmowa
+    win._show_view(NAV_PORZADKI)
+    assert win.report_label.text() == "zdanie osi", "zdanie osi nie czekało na Porządki"
 
 
 def test_AR48_planer_bez_stanowiska_milczy_poza_soba_i_mowi_PUSTYM_STANEM(okno):
@@ -413,11 +454,11 @@ def test_AR48_planer_bez_stanowiska_milczy_poza_soba_i_mowi_PUSTYM_STANEM(okno):
     zostaw tabelę zamiast pustego stanu → ekran planera nie podaje drogi dalej."""
     from horreum.gui.app import NAV_DOSTAWA, NAV_PLANER, NAV_PORZADKI
     from horreum.gui.tasks import _PAGE_OBSERVATORY
+    from test_gui_mainwindow import _zapis_paska
     win = okno
     planer = win.planner_view
     assert planer.bez_stanowiska, "fikstura ma stanowisko GPS - brak układu"
-    pasek = []
-    win.statusBar().messageChanged.connect(pasek.append)
+    pasek = _zapis_paska(win)
     win._show_view(NAV_DOSTAWA)
     planer.refresh()                               # np. po przebiegu Dostawy
     _czekaj_na_planer(win)
@@ -429,7 +470,7 @@ def test_AR48_planer_bez_stanowiska_milczy_poza_soba_i_mowi_PUSTYM_STANEM(okno):
     assert not planer.empty_note.isHidden() and planer.empty_note.text() == i18n.t("planner.no_site")
     assert not planer.empty_btn.isHidden() and planer.table.isHidden()
     assert planer.night_label.text() == tytul
-    assert win.statusBar().currentMessage() == tytul, "przy widocznym planerze zdanie ma paść"
+    assert win.report_label.text() == tytul, "przy widocznym planerze zdanie ma paść"
 
     planer.empty_btn.click()
     assert win.nav.currentRow() == NAV_PORZADKI
@@ -584,6 +625,73 @@ def test_Z4_recepta_w_trakcie_etapu_ODMAWIA_z_powodem_i_zostaje(widok):
     v.set_busy(False)
     recepty[-1].czlony[-1].wykonaj()
     assert _object_id(con, 1) == 5
+
+
+# Trzy ostatnie sloty piszą tę samą oś zaznaczenia połączeniem GUI - bramka stoi PRZED oknem
+# („Przypisz obiekt…”, potwierdzenie wycofania), więc przy zajętości okno się nie otwiera.
+@pytest.mark.parametrize("slot", ["_on_object_clear", "_on_object_restore", "_on_frame_restore",
+                                  "_on_object_name", "_on_object_recent", "_on_frame_retire"])
+def test_AR70_pozycje_menu_osi_przy_zajetosci_ODMAWIAJA_z_powodem(widok, slot):
+    """AR-70. Recepta dostała bramkę zajętości (Z4), a pozycje menu, które nazywa („Cofnij
+    przypisanie”, „Przywróć cofnięte przypisanie”, „Przywróć klatkę”), dalej pisały połączeniem
+    GUI obok workera etapu albo zapisu do plików. Ta sama bramka i ten sam słownik powodów
+    (`_RECEPTA_ZAJETA`): przy obu powodach zajętości klik nic nie zapisuje, a pasek mówi
+    DLACZEGO. Recepta poprzedniego gestu zostaje - odmowa niczego nie zmieniła.
+
+    Falsyfikator: zdejmij `_odmowa_zajetosci` z któregoś slotu → zapis w trakcie etapu
+    (`total_changes` rośnie) albo cisza na pasku."""
+    v, con = widok
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()                                  # żywa recepta, 1 i 2 to nagrobki
+    _zaznacz(v, [1, 2, 3])
+    recepty = _recepty(v)
+    raporty = []
+    v.status_message.connect(raporty.append)
+    for wlacz, wylacz, klucz in (
+            (lambda: v.set_busy(True), lambda: v.set_busy(False), "grid.recipe.busy_stage"),
+            (lambda: v.set_writeback_busy(True), lambda: v.set_writeback_busy(False),
+             "grid.recipe.busy_write")):
+        wlacz()
+        try:
+            recepty.clear()
+            przed = con.total_changes
+            argi = (("NGC6960", "NGC", "deep_sky") if slot == "_on_object_recent" else ())
+            getattr(v, slot)(*argi)
+            assert con.total_changes == przed, f"{slot} zapisał w trakcie zajętości"
+            assert raporty[-1] == i18n.t(klucz), raporty[-1]
+            assert recepty and recepty[-1].czlony, "odmowa zdjęła żywą receptę"
+        finally:
+            wylacz()
+    assert [_object_id(con, f) for f in (1, 2, 3)] == [None, None, 5]
+
+
+def test_AR70_bez_zajetosci_pozycja_menu_PISZE(widok):
+    """Przypadek negatywny AR-70: bez zajętości bramka przepuszcza - pozycja menu robi swój zapis
+    jak przed nią. Falsyfikator: odwróć warunek w `_odmowa_zajetosci` → nic się nie przywraca."""
+    v, con = widok
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+    _zaznacz(v, [1, 2])
+    v.sel_bar.act_restore.trigger()
+    assert [_object_id(con, f) for f in (1, 2)] == [5, 5]
+
+
+def test_AR71_odwrot_wycofania_ma_WLASNE_klucze_o_tym_samym_brzmieniu():
+    """AR-71. Recepta wycofania klatki czytała klucze osi OBIEKTU (`grid.sel.object_clear_undo*`):
+    brzmienie było wspólne, ale zmiana zdania osi obiektu zmieniłaby receptę osi klatki. Własne
+    klucze `grid.sel.frame_retire_undo*`, dziś o tym samym brzmieniu w PL i EN.
+
+    Falsyfikator: wróć `_ODWROT_WYCOFANIA` na klucze osi obiektu → pierwsza asercja pada."""
+    from horreum.gui.i18n_catalog import CATALOG
+    odwrot = grid_mod._ODWROT_WYCOFANIA
+    assert (odwrot.klucz, odwrot.klucz_potem) == ("grid.sel.frame_retire_undo",
+                                                  "grid.sel.frame_retire_undo_after")
+    for wlasny, osi_obiektu in ((odwrot.klucz, "grid.sel.object_clear_undo"),
+                                (odwrot.klucz_potem, "grid.sel.object_clear_undo_after")):
+        assert CATALOG[wlasny] == CATALOG[osi_obiektu], wlasny
+        assert set(CATALOG[wlasny]) >= {"pl", "en"}
 
 
 def test_odslanianie_w_trakcie_etapu_DZIALA_bo_nie_zapisuje(widok):

@@ -172,6 +172,36 @@ def test_szarosc_braku_ma_kontrast_AA_na_kazdym_tle(name):
     assert not slabe, f"[{name}] missing={grid['missing']} poniżej AA 4,5:1 na: {slabe}"
 
 
+@pytest.mark.parametrize("name", _THEMES)
+def test_AR73_ramka_pustego_pola_wyboru_odcina_sie_od_tla(name):
+    """BRAMKA KLASY (AR-73): ramka NIEZAZNACZONEGO pola wyboru i radia ma co najmniej 3:1 (WCAG 1.4.11,
+    elementy sterujące) do każdego tła, na którym stoi: wypełnienia pola (`base`), paska/okna
+    (`window`) i naprzemiennego wiersza listy (`alt_base`). Fusion rysował ją z tła: 1,03:1 w ciemnym
+    motywie, 1,9:1 w jasnym - lista 178 odznaczonych wierszy nie wyglądała na listę do zaznaczania.
+    Kolory z jednego właściciela (`theme.wskaznik_odznaczony`), z którego składa się reguła QSS.
+
+    Falsyfikator: podaj w `wskaznik_odznaczony` `disabled_text` ciemnego motywu albo zdejmij regułę
+    z `qss` - pada kontrast albo asercja reguły."""
+    ramka, tlo = theme.wskaznik_odznaczony(name)
+    paleta = theme.palette_spec(name)
+    tla = {"base": paleta["base"], "window": paleta["window"], "alt_base": paleta["alt_base"]}
+    slabe = {k: round(_kontrast(ramka, v), 2) for k, v in tla.items() if _kontrast(ramka, v) < 3.0}
+    assert not slabe, f"[{name}] ramka {ramka} poniżej 3:1 na: {slabe}"
+    q = theme.qss(name)
+    for selektor in (*theme.WSKAZNIK_CHECKBOX, theme.WSKAZNIK_RADIO):
+        assert selektor.endswith(":unchecked"), selektor
+        regula = q.split(selektor, 1)[1].split("}", 1)[0]
+        assert f"border: 1px solid {ramka}" in regula and f"background: {tlo}" in regula, selektor
+
+
+def test_AR73_regula_wskaznika_nie_dotyka_stanu_zaznaczonego():
+    """Arkusz z ramką rysuje sam prostokąt - bez obrazka nie ma ptaszka. Reguła na `::indicator`
+    bez stanu albo na `:checked` zgasiłaby znak zaznaczenia w każdym polu aplikacji."""
+    for name in _THEMES:
+        q = theme.qss(name)
+        assert "::indicator {" not in q and "::indicator:checked" not in q, name
+
+
 def test_warn_jest_osobny_od_gold():
     """Bursztyn ZNACZENIA (`warn`) nie jest złotem MARKI (`gold`) — złoto w jasnym motywie ma 2,7:1
     i jako tekst nie dochodzi do progu AA (wiz T5 N5). Zlanie tych dwóch kluczy wróciłoby po ten

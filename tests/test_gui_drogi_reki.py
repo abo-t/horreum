@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db, repo, resolver, supersede, writeback
-from horreum.gui import queries, rows, tasks as tasks_mod
+from horreum.gui import i18n, queries, rows, tasks as tasks_mod
 from horreum.gui.app import _REVIEW_TAG, MainWindow, NAV_PORZADKI
 from horreum.gui.grid import BASE_COLS, PRESET_SUPERSEDED
 
@@ -88,6 +88,65 @@ def test_klik_w_wiersz_osi_prowadzi_do_gestu(qapp, tmp_path):
         tv.tasks.itemClicked.emit(_wiersz(win, "observatory_review_frames"))
         assert tv.pages.currentIndex() == tasks_mod._PAGE_OBSERVATORY
     finally:
+        win.close()
+
+
+def test_AR74_wejscie_z_porzadkow_na_os_stanowiska_niesie_licznik_i_fokus(qapp, tmp_path):
+    """AR-74: klik w „Klatki bez stanowiska" (N) prowadzi na oś obserwatorium, gdzie „Wskaż
+    stanowisko… (N)" niesie TĘ SAMĄ liczbę co wiersz i ma fokus (obwódka, Enter otwiera okno) -
+    lustro osi zestawu, która zaznacza kubełek. Liczba świeża: stan bazy zmieniony po montażu
+    widać w wierszu i na przycisku po kliknięciu, bez ręcznego odświeżania osi.
+
+    Falsyfikator: zdejmij wołanie `wejdz_po_wskazanie` z `_on_task_clicked` → fokus zostaje na
+    liście Porządków, a przycisk mówi liczbę z montażu."""
+    win = MainWindow(_s8(tmp_path))
+    try:
+        tv = win.tasks_view
+        obs = tv.observatory_view
+        bez = [r["frame_id"] for r in queries.observatory_review_frames(win.con)]
+        assert bez
+        win.con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, bez[0]))
+        win.con.commit()
+        tv.refresh_counts()
+        n = len(bez) - 1
+        it = _wiersz(win, "observatory_review_frames")
+        assert it.data(rows.SECONDARY) == f"{n}  ›"
+        assert obs.btn_hand_assign.text() != i18n.t("obshand.btn_assign_n", n=n)   # stan z montażu
+        tv.tasks.itemClicked.emit(it)
+        assert tv.pages.currentIndex() == tasks_mod._PAGE_OBSERVATORY
+        assert obs.btn_hand_assign.text() == i18n.t("obshand.btn_assign_n", n=n)
+        assert win.focusWidget() is obs.btn_hand_assign
+    finally:
+        win.close()
+
+
+def test_AR74_wejscie_z_pustego_stanu_planera_niesie_licznik_i_fokus(qapp, tmp_path):
+    """Pusty stan planera „bez stanowiska" prowadzi do tej samej roboty co wiersz Porządków -
+    `otworz_stanowiska` daje tę samą drogę wejścia: świeży licznik i fokus na geście."""
+    win = MainWindow(_s8(tmp_path))
+    try:
+        tv = win.tasks_view
+        obs = tv.observatory_view
+        n = len(queries.observatory_review_frames(win.con))
+        assert n
+        tv.otworz_stanowiska()
+        assert tv.pages.currentIndex() == tasks_mod._PAGE_OBSERVATORY
+        assert obs.btn_hand_assign.text() == i18n.t("obshand.btn_assign_n", n=n)
+        assert win.focusWidget() is obs.btn_hand_assign
+    finally:
+        win.close()
+
+
+def test_AR74_wejscie_w_biegu_etapu_nie_daje_fokusu_wygaszonemu(qapp, tmp_path):
+    """Przy biegu etapu gest jest wygaszony - wejście z Porządków nie stawia na nim fokusu."""
+    win = MainWindow(_s8(tmp_path))
+    try:
+        tv = win.tasks_view
+        tv.observatory_view.set_busy(True)
+        tv.tasks.itemClicked.emit(_wiersz(win, "observatory_review_frames"))
+        assert win.focusWidget() is not tv.observatory_view.btn_hand_assign
+    finally:
+        tv.observatory_view.set_busy(False)
         win.close()
 
 

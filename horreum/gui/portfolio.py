@@ -33,9 +33,23 @@ def summarize(rows) -> dict:
     return out
 
 
+# Próg, od którego czas materiału mówi godzinami (AR-75): 0,1 h = 6 min to najmniejsza wartość,
+# jaką format „x.y h" pokazuje jako niezerową. Poniżej „0.0 h" czytało się jak brak materiału
+# (Moon 503 klatki, Jupiter 256), więc tam czas mówi minutami.
+_PROG_GODZIN_S = 360
+
+
 def format_hours(secs) -> str:
-    """Sekundy → godziny z jednym miejscem po przecinku: `3600 → "1.0 h"`, `None/0 → "0.0 h"`."""
-    return f"{(secs or 0) / 3600:.1f} h"
+    """Czas materiału jednym formatem dla każdego wołającego: od 0,1 h godziny z jednym miejscem po
+    przecinku (`3600 → "1.0 h"`), poniżej minuty zaokrąglone (`240 → "4 min"`), poniżej minuty
+    `"< 1 min"` - materiał jest, tylko krótszy niż minuta. `None/0 → "0.0 h"` jak dotąd: zero to
+    „brak czasu" (sufiks lightów bez EXPTIME i rozbicie per filtr na tym stoją)."""
+    secs = secs or 0
+    if secs <= 0 or secs >= _PROG_GODZIN_S:
+        return f"{secs / 3600:.1f} h"
+    if secs < 60:
+        return i18n.t("portfolio.under_minute")
+    return i18n.t("portfolio.minutes", n=round(secs / 60))
 
 
 def object_suffix(entry) -> str:

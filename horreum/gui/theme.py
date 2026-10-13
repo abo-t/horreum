@@ -146,6 +146,45 @@ def recepta_wygaszona(name):
     return accents(name)["secondary_text"], palette_spec(name)["window"]
 
 
+# Selektory wskaźnika NIEZAZNACZONEGO pola wyboru (AR-73). Listy z polami wyboru są dziś wyłącznie
+# `QListWidget` (okno „Wskaż stanowisko", konfiguracja źródeł, wybór kolumn), więc `QListView`
+# wystarcza; drzewa i tabele pól wyboru nie niosą.
+WSKAZNIK_CHECKBOX = ("QCheckBox::indicator:unchecked", "QListView::indicator:unchecked")
+WSKAZNIK_RADIO = "QRadioButton::indicator:unchecked"
+
+
+def wskaznik_odznaczony(name):
+    """(ramka, wypełnienie) NIEZAZNACZONEGO wskaźnika pola wyboru i radia (AR-73) - jeden właściciel,
+    z którego czyta `qss` i bramka kontrastu.
+
+    Fusion rysuje ramkę pustego pola kolorem wyprowadzonym z tła: w ciemnym motywie `#222222` na
+    `#1E1E1E` (zmierzone 1,03:1), w jasnym `#BDBDBD` na `#FFFFFF` (1,9:1) - oba poniżej 3:1, które
+    WCAG 1.4.11 stawia elementom sterującym. Lista 178 odznaczonych wierszy nie wyglądała przez to
+    na listę do zaznaczania. Ramka bierze `secondary_text` (ten sam kolor, którym mówi tekst
+    drugorzędny), wypełnienie zostaje `base` jak u Fusion."""
+    return accents(name)["secondary_text"], palette_spec(name)["base"]
+
+
+def _qss_wskaznikow(name):
+    """Reguły wyłącznie dla stanu `:unchecked`: styl arkusza z ramką rysuje SAM prostokąt bez
+    znaku zaznaczenia, więc reguła na `:checked` zgasiłaby ptaszka (bez obrazka go nie ma). Stan
+    zaznaczony i częściowy maluje dalej Fusion. Rozmiar 12 px + ramka 1 px = 14 px, czyli metryka
+    wskaźnika Fusion - pole nie skacze przy przełączeniu. Wyłączone pole dostaje ramkę
+    `disabled_text`, żeby nie udawało aktywnego.
+
+    Reguła na wskaźniku przełącza liczenie rozmiaru pola na arkusz, który gubi margines ramki
+    fokusu Fusion: podpowiedź wysokości spadała z 21 do 16 px (zmierzone natywnie, czcionka 16 px),
+    czyli każdy rząd pól wyboru ściskał się o 5 px. Wypełnienie 2 + 3 px oddaje dawną wysokość."""
+    ramka, tlo = wskaznik_odznaczony(name)
+    wygaszona = palette_spec(name)["disabled_text"]
+    pole = f"border: 1px solid {ramka}; background: {tlo}; width: 12px; height: 12px;"
+    return ("QCheckBox, QRadioButton { padding: 2px 0px 3px 0px; }"
+            + ", ".join(WSKAZNIK_CHECKBOX) + f" {{ {pole} }}"
+            + f"{WSKAZNIK_RADIO} {{ {pole} border-radius: 7px; }}"
+            + ", ".join(s + ":disabled" for s in (*WSKAZNIK_CHECKBOX, WSKAZNIK_RADIO))
+            + f" {{ border-color: {wygaszona}; }}")
+
+
 def qss(name):
     """Arkusz stylów akcentów dla motywu: własność `role` etykiety → kolor z `ROLES` (widżet pisze
     `setProperty("role","error")` zamiast inline `color:`). Rola jest CZYTANA PRZY POLISHU — etykieta,
@@ -164,4 +203,4 @@ def qss(name):
         f'QLabel[role="{role}"] {{ color: {a[key]}; }}' for role, key in ROLES.items()
     ) + (f'QPushButton:checked {{ border: 2px solid {a["gold"]}; font-weight: bold; }}') + (
         f'QToolButton#{RECEPTA_OBJECT_NAME}:disabled {{ color: {tekst}; background: {tlo}; '
-        f'border: 1px dashed {tekst}; padding: 2px 4px; }}')
+        f'border: 1px dashed {tekst}; padding: 2px 4px; }}') + _qss_wskaznikow(name)

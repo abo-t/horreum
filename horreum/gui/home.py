@@ -29,7 +29,8 @@ ekranie ma tu już stać.
 
 OSTATNIO: RECEPTA ALBO DZIENNIK. Droga powrotu ostatniego gestu żyje dziś wyłącznie w pamięci
 widoku Zbiorów (strumień `status_recipe`); Dom pokazuje TĘ SAMĄ receptę, którą dostaje pasek stanu,
-a jej życie wyznacza wyłącznie ten strumień (pusta = zdjęta). Bez recepty w sesji zostaje zdanie
+a jej życie wyznacza wyłącznie ten strumień (pusta = zdjęta). Zdanie przy recepcie opisuje gest
+o jej znaczniku (`Recepta.ts`, AR-94), nie ostatni gest w ogóle. Bez recepty w sesji zostaje zdanie
 z dziennika `event` - bez przycisku, bo dziennik nie zna drogi powrotu."""
 from __future__ import annotations
 
@@ -396,7 +397,7 @@ class HomeView(QWidget):
             if s["last_night"]:
                 czlony.append(i18n.t("home.have.last_night", night=s["last_night"]))
             self.co_mam.setText(i18n.t("home.have.line", what=" · ".join(czlony)))
-        self._gest = queries.last_hand_gesture(self.con)
+        self._gest = self._gest_ostatnio()
         self._render_ostatnio()
 
     def odswiez_teczki(self):
@@ -646,8 +647,16 @@ class HomeView(QWidget):
         znika = self._recepta is not None and not recepta
         self._recepta = recepta if recepta else None
         if znika or self.isVisible():
-            self._gest = queries.last_hand_gesture(self.con)
+            self._gest = self._gest_ostatnio()
         self._render_ostatnio()
+
+    def _gest_ostatnio(self):
+        """Gest, który opisuje „Ostatnio”: przy żywej recepcie z tożsamością (`Recepta.ts`, AR-94) -
+        gest O TYM znaczniku, bo przycisk obok cofa właśnie jego, a nie ostatni gest w ogóle (po
+        geście w Zbiorach i drugim w Porządkach zdanie opisywało Porządki). Bez recepty albo przy
+        recepcie bez znacznika - ostatni gest ręki z dziennika."""
+        ts = self._recepta.ts if self._recepta is not None else None
+        return queries.last_hand_gesture(self.con, ts=ts)
 
     def wstrzymaj_recepte(self, wstrzymana):
         """Blokada po wykonaniu członu (dwuklik to jeden gest) - stan trzyma gospodarz, wspólny

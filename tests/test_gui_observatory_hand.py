@@ -253,3 +253,56 @@ def test_przyciski_gasna_w_biegu_etapu(scena):
     assert not w.btn_hand_assign.isEnabled() and not w.btn_hand_clear.isEnabled()
     w.set_busy(False)
     assert w.btn_hand_assign.isEnabled()
+
+
+# --- AR-80: dark i bias poza listą roboty, gest ręką dozwolony ---
+
+def test_AR80_dark_i_bias_poza_lista_roboty_gest_reka_dozwolony(scena):
+    """Decyzja właściciela 2026-10-07 (AR-80): dark i bias z masterami nie widzą nieba, więc
+    wejście gestu „Wskaż stanowisko…" i licznik przycisku ich nie liczą; flaty i stosy zostają.
+    Zbiór pominięty to DOKŁADNIE `grouper.NO_TELESCOPE_KINDS` (jeden właściciel rodzajów, nie
+    literał). Klinga rodzaju nie odsiewa: wskazanie ręką na darku przechodzi, a lista RĘKI pokazuje
+    je dalej, żeby dało się je zmienić i cofnąć.
+
+    Falsyfikator: zdejmij `f.kind NOT IN (json_each(?))` z `observatory_review_frames` → dark
+    i bias wracają na listę, a licznik przycisku rośnie o cztery."""
+    from horreum.grouper import NO_TELESCOPE_KINDS
+    w, con, dom, bez = scena
+    rodzaje = ["dark", "bias", "master_dark", "master_bias", "flat", "master_flat", "master_light"]
+    nowe = {}
+    for i, kind in enumerate(rodzaje):
+        f, _ = repo.upsert_frame(con, sha1_data=f"k{i}", kind=kind, filetype="fits",
+                                 camera_id=None, now=NOW)
+        repo.add_location(con, frame_id=f, volume="V", path=f"X:\\A\\CAL\\k{i}.fits", now=NOW)
+        nowe[kind] = f
+    lista = queries.observatory_review_frames(con)
+    na_liscie = {r["kind"] for r in lista}
+    assert na_liscie == {"light", "flat", "master_flat", "master_light"}
+    assert set(rodzaje) - na_liscie == set(NO_TELESCOPE_KINDS)
+    assert sum(g["n_frames"] for g in queries.observatory_review_groups(con)) == len(lista)
+    w.refresh()
+    assert w.btn_hand_assign.text() == i18n.t("obshand.btn_assign_n", n=len(bez) + 3)
+
+    g = repo.user_assign_observatory(con, frame_ids=[nowe["master_dark"]], observatory_id=dom,
+                                     now=NOW)
+    assert g.assigned == 1
+    assert nowe["master_dark"] in {r["frame_id"] for r in queries.observatory_by_hand_frames(con)}
+
+
+def test_AR74_przycisk_niesie_licznik_PL_i_EN(scena):
+    """AR-74: „Wskaż stanowisko… (N)" - N z tego samego predykatu co wiersz Porządków; liczba
+    nadąża za gestem (refresh po zapisie), a podpowiedź mówi, czego liczba nie liczy."""
+    w, con, dom, bez = scena
+    i18n.set_lang("pl")
+    w.refresh()
+    assert w.btn_hand_assign.text() == "Wskaż stanowisko… (4)"
+    repo.user_assign_observatory(con, frame_ids=bez[:3], observatory_id=dom, now=NOW)
+    w.refresh()
+    assert w.btn_hand_assign.text() == "Wskaż stanowisko… (1)"
+    assert "Dark i bias" in w.btn_hand_assign.toolTip()
+    i18n.set_lang("en")
+    try:
+        assert i18n.t("obshand.btn_assign_n", n=1) == "Assign site… (1)"
+        assert "Darks and biases" in i18n.t("obshand.btn_assign_tip")
+    finally:
+        i18n.set_lang("pl")

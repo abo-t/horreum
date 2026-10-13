@@ -339,6 +339,9 @@ class AssignObjectDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.accept_btn = buttons.button(QDialogButtonBox.Ok)
         self.accept_btn.setText(i18n.t_plural("assign.accept_btn", frame_count))
+        # Enter z szukajki albo pola nazwy zatwierdza (AR-98) - jawnie, nie z domysłu
+        # `QDialogButtonBox` przy pokazaniu okna; wygaszony OK Entera nie przepuszcza.
+        self.accept_btn.setDefault(True)
         # Tekst przycisku z katalogu, nie z Qt (precedens `planner.py`): repo nie wozi QTranslator,
         # więc `Cancel` zostawało po angielsku obok spolszczonego „Przypisz N klatek".
         buttons.button(QDialogButtonBox.Cancel).setText(i18n.t("assign.cancel_btn"))
@@ -361,6 +364,12 @@ class AssignObjectDialog(QDialog):
 
         Wybór PRZEŻYWA zawężenie, gdy wybrany obiekt nadal jest na liście; gdy fraza go chowa,
         combo wraca na pozycję zerową - akcja nie może celować w obiekt, którego user nie widzi.
+        JEDNO TRAFIENIE = PRESELEKCJA (AR-98): fraza, która zawęża listę do jednego obiektu, już
+        wskazała cel - combo staje na nim, OK się zapala, a Enter z szukajki zatwierdza (wizytacja:
+        „M106" kosztowało 5 interakcji zamiast 3). Preselekcja jest zwykłym wyborem i podlega tej
+        samej regule: szersza fraza, która ją dalej pokazuje, ją zostawia; fraza, która ją chowa,
+        cofa combo na zero (albo na nowe jedyne trafienie). Pusta fraza niczego nie preselekcjonuje
+        - jedyny obiekt biblioteki to nie jest trafienie szukajki.
         Sygnały zablokowane na czas przeładunku: `clear()` emituje zmianę indeksu dla każdej
         pozycji po drodze, a stan akcji liczy wołający raz, po wszystkim."""
         wybrany = self.combo.currentData()
@@ -381,6 +390,8 @@ class AssignObjectDialog(QDialog):
                 self.combo.addItem(self._item_text(o), (o["id"], o["canon"], o["catalog"]))
                 if wybrany is not None and wybrany[0] == o["id"]:
                     indeks = self.combo.count() - 1
+            if indeks == 0 and fraza and len(trafione) == 1:
+                indeks = 1                                  # jedno trafienie = preselekcja (AR-98)
             self.combo.setCurrentIndex(indeks)
         finally:
             self.combo.blockSignals(False)

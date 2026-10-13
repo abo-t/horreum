@@ -15,7 +15,9 @@ from typing import NamedTuple
 
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QStyledItemDelegate, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QHBoxLayout, QLineEdit, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QWidget,
+)
 
 from horreum import naming, pivot as pivot_mod
 from horreum.gui import facet_model, i18n, queries, rows, theme
@@ -702,20 +704,27 @@ class Recepta(str):
     jest kontraktem; konstruktor tylko odsiewa milczące i skleja.
 
     Separator ten sam, co w raporcie, bo oba zdania czyta się jednym ruchem oka wzdłuż paska -
-    dwa różne rozdzielniki na jednej belce wyglądałyby jak dwa różne rejestry."""
+    dwa różne rozdzielniki na jednej belce wyglądałyby jak dwa różne rejestry.
+
+    `ts` - TOŻSAMOŚĆ GESTU, którego drogę powrotu recepta niesie (AR-94): znacznik `event.ts`
+    jego zdarzeń w dzienniku albo `None`, gdy nadawca go nie zna. Dom opisuje „Ostatnio” zdarzeniem
+    o tym znaczniku, a nie ostatnim gestem w ogóle - gest wykonany później w innym miejscu nie
+    podszywa się pod gest, który cofa przycisk recepty."""
     SEPARATOR = " · "
 
-    def __new__(cls, czlony=()):
+    def __new__(cls, czlony=(), ts=None):
         czlony = tuple(c if isinstance(c, CzlonRecepty) else CzlonRecepty(c) for c in czlony)
         czlony = tuple(c for c in czlony if c.tekst)
         self = super().__new__(cls, cls.SEPARATOR.join(c.tekst for c in czlony))
         self.czlony = czlony
+        self.ts = ts
         return self
 
 
-def _zlacz_recepty(czlony):
-    """Człony recepty (`CzlonRecepty` albo goły tekst bez wykonawcy) w `Recepta` (FH-2, FH-8)."""
-    return Recepta(czlony)
+def _zlacz_recepty(czlony, ts=None):
+    """Człony recepty (`CzlonRecepty` albo goły tekst bez wykonawcy) w `Recepta` (FH-2, FH-8),
+    z tożsamością gestu (`ts`, AR-94)."""
+    return Recepta(czlony, ts)
 
 
 class _Odwrot(NamedTuple):
@@ -735,10 +744,11 @@ class _Odwrot(NamedTuple):
     zostalo: str
 
 
-# Trzy drogi powrotu osi zaznaczenia. Cofnięcie przypisania i wycofanie klatki mówią tymi samymi
-# kluczami („przywrócisz: …"), bo para gest↔odwrót różni się tylko etykietami - klucze zdania są
-# wspólne, a etykiety jadą parametrem. Przywrócenie przypisania ma własną parę: jego odwrotem
-# jest COFNIĘCIE („cofniesz: …"), a „przywrócisz" byłoby nieprawdą o kierunku (FH-9).
+# Trzy drogi powrotu osi zaznaczenia, każda z WŁASNĄ parą kluczy zdania. Cofnięcie przypisania
+# i wycofanie klatki brzmią dziś tak samo („przywrócisz: …”, etykiety jadą parametrem), ale klucz
+# wspólny kłamałby o osi: zmiana zdania osi obiektu zmieniałaby receptę osi klatki (AR-71).
+# Przywrócenie przypisania ma własną parę także w brzmieniu: jego odwrotem jest COFNIĘCIE
+# („cofniesz: …"), a „przywrócisz" byłoby nieprawdą o kierunku (FH-9).
 _ODWROT_COFNIECIA = _Odwrot("grid.sel.object_clear_undo", "grid.sel.object_clear_undo_after",
                             "grid.sel.object", "grid.sel.object_restore",
                             "_on_object_restore", "_ile_do_przywrocenia")
@@ -747,11 +757,12 @@ _ODWROT_PRZYWROCENIA = _Odwrot("grid.sel.object_restore_undo", "grid.sel.object_
                                "_on_object_clear", "_ile_do_cofniecia")
 # Odmowa wykonania recepty przy zajętości (Z4) - powód z `_powod_zajetosci` (klucze gestów
 # izolacji) na zdanie RECEPTY: tamte obiecują, że gest „ruszy po zakończeniu", a recepta sama
-# nie ruszy - trzeba ją kliknąć jeszcze raz.
+# nie ruszy - trzeba ją kliknąć jeszcze raz. Ten sam słownik odmawia pozycjom menu osi, które
+# recepta nazywa (AR-70, `FramesView._odmowa_zajetosci`) - to te same sloty.
 _RECEPTA_ZAJETA = {"grid.inplace.busy_stage": "grid.recipe.busy_stage",
                    "grid.inplace.busy_write": "grid.recipe.busy_write"}
 
-_ODWROT_WYCOFANIA = _Odwrot("grid.sel.object_clear_undo", "grid.sel.object_clear_undo_after",
+_ODWROT_WYCOFANIA = _Odwrot("grid.sel.frame_retire_undo", "grid.sel.frame_retire_undo_after",
                             "grid.sel.frame", "grid.sel.frame_restore",
                             "_on_frame_restore", "_ile_wycofanych")
 # Droga powrotu gestu UWAG nie jest pozycją menu: odwrotem jest przywrócenie stanu sprzed gestu,
@@ -1130,11 +1141,36 @@ def _adnotuj_rodowod(base, stany):
 class _ElizjaWSrodku(QStyledItemDelegate):
     """Delegat JEDNEJ kolumny z elizją w środku: tekst traci środek, a zachowuje oba końce -
     prefiks „×N" i ogon nazwy pliku z rozszerzeniem. `QTableView.setTextElideMode` działa na całą
-    tabelę, więc elizja kolumny żyje w delegacie (`setItemDelegateForColumn`)."""
+    tabelę, więc elizja kolumny żyje w delegacie (`setItemDelegateForColumn`).
+
+    JEDNA LINIA, BEZ ZAWIJANIA (AR-116). Tabela ma domyślnie `wordWrap`, więc styl dostawał opcję
+    z `WrapText` i nazwę ze spacjami („×2  NGC6992 …") łamał na dwie linie w wąskiej kolumnie,
+    zamiast ją skrócić. Zawijanie zdejmujemy w opcji, a tekst do malowania skraca
+    `QFontMetrics.elidedText` do szerokości prostokąta tekstu (`tekst_w_linii`) - w malowaniu, nie
+    w `initStyleOption`, bo z tej opcji liczy się też podpowiedź szerokości kolumny z treści."""
 
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
         option.textElideMode = Qt.ElideMiddle
+        option.features &= ~QStyleOptionViewItem.WrapText
+
+    @staticmethod
+    def tekst_w_linii(option):
+        """Tekst opcji skrócony w środku do szerokości, którą styl da mu w komórce: prostokąt
+        tekstu (`SE_ItemViewItemText`) minus margines, który styl odejmuje sam przy rysowaniu
+        (`PM_FocusFrameHMargin` + 1 z każdej strony). Mieści się w całości - zostaje bez zmian."""
+        styl = option.widget.style() if option.widget is not None else QApplication.style()
+        prostokat = styl.subElementRect(QStyle.SE_ItemViewItemText, option, option.widget)
+        margines = styl.pixelMetric(QStyle.PM_FocusFrameHMargin, None, option.widget) + 1
+        return option.fontMetrics.elidedText(option.text, Qt.ElideMiddle,
+                                             max(0, prostokat.width() - 2 * margines))
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = self.tekst_w_linii(opt)
+        styl = opt.widget.style() if opt.widget is not None else QApplication.style()
+        styl.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
 
 
 class _EdycjaKomorki(QStyledItemDelegate):
@@ -1346,7 +1382,7 @@ class GridTableModel(QAbstractTableModel):
         self._sort_id = ("base", BASE_COLS[0][1])
         self._sort_desc = False
         self._obrazy_pytajnik = False   # perspektywa kopii: brak liczby obrazów = „?" (`_images_cell`)
-        self._numeric_kw = set() # keywordy z choć jedną komórką liczbową → MISSING „—" też prawo (P3-7)
+        self._numeric_kw = set() # keywordy z większością wartości liczbowych → cała kolumna w prawo (AR-77)
         self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
         self._preview_label = i18n.t("grid.preview.macro")   # etykieta efemerycznej kolumny (klinga-zależna, R1 #4)
         self._version_col_on = False   # kolumna „Wersja" - perspektywa „Wersje stosów" albo wybór w Znajdź
@@ -1404,15 +1440,28 @@ class GridTableModel(QAbstractTableModel):
             d["cells"] = cells.get(d["frame_id"], {})
         self._data_rows = list(base_rows)
         self._keywords = list(keywords)
-        # Kolumna-keyword jest NUMERYCZNA, gdy ma choć jedną komórkę liczbową — wtedy MISSING „—"
-        # wyrównujemy w prawo, by nie wisiał po lewej pod słupkiem liczb (wizytator P3-7).
+        # Kolumna-keyword jest NUMERYCZNA, gdy WIĘKSZOŚĆ jej wartości to liczby (AR-77), i wtedy
+        # CAŁA stoi do prawej - wartości i kreska braku MISSING (wizytator P3-7), inaczej do lewej.
+        # Dawniej wystarczała jedna komórka liczbowa, a wartość szła za typem własnej karty: GAIN
+        # „4000" zapisany tekstem stał po lewej, a kreska braku w tej samej kolumnie po prawej
+        # (firsthand W11). Remis to nie większość - kolumna zostaje tekstowa. Pętla kończy się,
+        # gdy wynik jest już przesądzony (połowa wierszy po jednej stronie).
         self._numeric_kw = set()
+        polowa = len(self._data_rows) / 2
         for kw in self._keywords:
+            liczby = teksty = 0
             for d in self._data_rows:
                 c = d["cells"].get(kw, pivot_mod.MISSING)
-                if c is not pivot_mod.MISSING and c.num is not None:
-                    self._numeric_kw.add(kw)
+                if c is pivot_mod.MISSING or c.raw is None:
+                    continue
+                if c.num is not None:
+                    liczby += 1
+                else:
+                    teksty += 1
+                if liczby > polowa or teksty >= polowa:
                     break
+            if liczby > teksty:
+                self._numeric_kw.add(kw)
         self._group_by = group_by
         self._rebuild()
 
@@ -1904,8 +1953,8 @@ class GridTableModel(QAbstractTableModel):
             return None
         if role == Qt.DisplayRole:
             return "" if cell.raw is None else str(cell.raw)
-        if role == Qt.TextAlignmentRole and cell.num is not None:
-            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role == Qt.TextAlignmentRole and kw in self._numeric_kw:
+            return int(Qt.AlignRight | Qt.AlignVCenter)   # wyrównanie kolumny, nie karty (AR-77)
         return None
 
     # ---- sort + grupowanie ----

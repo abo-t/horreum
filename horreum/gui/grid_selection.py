@@ -37,7 +37,12 @@ class SelectionBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
-        lay = QHBoxLayout(self); lay.setContentsMargins(8, 4, 8, 4)
+        # Dwa rzędy w zapasie (AR-77): rząd przycisków i - tylko gdy obok przycisków nie mieści się
+        # nawet pierwsze kryterium - rząd samych kryteriów pod nim (`_dopasuj_kryteria`).
+        self._zew = QVBoxLayout(self); self._zew.setContentsMargins(8, 4, 8, 4); self._zew.setSpacing(2)
+        lay = QHBoxLayout(); lay.setContentsMargins(0, 0, 0, 0)
+        self._zew.addLayout(lay)
+        self._kryteria_pod = False
         self.count_label = QLabel("")
         f = QFont(); f.setBold(True); self.count_label.setFont(f)
         self.criteria_label = ElidedLabel()
@@ -166,8 +171,13 @@ class SelectionBar(QFrame):
         lay = self._lay
         while lay.count():
             lay.takeAt(0)            # widżety zostają dziećmi paska; odstępy znikają z elementem
+        self._zew.removeWidget(self.criteria_label)
         lay.addWidget(self.count_label); lay.addSpacing(8)
-        lay.addWidget(self.criteria_label, 1)
+        if self._kryteria_pod:
+            lay.addStretch(1)        # przyciski zostają przy prawej krawędzi, jak w jednym rzędzie
+            self._zew.addWidget(self.criteria_label)
+        else:
+            lay.addWidget(self.criteria_label, 1)
         rzad = self._rzad()
         # NAJPIERW UKŁAD, POTEM WIDOCZNOŚĆ: widżet pokazywany jest już na swoim miejscu w pasku.
         for w in rzad:
@@ -191,6 +201,65 @@ class SelectionBar(QFrame):
 
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
+        self._dopasuj_kryteria()
+
+    # ---- miejsce kryteriów (AR-77) ----
+    # KRYTERIA MAJĄ PIERWSZEŃSTWO PRZED PRZYCISKAMI. Przyciski nie maleją poniżej podpowiedzi
+    # (tekst przycisku nie podlega elizji), więc w jednym rzędzie kryteria dostawały resztę - przy
+    # „1 zaznaczona" licznik urósł i „Obiekt: NGC1976" zwijał się do „Obie…" (firsthand W11, okno
+    # przy podłodze). Gdy obok przycisków nie mieści się nawet PIERWSZE kryterium, kryteria schodzą
+    # do własnego rzędu na całą szerokość paska. Minimum paska nie rośnie (podłogę okna wiąże
+    # `QSplitter` widoku, kanon „MINIMALNY WSPIERANY EKRAN"), a drugi rząd kosztuje wysokość
+    # jednej linii tekstu wyłącznie wtedy, gdy bez niego kryteria byłyby nieczytelne.
+    _SEPARATOR_KRYTERIOW = " · "     # łącznik `FramesView._describe_criteria`
+
+    def _miejsce_na_kryteria(self):
+        """Szerokość, jaką kryteria dostałyby w JEDNYM rzędzie z przyciskami przy bieżącej szerokości
+        paska. Liczona z podpowiedzi sąsiadów (przyciski i licznik nie schodzą poniżej nich), nie
+        z geometrii etykiety - w trybie dwóch rzędów etykiety w rzędzie nie ma. `QBoxLayout` stawia
+        odstęp układu między WIDŻETAMI (licznik, kryteria, przyciski), a nie przy odstępach stałych."""
+        rzad = self._rzad()
+        przyciski = [w for w in rzad if w is not None]
+        m = self._zew.contentsMargins()
+        zajete = (m.left() + m.right() + self.count_label.sizeHint().width() + 8
+                  + sum(w.sizeHint().width() for w in przyciski)
+                  + 12 * (len(rzad) - len(przyciski))
+                  + self._lay.spacing() * (len(przyciski) + 1))
+        return self.contentsRect().width() - zajete       # bez ramki `StyledPanel`
+
+    def _potrzeba_kryteriow(self):
+        """Szerokość pierwszego kryterium razem z „…" (za nim idą kolejne) i z zapasem elizji
+        `ElidedLabel` (4 px) - poniżej niej etykieta nie mówi już nawet, CO zawęża zbiór."""
+        pierwsze = self.criteria_label.full_text().split(self._SEPARATOR_KRYTERIOW, 1)[0]
+        if not pierwsze:
+            return 0
+        return self.criteria_label.fontMetrics().horizontalAdvance(pierwsze + "…") + 5
+
+    def _dopasuj_kryteria(self):
+        """Kryteria w rzędzie przycisków albo pod nim - przełożenie tylko przy zmianie trybu, więc
+        `LayoutRequest`, który przełożenie samo wywoła, kończy się tu bez pracy. Niepokazany pasek
+        zostaje w jednym rzędzie: jego szerokość nie jest jeszcze szerokością z układu."""
+        if not self.isVisible():
+            return
+        pod = self._miejsce_na_kryteria() < self._potrzeba_kryteriow()
+        if pod != self._kryteria_pod:
+            self._kryteria_pod = pod
+            self._uloz()
+
+    def event(self, e):
+        # Licznik zmienia tekst z zewnątrz (`FramesView._update_count` pisze wprost do etykiety),
+        # a każda zmiana podpowiedzi sąsiada kończy się `LayoutRequest` na pasku.
+        if e.type() == QEvent.LayoutRequest:
+            self._dopasuj_kryteria()
+        return super().event(e)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._dopasuj_kryteria()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._dopasuj_kryteria()
 
     def set_object_actions(self, *, namable, clearable, changeable, stacks=0, restorable=0,
                            reason=None):

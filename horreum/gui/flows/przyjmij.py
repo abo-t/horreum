@@ -85,6 +85,14 @@ class PrzyjmijView(QWidget):
     def _build_ui(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        # Odmowa kafla Przyjmij (bieg w toku, zapis nagłówków) - w treści strony, nie tylko na pasku:
+        # pasek żyje kilka sekund, a strona z postępem biegu stoi przed oczami do końca biegu (AR-97).
+        # Poza `self.panel`, bo panel raportu jest ukryty do pierwszego przebiegu.
+        self.lbl_odmowa = QLabel("")
+        self.lbl_odmowa.setProperty("role", "warn")
+        self.lbl_odmowa.setWordWrap(True)
+        self.lbl_odmowa.setVisible(False)
+        lay.addWidget(self.lbl_odmowa)
         self.panel = QFrame()
         self.panel.setFrameShape(QFrame.StyledPanel)
         pv = QVBoxLayout(self.panel)
@@ -180,11 +188,20 @@ class PrzyjmijView(QWidget):
         """Przebieg Dostawy pisze do bazy - gest zapisu gaśnie (szczery disabled z powodem)."""
         self._busy = bool(busy)
         self._sync_przyciski()
+        self._sync_odmowa()
 
     def set_writeback_busy(self, busy):
         """Zapis nagłówków do plików w toku - gest gaśnie jak etapy Dostawy (mutex writebacku)."""
         self._writeback_busy = bool(busy)
         self._sync_przyciski()
+        self._sync_odmowa()
+
+    def _sync_odmowa(self):
+        """Odmowa kafla mówi o zajętości (bieg albo zapis nagłówków) - gaśnie, gdy żadnej już nie ma.
+        Zapis nagłówków nie kończy się przebiegiem Dostawy, więc samo `_on_run_finished` zostawiłoby
+        zdanie „zapis trwa” nad stroną po jego końcu."""
+        if not self._busy and not self._writeback_busy:
+            self.lbl_odmowa.setVisible(False)
 
     def odswiez_raport(self):
         """Przelicz raport ze stanu bazy z TĄ SAMĄ granicą okna - gest na tej stronie, w Porządkach
@@ -193,12 +210,19 @@ class PrzyjmijView(QWidget):
         if self._zapis is not None:
             self._render()
 
+    def pokaz_odmowe(self, msg):
+        """Odmowa kafla Przyjmij w treści strony - gaśnie z końcem biegu, który ją spowodował."""
+        self.lbl_odmowa.setText(msg)
+        self.lbl_odmowa.setVisible(True)
+
     # ---------------------------------------------------------------- raport
 
     def _on_run_finished(self, zapis):
         """Koniec przebiegu Dostawy (po odświeżeniu widoków gospodarza). Przebieg „all” stawia nowy
         raport; każdy inny etap tylko go przelicza - `Rozwiąż` po naprawie nagłówka zmienia, które
-        klatki tej dostawy mają obiekt, ale dostawą nie jest."""
+        klatki tej dostawy mają obiekt, ale dostawą nie jest. Odmowa kafla gaśnie: bieg, który ją
+        spowodował, właśnie się skończył."""
+        self.lbl_odmowa.setVisible(False)
         if zapis["stage"] == "all":
             self._zapis = zapis
             self._until = self._now()

@@ -1803,6 +1803,81 @@ def test_staging_przezywa_przelaczenie_paneli(rn_view):
     assert "makra" in view.rename_bar.btn_stage.toolTip()
 
 
+def _staging_makra(view):
+    view._toggle_panel("macro")
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    assert view._pending_count() == 2
+
+
+def test_AR72_zdjecie_podgladu_nazw_oddaje_kolumne_stagingowi(rn_view):
+    """Rename przejmuje podgląd także wtedy, gdy w szufladzie czekają karty makra (mutex trzyma tylko
+    „Do stagingu"). Po zdjęciu podglądu nazw kolumna wraca do tego, co zapisze commit - wcześniej
+    oczekujące karty stały bez podglądu aż do następnej edycji. Obie drogi zdjęcia: przycisk panelu
+    i przełączenie na panel makra.
+
+    Falsyfikator: zdejmij oddanie ze `_on_rename_clear` - właściciel zostaje `None`, kolumna pusta."""
+    from horreum.gui import i18n
+    view, con, files = rn_view
+    _staging_makra(view)
+    oczekiwany = view._podglad_ze_stagingu()
+    assert oczekiwany, "staging bez podglądu - sekwencja nie zaczyna się od kart"
+    komunikaty = []
+    view.status_message.connect(komunikaty.append)
+    for zdejmij in (lambda: view.rename_bar.cleared.emit(), lambda: view._toggle_panel("macro")):
+        if view._rename_panel_open():
+            view._toggle_panel("rename")               # zamknięcie zostawia podgląd
+        view._toggle_panel("rename")                   # cudzy panel zdejmuje podgląd makra (R#9)
+        assert view._preview_owner is None and not view.model._preview_active()
+        view._on_rename_preview(_POL)
+        assert view._preview_owner == "rename"
+        zdejmij()
+        assert view._preview_owner == "macro" and view.model._preview_active()
+        assert view.model._preview == oczekiwany, "kolumna nie pokazuje stagingu przebiegu"
+        assert komunikaty[-1] == i18n.t("grid.rename.preview_cleared_staging_back")
+    assert view._pending_count() == 2                  # podgląd ≠ staging - karty nietknięte
+
+
+def test_AR72_samo_otwarcie_panelu_nazw_nie_zostawia_stagingu_bez_kolumny(rn_view):
+    """Druga droga AR-72 (wizytacja natywna): samo OTWARCIE panelu nazw zdejmuje podgląd makra (R#9),
+    a bez podglądu nazw nic go potem nie oddawało - karty czekały bez kolumny podglądu. Zamknięcie
+    panelu nazw i powrót do panelu makra oddają kolumnę stagingowi.
+
+    Falsyfikator: zdejmij `_wroc_do_stagingu` z `_toggle_panel` → po zamknięciu panelu nazw
+    właściciel `None`, kolumna pusta, choć szuflada niesie karty."""
+    view, con, files = rn_view
+    _staging_makra(view)
+    oczekiwany = view._podglad_ze_stagingu()
+    for wroc in (lambda: view._toggle_panel("rename"), lambda: view._toggle_panel("macro")):
+        view._toggle_panel("rename")                   # otwarcie zdejmuje podgląd makra (R#9)
+        assert view._preview_owner is None and not view.model._preview_active()
+        wroc()                                         # zamknięcie nazw albo powrót do makra
+        assert view._preview_owner == "macro" and view.model._preview == oczekiwany
+    assert view._pending_count() == 2
+
+
+def test_AR72_bez_stagingu_i_przy_rodowodzie_podglad_nie_wraca(rn_view):
+    """Oddanie dotyczy wyłącznie kart, które czekają: bez stagingu zdjęcie podglądu nazw zostawia
+    kolumnę pustą, jak dotąd. Otwarcie panelu rodowodu zdejmuje podgląd każdej klingi (R#9),
+    więc staging też nie wraca - rodowód nie jest panelem makra."""
+    from horreum.gui import i18n
+    view, con, files = rn_view
+    komunikaty = []
+    view.status_message.connect(komunikaty.append)
+    view._toggle_panel("rename")
+    view._on_rename_preview(_POL)
+    view.rename_bar.cleared.emit()
+    assert view._preview_owner is None and not view.model._preview_active()
+    assert komunikaty[-1] == i18n.t("grid.rename.preview_cleared")
+    _staging_makra(view)
+    view._toggle_panel("rename")
+    view._on_rename_preview(_POL)
+    view._toggle_panel("lineage")
+    assert view._preview_owner is None and not view.model._preview_active()
+
+
 def test_echo_daty_po_otwarciu_rename_niepuste(rn_view):
     """F3R#4 (kolejność = kontrakt): echo daty policzone OD RAZU przy otwarciu panelu renamu
     (strona → pokaż → echo), nie dopiero po zmianie zaznaczenia."""
@@ -3652,6 +3727,30 @@ def test_przywrocenie_liczy_CALE_zaznaczenie_z_rozbiciem_per_fakt(obj_view):
     assert "· kalibracja: 2" in msgs[-1], msgs[-1]
     assert "cofać" not in msgs[-1], "czasownik cofnięcia pod zdaniem przywracania"
     assert "oddano: IC443, NGC7000" in msgs[-1], msgs[-1]
+
+
+def test_przywrocenie_DWOCH_grup_to_JEDEN_gest_w_dzienniku(obj_view):
+    """Gest „Przywróć cofnięte przypisanie” na dwóch grupach (dwa obiekty) pisze klingą per grupa -
+    ale jednym `now`: tożsamością gestu w dzienniku jest `ts` (recepta i „Ostatnio” Domu, AR-94).
+    Dom opisuje cały gest, nie ostatnią grupę.
+
+    Falsyfikator: wróć do `now=self._now()` w pętli grup → dwa znaczniki, a `last_hand_gesture`
+    o znaczniku recepty liczy tylko klatki ostatniej grupy."""
+    import itertools
+    v, con = obj_view
+    ids = _zaznaczenie_do_przywrocenia(con, pamiec=["NGC7000"] * 4 + ["IC443"] * 2,
+                                       bez_pamieci=0, z_obiektem=0, darki=0, bez_obiektu=0)
+    v.refresh()
+    _zaznacz(v, ids)
+    tyk = itertools.count(1)               # zegar, który tyka - stały zegar fikstury nie odróżni wersji
+    v._now = lambda: f"2026-10-13T12:00:{next(tyk):02d}+00:00"
+    przed = con.execute("SELECT COALESCE(max(id), 0) FROM event").fetchone()[0]
+    v._on_object_restore()
+    znaczniki = {r[0] for r in con.execute(
+        "SELECT ts FROM event WHERE id > ? AND actor LIKE 'user%'", (przed,))}
+    assert len(znaczniki) == 1, znaczniki
+    gest = queries.last_hand_gesture(con, ts=znaczniki.pop())
+    assert gest is not None and sum(gest["verbs"].values()) >= 6, gest
 
 
 def test_przywrocenie_przy_ZERZE_grup_mowi_zdaniem_sasiadow(obj_view):

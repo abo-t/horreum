@@ -175,7 +175,7 @@ def test_panel_ukryty_do_pierwszego_przebiegu_potem_raport(strona, tmp_path):
     assert not strona.panel.isHidden()
     assert strona.lbl_head.text() == (
         f"Dostawa z {godzina_dostawy(zapis['since'])}: 4 nowe klatki (lighty 4)")
-    assert strona.lbl_objects.text() == "Obiekty: IC1795 ×1 (0.1 h)"
+    assert strona.lbl_objects.text() == "Obiekty: IC1795 ×1 (5 min)"   # 300 s: minuty (AR-75)
     assert strona.lbl_cal.text() == "Kalibracja nowych lightów: bez flatu 4 · bez darka 4"
     assert strona.lbl_unresolved.text() == "Nie rozpoznałem: 3 klatki"
     wiersze = _wiersze(strona)
@@ -263,7 +263,7 @@ def test_druga_dostawa_rozpoznana_aliasem_reka_nie_ubywa(strona, tmp_path, monke
     assert [tuple(r) for r in plamy] == [("user", "NGC7000"), ("user", "NGC7000"),
                                          ("alias", "NGC7000")]
     assert _wiersze(strona) == [] and strona.lbl_unresolved.text() == "Wszystko rozpoznane"
-    assert strona.lbl_objects.text() == "Obiekty: NGC7000 ×1 (0.1 h)"     # TA dostawa
+    assert strona.lbl_objects.text() == "Obiekty: NGC7000 ×1 (5 min)"     # TA dostawa (AR-75)
     po_drugiej = audit.human_facts_census(strona.con)
     assert po_drugiej.spadki(po_gescie) == {}
     assert po_drugiej.object_hand >= po_gescie.object_hand
@@ -438,7 +438,7 @@ def test_kafel_przyjmij_to_jedna_interakcja_do_dostawy(qapp, tmp_path, monkeypat
         assert win.pipeline_view.parent() is win.przyjmij_view
         win._show_view(NAV_DOM)
         win.home_view.tile_przyjmij.click()
-        assert len(wolane) == 2 and win.statusBar().currentMessage() == "powód odmowy"
+        assert len(wolane) == 2 and win.report_label.text() == "powód odmowy"
     finally:
         win.close()
 
@@ -498,13 +498,13 @@ def test_wciagnij_mastery_otwiera_okno_zniw_i_przyjmuje_korzen(qapp, tmp_path, u
         assert okna == [(win.con, "X:/archiwum", win)]                # archiwum z bazy
         assert parametry[0] == (praca, [praca, os.path.normpath("X:/inna/_Review")])
         assert biegi == ["X:/archiwum/CALIBRATION/masters/flats"]
-        assert win.statusBar().currentMessage() == "Wciągnięto 1"
+        assert win.report_label.text() == "Wciągnięto 1"
         win.pipeline_view.btn_harvest.click()                          # nic nie wciągnięto
         assert okna[1][1] == "X:/archiwum/2024-03-01"                  # bez bazy: ostatnie źródło
         assert biegi == ["X:/archiwum/CALIBRATION/masters/flats"]
         win.pipeline_view.btn_harvest.click()                          # łańcuch odmówił
         assert len(biegi) == 2
-        assert win.statusBar().currentMessage() == "Wciągnięto 2 - dostawa w biegu"
+        assert win.report_label.text() == "Wciągnięto 2 - dostawa w biegu"
         assert parametry == [parametry[0]] * 3                         # każde otwarcie: te same wejścia
     finally:
         win.close()
@@ -532,7 +532,13 @@ def test_okno_bieg_mutex_porzadki_i_powrot(qapp, tmp_path, ustawienia, monkeypat
     monkeypatch.setattr(PipelineWorker, "_zrodlo", sonda_za_brama)
     win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
     try:
+        from test_gui_mainwindow import _zapis_paska
         pv, przyjmij = win.pipeline_view, win.przyjmij_view
+        odmowa = i18n.t("pipeline.refuse.delivery_running")
+        # AR-97: okno priorytetu wydłużone na czas testu - bieg trwa tu milisekundy, ale wolna
+        # maszyna nie może zamienić asercji o oknie w wyścig z zegarem.
+        win._zegar_priorytetu.setInterval(60000)
+        pasek = _zapis_paska(win)
 
         def start():
             win.home_view.tile_przyjmij.click()
@@ -541,11 +547,18 @@ def test_okno_bieg_mutex_porzadki_i_powrot(qapp, tmp_path, ustawienia, monkeypat
             win._show_view(NAV_DOM)
             win.home_view.tile_przyjmij.click()             # drugi klik w biegu
             assert pv._thread is watek
-            assert win.statusBar().currentMessage() == i18n.t("pipeline.refuse.delivery_running")
+            assert win.report_label.text() == odmowa
             assert win.stack.currentIndex() == STRONA_DOSTAWA
+            # odmowa także w treści strony - pasek żyje sekundy, strona z postępem do końca biegu
+            assert not przyjmij.lbl_odmowa.isHidden()
+            assert przyjmij.lbl_odmowa.text() == odmowa
             brama.set()
 
         _przebieg(pv, lambda: start())
+        assert przyjmij.lbl_odmowa.isHidden(), "odmowa gaśnie z końcem biegu, który ją spowodował"
+        # AR-97: „<etap>: gotowe.” łańcucha nie wyparło odmowy kafla - czeka na koniec okna.
+        po_odmowie = pasek[len(pasek) - 1 - pasek[::-1].index(odmowa):]
+        assert not any(m.endswith(": gotowe.") for m in po_odmowie), po_odmowie
         [wiersz] = _wiersze(przyjmij)
         for zrodlo in (win.grid_view.writeback_busy, win.object_view.writeback_busy):
             zrodlo.emit(True)
@@ -1027,6 +1040,54 @@ def test_gest_wydania_przezywa_wczytanie_i_recepte_gridu_w_Zbiorach(qapp, tmp_pa
         assert win._pelny_komunikat == "Obiekt wydania przypisany ręką: 1 stos (NGC7000)"
         _klik_recepty(win)
         assert _obiekt_stosu(win) == ("IC1795", "header")
+    finally:
+        win.close()
+
+
+def test_gest_wydania_z_Dostawy_gasnie_z_raportem_przy_wejsciu_w_Zbiory(qapp, tmp_path, ustawienia,
+                                                                        monkeypatch):
+    """Gest padł w Dostawie (raport związany z nią). Wejście w Zbiory gasi raport - i gest razem z nim:
+    przycisk „Przypisz obiekt wydania” nie stoi nad Zbiorami bez swojego zdania, a recepta Zbiorów
+    może wejść na jego miejsce.
+
+    Falsyfikator: zdejmij gaszenie gestu wydania w `_on_nav_changed` → po wejściu w Zbiory przycisk
+    niesie „Przypisz obiekt wydania” przy pustym raporcie."""
+    from horreum.gui.app import NAV_ZBIORY
+    i18n.set_lang("pl")
+    _zniwa_ze_stosami(monkeypatch, [("stos-ic", [7], "NGC7000")])
+    win = MainWindow(_baza_ze_stosem(tmp_path), now_fn=_Zegar())
+    try:
+        win.show()
+        _zniwa_i_przebieg(win)
+        zdanie = win._pelny_komunikat
+        assert zdanie.startswith("1 stos ma inny obiekt niż wydanie")
+        assert win.recipe_label.isVisible() and win.recipe_label.text() == "Przypisz obiekt wydania"
+        win._show_view(NAV_ZBIORY)
+        assert win._pelny_komunikat != zdanie               # na pasku raport Zbiorów, nie zdanie gestu
+        assert not win._gest_wydania_aktywny()
+        assert win.recipe_label.text() != "Przypisz obiekt wydania"
+    finally:
+        win.close()
+
+
+def test_odmowa_kafla_przy_zapisie_naglowkow_gasnie_z_koncem_zapisu(qapp, tmp_path):
+    """Zapis nagłówków nie kończy się przebiegiem Dostawy - odmowa kafla „zapis trwa” w treści strony
+    gaśnie z końcem zapisu, nie czeka na następny przebieg. Odmowa w biegu zostaje, dopóki bieg trwa."""
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        przyjmij = win.przyjmij_view
+        przyjmij.set_writeback_busy(True)
+        przyjmij.pokaz_odmowe("zapis nagłówków w toku")
+        assert not przyjmij.lbl_odmowa.isHidden()
+        przyjmij.set_writeback_busy(False)
+        assert przyjmij.lbl_odmowa.isHidden()
+
+        przyjmij.set_busy(True)
+        przyjmij.pokaz_odmowe("Dostawa w biegu")
+        przyjmij.set_writeback_busy(False)
+        assert not przyjmij.lbl_odmowa.isHidden(), "bieg trwa - odmowa zgasła za wcześnie"
+        przyjmij.set_busy(False)
+        assert przyjmij.lbl_odmowa.isHidden()
     finally:
         win.close()
 

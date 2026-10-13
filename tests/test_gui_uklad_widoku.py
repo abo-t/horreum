@@ -556,3 +556,278 @@ def test_FH10_biblioteka_mowi_godziny_materialu_pod_filtrem_w_kadrze(obiekty, qa
     assert h.sectionSize(OBJ_COL_HOURS) > najdluzszy, "tekst godzin mieści się bez elizji"
     v.combo_filter.setCurrentIndex(v.combo_filter.findData("Ha"))
     assert _komorka_obiektu(v, "NGC7000", OBJ_COL_HOURS).text() == portfolio.format_hours(1200.0)
+
+
+def test_AR75_obiekt_z_minutami_materialu_mowi_minuty_nie_zero(obiekty, qapp):
+    """Moon 503 klatki, Jupiter 256 - „0.0 h" czytało się jak brak materiału. Komórka „Godziny"
+    biblioteki idzie przez ten sam `format_hours` co listwa facetów: 3 lighty po 80 s to „4 min".
+
+    Falsyfikator: składaj komórkę z własnego formatu godzin - zostanie „0.1 h"."""
+    from horreum.gui import i18n
+    from horreum.gui.app import OBJ_COL_HOURS
+    v, con = obiekty
+    lighty = [fid for (fid,) in con.execute(
+        "SELECT f.id FROM frame f JOIN object o ON o.id = f.object_id "
+        "WHERE o.canon = 'M42' AND f.kind = 'light'")]
+    assert len(lighty) == 3
+    con.executemany("UPDATE header SET exptime = 80.0 WHERE frame_id = ?", [(f,) for f in lighty])
+    con.commit()
+    v.refresh()
+    m42 = _komorka_obiektu(v, "M42", OBJ_COL_HOURS)
+    assert m42.text() == i18n.t("portfolio.minutes", n=4), m42.text()
+
+
+# ---------- AR-73: wskaźnik pustego pola wyboru w motywie ----------
+
+def _piksele(obraz, kolor, prostokat=None):
+    from PySide6.QtGui import QColor
+    cel = QColor(kolor).rgb()
+    if prostokat is None:
+        xs, ys = range(obraz.width()), range(obraz.height())
+    else:
+        xs = range(prostokat.left(), prostokat.right())
+        ys = range(prostokat.top(), prostokat.bottom())
+    return sum(1 for x in xs for y in ys if obraz.pixel(x, y) == cel)
+
+
+@pytest.mark.parametrize("motyw", ["dark", "light"])
+def test_AR73_puste_pole_ma_ramke_z_motywu_a_zaznaczone_zostaje_ptaszkiem(qapp, motyw):
+    """Pole wyboru, radio i pozycja listy z polem wyboru: NIEZAZNACZONE rysują ramkę koloru
+    `secondary_text` motywu (arkusz `theme.qss`), ZAZNACZONE maluje dalej Fusion - ze znakiem.
+    Arkusz i styl na widżecie, nie na aplikacji: test nie zmienia wyglądu innych testów sesji.
+
+    Falsyfikator: reguła na `::indicator` bez `:unchecked` - zaznaczone pole dostaje tę samą
+    ramkę i traci ptaszka (liczba pikseli ramki w obu stanach równa)."""
+    from PySide6.QtWidgets import (QCheckBox, QListWidget, QListWidgetItem, QRadioButton,
+                                   QStyleFactory)
+    from horreum.gui import theme
+    ramka, _tlo = theme.wskaznik_odznaczony(motyw)
+    fusion = QStyleFactory.create("Fusion")
+
+    def ostyluj(w):
+        w.setStyle(fusion)
+        w.setStyleSheet(theme.qss(motyw))
+        w.resize(w.sizeHint())
+        return w
+
+    puste, pelne = ostyluj(QCheckBox("x")), ostyluj(QCheckBox("x"))
+    pelne.setChecked(True)
+    n_puste = _piksele(puste.grab().toImage(), ramka)
+    n_pelne = _piksele(pelne.grab().toImage(), ramka)
+    assert n_puste >= 8, f"pole wyboru: brak ramki z motywu ({n_puste} px)"
+    assert n_pelne < n_puste / 2, "zaznaczone pole wyboru wzięło regułę pustego"
+    # Radio jest okręgiem z wygładzaniem krawędzi - dokładny kolor ramki trafia w pojedyncze
+    # piksele, więc liczymy piksele BLISKIE ramce (każdy kanał do 24 poziomów).
+    from PySide6.QtGui import QColor
+    cel = QColor(ramka)
+    obraz = ostyluj(QRadioButton("x")).grab().toImage()
+    bliskie = sum(1 for x in range(obraz.width()) for y in range(obraz.height())
+                  if max(abs(obraz.pixelColor(x, y).red() - cel.red()),
+                         abs(obraz.pixelColor(x, y).green() - cel.green()),
+                         abs(obraz.pixelColor(x, y).blue() - cel.blue())) <= 24)
+    assert bliskie >= 8, f"radio: brak ramki z motywu ({bliskie} px)"
+    lista = ostyluj(QListWidget())
+    for stan in (Qt.Unchecked, Qt.Checked):
+        it = QListWidgetItem("wiersz")
+        it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+        it.setCheckState(stan)
+        lista.addItem(it)
+    lista.resize(200, 80)
+    obraz = lista.viewport().grab().toImage()
+    pusty = _piksele(obraz, ramka, lista.visualItemRect(lista.item(0)))
+    pelny = _piksele(obraz, ramka, lista.visualItemRect(lista.item(1)))
+    assert pusty >= 8, "pusta pozycja listy bez ramki z motywu"
+    assert pelny < pusty / 2, "zaznaczona pozycja listy wzięła regułę pustej"
+
+
+# ---------- AR-77: wyrównanie kolumny i pasek zbioru ----------
+
+def _model_z_kolumna(wartosci):
+    """Model z jedną kolumną GAIN: `wartosci` = lista (raw, num) albo None (brak karty)."""
+    from horreum import pivot as pivot_mod
+    ids = list(range(1, len(wartosci) + 1))
+    base = [{"frame_id": i, "path": f"/a/f{i}.fits", "_telescope": "", "_object": "",
+             "kind": "light", "camera_model": None, "filter_canon": None, "present": 1,
+             "n_present": 1} for i in ids]
+    karty = [(i, "GAIN", 0, w[0], w[1]) for i, w in zip(ids, wartosci) if w is not None]
+    m = grid_mod.GridTableModel()
+    m.set_data(base, pivot_mod.build_pivot(ids, ["GAIN"], karty), ["GAIN"])
+    return m
+
+
+def _wyrownania(m):
+    kol = len(grid_mod.BASE_COLS)
+    return [m.data(m.index(r, kol), Qt.TextAlignmentRole) for r in range(m.rowCount())]
+
+
+def test_AR77_kolumna_wyrownana_po_wiekszosci_wartosci_kreska_za_kolumna(qapp):
+    """Jedna komórka liczbowa robiła kolumnę liczbową, a wartość szła za typem własnej karty: GAIN
+    „4000" zapisany tekstem stał po lewej, kreska braku w tej samej kolumnie po prawej (W11).
+    Teraz kolumna ma JEDNO wyrównanie, z większości wartości; kreska i każda wartość idą za nim.
+    Remis nie jest większością - kolumna zostaje tekstowa.
+
+    Falsyfikator: wróć do „choć jednej komórki" - kolumna z trzema tekstami i jedną liczbą stanie
+    po prawej; albo wyrównuj wartość po `cell.num` - tekst w kolumnie liczbowej zostanie po lewej."""
+    prawo = int(Qt.AlignRight | Qt.AlignVCenter)
+    tekstowa = _model_z_kolumna([("4000", None), ("4000", None), ("4000", None), ("100", 100.0),
+                                 None])
+    assert _wyrownania(tekstowa) == [None] * 5
+    liczbowa = _model_z_kolumna([("100", 100.0), ("120", 120.0), ("4000", None), None])
+    assert _wyrownania(liczbowa) == [prawo] * 4
+    remis = _model_z_kolumna([("100", 100.0), ("4000", None), None])
+    assert _wyrownania(remis) == [None] * 3
+
+
+def _pasek(qapp, licznik, kryteria):
+    from horreum.gui.grid_selection import SelectionBar
+    bar = SelectionBar()
+    bar.count_label.setText(licznik)
+    bar.set_criteria(kryteria)
+    bar.show()
+    qapp.processEvents()
+    return bar
+
+
+def test_AR77_kryteria_schodza_do_wlasnego_rzedu_zamiast_zwijac_sie_do_obie(qapp):
+    """Przy „1 zaznaczona" licznik urósł i „Obiekt: NGC1976" zwijał się do „Obie…" - przyciski nie
+    maleją, więc kryteria dostawały resztę. Gdy obok przycisków nie mieści się PIERWSZE kryterium,
+    kryteria schodzą pod przyciski na całą szerokość; gdy znów się mieści - wracają. Zmiana
+    licznika z zewnątrz (`_update_count` pisze wprost do etykiety) też przekłada pasek. Minimum
+    paska w dwóch rzędach nie rośnie, więc podłogi okna to nie podnosi. Szerokości liczone
+    z podpowiedzi widżetów, nie pinowane w pikselach.
+
+    Falsyfikator: zdejmij `_dopasuj_kryteria` z `event` - zmiana licznika zostawia „Obie…"."""
+    kryteria = "Obiekt: NGC1976 · Teleskop: RC8 · Filtr: Ha"
+    bar = _pasek(qapp, "12 klatek", kryteria)
+    try:
+        # szeroko: całe kryteria mieszczą się obok przycisków nawet przy długim liczniku
+        bar.resize(bar.width() - bar._miejsce_na_kryteria()
+                   + bar.criteria_label.fontMetrics().horizontalAdvance(kryteria) + 600, bar.height())
+        qapp.processEvents()
+        assert not bar._kryteria_pod
+        assert bar.criteria_label.width() == bar._miejsce_na_kryteria(), "rachunek miejsca = układ"
+        bar.count_label.setText("12 klatek  ·  1 zaznaczona")
+        qapp.processEvents()
+        assert not bar._kryteria_pod
+        min_jeden_rzad = bar.minimumSizeHint().width()     # minimum z długim licznikiem
+        bar.count_label.setText("12 klatek")
+        qapp.processEvents()
+        # szerokość, przy której pierwsze kryterium mieści się z zapasem 10 px - dłuższy licznik
+        # (człon „1 zaznaczona") je wypycha
+        szer = bar.width() - bar._miejsce_na_kryteria() + bar._potrzeba_kryteriow() + 10
+        bar.resize(szer, bar.height())
+        qapp.processEvents()
+        assert not bar._kryteria_pod
+        assert bar.criteria_label.text().startswith("Obiekt: NGC1976")
+        bar.count_label.setText("12 klatek  ·  1 zaznaczona")
+        qapp.processEvents()
+        assert bar._kryteria_pod, "kryteria zostały w rzędzie przycisków"
+        assert bar._lay.indexOf(bar.criteria_label) == -1
+        assert bar.criteria_label.text() == kryteria, "we własnym rzędzie kryteria mówią w całości"
+        assert bar.minimumSizeHint().width() <= min_jeden_rzad
+        bar.resize(szer + 400, bar.height())
+        qapp.processEvents()
+        assert not bar._kryteria_pod and bar._lay.indexOf(bar.criteria_label) >= 0
+    finally:
+        bar.close()
+
+
+def test_AR77_puste_kryteria_nie_przekladaja_paska(qapp):
+    bar = _pasek(qapp, "12 klatek", "")
+    try:
+        bar.resize(200, bar.height())
+        qapp.processEvents()
+        assert not bar._kryteria_pod
+    finally:
+        bar.close()
+
+
+# ---------- AR-78: wzór nazwy zwijany ----------
+
+def test_AR78_wzor_zwiniety_po_pierwszym_uzyciu_a_gest_reki_decyduje(view, qapp, ustawienia):
+    """Pierwsze otwarcie panelu: wzór rozwinięty (tam widać, że nazwa składa się z tokenów). Pierwszy
+    podgląd zapisuje „zwinięty", więc kolejne otwarcie zostawia tabeli wiersze, a wzór mówi jednym
+    wierszem streszczenia. Zwinięty panel jest niższy o listę tokenów. Gest ręki nadpisuje pamięć
+    i kolejne użycie już jej nie rusza.
+
+    Falsyfikator: zdejmij `_zapamietaj_uzycie_wzoru` - drugie otwarcie znowu rozwinięte."""
+    from horreum.gui import i18n
+    klucz = grid_mod.FramesView._KLUCZ_WZORU_RENAMU
+    ed = view.rename_bar.template_editor
+    view.resize(1400, 900)
+    view.show()
+    view._toggle_panel("rename")
+    qapp.processEvents()
+    assert ed.is_expanded() and not ed._scroll.isHidden()
+    wys_rozwiniety = view.rename_bar.sizeHint().height()
+    view.rename_bar._emit_preview()
+    assert ed.is_expanded(), "pierwsze użycie nie zwija pod ręką"
+    assert ustawienia.value(klucz, True, type=bool) is False
+    view._toggle_panel("rename")                       # zamknięcie
+    view._toggle_panel("rename")                       # kolejne otwarcie
+    qapp.processEvents()                               # układ panelu przelicza się zdarzeniem
+    assert not ed.is_expanded() and ed._scroll.isHidden()
+    assert view.rename_bar.sizeHint().height() < wys_rozwiniety
+    streszczenie = ed._summary.full_text()
+    assert streszczenie.startswith(i18n.t("grid.token.datetime")) and " · " in streszczenie
+    ed.btn_toggle.click()                              # gest: rozwiń
+    assert ed.is_expanded() and ed._summary.full_text() == ""
+    assert ustawienia.value(klucz, False, type=bool) is True
+    view.rename_bar._emit_preview()                    # kolejne użycie nie nadpisuje gestu
+    assert ustawienia.value(klucz, False, type=bool) is True
+
+
+def test_AR78_plus_token_rozwija_zwiniety_wzor(qapp):
+    from horreum.gui import i18n
+    from horreum.gui.grid import RenameBar
+    bar = RenameBar()
+    ed = bar.template_editor
+    gesty = []
+    ed.expandedChanged.connect(gesty.append)
+    ed.set_expanded(False)
+    assert gesty == [] and ed._scroll.isHidden(), "stan z pamięci to nie gest"
+    n = len(ed._rows())
+    plus = next(b for b in ed.findChildren(type(bar.btn_prev))
+                if b.text() == i18n.t("grid.tmpl.add_token"))
+    plus.click()
+    assert ed.is_expanded() and len(ed._rows()) == n + 1 and gesty == [True]
+
+
+# ---------- AR-116: elizja w środku w jednej linii ----------
+
+def test_AR116_waska_kolumna_dlugiej_nazwy_jedna_linia_z_elizja_w_srodku(qapp):
+    """Delegat elizji w środku przy wąskiej kolumnie łamał nazwę ze spacjami na dwie linie
+    (`wordWrap` tabeli) zamiast ją skrócić. Teraz: bez zawijania, jedna linia, „…" w środku,
+    oba końce nazwy zostają, tekst mieści się w komórce.
+
+    Falsyfikator: zdejmij zdjęcie `WrapText` z `initStyleOption` - opcja niesie zawijanie."""
+    from PySide6.QtGui import QStandardItem, QStandardItemModel
+    from PySide6.QtWidgets import QStyleOptionViewItem, QTableView
+    nazwa = "×2  NGC6992 Ha 300s gain100 2024-03-15 sesja druga ostatnia.xisf"
+    model = QStandardItemModel(1, 1)
+    model.setItem(0, 0, QStandardItem(nazwa))
+    t = QTableView()
+    t.setModel(model)
+    assert t.wordWrap()
+    grid_mod.elizja_w_srodku(t, 0)
+    t.setColumnWidth(0, 200)
+    t.verticalHeader().setDefaultSectionSize(60)        # miejsce na dwie linie - pułapka zawijania
+    t.resize(300, 200)
+    t.show()
+    qapp.processEvents()
+    try:
+        idx = model.index(0, 0)
+        opt = QStyleOptionViewItem()
+        opt.initFrom(t)
+        opt.widget = t
+        opt.rect = t.visualRect(idx)
+        opt.features = QStyleOptionViewItem.WrapText      # tak widok podaje opcję przy `wordWrap`
+        delegat = t.itemDelegateForColumn(0)
+        delegat.initStyleOption(opt, idx)
+        assert not (opt.features & QStyleOptionViewItem.WrapText)
+        tekst = delegat.tekst_w_linii(opt)
+        assert "\n" not in tekst and "…" in tekst
+        assert tekst.startswith("×2") and tekst.endswith("xisf"), tekst
+        assert opt.fontMetrics.horizontalAdvance(tekst) <= opt.rect.width()
+    finally:
+        t.close()

@@ -153,7 +153,7 @@ def test_brak_bazy_startuje_pusto_z_podpowiedzia(qapp):
         assert win.stack.count() == 0                  # bez bazy brak widoków
         assert win.nav.count() == 0 and win.nav.isHidden()
         assert not win.empty_note.isHidden()           # pusty stan ODKRYWALNY w centrum (wiz F5 #3)
-        assert "brak baz" in win.statusBar().currentMessage().lower()
+        assert "brak baz" in win.report_label.text().lower()
     finally:
         win.close()
 
@@ -451,6 +451,15 @@ def _licz_przeladowania(win, monkeypatch):
             _o()
         monkeypatch.setattr(widok, "_load_facets", _licz)
     return licznik
+
+
+def _zapis_paska(win):
+    """Historia raportów postawionych na etykiecie paska (pełna treść, przed elizją) - lista, która
+    rośnie z każdym `_wyswietl`. Raport ma własną etykietę (AR-76), więc `messageChanged`
+    `QStatusBar` już o nim nie mówi."""
+    pasek, wyswietl = [], win._wyswietl
+    win._wyswietl = lambda msg: (pasek.append(msg), wyswietl(msg))[1]
+    return pasek
 
 
 def _przebieg_w_watku(win, start):
@@ -795,17 +804,16 @@ def test_faza_startu_MA_WLASNY_KANAL_a_nie_pasek_raportow(qapp, tmp_path):
     z niego raport, który właśnie padł („Etap Rozwiąż zakończony") — a to raport jest tym, po co
     user czekał. Stąd `phase_label` jako STAŁY widżet paska: dwa kanały, zero kolizji.
 
-    Falsyfikator: zawróć `_say_phase` na `showMessage` → `currentMessage()` przestanie być pusty
-    i raport zniknie."""
+    Falsyfikator: zawróć `_say_phase` na etykietę raportu → raport zniknie pod fazą."""
     win = MainWindow(_seeded_db(tmp_path))
     try:
         win._say_phase("Czytam bazę…")
         assert win.phase_label.text() == "Czytam bazę…"
-        assert win.statusBar().currentMessage() != "Czytam bazę…"   # raport ma własne pole
+        assert win.report_label.text() != "Czytam bazę…"   # raport ma własne pole
 
-        win.statusBar().showMessage("Etap Rozwiąż zakończony")
+        win._flash("Etap Rozwiąż zakończony")
         win._say_phase("Odświeżam widoki po etapie…")
-        assert win.statusBar().currentMessage() == "Etap Rozwiąż zakończony"   # faza go NIE zjadła
+        assert win.report_label.text() == "Etap Rozwiąż zakończony"   # faza go NIE zjadła
     finally:
         win.close()
 
@@ -1101,7 +1109,7 @@ def test_dlugi_raport_dostaje_WIELOKROPEK_i_pelna_tresc_w_podpowiedzi(qapp, tmp_
     try:
         dlugie = "Cofnięto przypisanie na 229 z 711 klatek" + " · kalibracja: 6" * 40
         win._flash(dlugie)
-        widoczne = win.statusBar().currentMessage()
+        widoczne = win.report_label.text()
 
         assert widoczne != dlugie and len(widoczne) < len(dlugie), "raport nie został przycięty"
         assert widoczne.endswith("…"), f"przycięcie bez znaku - ciche kłamstwo: {widoczne!r}"
@@ -1112,7 +1120,7 @@ def test_dlugi_raport_dostaje_WIELOKROPEK_i_pelna_tresc_w_podpowiedzi(qapp, tmp_
         # tooltipie: gałąź „za wąsko na elizję", zwężenie okna w trakcie życia komunikatu
         # i recepta przezroczysta dla myszy. Podpowiedź bezwarunkowa zdejmuje wszystkie trzy.
         win._flash("Nazwano 12 z 12 klatek: NGC 7000")
-        assert win.statusBar().currentMessage() == "Nazwano 12 z 12 klatek: NGC 7000"
+        assert win.report_label.text() == "Nazwano 12 z 12 klatek: NGC 7000"
         assert win.statusBar().toolTip() == "Nazwano 12 z 12 klatek: NGC 7000"
     finally:
         win.close()
@@ -1129,13 +1137,13 @@ def test_recepta_ma_WLASNY_nosnik_i_ZABIERA_szerokosc_raportowi(qapp, tmp_path):
     try:
         dlugie = "Cofnięto przypisanie na 229 z 711 klatek" + " · kalibracja: 6" * 40
         win._flash(dlugie)
-        bez_recepty = win.statusBar().currentMessage()
+        bez_recepty = win.report_label.text()
 
         recepta = "potem przywrócisz: Obiekt → Przywróć cofnięte przypisanie"
         win._pokaz_recepte(Recepta([recepta]))
         assert win.recipe_label.isVisible(), "recepta nie ma nośnika"
         assert "Przywróć cofnięte przypisanie" in win.recipe_label.text()
-        assert len(win.statusBar().currentMessage()) < len(bez_recepty), \
+        assert len(win.report_label.text()) < len(bez_recepty), \
             "raport nie oddał miejsca recepcie - przy realnym zdaniu wystawałby pod nią"
         # PODPOWIEDŹ PASKA NIESIE OBA CZŁONY. Od FH-2e recepta jest klikalna, więc `QEvent::ToolTip`
         # do niej dociera - jej własna podpowiedź niesie pełną receptę (przycięty napis jej nie zgubi).
@@ -1190,16 +1198,46 @@ def test_recepta_STOI_PRZY_RAPORCIE_a_faza_przy_uchwycie(qapp, tmp_path):
     dodana pierwsza wchodziła MIĘDZY raport a receptę - dwa człony jednego zdania rozdzielone
     komunikatem trzeciej sprawy (firsthand, `K_faza.png`). Recepta ma się kleić do swojego raportu.
 
-    Falsyfikator: zamień kolejność `addPermanentWidget` → recepta odjeżdża na prawo od fazy."""
+    AR-76: recepta stoi ZARAZ ZA RAPORTEM, nie przy prawej krawędzi. Firsthand mierzył raport od
+    x≈8 i receptę od x≈1290 - dwa człony jednego zdania ~700 px od siebie, bo raport malował się
+    w polu komunikatu, a recepta mogła stać wyłącznie wśród widżetów stałych. Raport ma własną
+    etykietę, recepta jest następnym widżetem: odstęp między nimi to odstęp układu paska. Przy
+    raporcie dłuższym niż pasek oba człony mieszczą się przed fazą (elizja liczy receptę).
+
+    Falsyfikator: wróć recepcie `addPermanentWidget` → odstęp rośnie do szerokości wolnego paska;
+    wróć raport na `showMessage` → etykieta raportu jest pusta, a recepta ląduje na x≈2."""
+    from horreum.gui.app import _PASEK_ODSTEP
     win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    bar = win.statusBar()
+
+    def x_na_pasku(w):
+        return w.mapTo(bar, w.rect().topLeft()).x()
+
     try:
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
         win._pokaz_recepte(Recepta(["przywrócisz: Obiekt → Przywróć cofnięte przypisanie"]))
         win._say_phase("Odświeżam widoki po etapie…")
         QApplication.processEvents()
 
-        assert win.recipe_label.x() < win.phase_label.x(), \
+        assert x_na_pasku(win.recipe_label) < x_na_pasku(win.phase_label), \
             "faza rozdziela raport od jego recepty"
+        koniec_raportu = x_na_pasku(win.report_label) + win.report_label.width()
+        assert win.report_label.text() == "Cofnięto przypisanie na 2 z 2 klatek"
+        assert x_na_pasku(win.recipe_label) - koniec_raportu == _PASEK_ODSTEP, \
+            "recepta odjechała od raportu"
+        assert win.report_label.width() <= win.report_label.sizeHint().width() + 1, \
+            "etykieta raportu rozlała się na pusty pasek"
+
+        win._flash("Cofnięto przypisanie na 229 z 711 klatek" + " · kalibracja: 6" * 40)
+        win._pokaz_recepte(Recepta(["przywrócisz: Obiekt → Przywróć cofnięte przypisanie"]))
+        QApplication.processEvents()
+        assert win.report_label.text().endswith("…")
+        assert win.report_label.width() >= win.report_label.sizeHint().width(), \
+            "elizja liczona do zapasu większego niż pole - wielokropek ucięty bez znaku"
+        assert x_na_pasku(win.recipe_label) + win.recipe_label.width() <= x_na_pasku(win.phase_label), \
+            "długi raport wypchnął receptę pod fazę"
+        assert x_na_pasku(win.recipe_label) - (x_na_pasku(win.report_label)
+                                               + win.report_label.width()) == _PASEK_ODSTEP
     finally:
         win.close()
 
@@ -1220,7 +1258,7 @@ def test_recepta_PRZEZYWA_wygasniecie_raportu_a_GASNIE_przy_cudzym(qapp, tmp_pat
         win._pokaz_recepte(Recepta([recepta]))
         assert win.recipe_label.isVisible()
 
-        win.statusBar().clearMessage()                 # …to samo robi timeout 5 s
+        win._wygas_raport()                            # …to samo robi zegar raportu po 5 s
         assert win.recipe_label.isVisible(), "recepta umarła z zegarem raportu"
         assert win.statusBar().toolTip() == recepta, "podpowiedź niesie wygasły raport"
 
@@ -1261,17 +1299,17 @@ def test_raport_gridu_GASNIE_przy_zmianie_miejsca_nawigacji(qapp, tmp_path):
     try:
         win._show_view(NAV_ZBIORY)
         win.grid_view.load_report.emit("Grid: 16 901 klatek, 0 kolumn-keywordów")
-        assert win.statusBar().currentMessage().startswith("Grid:")
+        assert win.report_label.text().startswith("Grid:")
         win._show_view(NAV_PORZADKI)
-        assert win.statusBar().currentMessage() == "", "raport gridu przeżył zmianę miejsca"
+        assert win.report_label.text() == "", "raport gridu przeżył zmianę miejsca"
         win._show_view(NAV_ZBIORY)
         win.grid_view.load_report.emit("Grid: 3 klatki, 0 kolumn-keywordów")
         win._show_view(NAV_DOSTAWA)
-        assert win.statusBar().currentMessage() == ""
+        assert win.report_label.text() == ""
         # raport spoza gridu nie jest związany z miejscem
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
         win._show_view(NAV_ZBIORY)
-        assert win.statusBar().currentMessage().startswith("Cofnięto")
+        assert win.report_label.text().startswith("Cofnięto")
     finally:
         win.close()
 
@@ -1289,8 +1327,7 @@ def test_raport_wczytania_gridu_POZA_Zbiorami_nie_przykrywa_statusu_etapu(qapp, 
     win = _pokazane(MainWindow(_seeded_db(tmp_path, object_axis=True)))
     try:
         win._show_view(NAV_DOSTAWA)
-        pasek = []
-        win.statusBar().messageChanged.connect(pasek.append)
+        pasek = _zapis_paska(win)
         _przebieg_w_watku(win, lambda: win.pipeline_view.run_stage("group"))
         status_etapu = i18n.t("pipeline.stage_done_status", stage=i18n.t("pipeline.stage.group"))
         assert status_etapu in pasek, pasek
@@ -1301,15 +1338,15 @@ def test_raport_wczytania_gridu_POZA_Zbiorami_nie_przykrywa_statusu_etapu(qapp, 
         assert not any(m.startswith("Grid:") or m == i18n.t("busy.read_frames")
                        for m in po_etapie), po_etapie
         win._show_view(NAV_PORZADKI)
-        assert not win.statusBar().currentMessage().startswith("Grid:")
+        assert not win.report_label.text().startswith("Grid:")
         win._show_view(NAV_ZBIORY)
-        assert win.statusBar().currentMessage().startswith("Grid:"), \
+        assert win.report_label.text().startswith("Grid:"), \
             "raport wczytania czekał na wejście w Zbiory"
         # odłożony raport pada RAZ - kolejne wejście nie powtarza starego zdania
         win._show_view(NAV_DOSTAWA)
         win._flash("inny raport")
         win._show_view(NAV_ZBIORY)
-        assert win.statusBar().currentMessage() == "inny raport"
+        assert win.report_label.text() == "inny raport"
     finally:
         win.close()
 
@@ -1323,7 +1360,7 @@ def test_wynik_GESTU_gridu_poza_Zbiorami_dalej_pada_na_pasek(qapp, tmp_path):
     try:
         win._show_view(NAV_DOSTAWA)
         win.grid_view.status_message.emit("Zapisano odniesienie czasu")
-        assert win.statusBar().currentMessage() == "Zapisano odniesienie czasu"
+        assert win.report_label.text() == "Zapisano odniesienie czasu"
     finally:
         win.close()
 
@@ -1378,6 +1415,52 @@ def test_recepta_PRZEZYWA_otwarcie_menu_ktore_sama_wskazuje(qapp, tmp_path):
         win.close()
 
 
+def test_AR97_zdanie_etapu_CZEKA_na_koniec_okna_raportu_gestu(qapp, tmp_path):
+    """AR-97. Wizytacja natywna: odmowa kafla Przyjmij w biegu żyła na pasku 0,39 s, bo
+    „Grupowanie: gotowe.” wypierało ją od razu; zdanie żniw - 0,38 s („Skan: gotowe.”). Raport
+    gestu otwiera okno priorytetu, w którym zdanie etapu czeka, a po oknie staje na pasku.
+    Granice: zdanie etapu bez okna pada od razu i samo okna nie otwiera; nowszy raport zastępuje
+    czekające zdanie (jest od niego starsze); wygaśnięcie raportu gestu kończy okno; stan okna
+    („Baza wczytana”) okna nie otwiera.
+
+    Falsyfikator: podepnij `stage_status` wprost pod `_flash` → po odmowie na pasku stoi zdanie
+    etapu; zostaw okno po wygaśnięciu raportu → zdanie etapu czeka nad pustym paskiem."""
+    from horreum.gui import i18n
+    from horreum.gui.app import _PRIORYTET_GESTU_MS
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    etap = win.pipeline_view.stage_status
+    gotowe = i18n.t("pipeline.stage_done_status", stage=i18n.t("pipeline.stage.group"))
+    try:
+        assert win._zegar_priorytetu.interval() == _PRIORYTET_GESTU_MS == 5000
+        etap.emit(gotowe)                                   # bez okna - od razu
+        assert win.report_label.text() == gotowe
+        assert not win._zegar_priorytetu.isActive(), "zdanie etapu otworzyło okno"
+
+        win._flash("Dostawa w biegu - poczekaj na koniec etapu")
+        etap.emit(gotowe)
+        assert win.report_label.text() == "Dostawa w biegu - poczekaj na koniec etapu", \
+            "zdanie etapu wyparło odmowę gestu w oknie priorytetu"
+        win._wypusc_raport_etapu()                          # koniec okna (zegar)
+        assert win.report_label.text() == gotowe, "zdanie etapu przepadło zamiast poczekać"
+
+        win._flash("Odmowa")
+        etap.emit(gotowe)
+        win._flash("Wciągnięto 1 master")                   # nowszy raport w oknie
+        win._wypusc_raport_etapu()
+        assert win.report_label.text() == "Wciągnięto 1 master", "starsze zdanie etapu wróciło"
+
+        win._flash("Odmowa")
+        etap.emit(gotowe)
+        win._wygas_raport()                                 # raport gestu zgasł przed końcem okna
+        assert win.report_label.text() == gotowe and not win._zegar_priorytetu.isActive()
+
+        win._flash("Baza wczytana", gest=False)
+        etap.emit(gotowe)
+        assert win.report_label.text() == gotowe, "stan okna trzymał zdanie etapu"
+    finally:
+        win.close()
+
+
 def test_recepta_MA_SUFIT_szerokosci_i_nie_zjada_pola_raportu(qapp, tmp_path):
     """FH-2. Sufit recepty jest strażnikiem na przyszłość, nie ograniczeniem stanu dzisiejszego:
     bez niego długość instrukcji zależy wyłącznie od zawartości katalogu i18n, więc dłuższa
@@ -1394,7 +1477,7 @@ def test_recepta_MA_SUFIT_szerokosci_i_nie_zjada_pola_raportu(qapp, tmp_path):
         sufit = int(win.statusBar().width() * _PASEK_UDZIAL_RECEPTY)
         assert win.recipe_label.sizeHint().width() <= sufit + 4, "recepta przebiła swój sufit"
         assert win.recipe_label.text().endswith("…"), "przycięcie recepty bez znaku"
-        assert win.statusBar().currentMessage(), "raport zniknął z paska przez szerokość recepty"
+        assert win.report_label.text(), "raport zniknął z paska przez szerokość recepty"
     finally:
         win.close()
 

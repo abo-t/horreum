@@ -143,6 +143,13 @@ CATALOG = {
 
     # --- stanowisko Z RĘKI (0027): okno „Wskaż stanowisko…" i przyciski widoku stanowisk ---
     "obshand.btn_assign": {"pl": "Wskaż stanowisko…", "en": "Assign site…"},
+    # AR-74: przycisk niesie licznik - ta sama liczba co wiersz Porządków „Klatki bez stanowiska".
+    "obshand.btn_assign_n": {"pl": "Wskaż stanowisko… ({n})", "en": "Assign site… ({n})"},
+    "obshand.btn_assign_tip": {
+        "pl": "Klatki bez GPS i bez wskazania ręki. Dark i bias (z masterami) są poza liczbą - "
+              "nie widzą nieba, więc stanowisko ich nie opisuje.",
+        "en": "Frames without GPS and without a hand assignment. Darks and biases (with masters) "
+              "are not counted - they see no sky, so a site does not describe them."},
     "obshand.btn_change": {"pl": "Zmień wskazanie…", "en": "Change assignment…"},
     "obshand.btn_clear": {"pl": "Cofnij wskazanie…", "en": "Undo assignment…"},
     "obshand.title": {"pl": "Wskaż stanowisko klatkom bez GPS",
@@ -218,8 +225,10 @@ CATALOG = {
     "obshand.err_no_site": {"pl": "Wybierz stanowisko z listy albo podaj współrzędne.",
                             "en": "Pick a site from the list or enter coordinates."},
     "obshand.err_coords": {"pl": "Współrzędne odrzucone: {e}", "en": "Coordinates rejected: {e}"},
-    "obshand.nothing": {"pl": "Brak klatek bez stanowiska - każda ma GPS albo wskazanie ręki.",
-                        "en": "No frames without a site - each has GPS or a hand assignment."},
+    "obshand.nothing": {"pl": "Brak klatek bez stanowiska - każda ma GPS albo wskazanie ręki "
+                              "(dark i bias stanowiska nie potrzebują).",
+                        "en": "No frames without a site - each has GPS or a hand assignment "
+                              "(darks and biases need no site)."},
     "obshand.nothing_hand": {"pl": "Brak klatek ze stanowiskiem wskazanym ręką.",
                              "en": "No frames with a hand-assigned site."},
     # Zdania po geście: odmiana przez `t_plural` na liczbie wszystkich klatek gestu („z 1 klatki",
@@ -1004,9 +1013,11 @@ CATALOG = {
     # Od S4 pole przyjmuje KAŻDĄ nazwę, którą rozpozna przebieg (oznaczenie katalogowe, nazwa
     # potoczna, słownik obiektów własnych, nazwa nauczona aliasem) — etykieta mówiąca „oznaczenie
     # katalogowe" kłamałaby o regule i odstraszała od jedynej drogi dla `LMC`.
+    # AR-98: pole przyjmuje KAŻDE oznaczenie, które przebieg rozpozna - także obiektu już
+    # obecnego w bibliotece - więc etykieta nie obiecuje NOWEGO obiektu.
     "assign.new_designation": {
-        "pl": "albo nowa nazwa (wypełnione nadpisuje wybór z listy):",
-        "en": "or a new name (if filled, it overrides the list selection):",
+        "pl": "albo wpisz oznaczenie (wypełnione nadpisuje wybór z listy):",
+        "en": "or type a designation (if filled, it overrides the list selection):",
     },
     "assign.designation_placeholder": {"pl": "np. IC 1795 albo LMC", "en": "e.g. IC 1795 or LMC"},
     "assign.accept_btn": {
@@ -2170,6 +2181,12 @@ CATALOG = {
     "grid.tmpl.title": {"pl": "Wzór nazwy:", "en": "Name pattern:"},
     "grid.tmpl.add_token": {"pl": "+ Token", "en": "+ Token"},
     "grid.tmpl.restore": {"pl": "Przywróć domyślny", "en": "Restore default"},
+    # AR-78: wzór zwijany do jednego wiersza ze streszczeniem
+    "grid.tmpl.toggle_tip": {
+        "pl": "Zwiń albo rozwiń wzór - zwinięty zostawia tabeli więcej wierszy",
+        "en": "Collapse or expand the pattern - collapsed leaves more rows for the table",
+    },
+    "grid.tmpl.summary_empty": {"pl": "pusty wzór", "en": "empty pattern"},
     "grid.tmpl.empty_hint": {
         "pl": "pusty wzór — dodaj token przyciskiem „+ Token",
         "en": "empty pattern — add a token with the „+ Token” button",
@@ -2293,20 +2310,32 @@ CATALOG = {
     "grid.sel.object_clear_undo_after": {
         "pl": "potem przywrócisz: {menu} → {action}",
         "en": "then undo it: {menu} → {action}"},
+    # AR-71: droga powrotu WYCOFANIA klatki ma własne klucze - brzmienie dziś to samo, co przy
+    # cofnięciu przypisania, ale zmiana zdania osi obiektu nie może zmienić recepty osi klatki.
+    "grid.sel.frame_retire_undo": {
+        "pl": "przywrócisz: {menu} → {action}",
+        "en": "to undo this: {menu} → {action}"},
+    "grid.sel.frame_retire_undo_after": {
+        "pl": "potem przywrócisz: {menu} → {action}",
+        "en": "then undo it: {menu} → {action}"},
     # FH-9: droga powrotu PRZYWRÓCENIA przypisania - jej odwrotem jest cofnięcie, więc czasownik
     # jest inny niż wyżej („przywrócisz" mówiłoby o kierunku, którego ten gest nie ma). Para
     # wariantów z tego samego powodu co wyżej: cel bywa najpierw do odsłonięcia.
     "grid.sel.object_restore_undo": {
         "pl": "cofniesz: {menu} → {action}",
         "en": "to take it back: {menu} → {action}"},
-    # Odmowy wykonania recepty paska (Z4, Z9). Recepta sama nie ruszy po końcu zajętości - inaczej
-    # niż gesty izolacji („ruszy po zakończeniu") - więc zdanie mówi, że trzeba ją kliknąć ponownie.
+    # Odmowy wykonania recepty paska (Z4, Z9) i pozycji menu osi zaznaczenia, które recepta
+    # nazywa (AR-70: „Cofnij przypisanie”, „Przywróć cofnięte przypisanie”, „Przywróć klatkę”).
+    # Żaden z tych gestów sam nie ruszy po końcu zajętości - inaczej niż gesty izolacji („ruszy po
+    # zakończeniu") - więc zdanie mówi, że nic nie zapisano i gest trzeba ponowić. Jedno zdanie na
+    # obie drogi, bo recepta woła ten sam slot, co pozycja menu.
     "grid.recipe.busy_stage": {
-        "pl": "Trwa etap Dostawy - kliknij receptę ponownie po jego zakończeniu.",
-        "en": "An Intake stage is running - click the recipe again after it finishes."},
+        "pl": "Trwa etap Dostawy - nic nie zapisano; ponów gest po jego zakończeniu.",
+        "en": "An Intake stage is running - nothing was saved; repeat the gesture after it finishes."},
     "grid.recipe.busy_write": {
-        "pl": "Trwa zapis nagłówków do plików - kliknij receptę ponownie po jego zakończeniu.",
-        "en": "A header write to files is in progress - click the recipe again after it finishes."},
+        "pl": "Trwa zapis nagłówków do plików - nic nie zapisano; ponów gest po jego zakończeniu.",
+        "en": "A header write to files is in progress - nothing was saved; repeat the gesture after "
+              "it finishes."},
     "grid.recipe.nothing_to_reveal": {
         "pl": "Zbiór nie jest już zawężony - nie ma czego odsłaniać.",
         "en": "The set is no longer narrowed - there is nothing to reveal."},
@@ -3016,6 +3045,11 @@ CATALOG = {
         "en": "To name staging: {t} changes, {s} skipped (target: {target})",
     },
     "grid.rename.preview_cleared": {"pl": "Podgląd nazw wyczyszczony", "en": "Name preview cleared"},
+    # AR-72: po zdjęciu podglądu nazw kolumna wraca do kart czekających w szufladzie
+    "grid.rename.preview_cleared_staging_back": {
+        "pl": "Podgląd nazw wyczyszczony - wrócił podgląd zmian czekających w szufladzie",
+        "en": "Name preview cleared - the changes waiting in the drawer are previewed again",
+    },
     "grid.rename.status_summary": {"pl": "Rename: {summary}", "en": "Rename: {summary}"},
     # Recepta przy nieudanym cofnięciu - wspólna dla obu kling szuflady (makro i rename, AR-31 (2)):
     # commit albo przebieg zostaje przy „Cofnij" (wiersze nieudane czekają), więc drugi klik
@@ -4556,8 +4590,10 @@ CATALOG = {
                                         "en": "Frames without a site"},
     "tasks.observatory_review_tip": {
         "pl": "Nagłówek nie niesie GPS, a stanowiska nie wskazała ręka.\n"
+              "Dark i bias (z masterami) poza liczbą - nie widzą nieba.\n"
               "W podstronie: „{assign}” - okno grupuje te klatki po folderze.",
         "en": "The header carries no GPS and no site was assigned by hand.\n"
+              "Darks and biases (with masters) are not counted - they see no sky.\n"
               "On the subpage: “{assign}” - the window groups these frames by folder."},
     "tasks.config_review_frames": {"pl": "Klatki bez zestawu", "en": "Frames without a setup"},
     "tasks.config_review_tip": {
@@ -5323,6 +5359,9 @@ CATALOG = {
     "portfolio.frames_no_exptime": {
         "pl": "+{n} klatek bez exptime", "en": "+{n} frames without exptime",
     },
+    # AR-75: czas materiału poniżej 0,1 h mówi minutami (`format_hours`)
+    "portfolio.minutes": {"pl": "{n} min", "en": "{n} min"},
+    "portfolio.under_minute": {"pl": "< 1 min", "en": "< 1 min"},
 
     # --- KANAŁ gotowego obrazu (0028, P4-3): grupa listwy facetów ---
     "facets.group.channel": {"pl": "Kanał", "en": "Channel"},

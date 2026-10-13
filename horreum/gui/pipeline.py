@@ -476,7 +476,9 @@ class PipelineView(QWidget):
     (`PipelineWorker._zrodlo`); skan `'?'` do bazy z realnymi wolumenami wstrzymuje guard
     `powod_mieszania` (F5R#3).
 
-    Sygnały do gospodarza (`MainWindow`): `status_message(str)` (pasek statusu), `stage_finished(str)`
+    Sygnały do gospodarza (`MainWindow`): `status_message(str)` (pasek statusu), `stage_status(str)`
+    (zdanie „<etap>: gotowe.” - też na pasek, ale ustępuje świeżemu raportowi gestu, AR-97),
+    `stage_finished(str)`
     (etap zakończył zapis - znacznik etapu dla testów i słuchaczy; gospodarz NIE odświeża na nim
     widoków, bo pełne przeładowanie po każdym etapie zamrażało okno), `running_changed(bool)` (etap
     w toku - gospodarz wyłącza akcje zapisu osi, szczery disabled, §6; `False` = koniec przebiegu,
@@ -485,6 +487,11 @@ class PipelineView(QWidget):
     przyciski Dostawy."""
 
     status_message = Signal(str)
+    # Zdanie zwykłego końca etapu idzie OSOBNYM kanałem (AR-97): w łańcuchu pada co etap, w tle,
+    # i wypierało z paska odmowę albo wynik gestu po ~0,4 s. Gospodarz trzyma je w poczekalni przez
+    # okno priorytetu gestu. Przerwanie i błąd etapu zostają na `status_message` - pierwsze jest
+    # wynikiem gestu „Anuluj”, drugie wymaga reakcji.
+    stage_status = Signal(str)
     stage_finished = Signal(str)
     running_changed = Signal(bool)
     open_collection = Signal(str)          # nazwa perspektywy Zbiorów (ścieżka 3→1 po oznaczeniu)
@@ -1347,7 +1354,7 @@ class PipelineView(QWidget):
         self._append_summary(self._format_result(name, result))
         if name == "presence":
             self._update_vanished_box(result)
-        self.status_message.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
+        self.stage_status.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
         self.stage_finished.emit(name)                  # widoki odświeża koniec przebiegu, nie etap
 
     @Slot(str, object)

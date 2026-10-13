@@ -16,8 +16,8 @@ from astropy.io import fits
 
 from horreum import db, repo
 from horreum.import_fitsmirror import (
-    ACTOR, ImportAbort, import_fitsmirror, open_donor, preflight, read_repaired_registry,
-    run_import,
+    ACTOR, ImportAbort, import_fitsmirror, open_donor, preflight, read_relocations,
+    read_repaired_registry, run_import,
 )
 from horreum.scan import scan_file
 
@@ -513,6 +513,164 @@ def test_facade_live_db_przekazuje_rejestr(tmp_path):
     assert s.gate_failures == []
 
 
+# ── AR-130: mapa relokacji z żywej bazy - plik przeniesiony przez Horreum nie jest „nieosiągalny” ──
+def _sha1_dawcy(donor_path, path):
+    dcon = sqlite3.connect(str(donor_path))
+    try:
+        return dcon.execute("SELECT sha1_data FROM files WHERE path = ?", (str(path),)).fetchone()[0]
+    finally:
+        dcon.close()
+
+
+def _mk_live_relocations(tmp_path, ruchy, naprawione=()):
+    """Żywa baza z relokacjami jak po geście (`repo.relocate_location` - ta sama droga
+    `_apply_relocation` co „Zmień obiekt”/rename). `ruchy` = [(sha1_data, [ścieżka, ...])] - lokacja
+    zakładana pod pierwszą ścieżką i przenoszona kolejno na następne. `naprawione` = ścieżki obecne,
+    którym writeback przepisał nagłówek (rejestr napraw). Wszystko przez `repo` (jedna klinga)."""
+    live = tmp_path / "zywa_relokacje.db"
+    con = db.open_db(str(live))
+    for sha1, sciezki in ruchy:
+        frame_id, _new = repo.upsert_frame(con, sha1_data=sha1, kind="light", filetype="fits",
+                                           camera_id=None, now=NOW)
+        loc_id, _known = repo.add_location(con, frame_id=frame_id, volume="V",
+                                           path=str(sciezki[0]), mtime=NOW, size_bytes=1, now=NOW)
+        for nowa in sciezki[1:]:
+            repo.relocate_location(con, location_id=loc_id, new_path=str(nowa), now=NOW)
+    if naprawione:
+        commit_id = repo.insert_commit(con, run_id="r1", now=NOW)
+        for path in naprawione:
+            loc_id = con.execute("SELECT id FROM location WHERE path = ?", (str(path),)).fetchone()[0]
+            repo.insert_header_backup(con, commit_id=commit_id, location_id=loc_id, hdu_index=0,
+                                      header_text="x", post_hash="y")
+    con.close()
+    return live
+
+
+def _przenies(stara, nowa):
+    """Przeniesienie pliku na dysku (os.rename gestu) do nowego folderu obiektu."""
+    nowa.parent.mkdir(parents=True, exist_ok=True)
+    os.rename(str(stara), str(nowa))
+    return nowa
+
+
+def test_mapa_relokacji_kazda_dawna_sciezka_prowadzi_do_obecnej(tmp_path):
+    """Łańcuch A → B → C jednej lokacji: OBIE dawne ścieżki prowadzą do obecnej C (dawca zna
+    ścieżkę z dowolnej chwili przed przeniesieniami), klucz wewnętrzny = tożsamość klatki. Lokacja
+    bez relokacji i ścieżka równa obecnej (po cofnięciu) w mapie nie występują. Baza czytana RO."""
+    a, b, c = tmp_path / "A" / "x.fits", tmp_path / "B" / "x.fits", tmp_path / "C" / "x.fits"
+    wraca, tam = tmp_path / "D" / "y.fits", tmp_path / "E" / "y.fits"
+    live = _mk_live_relocations(
+        tmp_path, [("s1", [a, b, c]), ("s2", [wraca, tam, wraca]),
+                   ("s3", [tmp_path / "F" / "z.fits"])])
+    przed = live.stat().st_mtime_ns
+    assert read_relocations(str(live)) == {
+        str(a): {"s1": str(c)}, str(b): {"s1": str(c)}, str(tam): {"s2": str(wraca)}}
+    assert live.stat().st_mtime_ns == przed                     # RO: baza nietknięta
+    with pytest.raises(ImportAbort, match="nie istnieje"):
+        read_relocations(str(tmp_path / "brak.db"))
+
+
+def test_relokacja_plik_przeniesiony_znaleziony_pod_obecna_sciezka(tmp_path):
+    """Plik przeniesiony gestem Horreum: bez `--live-db` dawca go nie znajduje (skip +
+    `frame.review` - szum, który podbijał kotwicę akceptacji); z mapą relokacji fasady jest
+    znaleziony, lokacja wchodzi pod ścieżką OBECNĄ, zero `frame.review`, nadwyżka listingu 0
+    (plik przeniesiony nie jest „nowym plikiem na dysku”), bramki §4.6 pełne."""
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    stara, _fid = files[os.path.join("LIGHTS", "m31_1.fits")]
+    sha1 = _sha1_dawcy(donor_path, stara)
+    nowa = _przenies(stara, tmp_path / "astro" / "LIGHTS" / "M31" / "m31_1.fits")
+    live = _mk_live_relocations(tmp_path, [(sha1, [stara, nowa])])
+
+    bez = import_fitsmirror(str(donor_path), str(tmp_path / "h1.db"), now=NOW, rng_seed=1)
+    assert bez.skipped == 1 and bez.preflight.surplus == 1
+
+    s = import_fitsmirror(str(donor_path), str(tmp_path / "h2.db"), now=NOW, rng_seed=1,
+                          repaired_db=str(live))
+    assert s.skipped == 0 and s.imported == 4 and s.gate_failures == []
+    assert s.preflight.relocated == {str(stara): str(nowa)}
+    assert s.preflight.surplus == 0 and s.preflight.missing == []
+    assert any("przeniesionych przez Horreum" in n for n in s.preflight.notes)
+    con = db.open_db(str(tmp_path / "h2.db"))
+    try:
+        assert con.execute("SELECT f.sha1_data FROM location l JOIN frame f ON f.id = l.frame_id "
+                           "WHERE l.path = ?", (str(nowa),)).fetchone()[0] == sha1
+        assert con.execute("SELECT count(*) FROM location WHERE path = ?",
+                           (str(stara),)).fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM event WHERE verb = 'frame.review'"
+                           ).fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_relokacja_naprawiony_po_przeniesieniu_zeznanie_dawcy_i_falsyfikator(tmp_path):
+    """Gest „Zmień obiekt” przenosi plik i przepisuje nagłówek: rejestr napraw zna ścieżkę OBECNĄ.
+    Falsyfikator czyta plik spod ścieżki obecnej (próbka obejmuje wszystkie 4 pliki), a rejestr
+    tłumaczony relokacją robi z rozjazdu faktów kopii NOTĘ (D-0722-2), zeznaniem zostaje dawca
+    (TELESCOP sprzed naprawy). Ostrze EXPECT zostaje: ta sama relokacja bez rejestru = abort."""
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    stara, _fid = files[os.path.join("LIGHTS", "m31_2.fits")]
+    sha1 = _sha1_dawcy(donor_path, stara)
+    nowa = _przenies(stara, tmp_path / "astro" / "LIGHTS" / "M31" / "m31_2.fits")
+    fits.setval(str(nowa), "TELESCOP", value="RC8-EDIT")       # writeback gestu pod nową ścieżką
+    live = _mk_live_relocations(tmp_path, [(sha1, [stara, nowa])], naprawione=[nowa])
+    relocations = read_relocations(str(live))
+    registry = read_repaired_registry(str(live))
+    assert registry == frozenset({str(nowa)})
+
+    donor = open_donor(str(donor_path))
+    try:
+        with pytest.raises(ImportAbort, match="pozno-naprawianymi"):
+            preflight(donor, rng_seed=1, relocations=relocations)
+        pf = preflight(donor, rng_seed=1, repaired_paths=registry, relocations=relocations)
+    finally:
+        donor.close()
+    assert str(stara) in pf.verified                            # próbka trafiła plik przeniesiony
+    assert pf.repaired_registry == frozenset({str(stara)})      # ścieżka dawcy, przez relokację
+    assert pf.recompute == frozenset()
+    assert any("naprawionym przez Horreum" in n for n in pf.notes)
+
+    s = import_fitsmirror(str(donor_path), str(tmp_path / "h.db"), now=NOW, rng_seed=1,
+                          repaired_db=str(live))
+    assert s.skipped == 0 and s.gate_failures == []
+    con = db.open_db(str(tmp_path / "h.db"))
+    try:
+        assert con.execute("SELECT h.telescop FROM location l JOIN header h ON h.frame_id = l.frame_id "
+                           "WHERE l.path = ?", (str(nowa),)).fetchone()[0] == "RC8"
+    finally:
+        con.close()
+
+
+def test_relokacja_odrzucona_inna_tozsamosc_albo_cel_zajety(tmp_path):
+    """Mapa podstawia ścieżkę wyłącznie wierszowi dawcy o TEJ SAMEJ tożsamości klatki i wyłącznie
+    na cel, którego nie zajmuje inny wiersz dawcy: inna tożsamość (ścieżkę zajął potem inny plik)
+    i cel = ścieżka innego wiersza dawcy (dwie lokacje jednego pliku) zostają brakiem + notą."""
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    obcy, _fid = files[os.path.join("LIGHTS", "m31_1.fits")]
+    zajety, _fid = files[os.path.join("LIGHTS", "m31_2.fits")]
+    sasiad, _fid = files[os.path.join("LIGHTS", "ngc7000_1.fits")]
+    nowa = _przenies(obcy, tmp_path / "astro" / "LIGHTS" / "M31" / "m31_1.fits")
+    os.remove(str(zajety))
+    live = _mk_live_relocations(tmp_path, [
+        ("inna-tozsamosc", [obcy, nowa]),
+        (_sha1_dawcy(donor_path, zajety), [zajety, tmp_path / "tymczasowa.fits"]),
+    ])
+    con = db.open_db(str(live))                       # cel zajęty: druga relokacja na ścieżkę sąsiada
+    loc_id = con.execute("SELECT id FROM location WHERE path = ?",
+                         (str(tmp_path / "tymczasowa.fits"),)).fetchone()[0]
+    repo.relocate_location(con, location_id=loc_id, new_path=str(sasiad), now=NOW)
+    con.close()
+
+    donor = open_donor(str(donor_path))
+    try:
+        pf = preflight(donor, rng_seed=1, relocations=read_relocations(str(live)))
+    finally:
+        donor.close()
+    assert pf.relocated == {}
+    assert sorted(pf.missing) == sorted([str(obcy), str(zajety)])
+    assert pf.surplus == 1 and pf.surplus_sample == [str(nowa)]
+    assert any("relokacja odrzucona" in n and n.startswith("2 ") for n in pf.notes)
+
+
 def test_abort_sciezka_poza_listingiem(tmp_path):
     """Plik dawcy osiągalny na dysku, ale POZA listingiem skanu (katalog wykluczony _WBPP) —
     przyszły skan zdublowałby lokacje → abort (ochrona tożsamości, R3-a3)."""
@@ -638,6 +796,50 @@ def test_kotwica_nameless_bez_przeliczenia_rowna_stanowi(tmp_path):
     s, ns, stan = _kotwica_po_wsadzie(tmp_path, SPECS_AR49, [_NAPRAWIONY, _NIETKNIETY], [])
     assert s.recomputed == 0
     assert ns.anchor == stan == 2 and ns.recomputed_lights == 0
+
+
+def test_kotwica_nameless_paruje_zeznanie_dawcy_po_sciezce_obecnej(tmp_path):
+    """AR-130 na szwie z AR-49: późno-naprawiany light bez nazwy przeniesiony gestem Horreum
+    (i z kartą `OBJECT` dopisaną na dysku) wchodzi z podgrupą przeliczoną pod ścieżką OBECNĄ, więc
+    zeznanie dawcy musi być kluczowane tą ścieżką - `nameless_split` paruje po `location.path`.
+    Klucz ścieżką dawcy zgubiłby plik z podgrupy, a kotwica spadłaby z 2 do 1. Straż pokrycia
+    w `check_criteria` porównuje te same klucze z podgrupą w ścieżkach lokacji - porównanie ze
+    ścieżkami dawcy wywracało fazę kryteriów przy równej liczności obu zbiorów."""
+    acc = _acceptance()
+    donor_path, files = _mk_donor(tmp_path, SPECS_AR49)
+    dcon = sqlite3.connect(str(donor_path))
+    dcon.execute("INSERT INTO commits(run_id, applied_at, summary) VALUES ('r1', ?, 's')",
+                 ("2026-07-01T00:00:00+00:00",))            # applied_at > SCANNED_AT
+    for rel in (_NAPRAWIONY, _NIETKNIETY):
+        dcon.execute("INSERT INTO header_backups(commit_id, file_id, hdu_index, header_text, "
+                     "post_hash) VALUES (1, ?, 0, 'x', 'y')", (files[rel][1],))
+    dcon.commit()
+    dcon.close()
+    stara = files[_NAPRAWIONY][0]
+    sha1 = _sha1_dawcy(donor_path, stara)
+    nowa = _przenies(stara, tmp_path / "astro" / "LIGHTS" / "M31" / "bez_nazwy_1.fits")
+    fits.setval(str(nowa), "OBJECT", value="M31")              # wsad kart PO zeznaniu dawcy
+    live = _mk_live_relocations(tmp_path, [(sha1, [stara, nowa])])
+
+    donor = open_donor(str(donor_path))
+    con = db.open_db(str(tmp_path / "horreum.db"))
+    try:
+        s = run_import(donor, con, now=NOW, rng_seed=1, relocations=read_relocations(str(live)))
+        testimony = acc.donor_object_testimony(donor, s.preflight.recompute, s.preflight.relocated)
+        ns = acc.nameless_split(con, testimony)
+        linie = []
+        wyniki = acc.check_criteria(con, s, linie.append, donor_testimony=testimony,
+                                    now="2026-10-13T08:00:00+00:00")
+    finally:
+        con.close()
+        donor.close()
+    assert s.skipped == 0 and s.recomputed == 2 and s.gate_failures == []
+    assert str(nowa) in testimony and str(stara) not in testimony
+    assert (ns.anchor, ns.outside, ns.recomputed_lights, ns.recomputed_donor,
+            ns.recomputed_disk) == (2, 0, 2, 2, 1)
+    assert ns.mismatch == []
+    (_etykieta, ok, _p), = [w for w in wyniki if w[0].startswith("§5.7b derywacja")]
+    assert ok
 
 
 # ── AR-53: FAIL kryterium z kotwicą drukuje jej pochodzenie i wiek ───────────────────────────────

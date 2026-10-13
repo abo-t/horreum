@@ -252,7 +252,9 @@ def _main(argv=None):
     p_imp.add_argument("db", help="ścieżka ŚWIEŻEJ bazy Horreum (utworzy ją migracja)")
     p_imp.add_argument("--live-db", default=None,
                        help="żywa baza Horreum — rejestr napraw writebacku (ścieżki naprawione "
-                            "przez tę instalację nie wywołają abortu falsyfikatora; D-0722-2)")
+                            "przez tę instalację nie wywołają abortu falsyfikatora; D-0722-2) i mapa "
+                            "relokacji (plik przeniesiony gestem Horreum znaleziony pod ścieżką "
+                            "obecną; AR-130)")
 
     p_ren = sub.add_parser("rename", help="rename plików z faktów (DRY domyślnie; --apply/--undo)")
     p_ren.add_argument("db", help="ścieżka pliku bazy")

@@ -12,7 +12,9 @@ Przebieg (`run_import`):
      abort, brama przyrostowa przyszłych skanów musi trafiać); ZBIORY ścieżek: każdy plik dawcy
      osiągalny `os.stat` MUSI być w pełnym listingu `iter_headers` (rozjazd = zatrucie tożsamości:
      casing/wykluczenia → przyszły skan zdublowałby lokacje — abort); braki (stat nieudany) →
-     `skipped` §4.3; nadwyżka listingu = nowe pliki (XISF ~331 — domyka PF-4, tylko raport).
+     `skipped` §4.3, chyba że plik przeniosła ta instalacja Horreum - wtedy stoi pod ścieżką
+     z mapy relokacji żywej bazy (`read_relocations`, AR-130) i liczy się jako osiągalny;
+     nadwyżka listingu = nowe pliki (XISF ~331 - domyka PF-4, tylko raport).
   2. FALSYFIKATOR KIERUNKU C (R1#6): 5 losowych + celowana próbka plików naprawianych PO
      `scanned_at` (z `header_backups`×`commits`; gdy pusta — ostatnio naprawiane) → `scan_file`
      liczy z dysku i porównuje z dawcą. Rozjazd `sha1_data` GDZIEKOLWIEK = STOP (spadek do
@@ -97,6 +99,9 @@ class Preflight:
     verified: list = field(default_factory=list)         # ścieżki sprawdzone falsyfikatorem
     late_repaired: list = field(default_factory=list)    # podgrupa naprawianych po scanned_at
     repaired_registry: frozenset = frozenset()  # naprawione przez HORREUM (D-0722-2), obecne u dawcy
+    # Ścieżka dawcy -> ścieżka, pod którą plik stoi dziś, bo przeniósł go Horreum (AR-130). Klucze
+    # `stats` zostają ścieżkami DAWCY (wiersz dawcy jest jednostką pętli), plik czytamy spod wartości.
+    relocated: dict = field(default_factory=dict)
     recompute: frozenset = frozenset()         # ścieżki czytane z dysku zamiast syntezy z dawcy
     notes: list = field(default_factory=list)  # ustalenia raportowane userowi (ASCII)
 
@@ -252,7 +257,50 @@ def read_repaired_registry(path):
     return frozenset(r[0] for r in rows)
 
 
-def _verify_sample(donor, paths, late_set, registry, notes):
+def read_relocations(path):
+    """Mapa RELOKACJI HORREUM (AR-130): `{dawna ścieżka: {tożsamość klatki: obecna ścieżka}}` -
+    gdzie dziś leży plik, który TA instalacja przeniosła. Dawca jest zamrożonym snapshotem, więc zna
+    plik pod ścieżką sprzed przeniesienia; bez mapy import liczył go jako „dawca nieosiągalny”
+    (`frame.review`), a taki szum zasłaniał w kotwicy akceptacji prawdziwe braki.
+
+    Źródło: każda relokacja lokacji idzie jedną drogą - `repo._apply_relocation` (zmiana nazwy
+    z faktów, „Zmień obiekt”/„Uzgodnij” i ich cofnięcie, rekoncyliacja zamiaru renamu): `UPDATE
+    location.path` w miejscu + `event(location.renamed)` z `before`/`after`. Lokacja przeżywa
+    relokację, więc KAŻDA dawna ścieżka z jej dziennika prowadzi do jej obecnej `path`, także po
+    kilku przeniesieniach z rzędu. Klucz wewnętrzny = tożsamość klatki (`frame.sha1_data`, przy
+    degeneracji odcisk pliku - jak u dawcy): import podstawia obecną ścieżkę wyłącznie wierszowi
+    dawcy o TEJ SAMEJ tożsamości, więc ścieżka zwolniona i zajęta potem przez inny plik nie
+    podstawia cudzych danych. Kilka relokacji tej samej pary - wygrywa najpóźniejsza (`e.id`).
+    Baza otwierana WYŁĄCZNIE read-only, bez migracji (jak `read_repaired_registry`)."""
+    apath = os.path.abspath(str(path))
+    if not os.path.isfile(apath):
+        raise ImportAbort(f"baza mapy relokacji nie istnieje: {apath}")
+    con = sqlite3.connect("file:" + pathname2url(apath) + "?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT json_extract(e.payload, '$.before'), l.path, f.sha1_data FROM event e "
+            "JOIN location l ON l.id = CAST(substr(e.target, 10) AS INTEGER) "
+            "JOIN frame f ON f.id = l.frame_id "
+            "WHERE e.verb = 'location.renamed' AND e.target LIKE 'location:%' "
+            "ORDER BY e.id").fetchall()
+    finally:
+        con.close()
+    mapa = {}
+    for dawna, obecna, tozsamosc in rows:
+        if dawna and dawna != obecna:
+            mapa.setdefault(dawna, {})[tozsamosc] = obecna
+    return mapa
+
+
+def _donor_identity(row):
+    """Tożsamość klatki z wiersza dawcy - ta sama, którą pętla nadaje klatce: `sha1_data`, a przy
+    degeneracji (`sha1_data_uncomputable`) odcisk pliku (`scan` degeneruje tak samo)."""
+    if row["sha1_data_uncomputable"] or row["sha1_data"] is None:
+        return row["sha1_file"]
+    return row["sha1_data"]
+
+
+def _verify_sample(donor, paths, late_set, registry, notes, relocated):
     """Falsyfikator kierunku C (R1#6): dla każdej ścieżki próbki policz odciski Z DYSKU
     (`scan_file`) i porównaj z dawcą. Zwrot: True gdy fakty kopii późno-naprawianych się
     rozjechały (→ podgrupa do przeliczenia z dysku). Rozjazd `sha1_data` = STOP; rozjazd
@@ -263,16 +311,21 @@ def _verify_sample(donor, paths, late_set, registry, notes):
     fakty kopii mogą być stęchłe) → przeliczenie CAŁEJ podgrupy z dysku; `registry` (naprawił
     Horreum, dawca nie wie) → sama NOTA, bo zeznanie dawcy jest wtedy spójnym snapshotem
     sprzed naprawy, a to jest baseline tej bramki. Tożsamość (`sha1_data`) sprawdzana tak
-    samo w obu — writeback nie rusza danych, więc rozjazd tożsamości zostaje STOPEM."""
+    samo w obu - writeback nie rusza danych, więc rozjazd tożsamości zostaje STOPEM.
+
+    `relocated` (AR-130): plik przeniesiony przez Horreum czytamy spod ścieżki obecnej; wiersz
+    dawcy i oba rejestry zostają przy ścieżce dawcy (`Preflight.repaired_registry` jest już
+    przetłumaczony - naprawa zapisana pod ścieżką obecną liczy się ścieżce dawcy)."""
     stale_late = False
     for path in paths:
         row = donor.execute(
             "SELECT sha1_file, sha1_data, sha1_data_uncomputable, header_hash, mtime "
             "FROM files WHERE path = ?", (path,)).fetchone()
-        rec = scan_file(path)
+        plik = relocated.get(path, path)
+        rec = scan_file(plik)
         if rec.error is not None:
             raise ImportAbort(
-                f"falsyfikator: plik probki nieczytelny z dysku: {path} ({rec.error}) "
+                f"falsyfikator: plik probki nieczytelny z dysku: {plik} ({rec.error}) "
                 f"— sprawdz NAS/plik zanim import ruszy")
         # degenerat (uncomputable) nie ma odcisku danych do porównania — rozstrzyga file_sha1
         if not row["sha1_data_uncomputable"] and rec.sha1_data != row["sha1_data"]:
@@ -282,7 +335,7 @@ def _verify_sample(donor, paths, late_set, registry, notes):
                 f"spadek do pelnego skanu B (horreum scan)")
         facts_ok = (rec.file_sha1 == row["sha1_file"]
                     and rec.header_hash == row["header_hash"]
-                    and _mtime_iso(os.stat(path)) == _mtime_iso_from_epoch(row["mtime"]))
+                    and _mtime_iso(os.stat(plik)) == _mtime_iso_from_epoch(row["mtime"]))
         if facts_ok:
             continue
         if path in late_set:
@@ -308,12 +361,14 @@ def _mtime_iso_from_epoch(mtime_epoch):
     return _mtime_iso(_St)
 
 
-def preflight(donor, *, rng_seed=None, repaired_paths=None):
+def preflight(donor, *, rng_seed=None, repaired_paths=None, relocations=None):
     """Pre-flight §4.1 (twarde, EXPECT; zero zapisu). Zwraca `Preflight` z materiałem pętli
-    (stats, missing→skipped, recompute) albo rzuca `ImportAbort`.
+    (stats, missing→skipped, relocated, recompute) albo rzuca `ImportAbort`.
 
     `repaired_paths` = rejestr napraw Horreum (`read_repaired_registry` z ŻYWEJ bazy) — ścieżki,
-    dla których stęchłe fakty kopii u dawcy mają ZNANY powód, więc nie są abortem."""
+    dla których stęchłe fakty kopii u dawcy mają ZNANY powód, więc nie są abortem.
+    `relocations` = mapa relokacji Horreum (`read_relocations` z tej samej bazy, AR-130) - plik
+    nieosiągalny pod ścieżką dawcy, przeniesiony przez Horreum, stoi pod ścieżką obecną."""
     _assert_donor_complete(donor)
 
     paths = [r["path"] for r in donor.execute("SELECT path FROM files ORDER BY path")]
@@ -341,35 +396,70 @@ def preflight(donor, *, rng_seed=None, repaired_paths=None):
     pf = Preflight(root=root, volume=volume, drive_letter=(Path(root).drive or None),
                    files_total=len(paths))
 
-    # jeden pass stat: mtime do pętli + podział osiągalne/braki (braki = skipped §4.3)
+    # jeden pass stat: mtime do pętli + podział osiągalne/braki (braki = skipped §4.3). Plik
+    # nieosiągalny pod ścieżką dawcy, który przeniósł Horreum (AR-130), bierzemy spod ścieżki
+    # obecnej - wyłącznie przy tej samej tożsamości klatki i celu, którego nie zajmuje inny wiersz
+    # dawcy ani inna relokacja (dwa wiersze dawcy pod jedną ścieżką = dwie lokacje jednego pliku).
+    relocations = relocations or {}
+    zajete = set(paths)
+    odrzucone = 0
     for p in paths:
         try:
             pf.stats[p] = os.stat(p)
+            continue
         except OSError:
-            pf.missing.append(p)
+            pass
+        kandydaci = relocations.get(p)
+        if kandydaci:
+            row = donor.execute(
+                "SELECT sha1_file, sha1_data, sha1_data_uncomputable FROM files WHERE path = ?",
+                (p,)).fetchone()
+            obecna = kandydaci.get(_donor_identity(row))
+            if obecna is not None and obecna not in zajete:
+                try:
+                    pf.stats[p] = os.stat(obecna)
+                    pf.relocated[p] = obecna
+                    zajete.add(obecna)
+                    continue
+                except OSError:
+                    pass
+            odrzucone += 1
+        pf.missing.append(p)
 
     # zbiory ścieżek (R2#1/R3-a3): stat-OK ⊆ pełny listing — rozjazd zatruwa tożsamość
-    # (casing/wykluczenia → przyszły skan dubluje lokacje przy tym samym serialu) → abort
+    # (casing/wykluczenia → przyszły skan dubluje lokacje przy tym samym serialu) → abort.
+    # Porównujemy ścieżki FIZYCZNE: plik przeniesiony stoi w listingu pod ścieżką obecną.
+    fizyczne = {pf.relocated.get(p, p) for p in pf.stats}
     listing = set(map(str, iter_headers(root)))
-    unlisted = sorted(set(pf.stats) - listing)
+    unlisted = sorted(fizyczne - listing)
     if unlisted:
         sample = "; ".join(unlisted[:10])
         raise ImportAbort(
             f"{len(unlisted)} sciezek dawcy osiagalnych na dysku NIE MA w listingu skanu "
             f"(casing albo katalog wykluczony _WBPP/_Review) — przyszly skan zdublowalby "
             f"lokacje; wyjasnij zanim import ruszy. Probka: {sample}")
-    surplus = sorted(listing - set(pf.stats) - set(pf.missing))
+    surplus = sorted(listing - fizyczne - set(pf.missing))
     pf.surplus = len(surplus)
     pf.surplus_sample = surplus[:10]
+    if pf.relocated:
+        pf.notes.append(f"{len(pf.relocated)} sciezek dawcy przeniesionych przez Horreum "
+                        f"(location.renamed) -> plik spod obecnej sciezki, zeznanie dawcy")
+    if odrzucone:
+        pf.notes.append(f"{odrzucone} sciezek dawcy z relokacja odrzucona (inna tozsamosc klatki, "
+                        f"cel zajety albo nieosiagalny) -> skipped")
     if pf.missing:
         pf.notes.append(f"{len(pf.missing)} sciezek dawcy nieosiagalnych (os.stat) -> skipped")
     if pf.surplus:
         pf.notes.append(f"{pf.surplus} plikow na dysku poza dawca (nowe; XISF domyka PF-4)")
 
-    # falsyfikator kierunku C: 5 losowych + celowana próbka późno-naprawianych
+    # falsyfikator kierunku C: 5 losowych + celowana próbka późno-naprawianych. Rejestr napraw
+    # zna ścieżki ŻYWEJ bazy, czyli obecne - plik naprawiony, a potem przeniesiony, liczy się
+    # ścieżce dawcy przez relokację.
     late, targeted, why = _late_repaired(donor)
     pf.late_repaired = late
-    pf.repaired_registry = frozenset(p for p in (repaired_paths or ()) if p in pf.stats)
+    naprawione = frozenset(repaired_paths or ())
+    pf.repaired_registry = frozenset(
+        p for p in pf.stats if pf.relocated.get(p, p) in naprawione)
     if pf.repaired_registry:
         pf.notes.append(f"rejestr napraw Horreum: {len(pf.repaired_registry)} sciezek "
                         f"(znany powod stechlych faktow kopii — nota, nie abort)")
@@ -379,7 +469,8 @@ def preflight(donor, *, rng_seed=None, repaired_paths=None):
     probe = list(dict.fromkeys(                     # dedup, kolejność: celowane najpierw
         [p for p in targeted if p in pf.stats] + sample))
     pf.notes.append(f"falsyfikator: {len(probe)} plikow (celowane: {why})")
-    stale_late = _verify_sample(donor, probe, frozenset(late), pf.repaired_registry, pf.notes)
+    stale_late = _verify_sample(donor, probe, frozenset(late), pf.repaired_registry, pf.notes,
+                                pf.relocated)
     pf.verified = probe
     if stale_late:
         pf.recompute = frozenset(p for p in late if p in pf.stats)
@@ -462,12 +553,16 @@ def _gates(con, summary, axes_seen):
             summary=summary)
 
 
-def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=None):
+def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, relocations=None,
+               progress=None):
     """Cały przebieg PF-3 na otwartych połączeniach (dawca RO, cel po `db.open_db`): pre-flight →
     pętla → grouper+resolver+kalibracja+rodowód → bramki. Zwraca `ImportSummary`; twarde złamanie
     → `ImportAbort`.
     `progress(done, total, path)` wołany po każdym pliku (CLI: heartbeat; Qt tu nie mieszka).
-    `repaired_paths` → `preflight` (rejestr napraw Horreum, D-0722-2).
+    `repaired_paths` → `preflight` (rejestr napraw Horreum, D-0722-2); `relocations` → `preflight`
+    (mapa relokacji Horreum, AR-130). Plik przeniesiony wchodzi ZEZNANIEM DAWCY pod ścieżką obecną -
+    ta sama dyspozycja co dla naprawy Horreum (D-0722-2: zeznanie dawcy to baseline), a fakty
+    lokacji (ścieżka, `mtime`) są faktami dysku, jak dla każdego pliku importu.
 
     GENERACJA ZAPISU W MIEJSCU (AR-17 (4), dyscyplina skanu): rekord importu to fakty z chwili
     pre-flightu (`os.stat`, zeznanie dawcy, odczyt podgrupy przeliczanej) - generację dziennika
@@ -478,7 +573,8 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
     a nie ciche wciągnięcie faktów dawcy sprzed zapisu na plik opisany już po nim."""
     _assert_target_fresh(con)
     gen = repo.inplace_generation(con)
-    pf = preflight(donor, rng_seed=rng_seed, repaired_paths=repaired_paths)
+    pf = preflight(donor, rng_seed=rng_seed, repaired_paths=repaired_paths,
+                   relocations=relocations)
 
     summary = ImportSummary(preflight=pf, scan=ScanSummary(), files_total=pf.files_total)
     tel_seen, cam_seen, cfg_seen = set(), set(), set()
@@ -500,13 +596,14 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
             if progress is not None:
                 progress(done, total, path)
             continue
+        plik = pf.relocated.get(path, path)    # plik przeniesiony przez Horreum (AR-130)
         if path in pf.recompute:               # podgrupa stęchła: pełne zeznanie z dysku
-            rec = scan_file(path)
+            rec = scan_file(plik)
             summary.recomputed += 1
         else:                                  # tor główny: synteza z zeznania dawcy
             cards = _donor_cards(donor, row["id"])
             rec = ScanRecord(
-                path=path, size_bytes=row["size"], mtime=_mtime_iso(st),
+                path=plik, size_bytes=row["size"], mtime=_mtime_iso(st),
                 header=header_dict_from_cards(cards), error=None,
                 sha1_data=None if row["sha1_data_uncomputable"] else row["sha1_data"],
                 file_sha1=row["sha1_file"], header_hash=row["header_hash"],
@@ -594,14 +691,17 @@ def import_fitsmirror(donor_path, db_path, *, now, rng_seed=None, repaired_db=No
     naprawione przez tę instalację nie trafiły w abort falsyfikatora (D-0722-2). Realny import
     poza `acceptance_s5` trafiłby tę samą loterię co bramka etapu — bez rejestru losowa próbka
     czyta naprawiony plik jako „dawca stęchły z nieznanego powodu". Brak → import bez rejestru
-    (zachowanie sprzed dokrętki: świeży dawca bez napraw Horreum przechodzi tak czy tak)."""
+    (zachowanie sprzed dokrętki: świeży dawca bez napraw Horreum przechodzi tak czy tak).
+    Z tej samej bazy idzie mapa relokacji (`read_relocations`, AR-130): plik przeniesiony przez
+    tę instalację jest znaleziony pod ścieżką obecną, zamiast liczyć się jako nieosiągalny."""
     donor = open_donor(donor_path)
     try:
         repaired = read_repaired_registry(repaired_db) if repaired_db else None
+        relocations = read_relocations(repaired_db) if repaired_db else None
         con = db.open_db(db_path)
         try:
-            return run_import(donor, con, now=now, rng_seed=rng_seed,
-                              repaired_paths=repaired, progress=progress)
+            return run_import(donor, con, now=now, rng_seed=rng_seed, repaired_paths=repaired,
+                              relocations=relocations, progress=progress)
         finally:
             con.close()
     finally:

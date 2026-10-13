@@ -51,6 +51,8 @@ Użycie:
 `--live-db` podawaj ZAWSZE, gdy Horreum naprawiał nagłówki na tym samym drzewie (D-0722-2
 wariant A): dawca jest zamrożonym snapshotem sprzed napraw, więc bez rejestru losowa próbka
 falsyfikatora czyta naprawiony plik jako „dawca stęchły z NIEZNANEGO powodu" i abortuje.
+Ta sama baza niesie mapę RELOKACJI (AR-130, `read_relocations`): plik przeniesiony gestem Horreum
+import znajduje pod ścieżką obecną, zamiast liczyć go jako „dawca nieosiągalny” (`frame.review`).
 """
 import argparse
 import json
@@ -75,7 +77,7 @@ from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
 from horreum.gui.queries import nameless_frames                   # noqa: E402  (Qt-wolne)
 from horreum.import_fitsmirror import (                                   # noqa: E402
-    ImportAbort, donor_header, open_donor, read_repaired_registry, run_import,
+    ImportAbort, donor_header, open_donor, read_relocations, read_repaired_registry, run_import,
 )
 from horreum.resolve.headers import extract_header                # noqa: E402
 from horreum.resolve.regions import resolve_region                # noqa: E402
@@ -262,8 +264,16 @@ EXP_OBJECT_PCT_MIN = Kotwica(85.0, _PROG)
 EXP_UNCOMPUTABLE_FULL = Kotwica(0, _POMIAR_FULL_1005, _POTW_E1DBE60)
 # 0 → 400 (2026-10-12): wszystkie 400 to „import: plik dawcy nieosiągalny (os.stat)” - dokładnie pliki
 # przeniesione próbą fali 10 (308 + 90 + 2), których ścieżek zamrożony dawca nie zna; degenerat OIII
-# dalej czytelny. Liczba spadnie, gdy import nauczy się relokacji z żywej bazy (AR-130).
-EXP_FRAME_REVIEW_FULL = Kotwica(400, _POMIAR_STOSY_1012)
+# dalej czytelny.
+# 400 → 0 (AR-130): import bierze mapę relokacji z `--live-db` (`read_relocations`) i znajduje te
+# pliki pod ścieżką obecną (tożsamość klatki zgodna 400/400), więc kotwica znów liczy wyłącznie
+# PRAWDZIWE braki - każdy przyszły `frame.review` to plik, którego nie ma ani pod ścieżką dawcy,
+# ani pod ścieżką, na którą przeniósł go Horreum.
+_POMIAR_FULL_AR130 = Pomiar("2026-10-13", "FULL --donor <dawca> --xisf-root <archiwum> --live-db "
+                            "<kopia żywej bazy v36>, kotwice tego pomiaru PASS",
+                            "jak `_POMIAR_STOSY_1012` (400 plików przeniesionych gestami Horreum)",
+                            "05cccde + AR-130 (mapa relokacji w imporcie)")
+EXP_FRAME_REVIEW_FULL = Kotwica(0, _POMIAR_FULL_AR130)
 # Po kind-scopingu config (wariant B, 2026-07-22) dark/bias są POZA osią teleskopu: ich `config_id
 # IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
@@ -287,10 +297,12 @@ EXP_CONFIG_REVIEW_FULL = Kotwica(1, _POMIAR_KIND_SCOPING, _POTW_0804)
 # etapu 3 D-0802-2. Kotwice mówią o świeżej bazie akceptacji, nie o `pf4`, więc są niezależne.
 EXP_CONFIG_REVIEW_RAW_FULL = Kotwica(425, _POMIAR_RAW_0804)   # było 432 - nota C3 wyżej
 EXP_XISF_KINDS = Kotwica(
-    {"flat": 11, "light": 228, "master_dark": 38, "master_flat": 74, "unknown": 1},
-    _POMIAR_FULL_1005, _POTW_E1DBE60)   # AR-53: (c) OIII 15629 unknown → master_flat, (d) +26 lightów XISF
-# ⚠ NIEZMIERZONA po fali 4: przebieg FULL+STOSY 2026-10-12 dał `flat` 11 → `master_flat` 85 (AR-96),
-# ale tej kotwicy (FULL bez stosów) nikt nie zmierzył - spodziewany FAIL do pierwszego przebiegu FULL.
+    {"light": 228, "master_dark": 38, "master_flat": 85, "unknown": 1},
+    _POMIAR_FULL_AR130)   # AR-96: 11 masterflatów z `IMAGETYP='FLAT'` liczy się od fali 4 jako master_flat
+# ZMIERZONA, NIE POTWIERDZONA: wartość z `akt=` przebiegu FULL 2026-10-13 (sesja bz), który dał tu FAIL
+# na starej kotwicy (`flat` 11, `master_flat` 74 - sprzed reguły rodzaju AR-96, fala 4 `8d87d57`).
+# Przyczyna przeliczona: 74 + 11 = 85, `flat` 11 → 0, reszta bez ruchu. Potwierdzeniem będzie
+# PIERWSZY następny przebieg FULL, w którym ta wartość da PASS - wtedy drugi `Pomiar`.
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
 # do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
 # także dla XISF, a backfill (`horreum backfill-xisf`) dociąga je do lokacji sprzed P6a — 202 klatki
@@ -365,7 +377,12 @@ EXP_NAMELESS_IMPORT = Kotwica(25, _POMIAR_IMPORT_0801, _POTW_IMPORT_1004)   # ZM
 # (bez kotwicy - jej wartość zależy od tego, czy przeliczenie w ogóle zaszło, i od stanu dysku).
 # 25 → 23 (2026-10-12): dwie klatki odzyskały nazwę między 10-04 a 10-12; która i czym -
 # nieweryfikowalne (baza akceptacji z 10-04 nie przetrwała); kandydaci: fala 4 i przenosiny fali 10.
-EXP_NAMELESS_FULL = Kotwica(23, _POMIAR_STOSY_1012)   # pierwotnie 25, ZMIERZONE po pilocie P-D.
+# 23 → 25 (AR-130), przyczyna USTALONA: obie to lighty `NGC3034\RC6_2600MC\OSC` przeniesione gestem
+# do `NGC2632` - późno-naprawiane i bez nazwy wg dawcy. Import bez mapy relokacji ich nie znalazł,
+# więc wypadły z zeznania dawcy, a doskan wciągnął je zeznaniem DYSKU (z nazwą). Z mapą wracają do
+# podgrupy przeliczonej pod ścieżką obecną i kotwica znów liczy zeznanie dawcy - jak przed
+# przeniesieniem. Ruch 25 → 23 był więc szumem gestu, nie zmianą w dawcy.
+EXP_NAMELESS_FULL = Kotwica(25, _POMIAR_FULL_AR130)   # pierwotnie 25, ZMIERZONE po pilocie P-D.
 # **Przesłanka briefu §6 pkt 9 („po naprawie padnie na 0")
 # OKAZAŁA SIĘ FAŁSZYWA i to jest tu udokumentowane, żeby nikt nie „poprawił" tej liczby z powrotem
 # na 0:** baza akceptacji bierze `mtime` ze STANU NA DYSKU, ale zeznanie FITS (nagłówek, `file_sha1`,
@@ -387,8 +404,9 @@ EXP_NAMELESS_RAW_FULL = Kotwica(756, _POMIAR_RAW_0804)   # lighty w formacie bez
 # drzewie: WYCOFANIE klatki ręką (`frame.retired_at`, D-OW-3/R2). Predykat bezimiennych
 # (`gui.queries.nameless_frames`, za nim `nameless_split`) odsiewa wycofane, więc każde wycofanie
 # lightu bez nazwy zbija kubełek o 1. Na świeżej bazie z dawcy populacja wycofanych jest ZEROWA
-# (gest robi człowiek w GUI, skrypt nie; `--live-db` przenosi WYŁĄCZNIE rejestr napraw,
-# `read_repaired_registry`), więc w tym skrypcie generator nie działa wprost - rusza liczbę tam,
+# (gest robi człowiek w GUI, skrypt nie; `--live-db` przenosi WYŁĄCZNIE rejestr napraw i mapę
+# relokacji, `read_repaired_registry` + `read_relocations` - wycofań nie), więc w tym skrypcie
+# generator nie działa wprost - rusza liczbę tam,
 # gdzie wycofania żyją: w raporcie dostawy na żywej bazie. Do akceptacji dociera pośrednio, gdy
 # wycofanie idzie w parze z kasacją pliku na dysku (wzór: nota C3, import pomija plik nieobecny).
 # Protokół: kotwica rusza się o N - nowy `Pomiar` z „-N wycofanych/skasowanych" w `stan_r`,
@@ -507,20 +525,25 @@ def build_import(donor_path, work_path, now, out, live_db=None):
 
     `live_db` (opcja `--live-db`) = ŻYWA baza Horreum, z której bierzemy rejestr napraw
     (D-0722-2 wariant A). Bez niego falsyfikator czyta pliki naprawione przez Horreum jako
-    „dawca stęchły z nieznanego powodu" i abortuje, gdy losowa próbka w nie trafi."""
+    „dawca stęchły z nieznanego powodu" i abortuje, gdy losowa próbka w nie trafi. Z tej samej
+    bazy idzie mapa relokacji (AR-130): bez niej każdy plik przeniesiony gestem Horreum liczy się
+    jako „dawca nieosiągalny”, a kotwica `frame.review` mierzy gesty zamiast braków."""
     if os.path.exists(work_path):
         os.remove(work_path)
     out(f"== (I) IMPORT: {donor_path} -> {work_path} ==")
-    repaired = None
+    repaired = relocations = None
     if live_db:
         repaired = read_repaired_registry(live_db)
+        relocations = read_relocations(live_db)
         out(f"  rejestr napraw Horreum: {len(repaired)} sciezek z {live_db}")
+        out(f"  mapa relokacji Horreum: {len(relocations)} dawnych sciezek z {live_db}")
     donor = open_donor(donor_path)
     try:
         con = db.open_db(work_path)
         con.execute("PRAGMA synchronous=OFF")          # baza JEDNORAZOWA — wolno przyspieszyć
-        summary = run_import(donor, con, now=now, repaired_paths=repaired)
-        testimony = donor_object_testimony(donor, summary.preflight.recompute)
+        summary = run_import(donor, con, now=now, repaired_paths=repaired, relocations=relocations)
+        testimony = donor_object_testimony(donor, summary.preflight.recompute,
+                                           summary.preflight.relocated)
     finally:
         donor.close()
     pf = summary.preflight
@@ -529,7 +552,8 @@ def build_import(donor_path, work_path, now, out, live_db=None):
     for note in pf.notes:
         out(f"    {note}")
     out(f"  import: {summary.imported}/{summary.files_total} "
-        f"(skipped {summary.skipped}, przeliczone z dysku {summary.recomputed})")
+        f"(skipped {summary.skipped}, przeniesione przez Horreum {len(pf.relocated)}, "
+        f"przeliczone z dysku {summary.recomputed})")
     out(f"  grouper: {summary.group}")
     out(f"  resolver: {summary.resolve}")
     out(f"  bramki §4.6: {'WSZYSTKIE PASS' if not summary.gate_failures else summary.gate_failures}")
@@ -537,18 +561,23 @@ def build_import(donor_path, work_path, now, out, live_db=None):
 
 
 # ── §5.7b: kotwica nawrotu P-D na ZEZNANIU DAWCY (AR-49, wariant O2) ─────────────────────────────
-def donor_object_testimony(donor, paths):
+def donor_object_testimony(donor, paths, relocated=None):
     """Zeznanie DAWCY o obiekcie dla ścieżek podgrupy przeliczonej z dysku: `{path: (object_raw,
     ra_deg, dec_deg)}`, pola gorące tą samą derywacją co `header` w bazie (`extract_header` na
     syntezie `donor_header`). Czytane, dopóki dawca jest otwarty - po imporcie baza o tych plikach
-    zna już tylko zeznanie dysku. Ścieżka spoza dawcy = złamany kontrakt `preflight` (EXPECT)."""
+    zna już tylko zeznanie dysku. Ścieżka spoza dawcy = złamany kontrakt `preflight` (EXPECT).
+
+    Klucz = ścieżka LOKACJI w bazie (`nameless_split` paruje po `location.path`): plik przeniesiony
+    przez Horreum (`Preflight.relocated`, AR-130) leży pod ścieżką obecną, a wiersz dawcy - pod
+    dawną."""
+    relocated = relocated or {}
     out = {}
     for path in sorted(paths):
         header = donor_header(donor, path)
         if header is None:
             raise RuntimeError(f"podgrupa przeliczona poza dawca: {path} - kontrakt preflight zlamany")
         hot = extract_header(header)
-        out[path] = (hot["object_raw"], hot["ra_deg"], hot["dec_deg"])
+        out[relocated.get(path, path)] = (hot["object_raw"], hot["ra_deg"], hot["dec_deg"])
     return out
 
 
@@ -939,16 +968,20 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
                    stacks=None, stacks_idempotent=None, slin=None, slin_idempotent=None,
                    slin_kept=None, donor_testimony=None, now=None):
     """`donor_testimony` = `donor_object_testimony` podgrupy przeliczonej (z `build_import`); musi
-    pokrywać `summary.preflight.recompute` co do ścieżki - inaczej kotwica §5.7b liczyłaby część
+    pokrywać `summary.preflight.recompute` co do ścieżki LOKACJI - plik przeniesiony przez Horreum
+    leży pod ścieżką obecną (`Preflight.relocated`, AR-130) - inaczej kotwica §5.7b liczyłaby część
     podgrupy zeznaniem dysku (EXPECT, nie cicha degradacja). `now` (ISO-8601) liczy wiek kotwic
     w wydruku FAIL; domyślnie bieżąca chwila.
 
     Zwraca listę `(etykieta, ok, pochodzenie)`, gdzie `pochodzenie` to linie `opis_niezgodnosci`
     przy FAIL kryterium z kotwicą (inaczej pusta krotka) - podsumowanie powtarza je przy FAIL-u."""
     donor_testimony = donor_testimony or {}
-    if set(donor_testimony) != set(summary.preflight.recompute):
+    pf = summary.preflight
+    podgrupa = {pf.relocated.get(p, p) for p in pf.recompute}
+    if set(donor_testimony) != podgrupa:
         raise RuntimeError("check_criteria: zeznanie dawcy nie pokrywa podgrupy przeliczonej "
-                           f"({len(donor_testimony)} != {len(summary.preflight.recompute)})")
+                           f"({len(set(donor_testimony) ^ podgrupa)} sciezek rozjechanych z "
+                           f"{len(podgrupa)})")
     dzis = (datetime.fromisoformat(now) if now else datetime.now(timezone.utc)).date()
     results = []                                    # (etykieta, PASS/FAIL, pochodzenie)
 
@@ -1081,9 +1114,9 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # jest docelowy. Predykat czerpie zbiór z `grouper.NO_TELESCOPE_KINDS` (jeden właściciel, SPOT),
     # ten sam, którego używa `resolver.review_state`; osobno raportujemy, ile klatek tak wyłączono.
     cfg = con.execute("SELECT count(*) FROM config").fetchone()[0]
-    # DISTINCT target, nie `count(*)` — poprawka 2026-08-02 (I-2b). `flag_config_review` emituje
-    # BEZWARUNKOWO przy każdym przebiegu groupera (znany wzorzec: „kolejka review = STAN, NIE
-    # count(event)"), więc surowy licznik zdarzeń rośnie z LICZBĄ PRZEBIEGÓW, a nie z liczbą spraw.
+    # DISTINCT target, nie `count(*)` - poprawka 2026-08-02 (I-2b). `flag_config_review` emitował
+    # do AR-88 BEZWARUNKOWO przy każdym przebiegu groupera (znany wzorzec: „kolejka review = STAN, NIE
+    # count(event)"), więc surowy licznik zdarzeń rósł z LICZBĄ PRZEBIEGÓW, a nie z liczbą spraw.
     # Kryterium nazywa się „zero cichego NULL" i jest pytaniem o ZBIÓR: czy każda klatka bez configu
     # ma zapisany POWÓD. Dopóki grouper biegł dwa razy, licznik przypadkiem równał się stanowi;
     # trzeci przebieg (droga „Stosy") to ujawnił — 873 zdarzenia na 440 spraw. Zmierzone, nie
@@ -1678,8 +1711,9 @@ def main(argv=None):
                          "skanem korzenia archiwum (gotowe obrazy jako `master_light`). Wymaga "
                          "`--xisf-root` (kotwice stosów są liczone na FULL, który `STACKS` odcina - O1)")
     ap.add_argument("--live-db", default=None,
-                    help="ŻYWA baza Horreum (read-only) — rejestr napraw writebacku; bez niej "
-                         "falsyfikator abortuje, gdy próbka trafi w plik naprawiony przez Horreum")
+                    help="ŻYWA baza Horreum (read-only) - rejestr napraw writebacku i mapa relokacji; "
+                         "bez niej falsyfikator abortuje, gdy próbka trafi w plik naprawiony przez "
+                         "Horreum, a pliki przeniesione gestem liczą się jako nieosiągalne")
     ap.add_argument("--subset", default=None,
                     help="mały realny katalog (lub kilka po przecinku) do krzyż-czeku czytników/sha1")
     ap.add_argument("--work", default=None, help="ścieżka jednorazowej horreum.db (domyślnie obok skryptu)")

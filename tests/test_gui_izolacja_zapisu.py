@@ -462,7 +462,8 @@ def test_zdanie_commitu_stawia_powod_bledu_przed_blokada():
              skipped=[], withheld=[])
     zdanie = zdanie_wyniku_zapisu(res, "grid.wb.renamed")
     assert zdanie.endswith("plik PRZENIESIONY na x.fits, ale baza NIE przepięta"), zdanie
-    assert "1 zablokowanych" in zdanie and "1 błędów" in zdanie, zdanie
+    assert "1 zablokowany" in zdanie and "zablokowanych" not in zdanie \
+        and "1 błąd" in zdanie, zdanie                                     # odmiana (`_liczba`)
 
 
 def test_przywroc_droga_powrotu_mowi_ze_plik_zmienil_sie_poza_naglowkiem(qapp, tmp_path,

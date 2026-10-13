@@ -455,9 +455,9 @@ def test_zdanie_wyniku_mowi_o_zapisie_wstrzymanym(tmp_path):
                               code=writeback.CODE_ZEZNANIE_WSTRZYMANE)
     zdanie = zdanie_wyniku_zapisu(writeback.CommitResult("r", 3, [], [], [], [], withheld=[fr]),
                                   "grid.wb.applied")
-    assert i18n.t("grid.wb.withheld", n=1) in zdanie and "plik ZAPISANY" in zdanie, zdanie
+    assert i18n.t_plural("grid.wb.withheld", 1) in zdanie and "plik ZAPISANY" in zdanie, zdanie
     cof = zdanie_undo_kart(writeback.UndoResult(3, [fr], [], [], withheld=[fr]))
-    assert i18n.t("grid.wb.undo_withheld", n=1) in cof, cof
+    assert i18n.t_plural("grid.wb.undo_withheld", 1) in cof, cof
 
 
 # ============================================================ poprawki bramki (B1..B12)
@@ -594,7 +594,7 @@ def test_zdanie_gestu_dokonczenia_mowi_o_wstrzymaniu():
     fr = writeback.FileResult(1, "A\\a.fits", "withheld", "plik ZAPISANY, ale zeznanie…",
                               code=writeback.CODE_ZEZNANIE_WSTRZYMANE)
     zdanie = _zdanie_gestu_zapisu("finish_inplace", SimpleNamespace(results=[fr], cancelled=False))
-    assert i18n.t("grid.wb.withheld", n=1) in zdanie, zdanie
+    assert i18n.t_plural("grid.wb.withheld", 1) in zdanie, zdanie
     assert i18n.t_plural("grid.inplace.failed", 1) not in zdanie, zdanie
 
 

@@ -527,7 +527,7 @@ def test_en_render_pipeline_z_katalogu(qapp, tmp_path):
     i18n.set_lang("en")
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     # build-time: stałe rozwiązane z katalogu, nie zamrożony PL
-    assert view.btn_receive.text().startswith("Take new")
+    assert view.btn_receive.text().startswith("Receive new")   # czasownik kafla Domu „Receive”
     assert view.btn_scan.text() == "Scan" and view.btn_all.text() == "Process all"
     assert view.combo_tier.itemText(1) == "cold (archive)"     # _TIERS[1] klucz → EN
     view._root = _tree(tmp_path, 2)
@@ -1104,7 +1104,7 @@ def test_etykieta_zlotej_akcji_skladana_z_listy_etapow_nie_z_literalu(qapp, tmp_
     i18n.set_lang("en")
     try:
         assert pipeline_mod.etykieta_przyjmij_nowe() == (
-            "Take new  (scan → copy facts → testimony adoption → stack history → grouping "
+            "Receive new  (scan → copy facts → testimony adoption → stack history → grouping "
             "→ resolving → calibration → lineage → stack lineage → delta → presence)")
     finally:
         i18n.set_lang("pl")
@@ -1354,8 +1354,12 @@ def test_stosy_pod_folderem_roboczym_odmowa_leksykalna_bez_dysku(
         if odmowa:
             assert starty == []
             assert komunikaty == [i18n.t("pipeline.stacks_in_work_root")]
-            assert not view.lbl_error.isHidden()
-            assert i18n.t("pipeline.stacks_in_work_root") in view.lbl_error.text()
+            # Reguła, nie awaria: zdanie w sekcji Stosów z rolą ostrzeżenia, bez „BŁĄD -” w wierszu
+            # błędu etapu.
+            assert not view.lbl_stacks_refused.isHidden()
+            assert view.lbl_stacks_refused.text() == i18n.t("pipeline.stacks_in_work_root")
+            assert view.lbl_stacks_refused.property("role") == "warn"
+            assert view.lbl_error.isHidden() and view.lbl_error.text() == ""
             assert ustawienia.value("stacks/last_root") == "stare"      # pamięć korzenia nietknięta
             assert view.lbl_summary.text() == ""                        # przebieg się nie zaczął
         else:
@@ -1480,7 +1484,8 @@ def test_stosy_niekompletne_skanuja_ponownie_ten_korzen_bez_dialogu(qapp, tmp_pa
                                                                    ustawienia):
     """Druga droga wciągająca pliki („Stosy”) ma TEN SAM nośnik listy (jeden właściciel sekcji) i tę
     samą powtórkę: bez dialogu korzenia, na korzeniu biegu. Folder roboczy ustawiony po pierwszym
-    biegu zamyka powtórkę tą samą odmową co dialog „Wciągnij stosy…”."""
+    biegu zamyka powtórkę tą samą odmową co dialog „Wciągnij stosy…” - zdaniem sekcji Stosów w roli
+    ostrzeżenia, bez wiersza błędu i nad nietkniętym logiem poprzedniego biegu; następny bieg ją gasi."""
     from PySide6.QtWidgets import QFileDialog
     from horreum.scan import StackScanSummary
     i18n.set_lang("pl")
@@ -1489,7 +1494,7 @@ def test_stosy_niekompletne_skanuja_ponownie_ten_korzen_bez_dialogu(qapp, tmp_pa
     monkeypatch.setattr(QFileDialog, "getExistingDirectory",
                         staticmethod(lambda *a, **k: dialogi.append(1) or korzen))
     wolane = _nieprzeczytane_w_biegu(monkeypatch, "scan_stacks", StackScanSummary,
-                                     [[r"R:\WBPP\NGC7000"], [r"R:\WBPP\NGC7000"]])
+                                     [[r"R:\WBPP\NGC7000"], [r"R:\WBPP\NGC7000"], []])
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     try:
         view._on_stacks()
@@ -1502,9 +1507,16 @@ def test_stosy_niekompletne_skanuja_ponownie_ten_korzen_bez_dialogu(qapp, tmp_pa
         assert wolane == [korzen, korzen] and dialogi == [1]
         assert view.last_run["stage"] == "stacks"
         view.set_work_root(str(Path(korzen).parent))     # korzeń leży teraz w folderze roboczym
+        log = view.lbl_summary.text()
         view.btn_rescan.click()
         assert view._thread is None and wolane == [korzen, korzen]
-        assert i18n.t("pipeline.stacks_in_work_root") in view.lbl_error.text()
+        assert view.lbl_stacks_refused.text() == i18n.t("pipeline.stacks_in_work_root")
+        assert not view.lbl_stacks_refused.isHidden() and view.lbl_error.isHidden()
+        assert view.lbl_summary.text() == log                       # log poprzedniego biegu nietknięty
+        view.set_work_root(None)
+        view.btn_rescan.click()                                     # następny bieg gasi odmowę
+        _czekaj_na_etap(view)
+        assert view.lbl_stacks_refused.isHidden()
     finally:
         view.close()
 
@@ -1705,3 +1717,87 @@ def test_przerwane_uzupelnienia_nie_udaja_etapow_ktore_nie_biegly(qapp, tmp_path
         assert i18n.t("pipeline.fmt.nothing_to_do") not in view.lbl_summary.text()
     finally:
         view.close()
+
+
+# --- ekran mówi prawdę: odmowy, memo Stosów, luki w logu ---
+
+@pytest.mark.parametrize("jezyk", ["pl", "en"])
+def test_odmowy_wejsc_stoja_samodzielnie_od_wielkiej_litery(jezyk):
+    """Odmowy `pipeline.refuse.*` stoją samodzielnie (pasek stanu, odmowa kafla na stronie Dostawy,
+    wiersz błędu okna naprawy, podpowiedź), więc zaczynają się wielką literą jak rodzeństwo z tych
+    powierzchni; EN bez polskiego cudzysłowu.
+
+    Falsyfikator: „etap Dostawy w biegu…” od małej litery nad stroną Dostawy."""
+    i18n.set_lang(jezyk)
+    try:
+        for klucz in ("pipeline.refuse.no_db", "pipeline.refuse.running", "pipeline.refuse.delivery_running",
+                      "pipeline.refuse.writeback", "pipeline.refuse.mark_stale"):
+            zdanie = i18n.t(klucz)
+            assert zdanie[:1].isupper(), (klucz, zdanie)
+            assert "\u2014" not in zdanie and (jezyk == "pl" or "\u201e" not in zdanie), (klucz, zdanie)
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_memo_stosow_pod_wierszem_przyciskow_nazywa_korzen(qapp, tmp_path, ustawienia):
+    """Memo sekcji Stosów stoi POD wierszem trzech przycisków, nie za „Wciągnij z WBPP…” (tam czytało
+    się jak stan żniw), a pierwsza linia nazywa korzeń słowami okna, które go ustawia.
+
+    Falsyfikator: memo w wierszu przycisków - jego górna krawędź na wysokości „Wciągnij z WBPP…”."""
+    i18n.set_lang("pl")
+    ustawienia.setValue("stacks/last_root", r"R:\WBPP")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view.show()
+        QApplication.processEvents()
+        assert view.lbl_stacks_memo.text().split("\n")[0] == r"ostatni korzeń drzewa obróbki: R:\WBPP"
+        memo, zniwa = view.lbl_stacks_memo.geometry(), view.btn_harvest.geometry()
+        assert memo.top() >= zniwa.bottom() and memo.left() <= view.btn_stacks.geometry().left()
+    finally:
+        view.close()
+    i18n.set_lang("en")
+    try:
+        assert i18n.t("pipeline.stacks_last", root="X") == "last processing tree root: X"
+        assert i18n.t("pipeline.stacks_first") == "(no processing tree root chosen yet)"
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_luki_rodowodu_i_braki_przepisu_w_logu_jezykiem_ekranu(qapp, tmp_path):
+    """Kubełki luk rdzenia niosą polską prozę (`lineage._GAP_PROSE`, `<klasa>: brak <fakty>`
+    z `run_calibration`) - log Dostawy mówi je językiem ekranu: luka rodowodu zdaniem panelu
+    rodowodu (`grid.lin.cal.gap.*`), brak przepisu przez katalog; kubełek spoza prozy rdzenia idzie
+    tak, jak przyszedł. Proza wzięta z PRAWDZIWEGO przebiegu rdzenia na świeżej bazie.
+
+    Falsyfikator: log EN „dark: brak przepisu w archiwum ×2”."""
+    from horreum import calibration, lineage
+    con = db.open_db(_fresh_db(tmp_path))
+    for sha, kind in (("l1", "light"), ("d1", "dark")):
+        con.execute("INSERT INTO frame (sha1_data, kind, filetype, first_seen_at) VALUES (?, ?, 'fits', ?)",
+                    (sha, kind, NOW))
+    con.commit()
+    kal = calibration.run_calibration(con, now=NOW)
+    rod = lineage.run_lineage(con, now=NOW)
+    con.close()
+    assert list(kal.reasons) == ["dark: brak camera_id, xbinning, exptime, set_temp_c, gain, offset_adu"]
+    assert set(rod.reasons) == {"dark: niekompletny przepis lightu", "flat: niekompletny przepis lightu"}
+    luki = lineage.LineageSummary(lights=3, reasons={
+        f"dark: {lineage._GAP_PROSE['no_profile']}": 2, f"flat: {lineage._GAP_PROSE['no_master']}": 1,
+        **rod.reasons})
+    i18n.set_lang("en")
+    try:
+        linia = PipelineView._format_lineage(PipelineView, luki)
+        assert ("gaps: dark: the archive holds nothing with these settings ×2, "
+                "flat: raw frames exist, no stacked master ×1") in linia
+        assert "dark: nothing to look for: the frame does not give its full settings ×1" in linia
+        assert "brak" not in linia and "surowe" not in linia
+        assert PipelineView._format_calibrate(PipelineView, kal).endswith(
+            "gaps: dark: missing camera_id, xbinning, exptime, set_temp_c, gain, offset_adu ×1")
+        obca = lineage.LineageSummary(lights=1, reasons={"flat: nowy powód rdzenia": 1})
+        assert "flat: nowy powód rdzenia ×1" in PipelineView._format_lineage(PipelineView, obca)
+    finally:
+        i18n.set_lang("pl")
+    linia = PipelineView._format_lineage(PipelineView, luki)
+    assert "luki: dark: brak w archiwum czegokolwiek o tej nastawie ×2, flat: są klatki surowe" in linia
+    assert PipelineView._format_calibrate(PipelineView, kal).endswith(
+        "braki: dark: brak camera_id, xbinning, exptime, set_temp_c, gain, offset_adu ×1")

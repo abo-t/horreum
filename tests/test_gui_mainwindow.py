@@ -825,10 +825,11 @@ def test_zadanie_zniknietych_otwiera_perspektywe(qapp, tmp_path):
 
 
 def test_zadanie_rodowodu_otwiera_perspektywe(qapp, tmp_path):
-    """0808: klik w „Obrazy bez rodowodu" prowadzi do Zbiorów z perspektywą `PRESET_LINEAGE`,
+    """0808: klik w „Rodowód do potwierdzenia" prowadzi do Zbiorów z perspektywą `PRESET_LINEAGE`,
     a grid pokazuje DOKŁADNIE obrazy czekające na gest. Wiersz celuje w perspektywę, nie
     w podstronę, bo gest (potwierdź / odrzuć wejście / wskaż odniesienie) mieszka w panelu
-    „Rodowód" TAM — i do tej zmiany dojście do niego wiodło przez przeklikanie archiwum stosów."""
+    „Rodowód" TAM - i do tej zmiany dojście do niego wiodło przez przeklikanie archiwum stosów.
+    Wiersz i perspektywa mówią JEDNĄ nazwą (dawniej wiersz „Obrazy bez rodowodu")."""
     from horreum.gui.grid import PRESET_LINEAGE
     path = _seeded_db(tmp_path, object_axis=True)
     con = db.open_db(path)
@@ -841,13 +842,43 @@ def test_zadanie_rodowodu_otwiera_perspektywe(qapp, tmp_path):
         con.close()
     win = MainWindow(path)
     try:
-        assert _task_row(win, "stacks_lineage_pending")[0] == "Obrazy bez rodowodu"
+        assert _task_row(win, "stacks_lineage_pending")[0] == "Rodowód do potwierdzenia"
         win.tasks_view.tasks.itemClicked.emit(_task_item(win, "stacks_lineage_pending"))
         assert win.stack.currentIndex() == STRONA_ZBIORY
         assert win.grid_view._only_lineage is True
         assert win.grid_view.combo_persp.currentData() == ("preset", PRESET_LINEAGE)
+        assert win.grid_view.combo_persp.currentText() == "Rodowód do potwierdzenia"
         widoczne = set(win.grid_view._frame_ids)          # to, co WIDAĆ po trimie perspektywy
         assert widoczne == queries.lineage_pending_frame_ids(win.con) == {fid}
+    finally:
+        win.close()
+
+
+def test_wejscie_w_Klatki_bez_obiektu_zaznacza_pierwszy_niepusty_kubelek(qapp, tmp_path):
+    """Porządki → „Klatki bez obiektu": podstrona zaznaczała pierwszy obiekt BIBLIOTEKI (na żywej
+    kopii kometę z 4 klatkami), a do klatek z kolejki trzeba było kliknąć wiersz kolejki - trzy
+    interakcje zamiast dwóch. Wejście zaznacza pierwszy niepusty kubełek osi obiektu (wzór
+    `tasks._KUBELEK_PODSTRONY`): lista klatek kubełka i gest stoją od razu, biblioteka bez wyboru.
+
+    Falsyfikator: zdejmij gałąź `unresolved_lights` z `TasksView._on_task_clicked` → zaznaczony
+    zostaje wiersz biblioteki, a kolejka stoi bez wyboru."""
+    from horreum.gui.app import _REVIEW_TAG
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    try:
+        win._show_view(NAV_PORZADKI)
+        win.tasks_view.tasks.itemClicked.emit(_task_item(win, "unresolved_lights"))
+        QApplication.processEvents()
+        v = win.object_view
+        lista = v.review
+        tagi = [lista.item(i).data(_REVIEW_TAG) for i in range(lista.count())]
+        pierwszy = next(i for i, t in enumerate(tagi) if t in ObjectAxisView.KUBELKI_OSI_OBIEKTU)
+        assert lista.currentRow() == pierwszy and lista.item(pierwszy).isSelected(), tagi
+        assert not v.objects.selectionModel().selectedRows(), "biblioteka dalej trzyma obiekt"
+        assert v.frames.rowCount() > 0, "kubełek zaznaczony, a klatki nie przyszły"
+        # Kubełki innych osi (kopie nieczytelne, zestaw) nie są celem tego wiersza.
+        assert not ({"unreadable", "config_review", "config_focal"}
+                    & ObjectAxisView.KUBELKI_OSI_OBIEKTU)
     finally:
         win.close()
 

@@ -437,22 +437,60 @@ def test_klik_facetu_ZOSTAWIA_note_query(strona, con):
     assert v.note_query == "x" and _ids(v) == [1, 3]
 
 
-# ---------- FH-12 (tekst uwag; sufiks przy filtrze i manifest - obok BP-5 w `test_gui_grid`) ----------
+# ---------- AR-95 (tekst uwag jest zawężeniem; sufiks przy filtrze i manifest - BP-5 w `test_gui_grid`) ----------
 
-def test_FH12_note_query_liczy_sie_jako_zmiana_stanu(strona):
+def _etykieta_manifestu(v, monkeypatch):
+    """Etykieta, którą `_open_projection` podaje oknu wydania (manifest) - okno podmienione."""
+    widziane = {}
+
+    class _Dialog:
+        summary = None
+
+        def __init__(self, *a, perspektywa=None, **k):
+            widziane["perspektywa"] = perspektywa
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(grid_mod, "ProjectionDialog", _Dialog)
+    v._open_projection()
+    return widziane["perspektywa"]
+
+
+def test_AR95_zapytanie_o_uwagi_i_facetowe_daja_TE_SAMA_etykiete(strona, con, monkeypatch):
+    """AR-95 (decyzja zarządcy): każdy składnik zapytania Znajdź - facet, zestaw, tekst uwag - jest
+    ZAWĘŻENIEM „Przeglądu", bez sufiksu „(zmieniona)". Dawniej zapytanie o uwagi dawało „Przegląd
+    (zmieniona)", a facetowe „Przegląd", i ta różnica szła do manifestu wydania.
+
+    Falsyfikator: przywróć `self.note_query is not None` w warunku `_stan_zgodny_z` → etykieta
+    zapytania o uwagi dostaje sufiks i asercja czerwienieje."""
+    repo.set_frame_note(con, frame_ids=[1, 3], body="x", now=NOW)   # zbiór uwag niepusty - jest co wydać
     v = strona.frames_view
+    strona.show_find("m42")
+    facetowe = (v.combo_persp.currentText(), _etykieta_manifestu(v, monkeypatch))
     _z_uwagami(strona)
     assert v.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY)
-    assert v.combo_persp.currentText().endswith("(zmieniona)")
+    o_uwagi = (v.combo_persp.currentText(), _etykieta_manifestu(v, monkeypatch))
+    assert o_uwagi == facetowe == (i18n.t("perspective.review"),) * 2
     v.zdejmij_skladnik(("uwagi",))
     assert v.combo_persp.currentText() == i18n.t("perspective.review")
 
 
-def test_FH12_EN(strona):
+def test_AR95_EN(strona):
+    """Sufiks składa się w chwili przeładowania (`grid.persp.changed`), więc EN pyta o jego brak."""
     i18n.set_lang("en")
     v = strona.frames_view
     _z_uwagami(strona)
-    assert v.combo_persp.currentText().endswith(" (modified)")
+    assert "(modified)" not in v.combo_persp.currentText(), v.combo_persp.currentText()
+
+
+def test_AR95_sufiks_zostaje_dla_zmiany_definicji_presetu_poza_Znajdz(strona):
+    """Druga połowa decyzji: zmiana definicji presetu POZA Znajdź (filtr nad „Kalibracją") dalej
+    mówi sufiksem - tekst uwag przestał być zmianą, filtr nie."""
+    v = strona.frames_view
+    v.apply_perspective("Kalibracja")
+    v.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "M42"})
+    assert v.combo_persp.currentText().endswith("(zmieniona)"), v.combo_persp.currentText()
 
 
 # ---------- AR-50 (5): kolumna „Wersja" w Znajdź ----------

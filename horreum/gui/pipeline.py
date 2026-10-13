@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from horreum import db, derive, presence, scan
+from horreum import db, derive, lineage, presence, scan
 from horreum.gui import i18n, queries
 from horreum.gui.grid import PRESET_LINEAGE, PRESET_VANISHED
 from horreum.gui.grid_lineage import SciezkaLabel
@@ -475,6 +475,38 @@ def etykieta_przyjmij_nowe():
     return i18n.t("pipeline.receive_chain", name=i18n.t("pipeline.receive"), chain=lancuch)
 
 
+# LUKI W LOGU DOSTAWY MÓWIĄ JĘZYKIEM EKRANU. Rdzeń składa kubełek luki jako „relacja: proza”
+# - rodowód z `lineage._GAP_PROSE`, przepis jako `<klasa>: brak <fakty>` (`calibration.run_calibration`)
+# - i na tej prozie stoją kotwice bramki i zdarzenia przebiegu, więc rdzeń jej nie zmienia, a bez
+# tłumaczenia okno EN mówiło „dark: brak przepisu w archiwum”. Token luki rodowodu wraca z prozy
+# rdzenia (jeden właściciel), zdanie bierze ten sam katalog co panel rodowodu (`grid.lin.cal.gap.*`)
+# - literalną mapą, bo kolektor kluczy `test_i18n` widzi tylko literały.
+_LUKI_RODOWODU = {"incomplete_recipe": "grid.lin.cal.gap.incomplete_recipe",
+                  "no_profile": "grid.lin.cal.gap.no_profile",
+                  "no_master": "grid.lin.cal.gap.no_master"}
+_TOKEN_LUKI = {proza: token for token, proza in lineage._GAP_PROSE.items()}
+_BRAK_FAKTOW = "brak "                       # przedrostek kubełka przepisu w `run_calibration`
+
+
+def zdanie_luki_rodowodu(kubelek):
+    """Kubełek luki rodowodu „relacja: proza rdzenia” → „relacja: zdanie z katalogu”. Kubełek spoza
+    prozy rdzenia idzie tak, jak przyszedł - widoczny, zanim ktoś dopisze mu zdanie."""
+    relacja, sep, proza = kubelek.partition(": ")
+    token = _TOKEN_LUKI.get(proza)
+    if not sep or token is None:
+        return kubelek
+    return f"{relacja}: {i18n.t(_LUKI_RODOWODU[token])}"
+
+
+def zdanie_braku_przepisu(kubelek):
+    """Kubełek braku przepisu „klasa: brak fakty” → zdanie z katalogu; fakty to nazwy pól przepisu
+    (`calibration.REQUIRED`), bez tłumaczenia. Kubełek innej postaci idzie tak, jak przyszedł."""
+    klasa, sep, reszta = kubelek.partition(": ")
+    if not sep or not reszta.startswith(_BRAK_FAKTOW):
+        return kubelek
+    return i18n.t("pipeline.fmt.calibrate_gap", cls=klasa, facts=reszta[len(_BRAK_FAKTOW):])
+
+
 def unreadable_kinds_text(counts):
     """Zdanie rozbicia kopii nieczytelnych po RODZAJU (P4-2, P4-5) z
     `resolver.unreadable_kind_counts`. Które rodzaje pokazać, rozstrzyga rdzeń
@@ -724,9 +756,22 @@ class PipelineView(QWidget):
         self.btn_harvest.setToolTip(i18n.t("pipeline.tip.harvest"))
         self.btn_harvest.clicked.connect(self.open_harvest)
         stk.addWidget(self.btn_harvest)
-        self.lbl_stacks_memo = QLabel("")      # treść = WYŁĄCZNIE _sync_stacks_memo
-        stk.addWidget(self.lbl_stacks_memo, 1)
+        stk.addStretch(1)
         v.addLayout(stk)
+        # Memo POD wierszem przycisków, nie za „Wciągnij z WBPP…”: tam czytało się jak stan żniw,
+        # a mówi o korzeniu drogi „Wciągnij stosy…” i o rodowodzie stosów w bazie - faktach całej
+        # sekcji. Pierwsza linia nazywa korzeń słowami okna, które go ustawia („korzeń drzewa obróbki”).
+        self.lbl_stacks_memo = QLabel("")      # treść = WYŁĄCZNIE _sync_stacks_memo
+        v.addWidget(self.lbl_stacks_memo)
+        # ODMOWA DROGI „STOSY” (korzeń w folderze roboczym WBPP) to REGUŁA, nie awaria: zdanie stoi
+        # w tej sekcji w roli ostrzeżenia, a nie czerwonym „BŁĄD -” w wierszu błędu etapu nad raportem
+        # poprzedniego przebiegu, którego odmowa nie zaczyna. Gaśnie z następnym przebiegiem
+        # (`_begin_run`). Treść i widoczność = WYŁĄCZNIE `_odmow_stosow`.
+        self.lbl_stacks_refused = QLabel("")
+        self.lbl_stacks_refused.setProperty("role", "warn")
+        self.lbl_stacks_refused.setWordWrap(True)
+        self.lbl_stacks_refused.setVisible(False)
+        v.addWidget(self.lbl_stacks_refused)
 
         # 4b. Wynik passa obecności — UKRYTY, dopóki nie ma czego pokazać (QUIET: „0 zniknięć" to
         # linia w panelu, nie osobny widżet). Zapis jest ZAWSZE osobnym gestem: sekwencja tylko
@@ -1034,12 +1079,21 @@ class PipelineView(QWidget):
         # `stacks/last_root`, ani przebiegu), bo następne otwarcie dialogu podpowiadałoby folder,
         # do którego ta droga nie ma wstępu.
         if self._under_work_root(root):
-            self._pokaz_odmowe(i18n.t("pipeline.stacks_in_work_root"))
+            self._odmow_stosow()
             return
         self._settings().setValue("stacks/last_root", root)
         self._sync_stacks_memo()
         self._begin_run()
         self._start_stage("stacks", **self._scan_params(root))
+
+    def _odmow_stosow(self):
+        """Odmowa drogi „Stosy” pod folderem roboczym WBPP: zdanie w sekcji Stosów (rola `warn`) i na
+        pasku stanu. Bez `_begin_run` i bez wiersza błędu etapu - przebieg nie ruszył, więc log
+        poprzedniego zostaje, jaki był, a reguła nie udaje awarii."""
+        msg = i18n.t("pipeline.stacks_in_work_root")
+        self.lbl_stacks_refused.setText(msg)
+        self.lbl_stacks_refused.setVisible(True)
+        self.status_message.emit(msg)
 
     def set_work_root(self, path):
         """Folder roboczy WBPP (korzeń `_WBPP`) albo `None`. Podaje go gospodarz, który jest
@@ -1230,6 +1284,7 @@ class PipelineView(QWidget):
         self._uzupelnienia = None
         self.box_lineage.setVisible(False)
         self.lbl_summary_head.setVisible(False)
+        self.lbl_stacks_refused.setVisible(False)   # odmowa „Stosów” mówi o geście sprzed tego biegu
         self._etap_bez_zrodla = None
         self.last_run = self._pusty_zapis_przebiegu()
         self.lbl_summary.setText("")
@@ -1909,7 +1964,7 @@ class PipelineView(QWidget):
             return
         etap, parametry = self._parametry_ponowienia      # zdejmij PRZED _begin_run (ono je zapomina)
         if etap == "stacks" and self._under_work_root(parametry["root"]):
-            self._pokaz_odmowe(i18n.t("pipeline.stacks_in_work_root"))
+            self._odmow_stosow()
             return
         self._begin_run()
         self._start_stage(etap, **parametry)
@@ -2008,7 +2063,7 @@ class PipelineView(QWidget):
             "pipeline.fmt.calibrate", frames=s.frames, prof_prop=s.profiles_proposed,
             prof_assign=s.profiles_assigned, facts=s.facts_recorded, incomplete=s.incomplete)
         if s.reasons:
-            gaps = ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+            gaps = ", ".join(f"{zdanie_braku_przepisu(powod)} ×{n}" for powod, n in s.reasons.items())
             linia += i18n.t("pipeline.fmt.calibrate_gaps", gaps=gaps)
         return linia
 
@@ -2019,7 +2074,7 @@ class PipelineView(QWidget):
         linked = " · ".join(f"{rel} {s.linked.get(rel, 0)}" for rel in ("dark", "flat"))
         linia = i18n.t("pipeline.fmt.lineage", lights=s.lights, linked=linked)
         if s.reasons:
-            gaps = ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+            gaps = ", ".join(f"{zdanie_luki_rodowodu(powod)} ×{n}" for powod, n in s.reasons.items())
             linia += i18n.t("pipeline.fmt.lineage_gaps", gaps=gaps)
         # Zdjęte ogniwa automatu (luka po wyzerowanym filtrze albo wycofanym masterze) - bez tej
         # linii panel pokazałby lukę, a raport milczałby, że przebieg właśnie zdjął kalibrator.

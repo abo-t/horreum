@@ -487,8 +487,12 @@ CATALOG = {
     # skutku KLATKA - rozdzielenie ich między człony kazałoby czytać wiersz od środka.
     "object.path_proposed_line": {
         "pl": "— …z tego ze ścieżki", "en": "— …of which from path"},
+    # Odmiana przez `t_plural` po liczbie NAZW; człon klatek (`{frames}`) podaje wołający już
+    # odmieniony (`object.review_count`) - „1 nazw / 1 klatek" czytało się jak błąd.
     "object.path_proposed_count": {
-        "pl": "{names} nazw / {frames} klatek", "en": "{names} names / {frames} frames"},
+        "pl": {"one": "{n} nazwa / {frames}", "few": "{n} nazwy / {frames}",
+               "many": "{n} nazw / {frames}"},
+        "en": {"one": "{n} name / {frames}", "other": "{n} names / {frames}"}},
     "object.path_proposed_broken": {
         "pl": "— ze ścieżki: NIE POLICZONO · słownik obiektów własnych ma błąd "
               "(objects_own.json) — popraw plik i odśwież",
@@ -510,17 +514,23 @@ CATALOG = {
     # wiedzieć, zanim zatwierdzi 707 klatek. Zdanie mówi więc, GDZIE jej szukać.
     # O3 krok 1 (2026-09-26): gest pisze też kartę `OBJECT` do PLIKÓW tam, gdzie plik na to
     # pozwala - dawne „zapis idzie do BAZY, nie do plików" stało się nieprawdą.
+    # Liczby zdania odmieniają się przez `t_plural` (`path.head_count`, `grid.frames`) - „1 nazw ·
+    # 1 klatek" czytało się jak błąd; reszta zdania jest wspólna dla każdej liczby.
+    "path.head_count": {
+        "pl": {"one": "{n} nazwa · {frames}", "few": "{n} nazwy · {frames}",
+               "many": "{n} nazw · {frames}"},
+        "en": {"one": "{n} name · {frames}", "other": "{n} names · {frames}"}},
     "path.head": {
-        "pl": "{names} nazw · {frames} klatek. Nazwa pochodzi z FOLDERU na pozycji obiektu; "
+        "pl": "{count}. Nazwa pochodzi z FOLDERU na pozycji obiektu; "
               "zapis idzie do BAZY, a tam, gdzie plik na to pozwala, także jako karta OBJECT "
               "do PLIKU - nagłówek i folder powiedzą to samo. Odznacz to, czego nie chcesz "
               "zapisać; zatwierdzone cofniesz w Zbiorach przez „Obiekt ▾ → Cofnij przypisanie”, "
               "karty - przyciskiem „Cofnij karty” do zamknięcia okna.",
-        "en": "{names} names · {frames} frames. The name comes from the FOLDER at the object "
+        "en": "{count}. The name comes from the FOLDER at the object "
               "position; the write goes to the DATABASE and, where the file allows it, also as an "
               "OBJECT card into the FILE - the header and the folder will say the same. Uncheck "
               "whatever you do not want written; confirmed names can be undone in Frames via "
-              "“Object ▾ → Undo assignment”, cards - with „Undo cards” until the window closes."},
+              "“Object ▾ → Undo assignment”, cards - with “Undo cards” until the window closes."},
     "path.card_item": {"pl": "do pliku: OBJECT = {value} · {n} z {total}",
                        "en": "into file: OBJECT = {value} · {n} of {total}"},
     "path.card_item_none": {"pl": "tylko baza - plik bez karty",
@@ -553,7 +563,7 @@ CATALOG = {
         "en": "Writing to files is in progress - stopping after the current file. You can close "
               "the window once the write stops and shows its result."},
     "wb.cancelled_note": {"pl": " - przerwano na żądanie", "en": " - stopped on request"},
-    "path.item": {"pl": "{canon}  ·  {n} klatek", "en": "{canon}  ·  {n} frames"},
+    "path.item": {"pl": "{canon}  ·  {frames}", "en": "{canon}  ·  {frames}"},
     "path.new_badge": {"pl": "NOWA w bazie", "en": "NEW in the database"},
     "path.known_badge": {"pl": "kanon znany", "en": "canon known"},
     "path.confirm_btn": {"pl": "Zatwierdź wszystko", "en": "Confirm all"},
@@ -566,12 +576,16 @@ CATALOG = {
     # dokleja `grid.zdanie_pominiec` - te same, co w zdaniach Zbiorów - więc zdanie kończy się BEZ
     # KROPKI: „klatek. · kalibracja: 1" byłoby drugą gramatyką w jednym zdaniu.
     # `{n}` = pozycje, które przeszły klingę (nie zaznaczone: po odmowie reszta nie doszła).
+    # `{of_total}` = `path.of_total` (dopełniacz po „z" odmieniony po wszystkich klatkach).
     "path.done": {
-        "pl": {"one": "Zatwierdzono {n} nazwę · przypisano {assigned} z {total} klatek",
-               "few": "Zatwierdzono {n} nazwy · przypisano {assigned} z {total} klatek",
-               "many": "Zatwierdzono {n} nazw · przypisano {assigned} z {total} klatek"},
-        "en": {"one": "Confirmed {n} name · assigned {assigned} of {total} frames",
-               "other": "Confirmed {n} names · assigned {assigned} of {total} frames"}},
+        "pl": {"one": "Zatwierdzono {n} nazwę · przypisano {assigned} {of_total}",
+               "few": "Zatwierdzono {n} nazwy · przypisano {assigned} {of_total}",
+               "many": "Zatwierdzono {n} nazw · przypisano {assigned} {of_total}"},
+        "en": {"one": "Confirmed {n} name · assigned {assigned} {of_total}",
+               "other": "Confirmed {n} names · assigned {assigned} {of_total}"}},
+    "path.of_total": {
+        "pl": {"one": "z {n} klatki", "few": "z {n} klatek", "many": "z {n} klatek"},
+        "en": {"one": "of {n} frame", "other": "of {n} frames"}},
     "object.unreadable_line": {"pl": "— kopie nieczytelne", "en": "— unreadable copies"},
     # KUBEŁEK OSI SPRZĘTU (R1) — do tej pory był POŁOWĄ wiersza informacyjnego z notą
     # „rozwiązywanie w przygotowaniu". Nota była uczciwa i dlatego musiała zniknąć razem z drogą:
@@ -779,7 +793,7 @@ CATALOG = {
     },
     "object.alias_no_alnum": {
         "pl": "Nazwa „{name}” nie ma znaków alfanumerycznych — nie może być zapamiętanym aliasem.",
-        "en": "Name „{name}” has no alphanumeric characters — it cannot be a remembered alias.",
+        "en": "Name “{name}” has no alphanumeric characters - it cannot be a remembered alias.",
     },
     "object.frames_nameless": {
         "pl": "Klatki bez nazwy w nagłówku ({n})", "en": "Frames with no name in header ({n})",
@@ -865,7 +879,12 @@ CATALOG = {
         "en": "{frames} frames in {groups} folders. The name goes into the FILE (OBJECT card); "
               "the object in the database is filled later by the regular „Resolve” stage.",
     },
-    "repair.group": {"pl": "{folder}  ·  {n} klatek", "en": "{folder}  ·  {n} frames"},
+    # Grupa „Napraw nagłówek…”: etykieta od folderu obiektu (`RepairHeaderDialog._etykieta_grupy`),
+    # liczba odmieniona.
+    "repair.group": {
+        "pl": {"one": "{folder}  ·  {n} klatka", "few": "{folder}  ·  {n} klatki",
+               "many": "{folder}  ·  {n} klatek"},
+        "en": {"one": "{folder}  ·  {n} frame", "other": "{folder}  ·  {n} frames"}},
     "repair.no_proposal": {
         "pl": "brak zgodnej propozycji ze ścieżki — wpisz oznaczenie",
         "en": "no matching proposal from the path — type a designation",
@@ -918,7 +937,7 @@ CATALOG = {
     "assign.group_head": {
         "pl": {"one": "Grupa „{name}” — {n} klatka.", "few": "Grupa „{name}” — {n} klatki.",
                "many": "Grupa „{name}” — {n} klatek."},
-        "en": {"one": "Group „{name}” — {n} frame.", "other": "Group „{name}” — {n} frames."},
+        "en": {"one": "Group “{name}” - {n} frame.", "other": "Group “{name}” - {n} frames."},
     },
     # Grupa BEZ zeznania (kubełek RAW, S4): nagłówek nie ma nazwy do zacytowania. Obietnicy
     # „alias zostanie zapamiętany" tu NIE MA i to jest zamierzone — dla nazwy z gramatyki
@@ -976,7 +995,7 @@ CATALOG = {
     # stan poprawny. Nota mówi to przed zapisem, żeby pusta komórka nie czytała się jak zgubione pole.
     "assign.own_object_note": {
         "pl": "„{canon}” to obiekt własny — spoza katalogów, więc kolumna „Katalog” zostanie pusta.",
-        "en": "„{canon}” is an own object — outside the catalogs, so the „Catalog” column stays empty.",
+        "en": "“{canon}” is an own object - outside the catalogs, so the “Catalog” column stays empty.",
     },
     "assign.catalog_note": {
         "pl": "Ta nazwa rozwiązuje się katalogowo — katalog bije alias: nowe klatki "
@@ -996,7 +1015,22 @@ CATALOG = {
     # odróżnia „fraza za wąska" od „biblioteka pusta" (wzorzec listwy facetów, R-S3-5).
     "assign.search_empty": {
         "pl": "(żaden obiekt nie pasuje do „{text}”)",
-        "en": "(no object matches „{text}”)",
+        "en": "(no object matches “{text}”)",
+    },
+    # Pusty wynik szukajki PROWADZI do pola nazwy (wizytacja: user utknął przy „M 44”, którego
+    # biblioteka nie ma) - wpisana fraza przechodzi do pola niżej, a zdanie mówi, gdzie jest.
+    "assign.search_moved": {
+        "pl": "Nie ma go na liście - wpisana nazwa przeszła do pola niżej.",
+        "en": "Not on the list - the typed name moved to the field below.",
+    },
+    "assign.search_to_field": {
+        "pl": "Nie ma go na liście - nazwę spoza listy wpisz w polu niżej.",
+        "en": "Not on the list - type a name from outside the list in the field below.",
+    },
+    # Kanon spoza bazy: zapis ZAŁOŻY obiekt - mówione przed kliknięciem, przy zdaniu na żywo.
+    "assign.creates_object": {
+        "pl": " · nowy obiekt: zapis założy go w bazie",
+        "en": " · new object: saving creates it in the database",
     },
     # Zdanie na żywo pod polem nazwy: co wpisano → jaki kanon zapisze Horreum → jaka forma stanie
     # w nagłówku (`catalog.header_form`). Mówi to PRZED kliknięciem „Przypisz".
@@ -1031,7 +1065,7 @@ CATALOG = {
     "assign.unknown_name": {
         "pl": "Nie rozpoznaję nazwy „{text}” — resolver nie umie jej rozwiązać. "
               "Podaj oznaczenie katalogowe, nazwę potoczną albo nazwę ze słownika obiektów własnych.",
-        "en": "Unrecognized name „{text}” — the resolver cannot resolve it. "
+        "en": "Unrecognized name “{text}” - the resolver cannot resolve it. "
               "Enter a catalog designation, a common name, or a name from the own-objects dictionary.",
     },
     # Słownik obiektów własnych jest plikiem CZŁOWIEKA — literówka w nim ma zostać ZGŁOSZONA, nie
@@ -1048,7 +1082,7 @@ CATALOG = {
     },
     "assign.alias_conflict": {
         "pl": "Alias dla tej nazwy wskazuje już obiekt „{target}” — wybierz go z listy.",
-        "en": "The alias for this name already points to object „{target}” — pick it from the list.",
+        "en": "The alias for this name already points to object “{target}” - pick it from the list.",
     },
 
     # --- MainWindow: menu, nawigacja, dialogi plików ---
@@ -1089,8 +1123,8 @@ CATALOG = {
         "pl": {"one": "{n} stos bez rodowodu - Dostawa nie ujęła go jako stosu; uruchom „Przyjmij nowe” na archiwum",
                "few": "{n} stosy bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
                "many": "{n} stosów bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum"},
-        "en": {"one": "{n} stack without lineage - Intake did not take it in as a stack; run Take new on the archive",
-               "other": "{n} stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"},
+        "en": {"one": "{n} stack without lineage - Intake did not take it in as a stack; run Receive new on the archive",
+               "other": "{n} stacks without lineage - Intake did not take them in as stacks; run Receive new on the archive"},
     },
     # Obiekt stosu wobec obiektu wydania po żniwach (AR-103): zdanie mówi, CO się nie zgadza, a przycisk
     # recepty na pasku - co zrobi gest. `pair` i `none` niosą kanony z bazy, nie z nagłówka.
@@ -1619,10 +1653,16 @@ CATALOG = {
               "gone from disk: it drops out of the work queues but STAYS in the archive and in "
               "the exposure hours. You can undo this (Frame ▾ → Restore frame).",
     },
+    # Odmiana po `{n}` = wszystkich klatkach gestu (dopełniacz po „z": „z 1 klatki", „z 5 klatek"),
+    # wzorem `object.assigned` - „Przywrócono 1 z 1 klatek" czytało się jak błąd.
     "grid.sel.frame_retired": {
-        "pl": "Wycofano {done} z {total} klatek", "en": "Retired {done} of {total} frames"},
+        "pl": {"one": "Wycofano {done} z {n} klatki", "few": "Wycofano {done} z {n} klatek",
+               "many": "Wycofano {done} z {n} klatek"},
+        "en": {"one": "Retired {done} of {n} frame", "other": "Retired {done} of {n} frames"}},
     "grid.sel.frame_restored": {
-        "pl": "Przywrócono {done} z {total} klatek", "en": "Restored {done} of {total} frames"},
+        "pl": {"one": "Przywrócono {done} z {n} klatki", "few": "Przywrócono {done} z {n} klatek",
+               "many": "Przywrócono {done} z {n} klatek"},
+        "en": {"one": "Restored {done} of {n} frame", "other": "Restored {done} of {n} frames"}},
     "grid.sel.frame_skip_present": {"pl": " · plik istnieje: {n}", "en": " · file exists: {n}"},
     "grid.sel.frame_skip_no_location": {
         "pl": " · bez lokalizacji: {n}", "en": " · no location: {n}"},
@@ -1936,7 +1976,7 @@ CATALOG = {
     },
     "grid.empty_persp_action": {
         "pl": "Przełącz na perspektywę „{perspective}”",
-        "en": "Switch to the \"{perspective}\" perspective",
+        "en": "Switch to the “{perspective}” perspective",
     },
     # Pusta perspektywa kopii przy kopiach bez zebranych faktów: robota mieszka w Dostawie
     # (`grid._ustaw_pusty_stan`). Dopełniacz w PL, więc nazwa widoku stoi w zdaniu, nie z `nav.dostawa`.
@@ -2035,7 +2075,7 @@ CATALOG = {
               "{place} → „{check}” → „{mark}”, który pojawi się pod wynikiem, gdy sprawdzenie "
               "potwierdzi zniknięcie)",
         "en": "\n    header testimony not collected yet (if the file is on disk - "
-              "{place} → “Take new”; if the file is no longer on disk - "
+              "{place} → “Receive new”; if the file is no longer on disk - "
               "{place} → “{check}” → “{mark}”, which appears below the result when the check "
               "confirms the file is gone)",
     },
@@ -2188,8 +2228,8 @@ CATALOG = {
     },
     "grid.tmpl.summary_empty": {"pl": "pusty wzór", "en": "empty pattern"},
     "grid.tmpl.empty_hint": {
-        "pl": "pusty wzór — dodaj token przyciskiem „+ Token",
-        "en": "empty pattern — add a token with the „+ Token” button",
+        "pl": "pusty wzór - dodaj token przyciskiem „+ Token”",
+        "en": "empty pattern - add a token with the “+ Token” button",
     },
 
     # --- RenameBar (polityka wsadu + echo daty) ---
@@ -2235,10 +2275,12 @@ CATALOG = {
     },
     "grid.sel.proj_tip_empty": {"pl": "brak klatek w zbiorze", "en": "no frames in the set"},
     # Skład zbioru w tle (AR-27): akcje na CAŁYM widoku czekają, aż tabela pokaże nowy zbiór.
-    "grid.sel.loading_tip": {"pl": "Wczytuję zbiór… - akcja ruszy na zbiorze, który zaraz pokaże tabela",
-                             "en": "Loading the set… - the action will run on the set the table is about to show"},
-    "grid.sel.loading_refused": {"pl": "Wczytuję zbiór - spróbuj, gdy tabela pokaże nowy zbiór.",
-                                 "en": "Loading the set - try again once the table shows the new set."},
+    # Ten sam stan, co faza paska (`busy.read_frames`), więc ten sam czasownik - podpowiedź i odmowa
+    # mówiące „Wczytuję zbiór" obok paska „Czytam klatki…" brzmiały jak dwie różne roboty.
+    "grid.sel.loading_tip": {"pl": "Czytam klatki… - akcja ruszy na zbiorze, który zaraz pokaże tabela",
+                             "en": "Reading frames… - the action will run on the set the table is about to show"},
+    "grid.sel.loading_refused": {"pl": "Czytam klatki - spróbuj, gdy tabela pokaże nowy zbiór.",
+                                 "en": "Reading frames - try again once the table shows the new set."},
     "grid.sel.project": {"pl": "Wydaj na stół…", "en": "Serve to table…"},
     "grid.sel.release_object": {"pl": "Wydaj obiekt…", "en": "Release object…"},
     "grid.sel.release_object_tip": {
@@ -2276,11 +2318,17 @@ CATALOG = {
         "pl": "Zaznaczenie ma {n} różnych obiektów do nadpisania — zawęź je. Nic nie zapisano.",
         "en": "Selection holds {n} different objects to overwrite — narrow it. Nothing was written."},
     "grid.sel.object_named": {
-        "pl": "Nazwano {assigned} z {total} klatek: {canon}",
-        "en": "Named {assigned} of {total} frames: {canon}"},
+        "pl": {"one": "Nazwano {assigned} z {n} klatki: {canon}",
+               "few": "Nazwano {assigned} z {n} klatek: {canon}",
+               "many": "Nazwano {assigned} z {n} klatek: {canon}"},
+        "en": {"one": "Named {assigned} of {n} frame: {canon}",
+               "other": "Named {assigned} of {n} frames: {canon}"}},
     "grid.sel.object_cleared": {
-        "pl": "Cofnięto przypisanie na {assigned} z {total} klatek",
-        "en": "Assignment undone on {assigned} of {total} frames"},
+        "pl": {"one": "Cofnięto przypisanie na {assigned} z {n} klatki",
+               "few": "Cofnięto przypisanie na {assigned} z {n} klatek",
+               "many": "Cofnięto przypisanie na {assigned} z {n} klatek"},
+        "en": {"one": "Assignment undone on {assigned} of {n} frame",
+               "other": "Assignment undone on {assigned} of {n} frames"}},
     # R-S2b-3: cofnięcie MÓWI, CO ZDJĘŁO — dokładnie jak bliźniacze zdanie nadania („…: NGC 7023").
     # OSOBNY klucz, nie placeholder w zdaniu bazowym: to zdanie ma dwóch wołających o różnych
     # kwargach, więc `{canons}` w nim byłoby `KeyError`-em u drugiego — a bramka i18n pyta
@@ -2356,16 +2404,30 @@ CATALOG = {
     # perspektywę - jest wtedy węższy, czyli tańszy dla jego zbioru.
     # RECEPTA WYSZŁA Z NAWIASU RAZEM Z WYJŚCIEM ZE ZDANIA (FH-2): na własnym widżecie nie jest już
     # wtrętem w raporcie, tylko samodzielną instrukcją, a nawias sugerowałby uwagę na marginesie.
+    # RECEPTA NAZYWA SWÓJ CEL (`grid.sel.reveal_target`): dawne „odsłoni je …" odsyłało do zdania
+    # raportu, a recepta żyje dłużej niż ono - po przejściu do innego zbioru (Znajdź „M64" po geście
+    # na NGC3623) „je" nie miało odniesienia, a klik czyścił bieżący widok. Dwa klucze niżej niosą
+    # wyłącznie GEST odsłonięcia (`{how}` zdania celu); liczba i obiekt idą z celu gestu.
     "grid.sel.out_of_view_set": {
-        "pl": "odsłoni je „{action}”", "en": "reveal with \"{action}\""},
+        "pl": "„{action}”", "en": "“{action}”"},
     "grid.sel.out_of_view_persp": {
-        "pl": "odsłoni je perspektywa „{perspective}”",
-        "en": "reveal with the \"{perspective}\" perspective"},
+        "pl": "perspektywa „{perspective}”",
+        "en": "the “{perspective}” perspective"},
+    # Odmiana po klatkach celu niewidocznych na ekranie (biernik: „odsłonisz 1 klatkę"); `{obj}` =
+    # `grid.sel.reveal_object` albo pusty, gdy gest nie ma jednego obiektu.
+    "grid.sel.reveal_target": {
+        "pl": {"one": "odsłonisz {n} klatkę{obj}: {how}", "few": "odsłonisz {n} klatki{obj}: {how}",
+               "many": "odsłonisz {n} klatek{obj}: {how}"},
+        "en": {"one": "to reveal {n} frame{obj}: {how}", "other": "to reveal {n} frames{obj}: {how}"}},
+    "grid.sel.reveal_object": {"pl": " {canon}", "en": " of {canon}"},
     "grid.sel.object_restore": {"pl": "Przywróć cofnięte przypisanie",
                                 "en": "Restore undone assignment"},
     "grid.sel.object_restored": {
-        "pl": "Przywrócono przypisanie na {assigned} z {total} klatek",
-        "en": "Assignment restored on {assigned} of {total} frames"},
+        "pl": {"one": "Przywrócono przypisanie na {assigned} z {n} klatki",
+               "few": "Przywrócono przypisanie na {assigned} z {n} klatek",
+               "many": "Przywrócono przypisanie na {assigned} z {n} klatek"},
+        "en": {"one": "Assignment restored on {assigned} of {n} frame",
+               "other": "Assignment restored on {assigned} of {n} frames"}},
     # Rozbicie PER FAKT — każda przyczyna osobno, bo znaczą dla człowieka co innego.
     "grid.sel.object_skip_kind": {"pl": " · kalibracja: {n}", "en": " · calibration: {n}"},
     "grid.sel.object_skip_source": {"pl": " · z nagłówka/regionu: {n}",
@@ -2571,7 +2633,7 @@ CATALOG = {
     },
     "grid.lin.cal.pending": {
         "pl": "⚠ uruchom etap Rodowód („Policz teraz”), żeby powiązać to, co już jest w archiwum",
-        "en": "⚠ run the Lineage step (\"Count now\") to link what the archive already holds",
+        "en": "⚠ run the Lineage step (“Count now”) to link what the archive already holds",
     },
     # --- gesty ręki na osi kalibracji (E4-5) ---
     "grid.lin.cal.pick": {"pl": "Wskaż kalibrator…", "en": "Choose calibrator…"},
@@ -2809,9 +2871,10 @@ CATALOG = {
     },
     # Odmiana przez `t_plural` [#11]: n=1 jest tu przypadkiem TYPOWYM (para plik + `_drizzle_1x`),
     # a „1 inne wersje" czytałoby się jak błąd — ta sama lekcja co przy liczniku zaznaczenia.
+    # Podmiotem jest „zestaw" (liczba pojedyncza, „ma"), a liczba wersji stoi w bierniku.
     "grid.lin.flag.twins": {
-        "pl": {"one": "ten sam zestaw klatek ma jeszcze {n} inna wersja obrazu",
-               "few": "ten sam zestaw klatek mają jeszcze {n} inne wersje obrazu",
+        "pl": {"one": "ten sam zestaw klatek ma jeszcze {n} inną wersję obrazu",
+               "few": "ten sam zestaw klatek ma jeszcze {n} inne wersje obrazu",
                "many": "ten sam zestaw klatek ma jeszcze {n} innych wersji obrazu"},
         "en": {"one": "{n} other version of the image uses the same set of frames",
                "other": "{n} other versions of the image use the same set of frames"},
@@ -2973,9 +3036,12 @@ CATALOG = {
     "grid.criteria.only_path_header_conflict": {
         "pl": "tylko nagłówek inny niż zatwierdzony folder",
         "en": "only header differing from the confirmed folder"},
+    # Ten sam zbiór, co perspektywa `perspective.lineage` i wiersz Porządków `tasks.stacks_lineage` -
+    # jedna nazwa na trzech powierzchniach („bez rodowodu" znaczy gdzie indziej stos, którego
+    # Dostawa nie ujęła wcale, `status.harvest_lineage_none`).
     "grid.criteria.only_lineage": {
-        "pl": "tylko obrazy bez rodowodu",
-        "en": "only images without lineage",
+        "pl": "tylko rodowód do potwierdzenia",
+        "en": "only lineage to confirm",
     },
     # D-V-9f: perspektywa zapisana NOWSZYM wydaniem niesie warunki, których ten build nie zna.
     # Pominięcie ich poszerza zbiór, więc pasek mówi to wprost i nazywa klucze - bez nazw nie
@@ -2993,18 +3059,42 @@ CATALOG = {
     },
 
     # --- writeback (commit/undo/reject; podsumowania składane) ---
-    "grid.wb.applied": {"pl": "{n} zapisanych", "en": "{n} applied"},
+    # Człony liczby zdania wyniku zapisu - wpisy MNOGIE (`wb_worker._liczba` wybiera `t_plural`):
+    # dawne „1 zapisanych”, „1 zablokowanych”, „1 błędów”.
+    "grid.wb.applied": {
+        "pl": {"one": "{n} zapisany", "few": "{n} zapisane", "many": "{n} zapisanych"},
+        "en": {"one": "{n} applied", "other": "{n} applied"}},
     "grid.wb.renamed": {"pl": "{n} przemianowanych", "en": "{n} renamed"},
-    "grid.wb.restored": {"pl": "{n} przywróconych", "en": "{n} restored"},
-    "grid.wb.semantic": {"pl": "{n} cofniętych semantycznie (bajty pliku inne niż przed zapisem)",
-                         "en": "{n} restored semantically (file bytes differ from before the write)"},
-    "grid.wb.withheld": {"pl": "{n} zapisanych z zeznaniem wstrzymanym (głosem klatki mówi inna kopia)",
-                         "en": "{n} written with testimony withheld (another copy speaks for the frame)"},
-    "grid.wb.undo_withheld": {"pl": "{n} przywróconych bez powrotu zeznania (głosem klatki mówi inna kopia)",
-                              "en": "{n} restored without testimony (another copy speaks for the frame)"},
-    "grid.wb.blocked": {"pl": "{n} zablokowanych", "en": "{n} blocked"},
-    "grid.wb.errors": {"pl": "{n} błędów", "en": "{n} errors"},
-    "grid.wb.skipped": {"pl": "{n} pominiętych", "en": "{n} skipped"},
+    "grid.wb.restored": {
+        "pl": {"one": "{n} przywrócony", "few": "{n} przywrócone", "many": "{n} przywróconych"},
+        "en": {"one": "{n} restored", "other": "{n} restored"}},
+    "grid.wb.semantic": {
+        "pl": {"one": "{n} cofnięty semantycznie (bajty pliku inne niż przed zapisem)",
+               "few": "{n} cofnięte semantycznie (bajty plików inne niż przed zapisem)",
+               "many": "{n} cofniętych semantycznie (bajty plików inne niż przed zapisem)"},
+        "en": {"one": "{n} restored semantically (file bytes differ from before the write)",
+               "other": "{n} restored semantically (file bytes differ from before the write)"}},
+    "grid.wb.withheld": {
+        "pl": {"one": "{n} zapisany z zeznaniem wstrzymanym (głosem klatki mówi inna kopia)",
+               "few": "{n} zapisane z zeznaniem wstrzymanym (głosem klatki mówi inna kopia)",
+               "many": "{n} zapisanych z zeznaniem wstrzymanym (głosem klatki mówi inna kopia)"},
+        "en": {"one": "{n} written with testimony withheld (another copy speaks for the frame)",
+               "other": "{n} written with testimony withheld (another copy speaks for the frame)"}},
+    "grid.wb.undo_withheld": {
+        "pl": {"one": "{n} przywrócony bez powrotu zeznania (głosem klatki mówi inna kopia)",
+               "few": "{n} przywrócone bez powrotu zeznania (głosem klatki mówi inna kopia)",
+               "many": "{n} przywróconych bez powrotu zeznania (głosem klatki mówi inna kopia)"},
+        "en": {"one": "{n} restored without testimony (another copy speaks for the frame)",
+               "other": "{n} restored without testimony (another copy speaks for the frame)"}},
+    "grid.wb.blocked": {
+        "pl": {"one": "{n} zablokowany", "few": "{n} zablokowane", "many": "{n} zablokowanych"},
+        "en": {"one": "{n} blocked", "other": "{n} blocked"}},
+    "grid.wb.errors": {
+        "pl": {"one": "{n} błąd", "few": "{n} błędy", "many": "{n} błędów"},
+        "en": {"one": "{n} error", "other": "{n} errors"}},
+    "grid.wb.skipped": {
+        "pl": {"one": "{n} pominięty", "few": "{n} pominięte", "many": "{n} pominiętych"},
+        "en": {"one": "{n} skipped", "other": "{n} skipped"}},
     "grid.wb.detail_sep": {"pl": " — {detail}", "en": " — {detail}"},
     "grid.wb.interrupted": {
         "pl": " — przerwano, {n} do dokończenia", "en": " — interrupted, {n} to finish",
@@ -3236,7 +3326,7 @@ CATALOG = {
     # (AR-115): dawny literał łańcucha gubił etapy, które biegły. Łańcuch wymienia fakty kopii: bez
     # nich człowiek z 550 kopiami „?" w Porządkach nie miał skąd wiedzieć, że złota akcja jest jedną
     # z dwóch dróg do tej roboty.
-    "pipeline.receive": {"pl": "Przyjmij nowe", "en": "Take new"},
+    "pipeline.receive": {"pl": "Przyjmij nowe", "en": "Receive new"},
     "pipeline.receive_chain": {"pl": "{name}  ({chain})", "en": "{name}  ({chain})"},
     # Gest „Zbierz fakty kopii (N)" (`PipelineView._on_copy_facts`): dwa etapy łańcucha złotej
     # akcji bez skanu. Liczba w nawiasie nie odmienia rzeczownika - odmiana żyje w podpowiedzi
@@ -3257,11 +3347,11 @@ CATALOG = {
                        "pytania o katalog, w całym archiwum."},
         "en": {"one": "{n} copy is waiting for its facts (image count, header testimony). This "
                       "reads headers only and adopts the surviving copy's testimony, then "
-                      "recomputes what derives from it - the same stages as in “Take new”, with "
+                      "recomputes what derives from it - the same stages as in “Receive new”, with "
                       "no scan and no folder prompt, across the whole archive.",
                "other": "{n} copies are waiting for their facts (image count, header testimony). "
                         "This reads headers only and adopts the surviving copy's testimony, then "
-                        "recomputes what derives from it - the same stages as in “Take new”, "
+                        "recomputes what derives from it - the same stages as in “Receive new”, "
                         "with no scan and no folder prompt, across the whole archive."},
     },
     # Linia nad akcjami, gdy do Dostawy przyprowadził klik w wiersz „?" Porządków
@@ -3367,9 +3457,9 @@ CATALOG = {
               "„{pick}” i wskaż jego korzeń (źródło „Przyjmij nowe” zostaje bez zmian). Tylko "
               "raport - zapis to „{mark}”, który pojawi się pod wynikiem, gdy sprawdzenie "
               "potwierdzi zniknięcie.",
-        "en": "No folder chosen - compares the last “Take new” source with the database: "
+        "en": "No folder chosen - compares the last “Receive new” source with the database: "
               "{source}. It checks only copies under this folder - to cover the whole archive, use "
-              "“{pick}” and choose its root (the “Take new” source stays unchanged). Report only - "
+              "“{pick}” and choose its root (the “Receive new” source stays unchanged). Report only - "
               "writing is “{mark}”, which appears below the result when the check confirms a copy "
               "is gone.",
     },
@@ -3460,9 +3550,14 @@ CATALOG = {
         "en": "Choose the processing tree root — Horreum takes only `masterLight*.xisf` files "
               "(no derived files) and touches not a single byte",
     },
-    "pipeline.stacks_last": {"pl": "ostatni korzeń: {root}", "en": "last root: {root}"},
+    # Memo pod wierszem przycisków sekcji: korzeń nazwany słowami okna „Wciągnij stosy…”, które go
+    # ustawia (`pipeline.dlg.pick_stacks`) - samo „ostatni korzeń” nie mówiło, czego.
+    "pipeline.stacks_last": {
+        "pl": "ostatni korzeń drzewa obróbki: {root}", "en": "last processing tree root: {root}",
+    },
     "pipeline.stacks_first": {
-        "pl": "(jeszcze nie wskazano korzenia)", "en": "(no root chosen yet)",
+        "pl": "(jeszcze nie wskazano korzenia drzewa obróbki)",
+        "en": "(no processing tree root chosen yet)",
     },
     # Druga linia memo stosów - cztery rozłączne liczniki ze stanu (`queries.stack_lineage_counts`).
     "pipeline.stacks_counts": {
@@ -3495,33 +3590,35 @@ CATALOG = {
     "pipeline.cancelling": {
         "pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)",
     },
-    # Powody odmowy fasady `run_stage` (D-PD-6) — POWÓD, nie goły False: jedna bramka łączyła dwa
-    # różne stany, a komunikat oparty na bool-u mógłby skłamać.
+    # Powody odmowy fasady `run_stage` (D-PD-6) - POWÓD, nie goły False: jedna bramka łączyła dwa
+    # różne stany, a komunikat oparty na bool-u mógłby skłamać. Zdania od WIELKIEJ litery: stoją
+    # samodzielnie (pasek stanu, odmowa kafla na stronie Dostawy, wiersz błędu okna naprawy,
+    # podpowiedź) obok rodzeństwa z tych samych powierzchni, które zaczyna wielką.
     "pipeline.refuse.no_db": {
-        "pl": "brak otwartej bazy — otwórz bazę i spróbuj ponownie",
-        "en": "no database open — open one and try again",
+        "pl": "Brak otwartej bazy - otwórz bazę i spróbuj ponownie",
+        "en": "No database open - open one and try again",
     },
     "pipeline.refuse.running": {
-        "pl": "etap w biegu — uruchom „Rozwiąż” po jego zakończeniu",
-        "en": "a stage is running — start „Resolve” after it finishes",
+        "pl": "Etap w biegu - uruchom „Rozwiąż” po jego zakończeniu",
+        "en": "A stage is running - start “Resolve” after it finishes",
     },
     # Odmowa wejść SPOZA strony (kafel Przyjmij, żniwa): wołający nie prosił o „Rozwiąż”, więc
     # zdanie mówi, gdzie widać bieżący etap i co zrobić po nim.
     "pipeline.refuse.delivery_running": {
-        "pl": "etap Dostawy w biegu - postęp na stronie Dostawy; przyjmij po jego zakończeniu",
-        "en": "an Intake stage is running - progress is on the Intake page; receive after it finishes",
+        "pl": "Etap Dostawy w biegu - postęp na stronie Dostawy; przyjmij po jego zakończeniu",
+        "en": "An Intake stage is running - progress is on the Intake page; receive after it finishes",
     },
     "pipeline.refuse.writeback": {
-        "pl": "trwa zapis nagłówków do plików - etapy Dostawy ruszą po jego zakończeniu",
-        "en": "header write to files in progress - Intake stages start after it finishes",
+        "pl": "Trwa zapis nagłówków do plików - etapy Dostawy ruszą po jego zakończeniu",
+        "en": "Header write to files in progress - Intake stages start after it finishes",
     },
     # Odmowa „Oznacz zniknięte” PO dialogu progu: w trakcie pytania inny etap albo zmiana źródła
     # zapomniały wynik sprawdzenia (`_forget_vanished`). `refuse.running` nie pasuje - odsyła
     # do „Rozwiąż”.
     "pipeline.refuse.mark_stale": {
-        "pl": "wynik sprawdzenia przepadł w trakcie pytania (inny etap albo zmiana źródła) - nic "
+        "pl": "Wynik sprawdzenia przepadł w trakcie pytania (inny etap albo zmiana źródła) - nic "
               "nie zapisano; sprawdź obecność ponownie",
-        "en": "the check result was dropped while the question was open (another stage or a "
+        "en": "The check result was dropped while the question was open (another stage or a "
               "source change) - nothing was written; check presence again",
     },
     "pipeline.counts": {
@@ -3752,6 +3849,9 @@ CATALOG = {
               "facts from path {facts} · incomplete {incomplete}",
     },
     "pipeline.fmt.calibrate_gaps": {"pl": "\n   braki: {gaps}", "en": "\n   gaps: {gaps}"},
+    # Kubełek braku przepisu językiem ekranu (`pipeline.zdanie_braku_przepisu`); `facts` = nazwy pól
+    # przepisu z rdzenia (`calibration.REQUIRED`), bez tłumaczenia.
+    "pipeline.fmt.calibrate_gap": {"pl": "{cls}: brak {facts}", "en": "{cls}: missing {facts}"},
     "pipeline.fmt.lineage": {
         "pl": "lighty {lights} · powiązane: {linked}",
         "en": "lights {lights} · linked: {linked}",
@@ -4035,7 +4135,7 @@ CATALOG = {
     # --- auto-DRY: stany raportu / noty karty ---
     "proj.pick_or_add": {
         "pl": "Dodaj lub wybierz cel wydania („+ inny cel…”).",
-        "en": "Add or pick a target („+ another target…”).",
+        "en": "Add or pick a target (“+ another target…”).",
     },
     "proj.probing": {"pl": "Sonduję cel (DRY)…", "en": "Probing target (DRY)…"},
     "proj.dry_failed": {"pl": "Nie można: {msg}", "en": "Cannot: {msg}"},
@@ -4050,9 +4150,17 @@ CATALOG = {
     "proj.applying": {
         "pl": "Wydaję na stół → {root}\n\nDysk się ZMIENIA. „Przerwij wydawanie” zatrzyma po bieżącym "
               "pliku; to, co powstało,\nzostaje na dysku (undo = skasuj folder w Eksploratorze).",
-        "en": "Serving to table → {root}\n\nThe disk is CHANGING. „Stop serving” halts after the current "
+        "en": "Serving to table → {root}\n\nThe disk is CHANGING. “Stop serving” halts after the current "
               "file; whatever was made\nstays on disk (undo = delete the folder in Explorer).",
     },
+    # Bieg wydania OBIEKTU - słownik wydania, nie stołu (tryb obiektu `ProjectionDialog`).
+    "proj.obj.applying": {
+        "pl": "Wydaję obiekt → {root}\n\nDysk się ZMIENIA. „Przerwij wydawanie” zatrzyma po bieżącym "
+              "pliku; to, co powstało,\nzostaje na dysku (undo = skasuj folder w Eksploratorze).",
+        "en": "Releasing the object → {root}\n\nThe disk is CHANGING. “Stop releasing” halts after the "
+              "current file; whatever was made\nstays on disk (undo = delete the folder in Explorer).",
+    },
+    "proj.obj.btn_cancel_apply": {"pl": "Przerwij wydawanie", "en": "Stop releasing"},
     "proj.cancelling": {
         "pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)",
     },
@@ -4060,8 +4168,17 @@ CATALOG = {
     "proj.btn_created_ok": {"pl": "Utworzono ✓", "en": "Created ✓"},
     "proj.btn_nothing_new": {"pl": "Bez zmian ✓", "en": "No changes ✓"},
     "proj.status_summary": {
-        "pl": "Wydano na stół: {n} {word} → {root}",
-        "en": "Served to table: {n} {word} → {root}",
+        "pl": "Wydano na stół: {files} → {root}",
+        "en": "Served to table: {files} → {root}",
+    },
+    # `{files}` zdań na pasek stanu: liczba odmieniona frazą („skopiowano 1 plik"), nie „1 skopiowano".
+    "proj.files_copied": {
+        "pl": {"one": "skopiowano {n} plik", "few": "skopiowano {n} pliki", "many": "skopiowano {n} plików"},
+        "en": {"one": "copied {n} file", "other": "copied {n} files"},
+    },
+    "proj.files_linked": {
+        "pl": {"one": "zlinkowano {n} plik", "few": "zlinkowano {n} pliki", "many": "zlinkowano {n} plików"},
+        "en": {"one": "linked {n} file", "other": "linked {n} files"},
     },
     "proj.abort_prefix": {"pl": "ABORT: {msg}\n\n", "en": "ABORT: {msg}\n\n"},
     "proj.btn_not_created": {"pl": "Nie utworzono", "en": "Not created"},
@@ -4082,6 +4199,10 @@ CATALOG = {
     "proj.word_link_done": {"pl": "zlinkowano", "en": "linked"},
     "proj.mode_copies": {"pl": "kopie", "en": "copies"},
     "proj.mode_links": {"pl": "hardlinki", "en": "hardlinks"},
+    # Nazwa układu w nagłówku raportu - mapa `projection_dialog._LAYOUT_KEYS` (token dysku → nazwa).
+    "proj.layout_name.by_object": {"pl": "po obiektach", "en": "by object"},
+    "proj.layout_name.wbpp_feed": {"pl": "WBPP feed", "en": "WBPP feed"},
+    "proj.layout_name.object": {"pl": "obiekt do WBPP", "en": "object for WBPP"},
     "proj.dry_head": {
         "pl": "DRY - bez zmian na dysku (układ {layout}, {mode}):",
         "en": "DRY - no disk changes (layout {layout}, {mode}):",
@@ -4112,8 +4233,8 @@ CATALOG = {
               "   errors: {errors}   skipped: {skipped}",
     },
     "proj.untouched": {
-        "pl": "  nietknięte: {n} (plan zostaje — wznów przez „Odśwież podgląd”)",
-        "en": "  untouched: {n} (the plan stays — resume via „Refresh preview”)",
+        "pl": "  nietknięte: {n} (plan zostaje - wznów przez „Odśwież podgląd”)",
+        "en": "  untouched: {n} (the plan stays - resume via “Refresh preview”)",
     },
     "proj.multi_present": {
         "pl": "  wiele obecnych kopii: {n} (użyto pierwszej)",
@@ -4133,9 +4254,12 @@ CATALOG = {
     # --- wydanie obiektu (tryb obiektu `ProjectionDialog`) ---
     "proj.obj.title": {"pl": "Wydaj obiekt do WBPP", "en": "Release object to WBPP"},
     "proj.obj.head": {
-        "pl": "{canon}: {lights} · {masters} · {raw} · bez flatu {no_flat} · bez darka {no_dark}",
-        "en": "{canon}: {lights} · {masters} · {raw} · without flat {no_flat} · without dark {no_dark}",
+        "pl": "{canon}: {lights} · {masters} · {raw}",
+        "en": "{canon}: {lights} · {masters} · {raw}",
     },
+    # Luki nagłówka - osobny wiersz w roli `warn` (`projection_dialog.object_gaps_text`).
+    "proj.obj.head_no_flat": {"pl": "bez flatu {n}", "en": "without flat {n}"},
+    "proj.obj.head_no_dark": {"pl": "bez darka {n}", "en": "without dark {n}"},
     "proj.obj.pending_head": {
         "pl": "do przeliczenia w Dostawie: {n}", "en": "to recompute in Delivery: {n}",
     },
@@ -4182,8 +4306,8 @@ CATALOG = {
               "you mix releases, add the TELESCOP keyword as Pre and Post.",
     },
     "proj.obj.status_summary": {
-        "pl": "Wydano obiekt {canon}: {n} {word} → {root}",
-        "en": "Released object {canon}: {n} {word} → {root}",
+        "pl": "Wydano obiekt {canon}: {files} → {root}",
+        "en": "Released object {canon}: {files} → {root}",
     },
     "proj.obj.status_cancelled": {
         "pl": "Przerwano wydanie obiektu {canon}: {word} {n} z {total}, reszta nietknięta → {root}",
@@ -4219,7 +4343,7 @@ CATALOG = {
     "proj.pick.title": {"pl": "Wybierz obiekt do wydania", "en": "Pick an object to release"},
     "proj.pick.hint": {
         "pl": "Dwuklik albo „Dalej” otwiera podgląd wydania (nic nie powstaje na dysku).",
-        "en": "Double-click or „Next” opens the release preview (nothing is written to disk).",
+        "en": "Double-click or “Next” opens the release preview (nothing is written to disk).",
     },
     "proj.pick.search_label": {"pl": "Szukaj:", "en": "Search:"},
     "proj.pick.search_placeholder": {"pl": "nazwa obiektu", "en": "object name"},
@@ -4262,7 +4386,10 @@ CATALOG = {
     },
 
     # --- okno żniw „Wciągnij z WBPP…” (`harvest_dialog.py`) ---------------------------------
-    "harvest.title": {"pl": "Wciągnij wyniki WBPP", "en": "Harvest WBPP results"},
+    # EN: czasownik drogi to „take in” - słowo, które stoi na Dostawie i w menu „Więcej…” Domu
+    # („Take in from WBPP…”), jak polskie „Wciągnij”; rzeczownik „harvest” zostaje tam, gdzie polski
+    # mówi „żniwa” (okno żniw, zeznanie żniw).
+    "harvest.title": {"pl": "Wciągnij wyniki WBPP", "en": "Take in WBPP results"},
     "harvest.hint": {
         "pl": "Master flat trafia do biblioteki kalibracji, gdy historia integracji w pliku wymienia surowe "
               "flaty znane bazie; stos z wydania Horreum - do biblioteki STACKS, obok lightów swoich wejść. "
@@ -4302,7 +4429,7 @@ CATALOG = {
     "harvest.dry_failed": {"pl": "Nie można: {msg}", "en": "Cannot: {msg}"},
     "harvest.head_dry": {
         "pl": "Do wciągnięcia {place} · już w archiwum {exists} · do przeglądu {review}",
-        "en": "To harvest {place} · already in the archive {exists} · to review {review}",
+        "en": "To take in {place} · already in the archive {exists} · to review {review}",
     },
     "harvest.manifest_note": {
         "pl": "Wydanie Horreum (manifest _PROJEKCJA.json): {path}",
@@ -4313,16 +4440,21 @@ CATALOG = {
     "harvest.kind.master_flat": {"pl": "master flat", "en": "master flat"},
     "harvest.kind.master_light": {"pl": "stos", "en": "stack"},
     "harvest.kind.master_dark": {"pl": "master dark", "en": "master dark"},
+    # Plik z nazwą mastera, którego nagłówek mówi o surowej klatce - rodzaj, który nada mu skan.
+    "harvest.kind.light": {"pl": "surowy light", "en": "raw light"},
+    "harvest.kind.flat": {"pl": "surowy flat", "en": "raw flat"},
+    "harvest.kind.dark": {"pl": "surowy dark", "en": "raw dark"},
+    "harvest.kind.bias": {"pl": "surowy bias", "en": "raw bias"},
     "harvest.kind.unknown": {"pl": "nieznany", "en": "unknown"},
     "harvest.col.status": {"pl": "Stan", "en": "Status"},
     "harvest.col.name": {"pl": "Nazwa docelowa", "en": "Target name"},
     "harvest.col.dir": {"pl": "Katalog docelowy", "en": "Target folder"},
     "harvest.col.release": {"pl": "Wydanie", "en": "Release"},
     "harvest.col.reason": {"pl": "Powód", "en": "Reason"},
-    "harvest.status.would_place": {"pl": "do wciągnięcia", "en": "to harvest"},
+    "harvest.status.would_place": {"pl": "do wciągnięcia", "en": "to take in"},
     "harvest.status.exists": {"pl": "już w archiwum", "en": "already in the archive"},
     "harvest.status.review": {"pl": "do przeglądu", "en": "to review"},
-    "harvest.status.placed": {"pl": "wciągnięty", "en": "harvested"},
+    "harvest.status.placed": {"pl": "wciągnięty", "en": "taken in"},
     "harvest.status.verify_bad": {"pl": "bajty inne niż w podglądzie", "en": "bytes differ from preview"},
     "harvest.status.conflict": {"pl": "konflikt nazwy", "en": "name conflict"},
     "harvest.status.error": {"pl": "błąd", "en": "error"},
@@ -4364,6 +4496,16 @@ CATALOG = {
     "harvest.reason.header_mismatch": {
         "pl": "nagłówek pliku nie zgadza się z wejściami", "en": "the file header disagrees with its inputs",
     },
+    # `header_mismatch` stosu, któremu brak czytelnego `DATE-OBS` (`harvest_dialog.date_obs_text`):
+    # nazwa stosu niesie datę nocy, więc bez daty z godziną stosu nie da się nazwać.
+    "harvest.reason.date_obs_missing": {
+        "pl": "brak DATE-OBS w nagłówku - nazwa stosu wymaga daty i godziny",
+        "en": "no DATE-OBS in the header - the stack name needs a date and time",
+    },
+    "harvest.reason.date_obs_unreadable": {
+        "pl": "DATE-OBS bez godziny albo nieczytelne ({value}) - nazwa stosu wymaga daty i godziny",
+        "en": "DATE-OBS without a time or unreadable ({value}) - the stack name needs a date and time",
+    },
     "harvest.reason.outside_release": {
         "pl": "wejścia spoza wydania, w którego drzewie leży wyjście",
         "en": "inputs outside the release whose tree holds the output",
@@ -4372,7 +4514,7 @@ CATALOG = {
     "harvest.reason.outside_release_stack": {
         "pl": "wejść spoza wydania (stos skopiuj ręcznie do STACKS archiwum, „Przyjmij nowe” na archiwum "
               "go weźmie): {n}",
-        "en": "inputs outside the release (copy the stack into the archive STACKS by hand, Take new on the "
+        "en": "inputs outside the release (copy the stack into the archive STACKS by hand, Receive new on the "
               "archive will take it): {n}",
     },
     "harvest.reason.no_config": {
@@ -4385,13 +4527,13 @@ CATALOG = {
     "harvest.reason.no_release": {
         "pl": "stos spoza wydania Horreum - skopiuj go ręcznie do biblioteki stosów, „Przyjmij nowe” na "
               "archiwum go weźmie",
-        "en": "stack outside a Horreum release - copy it into the stacks library by hand, Take new on the "
+        "en": "stack outside a Horreum release - copy it into the stacks library by hand, Receive new on the "
               "archive will take it",
     },
     "harvest.reason.no_light_seat": {
         "pl": "stos wymaga jednej siedziby lightów pod LIGHTS (skopiuj go ręcznie do STACKS, „Przyjmij nowe” "
               "na archiwum go weźmie), znalezionych: {n}",
-        "en": "a stack needs one home of its lights under LIGHTS (copy it into STACKS by hand, Take new on "
+        "en": "a stack needs one home of its lights under LIGHTS (copy it into STACKS by hand, Receive new on "
               "the archive will take it), found: {n}",
     },
     "harvest.reason.color_unknown": {
@@ -4406,22 +4548,22 @@ CATALOG = {
     },
     "harvest.btn_apply": {
         "pl": {"one": "Wciągnij {n} plik", "few": "Wciągnij {n} pliki", "many": "Wciągnij {n} plików"},
-        "en": {"one": "Harvest {n} file", "other": "Harvest {n} files"},
+        "en": {"one": "Take in {n} file", "other": "Take in {n} files"},
     },
     "harvest.btn_accept": {"pl": "Zamknij i przyjmij do archiwum", "en": "Close and receive into the archive"},
-    "harvest.btn_cancel_apply": {"pl": "Przerwij wciąganie", "en": "Stop harvesting"},
+    "harvest.btn_cancel_apply": {"pl": "Przerwij wciąganie", "en": "Stop taking in"},
     "harvest.btn_close": {"pl": "Zamknij", "en": "Close"},
     "harvest.applying": {
         "pl": "Kopiuję pliki do archiwum - dysk się ZMIENIA. „Przerwij wciąganie” zatrzyma po "
               "bieżącym pliku; to, co wciągnięte, zostaje w archiwum.",
-        "en": "Copying files into the archive - the disk is CHANGING. \"Stop harvesting\" halts "
-              "after the current file; whatever was harvested stays in the archive.",
+        "en": "Copying files into the archive - the disk is CHANGING. \"Stop taking in\" halts "
+              "after the current file; whatever was taken in stays in the archive.",
     },
     "harvest.cancelling": {"pl": "Przerywam… (po bieżącym pliku)", "en": "Stopping… (after the current file)"},
     "harvest.head_done": {
         "pl": "Wciągnięto {placed} · pominięto {exists} (już w archiwum) · do przeglądu {review} · "
               "konflikty {conflict} · błędy {errors}",
-        "en": "Harvested {placed} · skipped {exists} (already in the archive) · to review {review} · "
+        "en": "Taken in {placed} · skipped {exists} (already in the archive) · to review {review} · "
               "conflicts {conflict} · errors {errors}",
     },
     "harvest.verify_bad_tail": {
@@ -4432,16 +4574,16 @@ CATALOG = {
         "pl": " (przetworzono {done} z {total} przed błędem)",
         "en": " (processed {done} of {total} before the error)",
     },
-    "harvest.apply_error": {"pl": "Błąd wciągania: {msg}{made}", "en": "Harvest error: {msg}{made}"},
-    "harvest.btn_nothing": {"pl": "Nic nie wciągnięto", "en": "Nothing harvested"},
+    "harvest.apply_error": {"pl": "Błąd wciągania: {msg}{made}", "en": "Error while taking in: {msg}{made}"},
+    "harvest.btn_nothing": {"pl": "Nic nie wciągnięto", "en": "Nothing taken in"},
     "harvest.btn_cancelled": {"pl": "Przerwano", "en": "Stopped"},
     "harvest.btn_error": {"pl": "Przerwane błędem", "en": "Stopped by an error"},
     "harvest.status_placed": {
         "pl": {"one": "Wciągnięto {n} plik do archiwum → {root}",
                "few": "Wciągnięto {n} pliki do archiwum → {root}",
                "many": "Wciągnięto {n} plików do archiwum → {root}"},
-        "en": {"one": "Harvested {n} file into the archive → {root}",
-               "other": "Harvested {n} files into the archive → {root}"},
+        "en": {"one": "Took {n} file into the archive → {root}",
+               "other": "Took {n} files into the archive → {root}"},
     },
     "harvest.status_unknown": {
         "pl": {"one": "W archiwum leży {n} kopia nieznana bazie → {root}",
@@ -4454,7 +4596,7 @@ CATALOG = {
     "harvest.close_placed": {
         "pl": {"one": "Wciągnięto {n} plik do archiwum", "few": "Wciągnięto {n} pliki do archiwum",
                "many": "Wciągnięto {n} plików do archiwum"},
-        "en": {"one": "Harvested {n} file into the archive", "other": "Harvested {n} files into the archive"},
+        "en": {"one": "Took {n} file into the archive", "other": "Took {n} files into the archive"},
     },
     "harvest.close_unknown": {
         "pl": {"one": "W archiwum leży {n} kopia nieznana bazie", "few": "W archiwum leżą {n} kopie nieznane bazie",
@@ -4482,7 +4624,7 @@ CATALOG = {
     "harvest.sum_unknown": {"pl": " · kopie nieznane bazie: {n}", "en": " · copies unknown to the database: {n}"},
     "harvest.status_nothing": {
         "pl": "Żniwa: nic nie wciągnięto (już w archiwum {exists} · do przeglądu {review})",
-        "en": "Harvest: nothing harvested (already in the archive {exists} · to review {review})",
+        "en": "Harvest: nothing taken in (already in the archive {exists} · to review {review})",
     },
     "harvest.status_error": {"pl": "Żniwa przerwane błędem: {msg}", "en": "Harvest stopped by an error: {msg}"},
     "harvest.status_later": {
@@ -4497,7 +4639,7 @@ CATALOG = {
     },
     "harvest.sum_conflict": {"pl": " · konflikty: {n}", "en": " · conflicts: {n}"},
     "harvest.sum_error": {"pl": " · błędy: {n}", "en": " · errors: {n}"},
-    "harvest.btn_done": {"pl": "Wciągnięto", "en": "Harvested"},
+    "harvest.btn_done": {"pl": "Wciągnięto", "en": "Taken in"},
     "harvest.not_absolute": {
         "pl": "Ścieżka wyjścia musi być pełna (z dyskiem albo \\\\serwer): {path}",
         "en": "The output path must be absolute (with a drive or \\\\server): {path}",
@@ -4528,9 +4670,9 @@ CATALOG = {
     "harvest.rel.waiting": {"pl": "czeka na WBPP", "en": "waiting for WBPP"},
     # „do sprawdzenia” = kandydaci bez rozstrzygającego zeznania; „do wciągnięcia” mówi dopiero świeży podgląd.
     "harvest.rel.unchecked": {"pl": "do sprawdzenia {n}", "en": "to check {n}"},
-    "harvest.rel.pending": {"pl": "do wciągnięcia {n}", "en": "to harvest {n}"},
-    "harvest.rel.done": {"pl": "wciągnięte {n}", "en": "harvested {n}"},
-    "harvest.rel.done_before": {"pl": "poprzednio wciągnięte {n}", "en": "previously harvested {n}"},
+    "harvest.rel.pending": {"pl": "do wciągnięcia {n}", "en": "to take in {n}"},
+    "harvest.rel.done": {"pl": "wciągnięte {n}", "en": "taken in {n}"},
+    "harvest.rel.done_before": {"pl": "poprzednio wciągnięte {n}", "en": "previously taken in {n}"},
     "harvest.rel.review": {"pl": "do przeglądu {n}", "en": "to review {n}"},
     "harvest.rel.lineage": {"pl": "rodowód do zapisania {n}", "en": "lineage to record {n}"},
     "harvest.rel.no_sources": {
@@ -4612,7 +4754,8 @@ CATALOG = {
     "tasks.path_header_conflict_frames": {
         "pl": "Nagłówek inny niż zatwierdzony folder",
         "en": "Header differs from the confirmed folder"},
-    "tasks.stacks_lineage": {"pl": "Obrazy bez rodowodu", "en": "Images without lineage"},
+    # Nazwa perspektywy, którą wiersz otwiera (`perspective.lineage`) - jeden zbiór, jedna nazwa.
+    "tasks.stacks_lineage": {"pl": "Rodowód do potwierdzenia", "en": "Lineage to confirm"},
     "tasks.superseded_frames": {"pl": "Zastąpione (historia)", "en": "Superseded (history)"},
     "tasks.retired_frames": {"pl": "Wycofane (historia)", "en": "Retired (history)"},
     "tasks.retired_conflict_frames": {
@@ -4839,14 +4982,14 @@ CATALOG = {
                        "Klik prowadzi do: {dest}."},
         "en": {"one": "{n} copy has no header testimony collected yet, so this count does "
                       "not include it.\n"
-                      "If the file is on disk - {place} → “Take new”.\n"
+                      "If the file is on disk - {place} → “Receive new”.\n"
                       "If the copy lies under the stacks root - {place} → “{stacks}”.\n"
                       "If the file is no longer on disk - {place} → “{check}” → “{mark}” (appears "
                       "below the result when the check confirms the file is gone).\n"
                       "A click takes you to: {dest}.",
                "other": "{n} copies have no header testimony collected yet, so this count "
                         "does not include them.\n"
-                        "If the file is on disk - {place} → “Take new”.\n"
+                        "If the file is on disk - {place} → “Receive new”.\n"
                         "If the copy lies under the stacks root - {place} → “{stacks}”.\n"
                         "If the file is no longer on disk - {place} → “{check}” → “{mark}” "
                         "(appears below the result when the check confirms the file is gone).\n"
@@ -5444,25 +5587,36 @@ CATALOG = {
         "en": "File name: only the object part at the start of the name changes, the rest stays "
               "exactly as it is; a name that does not start with the object (e.g. a camera name) "
               "stays whole. A full rename is done by the “Names” bar."},
-    # Wejście z Porządków na przerwany przebieg (AR-121): okno bez planu, stan z bazy.
+    # Nagłówek „Uzgodnij” nazywa obiekty klatek (doklejany do `objchg.head_align` i
+    # `objchg.head_resume_align`); ponad trzy - reszta liczbą (`objchg.head_objects_more`).
+    "objchg.head_objects": {
+        "pl": {"one": " Obiekt w bazie: {objects}.",
+               "few": " Obiekty w bazie ({n}): {objects}.",
+               "many": " Obiekty w bazie ({n}): {objects}."},
+        "en": {"one": " Object in the database: {objects}.",
+               "other": " Objects in the database ({n}): {objects}."}},
+    "objchg.head_objects_more": {
+        "pl": {"one": " i {n} inny", "few": " i {n} inne", "many": " i {n} innych"},
+        "en": {"one": " and {n} more", "other": " and {n} more"}},
+    # Wejście z Porządków na przerwany przebieg (AR-121): okno bez planu, stan z bazy. Numer
+    # przebiegu niesie wiersz stanu pod listą (do zaznaczenia i skopiowania), nie nagłówek.
     "objchg.head_resume_change": {
-        "pl": {"one": "Przerwany przebieg {run_id}: zmiana obiektu {n} klatki na {canon} - karta "
+        "pl": {"one": "Przerwany przebieg: zmiana obiektu {n} klatki na {canon} - karta "
                       "OBJECT: „{card}”.",
-               "few": "Przerwany przebieg {run_id}: zmiana obiektu {n} klatek na {canon} - karta "
+               "few": "Przerwany przebieg: zmiana obiektu {n} klatek na {canon} - karta "
                       "OBJECT: „{card}”.",
-               "many": "Przerwany przebieg {run_id}: zmiana obiektu {n} klatek na {canon} - karta "
+               "many": "Przerwany przebieg: zmiana obiektu {n} klatek na {canon} - karta "
                        "OBJECT: „{card}”."},
-        "en": {"one": "Interrupted run {run_id}: changing the object of {n} frame to {canon} - "
+        "en": {"one": "Interrupted run: changing the object of {n} frame to {canon} - "
                       "OBJECT card: “{card}”.",
-               "other": "Interrupted run {run_id}: changing the object of {n} frames to {canon} - "
+               "other": "Interrupted run: changing the object of {n} frames to {canon} - "
                         "OBJECT card: “{card}”."}},
     "objchg.head_resume_align": {
-        "pl": {"one": "Przerwany przebieg {run_id}: uzgodnienie pliku {n} klatki z obiektem.",
-               "few": "Przerwany przebieg {run_id}: uzgodnienie plików {n} klatek z obiektem.",
-               "many": "Przerwany przebieg {run_id}: uzgodnienie plików {n} klatek z obiektem."},
-        "en": {"one": "Interrupted run {run_id}: aligning the file of {n} frame with its object.",
-               "other": "Interrupted run {run_id}: aligning the files of {n} frames with their "
-                        "object."}},
+        "pl": {"one": "Przerwany przebieg: uzgodnienie pliku {n} klatki z obiektem.",
+               "few": "Przerwany przebieg: uzgodnienie plików {n} klatek z obiektem.",
+               "many": "Przerwany przebieg: uzgodnienie plików {n} klatek z obiektem."},
+        "en": {"one": "Interrupted run: aligning the file of {n} frame with its object.",
+               "other": "Interrupted run: aligning the files of {n} frames with their object."}},
     "objchg.explain_resume": {
         "pl": "Stan pozycji z bazy. „Dokończ” zapisuje pozycje, które czekają; „Cofnij” przywraca "
               "karty, pliki, katalogi i obiekt sprzed gestu.",
@@ -5522,6 +5676,83 @@ CATALOG = {
     "objchg.st.untouched": {"pl": "nie ruszone (bieg przerwany przed tą pozycją)",
                             "en": "untouched (the run stopped before this item)"},
     "objchg.st.reason": {"pl": " - {reason}", "en": " - {reason}"},
+    # Spadek karty na drogę atomową w wierszu listy - to samo zdanie człowieka co w wyniku okna
+    # (`wb.inplace_fallback`); szczegół rdzenia w podpowiedzi.
+    "objchg.st.rewritten": {
+        "pl": "cały plik przepisany (karty nie dało się wpisać w samym nagłówku)",
+        "en": "whole file rewritten (the card could not be written into the header alone)"},
+    "objchg.st.detail_tip": {"pl": "Szczegół techniczny: {detail}",
+                             "en": "Technical detail: {detail}"},
+    # Plik zajęty przez inny program w powodzie rdzenia (`czytelny_powod`) - bliźniak powodu
+    # przeniesienia rdzenia po AR-125.
+    "objchg.reason.busy": {"pl": "plik zajęty przez inny program - spróbuj ponownie za chwilę",
+                           "en": "the file is in use by another program - try again in a moment"},
+    # Pominięcia planera po KODZIE (`object_change.SKIP_CODES`, `ObjectChangeSkip.params`) - zdanie
+    # w języku UI; kod bez wpisu tutaj zostaje przy zdaniu rdzenia (`tekst_pominiecia`). Komplet
+    # pinuje test parytetu (klucze składane w locie: `objchg.skip.<kod>`).
+    "objchg.skip.kind_not_light": {
+        "pl": "rodzaj „{kind}” nie ma obiektu z definicji - gest dotyczy lightów i stosów",
+        "en": "kind “{kind}” has no object by definition - the gesture is for lights and stacks"},
+    "objchg.skip.retired": {"pl": "klatka wycofana z archiwum",
+                            "en": "frame retired from the archive"},
+    "objchg.skip.superseded": {"pl": "klatka zastąpiona inną (podmiana pliku)",
+                               "en": "frame superseded by another (file replaced)"},
+    "objchg.skip.no_present_copy": {"pl": "brak obecnej kopii", "en": "no present copy"},
+    "objchg.skip.many_copies": {
+        "pl": "wiele obecnych kopii ({n}) - jedna klatka, jeden folder obiektu",
+        "en": "several present copies ({n}) - one frame, one object folder"},
+    "objchg.skip.isolated": {
+        "pl": "kopia izolowana przerwanym albo niedokończonym zapisem w miejscu - najpierw odzysk "
+              "albo dokończenie w Porządkach",
+        "en": "copy isolated by an interrupted or unfinished in-place write - recover or finish it "
+              "in Housekeeping first"},
+    "objchg.skip.no_mtime": {"pl": "kopia bez mtime - brak kotwicy przeniesienia",
+                             "en": "copy without mtime - no anchor for the move"},
+    "objchg.skip.no_object": {"pl": "klatka bez obiektu - nie ma czego uzgadniać",
+                              "en": "frame without an object - nothing to align"},
+    "objchg.skip.bad_target": {"pl": "cel, którego system plików nie przyjmie: {detail}",
+                               "en": "a target the file system will not accept: {detail}"},
+    "objchg.skip.off_position": {
+        "pl": "plik nie stoi na pozycji obiektu w drzewie archiwum - nie ma folderu obiektu, do "
+              "którego mógłby trafić",
+        "en": "the file is not at the object position in the archive tree - there is no object "
+              "folder it could go to"},
+    "objchg.skip.folder_twins": {
+        "pl": "folder obiektu „{canon}” ma tę samą nazwę co folder innego obiektu ({twins}) - pliki "
+              "dwóch obiektów trafiłyby do jednego folderu",
+        "en": "the object folder “{canon}” has the same name as another object's folder ({twins}) "
+              "- files of two objects would land in one folder"},
+    "objchg.skip.card_skip": {
+        "pl": "karta OBJECT nie do zapisania ({detail}) - plik zostaje, bo karta i folder idą razem",
+        "en": "the OBJECT card cannot be written ({detail}) - the file stays, because the card and "
+              "the folder go together"},
+    "objchg.skip.card_rule": {"pl": "karta OBJECT: {detail}", "en": "OBJECT card: {detail}"},
+    "objchg.skip.card_comment": {"pl": "karta OBJECT: {detail}", "en": "OBJECT card: {detail}"},
+    "objchg.skip.dir_unreadable": {"pl": "katalog celu nieczytelny ({dir}): {detail}",
+                                   "en": "target folder unreadable ({dir}): {detail}"},
+    "objchg.skip.file_in_dir_place": {"pl": "w miejscu katalogu celu stoi plik: {path}",
+                                      "en": "a file stands where the target folder should be: "
+                                            "{path}"},
+    "objchg.skip.variant_dir": {
+        "pl": "wersja stosu leży w innym katalogu niż oryginał - para jedzie razem",
+        "en": "the stack version lies in a different folder than the original - the pair moves "
+              "together"},
+    "objchg.skip.variant_name": {
+        "pl": "nazwa wersji stosu nie wynika z nazwy oryginału ({name}) - para jedzie razem",
+        "en": "the stack version name does not follow from the original's name ({name}) - the "
+              "pair moves together"},
+    "objchg.skip.unchanged": {
+        "pl": "bez zmian - plik w folderze obiektu, nazwa i karta zgodne",
+        "en": "unchanged - the file is in the object folder, name and card agree"},
+    "objchg.skip.target_on_disk": {"pl": "na dysku stoi już plik pod ścieżką celu: {path}",
+                                   "en": "a file already exists on disk at the target path: {path}"},
+    "objchg.skip.batch_collision": {"pl": "kolizja we wsadzie - dwa pliki w jeden cel: {path}",
+                                    "en": "collision in the batch - two files to one target: {path}"},
+    "objchg.skip.target_in_db": {"pl": "w bazie jest inna kopia pod ścieżką celu: {path}",
+                                 "en": "the database has another copy at the target path: {path}"},
+    "objchg.skip.pair": {"pl": "para stosu jedzie razem - druga połowa pominięta: {inner}",
+                         "en": "the stack pair moves together - the other half is skipped: "
+                               "{inner}"},
     "objchg.replan_btn": {"pl": "Policz plan ponownie", "en": "Compute the plan again"},
     "objchg.skipped_head_done": {
         "pl": {"one": "Pominięto {n} klatkę - powód i plik:",
@@ -5560,8 +5791,10 @@ CATALOG = {
               "albo są pominięte z powodem.",
         "en": "The plan has nothing to do - the files already sit in the object folder with the "
               "right card, or they are skipped with a reason."},
-    "objchg.res.applied": {"pl": "{n} zmienionych", "en": "{n} changed"},
-    "objchg.res.undone": {"pl": "{n} cofniętych", "en": "{n} undone"},
+    # Liczba w formie „etykieta: N” - bez odmiany, bo wspólna gramatyka zdania wyniku
+    # (`wb_worker.zdanie_wyniku_zapisu`) składa ten człon przez `t`, nie `t_plural`.
+    "objchg.res.applied": {"pl": "zmienione pozycje: {n}", "en": "items changed: {n}"},
+    "objchg.res.undone": {"pl": "cofnięte pozycje: {n}", "en": "items undone: {n}"},
     "objchg.res.dirs": {"pl": " · katalogi założone: {created}, usunięte: {removed}",
                         "en": " · folders created: {created}, removed: {removed}"},
     "objchg.res.dirs_uncertain": {
@@ -5647,9 +5880,12 @@ CATALOG = {
     "grid.criteria.only_file_object_mismatch": {
         "pl": "tylko plik niezgodny z obiektem (folder albo karta)",
         "en": "only files disagreeing with their object (folder or card)"},
-    # Okna kart piszą w miejscu (AR-117) - zdanie mówi o drodze zapisu tylko przy spadku.
-    "wb.inplace_fallback": {"pl": " · drogą atomową (cały plik przepisany): {n} - {reason}",
-                            "en": " · atomic path (whole file rewritten): {n} - {reason}"},
+    # Okna kart piszą w miejscu (AR-117) - zdanie mówi o drodze zapisu tylko przy spadku, językiem
+    # człowieka (szczegół rdzenia - w podpowiedzi okna, nie w zdaniu).
+    "wb.inplace_fallback": {
+        "pl": " · cały plik przepisany: {n} (karty nie dało się wpisać w samym nagłówku)",
+        "en": " · whole file rewritten: {n} (the card could not be written into the header "
+              "alone)"},
     # Dom: gest zmiany obiektu przenosi pliki, a nie przemianowuje (relokacja z powodem gestu).
     "home.gest.object_relocated": {
         "pl": {"one": "przeniesiono {n} plik do folderu obiektu",

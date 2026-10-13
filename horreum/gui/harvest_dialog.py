@@ -70,6 +70,7 @@ pilnuje test tego okna. Plik na whiteliście `test_gui_isolation` (warstwa widż
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import os
 import threading
@@ -85,7 +86,8 @@ from PySide6.QtWidgets import (
 
 from horreum import db, harvest, projection
 from horreum.gui import i18n, queries
-from horreum.gui.projection_dialog import _elide_path
+from horreum.gui.grid_panels import ElidedLabel
+from horreum.gui.projection_dialog import _COLORS, _elide_path
 
 # Ile poziomów nad wyjściem WBPP szukać manifestu wydania: WBPP pisze `master/` (i `calibrated/`)
 # wewnątrz katalogu roboczego, który wydanie obiektu kładzie pod `<karta>/OBJECTS/<obiekt>` -
@@ -123,13 +125,33 @@ _STACK_REASONS = {
 }
 
 # Rodzaj pozycji (`HarvestItem.kind`, ten sam, który nada skan kopii) → słowo kolumny „Rodzaj”.
-# Rodzaj spoza mapy (master z nagłówkiem surowej klatki) renderuje się tokenem, jak status.
+# Plik z nazwą mastera, którego nagłówek mówi o surowej klatce (`IMAGETYP=FLAT` bez historii
+# integracji), dostaje rodzaj surowy - i słowo „surowy …”, nie token `flat`: wiersz idzie wtedy do
+# przeglądu (`header_mismatch`), a kolumna ma powiedzieć, za co skan go weźmie. Zbiór rodzajów
+# = `resolve.frames._KIND_MAP` + `unknown`; rodzaj spoza mapy renderuje się tokenem, jak status.
 _HARVEST_KINDS = {
     "master_flat": "harvest.kind.master_flat",
     "master_light": "harvest.kind.master_light",
     "master_dark": "harvest.kind.master_dark",
+    "light": "harvest.kind.light",
+    "flat": "harvest.kind.flat",
+    "dark": "harvest.kind.dark",
+    "bias": "harvest.kind.bias",
     "unknown": "harvest.kind.unknown",
 }
+
+# `header_mismatch` stosu bez czytelnego `DATE-OBS`: rdzeń niesie w `detail` napis
+# `DATE-OBS <repr wartości>` (`harvest._plan_stack`, krok nazwy). To nie jest niezgodność nagłówka
+# z wejściami, tylko brak daty, której wymaga nazwa stosu - zdanie mówi to wprost, a wartość
+# pokazuje bez `repr` („DATE-OBS None” nic człowiekowi nie mówi).
+_DATE_OBS_DETAIL = "DATE-OBS "
+
+# Status pozycji → rola koloru kolumny „Stan” (kolory z motywu: `projection_dialog._COLORS`,
+# przeładowuje je `app.apply_theme`). Wciągnięty = ok; do przeglądu i przerwany = ostrzeżenie (plik
+# czeka na człowieka); konflikt, błąd i bajty inne niż w podglądzie = błąd. „Do wciągnięcia” i „już
+# w archiwum” bez roli - to stan zwykły, nie wynik ani kłopot.
+_STATUS_ROLES = {"placed": "ok", "review": "warn", "cancelled": "warn",
+                 "conflict": "error", "error": "error", "verify_bad": "error"}
 
 # Status pozycji (plan i apply) → słowo w tabeli. Ta sama zasada literalności; parytet
 # z `harvest.STATUSES`.
@@ -235,8 +257,11 @@ def reason_text(item):
     Stos bierze zdanie z `_STACK_REASONS`, gdy jego token ma tam własne. Po apply token jest pusty,
     a `detail` niesie tekst klingi kopii (konflikt, błąd I/O). Pozycja `exists` bez obecnej kopii
     mówi to wprost - pusta kolumna katalogu wyglądałaby jak błąd. Token spoza mapy renderuje się
-    sam, nie pustką."""
+    sam, nie pustką. `header_mismatch` z `DATE-OBS` w `detail` mówi o dacie nazwy stosu
+    (`date_obs_text`), nie o niezgodności z wejściami."""
     detail = (item.detail or "").strip()
+    if item.reason == "header_mismatch" and detail.startswith(_DATE_OBS_DETAIL):
+        return date_obs_text(detail[len(_DATE_OBS_DETAIL):])
     if item.reason:
         key = ((_STACK_REASONS.get(item.reason) if item.kind == "master_light" else None)
                or _HARVEST_REASONS.get(item.reason))
@@ -247,6 +272,24 @@ def reason_text(item):
     if item.status == "exists" and not item.exists_path:
         return i18n.t("harvest.exists_no_copy")
     return ""
+
+
+def date_obs_text(wartosc):
+    """Zdanie powodu stosu bez czytelnego `DATE-OBS` z wartości, którą rdzeń wpisał `repr`-em
+    (`None` albo napis w cudzysłowie): brak karty - jedno zdanie, karta bez godziny albo śmieć -
+    drugie, z wartością bez cudzysłowów. Napis spoza `repr` pokazuje się taki, jaki przyszedł."""
+    try:
+        wartosc = ast.literal_eval(wartosc)
+    except (ValueError, SyntaxError):
+        pass
+    if wartosc is None:
+        return i18n.t("harvest.reason.date_obs_missing")
+    return i18n.t("harvest.reason.date_obs_unreadable", value=wartosc)
+
+
+def status_role(status):
+    """Rola koloru kolumny „Stan” (`_STATUS_ROLES`) albo None - status bez znaczenia kłopotu."""
+    return _STATUS_ROLES.get(status)
 
 
 def name_text(item):
@@ -596,12 +639,14 @@ class HarvestDialog(QDialog):
         self._last_error = None          # wyjątek rdzenia ostatniego biegu
         self._close_after_apply = None   # kod zamknięcia zgłoszonego w biegu apply
         self._closing = False
+        self._zwolnione = False          # `deleteLater` po zamknięciu już zlecone (`_zwolnij_gdy_wolne`)
         self._notice_state = ("", None)  # ostatni komunikat stanu - wraca, gdy pole przestaje odbiegać
         self.summary = None              # zdanie na pasek stanu gospodarza (None = nic się nie stało)
         self.harvested_root = None       # korzeń do przyjęcia - ustawia go WYŁĄCZNIE „Zamknij i przyjmij”
         self.harvested_stacks = []       # [(sha1_data, frame_ids, kanon wydania)] - razem z `harvested_root`
         self._shown_out = None           # wyjście WBPP pozycji w tabeli - kolumna pliku liczy się względem niego
         self._table_viewport = None      # viewport tabeli po budowie (filtr zdarzeń zmiany rozmiaru)
+        self._rel_viewport = None        # viewport listy wydań po budowie (szerokość kolumny „Karta”)
         self._first_pick_checked = False  # pierwsze użycie: wybór katalogu raz po pokazaniu (`showEvent`)
         self._rel_gen = 0                # licznik generacji listy wydań - lista starszego zamówienia odpada
         self._rel_thread = None
@@ -650,8 +695,14 @@ class HarvestDialog(QDialog):
         self.rel_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.rel_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.rel_table.setWordWrap(False)
+        # Karta bywa długą ścieżką (folder roboczy pod profilem użytkownika, karta na udziale): liczona
+        # za treścią rozpychała tabelę w bok i ucinała komórkę „Stan” - jedyną, która mówi, co z wydaniem
+        # zrobić. Karta jest więc elidowana ŚRODKIEM (dysk i `_WBPP` na końcu zostają, pełna ścieżka pod
+        # kursorem), a jej szerokość liczy `_fit_rel_columns` z reszty po obiekcie, dacie i stanie.
+        self.rel_table.setTextElideMode(Qt.ElideMiddle)
         rh = self.rel_table.horizontalHeader()
         rh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        rh.setSectionResizeMode(REL_CARD, QHeaderView.Interactive)
         rh.setStretchLastSection(True)
         self.rel_table.setMaximumHeight(
             rh.sizeHint().height() + _REL_VISIBLE_ROWS * self.rel_table.verticalHeader().defaultSectionSize()
@@ -741,19 +792,27 @@ class HarvestDialog(QDialog):
         hh.setStretchLastSection(False)
         self._table_viewport = self.table.viewport()
         self._table_viewport.installEventFilter(self)    # zmiana szerokości okna → `_fit_columns`
+        # Filtr listy wydań dopiero tu, gdy pole wyjścia już stoi (`eventFilter` pyta o nie najpierw).
+        self._rel_viewport = self.rel_table.viewport()
+        self._rel_viewport.installEventFilter(self)      # zmiana szerokości okna → `_fit_rel_columns`
         v.addWidget(self.table, 1)
 
         act = QHBoxLayout()
+        # Pasek BEZ napisu: licznik biegu mówi notatka obok („3/12 · plik”) - procent na pasku
+        # powtarzał tę samą liczbę drugim zapisem („0%” obok „0/1”).
         self.busy = QProgressBar()       # DRY = nieokreślony (`_set_probing`), apply = `done/total`
         self.busy.setRange(0, 0)
         self.busy.setMinimumWidth(220)
         self.busy.setTextVisible(False)
         self.busy.setVisible(False)
         act.addWidget(self.busy)
-        self.progress_note = QLabel("")
+        # Notatka elidowana od prawej, pełna treść pod kursorem: nazwa stosu WBPP ma do ~100 znaków
+        # (zmierzone na kopii archiwum: 97), a etykieta za treścią rozpychała okno w bok. Licznik stoi
+        # na początku, więc elizja go nie zjada. Notatka bierze wolne miejsce wiersza (w miejscu
+        # dawnego rozpychacza), przyciski zostają przy prawej krawędzi.
+        self.progress_note = ElidedLabel()
         self.progress_note.setProperty("role", "secondary")
-        act.addWidget(self.progress_note)
-        act.addStretch(1)
+        act.addWidget(self.progress_note, 1)
         self.btn_apply = QPushButton(i18n.t_plural("harvest.btn_apply", 0))
         self.btn_apply.setEnabled(False)             # uzbraja WYŁĄCZNIE świeża sonda z czymś do wciągnięcia
         self.btn_apply.setDefault(True)
@@ -814,6 +873,8 @@ class HarvestDialog(QDialog):
             return True
         if obj is self._table_viewport and event.type() == QEvent.Resize:
             self._fit_columns()
+        if obj is self._rel_viewport and event.type() == QEvent.Resize:
+            self._fit_rel_columns()
         return super().eventFilter(obj, event)
 
     def showEvent(self, event):
@@ -848,6 +909,22 @@ class HarvestDialog(QDialog):
         width = max(vw - others, min(want, vw - left), hh.minimumSectionSize())
         if self.table.columnWidth(COL_REASON) != width:
             hh.resizeSection(COL_REASON, width)
+
+    def _fit_rel_columns(self):
+        """Szerokość kolumny „Karta” listy wydań: jej treść, gdy wiersz mieści się w kadrze, a gdy
+        nie - reszta viewportu po obiekcie, dacie i stanie liczonych w pełnej treści (nie mniej niż
+        minimum sekcji; elizja środkiem robi resztę). Stan stoi ostatni i rozciąga się na resztę, więc
+        zostaje cały zawsze, gdy w kadrze mieści się karta o minimalnej szerokości."""
+        if self._rel_viewport is None:
+            return
+        rh = self.rel_table.horizontalHeader()
+        tresc = {c: max(self.rel_table.sizeHintForColumn(c), rh.sectionSizeHint(c))
+                 for c in range(len(_REL_HEADERS))}
+        inne = sum(w for c, w in tresc.items() if c != REL_CARD)
+        width = max(min(tresc[REL_CARD], self.rel_table.viewport().width() - inne),
+                    rh.minimumSectionSize())
+        if self.rel_table.columnWidth(REL_CARD) != width:
+            rh.resizeSection(REL_CARD, width)
 
     def _grow_to_table(self):
         """Szerokość okna pod treść tabeli: suma kolumn (powód w pełnej treści) + ramy, najwyżej
@@ -1082,6 +1159,7 @@ class HarvestDialog(QDialog):
         self._dry_thread = None
         if self._dry_pending:
             self._trigger_dry()
+        self._zwolnij_gdy_wolne()                    # sonda dłuższa niż limit zamknięcia trzymała okno
 
     @Slot(int, object)
     def _on_dry_done(self, gen, payload):
@@ -1159,7 +1237,9 @@ class HarvestDialog(QDialog):
     def _fill(self, items):
         """Tabela pozycji (plan albo wynik apply - te same pola, inne statusy). Plik WZGLĘDEM
         wyjścia WBPP, katalog WZGLĘDEM archiwum (`rel_text`); pełne ścieżki i pełny powód pod
-        kursorem. Po wypełnieniu okno rośnie pod treść, a powód wraca w kadr (`_grow_to_table`)."""
+        kursorem. Słowo stanu w kolorze swojej roli (`status_role`) - kolor bierze się z motywu przy
+        każdym wypełnieniu, okno jest modalne i krótkotrwałe. Po wypełnieniu okno rośnie pod treść,
+        a powód wraca w kadr (`_grow_to_table`)."""
         self.table.setRowCount(len(items))
         for i, it in enumerate(items):
             folder = dir_of(it)
@@ -1171,10 +1251,13 @@ class HarvestDialog(QDialog):
                      COL_NAME: (name_text(it), None),
                      COL_DIR: (rel_text(folder, self._archive_root), folder),
                      COL_RELEASE: (release_text(it), None)}
+            role = status_role(it.status)
             for col, (text, tip) in cells.items():
                 cell = QTableWidgetItem(text)
                 if tip:
                     cell.setToolTip(tip)
+                if col == COL_STATUS and role is not None:
+                    cell.setForeground(_COLORS[role])
                 self.table.setItem(i, col, cell)
         self._grow_to_table()
 
@@ -1235,6 +1318,7 @@ class HarvestDialog(QDialog):
         self._rel_thread = None
         if self._rel_pending and not self._closing:
             self._trigger_releases()
+        self._zwolnij_gdy_wolne()                    # lista dobiegła po zamknięciu - okno może zniknąć
 
     @Slot(int, object)
     def _on_releases_done(self, gen, rows):
@@ -1328,6 +1412,7 @@ class HarvestDialog(QDialog):
             item = self.rel_table.item(i, REL_STATE)
             if item is not None:
                 item.setText(release_state_text(row, self._fresh_of(row)))
+        self._fit_rel_columns()                      # stan zmienił treść - karta oddaje mu miejsce
         self._sync_release_note()
 
     def _select_release_for(self, path):
@@ -1448,16 +1533,14 @@ class HarvestDialog(QDialog):
         self._close_if_requested()
 
     def _apply_begin(self, total):
-        """Tryb biegu: pasek `done/total`, „Przerwij” w miejscu „Wciągnij”, parametry zamrożone -
-        zmiana pola wyzerowałaby plan, który worker właśnie kopiuje. Komunikat mówi, że dysk się
-        zmienia, bo podgląd nad tabelą przestał być podglądem."""
+        """Tryb biegu: pasek `done/total` (bez napisu - licznik niesie notatka), „Przerwij” w miejscu
+        „Wciągnij”, parametry zamrożone - zmiana pola wyzerowałaby plan, który worker właśnie kopiuje.
+        Komunikat mówi, że dysk się zmienia, bo podgląd nad tabelą przestał być podglądem."""
         self._apply_seen = (0, total)
         self.busy.setRange(0, total)
         self.busy.setValue(0)
-        self.busy.setFormat("%p%")
-        self.busy.setTextVisible(True)
         self.busy.setVisible(True)
-        self.progress_note.setText(f"0/{total}")
+        self.progress_note.set_full_text(f"0/{total}")
         self._show_notice(i18n.t("harvest.applying"))
         self.btn_apply.setVisible(False)
         self.btn_apply.setEnabled(False)             # WPROST, nie tylko ukryciem (domyślny łapie Enter)
@@ -1467,10 +1550,8 @@ class HarvestDialog(QDialog):
 
     def _apply_end(self):
         self.busy.setVisible(False)
-        self.busy.setTextVisible(False)
-        self.busy.setFormat("")
         self.busy.setRange(0, 0)
-        self.progress_note.setText("")
+        self.progress_note.set_full_text("")
         self.btn_cancel.setVisible(False)
         self.btn_apply.setVisible(True)
         self._set_params_enabled(True)
@@ -1488,7 +1569,7 @@ class HarvestDialog(QDialog):
         if self._apply_worker is not None:
             self._apply_worker.request_cancel()      # rdzeń sprawdza PRZED następnym plikiem
             self.btn_cancel.setEnabled(False)
-            self.progress_note.setText(i18n.t("harvest.cancelling"))
+            self.progress_note.set_full_text(i18n.t("harvest.cancelling"))
 
     @Slot(int, int, str, str)
     def _on_apply_progress(self, done_n, total, dst, status):
@@ -1511,7 +1592,7 @@ class HarvestDialog(QDialog):
         elif status in ("conflict", "error", "verify_bad"):
             self._trouble[status] += 1
         if self._close_after_apply is None:
-            self.progress_note.setText(f"{done_n}/{total} · {os.path.basename(dst)}")
+            self.progress_note.set_full_text(f"{done_n}/{total} · {os.path.basename(dst)}")
         self._sync_buttons()
 
     @Slot(object)
@@ -1711,14 +1792,17 @@ class HarvestDialog(QDialog):
         LISTA WYDAŃ: rdzeń nie ma punktu przerwania, więc czekanie byłoby zakładem o czas spaceru
         po kartach (SMB) w wątku głównym. Generacja w górę (wynik nie dotknie zamkniętego okna),
         `quit()` kończy wątek zaraz po liście, a zbiera go `_cleanup_rel_thread`. Okno żyje dalej pod
-        rodzicem gospodarza; zanim gospodarz zniknie, czeka na wątek `zatrzymaj_pola`."""
+        rodzicem gospodarza; zanim gospodarz zniknie, czeka na wątek `zatrzymaj_pola`.
+
+        Zamknięte okno bez żywego wątku kasuje się samo (`_zwolnij_gdy_wolne`) - z wątkiem w biegu
+        robi to sprzątanie ostatniego wątku."""
         if self._apply_worker is not None:
             self._close_after_apply = r
             self._apply_worker.request_cancel()
             self.btn_cancel.setEnabled(False)
             self.btn_close.setEnabled(False)
             self._sync_buttons()
-            self.progress_note.setText(i18n.t("harvest.closing"))
+            self.progress_note.set_full_text(i18n.t("harvest.closing"))
             return
         self._closing = True
         if self._dry_worker is not None:
@@ -1741,13 +1825,28 @@ class HarvestDialog(QDialog):
         if not accepted and self._receivable_dirs():
             self.summary = self._close_summary()
         super().done(r)
+        self._zwolnij_gdy_wolne()
+
+    def _zwolnij_gdy_wolne(self):
+        """Zamknięte okno bez żywego wątku tła kasuje się samo (`deleteLater`). Bez tego każde
+        zamknięte okno żniw zostawało ukrytym dzieckiem okna głównego do końca sesji - z tabelami,
+        planem i listą wydań w pamięci. Usunięcie jest ODROCZONE: gospodarz czyta `summary`
+        i `harvested_*` zaraz po `exec()`, a atrybuty Pythona przeżywają obiekt Qt i tak (zmierzone
+        2026-10-13: PySide6 6.9.2, atrybut wrappera czytelny po `shiboken6.delete`). Wątek w biegu
+        (lista wydań bez punktu przerwania, sonda dłuższa niż limit zamknięcia) trzyma okno przy
+        życiu - `QThread` dziecka kasowany w biegu to twardy abort - więc wołają to też `_cleanup_*`
+        po ostatnim wątku; do tego czasu wątek zbiera gospodarz przez `zatrzymaj_pola`. Raz na okno."""
+        if (self._closing and not self._zwolnione and self._dry_thread is None
+                and self._rel_thread is None and self._apply_thread is None):
+            self._zwolnione = True
+            self.deleteLater()
 
     def zatrzymaj_pola(self):
         """Okno znika razem z gospodarzem (zamknięcie aplikacji, przełączenie bazy -
         `MainWindow._zatrzymaj_watki_widokow` woła tę metodę po nazwie): ZBIERZ każdy wątek tła okna,
-        zanim rodzic go skasuje - `QThread` niszczony w biegu to twardy abort. Zamknięte okno zostaje
-        ukrytym dzieckiem okna głównego, a `done` na listę wydań nie czeka (rdzeń bez punktu
-        przerwania, karta bywa uśpionym SMB) - więc czekanie żyje tu, poza gestem człowieka.
+        zanim rodzic go skasuje - `QThread` niszczony w biegu to twardy abort. Zamknięte okno z wątkiem
+        w biegu zostaje ukrytym dzieckiem okna głównego, a `done` na listę wydań nie czeka (rdzeń bez
+        punktu przerwania, karta bywa uśpionym SMB) - więc czekanie żyje tu, poza gestem człowieka.
         Kolejność jak w `_cleanup_*` (quit z góry → worker.deleteLater → wait → thread.deleteLater);
         anulowanie powtarzane co 100 ms tam, gdzie worker je ma. Generacje w górę: wynik, który
         zdążył wyjść z wątku, nie dotknie okna. Idempotentne."""

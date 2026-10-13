@@ -273,6 +273,55 @@ def test_kazdy_czasownik_z_mapy_ma_zdanie_PL_i_EN():
     assert i18n.t_plural("home.gest.location_renamed", 1) == "1 plik przemianowano"
 
 
+def test_Dom_liczy_gest_osi_obiektu_w_KLATKACH_jak_pasek(tmp_path):
+    """Dom mówił „4 zmiany" obok paska „Cofnięto przypisanie na 2 z 2 klatek" dla JEDNEGO cofnięcia:
+    klinga zapisuje klatkę parą `object.unassigned` + `object.cleared`, a Dom liczył zdarzenia. Gest
+    przez prawdziwą klingę → dziennik → `queries.last_hand_gesture` → zdanie Domu w klatkach. Nadanie
+    obiektu (słownik `object.upserted`/`object.aliased` w tym samym geście) też liczy klatki.
+
+    Falsyfikator: zdejmij `_bez_towarzyszacych` z `zdanie_gestu` → „4 zmiany"."""
+    from horreum import repo
+    con = db.open_db(str(tmp_path / "os.db"))
+    try:
+        con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (5,'NGC6960','NGC','deep_sky')")
+        for i in (1, 2):
+            con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, object_id, "
+                        "object_source) VALUES (?, 'light', 'raw', ?, ?, 5, 'path')", (i, f"s{i}", NOW))
+        for i in (3, 4):                                  # bez obiektu - cel nadania nowego obiektu
+            con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                        "VALUES (?, 'light', 'raw', ?, ?)", (i, f"s{i}", NOW))
+        con.commit()
+        g = repo.clear_object_assignment(con, frame_ids=[1, 2], now="2026-10-09T10:00:00+00:00")
+        assert g.assigned == 2
+        gest = queries.last_hand_gesture(con)
+        assert gest["n"] == 4, "test nie odtwarza pary zdarzeń na klatkę"
+        assert home_mod.zdanie_gestu(gest) == "2 klatkom cofnięto obiekt"
+        repo.user_assign_object(con, alias_norm="NOWYOBIEKT", canon="NowyObiekt", catalog=None,
+                                kind="deep_sky", frame_ids=[3, 4], now="2026-10-09T11:00:00+00:00")
+        gest = queries.last_hand_gesture(con)
+        assert {"object.upserted", "object.assigned"} <= set(gest["verbs"]), gest
+        assert home_mod.zdanie_gestu(gest) == "2 klatkom nadano obiekt"
+        i18n.set_lang("en")
+        assert home_mod.zdanie_gestu(gest) == "object assigned to 2 frames"
+    finally:
+        i18n.set_lang("pl")
+        con.close()
+
+
+def test_para_odpinania_zostaje_gdy_glowny_czasownik_jej_nie_pokrywa():
+    """Cofnięcie nadpisania do stanu bez obiektu odpina klatkę bez nadania (`_restore_override_tx`):
+    2 odpięcia, 1 nadanie - zdanie o samym nadaniu przemilczałoby drugą klatkę, więc zostaje zdanie
+    ogólne. Gest bez czasownika osi obiektu - bez zmian."""
+    assert home_mod.zdanie_gestu(
+        {"verbs": {"object.assigned": 1, "object.unassigned": 2}, "n": 3}) == "3 zmiany"
+    assert home_mod.zdanie_gestu(
+        {"verbs": {"object.unassigned": 2}, "n": 2}) == "2 zmiany"
+    assert home_mod.zdanie_gestu(
+        {"verbs": {"note.cleared": 1, "note.set": 2}, "n": 3}) == "3 zmiany"
+    assert home_mod.zdanie_gestu(
+        {"verbs": {"object.upserted": 1}, "n": 1}) == "1 obiekt dodano"
+
+
 # ---------------------------------------------------------------- HomeView: teczki
 
 def test_teczki_do_osiemnastu_kart_wg_godzin_i_stopka_do_Znajdz(qapp, tmp_path):

@@ -231,3 +231,72 @@ def test_parytet_podstawy_rodowodu_stosu_w_obie_strony():
     tokeny = {f"grid.lin.basis.{t}" for t in stacks.LINEAGE_BASES}
     katalog = {k for k in CATALOG if k.startswith("grid.lin.basis.")}
     assert katalog == tokeny, f"rozjazd podstaw: bez zdania {tokeny - katalog}, bez tokenu {katalog - tokeny}"
+
+
+# ---- odmiana i słowa (paczki D/E, P, wizytacje) --------------------------------------------------
+
+def _forma(lang, klucz, n, **kw):
+    i18n.set_lang(lang)
+    return i18n.t_plural(klucz, n, **kw)
+
+
+def test_licznik_propozycji_ze_sciezki_odmienia_nazwy_w_obu_jezykach():
+    """„1 nazw / 1 klatek" - wiersz kolejki przeglądu szedł jedną formą. Odmiana po nazwach, człon
+    klatek podaje wołający odmieniony (`object.review_count`).
+
+    Falsyfikator: wróć do wpisu prostego `{names} nazw / {frames} klatek` - formy padają."""
+    klatki = lambda lang, n: _forma(lang, "object.review_count", n)
+    for n, pl in ((1, "1 nazwa"), (3, "3 nazwy"), (5, "5 nazw"), (12, "12 nazw"), (22, "22 nazwy")):
+        assert _forma("pl", "object.path_proposed_count", n, frames=klatki("pl", 1)) == \
+            f"{pl} / 1 klatka"
+    assert _forma("en", "object.path_proposed_count", 1, frames=klatki("en", 1)) == "1 name / 1 frame"
+    assert _forma("en", "object.path_proposed_count", 3, frames=klatki("en", 707)) == \
+        "3 names / 707 frames"
+
+
+def test_panel_rodowodu_mowi_o_zestawie_w_liczbie_pojedynczej():
+    """„ma jeszcze 1 inna wersja obrazu" i „zestaw … mają" - podmiotem jest zestaw (liczba
+    pojedyncza), liczba wersji stoi w bierniku."""
+    oczekiwane = {1: "ma jeszcze 1 inną wersję obrazu", 3: "ma jeszcze 3 inne wersje obrazu",
+                  5: "ma jeszcze 5 innych wersji obrazu", 12: "ma jeszcze 12 innych wersji obrazu",
+                  22: "ma jeszcze 22 inne wersje obrazu"}
+    for n, koniec in oczekiwane.items():
+        assert _forma("pl", "grid.lin.flag.twins", n) == f"ten sam zestaw klatek {koniec}"
+    assert _forma("en", "grid.lin.flag.twins", 1) == "1 other version of the image uses the same set of frames"
+    assert _forma("en", "grid.lin.flag.twins", 2) == "2 other versions of the image use the same set of frames"
+
+
+def test_jeden_zbior_rodowodu_ma_jedna_nazwe_na_trzech_powierzchniach():
+    """Wiersz Porządków mówił „Obrazy bez rodowodu", perspektywa, którą otwiera - „Rodowód do
+    potwierdzenia", a pasek kryteriów - „tylko obrazy bez rodowodu". To jeden zbiór
+    (`queries.lineage_pending_frame_ids`); „bez rodowodu" znaczy gdzie indziej stos, którego Dostawa
+    nie ujęła (`status.harvest_lineage_none`).
+
+    Falsyfikator: wpisz w `tasks.stacks_lineage` inną nazwę niż w `perspective.lineage`."""
+    for lang in ("pl", "en"):
+        i18n.set_lang(lang)
+        nazwa = i18n.t("perspective.lineage")
+        assert i18n.t("tasks.stacks_lineage") == nazwa, lang
+        assert nazwa.lower() in i18n.t("grid.criteria.only_lineage").lower(), lang
+
+
+def test_zbior_w_drodze_mowi_jednym_czasownikiem_z_faza_paska():
+    """„Czytam klatki…" na pasku i „Wczytuję zbiór…" w odmowie i podpowiedzi - jeden stan (zbiór
+    w drodze), dwa czasowniki. Odmowa i podpowiedź zaczynają się frazą fazy paska."""
+    for lang in ("pl", "en"):
+        i18n.set_lang(lang)
+        faza = i18n.t("busy.read_frames").rstrip("…")
+        assert i18n.t("grid.sel.loading_refused").startswith(faza), lang
+        assert i18n.t("grid.sel.loading_tip").startswith(faza), lang
+
+
+def test_EN_recepty_i_pusty_stan_perspektywy_jednym_rodzajem_cudzyslowu():
+    """EN pasek i pusty stan mówiły prostym `"Review"` obok drukarskiego `“Lineage to confirm”`
+    z Dostawy. Zdania recepty, pustego stanu i panelu rodowodu - wyłącznie cudzysłów drukarski."""
+    klucze = ("grid.empty_persp_action", "grid.sel.out_of_view_set", "grid.sel.out_of_view_persp",
+              "grid.lin.cal.pending")
+    proste = [k for k in klucze if '"' in CATALOG[k]["en"]]
+    assert not proste, f"prosty cudzysłów w EN: {proste}"
+    assert all("“" in CATALOG[k]["en"] for k in klucze)
+    for forma in CATALOG["grid.sel.reveal_target"]["en"].values():
+        assert '"' not in forma

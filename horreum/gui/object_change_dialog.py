@@ -29,21 +29,29 @@ przerwaniu okno oferuje „Dokończ” tego samego przebiegu obok „Cofnij”.
 
 SZEROKOŚĆ: kanon minimalnego ekranu to 1920×1080 logicznych. Ścieżki archiwum bywają dłuższe niż
 ekran, więc lista ich nie zawija ani nie rozpycha okna: ścieżka pod korzeniem archiwum, elizja
-w środku (początek drzewa i nazwa pliku zostają w kadrze), pełna ścieżka w podpowiedzi.
+ROZRÓŻNIAJĄCA (`elizja_sciezki`: folder obiektu i początek nazwy pliku zostają w kadrze, ginie
+środek drzewa), pełna ścieżka w podpowiedzi.
+
+OKNO JEDNORAZOWE: każde wejście buduje nowe okno, więc po `exec` idzie do kasacji (`exec`) - inaczej
+każde zamknięte okno zostawałoby dzieckiem gospodarza do końca sesji.
 """
 from __future__ import annotations
 
 import ntpath
+import re
 import sqlite3
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QAbstractItemView, QApplication, QDialog, QHBoxLayout, QHeaderView, QLabel, QProgressBar,
+    QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout,
 )
 
 from horreum import db, object_change, repo, resolver
 from horreum.gui import i18n, queries
+from horreum.gui.i18n_catalog import CATALOG
+from horreum.resolve.paths import STACK_KIND, object_folder
 
 # Kolumny listy pozycji: plik dziś, plik po zmianie, karta `OBJECT` stara → nowa i - po biegu
 # zapisu albo cofnięcia - status pozycji z wyniku rdzenia (w podglądzie schowana).
@@ -63,6 +71,93 @@ _STATUS_POZYCJI = {"pending": "objchg.st.pending", "applied": "objchg.st.done",
 # Rozszerzenie XISF: zapis karty w miejscu umie tam także DOPISAĆ kartę; FITS w miejscu wyłącznie
 # podmienia istniejącą (`writeback._fits_inplace_plan`), więc dopisanie przepisuje cały plik.
 _XISF = ".xisf"
+# Rola komórki ścieżki: długość GŁOWY pokazanego tekstu (kategoria i folder obiektu pod korzeniem
+# archiwum, `glowa_sciezki`) - delegat elizji (`_ElizjaSciezki`) trzyma ją w kadrze. Komórka bez
+# tej roli (powód pominięcia, „bez przeniesienia”) maluje się zwykłą elizją widoku.
+_GLOWA_ROLE = Qt.UserRole + 1
+# Ile znaków nazwy pliku ma zostać obok głowy - przy mniejszym miejscu głowa ustępuje nazwie.
+_MIN_ZNAKOW_NAZWY = 12
+_WIELOKROPEK = "…"
+# Ile obiektów „Uzgodnij” nagłówek wymienia z nazwy, reszta liczbą.
+_OBIEKTOW_W_NAGLOWKU = 3
+# Plik zajęty przez inny program w powodzie rdzenia (`f"{type(exc).__name__}: {exc}"`):
+# ERROR_SHARING_VIOLATION 32 i ERROR_LOCK_VIOLATION 33 - te same kody, przy których rdzeń ponawia
+# przeniesienie i mówi „plik zajęty przez inny program” (AR-125). Komunikat systemu do separatora
+# zdania (`;`, `:`, ` · `), ścieżka w zapisie `repr` opcjonalnie.
+_OS_ZAJETY = re.compile(r"\b\w*Error: \[WinError 3[23]\] (?:(?! · )[^;:\n])*(?:: '(?:[^'\\]|\\.)*')?")
+# Ścieżka w zapisie `repr` z podwojonymi ukośnikami (`'R:\\ASTRO_\\…'` z `str(OSError)`).
+_REPR_SCIEZKI = re.compile(r"'((?:[^'\\]|\\.)*\\\\(?:[^'\\]|\\.)*)'")
+
+
+def czytelny_powod(tekst):
+    """Powód rdzenia w zdaniu dla człowieka: plik zajęty przez inny program jego słowami
+    (`objchg.reason.busy`, bliźniak powodu przeniesienia rdzenia po AR-125) zamiast surowego
+    `PermissionError: [WinError 32] …`, a ścieżka z zapisu `repr` bez podwojonych ukośników. Reszta
+    zdania znak w znak: powód rdzenia jest zdaniem dla człowieka, a przekład innych błędów systemu
+    to robota rdzenia, nie ekranu."""
+    if not tekst:
+        return tekst
+    tekst = _OS_ZAJETY.sub(lambda _m: i18n.t("objchg.reason.busy"), tekst)
+    return _REPR_SCIEZKI.sub(lambda m: "'" + m.group(1).replace("\\\\", "\\") + "'", tekst)
+
+
+def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
+    """`(status, podpowiedź)` wiersza listy: `stan` (tekst z katalogu) i powód rdzenia
+    (`czytelny_powod`). SPADEK KARTY NA DROGĘ ATOMOWĄ mówi tym samym zdaniem człowieka, co wynik okna
+    (`objchg.st.rewritten`, bliźniak `wb.inplace_fallback`), a nie żargonem rdzenia („droga
+    dotychczasowa: operacja add/str…”) - szczegół rdzenia schodzi do podpowiedzi, uwaga dopisana
+    przez rdzeń za spadkiem (`; …`) zostaje w statusie. Spadek rozpoznaje KOD wyniku
+    (`CODE_INPLACE_FALLBACK`, jak zdanie wyniku); wiersz z bazy (`z_bazy`, wejście z Porządków) kodu
+    nie niesie, więc tam rozpoznaje go prefiks rdzenia (`PREFIKS_DROGI_ATOMOWEJ`)."""
+    from horreum import writeback          # lazy: `writeback` ciągnie astropy
+    if not powod:
+        return stan, stan
+    szczegol = None
+    if (kod == writeback.CODE_INPLACE_FALLBACK
+            or (z_bazy and powod.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ))):
+        from horreum.gui.wb_worker import bez_prefiksu_spadku
+        szczegol, _, reszta = bez_prefiksu_spadku(powod).partition("; ")
+        powod = i18n.t("objchg.st.rewritten") + (f"; {reszta}" if reszta else "")
+    status = stan + i18n.t("objchg.st.reason", reason=czytelny_powod(powod))
+    if szczegol is None:
+        return status, status
+    return status, status + "\n" + i18n.t("objchg.st.detail_tip", detail=szczegol)
+
+
+def podpowiedz_spadku(res):
+    """Podpowiedź zdania wyniku okna piszącego karty („Napraw nagłówek…”, „Zatwierdź ze
+    ścieżki…”): szczegół rdzenia pierwszego spadku na drogę atomową - zdanie mówi go językiem
+    człowieka (`wb.inplace_fallback`), więc szczegół nie ginie, tylko schodzi pod kursor - albo `""`."""
+    from horreum.gui.wb_worker import bez_prefiksu_spadku, spadek_na_droge_atomowa
+    spadek = next((fr for fr in res.applied if spadek_na_droge_atomowa(fr) and fr.reason), None)
+    if spadek is None:
+        return ""
+    return i18n.t("objchg.st.detail_tip",
+                  detail=bez_prefiksu_spadku(spadek.reason).partition("; ")[0])
+
+
+def tekst_pominiecia(kod, params, powod):
+    """Zdanie pominięcia planera w języku UI: kod (`object_change.SKIP_CODES`) → `objchg.skip.<kod>`
+    z parametrami pominięcia; kod bez zdania w katalogu (i pominięcie bez kodu) zostaje przy zdaniu
+    rdzenia `powod` (PL). Para stosu niesie pominiętą połowę (kod, parametry, zdanie) - jej zdanie
+    też w języku UI. Całość przez `czytelny_powod` (szczegół błędu systemu w parametrze)."""
+    klucz = f"objchg.skip.{kod}" if kod else None
+    if klucz not in CATALOG:
+        return czytelny_powod(powod)
+    p = dict(params)
+    if kod == "pair":
+        p["inner"] = tekst_pominiecia(p.pop("inner_code", None), p.pop("inner_params", ()),
+                                      p.get("inner", ""))
+    return czytelny_powod(i18n.t(klucz, **p))
+
+
+def lista_obiektow(canons):
+    """Obiekty do nagłówka: pierwsze `_OBIEKTOW_W_NAGLOWKU` z nazwy (alfabetycznie), reszta liczbą
+    („IC405, NGC3034, Sh2-229 i 9 innych”) - nagłówek nie rośnie z liczbą obiektów zaznaczenia."""
+    canons = sorted(canons, key=str.casefold)
+    reszta = len(canons) - _OBIEKTOW_W_NAGLOWKU
+    return (", ".join(canons[:_OBIEKTOW_W_NAGLOWKU])
+            + (i18n.t_plural("objchg.head_objects_more", reszta) if reszta > 0 else ""))
 
 
 def policz_plan(con, frame_ids, *, target):
@@ -128,6 +223,113 @@ def sciezka_pod_korzeniem(path, korzen):
     return path
 
 
+def glowa_sciezki(path, korzen):
+    """Długość GŁOWY ścieżki pokazanej pod korzeniem (`sciezka_pod_korzeniem`): kategoria i folder
+    obiektu z właściciela pozycji obiektu (`resolve.paths.object_folder` - drzewo lightów, potem
+    drzewo stosów) - człon, którym „Po zmianie” różni się od „Plik dziś”. 0 = ścieżka poza
+    pozycją obiektu (elizja trzyma wtedy samą nazwę pliku)."""
+    if not path:
+        return 0
+    folder = object_folder(path, "light", korzen) or object_folder(path, STACK_KIND, korzen)
+    if not folder:
+        return 0
+    glowa = sciezka_pod_korzeniem(folder, korzen)
+    pokazana = sciezka_pod_korzeniem(path, korzen)
+    return len(glowa) if pokazana[:len(glowa)].casefold() == glowa.casefold() else 0
+
+
+def elizja_sciezki(fm, tekst, szerokosc, glowa=0):
+    """Ścieżka skrócona do `szerokosc` px tak, żeby wiersze i kolumny dalej się RÓŻNIŁY. Elizja
+    w środku dawała identyczne wiersze („NGC30…GHT_OSC”): ginął człon obiektu i znacznik czasu
+    z nazwy pliku, a zostawał wspólny ogon. Pierwszeństwo, od najważniejszego:
+      1. nazwa pliku od POCZĄTKU - człon obiektu i data z godziną, tym różnią się wiersze;
+      2. głowa `tekst[:glowa]` - kategoria i folder obiektu, tym różni się „Po zmianie”;
+      3. środek drzewa (zestaw, filtr) - ginie pierwszy, w miejscu `…`.
+    Nazwa, która zaczyna się członem obiektu z głowy (separator członu jak w planerze nazwy,
+    `object_change._SEPARATORY_CZLONU`), sama niesie obiekt - przy braku miejsca głowa ustępuje
+    nazwie (`…\\NGC3034_20220326_2115…`). Nazwa bez członu (z aparatu) trzyma głowę - całą, a gdy
+    się nie mieści, sam folder obiektu (`…\\21P_Giacobini-Zinner\\…\\20181011_dsc…`) - dopóki obok
+    zostaje `_MIN_ZNAKOW_NAZWY` znaków nazwy. Tekst, który się mieści, wraca bez zmian."""
+    if fm.horizontalAdvance(tekst) <= szerokosc:
+        return tekst
+    i = max(tekst.rfind("\\"), tekst.rfind("/"))
+    if i < 0:
+        return fm.elidedText(tekst, Qt.ElideRight, szerokosc)
+    sep, plik = tekst[i], tekst[i + 1:]
+    glowa = tekst[:min(glowa, i)]
+    srodek = tekst[len(glowa):i + 1]          # między głową a nazwą, z separatorami po obu stronach
+    znacznik = f"{sep}{_WIELOKROPEK}{sep}"
+    miejsce = szerokosc - fm.horizontalAdvance(glowa + plik)
+    if miejsce >= fm.horizontalAdvance(znacznik):
+        # Cała nazwa i głowa się mieszczą - traci środek drzewa (skrajne separatory zostają).
+        return glowa + fm.elidedText(srodek, Qt.ElideMiddle, miejsce) + plik
+    token = re.split(r"[\\/]", glowa)[-1] if glowa else ""
+    niesie_obiekt = (bool(token) and plik[:len(token)].casefold() == token.casefold()
+                     and plik[len(token):len(token) + 1] in object_change._SEPARATORY_CZLONU)
+    pominiety = srodek.strip("\\/") != ""
+    prefiks = f"{_WIELOKROPEK}{sep}"
+    if glowa and not niesie_obiekt:
+        # Cała głowa, a gdy się nie mieści - sam folder obiektu (bez kategorii), zanim ustąpi nazwie.
+        za_glowa = znacznik if pominiety else sep
+        for kandydat in (glowa + za_glowa, f"{_WIELOKROPEK}{sep}{token}{za_glowa}"):
+            if (szerokosc - fm.horizontalAdvance(kandydat)
+                    >= fm.averageCharWidth() * _MIN_ZNAKOW_NAZWY):
+                prefiks = kandydat
+                break
+    miejsce = szerokosc - fm.horizontalAdvance(prefiks)
+    if miejsce <= 0:
+        return fm.elidedText(plik, Qt.ElideRight, szerokosc)
+    return prefiks + fm.elidedText(plik, Qt.ElideRight, miejsce)
+
+
+class _ElizjaSciezki(QStyledItemDelegate):
+    """Delegat kolumn ścieżek: tekst do malowania skraca `elizja_sciezki` do szerokości prostokąta
+    tekstu - w malowaniu, nie w `initStyleOption`, bo z opcji liczy się też podpowiedź szerokości
+    (wzorzec `grid_model._ElizjaWSrodku`). Tekst pozycji zostaje pełny - kopiuje się, testuje
+    i trafia w podpowiedź bez zmian. Komórka bez roli głowy maluje się zwykłą elizją widoku."""
+
+    @staticmethod
+    def tekst_w_komorce(option, glowa):
+        """Tekst opcji skrócony do szerokości, którą styl da mu w komórce: prostokąt tekstu
+        (`SE_ItemViewItemText`) minus margines, który styl odejmuje przy rysowaniu
+        (`PM_FocusFrameHMargin` + 1 z każdej strony)."""
+        styl = option.widget.style() if option.widget is not None else QApplication.style()
+        prostokat = styl.subElementRect(QStyle.SE_ItemViewItemText, option, option.widget)
+        margines = styl.pixelMetric(QStyle.PM_FocusFrameHMargin, None, option.widget) + 1
+        return elizja_sciezki(option.fontMetrics, option.text,
+                              max(0, prostokat.width() - 2 * margines), glowa)
+
+    def paint(self, painter, option, index):
+        glowa = index.data(_GLOWA_ROLE)
+        if glowa is None:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = self.tekst_w_komorce(opt, glowa)
+        styl = opt.widget.style() if opt.widget is not None else QApplication.style()
+        styl.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+
+def tekst_postepu(etykieta, done, total, pokazana, glowa=0):
+    """Wiersz postępu „N/M · ścieżka” skrócony do szerokości `etykieta` (`elizja_sciezki`).
+    Ścieżka i nazwa pliku to jedno długie słowo bez miejsc łamania, więc zawijana etykieta stanu
+    rozpychała okno do szerokości nazwy (zmierzone: „Napraw nagłówek…” 680 → 730 px przy nazwie
+    komety) - postęp trwa chwilę, pełną ścieżkę niesie lista."""
+    prefiks = f"{done}/{total} · "
+    fm = etykieta.fontMetrics()
+    return prefiks + elizja_sciezki(fm, pokazana or "",
+                                    max(etykieta.width() - fm.horizontalAdvance(prefiks), 0), glowa)
+
+
+def ustaw_sciezke(wiersz, kolumna, path, korzen):
+    """Komórka ścieżki: tekst pod korzeniem archiwum, pełna ścieżka w podpowiedzi i rola głowy dla
+    delegata elizji (`_ElizjaSciezki`). Pusta ścieżka (lokacji nie ma) - pusta komórka."""
+    wiersz.setText(kolumna, sciezka_pod_korzeniem(path, korzen))
+    wiersz.setToolTip(kolumna, path or "")
+    wiersz.setData(kolumna, _GLOWA_ROLE, glowa_sciezki(path, korzen) if path else None)
+
+
 def ma_robote(item):
     """Czy pozycja planu cokolwiek zmienia: plik, karta albo obiekt w bazie."""
     return bool(item.new_path or item.card_op or item.object_change)
@@ -175,17 +377,18 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
     zapisu (`wb_worker.zdanie_wyniku_zapisu`: liczba, blokady, błędy, pominięcia, pierwszy powód)
     plus to, czego zwykły commit nie ma:
 
-      * pozycje `applied` z powodem: przy zapisie karta SPADŁA na drogę atomową (cały plik
-        przepisany - powód z prefiksem rdzenia), każdy inny powód to uwaga (przy cofnięciu np. nowsza
-        decyzja ręki w bazie) - liczba i pierwszy powód, bo „N zmienionych” samo by to ukryło;
+      * pozycje `applied` z powodem: przy zapisie karta SPADŁA na drogę atomową - liczba zdaniem
+        człowieka („cały plik przepisany”, `wb.inplace_fallback`; szczegół rdzenia niesie podpowiedź
+        wiersza, `status_pozycji`), każdy inny powód to uwaga (przy cofnięciu np. nowsza decyzja
+        ręki w bazie) - liczba i pierwszy powód, bo sama liczba zmienionych by to ukryła;
       * katalogi założone i usunięte, katalogi o niepewnej własności (zostają do oka);
       * blokada pliku zmienionego od ostatniego skanu - z receptą (skan w Dostawie, potem ponów);
       * numer przebiegu - po zamknięciu okna jedyny uchwyt do dokończenia albo cofnięcia
         (`horreum object-change finish|undo DB RUN_ID`), jak `commit_id` w oknach kart;
-      * ostrzeżenia rdzenia."""
+      * ostrzeżenia rdzenia.
+    Całość przechodzi przez `czytelny_powod` (plik zajęty, ścieżki z `repr`)."""
     from horreum import writeback          # lazy: `writeback` i `wb_worker` ciągną astropy
-    from horreum.gui.wb_worker import (
-        bez_prefiksu_spadku, spadek_na_droge_atomowa, zdanie_wyniku_zapisu)
+    from horreum.gui.wb_worker import spadek_na_droge_atomowa, zdanie_wyniku_zapisu
     msg = (zdanie_wyniku_zapisu(res, "objchg.res.undone") if cofniecie
            else zdanie_wyniku_zapisu(res, "objchg.res.applied"))
     z_powodem = [fr for fr in res.applied if fr.reason and fr not in res.withheld]
@@ -193,10 +396,9 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
                else [fr for fr in z_powodem if spadek_na_droge_atomowa(fr)])
     uwagi = [fr for fr in z_powodem if fr not in atomowe]
     if cofniecie and res.withheld:                       # AR-82: karta wróciła, zeznanie nie
-        msg += " · " + i18n.t("grid.wb.undo_withheld", n=len(res.withheld))
+        msg += " · " + i18n.t_plural("grid.wb.undo_withheld", len(res.withheld))
     if atomowe:
-        msg += i18n.t("wb.inplace_fallback", n=len(atomowe),
-                      reason=bez_prefiksu_spadku(atomowe[0].reason))
+        msg += i18n.t("wb.inplace_fallback", n=len(atomowe))
     if uwagi:
         msg += i18n.t("objchg.res.notes", n=len(uwagi), note=uwagi[0].reason)
     if res.dirs_created or res.dirs_removed:
@@ -211,7 +413,7 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
     msg += i18n.t("objchg.res.run", run_id=res.run_id)
     for ostrzezenie in res.warnings:
         msg += "\n" + ostrzezenie
-    return msg
+    return czytelny_powod(msg)
 
 
 def ruszyl_cokolwiek(res):
@@ -262,6 +464,11 @@ class ObjectChangeDialog(QDialog):
         self.con = con
         self._frame_ids = list(frame_ids)
         self._target = target
+        # „Uzgodnij” nie zmienia obiektu w bazie, więc nagłówek nazywa obiekty, które klatki już
+        # mają (read-model gridu, sam SQL - bez dysku na wątku okna).
+        self._obiekty = ([] if target is not None else sorted(
+            {r["object_canon"] for r in queries.base_rows(con, self._frame_ids)
+             if r["object_canon"]}))
         self._przebieg = przebieg        # wejście z Porządków: przebieg z bazy, bez planu
         self._zamknij_po_planie = None   # wynik zamknięcia odłożony do końca planu w biegu
         self._now = now_fn
@@ -283,7 +490,7 @@ class ObjectChangeDialog(QDialog):
         # (zapis do dokończenia), `undoing` (cofanie przerwane), `failed` (pozycja z błędem) albo
         # None (przebieg domknięty albo okno liczy nowy plan) - `_opisz_stan`.
         self._stan_przebiegu = None
-        self._status_wiersza = {}    # location_id → ostatni status wiersza (z bazy albo z biegu)
+        self._status_wiersza = {}    # location_id → (status, podpowiedź) - z bazy albo z biegu
         self._w_biegu = 0            # z iloma pozycjami ruszył ostatni bieg zapisu
         # LISTA PO BIEGU MÓWI O WYNIKU, NIE O PLANIE: `_wynik_na_liscie` = lista pokazuje wynik
         # zapisu albo cofnięcia (status per wiersz), a nowy plan liczy się dopiero na prośbę
@@ -338,10 +545,13 @@ class ObjectChangeDialog(QDialog):
         self.items_tree.setRootIsDecorated(False)
         self.items_tree.setUniformRowHeights(True)
         self.items_tree.setSelectionMode(QAbstractItemView.NoSelection)
-        # ELIZJA W ŚRODKU, NIE ZAWIJANIE: o tym, gdzie plik leży, mówi początek drzewa (folder
-        # obiektu), a o tym, który to plik - koniec. Środek (konfiguracja, filtr) jest tym samym
-        # po obu stronach strzałki.
+        # ELIZJA, NIE ZAWIJANIE: o tym, gdzie plik leży, mówi folder obiektu, a o tym, który to
+        # plik - początek nazwy (człon obiektu, data z godziną). Kolumny ścieżek skraca delegat
+        # rozróżniający (`elizja_sciezki`); reszta komórek zwykłą elizją w środku.
         self.items_tree.setTextElideMode(Qt.ElideMiddle)
+        self._elizja = _ElizjaSciezki(self)
+        for kolumna in (_COL_STARA, _COL_NOWA):
+            self.items_tree.setItemDelegateForColumn(kolumna, self._elizja)
         hdr = self.items_tree.header()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(_COL_STARA, QHeaderView.Stretch)
@@ -366,6 +576,7 @@ class ObjectChangeDialog(QDialog):
         self.skipped_tree.setUniformRowHeights(True)
         self.skipped_tree.setSelectionMode(QAbstractItemView.NoSelection)
         self.skipped_tree.setTextElideMode(Qt.ElideMiddle)
+        self.skipped_tree.setItemDelegateForColumn(_COL_POWOD, self._elizja)   # ścieżki pod powodem
         shdr = self.skipped_tree.header()
         shdr.setStretchLastSection(False)
         shdr.setSectionResizeMode(_COL_POWOD, QHeaderView.Stretch)
@@ -428,14 +639,20 @@ class ObjectChangeDialog(QDialog):
         przebieg z Porządków ma nagłówek „Przerwany przebieg…” i opis drogi wyjścia ze swojego
         stanu (`staged` - „Dokończ” albo „Cofnij”, `undoing` - „Cofnij” dokończy cofanie, `failed` -
         „Cofnij” cofa cały przebieg); przebieg domknięty albo nowy plan na tych klatkach - zwykły
-        nagłówek gestu. Wołane z `_sync_akcji`, więc nadąża za każdym biegiem i planem."""
+        nagłówek gestu. Wołane z `_sync_akcji`, więc nadąża za każdym biegiem i planem.
+
+        Nagłówek „Uzgodnij” NAZYWA obiekty klatek (`lista_obiektow`) - bez tego mówił „z obiektem,
+        który już mają”, nie mówiąc z jakim. Numer przebiegu (32 znaki) nie stoi w nagłówku: niesie
+        go wiersz stanu pod listą, gdzie da się go zaznaczyć i skopiować (uchwyt CLI)."""
         n = len(self._frame_ids)
+        obiekty = (i18n.t_plural("objchg.head_objects", len(self._obiekty),
+                                 objects=lista_obiektow(self._obiekty))
+                   if self._target is None and self._obiekty else "")
         if self._stan_przebiegu is not None:
-            run_id = self._przebieg["run_id"]
-            head = (i18n.t_plural("objchg.head_resume_change", n, run_id=run_id,
-                                  canon=self._target.canon, card=self._target.card_form)
+            head = (i18n.t_plural("objchg.head_resume_change", n, canon=self._target.canon,
+                                  card=self._target.card_form)
                     if self._target is not None
-                    else i18n.t_plural("objchg.head_resume_align", n, run_id=run_id))
+                    else i18n.t_plural("objchg.head_resume_align", n) + obiekty)
             opis = i18n.t({"staged": "objchg.explain_resume",
                            "undoing": "objchg.explain_resume_undoing",
                            "failed": "objchg.explain_resume_failed"}[self._stan_przebiegu])
@@ -444,7 +661,7 @@ class ObjectChangeDialog(QDialog):
                                  card=self._target.card_form)
             opis = i18n.t("objchg.explain_change")
         else:
-            head = i18n.t_plural("objchg.head_align", n)
+            head = i18n.t_plural("objchg.head_align", n) + obiekty
             opis = i18n.t("objchg.explain_align")
         self.head.setText(head)
         self.opis.setText(opis)
@@ -509,8 +726,15 @@ class ObjectChangeDialog(QDialog):
         if gen != self._gen:
             return
         self.counts.setText("")
-        self.error.setText(i18n.t("objchg.err.plan", msg=msg))
+        self.error.setText(i18n.t("objchg.err.plan", msg=czytelny_powod(msg)))
         self._sync_akcji()
+
+    def _kolumna_po_zmianie(self, sciezki):
+        """„Po zmianie” bez ani jednej ścieżki (same „bez przeniesienia” - zmiana karty i bazy
+        w miejscu) bierze szerokość swojej treści, a resztę dostaje „Plik dziś”; inaczej obie
+        kolumny ścieżek dzielą szerokość po równo. Po biegu „Jest” zawsze niesie ścieżki."""
+        self.items_tree.header().setSectionResizeMode(
+            _COL_NOWA, QHeaderView.Stretch if sciezki else QHeaderView.ResizeToContents)
 
     def _wypelnij(self):
         """Plan → lista pozycji, ostrzeżenia, pominięcia (pogrupowane po powodzie) i liczby."""
@@ -518,17 +742,19 @@ class ObjectChangeDialog(QDialog):
         self.items_tree.clear()
         self._naglowki(po_biegu=False)
         self.items_tree.setColumnHidden(_COL_STATUS, True)
+        self._kolumna_po_zmianie(any(it.new_path for it in plan.items))
         self._wiersze = {}
         self._status_wiersza = {}       # nowy plan: wiersze bez historii biegu
         self._jest = {it.location_id: it.old_path for it in plan.items}
         for it in plan.items:
-            stara = sciezka_pod_korzeniem(it.old_path, self._korzen)
-            nowa = (sciezka_pod_korzeniem(it.new_path, self._korzen) if it.new_path
-                    else i18n.t("objchg.no_move"))
-            w = QTreeWidgetItem([stara, nowa, self._tekst_karty(it.card_op, it.card_old,
-                                                                it.card_new, it.old_path)])
-            w.setToolTip(_COL_STARA, it.old_path)
-            w.setToolTip(_COL_NOWA, it.new_path or i18n.t("objchg.no_move"))
+            w = QTreeWidgetItem(["", "", self._tekst_karty(it.card_op, it.card_old, it.card_new,
+                                                           it.old_path)])
+            ustaw_sciezke(w, _COL_STARA, it.old_path, self._korzen)
+            if it.new_path:
+                ustaw_sciezke(w, _COL_NOWA, it.new_path, self._korzen)
+            else:
+                w.setText(_COL_NOWA, i18n.t("objchg.no_move"))
+                w.setToolTip(_COL_NOWA, i18n.t("objchg.no_move"))
             if it.mkdirs:
                 w.setToolTip(_COL_NOWA, (it.new_path or "") + "\n"
                              + i18n.t("objchg.mkdirs_tip", dirs="\n".join(it.mkdirs)))
@@ -545,15 +771,15 @@ class ObjectChangeDialog(QDialog):
         # Pozycje „bez zmian” planer oddaje jako pominięcia, ale odmową nie są - stoją w liczbach
         # („bez zmian: N”), a lista pominięć niesie wyłącznie to, czego gest NIE zrobi z powodu.
         pominiete = [s for s in plan.skipped if not bez_zmian(s)]
-        for s in pominiete:
-            grupy.setdefault(s.reason, []).append(s)
+        for s in pominiete:                          # zdanie w języku UI (kod pominięcia)
+            grupy.setdefault(tekst_pominiecia(s.code, s.params, s.reason), []).append(s)
         # Najliczniejszy powód na górze - 300 plików z jednym powodem to jeden wiersz, nie 300.
         for powod, lista in sorted(grupy.items(), key=lambda kv: (-len(kv[1]), kv[0])):
             g = QTreeWidgetItem([powod, str(len(lista))])
             g.setToolTip(_COL_POWOD, powod)
             for s in lista:
-                d = QTreeWidgetItem([sciezka_pod_korzeniem(s.path, self._korzen), ""])
-                d.setToolTip(_COL_POWOD, s.path)
+                d = QTreeWidgetItem(["", ""])
+                ustaw_sciezke(d, _COL_POWOD, s.path, self._korzen)
                 g.addChild(d)
             self.skipped_tree.addTopLevelItem(g)
         self.skipped_head.setText(i18n.t_plural("objchg.skipped_head", len(pominiete)))
@@ -584,22 +810,21 @@ class ObjectChangeDialog(QDialog):
         self._korzen = resolver.library_root_from_db(self.con)
         self._naglowki(po_biegu=True)
         self.items_tree.setColumnHidden(_COL_STATUS, False)
+        self._kolumna_po_zmianie(True)
         for it in przebieg["items"]:
             if it["status"] == "pending" and it["new_path"]:
-                status = i18n.t("objchg.st.pending_to",
-                                path=sciezka_pod_korzeniem(it["new_path"], self._korzen))
+                stan = i18n.t("objchg.st.pending_to",
+                              path=sciezka_pod_korzeniem(it["new_path"], self._korzen))
             else:
-                status = i18n.t(_STATUS_POZYCJI[it["status"]])
-            if it["reason"]:
-                status += i18n.t("objchg.st.reason", reason=it["reason"])
-            self._status_wiersza[it["location_id"]] = status
+                stan = i18n.t(_STATUS_POZYCJI[it["status"]])
+            status, tip = status_pozycji(stan, it["reason"], z_bazy=True)
+            self._status_wiersza[it["location_id"]] = (status, tip)
             karta = (self._tekst_karty(it["card_op"], it["card_old"], it["card_new"],
                                        it["old_path"]) if it["card_op"] else "")
-            w = QTreeWidgetItem([sciezka_pod_korzeniem(it["old_path"], self._korzen),
-                                 sciezka_pod_korzeniem(it["path"], self._korzen), karta, status])
-            w.setToolTip(_COL_STARA, it["old_path"])
-            w.setToolTip(_COL_NOWA, it["path"])
-            w.setToolTip(_COL_STATUS, status)
+            w = QTreeWidgetItem(["", "", karta, status])
+            ustaw_sciezke(w, _COL_STARA, it["old_path"], self._korzen)
+            ustaw_sciezke(w, _COL_NOWA, it["path"], self._korzen)
+            w.setToolTip(_COL_STATUS, tip)
             w.setData(_COL_STARA, Qt.UserRole, it["frame_id"])
             self.items_tree.addTopLevelItem(w)
             self._wiersze[it["location_id"]] = w
@@ -631,24 +856,22 @@ class ObjectChangeDialog(QDialog):
             ("withheld", [] if cofniecie else res.withheld)) for fr in lista}
         self._naglowki(po_biegu=True)
         self.items_tree.setColumnHidden(_COL_STATUS, False)
+        self._kolumna_po_zmianie(True)
         for lid, w in self._wiersze.items():
             bylo = self._jest.get(lid, "")
             klucz, fr = wyniki.get(lid, (None, None))
             jest = (fr.path or bylo) if fr is not None else bylo
             self._jest[lid] = jest
             if klucz:
-                status = i18n.t(statusy[klucz])
-                if fr.reason:
-                    status += i18n.t("objchg.st.reason", reason=fr.reason)
+                status, tip = status_pozycji(i18n.t(statusy[klucz]), fr.reason, fr.code)
             else:
-                status = self._status_wiersza.get(lid) or i18n.t("objchg.st.untouched")
-            self._status_wiersza[lid] = status
-            w.setText(_COL_STARA, sciezka_pod_korzeniem(bylo, self._korzen))
-            w.setToolTip(_COL_STARA, bylo)
-            w.setText(_COL_NOWA, sciezka_pod_korzeniem(jest, self._korzen))
-            w.setToolTip(_COL_NOWA, jest)
+                nietkniety = i18n.t("objchg.st.untouched")
+                status, tip = self._status_wiersza.get(lid) or (nietkniety, nietkniety)
+            self._status_wiersza[lid] = (status, tip)
+            ustaw_sciezke(w, _COL_STARA, bylo, self._korzen)
+            ustaw_sciezke(w, _COL_NOWA, jest, self._korzen)
             w.setText(_COL_STATUS, status)
-            w.setToolTip(_COL_STATUS, status)
+            w.setToolTip(_COL_STATUS, tip)
         self.counts.setVisible(False)
         pominiete = sum(g.childCount() for g in (self.skipped_tree.topLevelItem(i)
                                                  for i in range(self.skipped_tree.topLevelItemCount())))
@@ -787,7 +1010,9 @@ class ObjectChangeDialog(QDialog):
         if self.bar.maximum() != total:
             self.bar.setRange(0, total)
         self.bar.setValue(done)
-        self.status.setText(f"{done}/{total} · {sciezka_pod_korzeniem(path, self._korzen)}")
+        self.status.setText(tekst_postepu(self.status, done, total,
+                                          sciezka_pod_korzeniem(path, self._korzen),
+                                          glowa_sciezki(path, self._korzen)))
 
     def _after_commit(self, op, res):
         """Wynik przebiegu: lista z wynikiem per wiersz, zdanie, „Cofnij”, gdy cokolwiek się
@@ -835,7 +1060,7 @@ class ObjectChangeDialog(QDialog):
             else:
                 self._pozostalo, self._dokonczenie = 0, False
                 self._stan_przebiegu = "undoing"
-        self.error.setText(i18n.t("grid.wb.error", msg=msg)
+        self.error.setText(i18n.t("grid.wb.error", msg=czytelny_powod(msg))
                            + (i18n.t("objchg.res.run", run_id=self._run_id) if self._run_id else ""))
         self._sync_akcji()
         self.changed.emit()
@@ -887,3 +1112,15 @@ class ObjectChangeDialog(QDialog):
             self.hide()
             return
         super().done(r)
+
+    def exec(self):
+        """Modalny bieg okna i jego KASACJA. Każde wejście buduje nowe okno z rodzicem-gospodarzem,
+        więc bez kasacji każde zamknięte okno zostawało dzieckiem gospodarza (z wątkami i uchwytem
+        zapisu) do końca sesji. `deleteLater`, nie `WA_DeleteOnClose`: gospodarz czyta okno PO
+        `exec` (`summary`, zdanie stanu), a odroczona kasacja przychodzi dopiero w pętli zdarzeń
+        gospodarza, po jego slocie. `exec` wraca wyłącznie przez `done` po biegu (`refuse_close`,
+        zamknięcie po planie), więc kasowane okno nie ma już żywego wątku."""
+        try:
+            return super().exec()
+        finally:
+            self.deleteLater()

@@ -1529,6 +1529,25 @@ def test_kubelek_propozycji_ma_wlasny_wiersz_i_akcje(sciezka):
     assert v.confirm_path_btn.isEnabled()
 
 
+def test_wiersz_propozycji_ODMIENIA_nazwy_i_klatki(sciezka):
+    """„1 nazw / 1 klatek" (paczki D/E) - człon drugi wiersza propozycji szedł jedną formą. Jedna nazwa
+    i trzy klatki mówią „1 nazwa / 3 klatki", w EN „1 name / 3 frames".
+
+    Falsyfikator: wróć w `_load_review` do `i18n.t("object.path_proposed_count", …)` → człon
+    renderuje surowy klucz."""
+    v, con = sciezka
+    r = _select_review_tag(v, "path_proposals")
+    assert v.review.item(r).data(SECONDARY).startswith("1 nazwa / 3 klatki"), \
+        v.review.item(r).data(SECONDARY)
+    i18n.set_lang("en")
+    try:
+        v.refresh()
+        r = _select_review_tag(v, "path_proposals")
+        assert v.review.item(r).data(SECONDARY).startswith("1 name / 3 frames")
+    finally:
+        i18n.set_lang("pl")
+
+
 def test_okno_grupuje_PO_NAZWIE_i_oznacza_nowa(sciezka):
     """3 klatki ⇒ JEDNA pozycja (jednostką przeglądu jest NAZWA). Falsyfikator znacznika: `NGC6960`
     przy ISTNIEJĄCYCH `NGC6992`/`Veil` jest NOWY — to jeden obiekt nieba w trzech pozycjach facetu
@@ -2361,6 +2380,52 @@ def test_zatwierdzenie_odmienia_liczbe_nazw(sciezka):
     assert dlg.status.text().startswith("Zatwierdzono 2 nazwy · "), dlg.status.text()
 
 
+@pytest.mark.parametrize("n, pl, en", [
+    (1, "1 nazwa · 1 klatka", "1 name · 1 frame"),
+    (3, "3 nazwy · 3 klatki", "3 names · 3 frames"),
+    (5, "5 nazw · 5 klatek", "5 names · 5 frames"),
+    (12, "12 nazw · 12 klatek", "12 names · 12 frames"),
+    (22, "22 nazwy · 22 klatki", "22 names · 22 frames")])
+def test_naglowek_okna_sciezki_odmienia_nazwy_i_klatki(n, pl, en):
+    """„1 nazw · 1 klatek” w nagłówku i wierszu pozycji okna „Zatwierdź nazwy ze ścieżki” - liczby
+    przez `t_plural` (`path.head_count`, `grid.frames`); EN bez polskiego cudzysłowu."""
+    for lang, oczek in (("pl", pl), ("en", en)):
+        i18n.set_lang(lang)
+        glowa = i18n.t("path.head", count=i18n.t_plural(
+            "path.head_count", n, frames=i18n.t_plural("grid.frames", n)))
+        assert glowa.startswith(oczek + ". "), glowa
+        pozycja = i18n.t("path.item", canon="NGC7000", frames=i18n.t_plural("grid.frames", n))
+        assert pozycja.endswith(oczek.split(" · ")[1]), pozycja
+    i18n.set_lang("en")
+    assert "„" not in i18n.t("path.head", count="x")
+
+
+@pytest.mark.parametrize("n, pl, en", [
+    (1, "przypisano 1 z 1 klatki", "assigned 1 of 1 frame"),
+    (4, "przypisano 1 z 4 klatek", "assigned 1 of 4 frames"),
+    (22, "przypisano 1 z 22 klatek", "assigned 1 of 22 frames")])
+def test_zdanie_okna_sciezki_odmienia_dopelniacz(n, pl, en):
+    for lang, oczek in (("pl", pl), ("en", en)):
+        i18n.set_lang(lang)
+        zdanie = i18n.t_plural("path.done", 1, assigned=1,
+                               of_total=i18n.t_plural("path.of_total", n))
+        assert zdanie.endswith(oczek), zdanie
+
+
+def test_okno_sciezki_mowi_odmieniona_liczba_na_PRAWDZIWYCH_pozycjach(sciezka):
+    """Okno składa nagłówek, wiersz pozycji i zdanie wyniku z odmienionych członów: jedna nazwa
+    z jedną klatką to „1 nazwa · 1 klatka”, wiersz „LMC  ·  1 klatka”, wynik „z 1 klatki”."""
+    v, con = sciezka
+    lmc = next(p for p in resolver.path_proposals(con) if p.canon == "LMC")
+    dlg = ConfirmPathObjectsDialog(con, proposals=[_pozycja(lmc, "LMC", (1,))],
+                                   now_fn=lambda: NOW_S2, parent=v)
+    from PySide6.QtWidgets import QCheckBox, QLabel
+    assert any(w.text().startswith("1 nazwa · 1 klatka. ") for w in dlg.findChildren(QLabel))
+    assert [c.text() for c in dlg.findChildren(QCheckBox)] == ["LMC  ·  1 klatka"]
+    dlg._on_confirm()
+    assert "przypisano 1 z 1 klatki" in dlg.status.text(), dlg.status.text()
+
+
 def test_nadanie_z_kolejki_mowi_ROZBICIEM_per_fakt(view, monkeypatch):
     """R-S2b-13: bliźniak zdania Zbiorów po nadaniu z kolejki spłaszczał pominięcia do
     „(N pominięte - zajęte między dialogiem a zapisem)", choć klinga oddaje rozbicie per fakt -
@@ -2705,7 +2770,9 @@ def test_szukajka_oznaczenie_katalogowe_DOKLADNIE_reszta_podciagiem(aliasy, fraz
 @pytest.mark.parametrize("wpisane, zdanie", [
     ("M 106", "M 106 → NGC4258 · w nagłówku: NGC 4258"),
     ("M106", "M106 → NGC4258 · w nagłówku: NGC 4258"),
-    ("Heart Nebula", "Heart Nebula → IC1805 · w nagłówku: IC 1805"),
+    # IC1805 nie ma w bazie fixture'a - zapis założy obiekt i zdanie mówi to przed kliknięciem
+    ("Heart Nebula", "Heart Nebula → IC1805 · w nagłówku: IC 1805 · nowy obiekt: zapis założy go "
+                     "w bazie"),
     ("Large Magellanic Cloud", "Large Magellanic Cloud → LMC · w nagłówku: LMC"),
     ("Sh2 131", "Sh2 131 → Sh2-131 · w nagłówku: Sh2-131"),
 ])

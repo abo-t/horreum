@@ -10,6 +10,7 @@ CZYTA (`queries`, `object_change`, `repo`, `writeback` - okno i uchwyt wołają 
 
 Qt offscreen; okno z `off_thread=False` liczy plan i pisze inline (ten sam rdzeń, bez QThread)."""
 import dataclasses
+import os
 import time
 
 import pytest
@@ -246,18 +247,20 @@ def test_zdanie_wyniku_liczy_spadek_UWAGI_i_numer_przebiegu():
                                code=writeback.CODE_INPLACE_FALLBACK),
         _fr(3, "applied", "zapis potwierdzony z dysku")], blocked=[], failed=[], skipped=[])
     z = zdanie_wyniku_zmiany(res)
-    assert i18n.t("wb.inplace_fallback", n=1, reason="operacja add/str na OBJECT") in z
+    # Spadek mówi zdaniem człowieka, bez żargonu rdzenia (szczegół niesie podpowiedź wiersza).
+    assert i18n.t("wb.inplace_fallback", n=1) in z
+    assert "operacja add/str" not in z and prefiks not in z
     assert i18n.t("objchg.res.notes", n=1, note="zapis potwierdzony z dysku") in z
     bez_kodu = zdanie_wyniku_zmiany(_Wynik("p", applied=[_fr(2, "applied", f"{prefiks}: x")],
                                            blocked=[], failed=[], skipped=[]))
-    assert "drogą atomową" not in bez_kodu and i18n.t("objchg.res.notes", n=1,
-                                                      note=f"{prefiks}: x") in bez_kodu
+    assert i18n.t("wb.inplace_fallback", n=1) not in bez_kodu and i18n.t(
+        "objchg.res.notes", n=1, note=f"{prefiks}: x") in bez_kodu
     assert i18n.t("objchg.res.run", run_id="przebieg-7") in z
     cof = zdanie_wyniku_zmiany(_Wynik("przebieg-7", applied=[
         _fr(1, "restored", "baza: nowsza decyzja")], blocked=[], failed=[], skipped=[]),
         cofniecie=True)
     assert i18n.t("objchg.res.notes", n=1, note="baza: nowsza decyzja") in cof
-    assert "drogą atomową" not in cof
+    assert i18n.t("wb.inplace_fallback", n=1) not in cof
 
 
 def test_blokada_pliku_zmienionego_od_skanu_MA_recepte(tmp_path):
@@ -836,10 +839,12 @@ def test_zdanie_drogi_zapisu_mowi_TYLKO_o_spadku_na_atomowa():
                                      "do zapisania")
     assert zdanie_drogi_zapisu(writeback.CommitResult("r", 3, [a, potwierdzony], [], [], [],
                                                       in_place=[a])) == ""
-    # zwykły commit (atomowy z założenia) nie dostaje członu o „spadku”
-    assert "karta się nie mieści" not in zdanie_commitu_kart(spadek, "grid.wb.applied")[0]
-    assert "karta się nie mieści" in zdanie_commitu_kart(spadek, "grid.wb.applied",
-                                                         w_miejscu=True)[0]
+    # zwykły commit (atomowy z założenia) nie dostaje członu o „spadku”; zapis w miejscu mówi
+    # o spadku zdaniem człowieka - szczegół rdzenia nie wchodzi do zdania (podpowiedź okna)
+    czlon = i18n.t("wb.inplace_fallback", n=1)
+    assert czlon not in zdanie_commitu_kart(spadek, "grid.wb.applied")[0]
+    w_miejscu = zdanie_commitu_kart(spadek, "grid.wb.applied", w_miejscu=True)[0]
+    assert czlon in w_miejscu and "karta się nie mieści" not in w_miejscu
 
 
 # ═══════════════════════════════════════════════ pasek Zbiorów: „Zmień obiekt…” i `changeable`
@@ -1216,8 +1221,10 @@ def test_przerwany_przebieg_z_bazy_lista_Dokoncz_potem_Cofnij_bajty_jak_przed(qa
 
     dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
     assert dlg.frame_ids == (fa, fb)
-    assert dlg.head.text() == i18n.t_plural("objchg.head_resume_change", 2, run_id=plan.run_id,
-                                            canon="NGC2632", card="NGC 2632")
+    assert dlg.head.text() == i18n.t_plural("objchg.head_resume_change", 2, canon="NGC2632",
+                                            card="NGC 2632")
+    # 32-znakowy numer przebiegu nie stoi w nagłówku - niesie go wiersz stanu (do skopiowania)
+    assert plan.run_id not in dlg.head.text() and plan.run_id in dlg.status.text()
     assert dlg.opis.text() == i18n.t("objchg.explain_resume")
     nowe = a.root / r"LIGHTS\NGC2632\RC6\OSC"            # baza bez korzenia: pełne ścieżki
 
@@ -1366,3 +1373,620 @@ def test_Dom_mowi_o_przeniesieniu_do_folderu_obiektu_gdy_relokacja_ma_powod_gest
     # read-model bez powodów (sprzed fali) - zdanie jak dotąd
     assert zdanie_gestu({"verbs": {"location.renamed": 2}, "n": 2}) == \
         i18n.t_plural("home.gest.location_renamed", 2)
+
+
+# ═══════════════════════════════════════════════ wybierak „Zmień obiekt…”: pusty wynik szukania
+
+def _obiekt_z_klatka(con, canon, sha):
+    """Obiekt biblioteki z jedną klatką light (lista wybieraka = `library_objects`, `JOIN frame`)."""
+    from horreum.resolve.catalog import catalog_label
+    oid, _ = repo.upsert_object(con, canon=canon, catalog=catalog_label(canon), kind="deep_sky",
+                                now=NOW)
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits", camera_id=None,
+                               now=NOW)
+    repo.assign_object(con, frame_id=fid, object_id=oid, object_source="header", now=NOW)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wybierak_pusty_wynik_PROWADZI_do_pola_nazwy_i_mowi_ze_zalozy_obiekt(qapp, con, lang):
+    """Wizytacja bv: „M 44” (NGC2632 - biblioteka go nie ma) dawało listę „(żaden obiekt nie
+    pasuje…)” i milczące pole nazwy niżej - Zdzin utknął. Fraza bez trafień przechodzi do pola
+    nazwy, zdanie pod listą mówi gdzie, zdanie na żywo - że zapis ZAŁOŻY obiekt, a akcja się
+    zapala. Fraza znów z trafieniami oddaje pole; wpisu usera okno nie nadpisuje (mówi, gdzie
+    wpisać). Pisanie w polu - prawdziwymi klawiszami (`textEdited`)."""
+    from PySide6.QtTest import QTest
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    i18n.set_lang(lang)
+    _obiekt_z_klatka(con, "NGC3034", "sha-w-1")
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2)
+    assert dlg.search_hint.isHidden()
+    dlg.search.setText("M 44")
+    assert dlg.combo.count() == 1 and dlg.combo.itemData(0) is None       # lista pusta
+    assert dlg.designation.text() == "M 44"
+    assert not dlg.search_hint.isHidden()
+    assert dlg.search_hint.text() == i18n.t("assign.search_moved")
+    assert dlg.canon_preview.text() == (
+        i18n.t("assign.canon_preview", text="M 44", canon="NGC2632", header="NGC 2632")
+        + i18n.t("assign.creates_object"))
+    assert dlg.accept_btn.isEnabled()
+    dlg._validate_and_accept()
+    assert dlg.selected[0] == "NGC2632"
+
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2)
+    dlg.search.setText("M 44")
+    dlg.search.setText("NGC 3034")                     # znów trafia - pole oddane
+    assert dlg.designation.text() == "" and dlg.search_hint.isHidden()
+    assert dlg.combo.currentData()[1] == "NGC3034"    # jedno trafienie = preselekcja (AR-98)
+    QTest.keyClicks(dlg.designation, "NGC 3034")       # obiekt ISTNIEJĄCY - bez noty o założeniu
+    assert dlg.canon_preview.text() == i18n.t("assign.canon_preview", text="NGC 3034",
+                                              canon="NGC3034", header="NGC 3034")
+    dlg.search.setText("M 44")                         # wpis usera zostaje
+    assert dlg.designation.text() == "NGC 3034"
+    assert dlg.search_hint.text() == i18n.t("assign.search_to_field")
+    dlg.reject()
+
+
+# ═══════════════════════════════════════════════ elizja listy: rozróżnialna część zostaje
+
+# Realne ścieżki z kopii żywej bazy (v36, 2026-10-13): mediana długości lightów pod LIGHTS to 99
+# znaków, maksimum 135 (kometa). Pary różnią się sekundą w nazwie (Cr464) albo minutą (kometa).
+_CR464 = [r"R:\ASTRO_\LIGHTS\Cr464\76EDPH_2600MM\CLS\Cr464_20230507_224301_LIGHT_CLS_5s_FLATGRP_"
+          r"202305070_.fits",
+          r"R:\ASTRO_\LIGHTS\Cr464\76EDPH_2600MM\CLS\Cr464_20230507_224307_LIGHT_CLS_5s_FLATGRP_"
+          r"202305070_.fits"]
+_KOMETA = [r"R:\ASTRO_\LIGHTS\_COMETS\C2023A3_Tsuchinshan-ATLAS\ASI2600MM\C2023A3_Tsuchinshan-"
+           r"ATLAS_20241025_164324_LIGHT_R_60s_FLATGRP_NOFLAT_.fits",
+           r"R:\ASTRO_\LIGHTS\_COMETS\C2023A3_Tsuchinshan-ATLAS\ASI2600MM\C2023A3_Tsuchinshan-"
+           r"ATLAS_20241025_164435_LIGHT_R_60s_FLATGRP_NOFLAT_.fits"]
+_APARAT = [r"R:\ASTRO_\LIGHTS\_COMETS\21P_Giacobini-Zinner\NOCONFIG\20181011_dsc3322.dng",
+           r"R:\ASTRO_\LIGHTS\_COMETS\21P_Giacobini-Zinner\NOCONFIG\20181011_dsc3324.dng"]
+
+
+def _pokazane(paths):
+    from horreum.gui.object_change_dialog import glowa_sciezki, sciezka_pod_korzeniem
+    return [(sciezka_pod_korzeniem(p, KORZEN), glowa_sciezki(p, KORZEN)) for p in paths]
+
+
+def test_elizja_zostawia_czlon_obiektu_i_czas_z_nazwy_a_srodek_ginie(qapp):
+    """Wizytacja bs/bt: `Qt.ElideMiddle` dawało identyczne wiersze („Cr464…202305070_.fits”) i ciął
+    człon obiektu („NGC30…GHT_OSC”). Elizja rozróżniająca na szerokości, w której mieści się
+    początek nazwy do sekundy: wiersze różne, „Plik dziś” różny od „Po zmianie”, człon obiektu
+    widać. Falsyfikator: ta sama szerokość z `ElideMiddle` - wiersze identyczne."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFontMetrics
+    from horreum.gui.object_change_dialog import elizja_sciezki
+    fm = QFontMetrics(QApplication.font())
+    (a, ga), (b, gb) = _pokazane(_CR464)
+    assert a[:ga] == r"LIGHTS\Cr464"                   # głowa = kategoria + folder obiektu
+    szer = fm.horizontalAdvance("…\\Cr464_20230507_224301…") + 2
+    assert fm.elidedText(a, Qt.ElideMiddle, szer) == fm.elidedText(b, Qt.ElideMiddle, szer)
+    ea, eb = elizja_sciezki(fm, a, szer, ga), elizja_sciezki(fm, b, szer, gb)
+    assert ea != eb and "224301" in ea and "224307" in eb
+    assert fm.horizontalAdvance(ea) <= szer and fm.horizontalAdvance(eb) <= szer
+    nowa = a.replace("Cr464", "NGC2632")
+    from horreum.gui.object_change_dialog import glowa_sciezki
+    en = elizja_sciezki(fm, nowa, szer, glowa_sciezki(KORZEN + "\\" + nowa, KORZEN))
+    assert en != ea and "NGC2632" in en and "Cr464" in ea
+    # szerzej: głowa wraca do kadru, ginie środek drzewa (zestaw, filtr)
+    szer = fm.horizontalAdvance(a[:ga] + "\\…\\" + a.rsplit("\\", 1)[1]) + 2
+    ea = elizja_sciezki(fm, a, szer, ga)
+    assert ea.startswith(r"LIGHTS\Cr464" + "\\") and ea.endswith(a.rsplit("\\", 1)[1])
+    assert "76EDPH" not in ea
+    # kometa (najdłuższa ścieżka archiwum): pod kategorią, minuta w nazwie
+    (k1, g1), (k2, g2) = _pokazane(_KOMETA)
+    assert k1[:g1] == r"LIGHTS\_COMETS\C2023A3_Tsuchinshan-ATLAS"
+    szer = fm.horizontalAdvance("…\\C2023A3_Tsuchinshan-ATLAS_20241025_1643…") + 2
+    assert elizja_sciezki(fm, k1, szer, g1) != elizja_sciezki(fm, k2, szer, g2)
+    # nazwa z aparatu nie niesie obiektu - głowa zostaje w kadrze
+    (d1, h1), (d2, h2) = _pokazane(_APARAT)
+    szer = fm.horizontalAdvance(d1[:h1] + "\\…\\20181011_dsc3322.dng") + 2
+    e1, e2 = elizja_sciezki(fm, d1, szer, h1), elizja_sciezki(fm, d2, szer, h2)
+    assert e1 != e2 and "21P_Giacobini-Zinner" in e1 and "dsc3322" in e1
+    # węziej: kategoria ustępuje, folder obiektu zostaje (zrzut natywny 760 px gubił go cały)
+    szer = fm.horizontalAdvance("…\\21P_Giacobini-Zinner\\…\\20181011_dsc3322.dng") + 2
+    e1 = elizja_sciezki(fm, d1, szer, h1)
+    assert e1.startswith("…\\21P_Giacobini-Zinner\\") and "LIGHTS" not in e1 and "dsc3322" in e1
+    # mieści się - bez zmian
+    assert elizja_sciezki(fm, a, fm.horizontalAdvance(a) + 1, ga) == a
+
+
+def test_lista_przy_760px_rozroznia_wiersze_a_Po_zmianie_bez_przeniesien_jest_waska(
+        qapp, con, rdzen):
+    """Okno 760 px na realnych ścieżkach: tekst malowany przez delegata (`tekst_w_komorce`
+    w prostokącie komórki) jest RÓŻNY w wierszach różniących się sekundą (Cr464, mediana długości
+    archiwum) i między kolumnami każdego wiersza, a człon obiektu widać w obu kolumnach (także
+    w najdłuższej ścieżce archiwum - kometa). Plan bez ani jednego przeniesienia („bez
+    przeniesienia” w każdym wierszu) nie oddaje połowy szerokości kolumnie bez treści - „Po
+    zmianie” bierze szerokość swojej treści."""
+    from PySide6.QtWidgets import QHeaderView, QStyleOptionViewItem
+    from horreum.gui.object_change_dialog import _GLOWA_ROLE, _COL_NOWA, _COL_STARA
+    stare = _CR464 + _KOMETA
+    nowe = ([p.replace("\\Cr464\\", "\\NGC2632\\").replace("\\Cr464_", "\\NGC2632_")
+             for p in _CR464]
+            + [p.replace("\\_COMETS\\C2023A3_Tsuchinshan-ATLAS\\", "\\NGC2632\\")
+               .replace("\\C2023A3_Tsuchinshan-ATLAS_", "\\NGC2632_") for p in _KOMETA])
+    items = tuple(dataclasses.replace(_pozycja(i + 1), old_path=s, new_path=n, mkdirs=())
+                  for i, (s, n) in enumerate(zip(stare, nowe)))
+    rdzen.plany = [_plan(items=items, skipped=())]
+    dlg = _okno(qapp, con, frame_ids=range(1, 5))
+    # 760 px wizytacji natywnej = 127 średnich znaków Segoe UI 9 pt (zmierzone 2026-10-13: średni
+    # znak 6 px natywnie, 12 px offscreen) - okno w jednostkach fontu, nie w pikselach.
+    dlg.resize(127 * dlg.fontMetrics().averageCharWidth(), 640)
+    dlg.show()
+    QCoreApplication.processEvents()
+    tree = dlg.items_tree
+
+    def malowane(wiersz, kolumna):
+        index = tree.model().index(wiersz, kolumna)
+        opt = QStyleOptionViewItem()
+        opt.initFrom(tree)
+        dlg._elizja.initStyleOption(opt, index)
+        opt.rect = tree.visualRect(index)
+        return dlg._elizja.tekst_w_komorce(opt, index.data(_GLOWA_ROLE))
+
+    teksty = [[malowane(r, k) for k in (_COL_STARA, _COL_NOWA)] for r in range(4)]
+    assert all(t != tree.topLevelItem(r).text(k)              # szerokość realnie wymusiła elizję
+               for r, w in enumerate(teksty) for k, t in zip((_COL_STARA, _COL_NOWA), w))
+    (s1, n1), (s2, n2), (k1, kn1), (k2, kn2) = teksty
+    assert len({s1, n1, s2, n2}) == 4, teksty                  # wiersze i kolumny różne
+    assert "Cr464" in s1 and "NGC2632" in n1 and all(s != n for s, n in teksty)
+    assert "C2023A3" in k1 and "C2023A3" in k2 and "NGC2632" in kn1 and "NGC2632" in kn2
+    dlg.reject()
+    rdzen.plany = [_plan(items=tuple(dataclasses.replace(it, new_path=None) for it in items),
+                         skipped=())]
+    dlg = _okno(qapp, con, frame_ids=range(1, 5))
+    hdr = dlg.items_tree.header()
+    assert hdr.sectionResizeMode(_COL_NOWA) == QHeaderView.ResizeToContents
+    assert hdr.sectionResizeMode(_COL_STARA) == QHeaderView.Stretch
+    dlg.reject()
+
+
+# ═══════════════════════════════════════════════ okno przebiegu: jeden język człowieka
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_status_spadku_mowi_JEZYKIEM_CZLOWIEKA_a_szczegol_rdzenia_w_podpowiedzi(
+        qapp, con, rdzen, lang):
+    """Wizytacja bt: status wiersza mówił żargonem rdzenia („droga dotychczasowa: operacja
+    add/str…”), a zdanie wyniku „drogą atomową” - dwa języki na jeden fakt. Teraz status i zdanie
+    mówią „cały plik przepisany”, szczegół rdzenia jest w podpowiedzi, a uwaga dopisana przez
+    rdzeń za spadkiem (`; …`) zostaje w statusie."""
+    i18n.set_lang(lang)
+    prefiks = writeback.PREFIKS_DROGI_ATOMOWEJ
+    rdzen.wynik_commitu = _Wynik(
+        "run-1", applied=[
+            _fr(11, "applied", f"{prefiks}: operacja add/str na OBJECT - układ karty zostaje przy "
+                               f"astropy; nagrobek ręki został", code=writeback.CODE_INPLACE_FALLBACK),
+            _fr(12, "applied")], blocked=[], failed=[], skipped=[], commit_ids=(5,))
+    dlg = _okno(qapp, con)
+    dlg.action_btn.click()
+    w = dlg.items_tree.topLevelItem(0)
+    assert w.text(3) == (i18n.t("objchg.st.done") + i18n.t(
+        "objchg.st.reason", reason=i18n.t("objchg.st.rewritten") + "; nagrobek ręki został"))
+    assert prefiks not in w.text(3) and "add/str" not in w.text(3)
+    assert i18n.t("objchg.st.detail_tip",
+                  detail="operacja add/str na OBJECT - układ karty zostaje przy astropy") \
+        in w.toolTip(3)
+    assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()
+    assert prefiks not in dlg.status.text() and "add/str" not in dlg.status.text()
+    dlg.reject()
+
+
+def test_status_spadku_z_BAZY_rozpoznaje_prefiks_rdzenia():
+    """Wiersz przebiegu z bazy (wejście z Porządków) nie niesie kodu wyniku - spadek rozpoznaje
+    prefiks rdzenia; wynik biegu bez kodu zostaje uwagą (jak zdanie wyniku)."""
+    from horreum.gui.object_change_dialog import status_pozycji
+    prefiks = writeback.PREFIKS_DROGI_ATOMOWEJ
+    stan = i18n.t("objchg.st.done")
+    status, tip = status_pozycji(stan, f"{prefiks}: karta OBJECT występuje 2 razy", z_bazy=True)
+    assert status == stan + i18n.t("objchg.st.reason", reason=i18n.t("objchg.st.rewritten"))
+    assert "występuje 2 razy" in tip
+    status, tip = status_pozycji(stan, f"{prefiks}: x")
+    assert status == tip == stan + i18n.t("objchg.st.reason", reason=f"{prefiks}: x")
+    assert status_pozycji(stan, None) == (stan, stan)
+
+
+def _blad_os(klasa, winerror, komunikat, sciezka=None):
+    """Powód tak, jak składa go rdzeń z wyjątku systemu (`f"{type(exc).__name__}: {exc}"`)."""
+    exc = klasa(None, komunikat, sciezka, winerror)
+    return f"{type(exc).__name__}: {exc}"
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_czytelny_powod_plik_zajety_slowami_a_sciezki_bez_podwojnych_ukosnikow(lang):
+    """Wizytacja bt/bv: surowy `PermissionError: [WinError 32]` z podwojonymi ukośnikami w zdaniu
+    i statusie. Po AR-125 przeniesienie mówi już „plik zajęty przez inny program”, ale zapis karty
+    w pliku zajętym dalej oddawał surowy wyjątek (sonda na prawdziwym rdzeniu). Plik zajęty -
+    zdaniem okna; ścieżka z `repr` - bez podwojeń; reszta zdania (` · przebieg …`) nietknięta."""
+    from horreum.gui.object_change_dialog import czytelny_powod
+    i18n.set_lang(lang)
+    zajety = _blad_os(PermissionError, 32, "Proces nie może uzyskać dostępu do pliku, ponieważ jest "
+                                           "on używany przez inny proces", r"R:\ASTRO_\LIGHTS\a.fits")
+    assert "\\\\" in zajety and "[WinError 32]" in zajety           # surowy zapis z rdzenia
+    zdanie = f"karta odbita bez zapisu: {zajety} · przebieg abc"
+    assert czytelny_powod(zdanie) == (f"karta odbita bez zapisu: {i18n.t('objchg.reason.busy')}"
+                                      f" · przebieg abc")
+    bez_sciezki = _blad_os(PermissionError, 33, "Proces nie ma dostępu do pliku.")
+    assert czytelny_powod(f"{bez_sciezki}; dalej") == f"{i18n.t('objchg.reason.busy')}; dalej"
+    inny = _blad_os(FileNotFoundError, 2, "Nie można odnaleźć określonego pliku",
+                    r"R:\ASTRO_\LIGHTS\b.fits")
+    assert czytelny_powod(inny) == inny.replace("\\\\", "\\")
+    assert "\\\\" not in czytelny_powod(inny)
+    assert czytelny_powod("karta OBJECT = 'NGC 2632'") == "karta OBJECT = 'NGC 2632'"
+    assert czytelny_powod(None) is None
+
+
+@pytest.mark.skipif(not hasattr(__import__("ctypes"), "WinDLL"), reason="blokada pliku - Windows")
+def test_plik_ZAJETY_przy_zapisie_karty_mowi_zdaniem_okna_na_PRAWDZIWYM_rdzeniu(qapp, archiwum):
+    """Sonda: „Uzgodnij” z samą kartą (plik w folderze obiektu), plik otwarty przez inny
+    program bez współdzielenia - rdzeń odbija kartę surowym `PermissionError: [WinError 32]`
+    (przeniesienie mówi już po ludzku od AR-125). Status wiersza i zdanie wyniku mówią zdaniem
+    okna; surowego wyjątku na ekranie nie ma."""
+    import ctypes
+    a = archiwum
+    fid, p = a.fits(r"LIGHTS\NGC3031\RC6\OSC\NGC3031_20220326_220000_LIGHT_OSC_30s.fits",
+                    obj="NGC 3034", canon="NGC3031")
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = ctypes.c_void_p
+    uchwyt = k32.CreateFileW(str(p), 0x80000000, 0, None, 3, 0x80, None)   # odczyt, bez współdzielenia
+    try:
+        dlg = _okno(qapp, a.con, target=None, frame_ids=[fid])
+        dlg.action_btn.click()
+        status = dlg.items_tree.topLevelItem(0).text(3)
+        assert i18n.t("objchg.reason.busy") in status, status
+        assert "PermissionError" not in status and "WinError" not in status
+        assert "PermissionError" not in dlg.status.text()
+        dlg.reject()
+    finally:
+        k32.CloseHandle(ctypes.c_void_p(uchwyt))
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_naglowek_Uzgodnij_NAZYWA_obiekty_klatek(qapp, archiwum, lang):
+    """Wizytacja bt: nagłówek „Uzgodnij” mówił „z obiektem, który już mają”, nie mówiąc z jakim.
+    Obiekty z bazy, alfabetycznie; ponad trzy - reszta liczbą."""
+    from horreum.gui.object_change_dialog import lista_obiektow
+    i18n.set_lang(lang)
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3031\RC6\OSC\x.fits", obj="NGC 3034", canon="NGC3034", seed=1)
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\y.fits", obj="NGC 3031", canon="NGC3031", seed=2,
+                   date="2022-03-26T21:31:00")
+    dlg = _okno(qapp, a.con, target=None, frame_ids=[fa, fb])
+    assert dlg.head.text() == (i18n.t_plural("objchg.head_align", 2)
+                               + i18n.t_plural("objchg.head_objects", 2,
+                                               objects="NGC3031, NGC3034"))
+    dlg.reject()
+    dlg = _okno(qapp, a.con, target=None, frame_ids=[fa])
+    assert dlg.head.text().endswith(i18n.t_plural("objchg.head_objects", 1, objects="NGC3034"))
+    dlg.reject()
+    assert lista_obiektow(["Sh2-229", "IC405", "NGC3034", "M1x", "Cr464"]) == (
+        "Cr464, IC405, M1x" + i18n.t_plural("objchg.head_objects_more", 2))
+
+
+def test_odmiana_kluczy_naglowka_i_liczby_wyniku_PL_i_EN():
+    """Odmiana przez `t_plural` (1, 2-4, 5, 12-14, 22) w kluczach nagłówka; liczba wyniku w formie
+    „etykieta: N” - bez odmiany, więc poprawna dla każdego N (wspólna gramatyka zdania wyniku
+    składa ten człon przez `t`)."""
+    i18n.set_lang("pl")
+    assert [i18n.t_plural("objchg.head_objects_more", n) for n in (1, 2, 5, 12, 22)] == [
+        " i 1 inny", " i 2 inne", " i 5 innych", " i 12 innych", " i 22 inne"]
+    assert [i18n.t_plural("objchg.head_objects", n, objects="X") for n in (1, 2, 5)] == [
+        " Obiekt w bazie: X.", " Obiekty w bazie (2): X.", " Obiekty w bazie (5): X."]
+    assert [i18n.t("objchg.res.applied", n=n) for n in (1, 2, 5, 12, 22)] == [
+        f"zmienione pozycje: {n}" for n in (1, 2, 5, 12, 22)]
+    assert i18n.t("objchg.res.undone", n=1) == "cofnięte pozycje: 1"
+    i18n.set_lang("en")
+    assert [i18n.t_plural("objchg.head_objects_more", n) for n in (1, 2, 22)] == [
+        " and 1 more", " and 2 more", " and 22 more"]
+    assert i18n.t_plural("objchg.head_objects", 1, objects="X") == " Object in the database: X."
+    assert i18n.t("objchg.res.applied", n=1) == "items changed: 1"
+    assert i18n.t("objchg.res.undone", n=2) == "items undone: 2"
+    # EN bez polskich znaków cudzysłowu i słów w nowych kluczach okna
+    for k in ("objchg.st.rewritten", "objchg.st.detail_tip", "objchg.reason.busy",
+              "wb.inplace_fallback", "assign.search_moved", "assign.search_to_field",
+              "assign.creates_object", "objchg.head_resume_change", "objchg.head_resume_align"):
+        tekst = str(CATALOG[k]["en"])
+        assert not set(tekst) & set("„ąćęłńóśźż"), k
+
+
+_ODMIANA_WB = {   # n → (PL zapisane, zablokowane, błędy, pominięte, przywrócone)
+    1: ("1 zapisany", "1 zablokowany", "1 błąd", "1 pominięty", "1 przywrócony"),
+    2: ("2 zapisane", "2 zablokowane", "2 błędy", "2 pominięte", "2 przywrócone"),
+    5: ("5 zapisanych", "5 zablokowanych", "5 błędów", "5 pominiętych", "5 przywróconych"),
+    12: ("12 zapisanych", "12 zablokowanych", "12 błędów", "12 pominiętych", "12 przywróconych"),
+    22: ("22 zapisane", "22 zablokowane", "22 błędy", "22 pominięte", "22 przywrócone")}
+
+
+@pytest.mark.parametrize("n", sorted(_ODMIANA_WB))
+def test_zdanie_wyniku_zapisu_ODMIENIA_liczby_PL_i_EN(n):
+    """„1 zapisanych · 1 zablokowanych · 1 błędów” - wspólna gramatyka zdania wyniku
+    (`wb_worker.zdanie_wyniku_zapisu`, `zdanie_undo_kart`) składała człony przez `t`. Teraz wpisy
+    mnogie idą przez `t_plural` (`_liczba`), na PRAWDZIWYM zdaniu, 1, 2-4, 5, 12-14 i 22; prosty
+    klucz (`objchg.res.applied`, „etykieta: N”) dalej przez `t`."""
+    from horreum.gui.wb_worker import zdanie_undo_kart, zdanie_wyniku_zapisu
+    pliki = [_fr(i, "applied") for i in range(n)]
+    commit = writeback.CommitResult("r", 3, pliki, pliki, pliki, pliki)
+    cofniecie = writeback.UndoResult(3, pliki, [], [])
+    i18n.set_lang("pl")
+    zapisane, zablokowane, bledy, pominiete, przywrocone = _ODMIANA_WB[n]
+    assert zdanie_wyniku_zapisu(commit, "grid.wb.applied") == " · ".join(
+        (zapisane, zablokowane, bledy, pominiete))
+    assert zdanie_undo_kart(cofniecie) == przywrocone
+    assert zdanie_wyniku_zapisu(commit, "objchg.res.applied").startswith(
+        f"zmienione pozycje: {n} · ")
+    i18n.set_lang("en")
+    s = "" if n == 1 else "s"
+    assert zdanie_wyniku_zapisu(commit, "grid.wb.applied") == (
+        f"{n} applied · {n} blocked · {n} error{s} · {n} skipped")
+    assert zdanie_undo_kart(cofniecie) == f"{n} restored"
+
+
+# ═══════════════════════════════════════════════ powody pominięć w języku UI (kody planera)
+
+def _wywolania_odmowy():
+    """Kod → zbiór nazw parametrów z KAŻDEGO `_Odmowa(...)` w `object_change.py` (AST)."""
+    import ast
+    import inspect
+    drzewo = ast.parse(inspect.getsource(oc))
+    out = {}
+    for w in ast.walk(drzewo):
+        if (isinstance(w, ast.Call) and isinstance(w.func, ast.Name) and w.func.id == "_Odmowa"
+                and w.args):
+            a = w.args[0]
+            kod = (a.value if isinstance(a, ast.Constant)
+                   else oc.SKIP_UNCHANGED if isinstance(a, ast.Name) and a.id == "SKIP_UNCHANGED"
+                   else None)
+            assert kod is not None, ast.dump(a)
+            out.setdefault(kod, set()).update(k.arg for k in w.keywords)
+    return out
+
+
+def test_KAZDY_kod_pominiecia_ma_zdanie_PL_i_EN_z_parametrami_planera():
+    """Mapa kodów: każde `_Odmowa` planera niesie kod z `SKIP_CODES` (i każdy kod jest użyty), każdy
+    kod ma `objchg.skip.<kod>` w obu językach z tymi samymi polami, a pola zdania to parametry,
+    które planer podaje. Bramka dla kodów, których fixture nie zbuduje (izolacja, `bad_target`,
+    `card_comment`, `variant_name`, `unchanged`)."""
+    import string
+    uzyte = _wywolania_odmowy()
+    assert set(uzyte) == oc.SKIP_CODES
+    for kod, parametry in uzyte.items():
+        wpis = CATALOG[f"objchg.skip.{kod}"]
+        pola = {j: {f for _, f, _, _ in string.Formatter().parse(wpis[j]) if f}
+                for j in ("pl", "en")}
+        assert pola["pl"] == pola["en"], kod
+        assert pola["pl"] <= parametry, (kod, pola["pl"], parametry)
+        assert not set(wpis["en"]) & set("„ąćęłńóśźż"), kod
+
+
+@pytest.mark.parametrize("lang", ["en", "pl"])
+def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_path, monkeypatch,
+                                                                     lang):
+    """Recenzent fali 10: powody pominięć tylko po polsku w UI EN. Prawdziwy planer na fixture
+    planera: każdy rodzaj pominięcia, który da się zbudować, mówi zdaniem `objchg.skip.<kod>`
+    w języku UI z parametrami planera (para stosu - z pominiętą połową też w języku UI); szczegół
+    błędu systemu bez podwojonych ukośników. W oknie - lista pominięć tym samym zdaniem."""
+    from test_object_change_plan import _Archiwum as _ArchPlanu, _stos
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, tekst_pominiecia
+    from horreum.scan import Card
+    a = _ArchPlanu(tmp_path)
+    i18n.set_lang(lang)
+    plany = []
+    # stan klatki (tryb „Uzgodnij”)
+    bez_mtime = a.klatka(r"LIGHTS\X\cam\1.fits", canon="NGC224", mtime=None)
+    dwie = a.klatka(r"LIGHTS\X\cam\2.fits", canon="NGC224")
+    repo.add_location(a.con, frame_id=dwie, volume="VOL", path=a.sciezka(r"LIGHTS\Y\c\2.fits"),
+                      mtime="m", now=NOW)
+    dark = a.klatka(r"CALIBRATION\darks\d.fits", kind="dark")
+    wycofana = a.klatka(r"LIGHTS\X\cam\3.fits", canon="NGC224")
+    a.con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, wycofana))
+    zastapiona = a.klatka(r"LIGHTS\X\cam\6.fits", canon="NGC224")
+    a.con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (wycofana, zastapiona))
+    bez = a.klatka(r"LIGHTS\X\cam\4.fits")
+    poza = a.klatka(r"Inne\X\cam\5.fits", canon="NGC224")
+    znikla = a.klatka(r"LIGHTS\X\cam\7.fits", canon="NGC224")
+    a.con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (znikla,))
+    stan = [bez_mtime, dwie, dark, wycofana, zastapiona, bez, poza, znikla]
+    plany.append(a.plan(stan))
+    # folder komety o nazwie innego obiektu
+    a.obiekt("C/2025 A6 (Foo_Bar)", "comet")
+    plany.append(a.plan([a.klatka(r"LIGHTS\_COMETS\X\cam\1.ARW", canon="C/2025 A6 (Foo Bar)",
+                                  okind="comet", filetype="raw", source="comet")]))
+    # karta odbita bramką bazy
+    suma = a.klatka(r"LIGHTS\S\cam\1.fits", canon="NGC224", card="M 31",
+                    extra_cards=[Card("CHECKSUM", 0, "abc", None, "str", None)])
+    plany.append(a.plan([suma], target=queries.object_target(a.con, "M45")))
+    # kolizje: we wsadzie, na dysku, w bazie
+    k1 = a.klatka(r"LIGHTS\A\cam\1.fits", canon="NGC224")
+    k2 = a.klatka(r"LIGHTS\B\cam\1.fits", canon="NGC224")
+    plany.append(a.plan([k1, k2], target=queries.object_target(a.con, "NGC1")))
+    os.makedirs(a.sciezka(r"LIGHTS\NGC2\cam"))
+    open(a.sciezka(r"LIGHTS\NGC2\cam\ngc2_x.FITS"), "wb").close()
+    c = a.klatka(r"LIGHTS\C\cam\NGC224_x.fits", canon="NGC224")
+    plany.append(a.plan([c], target=queries.object_target(a.con, "NGC2")))
+    d = a.klatka(r"LIGHTS\D\cam\NGC224_y.fits", canon="NGC224")
+    duch = a.klatka(r"LIGHTS\NGC3\cam\NGC3_y.fits", canon="NGC3", plik=False)
+    a.con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (duch,))
+    plany.append(a.plan([d], target=queries.object_target(a.con, "NGC3")))
+    # plik w miejscu katalogu celu; katalog celu nieczytelny (błąd systemu ze ścieżką w `repr`)
+    open(a.sciezka(r"LIGHTS\NGC4"), "wb").close()
+    e = a.klatka(r"LIGHTS\E\cam\NGC224_z.fits", canon="NGC224")
+    plany.append(a.plan([e], target=queries.object_target(a.con, "NGC4")))
+    os.makedirs(a.sciezka(r"LIGHTS\NGC5\cam"))
+    f = a.klatka(r"LIGHTS\F\cam\NGC224_w.fits", canon="NGC224")
+
+    def listdir(katalog):
+        if "NGC5" in katalog:
+            raise PermissionError(13, "Odmowa dostępu", katalog)
+        return os.listdir(katalog)
+    plany.append(a.plan([f], target=queries.object_target(a.con, "NGC5"), listdir=listdir))
+    # para stosu: wersja w innym katalogu → obie połowy
+    o = _stos(a, r"STACKS\IC405\A140R\Ha\IC405_2025-08-23_A140R_Ha_60s_mono.xisf")
+    v = _stos(a, r"STACKS\IC405\A140R\OIII\IC405_2025-08-23_A140R_Ha_60s_mono_autocrop.xisf")
+    repo.link_stack_variant(a.con, variant_frame_id=v, original_frame_id=o, variant="autocrop",
+                            source="user", now=NOW)
+    plany.append(a.plan([o], target=queries.object_target(a.con, "IC1848")))
+
+    pominiete = [s for p in plany for s in p.skipped]
+    assert {s.code for s in pominiete} >= {
+        "no_mtime", "many_copies", "kind_not_light", "retired", "superseded", "no_object",
+        "off_position", "no_present_copy", "folder_twins", "card_skip", "batch_collision",
+        "target_on_disk", "target_in_db", "file_in_dir_place", "dir_unreadable", "variant_dir",
+        "pair"}
+    for s in pominiete:
+        tekst = tekst_pominiecia(s.code, s.params, s.reason)
+        p = dict(s.params)
+        if s.code == "pair":                           # pominięta połowa też w języku UI
+            wewn = tekst_pominiecia(p["inner_code"], p["inner_params"], p["inner"])
+            assert tekst == i18n.t("objchg.skip.pair", inner=wewn), tekst
+            assert (wewn != p["inner"]) == (lang == "en"), wewn
+        else:
+            assert tekst == czytelny(i18n.t(f"objchg.skip.{s.code}", **p)), (s.code, tekst)
+        assert "\\\\" not in tekst, tekst
+        if lang == "en" and s.code not in ("card_skip", "dir_unreadable"):   # szczegół z rdzenia
+            assert not set(tekst) & set("„ąćęłńóśźż"), (s.code, tekst)
+        if lang == "pl":
+            assert tekst == czytelny(s.reason) or s.code in ("folder_twins",), (s.code, tekst)
+
+    # okno: lista pominięć mówi tym samym zdaniem (plan stanu klatek, tryb „Uzgodnij”)
+    monkeypatch.setattr(resolver, "library_root_from_db", lambda con: str(a.root))
+    dlg = ObjectChangeDialog(a.con, frame_ids=stan, target=None, now_fn=lambda: NOW,
+                             off_thread=False)
+    grupy = {dlg.skipped_tree.topLevelItem(i).text(0)
+             for i in range(dlg.skipped_tree.topLevelItemCount())}
+    assert grupy == {tekst_pominiecia(s.code, s.params, s.reason) for s in plany[0].skipped}
+    assert i18n.t("objchg.skip.no_mtime") in grupy
+    dlg.reject()
+    a.con.close()
+
+
+def czytelny(tekst):
+    from horreum.gui.object_change_dialog import czytelny_powod
+    return czytelny_powod(tekst)
+
+
+# ═══════════════════════════════════════════════ okna kasowane po `exec`
+
+def _okno_do_exec(ktore, con, host):
+    from horreum.gui.app import ConfirmPathObjectsDialog, RepairHeaderDialog
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    from horreum.gui.object_change_dialog import ObjectChangeDialog
+    if ktore == "zmiana":
+        return ObjectChangeDialog(con, frame_ids=[1, 2], target=CEL, now_fn=lambda: NOW,
+                                  off_thread=False, parent=host)
+    if ktore == "wybierak":
+        return AssignObjectDialog(con, object_raw=None, frame_count=1, parent=host)
+    if ktore == "naprawa":
+        return RepairHeaderDialog(con, rows=[], db_path=queries.db_path_of(con),
+                                  now_fn=lambda: NOW, parent=host)
+    return ConfirmPathObjectsDialog(con, proposals=[], now_fn=lambda: NOW, parent=host)
+
+
+@pytest.mark.parametrize("ktore", ["zmiana", "wybierak", "naprawa", "sciezka"])
+def test_okno_KASUJE_sie_po_exec_a_gospodarz_czyta_je_jeszcze_po_powrocie(
+        qapp, con, rdzen, ktore):
+    """Recenzent fali 10: okno nie kasowane po `exec` - każde zamknięte zostawało dzieckiem
+    gospodarza do końca sesji. Po `exec` okno żyje do pętli zdarzeń gospodarza (gospodarz czyta
+    `summary`/`selected`/zdanie stanu), potem znika. Falsyfikator: bez kasacji w `exec` okno
+    zostaje dzieckiem gospodarza po `DeferredDelete`."""
+    import shiboken6
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QWidget
+    host = QWidget()
+    dlg = _okno_do_exec(ktore, con, host)
+    klasa = type(dlg)
+    QTimer.singleShot(0, dlg.reject)
+    dlg.exec()
+    assert shiboken6.isValid(dlg) and dlg.windowTitle()          # gospodarz czyta po `exec`
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not shiboken6.isValid(dlg)
+    assert host.findChildren(klasa) == []
+    host.deleteLater()
+
+
+# ═══════════════════════════════════════════════ „Napraw nagłówek…”: rozmiar od treści, powód
+
+def _bezimienne(root, con, foldery):
+    """Po dwa FITS-y lightów BEZ karty OBJECT w każdym folderze obiektu, wciągnięte skanem - kubełek
+    „Napraw nagłówek…” (propozycja nazwy z dwóch zgodnych świadków ścieżki)."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    for g, folder in enumerate(foldery):
+        for k in range(2):
+            p = (root / "LIGHTS" / folder / "RC8_2600MC" / "OSC"
+                 / f"{folder}_20230103_2000{k:02d}_LIGHT_OSC_300s_FLATGRP_NOFLAT_.fits")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + 10 * g + k)
+            hdu.header["IMAGETYP"] = "Light"
+            hdu.header["DATE-OBS"] = f"2023-01-03T20:00:{k:02d}"
+            hdu.writeto(str(p))
+            scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                               summary=scan.ScanSummary())
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_etykieta_grupy_OD_FOLDERU_OBIEKTU_i_odmieniona_liczba(qapp, tmp_path,
+                                                                             lang):
+    """Zrzut natywny: cztery grupy „OSC · 2 klatek” - etykietą był rodzic pliku (filtr),
+    jednakowy dla każdego obiektu, a liczba bez odmiany. Etykieta od folderu obiektu
+    (`object_folder`), liczba przez `t_plural` (1, 2-4, 5, 12-14, 22); błąd grupy mówi tą samą
+    etykietą."""
+    from horreum.gui.app import RepairHeaderDialog
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "e.db"))
+    _bezimienne(tmp_path / "ASTRO_", con, ["NGC7635", "IC405"])
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    etykiety = sorted(g["check"].text() for g in dlg._groups)
+    assert etykiety == sorted(i18n.t_plural("repair.group", 2, folder=f"{o}\\RC8_2600MC\\OSC")
+                              for o in ("NGC7635", "IC405"))
+    g = dlg._groups[0]
+    g["edit"].setText("")                                # pusta nazwa - błąd mówi etykietą grupy
+    assert dlg.error.text().startswith(g["label"] + ":"), dlg.error.text()
+    dlg.reject()
+    con.close()
+    oczek = {"pl": ["1 klatka", "2 klatki", "5 klatek", "12 klatek", "22 klatki"],
+             "en": ["1 frame", "2 frames", "5 frames", "12 frames", "22 frames"]}[lang]
+    assert [i18n.t_plural("repair.group", n, folder="X") for n in (1, 2, 5, 12, 22)] == [
+        f"X  ·  {o}" for o in oczek]
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_rozmiar_OD_TRESCI_i_powod_spadku_jezykiem_czlowieka(qapp, tmp_path, lang):
+    """Wizytacja bs (W11): okno otwierało się 256×220 (wiersze grup za suwakiem) i mówiło powód
+    spadku żargonem rdzenia. Teraz: szerokość mieści całe wiersze grup (najdłuższy realny folder
+    obiektu archiwum - kometa) bez poziomego suwaka, wysokość wszystkie grupy, a zapis nie rozpycha
+    okna (przyciski „Cofnij”/„Rozwiąż teraz” policzone z góry); sufit - część ekranu. Zdanie mówi
+    „cały plik przepisany”, szczegół rdzenia jest w podpowiedzi zdania."""
+    from horreum.gui.app import RepairHeaderDialog
+    from horreum.gui.config_dialog import _SCREEN_FRAC
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "n.db"))
+    _bezimienne(tmp_path / "ASTRO_", con,
+                ["NGC7635", "C2023A3_Tsuchinshan-ATLAS", "Sh2-229", "IC405"])
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    dlg._runner.async_ok = False
+    dlg.show()
+    QCoreApplication.processEvents()
+    ekran = dlg.screen().availableGeometry()
+    sufit_w, sufit_h = int(ekran.width() * _SCREEN_FRAC), int(ekran.height() * _SCREEN_FRAC)
+    tresc = dlg._area.widget().sizeHint()
+    if dlg.width() < sufit_w:
+        assert dlg._area.horizontalScrollBar().isHidden()
+        assert dlg._area.viewport().width() >= tresc.width()
+    else:
+        assert dlg.width() == sufit_w
+    if dlg.height() < sufit_h:
+        assert dlg._area.viewport().height() >= tresc.height()
+    przed = dlg.size()
+    dlg._on_save()
+    QCoreApplication.processEvents()
+    assert not dlg.undo_btn.isHidden() and not dlg.resolve_btn.isHidden()
+    assert dlg.size() == przed                                 # zapis nie rozpycha okna
+    assert i18n.t("wb.inplace_fallback", n=8) in dlg.status.text()
+    assert writeback.PREFIKS_DROGI_ATOMOWEJ not in dlg.status.text()
+    assert "add/str" not in dlg.status.text() and "add/str" in dlg.status.toolTip()
+    dlg._on_undo()
+    assert dlg.status.toolTip() == ""
+    dlg.reject()
+    con.close()

@@ -1187,13 +1187,14 @@ def test_cofniecie_makra_z_bledem_pokazuje_powod_i_zostawia_Cofnij(wb_view, monk
                   lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
         view._dispatch_undo()
     tekst = view.drawer.result.text()
-    assert "1 błędów" in tekst and "zerwany udział" in tekst, tekst
+    assert "1 błąd" in tekst and "zerwany udział" in tekst, tekst          # odmiana: nie „1 błędów”
     assert i18n.t("grid.action.undo") in tekst, "recepta ponowienia nazywa przycisk"
     assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
     assert view._undo_commit_id == commit_id
     view._dispatch_undo()                                # ponowienie kończy cofnięcie
     assert fits.getheader(str(p))["TELESCOP"] == "RC8"
-    assert "1 przywróconych" in view.drawer.result.text(), view.drawer.result.text()
+    assert "1 przywrócony" in view.drawer.result.text() \
+        and "przywróconych" not in view.drawer.result.text(), view.drawer.result.text()
     assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None
 
 
@@ -1562,11 +1563,13 @@ def test_rename_commit_powod_w_summary(rn_view):
     """wiz#4: blokada commitu niesie POWÓD w wyniku szuflady, nie tylko liczbę (user pyta „czemu?")."""
     view, con, files = rn_view
     view._on_rename_stage(_POL)
-    for r in writeback.renames_for_run(con, view._rename_run_id):   # OBCE pliki pod celami → blocked
+    from horreum.gui import i18n
+    wpisy = writeback.renames_for_run(con, view._rename_run_id)
+    for r in wpisy:                                                  # OBCE pliki pod celami → blocked
         with open(r["new_path"], "wb") as f:
             f.write(b"OBCY")
     view._on_commit()
-    assert "zablokowanych" in view.drawer.result.text()
+    assert i18n.t_plural("grid.wb.blocked", len(wpisy)) in view.drawer.result.text()
     assert "cel już istnieje" in view.drawer.result.text()         # reprezentatywny reason widoczny
 
 
@@ -1596,7 +1599,8 @@ def test_cofniecie_renamu_z_bledem_pokazuje_powod_i_zostawia_Cofnij(rn_view, mon
     view._dispatch_undo()
     monkeypatch.undo()
     tekst = view.drawer.result.text()
-    assert "1 przywróconych" in tekst and "1 błędów" in tekst and "PermissionError" in tekst, tekst
+    assert "1 przywrócony" in tekst and "przywróconych" not in tekst and "1 błąd" in tekst \
+        and "PermissionError" in tekst, tekst
     assert i18n.t("grid.action.undo") in tekst, "recepta ponowienia nazywa przycisk"
     assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "rename"
     assert view._undo_rename_run_id == run
@@ -2456,7 +2460,7 @@ def test_perspektywa_rodowodu_mowi_o_sobie_i_przezywa_zapis(view, gcon):
     from horreum.gui.grid import PRESET_LINEAGE
     _seed_stos(gcon, reason="degenerate_window")
     view.apply_perspective(PRESET_LINEAGE)
-    assert "bez rodowodu" in view.sel_bar.criteria_label._full
+    assert "rodowód do potwierdzenia" in view.sel_bar.criteria_label._full   # nazwa perspektywy
     spec = {"only_dups": view._only_dups, "only_review": view._only_review,
             "only_vanished": view._only_vanished, "only_lineage": view._only_lineage,
             "only_superseded": view._only_superseded}
@@ -2957,7 +2961,7 @@ def test_panel_odroznia_wariant_obrazu_od_realnego_wspoldzielenia(view, gcon):
     assert _zaznacz_frame(view, 10)
     view._toggle_panel("lineage")
     bar = view.lineage_bar
-    assert "inna wersja obrazu" in bar.note.full_text()
+    assert "ma jeszcze 1 inną wersję obrazu" in bar.note.full_text()
     assert bar.warn.full_text() == ""                    # ten sam zbiór ⇒ to wariant, nie kolizja
 
     gcon.execute("UPDATE integration SET integ_hash = 'ZBIOR-B' WHERE id = 6")   # inny zbiór
@@ -3562,6 +3566,119 @@ def test_OS_ZYWOTNOSCI_tez_mowi_gdzie_podzialy_sie_klatki(obj_view, monkeypatch)
     assert i18n.t("perspective.review") in recepty[-1], recepty[-1]
 
 
+@pytest.mark.parametrize("lang, wycofano, przywrocono, odslonisz", [
+    ("pl", "Wycofano 1 z 1 klatki", "Przywrócono 1 z 1 klatki",
+     "odsłonisz 1 klatkę: perspektywa „Przegląd”"),
+    ("en", "Retired 1 of 1 frame", "Restored 1 of 1 frame",
+     "to reveal 1 frame: the “Review” perspective"),
+])
+def test_os_zywotnosci_odmienia_jedna_klatke_a_recepta_nazywa_cel_bez_obiektu(
+        obj_view, monkeypatch, lang, wycofano, przywrocono, odslonisz):
+    """„Przywrócono 1 z 1 klatek" (paczki D/E) - zdanie gestu osi żywotności szło jedną formą
+    (`i18n.t`). Odmiana po wszystkich klatkach gestu, dopełniacz po „z". Recepta paska nazywa cel
+    liczbą klatek poza widokiem - gest wycofania nie niesie obiektu, więc bez nazwy.
+
+    Falsyfikator: wróć w `_po_gescie_klatki` do `i18n.t(klucz, …)` → zdanie renderuje surowy klucz;
+    zdejmij `grid.sel.reveal_target` z `_czlony_recepty_gestu` → człon wraca do gołego gestu."""
+    from PySide6.QtWidgets import QMessageBox
+    from horreum.gui import i18n
+    i18n.set_lang(lang)
+    try:
+        v, con = obj_view
+        con.execute("UPDATE location SET present = 0 WHERE frame_id = 3")
+        con.commit()
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        v.apply_perspective(grid_mod.PRESET_VANISHED)
+        _zaznacz(v, [3])
+        raporty, recepty = _sluchaj_paska(v)
+        v._on_frame_retire()
+        assert raporty[-1].startswith(wycofano), raporty[-1]
+        assert recepty[-1].czlony[0].tekst == odslonisz, recepty[-1]
+
+        v.apply_perspective(grid_mod.PRESET_RETIRED)
+        _zaznacz(v, [3])
+        v._on_frame_restore()
+        assert raporty[-1].startswith(przywrocono), raporty[-1]
+    finally:
+        i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("n, pl, en", [
+    (1, "Przywrócono 0 z 1 klatki", "Restored 0 of 1 frame"),
+    (3, "Przywrócono 0 z 3 klatek", "Restored 0 of 3 frames"),
+    (5, "Przywrócono 0 z 5 klatek", "Restored 0 of 5 frames"),
+    (12, "Przywrócono 0 z 12 klatek", "Restored 0 of 12 frames"),
+    (22, "Przywrócono 0 z 22 klatek", "Restored 0 of 22 frames")])
+def test_zdania_osi_zywotnosci_odmieniaja_sie_po_wszystkich_klatkach(n, pl, en):
+    """Dopełniacz po „z": tylko jedynka ma formę pojedynczą („z 1 klatki"), reszta - mnogą."""
+    from horreum.gui import i18n
+    try:
+        i18n.set_lang("pl")
+        assert i18n.t_plural("grid.sel.frame_restored", n, done=0) == pl
+        assert i18n.t_plural("grid.sel.frame_retired", n, done=0) == pl.replace("Przywrócono",
+                                                                                 "Wycofano")
+        i18n.set_lang("en")
+        assert i18n.t_plural("grid.sel.frame_restored", n, done=0) == en
+        assert i18n.t_plural("grid.sel.frame_retired", n, done=0) == en.replace("Restored", "Retired")
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_recepta_NAZYWA_cel_gestu_takze_poza_zbiorem_gestu(obj_view):
+    """Recepta paska żyje dłużej niż zdanie raportu, do którego dawne „odsłoni je …" się odwoływało
+    (wizytacja: w Znajdź „M64" po geście na NGC3623 „je" nie miało odniesienia, a klik działa na
+    bieżący widok). Człon odsłonięcia nazywa więc CEL: liczbę klatek poza widokiem i obiekt gestu -
+    także po przejściu do innego zbioru, i tak samo w EN, jednym rodzajem cudzysłowu.
+
+    Falsyfikator: wróć w `_czlony_recepty_gestu` do `i18n.t(klucz, **kwargi)` → asercje o celu
+    czerwienieją; nie przekazuj `kanony` z `_po_gescie_osi` → znika „NGC6960"."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    v.apply_object_facet([(5, "NGC6960")])
+    _zaznacz(v, [1, 2])
+    raporty, recepty = _sluchaj_paska(v)
+    v._on_object_clear()
+    akcja = i18n.t("grid.sel.clear_set")
+    assert recepty[-1].czlony[0].tekst == f"odsłonisz 2 klatki NGC6960: „{akcja}”", recepty[-1]
+
+    # Inny zbiór (zawężenie po rodzaju) - cel gestu dalej poza widokiem, zdanie raportu już nie stoi.
+    v._facet_state = {"kind": {"in": [["dark", "dark"]]}}
+    v.refresh()
+    recepty.clear()
+    v.ponow_recepte()
+    assert recepty[-1].czlony[0].tekst == f"odsłonisz 2 klatki NGC6960: „{akcja}”", recepty[-1]
+    i18n.set_lang("en")
+    try:
+        recepty.clear()
+        v.ponow_recepte()
+        tekst = recepty[-1].czlony[0].tekst
+        assert tekst == f"to reveal 2 frames of NGC6960: “{i18n.t('grid.sel.clear_set')}”", tekst
+        assert '"' not in str(recepty[-1]), "cudzysłów prosty obok drukarskiego w jednej recepcie"
+    finally:
+        i18n.set_lang("pl")
+
+    v._on_clear_selection()                         # klik działa: cel wraca na ekran
+    assert {1, 2} <= {r["frame_id"] for r in v.model._rows if isinstance(r, dict)}
+
+
+@pytest.mark.parametrize("n, pl, en", [
+    (1, "odsłonisz 1 klatkę: X", "to reveal 1 frame: X"),
+    (3, "odsłonisz 3 klatki: X", "to reveal 3 frames: X"),
+    (5, "odsłonisz 5 klatek: X", "to reveal 5 frames: X"),
+    (13, "odsłonisz 13 klatek: X", "to reveal 13 frames: X"),
+    (22, "odsłonisz 22 klatki: X", "to reveal 22 frames: X")])
+def test_czlon_odslonienia_odmienia_liczbe_celu(n, pl, en):
+    """Biernik po „odsłonisz": 1 klatkę, 2-4 klatki, 5 klatek, -naście klatek, 22 klatki."""
+    from horreum.gui import i18n
+    try:
+        i18n.set_lang("pl")
+        assert i18n.t_plural("grid.sel.reveal_target", n, obj="", how="X") == pl
+        i18n.set_lang("en")
+        assert i18n.t_plural("grid.sel.reveal_target", n, obj="", how="X") == en
+    finally:
+        i18n.set_lang("pl")
+
+
 def test_PRESET_wskazywany_przez_recepte_jest_naprawde_bez_zawezenia():
     """Recepta obiecuje, że „Przegląd" odsłoni WSZYSTKO. Obietnica stoi na tym, że ten preset nie
     niesie ani filtra, ani żadnej flagi `only_*` - a rodzina `only_*` ma w tym repo udokumentowaną
@@ -3637,7 +3754,7 @@ def test_przywrocenie_nagrobka_BEZ_pamieci_mowi_prawde_i_nic_nie_pisze(obj_view)
     _zaznacz(v, [1])
     v._on_object_restore()
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
-    assert "Przywrócono przypisanie na 0 z 1 klatek" in msgs[-1], msgs[-1]
+    assert "Przywrócono przypisanie na 0 z 1 klatki" in msgs[-1], msgs[-1]
     assert "bez zapamiętanego obiektu: 1" in msgs[-1], msgs[-1]
 
 
@@ -5506,7 +5623,7 @@ def test_FH4_pusty_stan_renderuje_EN_z_katalogu(qapp, tmp_path, monkeypatch):
         v.apply_perspective(grid_mod.PRESET_RETIRED)                     # nikt niczego nie wycofał
         assert v._n_total == 0
         assert v.empty.text() == "No frames in this perspective."
-        assert v.empty_btn.text() == 'Switch to the "Review" perspective'
+        assert v.empty_btn.text() == "Switch to the “Review” perspective"
 
         v.apply_perspective(grid_mod._PRESET_CZYSTY)
         v.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "NONE"})

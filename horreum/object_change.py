@@ -71,17 +71,28 @@ class ObjectChangeItem:
 
 @dataclasses.dataclass(frozen=True)
 class ObjectChangeSkip:
-    """Klatka, której gest nie ruszy - z powodem dla człowieka. `code` = stan, który okno
-    rozpoznaje (`SKIP_UNCHANGED`); zdanie `reason` jest dla człowieka i może się zmienić."""
+    """Klatka, której gest nie ruszy - z powodem dla człowieka. `code` = rodzaj pominięcia, który
+    okno rozpoznaje (`SKIP_CODES`: `SKIP_UNCHANGED` liczy się w „bez zmian”, każdy kod ma zdanie
+    w katalogu okna, także po angielsku), `params` = jego parametry jako pary `(nazwa, wartość)`
+    (wartości tekst albo liczba; przy `pair` - kod, parametry i zdanie pominiętej połowy). Zdanie
+    `reason` (PL) jest dla człowieka, może się zmienić i zostaje zapasem okna dla kodu bez zdania."""
     frame_id: int
     path: str
     reason: str
     code: str | None = None
+    params: tuple = ()
 
 
 # Kod pominięcia, które NIE jest odmową: plik w folderze obiektu, nazwa i karta zgodne - pozycja
 # bez zmian (okno liczy ją w „bez zmian”, nie w „pominie”).
 SKIP_UNCHANGED = "unchanged"
+# Komplet kodów pominięć planera - każdy ma zdanie `objchg.skip.<kod>` w katalogu okna (PL+EN,
+# test parytetu), a każde `_Odmowa`/pominięcie w tym module niesie jeden z nich (test AST).
+SKIP_CODES = frozenset({
+    "kind_not_light", "retired", "superseded", "no_present_copy", "many_copies", "isolated",
+    "no_mtime", "no_object", "bad_target", "off_position", "folder_twins", "card_skip",
+    "card_rule", "card_comment", "dir_unreadable", "file_in_dir_place", "variant_dir",
+    "variant_name", SKIP_UNCHANGED, "target_on_disk", "batch_collision", "target_in_db", "pair"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -116,7 +127,13 @@ _UKLAD_STOSU = re.compile(r"^(?P<obiekt>.+?)_(?P<reszta>\d{4}-\d{2}-\d{2}_.+)$")
 
 
 class _Odmowa(Exception):
-    """Pozycja pominięta z powodem - wewnętrzny sygnał planera, nie wychodzi poza moduł."""
+    """Pozycja pominięta z powodem - wewnętrzny sygnał planera, nie wychodzi poza moduł. Niesie
+    kod (`SKIP_CODES`), zdanie dla człowieka i parametry zdania okna."""
+
+    def __init__(self, kod, powod, **params):
+        assert kod in SKIP_CODES, kod
+        super().__init__(powod)
+        self.wpis = (powod, kod, tuple(params.items()))
 
 
 class _Dysk:
@@ -144,7 +161,8 @@ class _Dysk:
                 self._pamiec[klucz] = (set(nazwy), {n.casefold(): n for n in reversed(nazwy)})
         wynik = self._pamiec[klucz]
         if isinstance(wynik, OSError):
-            raise _Odmowa(f"katalog celu nieczytelny ({katalog}): {wynik}")
+            raise _Odmowa("dir_unreadable", f"katalog celu nieczytelny ({katalog}): {wynik}",
+                          dir=katalog, detail=str(wynik))
         return wynik
 
     def katalog(self, cel, stary):
@@ -180,7 +198,8 @@ class _Dysk:
                 if na_dysku is not None:
                     czesci[j] = na_dysku
                     if not self._isdir("".join(czesci[:j + 1])):
-                        raise _Odmowa(f"w miejscu katalogu celu stoi plik: {''.join(czesci[:j + 1])}")
+                        raise _Odmowa("file_in_dir_place", f"w miejscu katalogu celu stoi plik: "
+                                      f"{''.join(czesci[:j + 1])}", path="".join(czesci[:j + 1]))
                     continue
             mkdirs.append("".join(czesci[:j + 1]))
         for j in pozycje[len(pozycje) - len(mkdirs):]:
@@ -189,24 +208,27 @@ class _Dysk:
 
 
 def _powod_klatki(r, target):
-    """Powód, dla którego klatki gest nie ruszy z samego jej stanu (bez celu i dysku), albo None."""
+    """Odmowa (`_Odmowa`), z którą klatki gest nie ruszy z samego jej stanu (bez celu i dysku),
+    albo None."""
     if r["kind"] not in LIGHT_KINDS:
-        return f"rodzaj „{r['kind']}” nie ma obiektu z definicji - gest dotyczy lightów i stosów"
+        return _Odmowa("kind_not_light", f"rodzaj „{r['kind']}” nie ma obiektu z definicji - gest "
+                                         f"dotyczy lightów i stosów", kind=r["kind"])
     if r["retired_at"] is not None:
-        return "klatka wycofana z archiwum"
+        return _Odmowa("retired", "klatka wycofana z archiwum")
     if r["superseded_by"] is not None:
-        return "klatka zastąpiona inną (podmiana pliku)"
+        return _Odmowa("superseded", "klatka zastąpiona inną (podmiana pliku)")
     if r["n_present"] == 0:
-        return "brak obecnej kopii"
+        return _Odmowa("no_present_copy", "brak obecnej kopii")
     if r["n_present"] > 1:
-        return f"wiele obecnych kopii ({r['n_present']}) - jedna klatka, jeden folder obiektu"
+        return _Odmowa("many_copies", f"wiele obecnych kopii ({r['n_present']}) - jedna klatka, "
+                                      f"jeden folder obiektu", n=r["n_present"])
     if r["isolated"]:
-        return ("kopia izolowana przerwanym albo niedokończonym zapisem w miejscu - najpierw "
-                "odzysk albo dokończenie w Porządkach")
+        return _Odmowa("isolated", "kopia izolowana przerwanym albo niedokończonym zapisem "
+                                   "w miejscu - najpierw odzysk albo dokończenie w Porządkach")
     if r["mtime"] is None:
-        return "kopia bez mtime - brak kotwicy przeniesienia"
+        return _Odmowa("no_mtime", "kopia bez mtime - brak kotwicy przeniesienia")
     if target is None and r["canon"] is None:
-        return "klatka bez obiektu - nie ma czego uzgadniać"
+        return _Odmowa("no_object", "klatka bez obiektu - nie ma czego uzgadniać")
     return None
 
 
@@ -220,8 +242,8 @@ def _karta(r, comment_loss_route):
     if not r["card_applicable"]:
         return None, None
     if r["card_skip"] is not None:
-        raise _Odmowa(f"karta OBJECT nie do zapisania ({r['card_skip']}) - plik zostaje, bo karta "
-                      f"i folder idą razem")
+        raise _Odmowa("card_skip", f"karta OBJECT nie do zapisania ({r['card_skip']}) - plik "
+                                   f"zostaje, bo karta i folder idą razem", detail=r["card_skip"])
     nowa = r["card_form"]
     if nowa is None:
         raise AssertionError(f"klatka {r['frame_id']}: karta do zapisu bez formy i bez powodu bramki")
@@ -230,11 +252,11 @@ def _karta(r, comment_loss_route):
     op = "set" if r["card_present"] else "add"         # pusta karta stoi w nagłówku - `set`
     naruszenie = card_rules.card_violation("OBJECT", nowa, None, new_card=op == "add")
     if naruszenie is not None:
-        raise _Odmowa(f"karta OBJECT: {naruszenie.reason}")
+        raise _Odmowa("card_rule", f"karta OBJECT: {naruszenie.reason}", detail=naruszenie.reason)
     if op == "set":
         odmowa = comment_loss_route(r["filetype"], "OBJECT", nowa, r["card_comment"])
         if odmowa is not None:
-            raise _Odmowa(f"karta OBJECT: {odmowa}")
+            raise _Odmowa("card_comment", f"karta OBJECT: {odmowa}", detail=odmowa)
     return op, nowa
 
 
@@ -346,7 +368,8 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
     normalizacji Windows i `casefold` → `new_path` None (sama zmiana pisowni nie jest robotą tego
     gestu). Karta: `set`/`add` na formę celu albo None.
 
-    POMINIĘCIA (`ObjectChangeSkip`, zdanie PL dla człowieka): stan klatki (`_powod_klatki`), plik
+    POMINIĘCIA (`ObjectChangeSkip`, zdanie PL dla człowieka, kod `SKIP_CODES` z parametrami dla
+    zdania okna w języku UI): stan klatki (`_powod_klatki`), plik
     spoza pozycji obiektu, kanon nie do postawienia jako folder, karta potrzebna a nie do zapisania
     (cały plik zostaje), kolizja celu we wsadzie, na dysku (`listdir` katalogu celu) albo w bazie
     (inna lokacja), wersja stosu w innym katalogu niż oryginał (oba), połowa pary stosu pominięta
@@ -379,29 +402,32 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
     run_id = run_id or uuid.uuid4().hex
     dysk = _Dysk(isdir, listdir)
     wiersz = {int(r["frame_id"]): r for r in rows}
-    pominiete: dict[int, str] = {}
+    # frame_id → (zdanie PL, kod `SKIP_CODES`, parametry) - `_Odmowa.wpis`.
+    pominiete: dict[int, tuple] = {}
     robocze: dict[int, dict] = {}
 
     # 1. Stan klatki, folder celu, karta, katalog z dysku.
     for fid, r in wiersz.items():
         try:
-            powod = _powod_klatki(r, target)
-            if powod is not None:
-                raise _Odmowa(powod)
+            odmowa = _powod_klatki(r, target)
+            if odmowa is not None:
+                raise odmowa
             canon = target.canon if target is not None else r["canon"]
             rodzaj = target.kind if target is not None else r["object_kind"]
             try:
                 cel = path_after_object_change(r["path"], canon, r["kind"], library_root,
                                                object_kind=rodzaj)
             except ValueError as exc:
-                raise _Odmowa(f"cel, którego system plików nie przyjmie: {exc}") from None
+                raise _Odmowa("bad_target", f"cel, którego system plików nie przyjmie: {exc}",
+                              detail=str(exc)) from None
             if cel is None:
-                raise _Odmowa("plik nie stoi na pozycji obiektu w drzewie archiwum - nie ma "
-                              "folderu obiektu, do którego mógłby trafić")
+                raise _Odmowa("off_position", "plik nie stoi na pozycji obiektu w drzewie archiwum "
+                                              "- nie ma folderu obiektu, do którego mógłby trafić")
             if r["folder_twins"]:
-                raise _Odmowa(f"folder obiektu {canon!r} ma tę samą nazwę co folder innego "
-                              f"obiektu ({', '.join(r['folder_twins'])}) - pliki dwóch obiektów "
-                              f"trafiłyby do jednego folderu")
+                raise _Odmowa("folder_twins", f"folder obiektu {canon!r} ma tę samą nazwę co folder "
+                              f"innego obiektu ({', '.join(r['folder_twins'])}) - pliki dwóch "
+                              f"obiektów trafiłyby do jednego folderu",
+                              canon=canon, twins=", ".join(r["folder_twins"]))
             if any(s.casefold() in EXCLUDED_DIR_NAMES for s in re.split(r"[\\/]+", cel)):
                 raise AssertionError(f"cel w drzewie roboczym (_WBPP/_Review): {cel}")
             card_op, card_new = _karta(r, writeback.comment_loss_route)
@@ -409,7 +435,7 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
             sep = cel[len(glowa)] if cel[len(glowa):len(glowa) + 1] in ("\\", "/") else "\\"
             katalog, mkdirs = dysk.katalog(glowa, ntpath.dirname(r["path"]))
         except _Odmowa as exc:
-            pominiete[fid] = str(exc)
+            pominiete[fid] = exc.wpis
             continue
         robocze[fid] = {"canon": canon, "katalog": katalog, "sep": sep, "mkdirs": mkdirs,
                         "card_op": card_op, "card_new": card_new,
@@ -436,37 +462,39 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
         po = robocze[oryginal]
         if (path_key(ntpath.dirname(wiersz[fid]["path"]))
                 != path_key(ntpath.dirname(wiersz[oryginal]["path"]))):
-            pominiete[fid] = "wersja stosu leży w innym katalogu niż oryginał - para jedzie razem"
+            pominiete[fid] = _Odmowa("variant_dir", "wersja stosu leży w innym katalogu niż "
+                                                    "oryginał - para jedzie razem").wpis
             del robocze[fid]
             continue
         nazwa = naming.variant_stack_name(po["nazwa"], wariant)
         if nazwa is None:
-            pominiete[fid] = (f"nazwa wersji stosu nie wynika z nazwy oryginału ({po['nazwa']}) - "
-                              f"para jedzie razem")
+            pominiete[fid] = _Odmowa("variant_name", f"nazwa wersji stosu nie wynika z nazwy "
+                                     f"oryginału ({po['nazwa']}) - para jedzie razem",
+                                     name=po["nazwa"]).wpis
             del robocze[fid]
             continue
         robocze[fid].update(katalog=po["katalog"], sep=po["sep"], mkdirs=po["mkdirs"], nazwa=nazwa)
 
     # 4. Cel pliku, brak zmian, kolizja na dysku.
     cele: dict[int, tuple] = {}
-    bez_zmian: set[int] = set()
     for fid in sorted(robocze):
         p, r = robocze[fid], wiersz[fid]
         nowa, mkdirs = p["katalog"] + p["sep"] + p["nazwa"], p["mkdirs"]
         if path_key(nowa) == path_key(r["path"]):
             nowa, mkdirs = None, ()
         if nowa is None and p["card_op"] is None and not p["object_change"]:
-            pominiete[fid] = "bez zmian - plik w folderze obiektu, nazwa i karta zgodne"
-            bez_zmian.add(fid)
+            pominiete[fid] = _Odmowa(SKIP_UNCHANGED, "bez zmian - plik w folderze obiektu, nazwa "
+                                                     "i karta zgodne").wpis
             continue
         if nowa is not None and not mkdirs:
             try:
                 _, bez_wielkosci = dysk.wpisy(p["katalog"])
             except _Odmowa as exc:
-                pominiete[fid] = str(exc)
+                pominiete[fid] = exc.wpis
                 continue
             if p["nazwa"].casefold() in bez_wielkosci:
-                pominiete[fid] = f"na dysku stoi już plik pod ścieżką celu: {nowa}"
+                pominiete[fid] = _Odmowa("target_on_disk", f"na dysku stoi już plik pod ścieżką "
+                                                           f"celu: {nowa}", path=nowa).wpis
                 continue
         cele[fid] = (nowa, mkdirs)
 
@@ -480,9 +508,11 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
         if nowa is None:
             continue
         if licznik[path_key(nowa)] > 1:
-            pominiete[fid] = f"kolizja we wsadzie - dwa pliki w jeden cel: {nowa}"
+            pominiete[fid] = _Odmowa("batch_collision", f"kolizja we wsadzie - dwa pliki w jeden "
+                                                        f"cel: {nowa}", path=nowa).wpis
         elif location_at(wiersz[fid]["volume"], nowa) - {int(wiersz[fid]["location_id"])}:
-            pominiete[fid] = f"w bazie jest inna kopia pod ścieżką celu: {nowa}"
+            pominiete[fid] = _Odmowa("target_in_db", f"w bazie jest inna kopia pod ścieżką celu: "
+                                                     f"{nowa}", path=nowa).wpis
         else:
             continue
         del cele[fid]
@@ -493,8 +523,10 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
             continue
         for jeden, drugi in ((fid, r["variant_of"][0]), (r["variant_of"][0], fid)):
             if jeden in pominiete and drugi in cele:
-                pominiete[drugi] = (f"para stosu jedzie razem - druga połowa pominięta: "
-                                    f"{pominiete[jeden]}")
+                powod, kod, params = pominiete[jeden]
+                pominiete[drugi] = _Odmowa("pair", f"para stosu jedzie razem - druga połowa "
+                                                   f"pominięta: {powod}", inner=powod,
+                                           inner_code=kod, inner_params=params).wpis
                 del cele[drugi]
 
     # 7. Ostrzeżenie: wejścia stosu rozdzielone między foldery.
@@ -525,8 +557,7 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
         expected_object=(wiersz[fid]["object_id"], wiersz[fid]["object_source"],
                          wiersz[fid]["object_cleared_id"]),
         object_change=robocze[fid]["object_change"]) for fid in sorted(cele))
-    skipped = tuple(ObjectChangeSkip(fid, wiersz[fid]["path"] or "", pominiete[fid],
-                                     SKIP_UNCHANGED if fid in bez_zmian else None)
+    skipped = tuple(ObjectChangeSkip(fid, wiersz[fid]["path"] or "", *pominiete[fid])
                     for fid in sorted(pominiete))
     return ObjectChangePlan(run_id=run_id, target=target, items=items, skipped=skipped,
                             warnings=tuple(warnings),

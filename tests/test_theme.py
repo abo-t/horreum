@@ -194,12 +194,38 @@ def test_AR73_ramka_pustego_pola_wyboru_odcina_sie_od_tla(name):
         assert f"border: 1px solid {ramka}" in regula and f"background: {tlo}" in regula, selektor
 
 
-def test_AR73_regula_wskaznika_nie_dotyka_stanu_zaznaczonego():
+def test_AR73_regula_wskaznika_nie_dotyka_stanu_zaznaczonego_POLA_wyboru():
     """Arkusz z ramką rysuje sam prostokąt - bez obrazka nie ma ptaszka. Reguła na `::indicator`
-    bez stanu albo na `:checked` zgasiłaby znak zaznaczenia w każdym polu aplikacji."""
+    bez stanu albo na `:checked` pola wyboru zgasiłaby znak zaznaczenia w każdym polu aplikacji.
+    Radio jest jedynym wyjątkiem: jego kropkę rysuje gradient radialny tła (bramka niżej)."""
     for name in _THEMES:
         q = theme.qss(name)
-        assert "::indicator {" not in q and "::indicator:checked" not in q, name
+        assert "::indicator {" not in q, name
+        assert "QCheckBox::indicator:checked" not in q and "QListView::indicator:checked" not in q, name
+        assert q.count("::indicator:checked") == q.count(theme.WSKAZNIK_RADIO_ZAZNACZONY), name
+
+
+@pytest.mark.parametrize("name", _THEMES)
+def test_zaznaczone_radio_jest_MOCNIEJSZE_od_pustego(name):
+    """Po AR-73 puste radio dostało jasną ramkę, a zaznaczone zostało przy ramce Fusion `#222222` na
+    `#1E1E1E` (1,03:1) - w ciemnym motywie zaznaczone wyglądało SŁABIEJ niż puste obok. Ramka i
+    kropka zaznaczonego mają kontrast do każdego tła wyższy niż ramka pustego (i co najmniej 3:1,
+    WCAG 1.4.11), a kropka stoi w regule - arkusz rysuje znak, nie sam okrąg.
+
+    Falsyfikator: podaj w `wskaznik_zaznaczony` `secondary_text` albo zdejmij gradient z reguły."""
+    znak, tlo = theme.wskaznik_zaznaczony(name)
+    pusta, _ = theme.wskaznik_odznaczony(name)
+    paleta = theme.palette_spec(name)
+    for nazwa_tla in ("base", "window", "alt_base"):
+        t = paleta[nazwa_tla]
+        assert _kontrast(znak, t) >= 3.0, (name, nazwa_tla)
+        assert _kontrast(znak, t) > _kontrast(pusta, t), (name, nazwa_tla, znak, pusta)
+    regula = theme.qss(name).split(theme.WSKAZNIK_RADIO_ZAZNACZONY + " {", 1)[1].split("}", 1)[0]
+    assert f"border: 1px solid {znak}" in regula
+    assert "qradialgradient" in regula and f"stop: 0 {znak}" in regula and tlo in regula
+    assert "width: 12px; height: 12px;" in regula, "radio skakałoby przy przełączeniu"
+    wylaczona = theme.qss(name).split(theme.WSKAZNIK_RADIO_ZAZNACZONY + ":disabled {", 1)[1]
+    assert paleta["disabled_text"] in wylaczona.split("}", 1)[0], "wyłączone udawałoby aktywne"
 
 
 def test_warn_jest_osobny_od_gold():

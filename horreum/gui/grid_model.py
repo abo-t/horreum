@@ -282,7 +282,7 @@ PRESET_DUPS = "Duplikaty"
 # z dysku" celuje w preset PO NAZWIE, więc stała musi być współdzielona z TasksView.
 PRESET_VANISHED = "Zniknięte"
 # PRESET_LINEAGE — trzeci bliźniak (0808). Gest rodowodu mieszka w panelu „Rodowód" TEGO widoku
-# i działa z zaznaczenia jednej klatki, więc wiersz Porządków „Obrazy bez rodowodu" nie ma dokąd
+# i działa z zaznaczenia jednej klatki, więc wiersz Porządków „Rodowód do potwierdzenia" nie ma dokąd
 # prowadzić POZA Zbiorami: perspektywa jest tu jedyną drogą od liczby do listy. Stała współdzielona
 # z TasksView po nazwie — jak u dwóch sąsiadów wyżej.
 PRESET_LINEAGE = "Rodowód"
@@ -823,7 +823,7 @@ def _zdanie_gestu_zapisu(op, res):
     zablokowane = [w for w in wyniki if w.status == "blocked"]
     bledy = [w for w in wyniki if w.status not in (sukces, "blocked", "withheld")]
     if wstrzymane:
-        msg += " · " + i18n.t("grid.wb.withheld", n=len(wstrzymane))
+        msg += " · " + i18n.t_plural("grid.wb.withheld", len(wstrzymane))
     if zablokowane:
         msg += i18n.t_plural("grid.inplace.blocked", len(zablokowane))
     if bledy:

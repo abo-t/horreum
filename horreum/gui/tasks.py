@@ -52,7 +52,8 @@ from horreum.gui.rows import TwoPartDelegate
 # Wiersz „XISF (nagłówki tylko do odczytu)" ZNIKNĄŁ w P6c: pisarz XISF istnieje, więc zdanie było
 # już nieprawdą, a sam licznik plików danego formatu nie jest robotą do zrobienia (facet formatu
 # w Zbiorach mówi to samo, w miejscu, gdzie się o to pyta).
-# Wiersz „Obrazy bez rodowodu" DOSZEDŁ 0808 i celuje w PERSPEKTYWĘ, nie w podstronę — bo gest
+# Wiersz „Rodowód do potwierdzenia" (nazwa perspektywy, którą otwiera - jeden zbiór, jedna nazwa)
+# DOSZEDŁ 0808 i celuje w PERSPEKTYWĘ, nie w podstronę - bo gest
 # (potwierdź / odrzuć wejście / wskaż odniesienie czasu) mieszka w panelu „Rodowód" w Zbiorach
 # i działa z zaznaczenia jednej klatki. Do tej zmiany liczba istniała wyłącznie w raporcie etapu
 # Dostawy, a droga od niej do konkretnego obrazu wiodła przez przeklikanie całego archiwum stosów.
@@ -689,6 +690,10 @@ class TasksView(QWidget):
             self.pages.setCurrentIndex(action)         # podstrona osi
             if key in _KUBELEK_PODSTRONY:
                 self._zaznacz_kubelek(_KUBELEK_PODSTRONY[key])
+            elif key == "unresolved_lights":
+                # Klatki bez obiektu mieszkają w kilku kubełkach kolejki - wejście zaznacza pierwszy
+                # niepusty, więc lista klatek i gest stoją od razu (dwie interakcje, nie trzy).
+                self.object_view.zaznacz_pierwszy_kubelek(ObjectAxisView.KUBELKI_OSI_OBIEKTU)
             elif key == "observatory_review_frames":
                 # AR-74: ta sama droga dla osi stanowiska - baza od nowa i gest gotowy pod ręką.
                 self.observatory_view.wejdz_po_wskazanie()

@@ -611,5 +611,8 @@ def test_proba_fali_10_b_i_c_bez_ruchu_pliku(arch):
 
 
 def test_odmowa_nie_niesie_kodu_bez_zmian(arch):
+    """Odmowa niesie WŁASNY kod (zdanie okna w języku UI), nigdy `SKIP_UNCHANGED` - tylko ten kod
+    okno liczy w „bez zmian”."""
     fid = arch.klatka(r"LIGHTS\X\cam\1.fits", canon="NGC224", mtime=None)
-    assert [s.code for s in arch.plan([fid]).skipped] == [None]
+    assert [s.code for s in arch.plan([fid]).skipped] == ["no_mtime"]
+    assert object_change.SKIP_UNCHANGED != "no_mtime"

@@ -178,6 +178,7 @@ def test_panel_ukryty_do_pierwszego_przebiegu_potem_raport(strona, tmp_path):
     assert strona.lbl_objects.text() == "Obiekty: IC1795 ×1 (5 min)"   # 300 s: minuty (AR-75)
     assert strona.lbl_cal.text() == "Kalibracja nowych lightów: bez flatu 4 · bez darka 4"
     assert strona.lbl_unresolved.text() == "Nie rozpoznałem: 3 klatki"
+    assert strona.lbl_unresolved.property("role") == "warn"          # robota czeka - rola ostrzeżenia
     wiersze = _wiersze(strona)
     assert [w.lbl.text() for w in wiersze] == ["„Plama Zdzicha” ×2 w tej dostawie"]
     assert wiersze[0].btn.isEnabled() and wiersze[0].btn.text() == "Przypisz obiekt…"
@@ -215,6 +216,7 @@ def test_gest_przypisz_obiekt_z_raportu_zapamietuje_nazwe(strona, tmp_path):
     assert osie == [1]
     assert _wiersze(strona) == []
     assert strona.lbl_unresolved.text() == "Wszystko rozpoznane"
+    assert strona.lbl_unresolved.property("role") == "ok"            # komplet - rola ok, po geście też
     assert strona.lbl_objects.text() == "Obiekty: NGC7000 ×2 (0.2 h)"
 
 
@@ -557,6 +559,22 @@ def test_raport_po_angielsku(qapp, tmp_path):
         assert widok.lbl_unresolved.text() == "Not recognized: 3 frames"
         assert [w.lbl.text() for w in _wiersze(widok)] == ["“Plama Zdzicha” ×3 in this intake"]
         assert _wiersze(widok)[0].btn.text() == "Assign object…"
+        # Okno przypisania z tego wiersza mówi po angielsku angielskim cudzysłowem (dawniej „…”).
+        teksty = []
+
+        def zamknij(dlg):
+            teksty.append(dlg.head.text())
+            dlg.reject()
+
+        stan = _prowadz_dialog(zamknij)
+        _wiersze(widok)[0].btn.click()
+        assert stan["widziane"], "okno przypisania się nie pokazało"
+        assert teksty[0].startswith("Group “Plama Zdzicha” - 3 frames.")
+        polskie = [k for k, w in i18n.CATALOG.items()
+                   if (k.startswith("assign.") or k == "object.alias_no_alnum")
+                   and any("„" in s for s in (w["en"].values() if isinstance(w["en"], dict)
+                                                   else [w["en"]]))]
+        assert polskie == [], polskie
     finally:
         con.close()
 
@@ -1034,15 +1052,15 @@ def test_rodowod_ze_zniw_pusty_rodowod_nie_flashuje_drugi_raz(qapp, tmp_path, us
 
 @pytest.mark.parametrize("n, pl, en", [
     (1, "1 stos bez rodowodu - Dostawa nie ujęła go jako stosu; uruchom „Przyjmij nowe” na archiwum",
-     "1 stack without lineage - Intake did not take it in as a stack; run Take new on the archive"),
+     "1 stack without lineage - Intake did not take it in as a stack; run Receive new on the archive"),
     (2, "2 stosy bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
-     "2 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+     "2 stacks without lineage - Intake did not take them in as stacks; run Receive new on the archive"),
     (5, "5 stosów bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
-     "5 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+     "5 stacks without lineage - Intake did not take them in as stacks; run Receive new on the archive"),
     (12, "12 stosów bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
-     "12 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+     "12 stacks without lineage - Intake did not take them in as stacks; run Receive new on the archive"),
     (22, "22 stosy bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
-     "22 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+     "22 stacks without lineage - Intake did not take them in as stacks; run Receive new on the archive"),
 ])
 def test_zdanie_stosow_bez_rodowodu_odmiana_liczebnika(qapp, n, pl, en):
     for jezyk, oczekiwane in (("pl", pl), ("en", en)):
@@ -1161,7 +1179,7 @@ def test_stos_bez_obiektu_zdanie_po_angielsku_a_dryf_przed_klikiem_nic_nie_zapis
         win.show()
         assert _obiekt_stosu(win) == (None, None)
         _zniwa_i_przebieg(win)
-        assert win._pelny_komunikat == ("1 stack has no object, the release says NGC7000 - Harvested 1 file "
+        assert win._pelny_komunikat == ("1 stack has no object, the release says NGC7000 - Took 1 file "
                                         "into the archive - lineage: 1 stack from harvest history")
         assert not re.search(r"[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]|Wciągnięto|stos\b|wydanie", win._pelny_komunikat)
         assert win.recipe_label.text() == "Assign release object"

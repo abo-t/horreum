@@ -4172,6 +4172,37 @@ def readiness_pct(n, total):
     return min(max(n * 100 // total, 1), 99)
 
 
+def split_pct(counts, total):
+    """Procenty CZĘŚCI jednej całości na ekran teczek (flat: master / surowy / do przeliczenia;
+    Qt-wolne, testowane wprost). Każda część trzyma regułę `readiness_pct` (0 i 100 tylko,
+    gdy są prawdą, środek 1..99), a ich SUMA równa się procentowi pokrycia liczonemu tą samą regułą.
+
+    Ścięcie każdej części osobno dawało Cr464 „79 % / 20 %" (132 i 35 ze 167 lightów, kopia `pf4`):
+    suma 99 przy flacie dla każdego lightu, czyli brak, którego nie ma - a podgląd wydania obok
+    mówi „bez flatu 0". Różnicę rozdaje metoda największej reszty: punkt dostaje część, której
+    ścięcie zabrało najwięcej (remis - wcześniejsza część). Gdy próg 1 % zawyżył sumę ponad
+    pokrycie, punkt oddaje część najbardziej zawyżona, nigdy poniżej progu - suma „100" przy
+    lighcie bez flatu byłaby gorszym kłamstwem niż część niższa o punkt."""
+    parts = [readiness_pct(c, total) for c in counts]
+    if not total:
+        return parts
+    target = readiness_pct(sum(counts), total)
+    exact = [c * 100 / total for c in counts]
+    while sum(parts) < target:
+        kandydaci = [i for i, c in enumerate(counts) if c and parts[i] < (100 if c >= total else 99)]
+        if not kandydaci:
+            break
+        i = max(kandydaci, key=lambda k: (exact[k] - parts[k], -k))
+        parts[i] += 1
+    while sum(parts) > target:
+        kandydaci = [i for i in range(len(counts)) if parts[i] > 1]
+        if not kandydaci:
+            break
+        i = min(kandydaci, key=lambda k: (exact[k] - parts[k], -k))
+        parts[i] -= 1
+    return parts
+
+
 # Stan flatu lightu - wartości `flat_states`. `pending` (master JEST, rodowód go nie przeliczył) nie
 # jest brakiem flatu: zakup klatek i jedno kliknięcie w Dostawie to dwie różne wiadomości.
 FLAT_MASTER, FLAT_RAW, FLAT_PENDING, FLAT_NONE = "master", "raw", "pending", "none"
@@ -4267,13 +4298,15 @@ def release_readiness(con, *, window_days=RAW_FLAT_WINDOW_DAYS):
             stan = "red"
         else:
             stan = "amber"
+        # Flat to JEDNA całość w trzech częściach - suma części = pokrycie flatem (`split_pct`).
+        pct_flat = split_pct((t["mf"], t["raw"], t["pending"]), n)
         out.append({
             "object_id": oid, "canon": t["canon"], "lights": n, "hours": t["secs"] / 3600.0,
             "nights": len(t["nights"]), "zestawy": len(t["zestawy"]),
             "n_master_flat": t["mf"], "n_master_dark": t["md"], "n_raw_flat": t["raw"],
             "n_pending": t["pending"],
-            "pct_master_flat": readiness_pct(t["mf"], n), "pct_master_dark": readiness_pct(t["md"], n),
-            "pct_raw_flat": readiness_pct(t["raw"], n), "pct_pending": readiness_pct(t["pending"], n),
+            "pct_master_flat": pct_flat[0], "pct_master_dark": readiness_pct(t["md"], n),
+            "pct_raw_flat": pct_flat[1], "pct_pending": pct_flat[2],
             "last_night": max(t["nights"]) if t["nights"] else None, "stan": stan})
     out.sort(key=lambda r: (-r["hours"], r["canon"].lower(), r["object_id"]))
     return out

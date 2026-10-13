@@ -304,6 +304,18 @@ class AssignObjectDialog(QDialog):
                     self.combo.setCurrentIndex(i)
                     break
         lay.addWidget(self.combo)
+        # PUSTY WYNIK SZUKAJKI PROWADZI DO POLA NAZWY (wizytacja: przy „M 44”, którego biblioteka
+        # nie ma, lista mówiła tylko „żaden obiekt nie pasuje”, a pole nazwy niżej milczało - user
+        # utknął). Fraza bez trafień przechodzi do pola nazwy (`_on_search`), zdanie pod listą mówi,
+        # gdzie jest, a zdanie na żywo pod polem - co z nią zrobi zapis (także „założy obiekt”).
+        self.search_hint = QLabel("")
+        self.search_hint.setWordWrap(True)
+        self.search_hint.setProperty("role", "secondary")
+        self.search_hint.setVisible(False)
+        lay.addWidget(self.search_hint)
+        # Fraza, którą okno SAMO wpisało w pole nazwy (None = pole należy do usera): tylko taką
+        # wolno zdjąć, gdy szukajka znów trafia, i tylko taką nadpisać nową frazą bez trafień.
+        self._przeniesiona = None
 
         lay.addWidget(QLabel(i18n.t("assign.new_designation")))
         self.designation = QLineEdit()
@@ -346,8 +358,19 @@ class AssignObjectDialog(QDialog):
         lay.addWidget(buttons)
         self.combo.currentIndexChanged.connect(self._sync_accept_enabled)
         self.designation.textChanged.connect(self._sync_accept_enabled)
+        # Edycja RĘKĄ (nie `setText` okna) zabiera polu status frazy przeniesionej.
+        self.designation.textEdited.connect(self._on_designation_edited)
         self.search.textChanged.connect(self._on_search)
         self._sync_accept_enabled()
+
+    def exec(self):
+        """Modalny bieg i kasacja okna - wzorzec `object_change_dialog.ObjectChangeDialog.exec`:
+        wołający czyta wyłącznie `selected` po `exec`, a odroczona kasacja przychodzi w jego pętli
+        zdarzeń, po slocie."""
+        try:
+            return super().exec()
+        finally:
+            self.deleteLater()
 
     def _item_text(self, o):
         """Pozycja listy: `kanon · katalog · aliasy` (`NGC4258  ·  NGC  ·  M106`)."""
@@ -367,7 +390,8 @@ class AssignObjectDialog(QDialog):
         cofa combo na zero (albo na nowe jedyne trafienie). Pusta fraza niczego nie preselekcjonuje
         - jedyny obiekt biblioteki to nie jest trafienie szukajki.
         Sygnały zablokowane na czas przeładunku: `clear()` emituje zmianę indeksu dla każdej
-        pozycji po drodze, a stan akcji liczy wołający raz, po wszystkim."""
+        pozycji po drodze, a stan akcji liczy wołający raz, po wszystkim. Zwraca liczbę trafień
+        (zero przy niepustej frazie prowadzi do pola nazwy - `_on_search`)."""
         wybrany = self.combo.currentData()
         # Igła BEZ OGONKÓW: predykat liczy `norm_alnum`, który litery diakrytyczne wycina,
         # więc złożenie musi nastąpić przed nim (`klucz_szukania`). Predykat zostaje wspólny
@@ -391,10 +415,29 @@ class AssignObjectDialog(QDialog):
             self.combo.setCurrentIndex(indeks)
         finally:
             self.combo.blockSignals(False)
+        return len(trafione)
 
     def _on_search(self, text):
-        self._fill_combo(text)
+        """Zawężenie listy; fraza BEZ TRAFIEŃ przechodzi do pola nazwy, jeśli pole jest puste albo
+        niesie poprzednią frazę przeniesioną przez okno - wpisu usera okno nie nadpisuje, tylko
+        mówi, gdzie go dać. Fraza znów z trafieniami (albo pusta) zdejmuje z pola to, co okno samo
+        tam wpisało. Pole nazwy z treścią nadpisuje wybór z listy, a zdanie na żywo pod nim mówi,
+        co zapisze zapis - przeniesiona nazwa jest więc widoczna, zanim cokolwiek pójdzie dalej."""
+        fraza = (text or "").strip()
+        bez_trafien = self._fill_combo(text) == 0 and bool(fraza)
+        if bez_trafien and (not self.designation.text().strip() or self._przeniesiona is not None):
+            self._przeniesiona = fraza
+            self.designation.setText(fraza)
+        elif not bez_trafien and self._przeniesiona is not None:
+            self._przeniesiona = None
+            self.designation.clear()
+        self.search_hint.setText(i18n.t("assign.search_moved") if self._przeniesiona is not None
+                                 else i18n.t("assign.search_to_field"))
+        self.search_hint.setVisible(bez_trafien)
         self._sync_accept_enabled()
+
+    def _on_designation_edited(self, _text):
+        self._przeniesiona = None
 
     def _fail(self, msg):
         self.error.setText(msg)
@@ -430,9 +473,16 @@ class AssignObjectDialog(QDialog):
         # zmiennej lokalnej, nie na `isVisible()` (ta sama lekcja, co przy nocie niżej).
         podglad = ident is not None
         self.canon_preview.setVisible(podglad)
+        # Kanon, którego baza nie zna, ZAŁOŻY obiekt (klinga zapisu go wstawia) - zdanie mówi to
+        # przed kliknięciem. Id po kanonie tą samą frazą co pre-check i klinga
+        # (`queries.object_id_by_canon`), nie z listy: obiekt bez klatek jest w bazie, choć lista
+        # (`library_objects`, `JOIN frame`) go nie pokazuje.
         self.canon_preview.setText(
             i18n.t("assign.canon_preview", text=text, canon=ident.canon,
-                   header=header_form(ident.canon)) if podglad else "")
+                   header=header_form(ident.canon))
+            + (i18n.t("assign.creates_object")
+               if queries.object_id_by_canon(self.con, ident.canon) is None else "")
+            if podglad else "")
         # Nota po RODZAJU, nie po pustym katalogu: `catalog IS NULL` mają też obiekty z REGIONU
         # (`Veil`), a nazwanie ich „obiektem własnym" byłoby nieprawdą o pochodzeniu kanonu.
         wlasny = ident is not None and ident.kind == "own"

@@ -100,6 +100,31 @@ _ZDANIA_GESTU = {
     "perspective.saved": "home.gest.perspective_saved",
 }
 
+# ZDARZENIA TOWARZYSZĄCE gestowi osi obiektu: klinga zapisuje klatkę PARĄ czasowników (§5.9) -
+# `object.unassigned` (co zdjęto) obok `object.cleared` albo `object.assigned` tej samej klatki - a gest
+# nadania dokłada słownik (`object.upserted`, `object.aliased` na celu `object:`). Dom liczył je jak
+# osobne zmiany: jedno „Cofnij przypisanie" na 2 klatkach mówiło „4 zmiany" obok paska „2 z 2
+# klatek". Jednostką gestu na klatkach jest KLATKA, więc zdanie bierze czasownik główny, a pary
+# i słownika nie dolicza. Para odpada wyłącznie wtedy, gdy czasownik główny ma co najmniej tyle
+# zdarzeń - cofnięcie nadpisania do stanu bez obiektu odpina klatkę bez nadania (`_restore_override_tx`)
+# i zdanie o samych nadaniach przemilczałoby resztę.
+_GLOWNE_OSI_OBIEKTU = ("object.assigned", "object.cleared")
+_SLOWNIK_OSI_OBIEKTU = ("object.upserted", "object.aliased")
+_PARA_OSI_OBIEKTU = "object.unassigned"
+
+
+def _bez_towarzyszacych(verbs):
+    """Czasowniki gestu bez zdarzeń towarzyszących gestowi osi obiektu - kopia, bez zmian, gdy gest
+    nie ma dokładnie jednego czasownika głównego tej osi."""
+    glowne = [v for v in _GLOWNE_OSI_OBIEKTU if v in verbs]
+    if len(glowne) != 1:
+        return verbs
+    glowny = glowne[0]
+    zostaja = {v: n for v, n in verbs.items() if v not in _SLOWNIK_OSI_OBIEKTU}
+    if zostaja.get(_PARA_OSI_OBIEKTU, 0) <= zostaja[glowny]:
+        zostaja.pop(_PARA_OSI_OBIEKTU, None)
+    return zostaja
+
 
 # Powód relokacji pliku z gestu „Zmień obiekt…"/„Uzgodnij pliki…" (AR-17 krok 3) i z jego
 # cofnięcia - ten, który klinga zapisu dokłada do ładunku `location.renamed` (`reason`). Takie
@@ -123,7 +148,10 @@ def zdanie_gestu(gest):
     folderu obiektu” mówi się WYŁĄCZNIE o relokacjach ze zmianą katalogu (`relocated_dirs`
     read-modelu: powód → liczba); gest zmienia też samą nazwę w tym samym folderze (człon obiektu
     na początku nazwy, D-1011-6 `O2`), więc bez tego rozróżnienia zdanie jest ogólne (nowe miejsce
-    albo nowa nazwa). Netto ujemne = cofnięcie gestu."""
+    albo nowa nazwa). Netto ujemne = cofnięcie gestu.
+
+    JEDNOSTKA GESTU NA KLATKACH TO KLATKA (`_bez_towarzyszacych`): para `object.unassigned` i słownik
+    obiektów nie są osobnymi zmianami, więc Dom mówi tą samą liczbą, co pasek po geście."""
     relokacje = (gest.get("reasons") or {}).get("location.renamed", {})
     netto = relokacje.get(POWOD_ZMIANY_OBIEKTU, 0) - relokacje.get(POWOD_COFNIECIA_ZMIANY, 0)
     katalogi = gest.get("relocated_dirs") or {}
@@ -135,8 +163,9 @@ def zdanie_gestu(gest):
         return i18n.t_plural("home.gest.object_files", netto)
     if netto < 0:
         return i18n.t_plural("home.gest.object_relocated_back", -netto)
-    if len(gest["verbs"]) == 1:
-        (verb, n), = gest["verbs"].items()
+    verbs = _bez_towarzyszacych(gest["verbs"])
+    if len(verbs) == 1:
+        (verb, n), = verbs.items()
         klucz = _ZDANIA_GESTU.get(verb)
         if klucz is not None:
             return i18n.t_plural(klucz, n)

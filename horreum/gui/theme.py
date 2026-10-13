@@ -151,6 +151,10 @@ def recepta_wygaszona(name):
 # wystarcza; drzewa i tabele pól wyboru nie niosą.
 WSKAZNIK_CHECKBOX = ("QCheckBox::indicator:unchecked", "QListView::indicator:unchecked")
 WSKAZNIK_RADIO = "QRadioButton::indicator:unchecked"
+# Selektor ZAZNACZONEGO radia - jedyny stan zaznaczony, który arkusz umie narysować w całości:
+# kropkę daje gradient radialny tła, więc znak zaznaczenia nie ginie (ptaszka pola wyboru gradient
+# nie narysuje - ten stan maluje dalej Fusion).
+WSKAZNIK_RADIO_ZAZNACZONY = "QRadioButton::indicator:checked"
 
 
 def wskaznik_odznaczony(name):
@@ -165,6 +169,18 @@ def wskaznik_odznaczony(name):
     return accents(name)["secondary_text"], palette_spec(name)["base"]
 
 
+def wskaznik_zaznaczony(name):
+    """(ramka i kropka, wypełnienie) ZAZNACZONEGO radia - jeden właściciel, z którego czyta `qss`
+    i bramka kontrastu.
+
+    Po AR-73 pusty wskaźnik dostał jasną ramkę, a zaznaczony został przy ramce Fusion `#222222` na
+    `#1E1E1E` (1,03:1): w ciemnym motywie zaznaczone radio wyglądało SŁABIEJ niż puste obok - ekran
+    mówił odwrotnie, niż jest. Ramka i kropka biorą `text` (najmocniejszy kolor treści palety, mocniejszy
+    od `secondary_text` pustej ramki w obu motywach), wypełnienie `base` jak u pustego."""
+    paleta = palette_spec(name)
+    return paleta["text"], paleta["base"]
+
+
 def _qss_wskaznikow(name):
     """Reguły wyłącznie dla stanu `:unchecked`: styl arkusza z ramką rysuje SAM prostokąt bez
     znaku zaznaczenia, więc reguła na `:checked` zgasiłaby ptaszka (bez obrazka go nie ma). Stan
@@ -174,15 +190,29 @@ def _qss_wskaznikow(name):
 
     Reguła na wskaźniku przełącza liczenie rozmiaru pola na arkusz, który gubi margines ramki
     fokusu Fusion: podpowiedź wysokości spadała z 21 do 16 px (zmierzone natywnie, czcionka 16 px),
-    czyli każdy rząd pól wyboru ściskał się o 5 px. Wypełnienie 2 + 3 px oddaje dawną wysokość."""
+    czyli każdy rząd pól wyboru ściskał się o 5 px. Wypełnienie 2 + 3 px oddaje dawną wysokość.
+
+    Wyjątek od reguły „tylko `:unchecked`": ZAZNACZONE RADIO (`WSKAZNIK_RADIO_ZAZNACZONY`) - kropkę
+    rysuje gradient radialny tła, więc arkusz nie gasi znaku; ramka i kropka z `wskaznik_zaznaczony`,
+    mocniejsze od pustej ramki. Ten sam rozmiar 12 + 1 px - radio nie skacze przy przełączeniu."""
     ramka, tlo = wskaznik_odznaczony(name)
     wygaszona = palette_spec(name)["disabled_text"]
     pole = f"border: 1px solid {ramka}; background: {tlo}; width: 12px; height: 12px;"
+    znak, tlo_znaku = wskaznik_zaznaczony(name)
+
+    def _kropka(kolor):
+        return ("qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5, "
+                f"stop: 0 {kolor}, stop: 0.42 {kolor}, stop: 0.52 {tlo_znaku}, stop: 1 {tlo_znaku})")
+
     return ("QCheckBox, QRadioButton { padding: 2px 0px 3px 0px; }"
             + ", ".join(WSKAZNIK_CHECKBOX) + f" {{ {pole} }}"
             + f"{WSKAZNIK_RADIO} {{ {pole} border-radius: 7px; }}"
             + ", ".join(s + ":disabled" for s in (*WSKAZNIK_CHECKBOX, WSKAZNIK_RADIO))
-            + f" {{ border-color: {wygaszona}; }}")
+            + f" {{ border-color: {wygaszona}; }}"
+            + f"{WSKAZNIK_RADIO_ZAZNACZONY} {{ border: 1px solid {znak}; width: 12px; height: 12px; "
+            f"border-radius: 7px; background: {_kropka(znak)}; }}"
+            + f"{WSKAZNIK_RADIO_ZAZNACZONY}:disabled {{ border-color: {wygaszona}; "
+            f"background: {_kropka(wygaszona)}; }}")
 
 
 def qss(name):

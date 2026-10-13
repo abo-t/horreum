@@ -352,6 +352,13 @@ class PrzyjmijView(QWidget):
             self.lbl_unresolved.setText(i18n.t_plural("intake.unresolved_head", razem))
         else:
             self.lbl_unresolved.setText(i18n.t("intake.all_recognized"))
+        # Zdanie niesie rolę koloru swojego znaczenia (`theme.ROLES`): robota czeka - ostrzeżenie,
+        # komplet - ok. Samo pogrubienie mówiło tylko „ważne”, nie „dobrze” albo „do zrobienia”.
+        rola = "warn" if razem else "ok"
+        if self.lbl_unresolved.property("role") != rola:
+            self.lbl_unresolved.setProperty("role", rola)
+            self.lbl_unresolved.style().unpolish(self.lbl_unresolved)   # rola czytana przy polishu
+            self.lbl_unresolved.style().polish(self.lbl_unresolved)
         self.lbl_unresolved.setVisible(
             bool(razem or ((r["lights"] or r["stacks"]) and not r["cleared"])))
         self.lbl_cleared.setText(i18n.t_plural("intake.cleared", r["cleared"]) if r["cleared"]

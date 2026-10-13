@@ -91,7 +91,7 @@ def test_podpowiedz_kopii_bez_zeznania_parytet_EN(qapp, sprzed_migracji):
         tip = _podpowiedz_sciezki(view, fid)
         assert "header testimony not collected yet" in tip
         assert "Intake → “Check presence” → “Mark vanished”" in tip, tip
-        assert "if the file is on disk - Intake → “Take new”" in tip, tip
+        assert "if the file is on disk - Intake → “Receive new”" in tip, tip
         assert "will fill" not in tip, tip
     finally:
         view.close()
@@ -181,7 +181,7 @@ def test_wiersz_bez_zeznania_parytet_EN(qapp, sprzed_migracji):
         tv.refresh_counts()
         w = _wiersz(tv, "copy_conflict_frames")
         assert w.data(rows.SECONDARY) == "? · 2 copies not yet read  ›"
-        assert "If the file is on disk - Intake → “Take new”" in w.toolTip(), w.toolTip()
+        assert "If the file is on disk - Intake → “Receive new”" in w.toolTip(), w.toolTip()
         assert ("If the file is no longer on disk - Intake → “Check presence” → “Mark vanished”"
                 in w.toolTip())
     finally:

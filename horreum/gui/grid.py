@@ -208,6 +208,7 @@ class FramesView(QWidget):
         self._recepta_gestu = None  # `(cel, _Odwrot|None)` ostatniego gestu osi - recepta paska
                                     # składa się z tego STANU przy każdym odświeżeniu (FH-2e)
         self._ts_recepty = None     # `event.ts` gestu tej recepty - tożsamość dla Domu (AR-94)
+        self._kanony_recepty = ()   # kanony celu gestu tej recepty - człon odsłonięcia je nazywa
         self._gest_nr = 0           # żeton gestu: ogon starszego gestu milknie po nowszym (AR-84)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
@@ -904,8 +905,8 @@ class FramesView(QWidget):
         ZAPYTANIE STARTUJE OD „PRZEGLĄDU", nie od bieżącej perspektywy: pozycja listy, grupowanie
         i wygląd presetu bez zawężenia. Inaczej zapytanie po „Kalibracji" dziedziczyło jej
         grupowanie po rodzaju i nazwę - lighty zestawu szły pod „Kalibracja (zmieniona)" także do
-        manifestu wydania. Etykietę rozstrzyga potem właściciel na końcu `_refresh` (FH-12): facety
-        i zestaw są zawężeniem W RAMACH „Przeglądu", tekst uwag - zmianą.
+        manifestu wydania. Etykietę rozstrzyga potem właściciel na końcu `_refresh` (FH-12): facety,
+        zestaw i tekst uwag są zawężeniem W RAMACH „Przeglądu" (AR-95).
         Pierwszy obiekt zapytania jest odsłaniany w listwie jak przy moście teczki."""
         nieznane = [f for f in facets if f not in facet_model.FACETS]
         if nieznane:
@@ -1138,19 +1139,21 @@ class FramesView(QWidget):
         Flagi biorą skład z `_TRIMY` (BP-4), a spec niesie je bez podkreślnika (`only_dups` ↔
         `_only_dups`) - konwencja pinowana bramką `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`.
 
-        TEKST UWAG ZAWSZE ROZJEŻDŻA STAN Z DEFINICJĄ (FH-12): żadna perspektywa go nie niesie, a zbiór
-        zawężony do klatek z uwagą „chmury" nie jest „Przeglądem" - w odróżnieniu od facetu, którego
-        wybór widać w listwie, uwagi nie mają kontrolki w klasycznej prezentacji."""
+        TEKST UWAG JEST ZAWĘŻENIEM, jak facet i zestaw (AR-95): każdy składnik zapytania Znajdź zawęża
+        „Przegląd" bez sufiksu „(zmieniona)". Dawniej uwagi liczyły się jako zmiana stanu (FH-12), więc
+        dwa zapytania Znajdź dostawały różne etykiety („Przegląd" przy facecie, „Przegląd (zmieniona)"
+        przy uwagach), a ta szła do manifestu wydania. Tekst uwag stawia wyłącznie Znajdź
+        (`apply_find`, powrót „×" chipu), a żadna perspektywa go nie niesie, więc nie rusza też
+        definicji presetu - sufiks zostaje dla filtra i flag zmienionych poza Znajdź."""
         flagi_spec = {atrybut for atrybut, _ in _TRIMY if spec.get(_klucz_spec(atrybut))}
         flagi_stanu = {atrybut for atrybut, _ in _TRIMY if getattr(self, atrybut)}
         # Filtr złożony WYŁĄCZNIE z liści facetowych (warunek zestawu z Znajdź: teleskop + kamera)
         # jest zawężeniem jak klik w listwie - nad definicją bez filtra nie zmienia perspektywy.
         filtr_zgodny = (spec.get("filter") == self._filter_tree
                         or (spec.get("filter") is None and _zawezenie_facetowe(self._filter_tree)))
-        # KLATKI WSKAZANE Z PANELU - jak tekst uwag: żadna perspektywa ich nie niesie, a 190 wejść
-        # jednego stosu nie jest „Przeglądem".
-        if (flagi_spec != flagi_stanu or not filtr_zgodny or self.note_query is not None
-                or self._wskazane is not None):
+        # KLATKI WSKAZANE Z PANELU: żadna perspektywa ich nie niesie, a 190 wejść jednego stosu nie
+        # jest „Przeglądem" - to nie zawężenie zapytania, tylko inny zbiór.
+        if flagi_spec != flagi_stanu or not filtr_zgodny or self._wskazane is not None:
             return False
         return all(self._facet_state.get(facet) == wybor
                    for facet, wybor in (spec.get("facets") or {}).items())
@@ -1424,7 +1427,8 @@ class FramesView(QWidget):
         # Recepta poprzedniego gestu przestaje obowiązywać w chwili nowego - `refresh()` niżej
         # nie ma jej już składać (FH-2e: składa ją ze stanu, którego za moment nie będzie).
         self._zacznij_gest()
-        msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
+        # Odmiana po WSZYSTKICH klatkach gestu (dopełniacz po „z”: „z 1 klatki”, „z 5 klatek”).
+        msg = i18n.t_plural(klucz, gest.assigned + gest.skipped, assigned=gest.assigned, **kw)
         # Rozbicie pominięć i gotowe obrazy składa JEDEN dom (`zdanie_pominiec`), wspólny z dwiema
         # powierzchniami osi w `gui.app` - `nothing_key` idzie za gestem (FC-6), jak `canons_key`.
         msg += zdanie_pominiec(gest, nothing_key=nothing_key)
@@ -1452,10 +1456,10 @@ class FramesView(QWidget):
             self.object_axis_changed.emit()
             self.stan_porzadkow_changed.emit()     # plakietka Porządków (patrz definicja sygnału)
             self._przeladuj_po_gescie(msg, zaznaczone, recepta=gest.frame_ids, odwrot=odwrot,
-                                      ts=queries.last_hand_ts(self.con))
+                                      ts=queries.last_hand_ts(self.con), kanony=gest.canons)
             return
         self.status_message.emit(msg)
-        self._ustaw_recepte_gestu(gest.frame_ids, odwrot)
+        self._ustaw_recepte_gestu(gest.frame_ids, odwrot, kanony=gest.canons)
 
     def _zacznij_gest(self):
         """Nowy gest z receptą: recepta poprzedniego przestaje obowiązywać i schodzi z paska i Domu
@@ -1478,7 +1482,8 @@ class FramesView(QWidget):
         gest bez zaznaczenia do odłożenia (zapis szuflady, cofnięcie)."""
         self.refresh(w_tle=True, potem=partial(self._ogon_gestu, msg, cel, nr=self._gest_nr, **kw))
 
-    def _ogon_gestu(self, msg, cel, *, nr, poza=True, recepta=None, odwrot=None, ts=None):
+    def _ogon_gestu(self, msg, cel, *, nr, poza=True, recepta=None, odwrot=None, ts=None,
+                    kanony=()):
         """Ogon gestu zapisu PO PRZYŁOŻENIU zbioru (`refresh(w_tle=True, potem=…)`, AR-84): cel
         w zaznaczeniu, człon „poza widokiem", JEDNO zdanie i recepta - wspólny dla gestów obu osi
         zaznaczenia, uwag, izolacji zapisu, werdyktu wersji i przeniesienia faktów.
@@ -1515,7 +1520,8 @@ class FramesView(QWidget):
         `ts` = znacznik gestu w dzienniku z CHWILI ZAPISU (AR-94): ogon leci później, a recepta
         ma nieść tożsamość tego gestu, nie zdarzenia ręki, które mogło dojść w międzyczasie.
         `nr` = żeton z chwili zlecenia (`_podbij_zeton`): inny znaczy, że po zleceniu padł nowszy
-        gest i to jego zdanie, recepta i zaznaczenie zostają. Pusty `msg` - ogon bez zdania."""
+        gest i to jego zdanie, recepta i zaznaczenie zostają. Pusty `msg` - ogon bez zdania.
+        `kanony` = obiekty celu gestu (`ObjectGesture.canons`) dla członu odsłonięcia recepty."""
         if nr != self._gest_nr:
             return
         wrocilo = self._przywroc_zaznaczenie(cel)
@@ -1524,9 +1530,9 @@ class FramesView(QWidget):
         if msg:
             self.status_message.emit(msg)
         if recepta is not None:
-            self._ustaw_recepte_gestu(recepta, odwrot, ts=ts)
+            self._ustaw_recepte_gestu(recepta, odwrot, ts=ts, kanony=kanony)
 
-    def _ustaw_recepte_gestu(self, cel, odwrot=None, *, ts=None):
+    def _ustaw_recepte_gestu(self, cel, odwrot=None, *, ts=None, kanony=()):
         """Zapamiętaj STAN recepty ostatniego gestu i podaj ją na pasek (FH-2e).
 
         RECEPTA ŻYJE TYLE, CO JEJ PRAWDA, NIE TYLE, CO KOMUNIKAT. Do FH-2e żyła 5 s razem
@@ -1539,10 +1545,15 @@ class FramesView(QWidget):
         TOŻSAMOŚĆ GESTU (AR-94) - znacznik ostatniego zdarzenia ręki w dzienniku, czytany zaraz po
         zapisie gestu, więc to jest `ts` właśnie zapisanego gestu (klinga pisze gest jednym `now`).
         Ogon po składzie w tle (`_ogon_gestu`) leci później i podaje `ts` złapany w chwili zapisu;
-        bez niego czytamy TERAZ. Recepta niesie go dalej, a Dom opisuje nim „Ostatnio”."""
+        bez niego czytamy TERAZ. Recepta niesie go dalej, a Dom opisuje nim „Ostatnio”.
+
+        `kanony` = obiekty, których gest dotknął (`ObjectGesture.canons`); człon odsłonięcia nazywa
+        nimi cel („odsłonisz 43 klatki NGC3623: …"), gdy obiekt jest jeden. Gest bez obiektu
+        (wycofanie, uwagi) podaje sam licznik."""
         self._podbij_zeton()
         self._recepta_gestu = (tuple(cel), odwrot) if cel else None
         self._ts_recepty = (ts or queries.last_hand_ts(self.con)) if cel else None
+        self._kanony_recepty = tuple(kanony) if cel else ()
         self._emituj_recepte_gestu()
 
     def ponow_recepte(self):
@@ -1566,21 +1577,31 @@ class FramesView(QWidget):
         odsłoni (`_recepta_powrotu_do_widoku`, cel „gest"); wykonawca pyta o wybór gestu PONOWNIE
         w chwili kliknięcia. Droga powrotu, dopóki jest co odwracać (`_Odwrot.zostalo`) - wykonalna
         od razu, gdy cały cel jest na ekranie, a w wariancie „potem" bez wykonawcy (przycisk
-        wygaszony, zdanie zostaje)."""
+        wygaszony, zdanie zostaje).
+
+        CZŁON ODSŁONIĘCIA NAZYWA SWÓJ CEL (`grid.sel.reveal_target`): liczbę klatek celu, których nie
+        ma na ekranie, i obiekt gestu, gdy jest jeden. Recepta żyje dłużej niż zdanie raportu, do
+        którego dawne „odsłoni je …" się odwoływało - w innym zbiorze (Znajdź „M64" po geście na
+        NGC3623) „je" nie miało odniesienia, a klik działa na bieżący widok."""
         if self._recepta_gestu is None:
             return []
         cel, odwrot = self._recepta_gestu
         widoczne = set(self._frame_ids)
-        poza = any(f not in widoczne for f in cel)
+        ukryte = sum(1 for f in cel if f not in widoczne)
+        poza = ukryte > 0
         czlony = []
         if poza:
             recepta = self._recepta_powrotu_do_widoku()
             if recepta is not None:
                 klucz, kwargi = recepta
+                obiekt = (i18n.t("grid.sel.reveal_object", canon=self._kanony_recepty[0])
+                          if len(self._kanony_recepty) == 1 else "")
                 # Odsłonięcie to sama NAWIGACJA (perspektywa, zbiór) - bez zapisu, więc bez bramki
                 # zajętości: w trakcie etapu ma działać jak każde przełączenie widoku.
-                czlony.append(CzlonRecepty(i18n.t(klucz, **kwargi),
-                                           partial(self.wykonaj_recepte_powrotu, cel=_CEL_GEST)))
+                czlony.append(CzlonRecepty(
+                    i18n.t_plural("grid.sel.reveal_target", ukryte, obj=obiekt,
+                                  how=i18n.t(klucz, **kwargi)),
+                    partial(self.wykonaj_recepte_powrotu, cel=_CEL_GEST)))
         if odwrot is not None and getattr(self, odwrot.zostalo)(cel):
             tekst = i18n.t(odwrot.klucz_potem if poza else odwrot.klucz,
                            menu=i18n.t(odwrot.menu), action=i18n.t(odwrot.akcja))
@@ -1651,7 +1672,7 @@ class FramesView(QWidget):
         wycofanie zdejmuje klatkę z kubełków roboczych. Dwie kopie tej frazy rozjechałyby się przy
         pierwszej poprawce, a trzecia oś dołożyłaby trzecią (bramka pakietu, soczewka repo).
 
-        ZWRACA SAM FAKT. „poza widokiem: N" jest POMIAREM i należy do raportu, a „odsłoni je …"
+        ZWRACA SAM FAKT. „poza widokiem: N" jest POMIAREM i należy do raportu, a „odsłonisz N klatek …"
         jest INSTRUKCJĄ z własnym nośnikiem (FH-2) - i od FH-2e składa się ze STANU gestu
         (`_czlony_recepty_gestu`), nie z tej chwili, bo ma przeżyć odświeżenie, po którym cel
         wraca na ekran.
@@ -1722,8 +1743,9 @@ class FramesView(QWidget):
         return set.intersection(*trimy)
 
     def _recepta_powrotu_do_widoku(self):
-        """Brzmienie recepty na PASKU STANU - `(klucz, kwargi)` albo `None`, gdy nie ma czego doradzić.
-        Pasek mówi o klatkach wypchniętych gestem („odsłoni je …"), więc pyta decyzję o `_CEL_GEST`;
+        """GEST odsłonięcia w recepcie PASKA STANU - `(klucz, kwargi)` albo `None`, gdy nie ma czego
+        doradzić; zdanie z celem („odsłonisz N klatek …: {how}") składa `_czlony_recepty_gestu`.
+        Pasek mówi o klatkach wypchniętych gestem, więc pyta decyzję o `_CEL_GEST`;
         pusty stan pyta tę samą metodę o `_CEL_WIDOK` i w trimie, który ma klatki, dostaje inną,
         też prawdziwą odpowiedź (FH-4, poprawka po firsthandzie). Brzmienie paska się przez to nie
         zmieniło. Recepta cytuje etykietę gestu z katalogu (nazwa presetu, napis przycisku zbioru),
@@ -2975,7 +2997,7 @@ class FramesView(QWidget):
         return self._zbior_w_drodze()
 
     def ponow_raport_wczytania(self):
-        """Podaj „Wczytuję…" jeszcze raz, gdy zbiór jest w drodze - wejście gospodarza zaraz po
+        """Podaj „Czytam klatki…" jeszcze raz, gdy zbiór jest w drodze - wejście gospodarza zaraz po
         podpięciu `load_report`: pierwsze zlecenie leci z `__init__`, zanim ktokolwiek słucha."""
         if self._zbior_w_drodze():
             self.load_report.emit(i18n.t("busy.read_frames"))
@@ -3371,7 +3393,8 @@ class FramesView(QWidget):
         a zdanie, które „bywa jedynym śladem", milczało o tym, gdzie te klatki się podziały."""
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
         self._zacznij_gest()                # recepta poprzedniego gestu przestaje obowiązywać
-        msg = i18n.t(klucz, done=gest.done, total=gest.done + gest.skipped)
+        # Odmiana po WSZYSTKICH klatkach gestu („z 1 klatki", „z 5 klatek").
+        msg = i18n.t_plural(klucz, gest.done + gest.skipped, done=gest.done)
         for sufiks, n in gest.skipped_breakdown:
             if n:
                 msg += i18n.t(f"grid.sel.frame_skip_{sufiks}", n=n)

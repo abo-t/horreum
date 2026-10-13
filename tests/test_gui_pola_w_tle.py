@@ -814,7 +814,7 @@ def test_gest_osi_wraca_od_razu_a_ogon_odklada_cel_zdanie_i_recepte(qapp, tmp_pa
         assert not view.table.viewport().testAttribute(Qt.WA_SetCursor), "kursor zajętości zdjęty"
         assert str(recepty[-1]) != "", "recepta gestu po przyłożeniu"
         assert len(msg) == 2 and msg[1].startswith(
-            i18n.t("grid.sel.object_cleared", assigned=2, total=2)), msg
+            i18n.t_plural("grid.sel.object_cleared", 2, assigned=2)), msg
         assert view._recepta_gestu is not None and sorted(view._recepta_gestu[0]) == [1, 2]
         assert view._ts_recepty == ts_gestu, "recepta niesie znacznik gestu, nie późniejszego zdarzenia"
     finally:
@@ -1129,6 +1129,26 @@ def test_koniec_przebiegu_liczy_liczniki_w_tle_a_niewidoczna_os_czeka(qapp, tmp_
         assert watki and threading.get_ident() not in watki, "liczył wątek tła"
     finally:
         brama.set()
+        win.close()
+
+
+def test_zaznaczenie_gridu_przezywa_przebieg_dostawy(qapp, tmp_path):
+    """Koniec przebiegu Dostawy przeładowuje zbiór gridu w tle; zaznaczenie wraca po `frame_id`
+    ogonem składu (`_przywroc_zaznaczenie`), bo zbiór jest ten sam, a reset modelu je zabierał.
+
+    Falsyfikator: `refresh(w_tle=True)` bez `potem` w `_odswiez_widoki_po_przebiegu` → puste."""
+    win = MainWindow(_baza_obiektu(tmp_path))
+    try:
+        grid = win.grid_view
+        _czekaj_na_pola(grid)
+        grid._przywroc_zaznaczenie([1, 2])
+        assert _zaznaczone(grid) == [1, 2]
+        win._on_pipeline_running(True)
+        win._on_pipeline_running(False)
+        _czekaj(lambda: not grid._zbior_w_drodze(), "skład zbioru nie dojechał")
+        _czekaj_na_pola(grid)
+        assert _zaznaczone(grid) == [1, 2]
+    finally:
         win.close()
 
 

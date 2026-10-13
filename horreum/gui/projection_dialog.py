@@ -49,22 +49,31 @@ import time
 
 from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QFontDatabase, QTextCharFormat, QTextCursor,
+    QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QPalette, QTextCharFormat,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
-    QRadioButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QProgressBar, QPushButton,
+    QRadioButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 
 from horreum import db, projection
 from horreum.gui import facet_model, i18n, queries, theme
+from horreum.gui.grid_panels import ElidedLabel
+from horreum.gui.i18n_catalog import CATALOG
 from horreum.volumes import volume_serial
 
 _TREE_CAP = 30                        # ile folderów kategorii pokazać w raporcie dialogu
+# Zawinięty wiersz raportu ciągnie się o tyle znaków GŁĘBIEJ niż jego własne wcięcie: kontynuacja
+# od kolumny 0 (np. „2023-05-07)" po „(noce:") czytała się jak nowy wiersz najwyższego poziomu
+# i łamała słupek, a wcięcie równe wierszom podrzędnym (4) myliłoby ją z nimi.
+_REPORT_HANG = 4
+_GOLD_HEIGHT = 34                     # wysokość złotej akcji - jak „Przyjmij nowe" Dostawy
 
-# Kolory semantyczne NAGŁÓWKA raportu — z motywu (SPOT), wzorzec `grid._COLORS`. Raport jest
-# QPlainTextEdit, więc QSS ról (`theme.qss`) tu nie sięga: kolor pierwszego bloku nakłada
+# Kolory semantyczne raportu (nagłówek i wiersze luk) - z motywu (SPOT), wzorzec `grid._COLORS`.
+# Raport jest QTextEdit, więc QSS ról (`theme.qss`) tu nie sięga: kolor bloku nakłada
 # `QTextCharFormat`, a ten chce QColor.
 _COLORS: dict[str, QColor] = {}
 
@@ -127,6 +136,17 @@ def remember_target(name, path, *, select=True):
     if select:
         ustawienia.setValue("projection/last_target", canon)
     return canon
+
+
+def card_name(name):
+    """Nazwa karty na ekran (Qt-wolne). Karta folderu roboczego dostaje nazwę z katalogu w języku
+    CHWILI ZAPISU (`app._on_work_root` składa ją `i18n.t("proj.work_card")`), więc karta założona
+    po polsku mówiła „Folder roboczy" w UI angielskim. Nazwę, która jest którymkolwiek tłumaczeniem
+    tego klucza, pokazujemy w bieżącym języku; zapis w ustawieniach zostaje bez zmian, a nazwa
+    nadana przez człowieka - jak ją nadał."""
+    if name in CATALOG["proj.work_card"].values():
+        return i18n.t("proj.work_card")
+    return name
 
 
 def target_roots():
@@ -259,6 +279,24 @@ def _elide_path(path, cap=64):
     return path[:half] + "…" + path[-half:]
 
 
+# Układ wydania (token klingi `projection.LAYOUTS` / `OBJECT_LAYOUT`) → nazwa w raporcie. Mapa
+# literałów, nie klucz składany w locie: kolektor kluczy `test_i18n` widzi tylko literały, parytet
+# tokenów z katalogiem pilnuje test tego okna. Token to nazwa DYSKOWA (manifest, CLI) - na ekranie
+# „układ wbpp-obiekt" był surowym tokenem, w UI angielskim do tego polskim.
+_LAYOUT_KEYS = {
+    "po-obiektach": "proj.layout_name.by_object",
+    "wbpp-feed": "proj.layout_name.wbpp_feed",
+    projection.OBJECT_LAYOUT: "proj.layout_name.object",
+}
+
+
+def layout_text(token):
+    """Nazwa układu do raportu (Qt-wolne). Token spoza mapy zostaje sobą - nowy układ klingi ma być
+    widoczny, nie zamieniony w pustkę ani w klucz katalogu."""
+    key = _LAYOUT_KEYS.get(token)
+    return i18n.t(key) if key else token
+
+
 # Luki flatu z `lineage.raw_flats_for` → zdanie katalogu. Mapa, nie klucz składany w locie: kolektor
 # kluczy (`test_i18n`) widzi tylko literały w `t(...)`, a parytet tokenów z katalogiem pilnuje test
 # tego okna. `pending` ma tu zdanie, choć do `flat_gaps` planu nie trafia (osobna lista) - linia
@@ -296,12 +334,28 @@ def object_totals(info):
     }
 
 
+def object_gaps_text(totals):
+    """Luki nagłówka wydania obiektu - „bez flatu 311 · bez darka 556" - wyłącznie części niezerowe,
+    pusty łańcuch przy komplecie (Qt-wolne). Osobny wiersz w roli `warn`: w jednym zdaniu z liczbami
+    tego, co JEST, luki miały ich wagę i kolor, a zero luki pod rolą ostrzeżenia ostrzegałoby przed
+    niczym. `pending` ma własną linię (`proj.obj.pending_head`) - to inna robota niż brak klatek."""
+    czesci = []
+    if totals["bez_flatu"]:
+        czesci.append(i18n.t("proj.obj.head_no_flat", n=totals["bez_flatu"]))
+    if totals["bez_darka"]:
+        czesci.append(i18n.t("proj.obj.head_no_dark", n=totals["bez_darka"]))
+    return " · ".join(czesci)
+
+
 def object_report_lines(info):
     """Sekcja raportu wydania obiektu: wiersz na zestaw (lighty, godziny, mastery per relacja,
     surowe flaty z nocami), pod nim - tylko gdy niezerowe - bez flatu z rozbiciem na powody, bez
     darka i do przeliczenia w Dostawie (Qt-wolne). Powody stoją przy liczbie, bo „bez flatu: 311"
     nie mówi, czy trzeba dokupić klatki, poszerzyć okno, czy poprawić nagłówek. Nazwy relacji
-    (`flat`, `dark`) to wartości domenowe - zostają nietłumaczone (D-L3)."""
+    (`flat`, `dark`) to wartości domenowe - zostają nietłumaczone (D-L3).
+
+    Zwraca pary `(wiersz, rola)`: wiersze luk niosą rolę `warn` (raport maluje je kolorem roli,
+    jak nagłówek okna), wiersz zestawu - `None`."""
     lines = []
     okno = info["window_days"]
     for seg, z in info["zestawy"].items():
@@ -309,18 +363,18 @@ def object_report_lines(info):
         surowe = i18n.t_plural("proj.obj.n_raw_flats", len(z["flat_raw"]))
         if z["flat_raw_nights"]:
             surowe += i18n.t("proj.obj.nights", nights=", ".join(z["flat_raw_nights"]))
-        lines.append(i18n.t("proj.obj.zestaw_line", seg=seg,
-                            lights=i18n.t_plural("proj.obj.n_lights", len(z["lights"])),
-                            hours=z["hours"], masters=mastery, raw=surowe))
+        lines.append((i18n.t("proj.obj.zestaw_line", seg=seg,
+                             lights=i18n.t_plural("proj.obj.n_lights", len(z["lights"])),
+                             hours=z["hours"], masters=mastery, raw=surowe), None))
         if z["bez_flatu"]:
             powody = "; ".join(f"{flat_gap_text(tok, okno)}: {n}" for tok, n in
                                sorted(z["flat_gaps"].items(), key=lambda kv: (-kv[1], kv[0])))
-            lines.append(i18n.t("proj.obj.no_flat_line", n=len(z["bez_flatu"]), why=powody))
+            lines.append((i18n.t("proj.obj.no_flat_line", n=len(z["bez_flatu"]), why=powody), "warn"))
         if z["bez_darka"]:
-            lines.append(i18n.t("proj.obj.no_dark_line", n=len(z["bez_darka"])))
+            lines.append((i18n.t("proj.obj.no_dark_line", n=len(z["bez_darka"])), "warn"))
         if z["pending"]:
-            lines.append(i18n.t("proj.obj.pending_line", n=len(z["pending"]),
-                                why=flat_gap_text("pending", okno)))
+            lines.append((i18n.t("proj.obj.pending_line", n=len(z["pending"]),
+                                 why=flat_gap_text("pending", okno)), "warn"))
     return lines
 
 
@@ -452,6 +506,35 @@ class ApplyWorker(QObject):
         self.progress.emit(done, total, dst, status)
 
 
+class _MiddleElidedLabel(ElidedLabel):
+    """`ElidedLabel` elidowany ŚRODKIEM: ścieżka wyjścia WBPP niesie sens na obu końcach (dysk
+    i karta z przodu, obiekt i `out` na końcu). Zawijana etykieta nie miała gdzie złamać ścieżki
+    bez spacji i dyktowała minimum okna (do 1578 px). Pełna ścieżka w tooltipie i w przycisku
+    „Kopiuj ścieżkę"; zaznaczanie myszą zdjęte, bo skopiowałoby wersję z wielokropkiem.
+
+    `keep` pierwszych znaków (przedrostek „Wyjście WBPP: ") zostaje całe - środek CAŁEGO napisu
+    przy wąskim miejscu ciął właśnie przedrostek; dopiero gdy nie mieści się nawet on, elizja
+    obejmuje cały napis."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._keep = 0
+
+    def set_full_text(self, text, keep=0):
+        self._keep = keep
+        super().set_full_text(text)
+
+    def _update_elide(self):
+        fm = self.fontMetrics()
+        szer = max(0, self.width() - 4)
+        glowa, ogon = self._full[:self._keep], self._full[self._keep:]
+        miejsce = szer - fm.horizontalAdvance(glowa)
+        if fm.horizontalAdvance(self._full) <= szer or miejsce <= 0:
+            self.setText(fm.elidedText(self._full, Qt.ElideMiddle, szer))
+        else:
+            self.setText(glowa + fm.elidedText(ogon, Qt.ElideMiddle, miejsce))
+
+
 # ---------------------------------------------------------------- dialog
 
 class ProjectionDialog(QDialog):
@@ -517,6 +600,12 @@ class ProjectionDialog(QDialog):
             _fh = self.head_label.font(); _fh.setBold(True); self.head_label.setFont(_fh)
             self.head_label.setWordWrap(True)
             v.addWidget(self.head_label)
+            # Luki (bez flatu / bez darka) w roli ostrzeżenia, osobno od liczb tego, co JEST
+            # (`object_gaps_text`); przy komplecie wiersz znika jak `pending`.
+            self.gaps_label = QLabel("")
+            self.gaps_label.setProperty("role", "warn")
+            self.gaps_label.setVisible(False)
+            v.addWidget(self.gaps_label)
             # `pending` OSOBNYM zdaniem, nigdy w „bez flatu": master jest, brakuje kliknięcia
             # w Dostawie - inna robota niż dokupienie klatek, więc inna linia i inny kolor.
             self.pending_label = QLabel("")
@@ -572,8 +661,11 @@ class ProjectionDialog(QDialog):
         self.chk_copy.toggled.connect(self._on_param_changed)
         v.addWidget(self.chk_copy)
 
-        self.report = QPlainTextEdit()
+        # QTextEdit, nie QPlainTextEdit: tylko on układa wcięcie wiszące (`QTextBlockFormat`
+        # `leftMargin`/`textIndent`), którym `_show_report` trzyma zawinięte wiersze w słupku.
+        self.report = QTextEdit()
         self.report.setReadOnly(True)
+        self.report.setAcceptRichText(False)
         self.report.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))   # monospace: słupki liczb (#7)
         self.report.setPlaceholderText(i18n.t("proj.placeholder"))
         v.addWidget(self.report, 1)
@@ -587,9 +679,7 @@ class ProjectionDialog(QDialog):
             ob = QVBoxLayout(self.out_box)
             ob.setContentsMargins(0, 0, 0, 0)
             row_out = QHBoxLayout()
-            self.out_label = QLabel("")
-            self.out_label.setWordWrap(True)
-            self.out_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.out_label = _MiddleElidedLabel()
             self.btn_out_copy = QPushButton(i18n.t("proj.obj.out_copy"))
             self.btn_out_copy.setAutoDefault(False)
             self.btn_out_copy.clicked.connect(self._copy_out_dir)
@@ -615,7 +705,10 @@ class ProjectionDialog(QDialog):
         self.busy.setTextVisible(False)
         self.busy.setVisible(False)
         act.addWidget(self.busy)
-        self.progress_note = QLabel("")              # „12/131 · plik.fits" — postęp NAZWANY, nie sam słupek
+        # „12/131 · plik.fits" - postęp NAZWANY, nie sam słupek. Elizja w prawo z pełną notą
+        # w tooltipie: nazwa pliku archiwum (do 79 znaków na kopii `pf4`) rozpychała okno z 701
+        # do 1011 px i zostawiała je takie po biegu.
+        self.progress_note = ElidedLabel()
         self.progress_note.setProperty("role", "secondary")
         act.addWidget(self.progress_note)
         self.btn_dry = QPushButton(i18n.t("proj.btn_refresh"))
@@ -624,14 +717,12 @@ class ProjectionDialog(QDialog):
         self.btn_dry.clicked.connect(self._on_manual_dry)
         self.btn_apply = QPushButton(i18n.t("proj.btn_create"))
         self.btn_apply.setEnabled(False)             # uzbraja WYŁĄCZNIE zakończony świeży DRY
-        self.btn_apply.setDefault(True)              # złota akcja wydania (F2: 1-klik)
-        # Waga wizualna złotej akcji (wiz F3 #3, dług zamknięty w P-C): bold + wysokość jak
-        # „Przyjmij nowe" Dostawy. W rzędzie [Odśwież][Utwórz][Zamknij] terminalna akcja była
-        # nieodróżnialna od dwóch pomocniczych — a to ona rusza dysk.
-        _fa = self.btn_apply.font(); _fa.setBold(True); self.btn_apply.setFont(_fa)
-        self.btn_apply.setMinimumHeight(34)
+        # Złota akcja wydania (F2: 1-klik) - waga i Enter przez `_set_gold` na końcu budowy.
         self.btn_apply.clicked.connect(self._on_apply)
-        self.btn_cancel = QPushButton(i18n.t("proj.btn_cancel_apply"))   # NAZYWA skutek — „Anuluj" obok „Zamknij" czytało się jak bliźniak (wiz #9)
+        # NAZYWA skutek - „Anuluj" obok „Zamknij" czytało się jak bliźniak (wiz #9). Tryb obiektu
+        # ma własny klucz: EN „Stop serving" to słownik stołu, nie wydania obiektu.
+        self.btn_cancel = QPushButton(i18n.t("proj.btn_cancel_apply" if self._object_id is None
+                                             else "proj.obj.btn_cancel_apply"))
         # wchodzi W MIEJSCE „Utwórz" na czas biegu (wzorzec szuflady gridu)
         self.btn_cancel.setAutoDefault(False)
         self.btn_cancel.setVisible(False)
@@ -652,18 +743,41 @@ class ProjectionDialog(QDialog):
         act.addWidget(self.btn_open)
         act.addWidget(btn_close)
         v.addLayout(act)
+        self._set_gold(self.btn_apply)
+
+    def _set_gold(self, btn):
+        """Waga złotej akcji - bold, wysokość jak „Przyjmij nowe" Dostawy i domyślny Enter - na
+        JEDNYM przycisku: `btn_apply` (wydanie) albo `btn_open` (folder gotowy pod WBPP). Wiz F3 #3:
+        terminalna akcja ma się odróżniać od pomocniczych. Po wydaniu waga zostawała na wygaszonym
+        „Utworzono ✓", a następny krok - Eksplorator - stał bez niej; przenosi ją `_arm_open`."""
+        for b in (self.btn_apply, self.btn_open):
+            gold = b is btn
+            f = b.font(); f.setBold(gold); b.setFont(f)
+            b.setMinimumHeight(_GOLD_HEIGHT if gold else 0)
+            b.setDefault(gold)
 
     # ---- cele (QSettings) ----
     def _reload_targets(self, select_path=None):
         """Przebuduj karty-radio z QSettings; zaznacz `select_path` albo ostatnio użyty cel. Zaznaczenie
         (o ile jest) ODPALA auto-DRY - to zdarzenie dyskretne „otwarcie dialogu / nowy cel".
         Cel wskazuje się kluczem porównania, nie napisem: karta zapisana dawniej z `/` jest tym samym
-        celem co `last_target` zapisany z `\\`."""
+        celem co `last_target` zapisany z `\\`.
+
+        Okno trzyma kartę w postaci KANONICZNEJ (`_canon_path`), zapis w ustawieniach zostaje bez
+        zmian: karta sprzed kanonizacji (`F:/ASTRO_WORK/_WBPP`) stała na liście obok `C:\\…\\_WBPP`
+        dwoma stylami separatora, a złożony z niej folder obiektu i „Wyjście WBPP" mieszały oba
+        w jednej ścieżce. Ten sam cel zapisany dawniej dwiema pisowniami to po kanonizacji dwa
+        identyczne wiersze - zostaje jeden, z nazwą późniejszego zapisu (reguła `remember_target`).
+        Nazwa karty folderu roboczego - w bieżącym języku (`card_name`)."""
         for c in self._cards:
             self._btn_group.removeButton(c["radio"])
             c["holder"].setParent(None)
         self._cards = []
-        targets = _load_targets()
+        po_kluczu = {}
+        for t in _load_targets():
+            po_kluczu.pop(_target_key(t["path"]), None)          # późniejszy zapis na koniec listy
+            po_kluczu[_target_key(t["path"])] = {**t, "path": _canon_path(t["path"])}
+        targets = list(po_kluczu.values())
         chciany = select_path or _settings().value("projection/last_target", "")
         klucz = _target_key(chciany) if chciany else None
         pick = next((t["path"] for t in targets if _target_key(t["path"]) == klucz), None)
@@ -671,7 +785,7 @@ class ProjectionDialog(QDialog):
             pick = targets[-1]["path"]               # brak pamięci → ostatnio dodany
         for t in targets:
             row = QHBoxLayout()
-            radio = QRadioButton(f"{t['name']}  —  {_elide_path(t['path'])}")
+            radio = QRadioButton(f"{card_name(t['name'])}  -  {_elide_path(t['path'])}")
             radio.setToolTip(t["path"])              # pełna ścieżka pod kursorem (wiz K3)
             self._btn_group.addButton(radio)
             note = QLabel("")
@@ -813,7 +927,8 @@ class ProjectionDialog(QDialog):
         self.btn_dry.setEnabled(True)
         self._plan = payload["plan"]
         self._dry = payload
-        self._show_report(self._format(payload["res"], payload["plan"], dry=True, payload=payload))
+        text, warn = self._format(payload["res"], payload["plan"], dry=True, payload=payload)
+        self._show_report(text, warn=warn)
         n = payload["res"].counts.get("would-link", 0)
         key = "proj.create_copies" if payload["copy"] else "proj.create_links"
         self.btn_apply.setText(i18n.t_plural(key, n))
@@ -866,6 +981,7 @@ class ProjectionDialog(QDialog):
         o którym z kilku zestawów obiektu jest mowa, a combo bywa zwinięte."""
         if info is None:
             self.head_label.setText(self._canon)
+            self.gaps_label.setVisible(False)
             self.pending_label.setVisible(False)
             return
         s = object_totals(info)
@@ -873,8 +989,10 @@ class ProjectionDialog(QDialog):
             "proj.obj.head", canon=self._release_label(info),
             lights=i18n.t_plural("proj.obj.n_lights", s["lights"]),
             masters=i18n.t_plural("proj.obj.n_masters", s["masters"]),
-            raw=i18n.t_plural("proj.obj.n_raw_flats", s["raw"]),
-            no_flat=s["bez_flatu"], no_dark=s["bez_darka"]))
+            raw=i18n.t_plural("proj.obj.n_raw_flats", s["raw"])))
+        luki = object_gaps_text(s)
+        self.gaps_label.setText(luki)
+        self.gaps_label.setVisible(bool(luki))
         self.pending_label.setText(i18n.t("proj.obj.pending_head", n=s["pending"]))
         self.pending_label.setVisible(s["pending"] > 0)
 
@@ -887,14 +1005,20 @@ class ProjectionDialog(QDialog):
         parametru (`_invalidate`) i padnięta sonda go gaszą. Folder sprzed zmiany karty, zestawu
         czy trybu kopii to odpowiedź na pytanie, którego user już nie zadaje: po przejściu na kartę
         B z „do skopiowania: N" przycisk otwierałby folder z karty A. Samo wydanie niczego nie
-        unieważnia, więc zaraz po nim przycisk stoi na właśnie wydanym folderze."""
+        unieważnia, więc zaraz po nim przycisk stoi na właśnie wydanym folderze.
+
+        Waga złotej akcji idzie za przyciskiem (`_set_gold`): uzbrojony folder to następny krok,
+        a „Utwórz" stoi wtedy wygaszone - waga na nim wskazywałaby martwy przycisk."""
         self._released_root = root
         self.btn_open.setVisible(root is not None)
+        self._set_gold(self.btn_open if root is not None else self.btn_apply)
         # Wiersz „Wyjście WBPP" żyje i gaśnie razem z przyciskiem: ten sam folder, te same parametry.
         if self.out_box is not None:
             self._out_dir = os.path.join(root, projection.OUTPUT_DIR) if root else None
-            self.out_label.setText(
-                i18n.t("proj.obj.out_line", path=self._out_dir) if root else "")
+            wiersz = i18n.t("proj.obj.out_line", path=self._out_dir) if root else ""
+            przedrostek = i18n.t("proj.obj.out_line", path="")
+            self.out_label.set_full_text(
+                wiersz, keep=len(przedrostek) if wiersz.startswith(przedrostek) else 0)
             self.out_box.setVisible(root is not None)
 
     def _copy_out_dir(self):
@@ -993,8 +1117,10 @@ class ProjectionDialog(QDialog):
         self.busy.setFormat("%p%")
         self.busy.setTextVisible(True)
         self.busy.setVisible(True)
-        self.progress_note.setText(f"0/{total}")
-        self._show_report(i18n.t("proj.applying", root=root))
+        self.progress_note.set_full_text(f"0/{total}")
+        # Tryb obiektu mówi swoim słownikiem - „Wydaję na stół" to wydanie perspektywy gridu.
+        self._show_report(i18n.t("proj.applying" if self._object_id is None else "proj.obj.applying",
+                                 root=root))
         self.btn_apply.setVisible(False)
         self.btn_apply.setEnabled(False)             # WPROST, nie tylko przez ukrycie (default-button łapie Enter)
         self.btn_cancel.setVisible(True)
@@ -1008,7 +1134,7 @@ class ProjectionDialog(QDialog):
         self.busy.setTextVisible(False)
         self.busy.setFormat("")
         self.busy.setRange(0, 0)                     # z powrotem nieokreślony (tryb DRY)
-        self.progress_note.setText("")
+        self.progress_note.set_full_text("")
         self.btn_cancel.setVisible(False)
         self.btn_apply.setVisible(True)
         self._set_params_enabled(True)
@@ -1030,7 +1156,7 @@ class ProjectionDialog(QDialog):
         if self._apply_worker is not None:
             self._apply_worker.request_cancel()      # rdzeń sprawdza PRZED następnym plikiem
             self.btn_cancel.setEnabled(False)
-            self.progress_note.setText(i18n.t("proj.cancelling"))
+            self.progress_note.set_full_text(i18n.t("proj.cancelling"))
 
     @Slot(int, int, str, str)
     def _on_apply_progress(self, done_n, total, dst, status):
@@ -1040,7 +1166,7 @@ class ProjectionDialog(QDialog):
         self._apply_seen = (done_n, total)
         tail = dst.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
         eta = eta_text(done_n, total, time.monotonic() - self._apply_started)
-        self.progress_note.setText(f"{done_n}/{total}{eta} · {tail}")
+        self.progress_note.set_full_text(f"{done_n}/{total}{eta} · {tail}")
 
     @Slot(object)
     def _on_apply_done(self, res):
@@ -1049,15 +1175,17 @@ class ProjectionDialog(QDialog):
         self._apply_end()
         # Cel był ZAMROŻONY na czas biegu, więc `_current_root()` to dokładnie ten, na który wydano.
         _settings().setValue("projection/last_target", _canon_path(self._current_root()))   # ostatnio UŻYTY = domyślny
-        self._show_report(self._format(res, self._plan, dry=False, partial=res.cancelled),
-                          report_outcome(res, partial=res.cancelled))
+        text, warn = self._format(res, self._plan, dry=False, partial=res.cancelled)
+        self._show_report(text, report_outcome(res, partial=res.cancelled), warn=warn)
         # ŚLAD PO ZAMKNIĘCIU (wizytacja P-C #4): po `exec()` okno główne nie niosło ani słowa
         # o wydaniu — jedynym trwałym zapisem był `_PROJEKCJA.json` w celu, czyli POZA aplikacją.
         # Zdanie składamy TU, gdzie liczby są świeże; `grid` je tylko przekazuje na statusbar.
+        # Liczba plików odmieniona frazą („skopiowano 1 plik"), nie „1 skopiowano".
         word = i18n.t("proj.word_copy_done" if res.copy else "proj.word_link_done")
+        files = i18n.t_plural("proj.files_copied" if res.copy else "proj.files_linked",
+                              res.counts.get("linked", 0))
         if self._object_id is None:
-            self.summary = i18n.t("proj.status_summary", n=res.counts.get("linked", 0),
-                                  word=word, root=self._current_root())
+            self.summary = i18n.t("proj.status_summary", files=files, root=self._current_root())
         elif res.cancelled:
             # Statusbar zostaje po zamknięciu okna jako JEDYNY ślad - „Wydano" nad połową drzewa
             # mówiłoby, że folder jest gotowy pod WBPP, a jest w nim tylko część planu.
@@ -1065,8 +1193,8 @@ class ProjectionDialog(QDialog):
                                   n=res.counts.get("linked", 0), total=len(self._plan.items),
                                   root=self._apply_root)
         else:
-            self.summary = i18n.t("proj.obj.status_summary", canon=self._canon,
-                                  n=res.counts.get("linked", 0), word=word, root=self._apply_root)
+            self.summary = i18n.t("proj.obj.status_summary", canon=self._canon, files=files,
+                                  root=self._apply_root)
             self._arm_open(self._apply_root)
         self.btn_apply.setEnabled(False)
         # nie głosi akcji, która zaszła (wiz K2) — także wtedy, gdy nie zaszła ŻADNA (#1)
@@ -1078,8 +1206,8 @@ class ProjectionDialog(QDialog):
     def _on_apply_aborted(self, msg, partial):
         """Sonda pierwszego linku padła (SMB oddał kopię zamiast hardlinka) — werdykt o wolumenie."""
         self._apply_end()
-        self._show_report(i18n.t("proj.abort_prefix", msg=msg)
-                          + self._format(partial, self._plan, dry=False, partial=True), "error")
+        text, warn = self._format(partial, self._plan, dry=False, partial=True)
+        self._show_report(i18n.t("proj.abort_prefix", msg=msg) + text, "error", warn=warn)
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(i18n.t("proj.btn_not_created"))  # NIE obiecuje akcji, której raport zabrania (wiz #4)
 
@@ -1094,16 +1222,38 @@ class ProjectionDialog(QDialog):
         self.btn_apply.setEnabled(False)             # dysk mógł się zmienić częściowo — DRY musi przeliczyć
         self.btn_apply.setText(i18n.t("proj.btn_error"))
 
-    def _show_report(self, text, outcome=None):
+    def _show_report(self, text, outcome=None, warn=()):
         """JEDYNA droga tekstu do panelu raportu. `outcome` (None | 'ok' | 'warn' | 'error') koloruje
         PIERWSZY BLOK — wynik widać, zanim user przeczyta słupek liczb (wizytacja P2: `pipeline`
-        koloruje błąd, a ten dialog był jednolicie szary).
+        koloruje błąd, a ten dialog był jednolicie szary). `warn` - wiersze (pełny tekst bloku) luk
+        z `_format`, malowane kolorem roli `warn`: liczby braków miały kolor liczb tego, co jest.
 
         Tekst zostaje NIETKNIĘTY: `toPlainText()` oddaje dokładnie argument, bo kolor to warstwa
         formatu, nie treść — kontrakt „raport zaczyna się od «Przerwano»" (wiz #6) i wszystkie
         asercje na tekście trzymają się bez zmian. `outcome=None` (podgląd, sonda, plan) zostaje
-        w kolorze tekstu — neutralność też jest komunikatem."""
+        w kolorze tekstu - neutralność też jest komunikatem.
+
+        Wcięcie WISZĄCE każdego bloku (`leftMargin` + ujemny `textIndent`, też warstwa formatu):
+        pierwsza linia stoi, gdzie stała, a zawinięta kontynuacja zaczyna się `_REPORT_HANG` znaków
+        głębiej niż własne wcięcie wiersza - zawinięcie nie łamie słupka monospace."""
         self.report.setPlainText(text)
+        znak = QFontMetricsF(self.report.font()).horizontalAdvance(" ")
+        ostrzezenia = set(warn)
+        blok = self.report.document().firstBlock()
+        while blok.isValid():
+            wiersz = blok.text()
+            wisi = (len(wiersz) - len(wiersz.lstrip(" ")) + _REPORT_HANG) * znak
+            fmt_bloku = blok.blockFormat()
+            fmt_bloku.setLeftMargin(wisi)
+            fmt_bloku.setTextIndent(-wisi)
+            cur = QTextCursor(blok)
+            cur.setBlockFormat(fmt_bloku)
+            if wiersz in ostrzezenia:
+                cur.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                fmt_luki = QTextCharFormat()
+                fmt_luki.setForeground(_COLORS["warn"])
+                cur.mergeCharFormat(fmt_luki)
+            blok = blok.next()
         if outcome is None:
             return
         cur = QTextCursor(self.report.document().firstBlock())
@@ -1114,16 +1264,19 @@ class ProjectionDialog(QDialog):
         cur.mergeCharFormat(fmt)
 
     def _format(self, res, plan, *, dry, partial=False, payload=None):
+        """Raport → `(tekst, wiersze_luk)`; drugie idzie do `_show_report(warn=…)`. Układ nazwą
+        z katalogu (`layout_text`), nie tokenem dysku."""
         c = res.counts
         word_todo = i18n.t("proj.word_copy_todo" if res.copy else "proj.word_link_todo")
         word_done = i18n.t("proj.word_copy_done" if res.copy else "proj.word_link_done")
         mode = i18n.t("proj.mode_copies" if res.copy else "proj.mode_links")
-        lines = []
+        layout = layout_text(res.layout)
+        lines, warn = [], []
         if dry:
             if dry_complete(res):
-                lines.append(i18n.t("proj.dry_head_complete", layout=res.layout, mode=mode))
+                lines.append(i18n.t("proj.dry_head_complete", layout=layout, mode=mode))
             else:
-                lines.append(i18n.t("proj.dry_head", layout=res.layout, mode=mode))
+                lines.append(i18n.t("proj.dry_head", layout=layout, mode=mode))
             lines.append(i18n.t("proj.dry_counts", todo=word_todo, would=c.get("would-link", 0),
                                 exists=c.get("exists", 0), conflict=c.get("conflict", 0),
                                 skipped=c.get("skipped", 0)))
@@ -1138,7 +1291,7 @@ class ProjectionDialog(QDialog):
             # wiedzieć, że reszta planu jest nietknięta, a nie że wydanie zawiodło. Rozbiór stanów
             # (w tym „nic nowego" przy powtórce) ma JEDNEGO właściciela: `report_head_key`.
             head = i18n.t(report_head_key(res, partial=partial))
-            lines.append(i18n.t("proj.done_head", head=head, layout=res.layout, mode=mode))
+            lines.append(i18n.t("proj.done_head", head=head, layout=layout, mode=mode))
             lines.append(i18n.t("proj.done_counts", done=word_done, linked=c.get("linked", 0),
                                 exists=c.get("exists", 0), conflict=c.get("conflict", 0),
                                 vbad=c.get("verify_bad", 0), errors=c.get("error", 0),
@@ -1149,8 +1302,11 @@ class ProjectionDialog(QDialog):
                 # pierwsza liczba pod nagłówkiem ma mówić o skutku, nie o jego braku (wiz #11).
                 touched = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error", "verify_bad"))
                 lines.append(i18n.t("proj.untouched", n=max(len(plan.items) - touched, 0)))
-        if plan.info is not None:
-            lines.extend(object_report_lines(plan.info))   # wydanie obiektu: zestawy i powody luk
+        if plan.info is not None:                          # wydanie obiektu: zestawy i powody luk
+            for wiersz, rola in object_report_lines(plan.info):
+                lines.append(wiersz)
+                if rola == "warn":
+                    warn.append(wiersz)
         if res.drift:
             # Rozjazd manifestu PRZED drzewem planu: stare drzewo NIE daje `conflict` (leży pod inną
             # ścieżką), więc liczniki wyżej wyglądają czysto — bez tej linii raport milczy o tym,
@@ -1170,7 +1326,7 @@ class ProjectionDialog(QDialog):
             lines.append(f"    {key}: {n}")
         if len(folders) > _TREE_CAP:
             lines.append(i18n.t("proj.more_folders", n=len(folders) - _TREE_CAP))
-        return "\n".join(lines)
+        return "\n".join(lines), warn
 
     # ---- sprzątanie wątków przy zamknięciu ----
     def done(self, r):
@@ -1206,6 +1362,19 @@ _PICK_HEADERS = ("", "proj.pick.col.object", "proj.pick.col.hours", "proj.pick.c
                  "proj.pick.col.nights", "proj.pick.col.sets", "proj.pick.col.flat",
                  "proj.pick.col.dark", "proj.pick.col.last_night")
 _PICK_COL_OBJECT = 1
+
+
+class _KropkaStanu(QStyledItemDelegate):
+    """Kolumna kropki stanu: w zaznaczonym wierszu Qt maluje tekst kolorem `HighlightedText`
+    (biel), więc kropka gubiła stan teczki dokładnie wtedy, gdy człowiek ją wskazał. Kolor roli
+    z komórki (`ForegroundRole`) zostaje też pod zaznaczeniem; podpowiedź mówi stan słowem."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        kolor = index.data(Qt.ForegroundRole)
+        if kolor is not None:
+            option.palette.setColor(QPalette.HighlightedText,
+                                    kolor.color() if isinstance(kolor, QBrush) else QColor(kolor))
 
 
 class ObjectPickDialog(QDialog):
@@ -1270,6 +1439,7 @@ class ObjectPickDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setItemDelegateForColumn(0, _KropkaStanu(self.table))
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(_PICK_COL_OBJECT, QHeaderView.Stretch)
@@ -1305,9 +1475,12 @@ class ObjectPickDialog(QDialog):
             dot.setForeground(_COLORS[_STATE_ROLES[r["stan"]]])
             dot.setTextAlignment(Qt.AlignCenter)
             dot.setToolTip(i18n.t(_STATE_TIPS[r["stan"]]))
-            flat = f"{r['pct_master_flat']} % / {r['pct_raw_flat']} %"
+            # Części jednej całości (`queries.split_pct` w `release_readiness`): suma = pokrycie
+            # flatem, nie 99 przy komplecie - te same liczby co karta teczki na Domu.
+            mf, raw, pending = r["pct_master_flat"], r["pct_raw_flat"], r["pct_pending"]
+            flat = f"{mf} % / {raw} %"
             if r["n_pending"]:
-                flat += i18n.t("proj.pick.flat_pending", n=r["pct_pending"])
+                flat += i18n.t("proj.pick.flat_pending", n=pending)
             cells = [dot, QTableWidgetItem(r["canon"]),
                      f"{r['hours']:.1f}", str(r["lights"]), str(r["nights"]), str(r["zestawy"]),
                      flat, f"{r['pct_master_dark']} %", r["last_night"] or ""]

@@ -23,7 +23,7 @@ from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
-from horreum.gui import i18n, theme
+from horreum.gui import i18n, queries, theme
 from horreum.gui import projection_dialog as pd_mod
 from horreum.gui.projection_dialog import (
     ProjectionDialog, chosen_present, eta_text, size_summary, volume_decision,
@@ -714,7 +714,7 @@ def test_dry_komplet_w_celu_mowi_naglowkiem(qapp, tmp_path, ustawienia, monkeypa
     dlg._on_apply()
     dlg._on_manual_dry()
     rep = dlg.report.toPlainText()
-    assert rep.startswith("Komplet już w celu (układ po-obiektach, hardlinki):")
+    assert rep.startswith("Komplet już w celu (układ po obiektach, hardlinki):")   # nazwa, nie token
     assert "do zlinkowania: 0   istnieje: 2   konflikty: 0" in rep
     assert not dlg.btn_apply.isEnabled() and dlg.btn_open.isHidden()
     con.close()
@@ -868,8 +868,9 @@ def test_tryb_obiektu_dry_naglowek_apply_manifest_eksplorator(qapp, tmp_path, us
     pozycje = [it.frame_id for it in dlg._plan.items]
     assert pozycje.count(ids["md"]) == 2                   # master wspólny: pozycja w KAŻDYM zestawie
     assert {ids["mf_a"], ids["mf_b"], ids["f1"], ids["f2"]} <= set(pozycje)
-    assert dlg.head_label.text() == ("NGC 6992: 6 lightów · 3 mastery · 2 surowe flaty · "
-                                     "bez flatu 1 · bez darka 4")
+    assert dlg.head_label.text() == "NGC 6992: 6 lightów · 3 mastery · 2 surowe flaty"
+    assert dlg.gaps_label.text() == "bez flatu 1 · bez darka 4" and not dlg.gaps_label.isHidden()
+    assert dlg.gaps_label.property("role") == "warn"       # luki rolą ostrzeżenia, nie liczbą pozytywną
     assert not dlg.pending_label.isHidden()
     assert dlg.pending_label.text() == "do przeliczenia w Dostawie: 1"
     # raport: powód „bez flatu" przy liczbie, `pending` osobną linią ze swoim zdaniem
@@ -895,7 +896,7 @@ def test_tryb_obiektu_dry_naglowek_apply_manifest_eksplorator(qapp, tmp_path, us
     assert man["etykieta"] == "NGC 6992"
     assert set(man["zestawy"]) == {"A140R_ASI2600MM", "RC8_ASI2600MM"}
     assert man["zestawy"]["A140R_ASI2600MM"]["pending"] == [ids["la3"]]
-    assert dlg.summary == f"Wydano obiekt NGC 6992: 11 zlinkowano → {obj_root}"
+    assert dlg.summary == f"Wydano obiekt NGC 6992: zlinkowano 11 plików → {obj_root}"
     assert ustawienia.value("projection/last_target") == str(card)   # pamięć = KARTA, nie folder obiektu
 
     assert not dlg.btn_open.isHidden()
@@ -920,8 +921,8 @@ def test_tryb_obiektu_combo_zestawu_zaweza_i_blokuje_sie_w_biegu(qapp, tmp_path,
     assert dlg._plan.info["config_id"] == 20 and list(dlg._plan.info["zestawy"]) == ["RC8_ASI2600MM"]
     assert {it.frame_id for it in dlg._plan.items} == {ids["lb1"], ids["md"], ids["mf_b"]}
     assert dlg.btn_apply.text() == "Utwórz 3 linki"
-    assert dlg.head_label.text() == ("NGC 6992 / RC8_ASI2600MM: 1 light · 2 mastery · "
-                                     "0 surowych flatów · bez flatu 0 · bez darka 0")
+    assert dlg.head_label.text() == "NGC 6992 / RC8_ASI2600MM: 1 light · 2 mastery · 0 surowych flatów"
+    assert dlg.gaps_label.isHidden()                       # komplet: zero luk → wiersz ostrzeżenia znika
     assert dlg.pending_label.isHidden()                    # zero do przeliczenia → linia znika
     assert dlg.combo_zestaw.count() == 3
     frozen = []
@@ -990,7 +991,7 @@ def test_tryb_obiektu_powrot_do_kompletu_od_razu_eksplorator(qapp, tmp_path, ust
 
     powrot = _dlg_obj(con)
     rep = powrot.report.toPlainText()
-    assert rep.startswith(f"Komplet już w celu (układ wbpp-obiekt, {tryb}):")
+    assert rep.startswith(f"Komplet już w celu (układ obiekt do WBPP, {tryb}):")
     assert "0   istnieje: 11   konflikty: 0   pominięto: 1" in rep
     assert "bez rozmiaru" not in rep                       # zero pozycji do skopiowania - zero niewiadomych
     assert not powrot.btn_apply.isEnabled()
@@ -1172,9 +1173,11 @@ def test_teczki_kolejnosc_kropka_z_motywu_i_kolumny(qapp, tmp_path):
     assert pick.table.item(0, 0).toolTip().startswith("komplet")
     ngc = _wiersz(pick, "NGC 6992")
     cells = [pick.table.item(ngc, c).text() for c in range(1, pick.table.columnCount())]
-    # flat: la1, la_gone, lb1 z masterem (3/6), la2 z surowymi (1/6 → 16), la3 `pending` (1/6)
+    # flat: la1, la_gone, lb1 z masterem (3/6), la2 z surowymi (1/6), la3 `pending` (1/6) - pokrycie
+    # 5/6 = 83 %, więc części sumują się do 83 (`split_pct`, największa reszta: remis 16,67 obu
+    # części rozstrzyga kolejność - surowe przed `pending`), a nie do 82 ze ścięcia każdej osobno.
     assert cells == ["NGC 6992", "0.5", "6", "1", "2",
-                     "50 % / 16 % · do przeliczenia w Dostawie: 16 %", "33 %", "2024-03-01"]
+                     "50 % / 17 % · do przeliczenia w Dostawie: 16 %", "33 %", "2024-03-01"]
     assert pick.table.selectionModel().selectedRows() == []
     assert not pick.btn_next.isEnabled()
     con.close()
@@ -1370,7 +1373,7 @@ def test_przycisk_paska_droga_trzech_interakcji(qapp, tmp_path, ustawienia, monk
     assert kliki == ["Wydaj obiekt…", "dwuklik teczki", "utwórz"]
     assert widziane == {"preselekcja": "NGC 6992", "przycisk": "Utwórz 11 linków"}
     assert (card / "OBJECTS" / "NGC_6992" / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "lb1.fits").exists()
-    assert any(m.startswith("Wydano obiekt NGC 6992: 11") for m in msgs)
+    assert any(m.startswith("Wydano obiekt NGC 6992: zlinkowano 11 plików") for m in msgs)
     view.close()
     con.close()
 
@@ -1466,8 +1469,8 @@ def test_en_render_trybu_obiektu_i_teczek(qapp, tmp_path, ustawienia, monkeypatc
     _target(ustawienia, tmp_path / "_WBPP" / "karta")
     dlg = _dlg_obj(con)
     assert dlg.windowTitle() == "Release object to WBPP"
-    assert dlg.head_label.text() == ("NGC 6992: 6 lights · 3 masters · 2 raw flats · "
-                                     "without flat 1 · without dark 4")
+    assert dlg.head_label.text() == "NGC 6992: 6 lights · 3 masters · 2 raw flats"
+    assert dlg.gaps_label.text() == "without flat 1 · without dark 4"
     assert dlg.pending_label.text() == "to recompute in Delivery: 1"
     assert dlg.combo_zestaw.itemText(0) == "All" and dlg.btn_open.text() == "Open in Explorer"
     assert dlg.btn_apply.text() == "Create 11 links"
@@ -1489,7 +1492,7 @@ def test_en_komplet_w_celu_i_stan_pusty_teczek(qapp, tmp_path, ustawienia, monke
     dlg._on_apply()
     dlg._on_manual_dry()
     assert dlg.report.toPlainText().startswith(
-        "Already complete in the target (layout po-obiektach, hardlinks):")
+        "Already complete in the target (layout by object, hardlinks):")
     con.close()
     teczki = _teczki_do_szukania(tmp_path)
     pick = pd_mod.ObjectPickDialog(teczki)
@@ -1593,7 +1596,8 @@ def test_tryb_obiektu_wiersz_wyjscia_wbpp_po_wydaniu_schowek_i_invalidate(
     dlg._on_apply()
     wyjscie = karta / "OBJECTS" / "NGC_6992" / projection.OUTPUT_DIR
     assert not dlg.out_box.isHidden()
-    assert dlg.out_label.text() == f"Wyjście WBPP: {wyjscie}"
+    assert dlg.out_label.full_text() == f"Wyjście WBPP: {wyjscie}"      # treść; `text()` = to, co się zmieściło
+    assert dlg.out_label.toolTip() == f"Wyjście WBPP: {wyjscie}"
     assert wyjscie.is_dir()                                              # zakłada go klinga apply, nie okno
     napisy = " ".join(_etykiety(dlg.out_box))
     assert "Output Directory" in napisy and "TELESCOP" in napisy and "jedna sesja" in napisy.lower()
@@ -1603,13 +1607,13 @@ def test_tryb_obiektu_wiersz_wyjscia_wbpp_po_wydaniu_schowek_i_invalidate(
 
     QApplication.clipboard().setText("sprzed")
     dlg._invalidate()
-    assert dlg.out_box.isHidden() and dlg._out_dir is None and dlg.out_label.text() == ""
+    assert dlg.out_box.isHidden() and dlg._out_dir is None and dlg.out_label.full_text() == ""
     dlg.btn_out_copy.click()                                             # zgaszony wiersz nie kopiuje starej ścieżki
     assert QApplication.clipboard().text() == "sprzed"
 
     powrot = _dlg_obj(con)                                               # DRY zastaje komplet
     assert not powrot.out_box.isHidden()
-    assert powrot.out_label.text() == f"Wyjście WBPP: {wyjscie}"
+    assert powrot.out_label.full_text() == f"Wyjście WBPP: {wyjscie}"
     con.close()
 
 
@@ -1657,7 +1661,365 @@ def test_en_wiersz_wyjscia_wbpp(qapp, tmp_path, ustawienia, monkeypatch):
     _target(ustawienia, karta)
     dlg = _dlg_obj(con)
     dlg._on_apply()
-    assert dlg.out_label.text() == f"WBPP output: {karta / 'OBJECTS' / 'NGC_6992' / 'out'}"
+    assert dlg.out_label.full_text() == f"WBPP output: {karta / 'OBJECTS' / 'NGC_6992' / 'out'}"
     assert dlg.btn_out_copy.text() == "Copy path"
     assert any("Output Directory" in t and "TELESCOP" in t for t in _etykiety(dlg.out_box))
+    con.close()
+
+
+# ---------- szlif wydania: rozmiar okna, procenty, wcięcie raportu, role, słownik, karty ----------
+
+# Realne długości z kopii `pf4` (v36, 2026-10-13): najdłuższa nazwa pliku obecnej kopii (79 znaków)
+# i najdłuższy kanon obiektu z lightami. Karta pod `tmp_path` z segmentem jak katalog sesji
+# wizytacji bm - tej długości ścieżka „Wyjście WBPP" rozpychała okno do 1578 px.
+_NAZWA_PF4 = "NGC891_2025-02-04_RC8_2600MC_NoFilter_120s_RGB_CALDWELL-23_fastIntegration.xisf"
+_KANON_PF4 = "C/2023 A3 (Tsuchinshan-ATLAS)"
+_SESJA = "e--Claude-Horreum_6ad439ba-e9d0-437d-a8ad-bd2375a42b5c"
+
+
+def test_split_pct_suma_rowna_pokryciu_liczby_z_kopii_pf4():
+    """Części jednej całości sumują się do pokrycia liczonego regułą `readiness_pct`, każda trzyma
+    tę regułę (0 i 100 tylko, gdy prawdziwe). Liczby z kopii `pf4`: Cr464 132 + 35 ze 167 (ścięte
+    osobno „79 % / 20 %", suma 99 przy flacie dla każdego lightu) i NGC6888 496 + 72 z 584 (96 przy
+    pokryciu 97). Dalej progi: część zawyżona do 1 % oddaje punkt, gdy suma przerosłaby pokrycie."""
+    from horreum.gui.queries import readiness_pct
+
+    assert queries.split_pct((132, 35, 0), 167) == [79, 21, 0]
+    assert queries.split_pct((496, 72, 0), 584) == [85, 12, 0]
+    assert queries.split_pct((999, 1), 1000) == [99, 1]         # komplet: 100 bez części „100"
+    assert queries.split_pct((998, 1), 1000) == [98, 1]         # pokrycie 99: suma nie udaje kompletu
+    assert queries.split_pct((1, 1, 1), 1000) == [1, 1, 1]      # próg 1 % ważniejszy niż suma 1
+    assert queries.split_pct((5, 0, 0), 5) == [100, 0, 0]
+    assert queries.split_pct((0, 0, 0), 0) == [0, 0, 0]
+    for total in (3, 6, 7, 167, 584):
+        for a in range(0, total + 1, max(1, total // 7)):
+            for b in range(0, total - a + 1, max(1, total // 5)):
+                czesci = queries.split_pct((a, b), total)
+                assert sum(czesci) == readiness_pct(a + b, total), (a, b, total)
+                for n, p in zip((a, b), czesci):
+                    assert (p == 0) == (n == 0) and (p == 100) == (n == total), (a, b, total)
+
+
+def test_teczki_procenty_flatu_cr464_sumuja_sie_do_kompletu(qapp, tmp_path, monkeypatch):
+    """Kolumna flatu okna teczek pokazuje części z `queries.release_readiness`, które liczy je
+    `queries.split_pct` (jeden właściciel dla okna i karty na Domu): Cr464 z kopii `pf4` (flat dla
+    każdego lightu, podgląd mówi „bez flatu 0") pokazuje 79 + 21, nie 79 + 20."""
+    czesci = queries.split_pct((132, 35, 0), 167)
+    assert czesci == [79, 21, 0]
+    wiersz = {"object_id": 9, "canon": "Cr464", "lights": 167, "hours": 1.62, "nights": 1, "zestawy": 1,
+              "n_master_flat": 132, "n_master_dark": 0, "n_raw_flat": 35, "n_pending": 0,
+              "pct_master_flat": czesci[0], "pct_master_dark": 0, "pct_raw_flat": czesci[1],
+              "pct_pending": czesci[2],
+              "last_night": "2023-05-07", "stan": "amber"}
+    monkeypatch.setattr(pd_mod.queries, "release_readiness", lambda con: [wiersz])
+    con = db.open_db(str(tmp_path / "cr464.db"))
+    pick = pd_mod.ObjectPickDialog(con)
+    assert pick.table.item(0, 6).text() == "79 % / 21 %"
+    con.close()
+
+
+def test_kropka_stanu_teczki_trzyma_kolor_pod_zaznaczeniem(qapp, tmp_path, monkeypatch):
+    """Zaznaczony wiersz okna teczek: Qt maluje tekst `HighlightedText` (biel), więc kropka stanu
+    traciła kolor dokładnie na wskazanym obiekcie. Delegat kolumny 0 podstawia kolor roli komórki.
+    Falsyfikator: bez delegata `HighlightedText` opcji = paleta widoku (nie kolor stanu)."""
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    wiersz = {"object_id": 9, "canon": "Cr464", "lights": 167, "hours": 1.62, "nights": 1, "zestawy": 1,
+              "n_master_flat": 167, "n_master_dark": 0, "n_raw_flat": 0, "n_pending": 0,
+              "pct_master_flat": 100, "pct_master_dark": 0, "pct_raw_flat": 0, "pct_pending": 0,
+              "last_night": "2023-05-07", "stan": "amber"}
+    monkeypatch.setattr(pd_mod.queries, "release_readiness", lambda con: [wiersz])
+    con = db.open_db(str(tmp_path / "kropka.db"))
+    pick = pd_mod.ObjectPickDialog(con)
+    try:
+        pick.table.selectRow(0)
+        idx = pick.table.model().index(0, 0)
+        opt = QStyleOptionViewItem()
+        pick.table.itemDelegateForColumn(0).initStyleOption(opt, idx)
+        assert opt.palette.color(QPalette.HighlightedText) == pd_mod._COLORS["warn"]
+    finally:
+        pick.close()
+        con.close()
+
+
+def _pokazany(dlg, qapp, szer=640):
+    dlg.resize(szer, 520)
+    dlg.show()
+    qapp.processEvents()
+    return dlg.width()
+
+
+def test_okno_nie_rosnie_od_dlugiej_nazwy_pliku_w_postepie(qapp, tmp_path, ustawienia, monkeypatch):
+    """Nota postępu z nazwą pliku z kopii `pf4` (79 znaków) nie rusza szerokości okna ani jego
+    minimum; pełna nota w tooltipie, widoczna - ucięta z wielokropkiem przy wąskim miejscu.
+    Metryki offscreen nie są natywne, więc porównanie WZGLĘDNE, a falsyfikator wierny: etykieta
+    z minimum równym treści (zwykły `QLabel`, na którym okno rosło z 701 do 1011 px - wizytacja
+    bg) podnosi minimum okna ponad bieżącą szerokość."""
+    from PySide6.QtWidgets import QLabel as _QLabel
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "postep.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    root = tmp_path / _SESJA / "_WBPP" / "feed"
+    _target(ustawienia, root)
+    dlg = _dlg(con, ids)
+    w0 = _pokazany(dlg, qapp)
+    dlg._apply_begin(167, str(root))
+    qapp.processEvents()
+    m0 = dlg.minimumSizeHint().width()
+    dlg._on_apply_progress(12, 167, str(root / "Cr464" / "R" / _NAZWA_PF4), "linked")
+    qapp.processEvents()
+    nota = dlg.progress_note.full_text()
+    assert nota.startswith("12/167") and nota.endswith(_NAZWA_PF4)
+    assert dlg.progress_note.toolTip() == nota
+    assert dlg.width() == w0 and dlg.minimumSizeHint().width() == m0
+    dlg.progress_note.resize(200, dlg.progress_note.height())
+    assert dlg.progress_note.text().startswith("12/167") and dlg.progress_note.text().endswith("…")
+    dlg._apply_end()
+    qapp.processEvents()
+    assert dlg.width() == w0 and dlg.progress_note.full_text() == ""
+    # Falsyfikator NA KOŃCU: przeliczenie układu z minimum starej etykiety naprawdę poszerza okno.
+    dlg.progress_note.setMinimumWidth(_QLabel(nota).sizeHint().width())   # minimum = treść
+    qapp.processEvents()
+    assert dlg.minimumSizeHint().width() > w0
+    dlg.close()
+    con.close()
+
+
+def test_okno_nie_rosnie_od_nierozbijalnej_sciezki_wyjscia(qapp, tmp_path, ustawienia, monkeypatch):
+    """„Wyjście WBPP" (najdłuższy kanon z kopii `pf4`, karta o długości ścieżki wizytacji bm) nie
+    dyktuje minimum ani wiersza, ani okna: minimum wiersza i okna jest to samo przy ścieżce długiej
+    i krótkiej, etykieta tnie ŚRODEK ścieżki (zostaje „Wyjście WBPP:" i koniec `…\\out`), pełna
+    ścieżka w tooltipie i w schowku. Offscreen inny wiersz trzyma minimum okna wyżej niż natywnie,
+    więc falsyfikator stoi na poziomie WIERSZA: dawna zawijana etykieta z tą ścieżką ma sama
+    minimum szersze niż cały dzisiejszy wiersz - natywnie tak rosło okno do 1578 px."""
+    from PySide6.QtWidgets import QLabel as _QLabel
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    con.execute("UPDATE object SET canon = ? WHERE id = 1", (_KANON_PF4,))
+    con.commit()
+    karta = tmp_path / _SESJA / "scratchpad" / "bramka" / "wiz" / "_WBPP"
+    _target(ustawienia, karta)
+    dlg = _dlg_obj(con)
+    _pokazany(dlg, qapp)
+    dlg._on_apply()
+    qapp.processEvents()
+    w1, m1, r1 = dlg.width(), dlg.minimumSizeHint().width(), dlg.out_box.minimumSizeHint().width()
+    pelna = dlg.out_label.full_text()
+    assert pelna == f"Wyjście WBPP: {dlg._out_dir}" and dlg._out_dir.endswith(os.sep + "out")
+    wydany = dlg._released_root
+    dlg._arm_open("X:\\")                                  # krótka ścieżka: to samo minimum
+    qapp.processEvents()
+    assert dlg.out_label.full_text() == "Wyjście WBPP: X:\\out"
+    assert dlg.minimumSizeHint().width() == m1 and dlg.out_box.minimumSizeHint().width() == r1
+    dlg._arm_open(wydany)                                  # jedyna droga produktu do etykiety
+    qapp.processEvents()
+    assert dlg.out_label.full_text() == pelna and dlg.width() == w1
+    zawijana = _QLabel(pelna)
+    zawijana.setWordWrap(True)
+    assert zawijana.minimumSizeHint().width() > r1         # stara etykieta dyktowałaby wiersz
+    dlg.out_label.resize(300, dlg.out_label.height())
+    widoczna = dlg.out_label.text()
+    assert "…" in widoczna and widoczna.startswith("Wyjście WBPP: ") and widoczna.endswith("out")
+    assert dlg.out_label.toolTip() == pelna
+    QTest.mouseClick(dlg.btn_out_copy, Qt.LeftButton)
+    assert QApplication.clipboard().text() == dlg._out_dir   # schowek niesie pełną ścieżkę
+    dlg.close()
+    con.close()
+
+
+def test_raport_zawiniety_wiersz_nie_lamie_slupka(qapp, tmp_path, ustawienia, monkeypatch):
+    """Wiersz zestawu Cr464 z nocami (liczby z wizytacji bg, `30_Cr464_dry.png`: zawinięty po
+    88 znakach, „2023-05-07)" od kolumny 0) zawija się przy tej samej szerokości tekstu, a
+    kontynuacja zaczyna się `_REPORT_HANG` znaków głębiej niż własne wcięcie wiersza. Tekst raportu
+    (`toPlainText`) zostaje dokładnie tym, co weszło. Szerokość zawijania stała (88 znaków), bo
+    metryki offscreen nie są natywne."""
+    from PySide6.QtGui import QFontMetricsF
+    from PySide6.QtWidgets import QTextEdit
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "slupek.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    _pokazany(dlg, qapp)
+    znak = QFontMetricsF(dlg.report.font()).horizontalAdvance(" ")
+    dlg.report.setLineWrapMode(QTextEdit.FixedPixelWidth)
+    dlg.report.setLineWrapColumnOrWidth(int(88 * znak))
+    info = {"window_days": 30, "zestawy": {"76EDPH_ASI2600MM": {
+        "masters": {"flat": list(range(6))}, "flat_raw": list(range(51)),
+        "flat_raw_nights": ["2023-05-07"], "lights": list(range(167)), "hours": 1.62,
+        "bez_flatu": [], "flat_gaps": {}, "bez_darka": list(range(167)), "pending": []}}}
+    wiersze = [w for w, _rola in pd_mod.object_report_lines(info)]
+    tekst = "\n".join(["DRY - bez zmian na dysku (układ obiekt do WBPP, kopie):", *wiersze])
+    dlg._show_report(tekst)
+    qapp.processEvents()
+    assert dlg.report.toPlainText() == tekst
+    zestaw = dlg.report.document().findBlockByNumber(1)
+    assert zestaw.text().startswith("  zestaw 76EDPH_ASI2600MM:") and "(noce: 2023-05-07)" in zestaw.text()
+    uklad = zestaw.layout()
+    assert uklad.lineCount() >= 2                          # wiersz naprawdę się zawija
+    for i in range(1, uklad.lineCount()):
+        assert uklad.lineAt(i).x() == pytest.approx(uklad.lineAt(0).x() + (2 + pd_mod._REPORT_HANG) * znak)
+    dlg.close()
+    con.close()
+
+
+def test_luki_w_naglowku_i_raporcie_kolorem_roli_warn(qapp, tmp_path, ustawienia, monkeypatch):
+    """Liczby luk mają rolę ostrzeżenia, nie kolor liczb tego, co jest: osobny wiersz nagłówka
+    (`warn`, znika przy komplecie) i wiersze luk raportu w kolorze roli `warn` z motywu; wiersz
+    zestawu zostaje neutralny."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    dlg = _dlg_obj(con)
+    assert dlg.gaps_label.property("role") == "warn" and not dlg.gaps_label.isHidden()
+    warn = pd_mod._COLORS["warn"].name().lower()
+    doc = dlg.report.document()
+    kolory = {}
+    for n in range(doc.blockCount()):
+        tekst = doc.findBlockByNumber(n).text()
+        f = _block_fmt(dlg.report, n)
+        kolory[tekst.strip().split(":")[0]] = (f.foreground().color().name().lower()
+                                               if f.foreground().style() != Qt.NoBrush else None)
+    assert kolory["bez flatu"] == warn and kolory["bez darka"] == warn
+    assert kolory["do przeliczenia w Dostawie"] == warn
+    assert kolory["zestaw A140R_ASI2600MM"] is None and kolory["do zlinkowania"] is None
+    assert pd_mod.object_gaps_text({"bez_flatu": 0, "bez_darka": 167}) == "bez darka 167"
+    assert pd_mod.object_gaps_text({"bez_flatu": 0, "bez_darka": 0}) == ""
+    con.close()
+
+
+def test_waga_zlotej_akcji_idzie_za_eksploratorem(qapp, tmp_path, ustawienia, monkeypatch):
+    """Po udanym wydaniu waga (bold, wysokość, Enter) przechodzi z wygaszonego „Utworzono ✓" na
+    „Otwórz w Eksploratorze", przy zmianie parametru wraca na „Utwórz", a powrót do kompletu
+    (nowe okno) stawia ją od razu na Eksploratorze."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+
+    def waga(b):
+        return (b.font().bold(), b.minimumHeight() == pd_mod._GOLD_HEIGHT, b.isDefault())
+
+    dlg = _dlg_obj(con)
+    assert waga(dlg.btn_apply) == (True, True, True) and waga(dlg.btn_open) == (False, False, False)
+    dlg._on_apply()
+    assert dlg.btn_apply.text() == "Utworzono ✓" and not dlg.btn_apply.isEnabled()
+    assert waga(dlg.btn_open) == (True, True, True) and waga(dlg.btn_apply) == (False, False, False)
+    dlg._invalidate()
+    assert waga(dlg.btn_apply) == (True, True, True) and waga(dlg.btn_open) == (False, False, False)
+    powrot = _dlg_obj(con)
+    assert waga(powrot.btn_open) == (True, True, True) and not powrot.btn_apply.font().bold()
+    con.close()
+
+
+def test_tryb_obiektu_mowi_slownikiem_wydania(qapp, tmp_path, ustawienia, monkeypatch):
+    """Bieg wydania obiektu nie mówi „Wydaję na stół", a zdanie na pasek odmienia liczbę plików
+    („zlinkowano 1 plik"), nie „1 zlinkowano". EN: „Stop releasing" w trybie obiektu, „Stop
+    serving" zostaje wydaniu perspektywy."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    w_biegu = []
+    _spy_progress(monkeypatch, hook=lambda n, w: w_biegu.append(dlg.report.toPlainText()))
+    dlg = _dlg_obj(con)
+    dlg.combo_zestaw.setCurrentIndex(2)                    # RC8_ASI2600MM: 3 pozycje
+    dlg._on_apply()
+    assert w_biegu and all(r.startswith("Wydaję obiekt → ") and "stół" not in r for r in w_biegu)
+    assert dlg.summary.startswith("Wydano obiekt NGC 6992: zlinkowano 3 pliki → ")
+
+    i18n.set_lang("en")                                    # język stoi PRZED budową okna (D-L1)
+    obj = _dlg_obj(con)
+    assert obj.btn_cancel.text() == "Stop releasing"
+    obj._apply_begin(11, "X:\\_WBPP\\OBJECTS\\NGC_6992")
+    assert obj.report.toPlainText().startswith("Releasing the object → X:\\_WBPP\\OBJECTS\\NGC_6992")
+    obj._apply_end()
+    persp = _dlg(con, [_ids["la1"]])
+    assert persp.btn_cancel.text() == "Stop serving"
+    con.close()
+
+
+def test_zdanie_paska_odmienia_liczbe_plikow():
+    """`{files}` zdań na pasek: fraza odmieniona (1, 2-4, 5, 12-14, 22) w obu trybach i językach."""
+    oczek = {
+        "proj.files_copied": ("skopiowano 1 plik", "skopiowano 2 pliki", "skopiowano 5 plików",
+                              "skopiowano 12 plików", "skopiowano 22 pliki"),
+        "proj.files_linked": ("zlinkowano 1 plik", "zlinkowano 2 pliki", "zlinkowano 5 plików",
+                              "zlinkowano 12 plików", "zlinkowano 22 pliki"),
+    }
+    for key, formy in oczek.items():
+        assert tuple(i18n.t_plural(key, n) for n in (1, 2, 5, 12, 22)) == formy, key
+    assert i18n.t("proj.status_summary", files="zlinkowano 2 pliki", root="R") == \
+        "Wydano na stół: zlinkowano 2 pliki → R"
+    i18n.set_lang("en")
+    assert [i18n.t_plural("proj.files_copied", n) for n in (1, 2)] == ["copied 1 file", "copied 2 files"]
+    assert [i18n.t_plural("proj.files_linked", n) for n in (1, 5)] == ["linked 1 file", "linked 5 files"]
+    assert i18n.t("proj.obj.status_summary", canon="M42", files="copied 1 file", root="R") == \
+        "Released object M42: copied 1 file → R"
+
+
+def test_en_bez_polskich_cudzyslowow_w_oknie_wydania():
+    """BRAMKA rejonu: żadne zdanie EN okna wydania (`proj.*`) nie niesie polskiego „ - tłumaczenie
+    przepisywało cudzysłów razem z polskim zdaniem („Next”, „Stop serving”)."""
+    from horreum.gui.i18n_catalog import CATALOG
+
+    zle = []
+    for key, forms in CATALOG.items():
+        if key.startswith("proj."):
+            en = forms["en"]
+            for tekst in (en.values() if isinstance(en, dict) else (en,)):
+                if "\u201e" in tekst:
+                    zle.append(key)
+    assert not zle, zle
+
+
+def test_uklad_nazwa_z_katalogu_parytet_i_en(qapp, tmp_path, ustawienia, monkeypatch):
+    """Każdy układ klingi ma nazwę w katalogu (mapa `_LAYOUT_KEYS` - kolektor literałów jej nie
+    widzi); token spoza mapy zostaje sobą. EN raportu wydania obiektu nie niesie tokenu dysku."""
+    from horreum.gui.i18n_catalog import CATALOG
+
+    assert set(pd_mod._LAYOUT_KEYS) == set(projection.LAYOUTS) | {projection.OBJECT_LAYOUT}
+    for key in pd_mod._LAYOUT_KEYS.values():
+        assert CATALOG[key]["pl"] and CATALOG[key]["en"], key
+    assert pd_mod.layout_text("nowy-uklad") == "nowy-uklad"
+    i18n.set_lang("en")
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    dlg = _dlg_obj(con)                                    # referencja: tymczasowe okno ginie z dziećmi
+    rep = dlg.report.toPlainText()
+    assert rep.startswith("DRY - no disk changes (layout object for WBPP, hardlinks):")
+    assert "wbpp-obiekt" not in rep
+    con.close()
+
+
+def test_karty_jednym_stylem_separatora_i_nazwa_folderu_roboczego(qapp, tmp_path, ustawienia, monkeypatch):
+    """Karta zapisana sprzed kanonizacji (`/`) stoi na liście, w tooltipie i w „Wyjściu WBPP"
+    separatorem systemu, jak karta zapisana dziś; ten sam cel zapisany dwiema pisowniami to jeden
+    wiersz. Karta folderu roboczego założona po polsku mówi w UI EN „Working folder". Zapis
+    w ustawieniach zostaje bez zmian."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    robocza, druga = tmp_path / "ASTRO_WORK" / "_WBPP", tmp_path / "x" / "_WBPP"
+    zapis = json.dumps([{"name": "Folder roboczy", "path": str(robocza).replace("\\", "/")},
+                        {"name": "druga", "path": str(druga)},
+                        {"name": "druga-2", "path": str(druga).replace("\\", "/") + "/"}])
+    ustawienia.setValue("projection/targets", zapis)
+    ustawienia.setValue("projection/last_target", str(robocza))
+    i18n.set_lang("en")
+    dlg = _dlg_obj(con)
+    napisy = [c["radio"].text() for c in dlg._cards]
+    assert len(napisy) == 2 and napisy[0].startswith("Working folder  -  ")
+    assert napisy[1].startswith("druga-2  -  ")           # nazwa późniejszego zapisu
+    for c in dlg._cards:
+        assert "/" not in c["radio"].text() and "/" not in c["radio"].toolTip()
+    assert dlg._current_root() == str(robocza)
+    dlg._on_apply()
+    assert "/" not in dlg.out_label.full_text() and "/" not in dlg.summary
+    assert ustawienia.value("projection/targets") == zapis  # zapis bez zmian
+    assert pd_mod.card_name("Working folder") == "Working folder"
+    i18n.set_lang("pl")
+    assert pd_mod.card_name("Working folder") == "Folder roboczy"
+    assert pd_mod.card_name("Moja karta") == "Moja karta"
     con.close()

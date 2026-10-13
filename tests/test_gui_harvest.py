@@ -23,7 +23,8 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QDeadlineTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QWidget
+from shiboken6 import isValid
 
 from horreum import db, harvest, hashing, projection, repo, stacks
 from horreum.gui import i18n
@@ -339,7 +340,7 @@ def test_odmiana_liczebnikow_z_nascie(n, forma):
     assert t("harvest.close_unknown", n).endswith(f" {n} {kopie} bazie")
     assert t("harvest.status_unknown", n, root="R").endswith(f" {n} {kopie} bazie → R")
     i18n.set_lang("en")
-    assert t("harvest.btn_apply", n) == (f"Harvest {n} file" if n == 1 else f"Harvest {n} files")
+    assert t("harvest.btn_apply", n) == (f"Take in {n} file" if n == 1 else f"Take in {n} files")
 
 
 # ---------------------------------------------------------------- DRY
@@ -1095,9 +1096,10 @@ def test_realny_qthread_zamkniecie_w_biegu_nie_czeka_w_watku_glownym(qapp, tmp_p
     dlg.done(0)
     assert dlg.isVisible()                                               # wraca od razu - okno czeka na plik
     assert not dlg.btn_close.isEnabled() and not dlg.btn_cancel.isEnabled()
-    assert dlg.progress_note.text() == "Zamykam po bieżącym pliku…"
-    assert _wait_until(dlg.isHidden)
-    assert dlg._apply_thread is None and dlg._apply_worker is None
+    assert dlg.progress_note.full_text() == "Zamykam po bieżącym pliku…"
+    # Zamknięte po sprzątnięciu wątku - i zwolnione (`deleteLater`), bo żaden wątek go już nie trzyma.
+    assert _wait_until(lambda: not isValid(dlg))
+    assert dlg._closing and dlg._apply_thread is None and dlg._apply_worker is None
     assert _cel(archive, "CLS").exists() and not _cel(archive, "Ha").exists()
     assert not _parts(archive)
     assert " · przerwano, nietknięte: 1" in dlg.summary and dlg.harvested_root is None
@@ -1121,8 +1123,9 @@ def test_realny_qthread_zamkniecie_w_trakcie_sondy(qapp, tmp_path, ustawienia, m
     dlg.done(0)
     assert time.monotonic() - t0 < 5                                     # anulowanie, nie limit 10 s
     assert dlg.isHidden()
-    assert _wait_until(lambda: dlg._dry_thread is None)
-    assert dlg.table.rowCount() == 0 and dlg._plan is None
+    # Sprzątnięcie wątku sondy zwalnia zamknięte okno; wynik porzucony - planu nie przyjęto.
+    assert _wait_until(lambda: not isValid(dlg))
+    assert dlg._dry_thread is None and dlg._plan is None and dlg._probed is None
     con.close()
 
 
@@ -1189,13 +1192,13 @@ def test_en_render_z_katalogu(qapp, tmp_path, ustawienia, monkeypatch):
                            "masterDark_D.xisf": {"kind": "master_dark"},
                            "masterFlat_X.xisf": {**_flat_ha(), "filter_raw": "OIII"}})
     dlg = _dlg(con, archive)
-    assert dlg.windowTitle() == "Harvest WBPP results"
+    assert dlg.windowTitle() == "Take in WBPP results"
     assert dlg.notice.text() == "Choose the WBPP output folder - the preview computes itself."
     dlg._set_output(str(out))
-    assert dlg.head_label.text() == "To harvest 2 · already in the archive 0 · to review 2"
-    assert dlg.btn_apply.text() == "Harvest 2 files"
+    assert dlg.head_label.text() == "To take in 2 · already in the archive 0 · to review 2"
+    assert dlg.btn_apply.text() == "Take in 2 files"
     rows = _wiersze(dlg)
-    assert {_kol(dlg, r, COL_STATUS) for r in rows.values()} == {"to harvest", "to review"}
+    assert {_kol(dlg, r, COL_STATUS) for r in rows.values()} == {"to take in", "to review"}
     assert _kol(dlg, rows["masterDark_D.xisf"], COL_REASON).startswith("dark/bias master")
     powod = _kol(dlg, rows["masterFlat_X.xisf"], COL_REASON)
     assert powod.startswith("the file header disagrees with its inputs: ")
@@ -1206,10 +1209,10 @@ def test_en_render_z_katalogu(qapp, tmp_path, ustawienia, monkeypatch):
     assert _kol(dlg, rows["masterDark_D.xisf"], COL_KIND) == "master dark"
     assert _kol(dlg, rows["masterFlat_A.xisf"], COL_RELEASE) == "outside a Horreum release"
     dlg._on_apply()
-    assert dlg.head_label.text().startswith("Harvested 2 · skipped 0 (already in the archive)")
-    assert dlg.btn_apply.text() == "Harvested"
+    assert dlg.head_label.text().startswith("Taken in 2 · skipped 0 (already in the archive)")
+    assert dlg.btn_apply.text() == "Taken in"
     assert dlg.btn_accept.text() == "Close and receive into the archive"
-    assert dlg.summary.startswith("Harvested 2 files into the archive → ")
+    assert dlg.summary.startswith("Took 2 files into the archive → ")
     con.close()
 
 
@@ -1663,7 +1666,7 @@ def test_ar104_zwykle_zamknij_samych_stosow_bez_kopii_do_przyjecia(qapp, tmp_pat
                            "do archiwum” w oknie żniw; folderu wydania nie kasuj do tego czasu")
     i18n.set_lang("en")
     dlg = _dlg(con, archive, work_root=str(work))
-    assert _stan(dlg, 0) == "harvested 3 · lineage to record 2"
+    assert _stan(dlg, 0) == "taken in 3 · lineage to record 2"
     dlg.reject()
     assert dlg.summary == ("Stacks in the archive without their exact lineage: 2 - only \"Close and receive into "
                            "the archive\" in the harvest window records it; keep the release folder until then")
@@ -1861,9 +1864,12 @@ def test_realny_qthread_zamkniecie_w_trakcie_listy_nie_czeka(qapp, tmp_path, ust
     t0 = time.monotonic()
     dlg.done(0)
     assert time.monotonic() - t0 < 1 and dlg.isHidden()
-    gate.set()
-    assert _wait_until(lambda: dlg._rel_thread is None)
+    QTest.qWait(50)
+    assert isValid(dlg) and dlg._rel_thread is not None                 # wątek w biegu trzyma okno
     assert dlg.rel_table.rowCount() == 0 and dlg.edit_output.text() == ""
+    gate.set()
+    assert _wait_until(lambda: not isValid(dlg))                         # lista dobiegła - okno zwolnione
+    assert dlg._rel_thread is None and dlg._releases == []              # spóźniona lista okna nie dotknęła
     con.close()
 
 
@@ -1879,16 +1885,16 @@ def test_en_lista_wydan_i_rodzaj(qapp, tmp_path, ustawienia, monkeypatch):
     dlg = _dlg(con, archive, work_root=str(work))
     assert [dlg.rel_table.horizontalHeaderItem(c).text() for c in range(4)] == \
         ["Object", "Card", "Release date", "Status"]
-    assert [_stan(dlg, r) for r in range(2)] == ["waiting for WBPP", "to harvest 3"]
+    assert [_stan(dlg, r) for r in range(2)] == ["waiting for WBPP", "to take in 3"]
     assert _kol(dlg, _wiersze(dlg)[os.path.join("master", STOS)], COL_KIND) == "stack"
     dlg._on_apply()
-    assert _stan(dlg, 1) == "harvested 3 · lineage to record 2"
+    assert _stan(dlg, 1) == "taken in 3 · lineage to record 2"
     assert dlg.rel_done_note.text() == (
         "Stacks from this release await their exact lineage - \"Close and receive into the archive\" "
         "records it. The set of their inputs exists only in this folder, so keep it until then.")
     assert dlg.btn_open_release.text() == "Open"
     dlg.reject()
-    assert dlg.summary.startswith("Harvested 3 files into the archive (stacks without exact lineage: 2 - only "
+    assert dlg.summary.startswith("Took 3 files into the archive (stacks without exact lineage: 2 - only "
                                   "\"Close and receive into the archive\" records it, also after reopening this "
                                   "window; keep the release folder)")
     con.close()
@@ -2175,3 +2181,170 @@ def test_rodowod_z_wydania_etykieta_w_panelu_i_czlon_raportu(qapp, tmp_path):
         assert "z wydania" not in bez
     finally:
         v.close()
+
+
+# ---------------------------------------------------------------- ekran mówi prawdę (role, słowa, rozmiar)
+
+# Najdłuższa nazwa mastera w kopii archiwum (sonda 2026-10-13 na kopii `pf4` v36: 97 znaków, stos
+# `masterLight_…_CALDWELL-23_fastIntegration.xisf`) z przedrostkiem mastera flat - 96 znaków.
+DLUGA_NAZWA = "masterFlat_BIN-1_6248x4176_EXPOSURE-120.00s_FILTER-NoFilter_RGB_CALDWELL-23_fastIntegration.xisf"
+
+
+def test_kolumna_stan_w_kolorze_roli_z_motywu(qapp, tmp_path, ustawienia, monkeypatch):
+    """Słowo stanu niesie kolor znaczenia z motywu (`projection_dialog._COLORS`): do przeglądu -
+    ostrzeżenie, wciągnięty - ok; „do wciągnięcia” bez roli (stan zwykły). Mapa ról tylko na
+    statusach rdzenia i tylko na rolach motywu.
+
+    Falsyfikator: komórka bez `setForeground` - pędzel `NoBrush` także przy „do przeglądu”."""
+    from horreum.gui.projection_dialog import _COLORS
+    assert set(hd_mod._STATUS_ROLES) <= set(harvest.STATUSES)
+    assert set(hd_mod._STATUS_ROLES.values()) <= set(_COLORS)
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A", "masterFlat_X.xisf": b"X"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls(),
+                           "masterFlat_X.xisf": {**_flat_ha(), "filter_raw": "OIII"}})
+    dlg = _dlg(con, archive)
+    dlg._set_output(str(out))
+
+    def stan(nazwa):
+        return dlg.table.item(_wiersze(dlg)[nazwa], COL_STATUS)
+
+    assert stan("masterFlat_X.xisf").text() == "do przeglądu"
+    assert stan("masterFlat_X.xisf").foreground().color() == _COLORS["warn"]
+    assert stan("masterFlat_A.xisf").foreground().style() == Qt.NoBrush       # do wciągnięcia
+    dlg._on_apply()
+    assert stan("masterFlat_A.xisf").text() == "wciągnięty"
+    assert stan("masterFlat_A.xisf").foreground().color() == _COLORS["ok"]
+    assert stan("masterFlat_X.xisf").foreground().color() == _COLORS["warn"]
+    con.close()
+
+
+def test_postep_zniw_jednym_licznikiem_a_dluga_nazwa_nie_rozpycha_okna(qapp, tmp_path, ustawienia,
+                                                                      monkeypatch):
+    """W biegu licznik mówi notatka („1/1 · plik kopii”), pasek jest bez napisu (dawniej „0%” obok
+    „0/1”). Notatka z najdłuższą realną nazwą mastera nie podnosi podłogi szerokości okna w biegu -
+    jest elidowana, pełna treść pod kursorem; podłoga z długą nazwą = podłoga z krótką.
+
+    Falsyfikator: `QLabel` za treścią - podłoga z długą nazwą rośnie o szerokość nazwy."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, archive)
+    w_biegu = []
+
+    def hook(_n, _w):
+        nota = dlg.progress_note
+        stan = (dlg.busy.isVisible(), dlg.busy.isTextVisible(), nota.full_text(), nota.toolTip())
+        krotka = dlg.minimumSizeHint().width()
+        nota.set_full_text(f"1/1 · {DLUGA_NAZWA}")               # ta sama notatka, nazwa z archiwum
+        w_biegu.append((stan, krotka, dlg.minimumSizeHint().width(), nota.toolTip()))
+
+    _spy_progress(monkeypatch, hook=hook)
+    dlg.show()
+    dlg._set_output(str(out))
+    dlg._on_apply()
+    (stan, krotka, dluga, podpowiedz), = w_biegu
+    plik = os.path.basename(str(_cel(archive)))
+    assert stan == (True, False, f"1/1 · {plik}", f"1/1 · {plik}")
+    assert len(DLUGA_NAZWA) == 96 and podpowiedz == f"1/1 · {DLUGA_NAZWA}"
+    assert dluga == krotka
+    con.close()
+
+
+def test_lista_wydan_dluga_karta_elidowana_a_stan_caly(qapp, tmp_path, ustawienia, monkeypatch):
+    """Karta to długa ścieżka (segmenty najdłuższego katalogu lokacji z kopii archiwum - katalog
+    wyjścia WBPP, 99 znaków): kolumna „Karta” dostaje resztę po obiekcie, dacie i stanie i elizję
+    środkiem, komórka „Stan” zostaje cała, wiersz bez przewijania w bok. Pełna ścieżka w treści
+    komórki i pod kursorem.
+
+    Falsyfikator: karta za treścią (`ResizeToContents`) - suma kolumn większa od kadru, stan ucięty."""
+    con, _profile, _flats = _baza(tmp_path)
+    work = tmp_path.joinpath("MC_76ED_2023-08_Bulgaria", "Veil_2023-08-22_76ED_2600C_0300s_Bulgaria",
+                             "WBPP2", "_WBPP")
+    _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con), {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work))
+    dlg.show()
+    QTest.qWait(30)
+    t = dlg.rel_table
+    karta = t.item(0, hd_mod.REL_CARD)
+    assert karta.text() == str(work) and karta.toolTip() == str(work)
+    assert _stan(dlg, 0) == "do wciągnięcia 1"
+    assert t.columnWidth(hd_mod.REL_CARD) < t.sizeHintForColumn(hd_mod.REL_CARD)       # karta elidowana
+    assert t.columnWidth(REL_STATE) >= t.sizeHintForColumn(REL_STATE)                   # stan cały
+    assert sum(t.columnWidth(c) for c in range(t.columnCount())) <= t.viewport().width()
+    con.close()
+
+
+def test_rodzaj_mastera_z_naglowkiem_surowej_klatki_mowi_slowem(qapp, tmp_path, ustawienia, monkeypatch):
+    """Plik `masterFlat…`, którego nagłówek mówi o surowym flacie, idzie do przeglądu, a kolumna
+    „Rodzaj” mówi „surowy flat”, nie token `flat`. Mapa słów obejmuje każdy rodzaj, który umie nadać
+    skan (`resolve.frames._KIND_MAP`) + `unknown`; EN z katalogu.
+
+    Falsyfikator: rodzaj spoza mapy - komórka mówi `flat`."""
+    from horreum.resolve import frames
+    assert set(_HARVEST_KINDS) == set(frames._KIND_MAP.values()) | {"unknown"}
+    con, _profile, _flats = _baza(tmp_path)
+    out = _wyjscie(tmp_path, {"masterFlat_S.xisf": b"S"})
+    _czytnik(monkeypatch, {"masterFlat_S.xisf": {**_flat_cls(), "kind": "flat",
+                                                 "header": {"IMAGETYP": "FLAT"}}})
+    dlg = _dlg(con, tmp_path / "ARCH")
+    dlg._set_output(str(out))
+    assert _kol(dlg, 0, COL_KIND) == "surowy flat"
+    assert _kol(dlg, 0, COL_STATUS) == "do przeglądu"
+    assert _kol(dlg, 0, COL_REASON) == "nagłówek pliku nie zgadza się z wejściami: IMAGETYP='FLAT' -> flat"
+    i18n.set_lang("en")
+    assert [hd_mod.kind_text(k) for k in ("light", "flat", "dark", "bias")] == \
+        ["raw light", "raw flat", "raw dark", "raw bias"]
+    con.close()
+
+
+@pytest.mark.parametrize("data, pl, en", [
+    (None, "brak DATE-OBS w nagłówku - nazwa stosu wymaga daty i godziny",
+     "no DATE-OBS in the header - the stack name needs a date and time"),
+    ("2025-12-16", "DATE-OBS bez godziny albo nieczytelne (2025-12-16) - nazwa stosu wymaga daty i godziny",
+     "DATE-OBS without a time or unreadable (2025-12-16) - the stack name needs a date and time"),
+])
+def test_stos_bez_czytelnego_date_obs_powod_mowi_o_dacie_nazwy(qapp, tmp_path, ustawienia, monkeypatch,
+                                                              data, pl, en):
+    """Stos, któremu rdzeń odmawia nazwy (`header_mismatch` z `DATE-OBS` w `detail`), dostaje zdanie
+    o dacie nazwy stosu, nie „nagłówek nie zgadza się z wejściami: DATE-OBS None”. `detail` z rdzenia
+    pinowany - to jego postać czyta okno.
+
+    Falsyfikator: zdanie tokenu z surowym `detail` - „…: DATE-OBS None”."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    work, _root, _out, _ids, zeznania = _wydanie_ic1795(tmp_path, con, archive, z_flatem=False)
+    zeznania[STOS] = {**zeznania[STOS], "date_obs": data}
+    _czytnik(monkeypatch, zeznania)
+    dlg = _dlg(con, archive, work_root=str(work))
+    it = next(i for i in dlg._plan.items if i.src.endswith(STOS))
+    assert (it.status, it.reason, it.detail) == ("review", "header_mismatch", f"DATE-OBS {data!r}")
+    assert _kol(dlg, _wiersze(dlg)[os.path.join("master", STOS)], COL_REASON) == pl
+    i18n.set_lang("en")
+    assert reason_text(it) == en
+    con.close()
+
+
+def test_zamkniete_okno_bez_watku_zwalnia_sie_samo(qapp, tmp_path, ustawienia, monkeypatch):
+    """Zamknięte okno bez żywego wątku tła nie zostaje dzieckiem gospodarza (dawniej każde zamknięte
+    okno żniw wisiało pod oknem głównym do końca sesji). Gospodarz czyta `summary` po `exec()` -
+    zdanie jest tam przed usunięciem i zostaje czytelne po nim (atrybut Pythona).
+
+    Falsyfikator: bez `deleteLater` - `findChildren(QDialog)` gospodarza zwraca zamknięte okno."""
+    con, _profile, _flats = _baza(tmp_path)
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    gospodarz = QWidget()
+    dlg = _dlg(con, tmp_path / "ARCH", parent=gospodarz)
+    dlg._set_output(str(out))
+    dlg._on_apply()
+    dlg.reject()
+    zdanie = dlg.summary
+    assert zdanie.startswith("Wciągnięto 1 plik do archiwum")
+    QTest.qWait(20)
+    assert not isValid(dlg) and gospodarz.findChildren(QDialog) == []
+    assert dlg.summary == zdanie
+    con.close()

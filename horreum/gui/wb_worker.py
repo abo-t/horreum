@@ -25,6 +25,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from horreum import db, lead_copy, writeback
 from horreum.gui import i18n
+from horreum.gui.i18n_catalog import CATALOG
 
 
 @dataclasses.dataclass(frozen=True)
@@ -238,6 +239,16 @@ class WritebackRunner(QObject):
 # Mieszkają TU, bo ten moduł importują wszystkie trzy bez cyklu (`app` → `grid` → `wb_worker`).
 
 
+def _liczba(klucz, n):
+    """Człon liczby zdania wyniku: wpis MNOGI katalogu idzie przez `t_plural` (odmiana 1 / 2-4 /
+    5+ / -naście), wpis prosty przez `t` (forma „etykieta: N”, bez odmiany). Rodzinę `grid.wb.*`
+    składał dotąd sam `t`, więc „1 zapisanych”, „1 zablokowanych”, „1 błędów” - klucze przeszły
+    na wpisy mnogie bez zmiany wołających."""
+    if isinstance(CATALOG.get(klucz, {}).get("pl"), dict):
+        return i18n.t_plural(klucz, n)
+    return i18n.t(klucz, n=n)
+
+
 def zdanie_wyniku_zapisu(res, noun_key):
     """„N {noun} · M zablokowanych · …" + pierwszy powód błędu/blokady (wiz #4: user na ścianie
     `blocked` pyta „czemu?", nie chce samego licznika). `noun_key` = klucz frazy głównej
@@ -246,19 +257,19 @@ def zdanie_wyniku_zapisu(res, noun_key):
     Powód BŁĘDU ma pierwszeństwo przed powodem blokady: blokada zostawia plik nietknięty, a błąd
     bywa rozjazdem, który trzeba naprawić („plik PRZENIESIONY…, baza NIE przepięta - zamiar renamu
     zapisany: ponowienie albo cofnięcie przebiegu dokończy przepięcie"). Przy odwrotnej kolejności jedna blokada w tym samym wsadzie chowała go za sobą."""
-    parts = [i18n.t(noun_key, n=len(res.applied))]
+    parts = [_liczba(noun_key, len(res.applied))]
     # AR-82: plik ZAPISANY, a zeznanie klatki go nie przyjęło - osobny człon, nie „0 zapisanych”.
     # Przy cofnięciu gestu `withheld` jest podzbiorem `applied` (karta wróciła) - tamto zdanie mówi
     # o nim własnym członem (`zdanie_wyniku_zmiany`), tu liczą się tylko pliki spoza `applied`.
     wstrzymane = [fr for fr in res.withheld if fr not in res.applied]
     if wstrzymane:
-        parts.append(i18n.t("grid.wb.withheld", n=len(wstrzymane)))
+        parts.append(_liczba("grid.wb.withheld", len(wstrzymane)))
     if res.blocked:
-        parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
+        parts.append(_liczba("grid.wb.blocked", len(res.blocked)))
     if res.failed:
-        parts.append(i18n.t("grid.wb.errors", n=len(res.failed)))
+        parts.append(_liczba("grid.wb.errors", len(res.failed)))
     if res.skipped:
-        parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
+        parts.append(_liczba("grid.wb.skipped", len(res.skipped)))
     summary = " · ".join(parts)
     detail = next((fr.reason for fr in (res.failed + wstrzymane + res.blocked) if fr.reason), None)
     if detail:
@@ -329,13 +340,13 @@ def zdanie_commitu_kart(res, applied_key, *, w_miejscu=False):
 
 def zdanie_undo_kart(res):
     """Zdanie wyniku cofnięcia - wspólne dla okien piszących karty."""
-    msg = i18n.t("grid.wb.restored", n=len(res.restored))
+    msg = _liczba("grid.wb.restored", len(res.restored))
     if res.semantic:
-        msg += " · " + i18n.t("grid.wb.semantic", n=len(res.semantic))
+        msg += " · " + _liczba("grid.wb.semantic", len(res.semantic))
     if res.withheld:                                     # AR-82: nagłówek wrócił, zeznanie nie
-        msg += " · " + i18n.t("grid.wb.undo_withheld", n=len(res.withheld))
+        msg += " · " + _liczba("grid.wb.undo_withheld", len(res.withheld))
     if res.blocked:
-        msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
+        msg += " · " + _liczba("grid.wb.blocked", len(res.blocked))
     if res.failed:
-        msg += " · " + i18n.t("grid.wb.errors", n=len(res.failed))
+        msg += " · " + _liczba("grid.wb.errors", len(res.failed))
     return msg

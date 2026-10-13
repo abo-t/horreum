@@ -921,10 +921,20 @@ class ConfirmPathObjectsDialog(QDialog):
         self._build_ui(proposals)
         self._sync_action()
 
+    def exec(self):
+        """Modalny bieg i kasacja okna - wzorzec `object_change_dialog.ObjectChangeDialog.exec`:
+        gospodarz czyta po `exec` `assigned` i zdanie stanu, a odroczona kasacja przychodzi
+        w jego pętli zdarzeń, po slocie."""
+        try:
+            return super().exec()
+        finally:
+            self.deleteLater()
+
     def _build_ui(self, proposals):
         lay = QVBoxLayout(self)
-        head = QLabel(i18n.t("path.head", names=len(proposals),
-                             frames=sum(p.n_frames for p in proposals)))
+        head = QLabel(i18n.t("path.head", count=i18n.t_plural(
+            "path.head_count", len(proposals),
+            frames=i18n.t_plural("grid.frames", sum(p.n_frames for p in proposals)))))
         head.setWordWrap(True)
         lay.addWidget(head)
 
@@ -938,7 +948,8 @@ class ConfirmPathObjectsDialog(QDialog):
             for _fid, _path, powod in skipped:
                 pominiete[powod] = pominiete.get(powod, 0) + 1
             row = QHBoxLayout()
-            check = QCheckBox(i18n.t("path.item", canon=p.canon, n=p.n_frames))
+            check = QCheckBox(i18n.t("path.item", canon=p.canon,
+                                     frames=i18n.t_plural("grid.frames", p.n_frames)))
             check.setChecked(True)
             check.setToolTip(p.folder or "")
             check.toggled.connect(self._sync_action)
@@ -1073,7 +1084,8 @@ class ConfirmPathObjectsDialog(QDialog):
         self.assigned += gest.assigned
         self.status.setText(
             i18n.t_plural("path.done", przeszly, assigned=gest.assigned,
-                          total=gest.assigned + gest.skipped) + grid.zdanie_pominiec(gest))
+                          of_total=i18n.t_plural("path.of_total", gest.assigned + gest.skipped))
+            + grid.zdanie_pominiec(gest))
         self.changed.emit()
         # KARTY DO PLIKÓW NIE ZALEŻĄ OD `assigned` TEGO KLIKNIĘCIA (C2, bramka 0926): pętla idzie
         # po klatkach, które SĄ nazwane tym kanonem ze źródłem `path` - także gdy klinga padła na
@@ -1143,8 +1155,11 @@ class ConfirmPathObjectsDialog(QDialog):
         (ta sama umowa co w „Napraw nagłówek…"). Commit, który NIE podmienił żadnego pliku (same
         `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty.
         Zapis w miejscu (`commit_inplace`) mówi o drodze zapisu tylko przy spadku na atomową."""
+        from horreum.gui.object_change_dialog import podpowiedz_spadku   # lazy jak `wb_worker`
         summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied",
                                               w_miejscu=op == "commit_inplace")
+        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem.
+        self.status.setToolTip(podpowiedz_spadku(res))
         if cofnij is not None:
             self._commit_id = cofnij
             self.undo_btn.setVisible(True)
@@ -1331,6 +1346,52 @@ class RepairHeaderDialog(QDialog):
         self._split_rows(rows)
         self._build_ui()
         self._sync_preview()
+        self.resize(self._rozmiar_startowy())
+
+    def exec(self):
+        """Modalny bieg i kasacja okna - wzorzec `object_change_dialog.ObjectChangeDialog.exec`
+        (gospodarz nie czyta okna po `exec`; odroczona kasacja przychodzi po jego slocie)."""
+        try:
+            return super().exec()
+        finally:
+            self.deleteLater()
+
+    def _rozmiar_startowy(self):
+        """Rozmiar startowy OD TREŚCI (wizytacja: okno otwierało się 256×220 - wiersze grup za
+        suwakiem, a po zapisie okno rozpychały przyciski „Cofnij”/„Rozwiąż teraz”). Szerokość:
+        całe wiersze grup (podpowiedź treści listy + ramka i suwak pionowy) pod sufitem
+        `_SCREEN_FRAC` dostępnego ekranu - dalej przewija lista, jak w oknach gestu ręki
+        (`config_dialog.default_dialog_size`) - i nie mniej niż cały rząd przycisków ze schowanymi
+        też (pojawiają się po zapisie, a ich rząd to minimum okna, którego sufit nie przebije);
+        wysokość: wszystkie grupy bez suwaka, pod tym samym sufitem. Minimum okna bez zmian."""
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QGuiApplication
+        from horreum.gui.config_dialog import _SCREEN_FRAC
+        # Przed pierwszym pokazaniem układ wierszy trzyma podpowiedź sprzed `_sync_preview`
+        # (zmierzone: 468 px przy wierszach 1026 px) - `activate` unieważnia układy rekurencyjnie.
+        self.ensurePolished()
+        self._area.widget().layout().activate()
+        self.layout().activate()
+        lay = self.layout()
+        m = lay.contentsMargins()
+        ramka = 2 * self._area.frameWidth()
+        tresc = self._area.widget().sizeHint()
+        przyciski = [self.save_btn, self.undo_btn, self.resolve_btn, self._close_btn]
+        rzad = (sum(b.sizeHint().width() for b in przyciski)
+                + self._actions.spacing() * len(przyciski))
+        w = max(self.sizeHint().width(),
+                tresc.width() + ramka + self._area.verticalScrollBar().sizeHint().width()
+                + m.left() + m.right())
+        h = self.sizeHint().height() - self._area.sizeHint().height() + tresc.height() + ramka
+        ekran = self.screen() or QGuiApplication.primaryScreen()
+        if ekran is not None:
+            dostepne = ekran.availableGeometry()
+            if w > int(dostepne.width() * _SCREEN_FRAC):
+                # Wiersze szersze niż sufit - poziomy suwak listy zabiera wiersz pionu.
+                w = int(dostepne.width() * _SCREEN_FRAC)
+                h += self._area.horizontalScrollBar().sizeHint().height()
+            h = min(h, int(dostepne.height() * _SCREEN_FRAC))
+        return QSize(max(w, rzad + m.left() + m.right()), max(h, self.sizeHint().height()))
 
     # ---------------------------------------------------------------- podział wejścia
     def _split_rows(self, rows):
@@ -1373,7 +1434,22 @@ class RepairHeaderDialog(QDialog):
             proposals = {resolver.path_proposal(self.con, it["path"], kind=rodzaj[it["frame_id"]])
                          for it in items}
             common = proposals.pop() if len(proposals) == 1 else None
-            self._groups.append({"folder": folder, "rows": items, "proposal": common})
+            self._groups.append({"folder": folder, "rows": items, "proposal": common,
+                                 "label": self._etykieta_grupy(folder, items[0]["path"],
+                                                               rodzaj[items[0]["frame_id"]],
+                                                               korzen)})
+
+    @staticmethod
+    def _etykieta_grupy(folder, path, kind, korzen):
+        """Etykieta grupy OD FOLDERU OBIEKTU (`resolve.paths.object_folder`, jak grupa stosu):
+        `NGC7635\\RC8_2600MC\\OSC`, nie sam rodzic pliku. Grupa lightów to folder pliku (zestaw,
+        filtr), więc sam rodzic dawał etykiety `OSC`/`Ha` jednakowe dla każdego obiektu (zrzut
+        natywny: cztery grupy „OSC”). Folder poza pozycją obiektu (układ WBPP) - nazwa folderu,
+        jak dotąd; pełna ścieżka w podpowiedzi."""
+        obiekt = object_folder(path, kind=kind, library_root=korzen)
+        if obiekt and folder[:len(obiekt)].casefold() == obiekt.casefold():
+            return os.path.relpath(folder, os.path.dirname(obiekt))
+        return os.path.basename(folder)
 
     # ---------------------------------------------------------------- budowa UI
     def _build_ui(self):
@@ -1385,12 +1461,13 @@ class RepairHeaderDialog(QDialog):
 
         area = QScrollArea()
         area.setWidgetResizable(True)
+        self._area = area                    # rozmiar startowy od treści (`_rozmiar_startowy`)
         inner = QWidget()
         gl = QVBoxLayout(inner)
         for g in self._groups:
             row = QHBoxLayout()
-            g["check"] = QCheckBox(i18n.t("repair.group", folder=os.path.basename(g["folder"]),
-                                          n=len(g["rows"])))
+            g["check"] = QCheckBox(i18n.t_plural("repair.group", len(g["rows"]),
+                                                 folder=g["label"]))
             g["check"].setToolTip(g["folder"])
             # Grupa z parsowalną propozycją jest ZAZNACZONA: bez tego cztery grupy kosztują cztery
             # dodatkowe kliknięcia, a obietnica „≤ 4 interakcje" przestaje być prawdziwa.
@@ -1447,6 +1524,7 @@ class RepairHeaderDialog(QDialog):
         close_btn.clicked.connect(self.reject)
         actions.addWidget(close_btn)
         lay.addLayout(actions)
+        self._actions, self._close_btn = actions, close_btn
 
     # ---------------------------------------------------------------- podgląd „co wpiszemy"
     def _sync_preview(self):
@@ -1461,8 +1539,7 @@ class RepairHeaderDialog(QDialog):
             value, err = _validate_object_value(self.con, g["edit"].text())
             if err:
                 g["preview"].setText(i18n.t("repair.preview_none"))
-                first_err = first_err or i18n.t(
-                    "repair.err.group", folder=os.path.basename(g["folder"]), reason=err)
+                first_err = first_err or i18n.t("repair.err.group", folder=g["label"], reason=err)
             else:
                 g["preview"].setText(i18n.t("repair.preview", value=repr(value)))
                 ready += len(g["rows"])
@@ -1493,8 +1570,7 @@ class RepairHeaderDialog(QDialog):
                 continue
             value, err = _validate_object_value(self.con, g["edit"].text())
             if err:
-                return self._fail(i18n.t("repair.err.group", folder=os.path.basename(g["folder"]),
-                                         reason=err))
+                return self._fail(i18n.t("repair.err.group", folder=g["label"], reason=err))
             plan.append((g, value))
         if not plan:
             return self._fail(i18n.t("repair.err.nothing"))
@@ -1544,16 +1620,22 @@ class RepairHeaderDialog(QDialog):
         if self.bar.maximum() != total:
             self.bar.setRange(0, total)
         self.bar.setValue(done)
-        self.status.setText(f"{done}/{total} · {os.path.basename(path)}")
+        # Nazwa pliku to jedno długie słowo - skrócona do szerokości etykiety, inaczej rozpycha
+        # okno (`object_change_dialog.tekst_postepu`).
+        from horreum.gui.object_change_dialog import tekst_postepu
+        self.status.setText(tekst_postepu(self.status, done, total, os.path.basename(path)))
 
     def _after_commit(self, op, res):
         """Post-processing commitu (wątek główny). Plik podmieniony → jednorazowe „Cofnij" + „Rozwiąż
         teraz"; `commit_id` WIDOCZNY, bo po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki.
         Zdanie i regułę „kiedy wolno cofnąć" daje `zdanie_commitu_kart` - wspólne z oknem
         „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij")."""
+        from horreum.gui.object_change_dialog import podpowiedz_spadku   # lazy jak `wb_worker`
         self.bar.setVisible(False)
         summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied",
                                               w_miejscu=op == "commit_inplace")
+        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem.
+        self.status.setToolTip(podpowiedz_spadku(res))
         if cofnij is not None:
             self._commit_id = cofnij
             self._committed = True
@@ -1603,6 +1685,7 @@ class RepairHeaderDialog(QDialog):
         self._committed = False                  # karty zdjęte → zapis znów ma sens
         self._sync_preview()
         self.status.setText(msg)
+        self.status.setToolTip("")               # szczegół spadku mówił o zapisie, nie o cofnięciu
         self.changed.emit()
 
     # ---------------------------------------------------------------- takt 3: delegacja do pipeline'u
@@ -1655,6 +1738,11 @@ class ObjectAxisView(QWidget):
 
     `con` = otwarte połączenie (NIE własność widoku). `now_fn` = źródło czasu akcji zapisu
     (ISO-8601); domyślnie zegar UTC, wstrzykiwalne dla testów."""
+
+    # Kubełki OSI OBIEKTU w kolejce przeglądu - klatki bez obiektu, które wiersz Porządków „Klatki bez
+    # obiektu" liczy (nazwy z nagłówka, bez nazwy, RAW, stosy, propozycje ze ścieżki i ich połówki
+    # cofnięte). Złożone z właścicieli dróg naprawy (ręka, karta), bez trzeciej wyliczanki.
+    KUBELKI_OSI_OBIEKTU = _ASSIGN_TAGS | _CARD_TAGS | frozenset({"path_proposals"})
 
     status_message = Signal(str)
     writeback_busy = Signal(bool)         # okno naprawy pisze do plików → mutex gridu (D-PD-3)
@@ -1712,6 +1800,27 @@ class ObjectAxisView(QWidget):
     def _odswiez_jesli_nieaktualny(self):
         if self._nieaktualny and self.isVisible():
             self.refresh()
+
+    def zaznacz_pierwszy_kubelek(self, tagi):
+        """Wejście na podstronę z wiersza Porządków: zaznacz PIERWSZY niepusty kubełek kolejki o tagu
+        z `tagi` - zaznaczenie drąży jego klatki i zapala gest (`_on_review_selected`). Bez tego
+        podstrona zaznaczała pierwszy obiekt biblioteki (np. kometę z 4 klatkami), a do klatek z kolejki
+        trzeba było kliknąć wiersz kolejki: trzy interakcje zamiast dwóch. Kubełek pusty nie ma tagu
+        (wiersz informacyjny), więc pierwszy z tagiem jest pierwszym niepustym; brak takiego =
+        nic się nie zaznacza (`False`).
+
+        KOLEJKA PRZEŁADOWANA TYLKO PRZY ZNACZNIKU (`odswiez_gdy_widoczny`, AR-84): gest, który zmienił
+        oś, postawił znacznik, więc kolejka bez niego mówi stanem bazy - wejście bez nowego gestu
+        nie liczy jej drugi raz. Zaznaczenie zdejmowane przed ustawieniem, żeby drążenie poszło także
+        przy kubełku już zaznaczonym."""
+        if self._nieaktualny:
+            self.refresh()
+        for i in range(self.review.count()):
+            if self.review.item(i).data(_REVIEW_TAG) in tagi:
+                self.review.clearSelection()
+                self.review.setCurrentRow(i)
+                return True
+        return False
 
     # ---------------------------------------------------------------- budowa UI
 
@@ -2049,8 +2158,9 @@ class ObjectAxisView(QWidget):
         elif q["path_proposed_frames"] > 0:
             self._add_review_item(
                 i18n.t("object.path_proposed_line"),
-                count=i18n.t("object.path_proposed_count", names=q["path_proposed_names"],
-                             frames=q["path_proposed_frames"]),
+                count=i18n.t_plural(
+                    "object.path_proposed_count", q["path_proposed_names"],
+                    frames=i18n.t_plural("object.review_count", q["path_proposed_frames"])),
                 mark=i18n.t("object.mark_to_confirm"), tag="path_proposals")
         # TRZECI kubełek tej samej partycji (I-2b/D-P-I-5): gotowy obraz po integracji, wciągnięty
         # drogą „Stosy". Do 2026-08-02 był INFORMACYJNY, bo pisarz XISF nie umiał dopisać karty
@@ -2078,8 +2188,9 @@ class ObjectAxisView(QWidget):
         if q["path_proposed_stack_frames"]:
             self._add_review_item(
                 i18n.t("object.path_proposed_line"),
-                count=i18n.t("object.path_proposed_count", names=q["path_proposed_stack_names"],
-                             frames=q["path_proposed_stack_frames"]),
+                count=i18n.t_plural(
+                    "object.path_proposed_count", q["path_proposed_stack_names"],
+                    frames=i18n.t_plural("object.review_count", q["path_proposed_stack_frames"])),
                 mark=i18n.t("object.mark_to_confirm"), tag="path_proposals",
                 payload=PATH_STACKS_PAYLOAD)
         # JEDNOSTKA TEGO WIERSZA TO KLATKA, mimo że kubełek nazywa się od KOPII (firsthand 0810,
@@ -3749,8 +3860,9 @@ class MainWindow(QMainWindow):
         zbieramy jawnie - pytanie samych stron stosu zgubiłoby skład zbioru i pokrycie pól.
         Metody są idempotentne, więc kontener, który kiedyś zacznie delegować, nie szkodzi.
 
-        Okna dialogowe też: zamknięte okno zostaje ukrytym dzieckiem okna głównego razem ze swoim
-        `QThread` (lista wydań w oknie żniw chodzi po kartach SMB i nie ma punktu przerwania), więc
+        Okna dialogowe też: zamknięte okno z wątkiem w biegu zostaje ukrytym dzieckiem okna głównego
+        razem ze swoim `QThread` (lista wydań w oknie żniw chodzi po kartach SMB i nie ma punktu
+        przerwania; bez wątku okno zwalnia się samo, `HarvestDialog._zwolnij_gdy_wolne`), więc
         wątek w biegu przy wyjściu z aplikacji zabiłby ją tak samo jak wątek widoku."""
         widoki = [self.stack.widget(i) for i in range(self.stack.count())]
         if self.stack.count():
@@ -3986,8 +4098,13 @@ class MainWindow(QMainWindow):
                     self.object_view.odswiez_gdy_widoczny()
                     self.grid_view._load_facets()
                     # Skład zbioru w wątku tła (AR-27: 1,4-1,5 s na żywej bazie stało tu w oknie);
-                    # wraca od razu, tabela dostaje zbiór, gdy ten dojedzie.
-                    self.grid_view.refresh(w_tle=True)
+                    # wraca od razu, tabela dostaje zbiór, gdy ten dojedzie. Zaznaczenie przeżywa
+                    # przebieg: reset modelu je zabierał, a zbiór jest ten sam - wraca po `frame_id`
+                    # ogonem składu (`_przywroc_zaznaczenie`, ta sama droga co cel gestu).
+                    zaznaczone = [r["frame_id"] for r in self.grid_view._selected_data_rows()]
+                    self.grid_view.refresh(w_tle=True, potem=(
+                        (lambda ids=zaznaczone: self.grid_view._przywroc_zaznaczenie(ids))
+                        if zaznaczone else None))
                     # Liczniki zadań + badge ze świeżego stanu (F5) - w wątku tła (AR-84: 1,2-1,9 s
                     # stało tu w oknie na kopii pf4).
                     self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)
@@ -4738,7 +4855,7 @@ class MainWindow(QMainWindow):
         zdejmuje swoją receptę z paska i Domu (`FramesView._zacznij_gest`), a receptę odwrotną
         składa ogon po przyłożeniu zbioru w tle (AR-84) - gdy ten zdąży przed drugim klikiem tego
         samego ruchu ręki, klik wykonałby odwrót odwrotu, masowo i bez potwierdzenia, a w trakcie
-        składu odbiłby się od odmowy „Wczytuję zbiór…". Po wykonaniu przycisk stoi więc
+        składu odbiłby się od odmowy „Czytam klatki…". Po wykonaniu przycisk stoi więc
         wygaszony przez systemowy odstęp podwójnego kliku (`doubleClickInterval`), a nie do
         następnego obrotu pętli: drugi klik dwukliku przychodzi z systemu do ~500 ms później,
         więc blokada na jeden obrót niczego by nie złapała. Blokada jest JEDNA dla paska i Domu -

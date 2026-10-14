@@ -6,6 +6,19 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.12.0] - 2026-10-14
+
+Wydanie o **teleskopie, który zna swoją optykę, i oknie, które nie stoi**. Ogniskową i f/ teleskopu
+poprawisz teraz ręką na Osi teleskopu, a Porządki wskażą klatki, których optyka nie pasuje do
+teleskopu. Gesty w Zbiorach, koniec Dostawy i wejście w Porządki nie zamrażają już okna, a pasek stanu
+trzyma raport gestu i jego „Cofnij” obok siebie. Zapis do plików jest ostrożniejszy: Horreum nie
+melduje sukcesu bez dowodu, a podmiana pliku przerwana w połowie (awaria, wyłączenie komputera, inny
+program piszący ten sam plik) daje się dokończyć bez utraty żadnej wersji. Do tego szlif słów
+w obu językach. Schemat bazy rośnie z wersji 36 do 39.
+
+Bazy otwartej w tej wersji nie otworzysz już w 0.11.0 - tamto wydanie odmówi bazy z nowszego
+schematu. Przed pierwszym otwarciem zrób kopię bazy, jeśli chcesz zachować drogę powrotu.
+
 ### Dodane
 
 - **Ogniskowa i f/ teleskopu wpisane ręką.** Dwuklik w kolumnach **f/** i **Ogniskowa** na Osi
@@ -18,6 +31,19 @@ schemat i API mogą się jeszcze zmieniać.
 - **Porządki: „f/ niezgodna z teleskopem"** - perspektywa z kolumną FOCRATIO i gestem **Popraw f/
   w plikach…** przez szufladę zapisu, z cofnięciem. Gest poprawia tylko mniejszość plików. Gdy f/
   teleskopu nie zgadza się z większością jego plików, odmawia i mówi dlaczego.
+- **Porządki: „Zeznanie wstrzymane” i „Kopie zostawione do oka”.** Gdy karta trafiła do pliku, ale
+  baza nie mogła jeszcze potwierdzić, co plik teraz mówi (druga kopia tej samej klatki wjechała
+  w trakcie zapisu), zapis nie melduje sukcesu, tylko „plik zapisany, zeznanie wstrzymane”, a wiersz
+  Porządków prowadzi do gestu „Ta kopia prowadzi”. Gdy podmiana pliku spotkała obcą wersję albo
+  przerwała się w połowie, żadna wersja nie znika - zostawione kopie czekają w Porządkach na Twoje oko.
+- **Dostawa mówi, których katalogów nie przeczytała** - przebieg niekompletny wymienia je z nazwy
+  i ma przycisk **Skanuj ponownie** na tych samych ustawieniach. Wiersz „czeka na Ciebie N” prowadzi
+  prosto do listy, a log przebiegu po Twoim geście dostaje podpis „Przebieg z HH:MM (stan sprzed
+  Twoich zmian)”.
+- **Znajdź zna numery Messiera** obiektów z archiwum: „M64” trafia NGC4826, tak samo M27, M33, M63,
+  M65, M78 i M94.
+- **Wróć do archiwum bazy** w oknie żniw - po zmianie archiwum jednym przyciskiem wracasz do
+  archiwum, które zna baza.
 
 ### Zmienione
 
@@ -28,7 +54,42 @@ schemat i API mogą się jeszcze zmieniać.
 - Planer liczy kadr z ogniskowej teleskopu: najpierw Twojej, potem z plików. Zestawy teleskopu
   scalonego są widoczne pod teleskopem, w który go scalono.
 - Schemat bazy v39: kolumny ręki optyki teleskopu. Teleskop dopisany kiedyś ręką przenosi swoją
-  ogniskową do nowej kolumny.
+  ogniskową do nowej kolumny. Wersje 37 i 38 dokładają stan wstrzymanych zapisów i zamiar podmiany
+  pliku; migracje wjeżdżają same przy pierwszym otwarciu i nie ruszają klatek ani kopii.
+- **Pasek stanu:** raport gestu stoi we własnym polu, a przycisk „Cofnij” zaraz za nim; faza
+  przebiegu przesunęła się do prawej krawędzi. Przez 5 s komunikaty etapów Dostawy nie zagłuszają
+  raportu. Dom → „Ostatnio” opisuje ten sam gest co pasek, w klatkach.
+- **Okno nie stoi po geście.** Gesty w Zbiorach („Cofnij przypisanie” i pozostałe zapisy) składają
+  zbiór w tle: przestój spadł z 2-4 s do ok. 0,1 s. W trakcie składu klik nie zmienia zaznaczenia,
+  a menu i drugi gest odmawiają z powodem. Koniec przebiegu Dostawy stoi ok. 0,4 s zamiast 2-3 s,
+  wejście w Porządki bez zmian w bazie jest natychmiastowe.
+- **Wciągnij z WBPP…** przeszło do menu „Więcej…” na Domu; po „Zamknij i przyjmij” program przechodzi
+  na Dostawę. Przycisk „Przyjmij nowe (…)” wymienia etapy tymi samymi słowami co log.
+- **Wskaż stanowisko… (N)** nie liczy już darków i biasów - nie mają teleskopu, więc wypadły
+  z listy. Jedno trafienie w szukajce okna przypisania jest od razu zaznaczone, Enter zatwierdza.
+- **Zmień obiekt…:** fraza bez trafień przechodzi do pola nazwy, a przycisk mówi „Załóż … i przypisz” -
+  nowy obiekt powstaje dopiero po Enterze w polu nazwy. Lista podglądu przy wąskim oknie zostawia
+  widoczny folder obiektu. Powody pominięć i błędy plików mówią po ludzku, bez surowych komunikatów
+  systemu w rodzaju `[WinError 32]`.
+- Godziny poniżej 6 minut pokazują się w minutach („< 1 min”, „4 min”) w bibliotece, na Domu
+  i w planerze. Kolumny liczb mają jedną precyzję na kolumnę. Wzór nazwy zwija się po pierwszym użyciu.
+- Planer liczy kadr szerokich obiektywów kątem (48 mm: 41,1° zamiast 43,0°); przy teleskopach
+  różnica jest niezauważalna.
+- Nazwa obiektu w podpowiedzi listwy facetów brzmi tak samo jak w oknie przypisania (`Cr464`, nie
+  `COLLINDER464`).
+- Wersja angielska ma mniej polskich słów i polskich cudzysłowów w oknach wydania, żniw i przypisania;
+  poprawiona odmiana liczebników („1 klatka”, nie „1 klatek”) w zdaniach wyniku.
+
+### Naprawione
+
+- Zamknięcie „Zmień obiekt…” albo „Uzgodnij pliki…” w trakcie liczenia planu mogło wywrócić program.
+- Enter w szukajce okna przypisania potrafił założyć nowy obiekt i przypisać mu klatki bez Twojej
+  decyzji; Enter w „Napraw nagłówek…” i „Zatwierdź ze ścieżki…” nie zapisuje już kart do plików.
+- Menu kontekstowe i „Zostaw tę wersję” w trakcie wczytywania zbioru działały na poprzednim
+  zaznaczeniu.
+- Procenty teczki sumują się do pokrycia: Cr464 pokazuje 79 + 21, nie 79 + 20.
+- Okno wydania nie rośnie od długiej ścieżki wyjścia WBPP.
+- Grupowanie nie dopisuje już setek zdarzeń przy każdym przebiegu Dostawy.
 
 ## [0.11.0] - 2026-10-12
 
@@ -1244,6 +1305,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/abo-t/horreum/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/abo-t/horreum/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/abo-t/horreum/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/abo-t/horreum/compare/v0.9.0...v0.9.1

@@ -472,6 +472,23 @@ def test_import_aliasow_lancuch_odcisk_i_idempotencja(con, tmp_path):
     assert con.execute("SELECT count(*) FROM event WHERE verb = 'light_name_alias.imported'").fetchone()[0] == 1
 
 
+def test_import_aliasow_idzie_za_przeniesieniem_horreum(con, tmp_path):
+    """AR-139: plik przeniesiony przez Horreum PO Custosie leży pod ścieżką, której zapis przenosin nie
+    zna - łańcuch startuje też od dawnej ścieżki z `location.renamed`, więc dawna nazwa z Custosa
+    wraca; sama nazwa sprzed przeniesienia Horreum NIE staje się aliasem `custos`."""
+    a = _light(con, "a", date_obs="2025-08-30T20:00:00", path=LIGHTS + "C_0001.fits")
+    lid = con.execute("SELECT id FROM location WHERE frame_id = ?", (a,)).fetchone()[0]
+    with con:
+        repo._apply_relocation(con, location_id=lid, old_path=LIGHTS + "C_0001.fits",
+                               new_path="R:\\ASTRO_\\LIGHTS\\IC405\\A140R_2600MM\\Ha\\E_0001.fits",
+                               now=NOW, actor="test")
+    z = _zip_manifestu(tmp_path, [("F:\\stare\\A_0001.fits", LIGHTS + "C_0001.fits", "done", None, None)])
+    mod = _skrypt()
+    plan = mod.plan_aliases(con, mod.read_moves(z))
+    assert plan.pary == [(a, "a_0001")]
+    assert plan.z_aliasem == 1
+
+
 # ============================================================ tura naprawcza: szwy i granice
 
 

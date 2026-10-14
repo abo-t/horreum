@@ -12,6 +12,14 @@ wszystkich manifestów depozytu, a każda napotkana dawna nazwa daje alias tej k
 tej samej klatki: ruch, którego odcisk (`sha_pre`/`sha_post`) równa się `file_sha1` kopii,
 niezależnie od ścieżki (kopie między woluminami, ścieżki zapisane inną literą dysku).
 
+ŁAŃCUCH ZACZYNA SIĘ TAKŻE OD PRZENIESIEŃ HORREUM (AR-139): plik, który Horreum przeniósł po Custosie
+(„Zmień obiekt”, „Uzgodnij”, zmiana nazwy z faktów), leży dziś pod ścieżką, której zapis przenosin nie
+zna - jego `new_path` to ścieżka SPRZED przeniesienia. Każda dawna ścieżka lokacji z dziennika
+(`location.renamed`, `before`) jest więc drugim punktem startu łańcucha tej lokacji. Zmierzone
+2026-10-14 na żywej bazie: bez tego 400 klatek przeniesionych próbą fali 10 (308 Sh2-229, 90 komet,
+2 NGC3034) traciło 402 dawne nazwy z czasu obróbki. Sama dawna ścieżka Horreum aliasu tu nie dostaje
+- jej nazwę czytelnik zna już z dziennika (`stacks.names_index_pairs`).
+
 KRAWĘDŹ BEZ DOWODU WYKONANIA POTRZEBUJE DRUGIEGO ŚWIADKA. Ruch `done`/`verified` (albo z manifestu
 bez kolumny stanu) wchodzi do łańcucha wprost. Ruch `planned`/`collision`/`error`/`review` mógł się
 nie wykonać: jego `new_path` bywa cudzym plikiem, a krawędź przypięłaby dawną nazwę obcej klatce -
@@ -20,6 +28,9 @@ a nie, gdy skasowano go poza regułą A1. Taka krawędź wchodzi więc wyłączn
 odcisk ruchu (`sha_pre`/`sha_post`) równy `file_sha1` tej kopii albo `old_path` znany bazie (ścieżka
 lokacji lub dawna ścieżka z `location.renamed`). Koszt świadomy: bliźniak `…_0000_…` stosów
 16860/16862 (kolizja z duplikatem `…_0000a_…`, bez odcisku i bez lokacji w bazie) aliasu nie dostaje.
+Sonda depozytu 2026-10-14 (AR-112): zapisu kasacji tego pliku z odciskiem treści w depozycie NIE MA -
+indeks Custos odpiął go bez odcisku, a sam plik z dawnego katalogu roboczego już nie istnieje;
+zostają rozmiar i czas modyfikacji równe bliźniakowi, a rozmiar świadkiem nie jest.
 
 NIEJEDNOZNACZNOŚĆ LICZONA NA PEŁNYM INDEKSIE CZYTELNIKA (`stacks.names_index_pairs`: lokacje,
 `location.renamed`, aliasy już w bazie) plus aliasy z tego planu - ta sama definicja co w rodowodzie
@@ -131,17 +142,28 @@ def plan_aliases(con, ruchy):
                 or (file_sha1 and file_sha1 in (r.sha_pre, r.sha_post))
                 or _norm(r.old_path) in znane)
 
+    przed_horreum = defaultdict(list)       # lokacja → dawne ścieżki sprzed przeniesień Horreum (AR-139)
+    for location_id, before in con.execute(
+            "SELECT CAST(substr(target, 10) AS INTEGER), json_extract(payload, '$.before') FROM event "
+            "WHERE verb = 'location.renamed' AND target LIKE 'location:%' "
+            "AND json_extract(payload, '$.before') IS NOT NULL ORDER BY id"):
+        przed_horreum[location_id].append(before)
+
     aliasy = defaultdict(set)
     bierzace = defaultdict(set)
     lokacje = con.execute(
-        "SELECT l.frame_id, l.path, l.file_sha1 FROM location l JOIN frame f ON f.id = l.frame_id "
+        "SELECT l.id, l.frame_id, l.path, l.file_sha1 FROM location l JOIN frame f ON f.id = l.frame_id "
         "WHERE f.kind = 'light' AND f.superseded_by IS NULL ORDER BY l.id").fetchall()
     plan.lighty = len(lokacje)
-    for frame_id, path, file_sha1 in lokacje:
+    for location_id, frame_id, path, file_sha1 in lokacje:
         bierzace[frame_id].add(raw_stem(path))
         dawne = set()
         widziane = {_norm(path)}
         kolejka = [_norm(path)]
+        for before in przed_horreum.get(location_id, ()):
+            if _norm(before) not in widziane:
+                widziane.add(_norm(before))
+                kolejka.append(_norm(before))
         for r in po_odcisku.get(file_sha1, ()) if file_sha1 else ():
             dawne.add(r.old_path)                # odcisk tej kopii JEST drugim świadkiem
             if _norm(r.old_path) not in widziane:

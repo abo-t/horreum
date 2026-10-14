@@ -81,7 +81,7 @@ from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QProgressBar, QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from horreum import db, harvest, projection
@@ -585,6 +585,27 @@ class HarvestReleasesWorker(QObject):
 
 # ---------------------------------------------------------------- dialog
 
+def _szerokosc_od_okna(label):
+    """Zdanie stanu nie dyktuje szerokości okna (AR-140). Zawijanie łamie wiersz tylko na spacjach,
+    więc ścieżka w zdaniu jest jednym słowem, a minimum etykiety - jej pełną szerokością: zdanie
+    podglądu z `<wydanie>\\OBJECTS\\<obiekt>` dłuższe od okna poszerzało je samo, okno już nie
+    wracało, wskazówka u góry traciła wiersz, a pole z „Wskaż…” i „Zmień…” podjeżdżało pod kursorem
+    o ten wiersz. Etykieta bierze szerokość, którą daje jej okno; ścieżki dłuższej od okna nie widać
+    do końca, więc droga do pełnej treści stoi tu, przy samej regule: etykieta jest zaznaczalna
+    (kopia z menu kontekstowego), a pełny tekst pod kursorem stawia `_ustaw_zdanie`."""
+    sp = label.sizePolicy()
+    sp.setHorizontalPolicy(QSizePolicy.Ignored)
+    label.setSizePolicy(sp)
+    label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+
+def _ustaw_zdanie(label, text):
+    """Tekst etykiety z `_szerokosc_od_okna` i ten sam tekst pod kursorem - ucięta ścieżka jest
+    czytelna w całości bez zaznaczania."""
+    label.setText(text)
+    label.setToolTip(text)
+
+
 class HarvestDialog(QDialog):
     """Żniwa wyników WBPP: lista wydań z kart (`work_root` = folder roboczy WBPP, `release_roots` =
     karty celu wydania; obie od gospodarza), pole wyjścia WBPP z pamięci (`harvest/last_output`),
@@ -678,14 +699,16 @@ class HarvestDialog(QDialog):
         v.addWidget(hint)
 
         # Lista wydań z kart. Zdanie nad nią: brak kart, liczenie, pusta lista, błąd listy. Z kartami
-        # miejsce listy stoi od startu (zdanie o wysokości wiersza, pusta tabela, zarezerwowany wiersz
+        # miejsce listy stoi od startu (widoczne zdanie, także puste, pusta tabela, zarezerwowany wiersz
         # „wciągnięte”): lista, która dochodzi z tła, nie spycha pola i przycisków pod kursorem - klik
-        # w „Wskaż…” trafiałby w wiersz listy.
+        # w „Wskaż…” trafiałby w wiersz listy. Puste zdanie trzyma wysokość wiersza samo (etykieta
+        # zaznaczalna liczy ją z dokumentu, zmierzone: z minimum 0 układ identyczny) - minimum niżej to
+        # tylko podłoga wysokości, liczona fontem z konstrukcji.
         reserve = bool(self._rel_roots)
         self.rel_notice = QLabel("")
         self.rel_notice.setWordWrap(True)
-        self.rel_notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.rel_notice.setMinimumHeight(self.rel_notice.fontMetrics().lineSpacing())
+        self.rel_notice.setMinimumHeight(self.rel_notice.fontMetrics().lineSpacing())   # podłoga wysokości
+        _szerokosc_od_okna(self.rel_notice)          # błąd listy niesie ścieżkę karty
         self.rel_notice.setVisible(False)
         v.addWidget(self.rel_notice)
         self.rel_table = QTableWidget(0, len(_REL_HEADERS))
@@ -756,6 +779,7 @@ class HarvestDialog(QDialog):
         self.archive_warn = QLabel("")               # archiwum okna ≠ archiwum bazy (`_show_archive`)
         self.archive_warn.setProperty("role", "warn")
         self.archive_warn.setWordWrap(True)
+        _szerokosc_od_okna(self.archive_warn)        # ostrzeżenie niesie ścieżki obu archiwów
         self.archive_warn.setVisible(False)
         row_w.addWidget(self.archive_warn, 1)
         # Powrót jednym klikiem (AR-107): ostrzeżenie mówi, że pliki trafią gdzie indziej, więc droga
@@ -773,7 +797,7 @@ class HarvestDialog(QDialog):
         # Stan okna jednym zdaniem: sonda w biegu, brak wyjścia, pusty katalog, błąd, bieg apply.
         self.notice = QLabel("")
         self.notice.setWordWrap(True)
-        self.notice.setTextInteractionFlags(Qt.TextSelectableByMouse)   # ścieżkę z komunikatu da się skopiować
+        _szerokosc_od_okna(self.notice)              # podgląd z tła niesie ścieżkę wydania (zaznaczalna)
         v.addWidget(self.notice)
 
         self.table = QTableWidget(0, len(_HEADERS))
@@ -853,8 +877,8 @@ class HarvestDialog(QDialog):
             self.archive_label.setText(i18n.t("harvest.archive_unset"))
             self.archive_label.setToolTip("")
         differs = self._archive_differs()
-        self.archive_warn.setText(i18n.t("harvest.archive_differs", db=self._db_archive)
-                                  if differs else "")
+        _ustaw_zdanie(self.archive_warn, i18n.t("harvest.archive_differs", db=self._db_archive)
+                      if differs else "")
         self.archive_warn.setVisible(differs)
         self.btn_archive_back.setVisible(differs)
 
@@ -1229,7 +1253,7 @@ class HarvestDialog(QDialog):
         wraca poprzedni komunikat."""
         if remember:
             self._notice_state = (text, role)
-        self.notice.setText(text)
+        _ustaw_zdanie(self.notice, text)
         self.notice.setProperty("role", role or "")
         self.notice.style().unpolish(self.notice)    # rola zmienia kolor z motywu dopiero po repolish
         self.notice.style().polish(self.notice)
@@ -1265,7 +1289,7 @@ class HarvestDialog(QDialog):
     def _show_rel_notice(self, text, role=None):
         """Zdanie nad listą wydań (brak kart, liczenie, pusta lista, błąd). Z kartami wiersz zdania
         zostaje także pusty - miejsce listy jest zarezerwowane; bez kart pusty tekst go chowa."""
-        self.rel_notice.setText(text)
+        _ustaw_zdanie(self.rel_notice, text)
         self.rel_notice.setProperty("role", role or "")
         self.rel_notice.style().unpolish(self.rel_notice)
         self.rel_notice.style().polish(self.rel_notice)

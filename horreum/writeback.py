@@ -73,6 +73,7 @@ from astropy.io import fits
 from . import exif, hashing, repo, scan
 from .card_rules import FITS_RECORD as _FITS_RECORD
 from .resolve.paths import path_key   # ścieżka FIZYCZNA (bez wielkości liter) - jak planer i straż
+from .object_change import ZdanieRdzenia   # ostrzeżenie gestu z kodem dla okna (AR-138)
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
 # ============================================================ WRITER (port dawcy fits_io)
@@ -729,17 +730,19 @@ def _fits_comment_loss(hdr, przed: dict) -> str | None:
                 continue
             zostal = fits.Card.fromstring(nowy).comment or ""
         if zostal != komentarz:
-            return _powod_ucietego_komentarza(kw, komentarz, zostal)
+            return _powod_ucietego_komentarza(kw, len(komentarz), len(zostal))
     return None
 
 
-def _powod_ucietego_komentarza(kw: str, komentarz: str, zostal: str) -> str:
+def _powod_ucietego_komentarza(kw: str, przed: int, po: int) -> str:
     """Jedno brzmienie odmowy AR-7 - dla pisarza (`_fits_comment_loss`) i podglądu planu
-    (`comment_loss_route`), żeby plan mówił DOKŁADNIE to, co potem powiedziałby zapis."""
-    return (f"zmiana wartości karty {kw} ucięłaby zastany komentarz z {len(komentarz)} do "
-            f"{len(zostal)} znaków (karta FITS po zmianie ma pole wartości stałego formatu) "
+    (`comment_loss_route`), żeby plan mówił DOKŁADNIE to, co potem powiedziałby zapis. Z długości
+    komentarza przed i po układzie karty - tych samych faktów, które `comment_loss_lengths` daje
+    powierzchniom mówiącym własnym językiem (AR-138)."""
+    return (f"zmiana wartości karty {kw} ucięłaby zastany komentarz z {przed} do "
+            f"{po} znaków (karta FITS po zmianie ma pole wartości stałego formatu) "
             f"- plik nietknięty; zapisz zmianę razem z komentarzem skróconym do "
-            f"{len(zostal)} znaków albo wybierz krótszą wartość")
+            f"{po} znaków albo wybierz krótszą wartość")
 
 
 def _is_xisf(path) -> bool:
@@ -2092,7 +2095,16 @@ def comment_loss_route(filetype, keyword: str, value: str, comment) -> str | Non
     AR-47): powód, gdy zastany komentarz nie przeżyje układu astropy przy nowej wartości, inaczej
     `None`. Odmawiają wtedy OBIE drogi - w miejscu `_fits_card_image` daje spadek, a droga
     atomowa `_fits_comment_loss` - więc plan ma taką klatkę pominąć, a nie liczyć jako spadek.
-    Ta sama karta astropy co pisarz; XISF i karta bez komentarza → `None`."""
+    Ta sama karta astropy co pisarz; XISF i karta bez komentarza → `None`. Fakty powodu:
+    `comment_loss_lengths`."""
+    dlugosci = comment_loss_lengths(filetype, keyword, value, comment)
+    return None if dlugosci is None else _powod_ucietego_komentarza(keyword, *dlugosci)
+
+
+def comment_loss_lengths(filetype, keyword: str, value: str, comment) -> tuple[int, int] | None:
+    """FAKTY przepowiedni AR-7 (`comment_loss_route`): `(długość zastanego komentarza, długość po
+    układzie karty astropy)` albo `None`, gdy komentarz przeżyje. Dla powierzchni, które mówią
+    własnym językiem (okno zmiany obiektu, AR-138) - zdanie składają z tych liczb same."""
     if filetype == "xisf" or not comment:
         return None
     with warnings.catch_warnings():
@@ -2100,7 +2112,7 @@ def comment_loss_route(filetype, keyword: str, value: str, comment) -> str | Non
         zostal = fits.Card.fromstring(fits.Card(keyword, value, comment).image).comment or ""
     if zostal == comment:
         return None
-    return _powod_ucietego_komentarza(keyword, comment, zostal)
+    return len(comment), len(zostal)
 
 
 def _pod_blokada(path: str, dzialanie) -> WriteResult | Fallback:
@@ -4327,6 +4339,14 @@ _GEST = "object_change"                  # ładunek `location.renamed` przeniesi
 _GEST_POWROTU = "object_change_undo"     # ... i powrotu pliku (cofnięcie, odmowa karty w biegu)
 
 
+def _uwaga_niepewnej_wlasnosci(katalog) -> ZdanieRdzenia:
+    """Ostrzeżenie: katalog z zamiarem założenia bez potwierdzenia, który istnieje - własność
+    niepewna. Kod `dir_uncertain` - zdanie okna `objchg.warn.dir_uncertain` (AR-138)."""
+    return ZdanieRdzenia(f"katalog {katalog}: zamiar założenia bez potwierdzenia, a katalog "
+                         f"istnieje - własność niepewna, zostaje do oka", "dir_uncertain",
+                         dir=katalog)
+
+
 @dataclasses.dataclass(frozen=True)
 class ObjectChangeResult:
     """Wynik przebiegu gestu zmiany obiektu (`commit_object_change`) albo jego cofnięcia
@@ -4343,7 +4363,8 @@ class ObjectChangeResult:
     `dirs_created` (zapis: założone katalogi celu, cofnięcie: odtworzone stare), `dirs_removed`
     (zapis: źródłowe opróżnione przez gest i własne puste po odmowie, cofnięcie: założone przez
     gest), `dirs_uncertain` (zamiar założenia bez potwierdzenia przy istniejącym katalogu - nigdy nie
-    usuwany automatycznie, ścieżki w `warnings`). `warnings` - zdania dla człowieka bez blokady.
+    usuwany automatycznie, ścieżki w `warnings`). `warnings` - zdania dla człowieka bez blokady
+    (`ZdanieRdzenia` z kodem i parametrami albo zwykły `str`).
 
     `withheld` (AR-82): przy zapisie - osobny kubeł pozycji, których karta jest ZAPISANA, a zeznanie
     klatki jej nie przyjęło (pozycja 'failed' do dokończenia); przy cofnięciu - podzbiór `applied`,
@@ -4479,14 +4500,17 @@ def _zaloz_katalogi(con, run_id, katalogi, *, now, akcja) -> tuple[str | None, i
     return None, zalozone
 
 
-def _usun_katalog(con, run_id, katalog, *, now) -> str | None:
+def _usun_katalog(con, run_id, katalog, *, now) -> ZdanieRdzenia | None:
     """Usuń PUSTY katalog źródłowy, który gest opróżnił: zamiar `removed` własną transakcją PRZED
-    `os.rmdir` (tylko pusty - na niepustym rzuca), `done_at` po nim. → powód porażki albo None."""
+    `os.rmdir` (tylko pusty - na niepustym rzuca), `done_at` po nim. → ostrzeżenie porażki albo
+    None."""
     try:
         dir_id = repo.open_run_dir(con, run_id=run_id, path=katalog, action="removed", now=now)
         os.rmdir(katalog)
     except Exception as exc:  # noqa: BLE001 - katalog zostaje; to nie blokuje przebiegu
-        return f"katalog {katalog} nie usunięty ({type(exc).__name__}: {exc})"
+        return ZdanieRdzenia(f"katalog {katalog} nie usunięty ({type(exc).__name__}: {exc})",
+                             "dir_not_removed", dir=katalog,
+                             detail=f"{type(exc).__name__}: {exc}")
     repo.finish_run_dir(con, dir_id=dir_id, now=now)
     return None
 
@@ -4654,7 +4678,7 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
                                       f"{exc})")
         if na_dysku != p["expected_mtime"]:
             return _odmowa("blocked", "plik zmieniony od ostatniego skanu - Dostawa, potem gest "
-                                      "ponownie")
+                                      "ponownie", code=CODE_CHANGED_SINCE_SCAN)
     if p["rename_id"] is not None and not przeniesiony:
         if p["rename_status"] != "pending":
             return _odmowa("blocked", f"przeniesienie odbite w poprzedniej próbie (status "
@@ -4831,8 +4855,7 @@ def commit_object_change(con, run_id, *, now,
     if not cancelled:
         repo.set_object_change_run_status(con, run_id=run_id, status="applied")
     niepewne = _niepewne_katalogi(con, run_id)
-    ostrzezenia.extend(f"katalog {k}: zamiar założenia bez potwierdzenia, a katalog istnieje - "
-                       f"własność niepewna, zostaje do oka" for k in niepewne)
+    ostrzezenia.extend(_uwaga_niepewnej_wlasnosci(k) for k in niepewne)
     return ObjectChangeResult(run_id, applied, blocked, failed, skipped,
                               _commity_przebiegu(con, run_id), liczniki["created"], usuniete,
                               len(niepewne), cancelled, tuple(ostrzezenia), withheld=withheld)
@@ -4955,14 +4978,15 @@ def undo_object_change(con, run_id, *, now,
     usuniete = 0
     if not cancelled:
         usuniete, niepuste = _usun_wlasne_puste(con, run_id, now=now)
-        ostrzezenia.extend(f"katalog {k}: założony przez gest, ale nie jest pusty - zostaje"
-                           for k in niepuste)
+        ostrzezenia.extend(ZdanieRdzenia(f"katalog {k}: założony przez gest, ale nie jest pusty - "
+                                         f"zostaje", "dir_not_empty", dir=k) for k in niepuste)
         if not any(p["status"] in ("applied", "failed", "pending")
                    for p in _pozycje_przebiegu(con, run_id)):
-            repo.set_object_change_run_status(con, run_id=run_id, status="undone")
+            # Status `undone` i nagrobek obiektu, który gest założył (AR-137, `Q8`) - jedna
+            # transakcja klingi; odmowa nagrobka (obiekt ma klatki, obcy alias) to zwykły stan.
+            repo.close_object_change_undo(con, run_id=run_id, now=now)
     niepewne = _niepewne_katalogi(con, run_id)
-    ostrzezenia.extend(f"katalog {k}: zamiar założenia bez potwierdzenia, a katalog istnieje - "
-                       f"własność niepewna, zostaje do oka" for k in niepewne)
+    ostrzezenia.extend(_uwaga_niepewnej_wlasnosci(k) for k in niepewne)
     return ObjectChangeResult(run_id, applied, blocked, failed, skipped,
                               _commity_przebiegu(con, run_id), liczniki["created"], usuniete,
                               len(niepewne), cancelled, tuple(ostrzezenia), withheld=withheld)

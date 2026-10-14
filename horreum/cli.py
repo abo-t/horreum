@@ -1292,8 +1292,10 @@ def _cmd_park(args):
     from .gui import queries          # leniwie: `gui.queries` ciągnie `resolver` (koszt startu CLI)
     now = datetime.now(timezone.utc).isoformat()
     con = db.open_db(args.db)
+    # Nagrobek (0040) nie jest teleskopem do oznaczenia - klinga parku i tak by mu odmówiła.
     known = {r["telescop_canon"]: r["id"] for r in con.execute(
-        "SELECT id, telescop_canon FROM telescope WHERE merged_into IS NULL").fetchall()}
+        "SELECT id, telescop_canon FROM telescope "
+        "WHERE merged_into IS NULL AND retired_at IS NULL").fetchall()}
     changed = 0
     for name, value in ([(n, 1) for n in args.add] + [(n, 0) for n in args.drop]
                         + [(n, None) for n in args.clear]):
@@ -1578,6 +1580,7 @@ def _format_plan(db_path, res):
     lines.append("")
     lines.append(f"  {'cel':<14}{'typ':<6}{'rozm':>6}{'kulm':>6}{'h>':>5}  {'zestaw':<17}"
                  f"{'wyp':>4}  {'koszt B/D/N':<14}{'rada':<6}{'plan':<10}pokrycie")
+    from .targets import STATUS_MARKS                    # lazy, jak `targets` w komendzie `plan`
     for row in res.rows:
         rig = row.best_rig
         fr = row.framing_in(rig)
@@ -1588,8 +1591,11 @@ def _format_plan(db_path, res):
         cost_txt = (f"{cost['broadband']:.1f}/{cost['duoband']:.1f}/{cost['narrowband']:.1f}")
         plan_txt = "-" if row.plan_status is None else (
             row.plan_status + ("" if row.priority is None else f" {row.priority}"))
+        # status katalogowy przy typie: kandydatka „PN?”, mimika „~” - goły typ kłamałby (K-3);
+        # znaczki z jednego słownika rdzenia (`targets.STATUS_MARKS`, ten sam czyta ekran planera)
+        typ = row.target.type + STATUS_MARKS.get(row.target.status, "")
         lines.append(
-            f"  {row.target.canon:<14}{row.target.type:<6}"
+            f"  {row.target.canon:<14}{typ:<6}"
             f"{row.target.major_arcmin:>5.0f}'{row.window.max_alt_deg:>6.1f}"
             f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{fill_txt:>4}  {cost_txt:<14}"
             f"{row.recommend or '-':<6}{plan_txt:<10}{_coverage_text(row)}")
@@ -1627,7 +1633,7 @@ def _plan_json(res):
         "skipped_rigs": [{"telescope": r.telescope, "reason": r.reason} for r in res.skipped_rigs],
         "unmatched": {k: round(v, 3) for k, v in sorted(res.unmatched.items())},
         "rows": [{
-            "canon": row.target.canon, "type": row.target.type,
+            "canon": row.target.canon, "type": row.target.type, "status": row.target.status,
             "major_arcmin": row.target.major_arcmin, "minor_arcmin": row.target.minor_arcmin,
             "ra_deg": row.target.ra_deg, "dec_deg": row.target.dec_deg, "layer": row.target.layer,
             "max_alt_deg": round(row.window.max_alt_deg, 2),

@@ -225,6 +225,7 @@ def test_etap_pipeline_wylacza_akcje_osi_R5(qapp, tmp_path):
         win.close()
 
 
+@pytest.mark.zmienia_motyw          # przełącza motyw świadomie (stan zastany wraca też w `finally`)
 def test_menu_widok_przelacza_motyw(qapp, tmp_path, ustawienia):
     """F6 §7: menu Widok odbija bieżący motyw bez klikania (default ciemny — recenzja #6);
     `_on_theme` podmienia kolory stanów gridu na żywo i utrwala wybór w QSettings (recenzja #7)."""
@@ -283,10 +284,23 @@ def test_badge_zywy_od_montazu(qapp, tmp_path):
     """F5R#1: badge liczony przy montażu, zanim user wejdzie w Porządki. s8+obiekt → 4 zadania
     akcyjne z n>0 (klatki bez obiektu 3, teleskopy 4, duplikaty 1, zniknięte 1; stanowiska 0 poza
     badge). „Zniknięte" doszły do badge'a wraz z passem obecności (P5) — wcześniej liczba istniała,
-    ale była informacyjna, bo nie było przebiegu, który by ją wytwarzał."""
+    ale była informacyjna, bo nie było przebiegu, który by ją wytwarzał.
+
+    Siódma pozycja (AR-135): fikstura zakłada obiekt o kanonie `M42` z klatkami - stara tożsamość
+    `NGC1976` z pary `catalog_xref` - więc wiersz „Nazwa katalogowa wskazuje inny obiekt” liczy jego
+    klatki. Ta pozycja nie zależy od żadnego gestu niżej w tym pliku, plakietka niesie ją stale."""
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (7)"
+        assert _task_row(win, "xref_reconcile_frames") == (
+            "Nazwa katalogowa wskazuje inny obiekt", "3  ›")
+        tip = _task_item(win, "xref_reconcile_frames").toolTip()
+        assert "M42 → NGC1976" in tip and "„Zmień obiekt…”" in tip      # zdanie NAZYWA cel
+        cele = []
+        win.tasks_view.open_collection.connect(cele.append)
+        win.tasks_view._on_task_clicked(_task_item(win, "xref_reconcile_frames"))
+        from horreum.gui.grid_model import PRESET_XREF_RECONCILE
+        assert cele == [PRESET_XREF_RECONCILE]
         # Wiersz DWUCZŁONOWY (P1, wiz F5 #6): etykieta w `text()`, liczba + chevron „›" w prawej
         # kolumnie (`rows.SECONDARY`) — liczby ustawiają się w kolumnę i dają się skanować.
         assert _task_row(win, "unresolved_lights") == ("Klatki bez obiektu", "3  ›")
@@ -306,7 +320,7 @@ def test_en_render_zadania(qapp, tmp_path):
     try:
         assert _task_row(win, "unresolved_lights") == ("Frames without object", "3  ›")
         assert _task_row(win, "dup_frames") == ("Duplicates (>1 copy)", "1  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Housekeeping (6)"    # nav.porzadki_count EN (app)
+        assert win.nav.item(NAV_PORZADKI).text() == "Housekeeping (7)"    # nav.porzadki_count EN (app)
     finally:
         win.close()
 
@@ -416,7 +430,7 @@ def test_podstrona_osi_i_powrot_odswieza_licznik(qapp, tmp_path):
         win.tasks_view._on_back()
         assert win.tasks_view.pages.currentIndex() == 0
         assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "3  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"   # wciąż 6 (klatki/tel/dup/zniknięte + bez zestawu/stanowiska)
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (7)"   # wciąż 7 (klatki/tel/dup/zniknięte + bez zestawu/stanowiska + nazwa M42)
     finally:
         win.close()
 
@@ -431,10 +445,10 @@ def test_koniec_przebiegu_odswieza_liczniki_zadan(qapp, tmp_path):
         win._on_pipeline_running(True)
         for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
             repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)", "w biegu - jeszcze stary stan"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (7)", "w biegu - jeszcze stary stan"
         win._on_pipeline_running(False)
         assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "0  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (5)"   # klatki + duplikaty + zniknięte + bez zestawu/stanowiska
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"   # klatki + duplikaty + zniknięte + bez zestawu/stanowiska + nazwa M42
     finally:
         win.close()
 
@@ -533,7 +547,7 @@ def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypa
         assert etapy == [], "etap padł - bez sygnału końca etapu"
         assert "etap padł" in win.pipeline_view.lbl_error.text()
         assert licznik == {"grid": 1, "obiekt": 1}
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (5)", "plakietka ze stanu bazy"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)", "plakietka ze stanu bazy"
     finally:
         win.close()
 
@@ -653,8 +667,9 @@ def test_gest_osi_zywotnosci_w_Zbiorach_odswieza_plakietke_Porzadkow(qapp, tmp_p
 
     win = MainWindow(path)
     try:
-        # klatki bez obiektu + teleskopy + duplikaty + „a plik wrócił" + bez zestawu i bez stanowiska (zniknięte spadły do 0)
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"
+        # klatki bez obiektu + teleskopy + duplikaty + „a plik wrócił" + bez zestawu i bez stanowiska
+        # + nazwa katalogowa M42 (AR-135; zniknięte spadły do 0)
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (7)"
         win._show_view(NAV_ZBIORY)
         grid = win.grid_view
         grid.apply_perspective(grid_mod.PRESET_RETIRED_CONFLICT)
@@ -665,7 +680,7 @@ def test_gest_osi_zywotnosci_w_Zbiorach_odswieza_plakietke_Porzadkow(qapp, tmp_p
         assert win.con.execute("SELECT retired_at FROM frame WHERE id = ?",
                                (fid,)).fetchone()[0] is None, "gest się odbył"
         assert win.stack.currentIndex() == STRONA_ZBIORY, "Porządków nikt nie otworzył"
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (5)"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"
     finally:
         win.close()
 
@@ -1024,6 +1039,7 @@ def test_baza_z_nowszego_horreum_okno_odmawia_i_zostaje_przy_swojej(qapp, tmp_pa
         win.close()
 
 
+@pytest.mark.zmienia_motyw          # `main()` stawia motyw na aplikacji - część startu, którą test przechodzi
 def test_start_z_zapamietana_nowsza_baza_stoi_bez_bazy(qapp, tmp_path, monkeypatch):
     """AR-69, ścieżka startu: `main` otwiera zapamiętaną bazę przed `app.exec()`, więc odmowa
     jako wyjątek wywracała program przy KAŻDYM uruchomieniu, zanim cokolwiek pokazał. Teraz okno
@@ -1104,6 +1120,7 @@ def test_kazdy_blad_otwarcia_bazy_okno_komunikatu_i_zostaje_przy_swojej(qapp, tm
         win.close()
 
 
+@pytest.mark.zmienia_motyw          # `main()` stawia motyw na aplikacji
 def test_start_z_zepsuta_baza_stoi_bez_bazy(qapp, tmp_path, monkeypatch):
     """AR-124, ścieżka startu: zapamiętany plik, który nie jest bazą, wywracał program przed
     `app.exec()` śladem stosu (w wydaniu onefile - bez okna). Teraz okno stoi bez bazy
@@ -1134,6 +1151,7 @@ def test_start_z_zepsuta_baza_stoi_bez_bazy(qapp, tmp_path, monkeypatch):
             w.close()
 
 
+@pytest.mark.zmienia_motyw          # `main()` stawia motyw na aplikacji
 def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypatch):
     """F-1, cała naprawa siedzi w KOLEJNOŚCI: do tej zmiany `MainWindow(start)` otwierał bazę
     i montował cztery widoki W KONSTRUKTORZE, a `show()` szedł dopiero po nim — 4,65 s czarnego
@@ -1171,6 +1189,7 @@ def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypa
 
 
 @pytest.mark.skipif(os.name != "nt", reason="rejestr = natywne QSettings tylko na Windows")
+@pytest.mark.zmienia_motyw          # `main()` i `_on_theme` stawiają motyw na aplikacji
 def test_main_NIE_rusza_rejestru_usera(qapp, tmp_path, monkeypatch, ustawienia, zrzut_rejestru):
     """Bateria pisała do PRAWDZIWYCH ustawień usera: 2026-09-26 `ostatnia_baza` w rejestrze
     wskazywała `...\\pytest-1976\\test_start_aplikacji_POKAZUJE_0\\s8.db`, więc zwykły start

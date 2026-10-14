@@ -2024,11 +2024,16 @@ class PipelineView(QWidget):
         if v is not None and (v.linked or v.waiting or v.mismatch or v.refused):
             by_hand += i18n.t("pipeline.fmt.group_variants", linked=v.linked, waiting=v.waiting,
                               bad=v.mismatch + v.refused)
-        return i18n.t(
+        linia = i18n.t(
             "pipeline.fmt.group", headers=s.headers, telescopes=s.telescopes_proposed,
             no_tel=s.telescop_missing, off_axis=s.calibration_off_axis, unassigned=unassigned,
             by_hand=by_hand,
             conf_prop=s.configs_proposed, conf_assign=s.configs_assigned, conf_review=s.config_review)
+        # Nagrobek teleskopu (0040) wrócił na oś nazwą z nagłówka - nie jest „nowym teleskopem”,
+        # więc ma własny człon; zero = cisza (QUIET).
+        if s.telescopes_unretired:
+            linia += i18n.t_plural("pipeline.fmt.group_unretired", s.telescopes_unretired)
+        return linia
 
     def _format_resolve(self, s):
         """Linia raportu osi obiektu. Ruch SŁOWNIKA obiektów własnych dopisujemy tylko wtedy, gdy
@@ -2039,11 +2044,20 @@ class PipelineView(QWidget):
             "pipeline.fmt.resolve", frames=s.frames, lights=s.light_frames, obj_new=s.objects_new,
             obj_assign=s.objects_assigned, obj_review=s.objects_review,
             obj_distinct=s.objects_unresolved_distinct, filters=s.filters_set)
+        if s.objects_unretired:                 # nagrobek obiektu wrócił nazwą z pliku (0040)
+            linia += i18n.t_plural("pipeline.fmt.resolve_unretired", s.objects_unretired)
         if s.own_aliases_seeded or s.own_aliases_retired or s.own_frames_unassigned:
             linia += i18n.t("pipeline.fmt.resolve_own", seeded=s.own_aliases_seeded,
                             retired=s.own_aliases_retired, unassigned=s.own_frames_unassigned)
         if s.own_alias_conflicts:
             linia += i18n.t("pipeline.fmt.resolve_own_conflict", n=s.own_alias_conflicts)
+        # Uzgodnienie z tabelą `catalog_xref` (AR-135): przepięta nazwa przenosi klatki, a konflikt
+        # rozstrzyga człowiek - oba mają powierzchnię w raporcie; zero = cisza (QUIET).
+        if s.xref_aliases_rebound:
+            linia += i18n.t_plural("pipeline.fmt.resolve_xref_rebound", s.xref_aliases_rebound,
+                                   frames=s.xref_frames_followed)
+        if s.alias_conflicts:
+            linia += i18n.t_plural("pipeline.fmt.resolve_alias_conflict", s.alias_conflicts)
         # SZCZEBEL ŚCIEŻKI (S2, D-OW-2/B) — przebieg go LICZY i nic nie zapisuje, więc bez tej
         # doklejki Dostawa milczałaby o klatkach czekających na gest człowieka, a jedynym śladem
         # byłby wiersz w kolejce INNEGO widoku. Zero propozycji = cisza (QUIET).

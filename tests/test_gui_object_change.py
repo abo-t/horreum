@@ -1918,14 +1918,21 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
     open(a.sciezka(r"LIGHTS\NGC4"), "wb").close()
     e = a.klatka(r"LIGHTS\E\cam\NGC224_z.fits", canon="NGC224")
     plany.append(a.plan([e], target=queries.object_target(a.con, "NGC4")))
-    os.makedirs(a.sciezka(r"LIGHTS\NGC5\cam"))
-    f = a.klatka(r"LIGHTS\F\cam\NGC224_w.fits", canon="NGC224")
+    # rodzaj błędu katalogu to fakt (AR-138): odmowa dostępu i brak katalogu mają własne zdania,
+    # inny błąd systemu zostaje szczegółem zdania
+    bledy = {"NGC5": PermissionError(13, "Odmowa dostępu"),
+             "NGC6": FileNotFoundError(2, "Nie można odnaleźć ścieżki"),
+             "NGC7": OSError(22, "Nieprawidłowy argument")}
+    for i, cel in enumerate(bledy):
+        os.makedirs(a.sciezka(rf"LIGHTS\{cel}\cam"))
+        f = a.klatka(rf"LIGHTS\F{i}\cam\NGC224_w.fits", canon="NGC224")
 
-    def listdir(katalog):
-        if "NGC5" in katalog:
-            raise PermissionError(13, "Odmowa dostępu", katalog)
-        return os.listdir(katalog)
-    plany.append(a.plan([f], target=queries.object_target(a.con, "NGC5"), listdir=listdir))
+        def listdir(katalog, cel=cel):
+            if cel in katalog:
+                blad = bledy[cel]
+                raise type(blad)(blad.errno, blad.strerror, katalog)
+            return os.listdir(katalog)
+        plany.append(a.plan([f], target=queries.object_target(a.con, cel), listdir=listdir))
     # para stosu: wersja w innym katalogu → obie połowy
     o = _stos(a, r"STACKS\IC405\A140R\Ha\IC405_2025-08-23_A140R_Ha_60s_mono.xisf")
     v = _stos(a, r"STACKS\IC405\A140R\OIII\IC405_2025-08-23_A140R_Ha_60s_mono_autocrop.xisf")
@@ -1937,8 +1944,8 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
     assert {s.code for s in pominiete} >= {
         "no_mtime", "many_copies", "kind_not_light", "retired", "superseded", "no_object",
         "off_position", "no_present_copy", "folder_twins", "card_skip", "batch_collision",
-        "target_on_disk", "target_in_db", "file_in_dir_place", "dir_unreadable", "variant_dir",
-        "pair"}
+        "target_on_disk", "target_in_db", "file_in_dir_place", "dir_unreadable", "dir_denied",
+        "dir_missing", "variant_dir", "pair"}
     for s in pominiete:
         tekst = tekst_pominiecia(s.code, s.params, s.reason)
         p = dict(s.params)
@@ -1947,9 +1954,11 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
             assert tekst == i18n.t("objchg.skip.pair", inner=wewn), tekst
             assert (wewn != p["inner"]) == (lang == "en"), wewn
         else:
+            if s.code == "card_skip":                  # szczegół bramki karty w języku UI
+                p["detail"] = i18n.t(f"objchg.gate.{p.pop('gate')}", **dict(p.pop("gate_params")))
             assert tekst == czytelny(i18n.t(f"objchg.skip.{s.code}", **p)), (s.code, tekst)
         assert "\\\\" not in tekst, tekst
-        if lang == "en" and s.code not in ("card_skip", "dir_unreadable"):   # szczegół z rdzenia
+        if lang == "en" and s.code != "dir_unreadable":        # szczegół z komunikatu systemu
             assert not set(tekst) & set("„ąćęłńóśźż"), (s.code, tekst)
         if lang == "pl":
             assert tekst == czytelny(s.reason) or s.code in ("folder_twins",), (s.code, tekst)
@@ -1964,6 +1973,238 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
     assert i18n.t("objchg.skip.no_mtime") in grupy
     dlg.reject()
     a.con.close()
+
+
+@pytest.mark.parametrize("lang", ["en", "pl"])
+def test_szczegol_odmowy_karty_i_celu_to_FAKTY_rdzenia_w_jezyku_UI(tmp_path, lang):
+    """AR-138: przy karcie i celu parametrem zdania była proza rdzenia (`detail`), więc zdanie EN
+    zostawało częściowo polskie. Prawdziwy planer: reguła karty FITS 4.0 (długość, znaki), długości
+    komentarza przed i po układzie karty astropy oraz kanon folderu, którego system plików nie
+    przyjmie, idą kodem z parametrami - zdanie w całości w języku UI. Falsyfikator: `detail` z prozą
+    rdzenia w EN → polskie znaki w zdaniu."""
+    from test_object_change_plan import _Archiwum as _ArchPlanu
+    from horreum.gui.object_change_dialog import tekst_pominiecia
+    a = _ArchPlanu(tmp_path)
+    i18n.set_lang(lang)
+
+    def cel(canon, forma):
+        return oc.ObjectTarget(canon=canon, catalog=None, kind="deep_sky", alias_norm=None,
+                               card_form=forma)
+    dluga = a.klatka(r"LIGHTS\A\cam\NGC224_a.fits", canon="NGC224")
+    znak = a.klatka(r"LIGHTS\B\cam\NGC224_b.fits", canon="NGC224")
+    komentarz = a.klatka(r"LIGHTS\C\cam\NGC224_c.fits", canon="NGC224")
+    a.con.execute("UPDATE cards SET comment = ? WHERE frame_id = ? AND keyword = 'OBJECT'",
+                  ("k" * 70, komentarz))
+    urzadzenie = a.klatka(r"LIGHTS\D\cam\NGC224_d.fits", canon="NGC224")
+    pominiete = {}
+    for fid, target in ((dluga, cel("NGC2632", "X" * 70)), (znak, cel("NGC2632", "NGC 2632 ±")),
+                        (komentarz, cel("NGC2632", "NGC 2632")), (urzadzenie, cel("CON", "CON"))):
+        plan = a.plan([fid], target=target)
+        assert not plan.items, plan.items
+        pominiete[fid] = plan.skipped[0]
+    strata = writeback.comment_loss_lengths("fits", "OBJECT", "NGC 2632", "k" * 70)
+    assert strata is not None and strata[0] == 70 > strata[1]
+    oczekiwane = {dluga: ("card_too_long", {"value": "X" * 70, "length": 70, "limit": 68}),
+                  znak: ("card_chars", {"value": "NGC 2632 ±"}),
+                  komentarz: ("card_comment", {"before": strata[0], "after": strata[1]}),
+                  urzadzenie: ("bad_target", {"canon": "CON"})}
+    for fid, (kod, params) in oczekiwane.items():
+        s = pominiete[fid]
+        assert (s.code, dict(s.params)) == (kod, params), s
+        tekst = tekst_pominiecia(s.code, s.params, s.reason)
+        assert tekst == czytelny(i18n.t(f"objchg.skip.{kod}", **params))
+        if lang == "en":
+            assert not set(tekst) & set("„ąćęłńóśźż"), (kod, tekst)
+    # zdanie rdzenia (zapas okna, PL) mówi te same fakty
+    assert f"z {strata[0]} do {strata[1]} znaków" in pominiete[komentarz].reason
+    assert writeback.comment_loss_route("fits", "OBJECT", "NGC 2632", "k" * 70).startswith(
+        f"zmiana wartości karty OBJECT ucięłaby zastany komentarz z {strata[0]} do {strata[1]} ")
+    a.con.close()
+
+
+def test_KAZDY_powod_bramki_karty_ma_zdanie_PL_i_EN_a_PL_to_zdanie_bramki():
+    """AR-138: szczegół `card_skip` był prozą bramki (`queries.object_card_gate`) - w EN po polsku.
+    Każdy powód bramki to `ZdanieRdzenia` z kodem: `objchg.gate.<kod>` w obu językach z tymi samymi
+    polami, pola to parametry bramki, a PL to zdanie bramki znak w znak (PL okna bez zmian)."""
+    import ast
+    import inspect
+    import string
+    kody = {}
+    for w in ast.walk(ast.parse(inspect.getsource(queries.object_card_gate))):
+        if (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
+                and w.func.id == "ZdanieRdzenia"):
+            zdanie, kod = w.args
+            kody[kod.value] = (zdanie, {k.arg for k in w.keywords})
+    assert len(kody) == 13
+    for kod, (zdanie, parametry) in kody.items():
+        wpis = CATALOG[f"objchg.gate.{kod}"]
+        pola = {j: {f for _, f, _, _ in string.Formatter().parse(wpis[j]) if f}
+                for j in ("pl", "en")}
+        assert pola["pl"] == pola["en"] and pola["pl"] <= parametry, kod
+        assert not set(wpis["en"]) & set("„ąćęłńóśźż"), kod
+        if isinstance(zdanie, ast.Constant):
+            assert wpis["pl"] == zdanie.value, kod
+        elif isinstance(zdanie, ast.Name):
+            assert wpis["pl"] == getattr(queries, zdanie.id), kod
+
+
+# ═══════════════════════════════════════════════ ostrzeżenia planera i sterownika w języku UI
+
+def _kody_ostrzezen():
+    """`(kod → nazwy parametrów, kody planera)` z KAŻDEGO ostrzeżenia z kodem (AST): planer
+    `ObjectChangeWarning(..., code=…, params=((nazwa, …), …))` i sterownik zapisu
+    `ZdanieRdzenia(zdanie, kod, **params)`."""
+    import ast
+    import inspect
+    out, planer = {}, set()
+    for modul in (oc, writeback):
+        for w in ast.walk(ast.parse(inspect.getsource(modul))):
+            if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)):
+                continue
+            if w.func.id == "ObjectChangeWarning":
+                kw = {k.arg: k.value for k in w.keywords}
+                assert isinstance(kw["code"], ast.Constant), ast.dump(w)
+                kod, nazwy = kw["code"].value, {e.elts[0].value for e in kw["params"].elts}
+                planer.add(kod)
+            elif w.func.id == "ZdanieRdzenia":
+                assert isinstance(w.args[1], ast.Constant), ast.dump(w)
+                kod, nazwy = w.args[1].value, {k.arg for k in w.keywords}
+            else:
+                continue
+            out.setdefault(kod, set()).update(nazwy)
+    return out, planer
+
+
+def test_KAZDY_kod_ostrzezenia_ma_zdanie_PL_i_EN_z_parametrami_rdzenia():
+    """AR-138: ostrzeżenia planera (`ObjectChangeWarning`) i sterownika zapisu (`ZdanieRdzenia`
+    w `writeback`) mówiły wyłącznie po polsku. Każde ostrzeżenie z kodem (planer: komplet
+    `WARNING_CODES`) ma `objchg.warn.<kod>` w obu językach z tymi samymi polami (wpis mnogi: każda
+    forma), a pola zdania to parametry, które rdzeń podaje. Bramka dla kodów, których fixture nie
+    zbuduje."""
+    import string
+    kody, planer = _kody_ostrzezen()
+    assert planer == oc.WARNING_CODES
+    assert {"stack_split", "dir_not_removed", "dir_uncertain"} <= set(kody)
+    for kod, parametry in kody.items():
+        wpis = CATALOG[f"objchg.warn.{kod}"]
+        pola = {}
+        for j in ("pl", "en"):
+            formy = list(wpis[j].values()) if isinstance(wpis[j], dict) else [wpis[j]]
+            zbiory = [{f for _, f, _, _ in string.Formatter().parse(forma) if f} for forma in formy]
+            assert all(z == zbiory[0] for z in zbiory), (kod, j)
+            pola[j] = zbiory[0]
+            if j == "en":
+                assert not any(set(forma) & set("„ąćęłńóśźż") for forma in formy), kod
+        assert pola["pl"] == pola["en"], kod
+        assert pola["pl"] <= parametry, (kod, pola["pl"], parametry)
+
+
+_FOLDERY = {1: ("folder", "folder"), 2: ("foldery", "folders"), 4: ("foldery", "folders"),
+            5: ("folderów", "folders"), 12: ("folderów", "folders"), 14: ("folderów", "folders"),
+            22: ("foldery", "folders")}
+
+
+@pytest.mark.parametrize("n", sorted(_FOLDERY))
+def test_ostrzezenie_stosu_ODMIENIA_liczbe_folderow_PL_i_EN(n):
+    """Rdzeń mówił „rozejdą się na 2 folderów” - teraz zdanie okna odmienia liczbę folderów
+    (`t_plural`, parametr `n`): 1, 2-4, 5, -naście, 22."""
+    from horreum.gui.object_change_dialog import tekst_ostrzezenia
+    params = (("stack", "M31_2022-03-21_cam_L_60s_mono.xisf"), ("moved", 2), ("inputs", 3),
+              ("n", n))
+    pl, en = _FOLDERY[n]
+    i18n.set_lang("pl")
+    assert f"przeniesie 2 z 3 jego wejść - wejścia rozejdą się na {n} {pl}, a żniwa" in (
+        tekst_ostrzezenia("stack_split", params, "zapas"))
+    i18n.set_lang("en")
+    assert f"moves 2 of its 3 inputs - the inputs will split across {n} {en}, and" in (
+        tekst_ostrzezenia("stack_split", params, "zapas"))
+    # kod bez zdania w katalogu i ostrzeżenie bez kodu - zdanie rdzenia
+    assert tekst_ostrzezenia("nieznany", params, "zapas") == "zapas"
+    assert tekst_ostrzezenia(None, (), "zdanie rdzenia") == "zdanie rdzenia"
+
+
+@pytest.mark.parametrize("lang", ["en", "pl"])
+def test_ostrzezenie_PRAWDZIWEGO_planera_w_oknie_w_jezyku_UI(qapp, tmp_path, monkeypatch, lang):
+    """Przeniesienie części wejść stosu: planer daje kod `stack_split` z parametrami, okno pokazuje
+    zdanie w języku UI (EN bez polskiego), zdanie rdzenia zostaje zapasem."""
+    from test_object_change_plan import _Archiwum as _ArchPlanu, _stos
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, tekst_ostrzezenia
+    a = _ArchPlanu(tmp_path)
+    i18n.set_lang(lang)
+    lights = [a.klatka(rf"LIGHTS\M31\cam\L\{i}.fits", canon="NGC224",
+                       date_obs=f"2022-03-2{i}T20:00:00") for i in range(1, 4)]
+    stos = _stos(a, r"STACKS\M31\cam\L\M31_2022-03-21_cam_L_60s_mono.xisf", canon="NGC224")
+    iid, _ = repo.upsert_integration(
+        a.con, master_frame_id=stos, integ_hash=None, tool=None, window_start=None, window_end=None,
+        declared_rows=None, drizzle_inputs=None, disabled_inputs=None, degenerate=0, ambiguous=0,
+        telescope_mismatch=0, unresolved_reason=None, now=NOW)
+    for f in lights:
+        repo.link_integration(a.con, integration_id=iid, input_frame_id=f, asserted_by="user",
+                              now=NOW)
+    cel = queries.object_target(a.con, "M45")
+    w, = a.plan(lights[:2], target=cel).warnings
+    assert (w.code, dict(w.params)) == ("stack_split", {
+        "stack": "M31_2022-03-21_cam_L_60s_mono.xisf", "moved": 2, "inputs": 3, "n": 2})
+    zdanie = tekst_ostrzezenia(w.code, w.params, w.text)
+    assert ("across 2 folders" if lang == "en" else "na 2 foldery") in zdanie
+    if lang == "en":
+        assert not set(zdanie) & set("„ąćęłńóśźż"), zdanie
+    monkeypatch.setattr(resolver, "library_root_from_db", lambda con: str(a.root))
+    dlg = ObjectChangeDialog(a.con, frame_ids=lights[:2], target=cel, now_fn=lambda: NOW,
+                             off_thread=False)
+    assert not dlg.warnings.isHidden() and dlg.warnings.text() == zdanie
+    # po biegu (i po cofnięciu) ostrzeżenie w czasie przyszłym znika razem z liczbami podglądu
+    from types import SimpleNamespace
+    pusty = SimpleNamespace(applied=[], blocked=[], failed=[], skipped=[], withheld=[])
+    dlg._pokaz_wynik(pusty, cofniecie=True)
+    assert dlg.warnings.isHidden()
+    dlg.reject()
+    a.con.close()
+
+
+@pytest.mark.parametrize("lang", ["en", "pl"])
+def test_ostrzezenia_STEROWNIKA_niosa_kod_i_mowia_w_jezyku_UI(tmp_path, monkeypatch, lang):
+    """AR-138: ostrzeżenia sterownika zapisu gestu (katalog źródła nie usunięty, katalog o niepewnej
+    własności) były wyłącznie polską prozą. Prawdziwy `commit_object_change`: ostrzeżenie to
+    `ZdanieRdzenia` - zdanie PL dla CLI i logu, kod z parametrami dla okna; zdanie wyniku okna mówi
+    je w języku UI. Ostrzeżenie bez kodu (zwykły `str` rdzenia) zostaje zdaniem rdzenia."""
+    from test_object_change_write import _Scena, _Smierc, _smierc_po
+    from horreum.gui.object_change_dialog import zdanie_wyniku_zmiany
+    i18n.set_lang(lang)
+    # katalog źródła opróżniony przez gest, którego system nie da usunąć
+    s = _Scena(tmp_path / "a")
+    run = s.stage(s.plan())
+
+    def _odmowa(sciezka, *a, **kw):
+        raise PermissionError(13, "Odmowa dostępu", sciezka)
+    monkeypatch.setattr(writeback.os, "rmdir", _odmowa)
+    wynik = writeback.commit_object_change(s.con, run, now=NOW)
+    monkeypatch.undo()
+    uwaga, = [w for w in wynik.warnings if getattr(w, "code", None) == "dir_not_removed"]
+    assert dict(uwaga.params)["dir"] == str(s.zrodlo)
+    assert dict(uwaga.params)["detail"].startswith("PermissionError: ")
+    assert uwaga.startswith(f"katalog {s.zrodlo} nie usunięty (PermissionError: ")   # zdanie PL
+    s.con.close()
+    # katalog założony bez potwierdzenia (śmierć po `mkdir`) - własność niepewna
+    s = _Scena(tmp_path / "b")
+    run = s.stage(s.plan(pozycje=[s.pozycja(0)]))
+    _smierc_po(monkeypatch, writeback.os, "mkdir")
+    with pytest.raises(_Smierc):
+        writeback.commit_object_change(s.con, run, now=NOW)
+    monkeypatch.undo()
+    drugi = writeback.commit_object_change(s.con, run, now=NOW)
+    niepewna, = [w for w in drugi.warnings if getattr(w, "code", None) == "dir_uncertain"]
+    assert dict(niepewna.params) == {"dir": str(tmp_path / "b" / "LIGHTS" / "IC405")}
+    s.con.close()
+
+    wynik = dataclasses.replace(wynik, warnings=(uwaga, niepewna, "zdanie rdzenia bez kodu"))
+    zdanie = zdanie_wyniku_zmiany(wynik)
+    for w in (uwaga, niepewna):
+        assert czytelny(i18n.t(f"objchg.warn.{w.code}", **dict(w.params))) in zdanie
+    assert zdanie.endswith("\nzdanie rdzenia bez kodu")
+    if lang == "en":
+        assert "nie usunięty" not in zdanie and "własność niepewna" not in zdanie
+        assert "not removed (PermissionError: " in zdanie and "ownership uncertain" in zdanie
 
 
 def czytelny(tekst):

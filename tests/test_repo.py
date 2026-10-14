@@ -546,7 +546,7 @@ def test_propose_telescope_idempotentny_po_canonie_nocase(tmp_path):
                                     focal_nominal=1600, now=NOW)
     t2, c2 = repo.propose_telescope(con, telescop_canon="rc8", now=NOW)
     t3, c3 = repo.propose_telescope(con, telescop_canon="  RC8  ", now=NOW)   # strip w repo
-    assert (c1, c2, c3) == (True, False, False) and t1 == t2 == t3
+    assert (c1, c2, c3) == ("created", "existing", "existing") and t1 == t2 == t3
     row = con.execute("SELECT telescop_canon, status, label, f_ratio_nominal, focal_nominal "
                       "FROM telescope WHERE id=?", (t1,)).fetchone()
     assert row["telescop_canon"] == "RC8"                  # casing pierwszego wystąpienia
@@ -640,7 +640,7 @@ def test_upsert_object_idempotentny_i_event(tmp_path):
     con = _fresh(tmp_path)
     o1, c1 = repo.upsert_object(con, canon="NGC4258", catalog="NGC", kind="deep_sky", now=NOW)
     o2, c2 = repo.upsert_object(con, canon="NGC4258", catalog="NGC", kind="deep_sky", now=NOW)
-    assert (c1, c2) == (True, False) and o1 == o2
+    assert (c1, c2) == ("created", "existing") and o1 == o2
     assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 1
     row = con.execute("SELECT canon, catalog, kind FROM object WHERE id=?", (o1,)).fetchone()
     assert (row["canon"], row["catalog"], row["kind"]) == ("NGC4258", "NGC", "deep_sky")
@@ -652,8 +652,8 @@ def test_add_object_alias_idempotentny_i_event(tmp_path):
     """Dwie formy surowe (NGC4258, M106) → ten sam obiekt; alias_norm UNIQUE, idempotentny."""
     con = _fresh(tmp_path)
     oid, _ = repo.upsert_object(con, canon="NGC4258", catalog="NGC", kind="deep_sky", now=NOW)
-    a1, ac1 = repo.add_object_alias(con, alias_norm="M106", object_id=oid, source="catalog_xref", now=NOW)
-    a2, ac2 = repo.add_object_alias(con, alias_norm="M106", object_id=oid, source="catalog_xref", now=NOW)
+    a1, ac1, _ = repo.add_object_alias(con, alias_norm="M106", object_id=oid, source="catalog_xref", now=NOW)
+    a2, ac2, _ = repo.add_object_alias(con, alias_norm="M106", object_id=oid, source="catalog_xref", now=NOW)
     repo.add_object_alias(con, alias_norm="NGC4258", object_id=oid, source="header", now=NOW)
     assert (ac1, ac2) == (True, False) and a1 == a2
     assert con.execute("SELECT count(*) FROM object_alias WHERE object_id=?", (oid,)).fetchone()[0] == 2

@@ -354,6 +354,51 @@ def retire_invariants(con):
     }
 
 
+def tombstone_invariants(con):
+    """Inwarianty nagrobka osi (0040, AR-133/AR-137) - `{nazwa: liczba naruszeń}`, zero == zdrowo.
+
+    Nagrobek mówi „tego obiektu / teleskopu na osi nie ma”, więc nic żywego nie ma prawa go wskazywać.
+    Klinga (`repo.retire_orphan`) stawia go wyłącznie przy zerze odwołań, a pisarze osi wskrzeszają
+    go przy ponownym założeniu - te liczniki łapią drogę, która obeszła oba (gołe SQL, przyszły
+    pisarz bez wskrzeszenia):
+
+    * `klatka_na_nagrobku_obiektu` - `frame.object_id` wskazuje nagrobek (lista i facet by jej nie
+      pokazały, a godziny liczyłyby się pod obiektem, którego nie ma);
+    * `pamiec_na_nagrobku_obiektu` - nagrobek klatki (`object_cleared_id`) pamięta nagrobek obiektu,
+      więc „Przywróć” przypiąłby klatkę do obiektu spoza osi;
+    * `alias_na_nagrobku_obiektu` - równoważność wskazuje nagrobek, a szczebel aliasu resolvera
+      przypiąłby do niego każdą nową klatkę z tą nazwą;
+    * `klatka_na_nagrobku_teleskopu` - klatka w zestawie nagrobka teleskopu (po zwinięciu scaleń);
+    * `profil_na_nagrobku_teleskopu` - profil kalibracji flatów wskazuje nagrobek;
+    * `fakt_na_nagrobku_teleskopu` - fakt przepisu klatki `calibration_fact(key='telescope_id')`
+      wskazuje nagrobek (to samo rzutowanie wartości co warunek klingi `repo._odmowa_nagrobka`).
+
+    Spis ręki (`human_facts_census`) nagrobków NIE odsiewa - pola ręki zostają na wierszu i wolno
+    je porównać ze spisem sprzed cofnięcia."""
+    return {
+        "klatka_na_nagrobku_obiektu": con.execute(
+            "SELECT count(*) FROM frame f JOIN object o ON o.id = f.object_id "
+            "WHERE o.retired_at IS NOT NULL").fetchone()[0],
+        "pamiec_na_nagrobku_obiektu": con.execute(
+            "SELECT count(*) FROM frame f JOIN object o ON o.id = f.object_cleared_id "
+            "WHERE o.retired_at IS NOT NULL").fetchone()[0],
+        "alias_na_nagrobku_obiektu": con.execute(
+            "SELECT count(*) FROM object_alias a JOIN object o ON o.id = a.object_id "
+            "WHERE o.retired_at IS NOT NULL").fetchone()[0],
+        "klatka_na_nagrobku_teleskopu": con.execute(
+            "SELECT count(*) FROM frame f JOIN config c ON c.id = f.config_id "
+            "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+            "JOIN telescope t ON t.id = tc.canon_id WHERE t.retired_at IS NOT NULL").fetchone()[0],
+        "profil_na_nagrobku_teleskopu": con.execute(
+            "SELECT count(*) FROM calibration_profile p JOIN telescope t ON t.id = p.telescope_id "
+            "WHERE t.retired_at IS NOT NULL").fetchone()[0],
+        "fakt_na_nagrobku_teleskopu": con.execute(
+            "SELECT count(*) FROM calibration_fact cf "
+            "JOIN telescope t ON t.id = CAST(cf.value AS INTEGER) "
+            "WHERE cf.key = 'telescope_id' AND t.retired_at IS NOT NULL").fetchone()[0],
+    }
+
+
 def config_review_reason_gap(con):
     """`§5.6` — ile klatek bez configu NIE MA zapisanego powodu. Zero == „zero cichego NULL".
 
@@ -370,7 +415,8 @@ def config_review_reason_gap(con):
 
     Kalibracja poza osią teleskopu NIE wchodzi (kind-scoping: jej `config_id IS NULL` to stan
     docelowy), klatka bez zeznania też nie (grouper iteruje `frame JOIN header`, więc nigdy jej
-    nie flaguje) - te same dwa wyłączenia, co w `resolver.review_state.no_config`.
+    nie flaguje), klatka zastąpiona i wycofana też nie (faza zestawów groupera mija nieaktywne,
+    AR-134) - te same wyłączenia, co w `resolver.review_state.no_config`.
 
     POWÓD MUSI BYĆ Z BIEŻĄCEGO EPIZODU (R1-4): liczy się `config.review` PÓŹNIEJSZY niż ostatni
     `config.assigned` tej klatki. Dowolny historyczny przegląd przepuszczałby klatkę, która config
@@ -380,6 +426,7 @@ def config_review_reason_gap(con):
 
     return con.execute(
         "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
+        "AND f.superseded_by IS NULL AND f.retired_at IS NULL "
         "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
         "AND EXISTS(SELECT 1 FROM header h WHERE h.frame_id = f.id) "
         "AND NOT EXISTS(SELECT 1 FROM event e WHERE e.verb = 'config.review' "

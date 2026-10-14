@@ -95,7 +95,25 @@ def tekst_pominiecia(kod, params, powod):
     if kod == "pair":
         p["inner"] = tekst_pominiecia(p.pop("inner_code", None), p.pop("inner_params", ()),
                                       p.get("inner", ""))
+    bramka, bramka_params = p.pop("gate", None), p.pop("gate_params", ())
+    if bramka and f"objchg.gate.{bramka}" in CATALOG:      # szczegół bramki karty (AR-138)
+        p["detail"] = i18n.t(f"objchg.gate.{bramka}", **dict(bramka_params))
     return czytelny_powod(i18n.t(klucz, **p))
+
+
+def tekst_ostrzezenia(kod, params, tekst):
+    """Zdanie ostrzeżenia w języku UI - planera (`object_change.ObjectChangeWarning`) albo
+    sterownika zapisu (`object_change.ZdanieRdzenia`): kod → `objchg.warn.<kod>` z parametrami;
+    wpis mnogi odmienia się przez parametr `n`. Kod bez zdania w katalogu (i ostrzeżenie bez
+    kodu, zwykły `str` rdzenia) zostaje przy zdaniu rdzenia `tekst` (PL). Bez `czytelny_powod` -
+    zdanie wyniku przepuszcza przez niego całość."""
+    klucz = f"objchg.warn.{kod}" if kod else None
+    if klucz not in CATALOG:
+        return str(tekst)
+    p = dict(params)
+    if isinstance(CATALOG[klucz]["pl"], dict):
+        return i18n.t_plural(klucz, p.pop("n"), **p)
+    return i18n.t(klucz, **p)
 
 
 def lista_obiektow(canons):
@@ -333,7 +351,7 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
       * blokada pliku zmienionego od ostatniego skanu - z receptą (skan w Dostawie, potem ponów);
       * numer przebiegu - po zamknięciu okna jedyny uchwyt do dokończenia albo cofnięcia
         (`horreum object-change finish|undo DB RUN_ID`), jak `commit_id` w oknach kart;
-      * ostrzeżenia rdzenia.
+      * ostrzeżenia rdzenia - po kodzie w języku UI (`tekst_ostrzezenia`).
     Całość przechodzi przez `czytelny_powod` (plik zajęty, ścieżki z `repr`)."""
     from horreum import writeback          # lazy: `writeback` i `wb_worker` ciągną astropy
     from horreum.gui.wb_worker import spadek_na_droge_atomowa, zdanie_wyniku_zapisu
@@ -363,7 +381,8 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
         msg += i18n.t("wb.cancelled_note")
     msg += i18n.t("objchg.res.run", run_id=res.run_id)
     for ostrzezenie in res.warnings:
-        msg += "\n" + ostrzezenie
+        msg += "\n" + tekst_ostrzezenia(getattr(ostrzezenie, "code", None),
+                                        getattr(ostrzezenie, "params", ()), ostrzezenie)
     return czytelny_powod(msg)
 
 
@@ -717,7 +736,7 @@ class ObjectChangeDialog(QDialog):
             self.items_tree.addTopLevelItem(w)
             self._wiersze[it.location_id] = w
 
-        ostrzezenia = [o.text for o in plan.warnings]
+        ostrzezenia = [tekst_ostrzezenia(o.code, o.params, o.text) for o in plan.warnings]
         self.warnings.setText("\n".join(ostrzezenia))
         self.warnings.setVisible(bool(ostrzezenia))
 
@@ -828,6 +847,7 @@ class ObjectChangeDialog(QDialog):
             w.setText(_COL_STATUS, status)
             w.setToolTip(_COL_STATUS, tip)
         self.counts.setVisible(False)
+        self.warnings.setVisible(False)       # ostrzeżenia planera mówią w czasie przyszłym, jak liczby
         pominiete = sum(g.childCount() for g in (self.skipped_tree.topLevelItem(i)
                                                  for i in range(self.skipped_tree.topLevelItemCount())))
         self.skipped_head.setText(i18n.t_plural("objchg.skipped_head_done", pominiete))

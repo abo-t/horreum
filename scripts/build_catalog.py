@@ -51,9 +51,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from horreum.resolve.catalog import catalog_canon, xref  # noqa: E402
 # Taksonomia typów ORAZ kontrakt rekordu mają JEDNEGO właściciela — `horreum.targets` (T3 §3,
 # D-OW-1/E′). Skrypt je IMPORTUJE: gdyby trzymał kopię, producent i konsument assetu mogliby się
-# rozjechać po cichu — plik przechodziłby budowę i padał przy wczytaniu.
-from horreum.targets import (DARK_TYPES, GALAXY_TYPES, NEBULA_TYPES,  # noqa: E402
-                            TARGET_FIELDS, target_fields_present)
+# rozjechać po cichu - plik przechodziłby budowę i padał przy wczytaniu. Tak samo status
+# katalogowy rekordu (pole `s`, K-3): jego słownik zna czytelnik assetu.
+from horreum.targets import (CATALOG_STATUSES, DARK_TYPES, GALAXY_TYPES,  # noqa: E402
+                            NEBULA_TYPES, TARGET_FIELDS, target_fields_present)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(_ROOT, "horreum", "data")
@@ -80,7 +81,14 @@ CIRRUS_SRC = {"lbn", "ldn"}
 # Kolejność zwycięzcy grupy. Green rozpada się na DWA szczeble, bo tylko 5 z 295 SNR ma oznaczenie,
 # które zna gramatyka katalogowa: nienazwany `G078.2+02.1` nie ma prawa wygrać z `Sh2-108`,
 # a nazwany `CTB1` musi wygrać ze wszystkim.
-PRIO = {"ngc": 0, "green_named": 1, "sh2": 2, "green": 3, "vdb": 4, "lbn": 5, "ldn": 6}
+#
+# Mgławice planetarne Le Du 2022 (K-3) wchodzą do grupy WYŁĄCZNIE jawną decyzją (`PN_DECYZJE`),
+# więc szczebel rozstrzyga tylko w grupach z decyzją „merge”. PN potwierdzona widmem (`pn`) stoi nad
+# Sharplessem: typ Sh2/LBN/vdB to typ Z DEFINICJI katalogu, a tu jest klasyfikacja zmierzona.
+# Kanon i tak zostaje formą gramatyki - PN z nazwą HASH znaną gramatyce bierze ją za oznaczenie
+# (`parse_pn`, jak nazwany Green). Kandydatka i mimika są na końcu: nie wygrywają z niczym.
+PRIO = {"ngc": 0, "green_named": 1, "pn": 2, "sh2": 3, "green": 4, "vdb": 5, "lbn": 6, "ldn": 7,
+        "pn_cand": 8, "pn_mimic": 9}
 
 MERGE_TOL_FACTOR = 0.35        # tolerancja pozycji = ten czynnik * WIĘKSZA oś (min. 2')
 MERGE_RATIO_MIN = 0.50         # bramka proporcji: mniejszy obiekt w wielkim to NIE duplikat
@@ -107,6 +115,8 @@ class Row:
     mag_from_b: bool = False
     names: list = field(default_factory=list)      # Identifiers + Common names (surowe)
     common: list = field(default_factory=list)     # same nazwy potoczne (verbatim)
+    status: str | None = None                      # status katalogowy rekordu (K-3, `s`)
+    pn_name: str | None = None                     # nazwa z tabeli Le Du - klucz `PN_DECYZJE`
 
 
 # ──────────────────────────────────────────────────────────────── pobranie i parsowanie
@@ -158,10 +168,14 @@ def _dms(s):
 
 
 def _vizier_rows(text):
-    """Wiersze tabeli `asu-tsv`: komentarze `#`, potem nagłówek, jednostki i linia myślników."""
+    """Wiersze tabeli `asu-tsv`: komentarze `#`, potem nagłówek, jednostki i linia myślników.
+    Dane zaczynają się PO linii myślników, nie od stałego indeksu: tabela bez jednostek (VII/192,
+    same nazwy) ma linię jednostek z samych tabulatorów, filtr pustych linii ją zdejmuje, a stały
+    indeks połykał wtedy pierwszy wiersz danych."""
     lines = [l for l in (x.rstrip("\n") for x in io.StringIO(text)) if l.strip() and not l.startswith("#")]
     hdr = lines[0].split("\t")
-    return [{h: v.strip() for h, v in zip(hdr, l.split("\t"))} for l in lines[3:]
+    start = next(i for i, l in enumerate(lines) if i and set(l) <= set("-\t ")) + 1
+    return [{h: v.strip() for h, v in zip(hdr, l.split("\t"))} for l in lines[start:]
             if len(l.split("\t")) == len(hdr)]
 
 
@@ -256,6 +270,207 @@ def parse_green(text):
     return out
 
 
+# ──────────────────────────────────────── K-3: mgławice planetarne Le Du+ 2022 (J/A+A/666/A152)
+# Trzy tabele publikacji, TRZY STATUSY katalogowe (pole `s` rekordu, `targets.CATALOG_STATUSES`):
+# table1 = PN potwierdzone widmem (HASH T/L/P), table2 = kandydatki bez widma, table3 = MIMIKI
+# (zgłoszone jako PN, okazały się czymś innym). Status jest OSOBNO od typu, bo typ steruje kanałami
+# planera, a „PN” na kandydatce byłoby twierdzeniem, którego źródło nie stawia.
+PN_STATUS = {"pn": "confirmed", "pn_cand": "candidate", "pn_mimic": "mimic"}
+# ZAKRES - JEDNO miejsce filtra po tabeli źródła (decyzja `Q7`: 132 obiekty ≥3′ ze wszystkich trzech
+# tabel; zawężenie - np. do samych potwierdzonych - to wykreślenie kluczy stąd).
+PN_ZAKRES = ("pn", "pn_cand", "pn_mimic")
+# TYP MIMIKI Z PUBLIKACJI: kolumna `Status` table3 niesie typ obiektu wg HASH (skróty SIMBAD:
+# `HII` obszar HII, `SNR` pozostałość, `SR?` kandydatka na pozostałość, `iISM` zjonizowana materia
+# międzygwiazdowa, `Em*` gwiazda emisyjna, `ooun` obiekt nieznanej natury, `cir` kod HASH bez
+# odpowiednika w taksonomii). Klasa planera = ten typ, a gdzie taksonomia go nie zna - `Neb`
+# (mgławica bez klasy): kanały wąskopasmowe, bez udawania obszaru HII. Kod spoza tabeli przy obiekcie
+# nad podłogą = twardy błąd budowy - nowe dane nie wejdą z typem zgadniętym.
+PN_MIMIKA_TYP = {"HII": "HII", "SNR": "SNR", "SR?": "SNR", "iISM": "EmN", "Em*": "Neb",
+                 "ooun": "Neb", "cir": "Neb"}
+# JAWNE DECYZJE SCALENIA K-3: wiersz Le Du nie skleja się z niczym bez wpisu tutaj - kolizja wg
+# KTÓREGOKOLWIEK klucza (kanon, alias, pozycja) bez decyzji jest twardym falsyfikatorem budowy, a wpis,
+# którego żadna kolizja nie użyła, też (dane się zmieniły - decyzję trzeba obejrzeć od nowa).
+# Klucz: (nazwa z tabeli Le Du, kanon drugiego wiersza). Wartość: (decyzja, dowód tożsamości).
+PN_DECYZJE = {
+    ("StDr 17", "Sh2-123"): (
+        "merge", "HASH (kolumna HName table1) nazywa StDr 17 `Sh2-123`; środki 4,5' przy osiach "
+                 "15'x13' i 13' - jeden obiekt, typ PN z widma zastępuje typ Sh2 z definicji katalogu"),
+    ("StDr 17", "LBN414"): (
+        "no-merge", "zbieżność wyłącznie pozycyjna (4,1'), bez nazwy wspólnej w żadnym źródle; "
+                    "Sh2-123 i LBN414 są w assecie osobnymi rekordami, a scalenie skleiłoby je "
+                    "tranzytywnie przez StDr 17"),
+    ("MoMi 2", "LBN340"): (
+        "no-merge", "mimika o nieznanej naturze (HASH `ooun`), zbieżność wyłącznie pozycyjna (0,9') "
+                    "bez nazwy wspólnej w żadnym źródle"),
+    ("Ou 4", "LBN453"): (
+        "no-merge", "zbieżność wyłącznie pozycyjna (29,2' przy osi LBN453 100'); LBN453 należy do "
+                    "grupy Sh2-129, a Ou 4 leży w jej środku (1,6') jako osobny cel - bramka "
+                    "proporcji 69'/140' rozdziela je z Sh2-129, scalenie przez LBN453 zrobiłoby "
+                    "z Ou 4 alias Sh2-129"),
+}
+_PN_LICZBA = re.compile(r"\d+(?:\.\d*)?")
+
+
+def parse_pn(text, key):
+    """Wiersze jednej tabeli Le Du. `Size` w minutach łuku (ReadMe: `Size ... min`), forma `9`,
+    `15 x 13`, `12.0 x 7.`, `9.5 x 12` (mniejsza oś bywa pierwsza) - osie z liczb, większa = `a`.
+
+    OZNACZENIE: nazwa HASH (`HName`, tylko table1), gdy zna ją gramatyka katalogowa (`Sh2-123` przy
+    StDr 17) - kanon zostaje formą gramatyki, jak u nazwanego Greena; inaczej nazwa z tabeli
+    (`StDr 61`, poza gramatyką z definicji). Nazwy do szukania (`common`, verbatim): nazwa z tabeli,
+    nazwa HASH i `PN G…` - oznaczenie PNG WYŁĄCZNIE z przedrostkiem `PN`, bo gołe `G…` gramatyka
+    czyta jako pozostałość Greena (`test_catalog`, pułapka K-1)."""
+    out = []
+    for r in _vizier_rows(text):
+        name = r["Name"]
+        ra, dec = _fnum(r["_RAJ2000"]), _fnum(r["_DEJ2000"])
+        osie = sorted(float(x) for x in _PN_LICZBA.findall(r["Size"] or ""))
+        if not name or ra is None or dec is None or not osie:
+            continue
+        if key == "pn_mimic":
+            typ = PN_MIMIKA_TYP.get(r["Status"])
+            if typ is None:
+                if osie[-1] >= FLOOR_ARCMIN:
+                    raise SystemExit(f"BLAD: mimika {name} ma typ HASH {r['Status']!r} spoza "
+                                     f"PN_MIMIKA_TYP -> dopisz decyzje typu")
+                typ = "?"                              # pod podłogą - i tak nie wejdzie do puli
+        else:
+            typ = "PN"
+        hname = (r.get("HName") or "").strip()
+        named = hname if hname and catalog_canon(hname, split=False) else None
+        common = [n for n in (name if named else None, hname if not named else None,
+                              f"PN G{r['PNG']}" if r["PNG"] else None) if n]
+        out.append(Row(ident=named or name, src=key, typ=typ, ra=ra, dec=dec, major=osie[-1],
+                       minor=osie[0] if len(osie) > 1 else None, names=common, common=common,
+                       status=PN_STATUS[key], pn_name=name))
+    return out
+
+
+# ──────────────────────────────────────── K-2: Arp (VII/192) - WYŁĄCZNIE aliasy istniejących celów
+# `Size` atlasu Arpa to bok ZDJĘCIA, nie średnica galaktyki (ReadMe VII/192 „Note on Size”), więc
+# Arp nie wnosi rekordów, pozycji ani rozmiarów: numer Arpa staje się nazwą celu, który już jest.
+# Arp wielu składników dostaje alias na PIERWSZYM składniku z nazwy (decyzja `Q7`: Arp 244 → NGC4038).
+_ARP_PIERWSZY = re.compile(r"^(NGC|IC|UGC|PGC|MESSIER)\s*(\d+)\s*([A-Z])?$")
+_ARP_ESO = re.compile(r"^ESO\s*(\d{1,3})\s*-\s*[A-Z]{0,2}\s*(\d{1,3})$")
+_ARP_NUMER = re.compile(r"^(\d+)\s*([A-Z])?$")
+_ARP_LITERA = re.compile(r"^([A-Z])$")
+_ARP_DOPISEK = re.compile(r"\s+(GROUP|FIELD)$")
+# Nazwy potoczne atlasu (pole `Name` ucięte do 15 znaków) - wyłącznie tożsamości pewne z literatury:
+# Kwintet Stephana = HCG 92 (Hickson 1982), Holmberg II = UGC 4305. Reszta nazw potocznych zostaje
+# bez celu i trafia do licznika pominiętych, zamiast zgadywania składnika.
+ARP_NAZWY_POTOCZNE = {"STEPHAN'S QUINT": "HCG 92", "HOLMBERG II": "UGC 4305"}
+
+
+def _arp_skladnik(kat, num, litera):
+    """Składnik z nazwy Arpa → forma kanonu assetu. Bez litery - forma gramatyki (`NGC 0772` →
+    `NGC772`, `MESSIER 65` → `M65`). Z literą gramatyka składnika nie zna (`resolve.catalog`: NGC/IC
+    to same cyfry), a OpenNGC pisze go z numerem na czterech cyfrach (`NGC6365A`, `IC0359A`) i taki
+    jest kanon rekordu - więc tę formę składamy jawnie."""
+    if litera is None:
+        return catalog_canon(f"{'M' if kat == 'MESSIER' else kat} {num}")
+    if kat in ("NGC", "IC"):
+        return f"{kat}{int(num):04d}{litera}"
+    return f"{kat}{int(num)}{litera}"
+
+
+def parse_arp_name(name):
+    """Pole `Name` atlasu Arpa → krotka składników w formie kanonu assetu (kolejność z nazwy) albo
+    pusta krotka, gdy nazwy nie da się rozwinąć bez zgadywania. Gramatyka zapisu:
+
+      * pierwszy człon: pełne oznaczenie (`NGC 6621`, `IC 0018`, `UGC 00212`, `MESSIER 65`,
+        `NGC 6365A`, `ESO 547-G002`), dopiski `Group`/`Field` i nawias (`NGC 7757(56?)` -
+        niepewny sąsiad) odpadają;
+      * człony po `+` albo `&`: sama liczba to ten sam katalog z cyframi uzupełnionymi z przodu
+        z poprzedniego numeru (`NGC 4615+13+14` → 4613, 4614; `NGC 0772 + 770` → 770), sama litera
+        to składnik poprzedniego numeru (`NGC 6365A + B` → NGC6365B), pełne oznaczenie zmienia
+        bazę (`NGC 5829+IC4526`), `comp` (towarzysz bez nazwy) odpada;
+      * ESO: numer w polu ESO (`ESO 547-G002&3` → ESO547-002, ESO547-003).
+
+    Nazwa potoczna - wyłącznie z `ARP_NAZWY_POTOCZNE`. Wszystko inne (`MCG…`, `CGCG…`, `VV…`,
+    `IC 029  8`) → `()`."""
+    s = re.sub(r"\s+", " ", (name or "").strip().upper())
+    if s in ARP_NAZWY_POTOCZNE:
+        c = catalog_canon(ARP_NAZWY_POTOCZNE[s])
+        return (c,) if c else ()
+    s = _ARP_DOPISEK.sub("", re.sub(r"\(.*?\)", "", s)).strip()
+    czlony = [c.strip() for c in re.split(r"[+&]", s)]
+    if not czlony or not czlony[0]:
+        return ()
+    m = _ARP_ESO.match(czlony[0])
+    if m:
+        pole, num = m.group(1), m.group(2)
+        out = [catalog_canon(f"ESO {pole}-{num}")]
+        for c in czlony[1:]:
+            mn = re.fullmatch(r"\d{1,3}", c)
+            if not mn:
+                return ()
+            out.append(catalog_canon(f"ESO {pole}-{c}"))
+        return tuple(out) if all(out) else ()
+    m = _ARP_PIERWSZY.match(czlony[0])
+    if not m:
+        return ()
+    kat, baza, litera = m.group(1), m.group(2), m.group(3)
+    out = [_arp_skladnik(kat, baza, litera)]
+    for c in czlony[1:]:
+        if c == "COMP":
+            continue
+        if (m := _ARP_PIERWSZY.match(c)) is not None:
+            kat, baza, litera = m.group(1), m.group(2), m.group(3)
+            out.append(_arp_skladnik(kat, baza, litera))
+        elif (m := _ARP_NUMER.match(c)) is not None:
+            num = m.group(1)
+            if len(num) < len(baza):
+                num = baza[:len(baza) - len(num)] + num
+            out.append(_arp_skladnik(kat, num, m.group(2)))
+        elif (m := _ARP_LITERA.match(c)) is not None:
+            out.append(_arp_skladnik(kat, baza, m.group(1)))
+        else:
+            return ()
+    return tuple(out) if all(out) else ()
+
+
+def parse_arp(text):
+    """Wiersze `VII/192/arpord` → lista `(numer Arpa, Name)`."""
+    return [(int(r["Arp"]), r["Name"]) for r in _vizier_rows(text) if r["Arp"].strip()]
+
+
+def attach_arp_aliases(records, arp):
+    """Alias `Arp N` na rekordzie PIERWSZEGO składnika nazwy - wyłącznie rekordy istniejące (zero
+    nowych, zero pozycji i rozmiarów). Rekord szukany po kanonie i po aliasach katalogowych (forma
+    po `xref`), tak jak pokrycie planera; składnik bez rekordu, rekord dwuznaczny i nazwa bez
+    rozwinięcia są POMINIĘTE z licznikiem (raport budowy, `PROVENANCE.md`). Zwraca liczniki."""
+    idx = {}
+    for r in records:
+        idx.setdefault(r["c"], set()).add(id(r))
+        # Kanon także w formie po `xref` - ten sam klucz, którym szukany jest składnik (`M65` →
+        # `NGC3623`); bez tego rekord o kanonie-kluczu pary chybiałby lookup po celu pary.
+        idx.setdefault(xref(r["c"]), set()).add(id(r))
+        for a in r.get("n", ()):
+            c = catalog_canon(a)
+            if c:
+                idx.setdefault(xref(c), set()).add(id(r))
+    by_id = {id(r): r for r in records}
+    stat = {"rows": len(arp), "attached": 0, "no_target": 0, "unparsed": 0, "ambiguous": 0}
+    for numer, name in arp:
+        skladniki = parse_arp_name(name)
+        if not skladniki:
+            stat["unparsed"] += 1
+            continue
+        pierwszy = skladniki[0]
+        trafione = idx.get(xref(pierwszy) if catalog_canon(pierwszy) == pierwszy else pierwszy,
+                           set())
+        if not trafione:
+            stat["no_target"] += 1
+            continue
+        if len(trafione) > 1:
+            stat["ambiguous"] += 1
+            continue
+        rec = by_id[next(iter(trafione))]
+        rec["n"] = sorted(set(rec.get("n", ())) | {f"Arp {numer}"})
+        stat["attached"] += 1
+    return stat
+
+
 SOURCES = [
     ("ngc", "OpenNGC NGC.csv", _OPENNGC.format(name="NGC.csv"), "NGC.csv", 11000, "CC-BY-SA-4.0"),
     ("ngc_add", "OpenNGC addendum.csv", _OPENNGC.format(name="addendum.csv"), "addendum.csv", 55,
@@ -273,29 +488,51 @@ SOURCES = [
     ("green", "Green Galactic SNR (VII/278)",
      _VIZIER.format(cat="VII/278", cols="SNR,RAJ2000,DEJ2000,MajDiam,MinDiam,Names"),
      "snr_green.tsv", 290, "CDS/VizieR"),
-]
+    # K-2: źródło ALIASÓW, nie rekordów - `load_all` oddaje je osobno (`attach_arp_aliases`).
+    ("arp", "Arp Atlas of Peculiar Galaxies (VII/192, arpord)",
+     _VIZIER.format(cat="VII/192/arpord", cols="Arp,Name"), "arp.tsv", 330, "CDS/VizieR"),
+] + [s for s in (
+    # K-3: trzy tabele Le Du+ 2022, każda z własnym statusem (`PN_STATUS`); zakres = `PN_ZAKRES`.
+    ("pn", "PN potwierdzone Le Du+ 2022 (J/A+A/666/A152, table1)",
+     _VIZIER.format(cat="J/A+A/666/A152/table1", cols="Name,HName,PNG,Size,Status")
+     + "&-out.add=_RAJ2000,_DEJ2000", "pn_ledu_t1.tsv", 150, "CDS/VizieR"),
+    ("pn_cand", "Kandydatki PN Le Du+ 2022 (J/A+A/666/A152, table2)",
+     _VIZIER.format(cat="J/A+A/666/A152/table2", cols="Name,PNG,Size,Status")
+     + "&-out.add=_RAJ2000,_DEJ2000", "pn_ledu_t2.tsv", 400, "CDS/VizieR"),
+    ("pn_mimic", "Mimiki PN Le Du+ 2022 (J/A+A/666/A152, table3)",
+     _VIZIER.format(cat="J/A+A/666/A152/table3", cols="Name,PNG,Size,Status")
+     + "&-out.add=_RAJ2000,_DEJ2000", "pn_ledu_t3.tsv", 60, "CDS/VizieR"),
+) if s[0] in PN_ZAKRES]
 
 
 def load_all(cache_dir, offline):
     """Pobierz i sparsuj wszystkie źródła. Widełki PER ŹRÓDŁO — urwane pobranie musi paść tutaj,
-    a nie przejść niezauważone w sumie."""
-    rows, meta = [], []
+    a nie przejść niezauważone w sumie. Zwraca `(wiersze, meta, arp)` - Arp jest źródłem aliasów,
+    nie wierszy puli (K-2)."""
+    rows, meta, arp = [], [], []
     for key, title, url, cache_name, min_rows, lic in SOURCES:
         text = fetch(url, cache_dir, cache_name, offline)
         if key == "ngc":
             got, _ = parse_openngc(text, key)
         elif key == "ngc_add":
             got, _ = parse_openngc(text, key)
+        elif key == "arp":
+            got = parse_arp(text)
+        elif key in PN_STATUS:
+            got = parse_pn(text, key)
         else:
             got = {"sh2": parse_sh2, "lbn": parse_lbn, "ldn": parse_ldn,
                    "vdb": parse_vdb, "green": parse_green}[key](text)
         if len(got) < min_rows:
-            raise SystemExit(f"BLAD: zrodlo {key} oddalo {len(got)} wierszy z rozmiarem, "
+            raise SystemExit(f"BLAD: zrodlo {key} oddalo {len(got)} wierszy, "
                              f"minimum {min_rows} -> pobranie urwane albo katalog sie zmienil")
-        rows += got
+        if key == "arp":
+            arp = got
+        else:
+            rows += got
         meta.append({"key": key, "title": title, "url": url, "rows": len(got), "license": lic})
-        print(f"  {key:<8} {len(got):>6} wierszy z pozycja i rozmiarem")
-    return rows, meta
+        print(f"  {key:<8} {len(got):>6} wierszy" + ("" if key == "arp" else " z pozycja i rozmiarem"))
+    return rows, meta, arp
 
 
 # ──────────────────────────────────────────────────────────────── pula, scalanie, rekordy
@@ -330,12 +567,24 @@ def separation(a, b):
                                                 + math.cos(d1) * math.cos(d2) * math.cos(ra1 - ra2)))))
 
 
+def _pn(o):
+    """Wiersz z tabel Le Du (K-3) - scala się wyłącznie decyzją `PN_DECYZJE`."""
+    return o.src in PN_STATUS
+
+
 def merge(items):
-    """Union-find po trzech kluczach (nagłówek modułu). Zwraca listę grup + licznik scaleń.
+    """Union-find po trzech kluczach (nagłówek modułu). Zwraca `(grupy, licznik scaleń, raport PN)`.
 
     Domknięcie TRANZYTYWNE jest zamierzone: `NGC1499 + Sh2-220 + LBN752 + LBN756` to jeden cel,
     choć dwa ostatnie są z tego samego katalogu i same nigdy by się nie połączyły. Grupy
-    wielokrotne z jednego katalogu RAPORTUJEMY — mają być widziane, nie ciche."""
+    wielokrotne z jednego katalogu RAPORTUJEMY - mają być widziane, nie ciche.
+
+    WIERSZ LE DU (K-3) NIE SKLEJA SIĘ AUTOMATEM: każde połączenie, które któryś klucz chciałby
+    zrobić z jego udziałem, przechodzi przez `PN_DECYZJE` - „merge” łączy, „no-merge” zostawia dwa
+    rekordy, brak decyzji trafia do raportu (`undecided`) i jest twardym falsyfikatorem, tak samo
+    jak decyzja, której żadna kolizja nie użyła (`unused`). Union-find wybiera JEDNEGO zwycięzcę
+    i JEDEN typ grupy, więc ciche sklejenie zgubiłoby klasę obiektu. Trzy tabele Le Du to jeden
+    katalog: między sobą nie scalają się pozycją (jak wiersze jednego źródła)."""
     parent = list(range(len(items)))
 
     def find(x):
@@ -345,8 +594,20 @@ def merge(items):
         return x
 
     stat = {"canon": 0, "alias": 0, "position": 0}
+    uzyte, nierozstrzygniete = set(), set()
 
     def union(i, j, key):
+        oi, oj = items[i], items[j]
+        if _pn(oi) or _pn(oj):
+            pn, inny = (oi, oj) if _pn(oi) else (oj, oi)
+            klucz = (pn.pn_name, inny.pn_name if _pn(inny) else canon_of(inny))
+            decyzja = PN_DECYZJE.get(klucz)
+            if decyzja is None:
+                nierozstrzygniete.add((*klucz, key))
+                return
+            uzyte.add(klucz)
+            if decyzja[0] != "merge":
+                return
         a, b = find(i), find(j)
         if a != b:
             parent[b] = a
@@ -376,7 +637,7 @@ def merge(items):
                 if j <= i:
                     continue
                 a, b = items[i], items[j]
-                if a.src == b.src:
+                if a.src == b.src or (_pn(a) and _pn(b)):
                     continue                       # w jednym katalogu zagnieżdżenie to STRUKTURA
                 lo, hi = sorted((a.major, b.major))
                 if lo / hi < MERGE_RATIO_MIN:
@@ -387,13 +648,17 @@ def merge(items):
     groups = {}
     for i, o in enumerate(items):
         groups.setdefault(find(i), []).append(o)
-    return list(groups.values()), stat
+    pn = {"merge": sorted(k for k in uzyte if PN_DECYZJE[k][0] == "merge"),
+          "no_merge": sorted(k for k in uzyte if PN_DECYZJE[k][0] != "merge"),
+          "undecided": sorted(nierozstrzygniete), "unused": sorted(set(PN_DECYZJE) - uzyte)}
+    return list(groups.values()), stat, pn
 
 
 def build_record(group):
     """Rekord assetu z grupy. Zwycięzca wg PRIO (remis -> większa oś); przegrani NIE giną —
     ich kanony wchodzą do aliasów ZAWSZE (to klucze tożsamości, więc filtr gramatyki ich nie
-    dotyczy: `catalog_canon('G074.0-08.5')` jest z definicji None)."""
+    dotyczy: `catalog_canon('G074.0-08.5')` jest z definicji None). Status katalogowy (`s`, K-3)
+    idzie za zwycięzcą - jak typ, którego dotyczy."""
     win = sorted(group, key=lambda o: (PRIO[o.src], -o.major))[0]
     own = canon_of(win)
     # Oznaczenie ŹRÓDŁOWE wchodzi obok kanonu — w formie SPRZED `xref`: `Sh2-184` kanonizuje się
@@ -402,7 +667,14 @@ def build_record(group):
     # do aliasów zapisu z zerami wiodącymi (`IC0410` obok `IC410`).
     alias = {canon_of(o) for o in group} | {catalog_canon(o.ident) or o.ident for o in group}
     for o in group:
-        alias.update(xref(catalog_canon(a)) for a in o.names if catalog_canon(a))
+        # Ta sama reguła dla oznaczeń z `names` (Identifiers OpenNGC, numer Messiera z kolumny M):
+        # forma SPRZED `xref` i forma PO nim. Sama forma po `xref` zjadała Messiera - `M27` ma parę,
+        # więc zamieniał się w kanon rekordu i wypadał jako „własny” (`discard` niżej). Przy pełnej
+        # tabeli Messiera (D-1013-1) przebudowa gubiła wszystkie numery Messiera z pola `n`.
+        for a in o.names:
+            c = catalog_canon(a)
+            if c:
+                alias.update((c, xref(c)))
         alias.update(o.common)
     alias.discard(own)
     rec = {"c": own, "t": win.typ, "r": round(win.ra, 4), "d": round(win.dec, 4),
@@ -415,8 +687,19 @@ def build_record(group):
             rec["mb"] = True          # B-V galaktyk to +0,7..1,0 mag — prog T3 musi to wiedzieć
     if alias:
         rec["n"] = sorted(alias)
+    if win.status:
+        rec["s"] = win.status
     rec["_layer"] = "cirrus" if win.src in CIRRUS_SRC else "core"
     return rec
+
+
+def _licz_statusy(records):
+    """Liczność rekordów per status katalogowy (raport budowy, K-3)."""
+    out = {}
+    for r in records:
+        if "s" in r:
+            out[r["s"]] = out.get(r["s"], 0) + 1
+    return out
 
 
 # ──────────────────────────────────────────────────────────────── falsyfikatory
@@ -425,9 +708,17 @@ def _find(records, canon):
     return next((r for r in records if r["c"] == canon), None)
 
 
-def falsifiers(records, curated, groups, items):
-    """Twarde bramki budowy. Każda kotwica ZMIERZONA (brief §7), nie założona."""
+def falsifiers(records, curated, groups, items, pn=None):
+    """Twarde bramki budowy. Każda kotwica ZMIERZONA (brief §7), nie założona. `pn` = raport
+    scalania wierszy Le Du z `merge` (K-3): kolizja bez decyzji i decyzja bez kolizji padają tu."""
     bad = []
+    for kto, inny, klucz in (pn or {}).get("undecided", ()):
+        bad.append(f"PN {kto} koliduje z {inny} (klucz {klucz}) bez decyzji w PN_DECYZJE")
+    for kto, inny in (pn or {}).get("unused", ()):
+        bad.append(f"decyzja PN_DECYZJE ({kto}, {inny}) bez kolizji -> dane sie zmienily")
+    for r in records:
+        if "s" in r and r["s"] not in CATALOG_STATUSES:
+            bad.append(f"rekord {r['c']} ma status {r['s']!r} spoza CATALOG_STATUSES")
     core = [r for r in records if r["_layer"] == "core"]
     cirrus = [r for r in records if r["_layer"] == "cirrus"]
 
@@ -542,15 +833,23 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     print("[1/4] zrodla")
-    rows, src_meta = load_all(args.cache, args.offline)
+    rows, src_meta, arp = load_all(args.cache, args.offline)
     items = pool(rows)
     print(f"[2/4] pula: {len(items)} z {len(rows)} wierszy "
           f"(podloga {FLOOR_ARCMIN}' / ciemna {FLOOR_DARK_ARCMIN}', bez filtru magnitudo)")
 
-    groups, stat = merge(items)
+    groups, stat, pn = merge(items)
     records = [build_record(g) for g in groups]
     print(f"[3/4] scalanie: {len(items)} -> {len(records)} rekordow "
           f"(kanon {stat['canon']}, alias {stat['alias']}, pozycja {stat['position']})")
+    print(f"       PN Le Du: decyzje merge {pn['merge']}, no-merge {pn['no_merge']}; "
+          f"statusy {dict(sorted(_licz_statusy(records).items()))}")
+    arp_stat = attach_arp_aliases(records, arp) if arp else None
+    if arp_stat:
+        src_meta = [dict(s, aliases=arp_stat) if s["key"] == "arp" else s for s in src_meta]
+        print(f"       Arp (VII/192): {arp_stat['attached']} aliasow na istniejacych celach; "
+              f"pominiete: bez celu {arp_stat['no_target']}, bez rozwiniecia nazwy "
+              f"{arp_stat['unparsed']}, dwuznaczne {arp_stat['ambiguous']}")
 
     # Plik człowieka jest OBOWIĄZKOWY (D-OW-1/E′): to on wnosi rekordy, których żadne źródło sieciowe
     # nie zna, i to na sumie z nim liczy się kontrola kolizji kanonów. Cicha degradacja do pustej
@@ -560,7 +859,7 @@ def main(argv=None):
     print(f"       objects_own.json: {len(curated)} wpisow ({_cele} celow, "
           f"{len(curated) - _cele} nazw) - plik czlowieka, tylko walidowany")
 
-    bad, wielo = falsifiers(records, curated, groups, items)
+    bad, wielo = falsifiers(records, curated, groups, items, pn)
     if wielo:
         print(f"       RAPORT: {len(wielo)} grup ma >1 rekord z tego samego katalogu "
               f"(domkniecie tranzytywne), np. {wielo[0]}")
@@ -577,11 +876,20 @@ def main(argv=None):
     meta = {"built": date.today().isoformat(), "sources": src_meta,
             "floor_arcmin": FLOOR_ARCMIN, "floor_dark_arcmin": FLOOR_DARK_ARCMIN,
             "merge": {"tol_factor_major": MERGE_TOL_FACTOR, "ratio_min": MERGE_RATIO_MIN,
-                      "keys": ["canon", "alias", "position"], "merged": stat},
+                      "keys": ["canon", "alias", "position"], "merged": stat,
+                      "pn_decisions": {f"{a} / {b}": {"decision": PN_DECYZJE[(a, b)][0],
+                                                      "evidence": PN_DECYZJE[(a, b)][1]}
+                                       for a, b in pn["merge"] + pn["no_merge"]}},
             "notes": ["pozycje J2000 w stopniach; epoki zrodel znormalizowane po stronie VizieR",
                       "rozmiar LDN = kolo rownowazne z pola Area (katalog nie podaje srednicy)",
                       "typ zrodel bez wlasnej typologii przypisany z definicji katalogu",
-                      "dane pochodne z OpenNGC (CC-BY-SA-4.0) — patrz PROVENANCE.md"],
+                      "status s (confirmed/candidate/mimic) tylko przy PN Le Du+ 2022 - typ t "
+                      "to klasa obiektu, status to twierdzenie zrodla",
+                      "scalenie PN z decyzji (merge.pn_decisions): zwyciezca PN wnosi typ, pozycje "
+                      "i rozmiar (Sh2-123: 15'x13' z Le Du zamiast 13' Sharplessa), przegrany "
+                      "zostaje w n",
+                      "Arp (VII/192) wylacznie jako alias pierwszego skladnika nazwy",
+                      "dane pochodne z OpenNGC (CC-BY-SA-4.0) - patrz PROVENANCE.md"],
             "license": "CC-BY-SA-4.0 (dane); kod repozytorium: MIT"}
 
     if args.dry_run:

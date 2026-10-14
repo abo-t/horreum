@@ -405,3 +405,37 @@ def test_reka_NIETYKALNA_przy_rozdziale():
     s2 = run_grouper(con, now=NOW)                     # idempotencja rozdziału
     assert (s2.telescopes_proposed, s2.configs_proposed, s2.configs_assigned) == (0, 0, 0)
     con.close()
+
+
+# ─────────────── AR-134: faza 2 = populacja kolejki przeglądu (klatki aktywne)
+
+def test_przebieg_mija_klatki_ZASTAPIONE_i_WYCOFANE_licznik_rowny_Porzadkom():
+    """AR-134: faza 2 iterowała także klatki zastąpione i wycofane - log Dostawy mówił „konfig. do
+    przeglądu 424”, a Porządki (`review_state.no_config`, klatki aktywne) 423. Klatka nieaktywna
+    jest bez liczenia, bez flagi i bez przypięcia zestawu; licznik przebiegu = wiersz Porządków.
+    Faza 1 czyta dalej wszystkie nagłówki (teleskop z klatki wycofanej powstaje jak dotąd).
+    Falsyfikator: faza 2 po wszystkich wierszach → `config_review` 3 wobec 1, trzy zdarzenia
+    `config.review` i zestaw na klatce wycofanej."""
+    con, cam = _baza_raw()
+    aktywna = _klatka(con, cam, "a", telescop=None, focallen=None, filetype="fits")
+    zastapiona = _klatka(con, cam, "z", telescop=None, focallen=None, filetype="fits")
+    wycofana = _klatka(con, cam, "w", telescop=None, focallen=None, filetype="fits")
+    wycofana_tel = _klatka(con, cam, "t", telescop="RC8R", focallen=1600.0, filetype="fits")
+    con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (aktywna, zastapiona))
+    con.execute("UPDATE frame SET retired_at = ? WHERE id IN (?, ?)", (NOW, wycofana, wycofana_tel))
+    con.commit()
+
+    s = run_grouper(con, now=NOW)
+    assert (s.headers, s.telescop_missing, s.config_review) == (4, 1, 1)
+    assert s.config_review == resolver.review_state(con).no_config == 1
+    flagowane = [r[0] for r in con.execute(
+        "SELECT target FROM event WHERE verb = 'config.review' ORDER BY id")]
+    assert flagowane == [f"frame:{aktywna}"]
+    assert s.telescopes_proposed == 1                          # faza 1 bez zmian
+    assert con.execute("SELECT config_id FROM frame WHERE id = ?",
+                       (wycofana_tel,)).fetchone()[0] is None  # bez przypięcia
+    assert (s.configs_proposed, s.configs_assigned) == (0, 0)
+    # audyt §5.6 („każda klatka bez configu ma powód”) liczy tę samą populację - nieaktywna klatka
+    # bez flagi nie jest cichym NULL-em (bez członu aktywności luka = 3)
+    assert audit.config_review_reason_gap(con) == 0
+    con.close()

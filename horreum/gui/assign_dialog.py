@@ -493,6 +493,7 @@ class AssignObjectDialog(QDialog):
 
     def _fail(self, msg):
         self.error.setText(msg)
+        self._dopasuj_wysokosc()
 
     _broni_sie_sama = staticmethod(broni_sie_sama)     # funkcja modułowa (R-S2b-12) — jeden właściciel
 
@@ -546,6 +547,35 @@ class AssignObjectDialog(QDialog):
         self.own_note.setVisible(wlasny)
         if wlasny:
             self.own_note.setText(i18n.t("assign.own_object_note", canon=ident.canon))
+        # AR-135: wybór z listy starej tożsamości pary `catalog_xref` (`M33` obok żywego `NGC598`)
+        # idzie do celu pary - zdanie mówi to przed kliknięciem, tą samą regułą co zapis.
+        wybor = self.combo.currentData() if not text else None
+        cel = queries.xref_live_target(self.con, wybor[1]) if wybor is not None else None
+        if cel is not None:
+            self.canon_preview.setVisible(True)
+            self.canon_preview.setText(i18n.t("assign.xref_redirect", old=wybor[1],
+                                              new=cel["canon"]))
+        self._dopasuj_wysokosc()
+
+    def _dopasuj_wysokosc(self):
+        """Okno ROŚNIE (tylko w górę) do wysokości, której treść potrzebuje przy BIEŻĄCEJ
+        szerokości - etykiety zawijają zdania (nagłówek, zdanie na żywo, noty, błąd), więc ich
+        wysokość zależy od szerokości (`heightForWidth`). Bez tego okno zostawało przy rozmiarze
+        z otwarcia, a druga linia zdania „…zapis założy go w bazie” i nagłówka była ucięta
+        w pół wiersza (wizytacja natywna: etykiety 24 px przy potrzebnych 32). Wołane po każdej
+        zmianie tych zdań i przy pokazaniu okna; okno niepokazane nie ma jeszcze szerokości."""
+        if not self.isVisible():
+            return
+        lay = self.layout()
+        lay.activate()
+        potrzeba = (lay.totalHeightForWidth(self.width()) if lay.hasHeightForWidth()
+                    else lay.totalSizeHint().height())
+        if potrzeba > self.height():
+            self.resize(self.width(), potrzeba)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._dopasuj_wysokosc()
 
     def _ustaw_zakladanie(self, canon):
         """Przycisk akcji mówi WPROST, że zapis założy obiekt `canon` („Załóż NGC1952 · Przypisz
@@ -585,6 +615,11 @@ class AssignObjectDialog(QDialog):
                 return self._fail(i18n.t("assign.pick_or_designate"))
             _, canon, catalog = selected
             kind = None                                   # obiekt istnieje — repo nie INSERTuje
+            # AR-135: stara tożsamość pary `catalog_xref` z ŻYWYM celem → cel pary (jedna reguła
+            # z celem gestu „Zmień obiekt…” i skrótem „ostatnio użyte”: `xref_live_target`).
+            cel = queries.xref_live_target(self.con, canon)
+            if cel is not None:
+                canon, catalog = cel["canon"], cel["catalog"]
         # Id po KANONIE, tą samą frazą co klinga (`queries.object_id_by_canon`), nie z biblioteki:
         # `library_objects` ma `JOIN frame`, więc obiekt bez klatek dla niej nie istnieje i pre-check
         # meldowałby konflikt tam, gdzie zapis przechodzi bez mrugnięcia.

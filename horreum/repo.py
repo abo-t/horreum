@@ -19,11 +19,14 @@ import os
 import zlib
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
+from enum import Enum
+from typing import NamedTuple
 
-from .resolve.paths import path_key            # klucz ścieżki fizycznej - jeden dla podglądu planera
+from .resolve.paths import path_key           # klucz ścieżki fizycznej - jeden dla podglądu planera
                                                 # i straży relokacji (liść `resolve`, bez cyklu)
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
+from .resolve.catalog import xref               # para katalogowa - strażnik wskrzeszenia (0040)
 from .resolve.channel import CHANNELS           # słownik kanału (0028) - liść, bez cyklu
 from .resolve.stack import raw_stem             # rdzeń nazwy pliku - alias dawnej nazwy (0034)
 from .resolve.frames import (HISTORY_MASTER_KINDS,   # pary przeliczenia rodzaju (AR-96)
@@ -1852,6 +1855,23 @@ def flag_kind_unmapped(con, *, frame_id, imagetyp, now, actor="scan"):
                    payload={"imagetyp": imagetyp})
 
 
+class Made(str, Enum):
+    """Wynik założenia osi (`propose_telescope`, `upsert_object`, `_upsert_object_tx`, 0040): nowy
+    wiersz, nagrobek przywrócony do osi, wiersz już żywy. Trzy stany, nie bool - wskrzeszony nagrobek
+    nie jest „nowym obiektem” w liczniku przebiegu, a ślad gestu (`made_object_id`) musi go znać.
+
+    `str` (porównanie z `"created"` działa), a `bool()` rzuca `TypeError` (EXPECT): dawny kontrakt
+    był boolem „nowy wiersz”, więc wołający z `if created:` albo `sum(...)` liczyłby `EXISTING` jako
+    nowy - po cichu. Niech pada głośno."""
+    CREATED = "created"
+    UNRETIRED = "unretired"
+    EXISTING = "existing"
+
+    def __bool__(self):
+        raise TypeError(f"wynik założenia osi {self.value!r} nie jest prawdą logiczną - porównaj "
+                        "z `Made.CREATED`/`Made.UNRETIRED`/`Made.EXISTING`")
+
+
 def propose_telescope(con, *, telescop_canon, f_ratio_nominal=None, focal_nominal=None,
                       member_count=None, now, actor="grouper"):
     """Wyłoń teleskop (oś) z nagłówków — `status='proposed'`, `label=NULL` (etykieta/scalanie =
@@ -1859,17 +1879,32 @@ def propose_telescope(con, *, telescop_canon, f_ratio_nominal=None, focal_nomina
     8 nazw × 1 ogniskowa — brief §3). Idempotentny po canonie: SELECT po kolumnie
     `UNIQUE COLLATE NOCASE` — to JEDYNY mechanizm foldowania wielkości liter (R2#8; grouper NIE
     folduje w Pythonie); casing wyświetlany = pierwszego wystąpienia. `f_ratio_nominal`/
-    `focal_nominal` to nullable WŁAŚCIWOŚCI (audyt/wyświetlanie), nie klucz. Istnieje →
-    (id, False) bez eventu; nowy → INSERT + `event(telescope.proposed)`."""
+    `focal_nominal` to nullable WŁAŚCIWOŚCI (audyt/wyświetlanie), nie klucz.
+
+    → `(id, wynik)`, `wynik` ∈ `Made`: `EXISTING` (żywy wiersz, bez eventu), `CREATED` (INSERT +
+    `event(telescope.proposed)`), `UNRETIRED` (nazwa należała do nagrobka - wiersz wraca do osi
+    z polami ręki sprzed nagrobka + `event(telescope.unretired)`, 0040). Nagrobek nie jest „nowym
+    teleskopem” dla licznika przebiegu i nie dostaje drugiego `proposed` (parytet wiersz == proposed).
+
+    WSKRZESZENIE ROZSTRZYGA WARUNKOWY `UPDATE` (`_unretire_telescope_tx`: `WHERE retired_at IS NOT
+    NULL`, wynik z `rowcount`), nie odczyt sprzed transakcji: dwóch pisarzy, którzy obaj widzieli
+    nagrobek, nie wskrzesi go dwa razy - drugi dostaje `EXISTING` bez zdarzenia. Transakcja `with
+    con:` jak dotąd (nie `_immediate`): wołający z otwartą niejawną transakcją (fixture'y z gołym
+    SQL-em) nie dostaje „transakcja w transakcji”."""
     canon = str(telescop_canon).strip()
     if not canon:
         raise ValueError("telescop_canon pusty — brak TELESCOP to config.review, nie oś")
     row = con.execute(
-        "SELECT id FROM telescope WHERE telescop_canon = ?", (canon,)).fetchone()
-    if row is not None:
-        return row[0], False
-
+        "SELECT id, retired_at FROM telescope WHERE telescop_canon = ?", (canon,)).fetchone()
+    if row is not None and row["retired_at"] is None:
+        return row[0], Made.EXISTING
     with con:
+        if row is not None:
+            if _unretire_telescope_tx(con, telescope_id=row[0], now=now, actor=actor,
+                                      payload={"telescop_canon": canon,
+                                               "member_count": member_count}):
+                return row[0], Made.UNRETIRED
+            return row[0], Made.EXISTING
         cur = con.execute(
             "INSERT INTO telescope(telescop_canon, label, f_ratio_nominal, focal_nominal, "
             "status, created_at) VALUES (?, NULL, ?, ?, 'proposed', ?)",
@@ -1882,7 +1917,43 @@ def propose_telescope(con, *, telescop_canon, f_ratio_nominal=None, focal_nomina
             payload={"telescop_canon": canon, "f_ratio_nominal": f_ratio_nominal,
                      "focal_nominal": focal_nominal, "member_count": member_count},
         )
-    return telescope_id, True
+    return telescope_id, Made.CREATED
+
+
+def _unretire_telescope_tx(con, *, telescope_id, now, actor, payload):
+    """Pod transakcją wołającego: nagrobek teleskopu wraca do osi (`retired_at` NULL) +
+    `event(telescope.unretired)` → `True`; wiersz już żywy → `False` bez zdarzenia (wynik
+    z `rowcount` warunkowego `UPDATE`, nie z wcześniejszego odczytu). Pola ręki zostają, jakie były -
+    nagrobek ich nie zerował."""
+    if con.execute("UPDATE telescope SET retired_at = NULL WHERE id = ? AND retired_at IS NOT NULL",
+                   (telescope_id,)).rowcount != 1:
+        return False
+    emit_event(con, actor=actor, verb="telescope.unretired", target=f"telescope:{telescope_id}",
+               now=now, payload=payload)
+    return True
+
+
+def _unretire_object_tx(con, *, object_id, canon, now, actor):
+    """Pod transakcją wołającego: nagrobek obiektu wraca do osi + `event(object.unretired)` →
+    `True`; obiekt już żywy → `False` bez zdarzenia (`rowcount` warunkowego `UPDATE`).
+
+    WYŁĄCZNIE PRZY KANONIE NADAL KANONICZNYM: kanon, który jest dziś kluczem pary `catalog_xref`
+    (`M33` po dopisaniu `M33 → NGC598`), nazywa cel pary, nie siebie - wskrzeszenie przywróciłoby
+    starą tożsamość obok celu. Wołający, który przyniósł taki kanon, ominął przekierowanie drabiny
+    (`queries.object_target`, resolver) → `ValueError`, zero zapisu (EXPECT)."""
+    if con.execute("SELECT 1 FROM object WHERE id = ? AND retired_at IS NOT NULL",
+                   (object_id,)).fetchone() is None:
+        return False                                  # żywy - strażnik pary go nie dotyczy
+    cel = xref(canon)
+    if cel != canon:
+        raise ValueError(f"obiekt '{canon}' to nagrobek, a jego kanon prowadzi dziś przez parę "
+                         f"katalogową do '{cel}' - nagrobka nie wskrzeszam, celem jest '{cel}'")
+    if con.execute("UPDATE object SET retired_at = NULL WHERE id = ? AND retired_at IS NOT NULL",
+                   (object_id,)).rowcount != 1:
+        return False
+    emit_event(con, actor=actor, verb="object.unretired", target=f"object:{object_id}", now=now,
+               payload={"canon": canon})
+    return True
 
 
 def propose_config(con, *, telescope_id, camera_id, now, actor="grouper"):
@@ -2102,8 +2173,12 @@ def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwr
     # źródłowego i docelowego (`refresh_all_optics` → `_tx`) musi dołączyć do TEJ transakcji - goły
     # `with con:` w środku `_immediate` zatwierdziłby gest w połowie.
     with atomic(con):
-        if con.execute("SELECT 1 FROM telescope WHERE id = ?", (telescope_id,)).fetchone() is None:
+        cel = con.execute("SELECT retired_at FROM telescope WHERE id = ?",
+                          (telescope_id,)).fetchone()
+        if cel is None:
             raise ValueError(f"telescope:{telescope_id} nie istnieje")
+        if cel["retired_at"] is not None:
+            raise ValueError(f"telescope:{telescope_id} to nagrobek - klatek mu nie przypisuję")
         actor = f"user:{uid}"
         zrodla = set()                           # teleskopy, z których klatki wyszły (N2)
         cfg_per_camera = {}                      # kamera → config; jeden SELECT na korpus, nie na klatkę
@@ -2175,34 +2250,52 @@ def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwr
 
 def upsert_object(con, *, canon, catalog, kind, now, actor="resolver"):
     """Wyłoń obiekt (oś) z rozwiązania `object_raw`. Tożsamość = `canon` (UNIQUE, NGC-wins).
-    Istnieje → (id, False) bez eventu; nowy → INSERT + `event(object.upserted)` w tej samej
-    transakcji; (id, True). Obiekty wyłaniają się z realnych nagłówków (jak kamery), nie a priori."""
-    row = con.execute("SELECT id FROM object WHERE canon = ?", (canon,)).fetchone()
-    if row is not None:
-        return row[0], False
-
-    with con:  # atomowo: INSERT object + INSERT event
+    → `(id, wynik)`, `wynik` ∈ `Made`: żywy → `EXISTING` bez eventu; nowy → INSERT +
+    `event(object.upserted)` w tej samej transakcji, `CREATED`; nagrobek (0040) → wraca do osi +
+    `event(object.unretired)`, `UNRETIRED` (strażnik kanonu: `_unretire_object_tx`). Obiekty
+    wyłaniają się z realnych nagłówków (jak kamery), nie a priori. Wskrzeszenie rozstrzyga
+    warunkowy `UPDATE` z `rowcount` (`_unretire_object_tx`) - jak w `propose_telescope`: dwóch
+    pisarzy nie wskrzesi jednego nagrobka dwa razy."""
+    row = con.execute("SELECT id, retired_at FROM object WHERE canon = ?", (canon,)).fetchone()
+    if row is not None and row["retired_at"] is None:
+        return row[0], Made.EXISTING
+    with con:  # atomowo: INSERT/wskrzeszenie + event
+        if row is not None:
+            if _unretire_object_tx(con, object_id=row[0], canon=canon, now=now, actor=actor):
+                return row[0], Made.UNRETIRED
+            return row[0], Made.EXISTING
         cur = con.execute(
             "INSERT INTO object(canon, catalog, kind) VALUES (?, ?, ?)", (canon, catalog, kind))
         object_id = cur.lastrowid
         emit_event(con, actor=actor, verb="object.upserted", target=f"object:{object_id}",
                    now=now, payload={"canon": canon, "catalog": catalog, "kind": kind})
-    return object_id, True
+    return object_id, Made.CREATED
+
+
+class AliasWrite(NamedTuple):
+    """Wynik `add_object_alias`. `conflict_object_id` niepuste = nazwa należy do INNEGO obiektu
+    (zero zapisu) - wołający dostaje konflikt wprost, zamiast cichego „już jest” (AR-135)."""
+    alias_id: int
+    created: bool
+    conflict_object_id: int | None
 
 
 def add_object_alias(con, *, alias_norm, object_id, source, now, actor="resolver"):
     """Zapisz równoważność `alias_norm` → obiekt (audyt „M106 ≡ NGC4258 via catalog_xref"). Po
-    `UNIQUE(alias_norm)`: znana → (id, False) bez eventu (idempotencja); nowa → INSERT +
-    `event(object.aliased)`; (id, True). `source` ∈ `resolve.objects.ALIAS_SOURCES` — JEDEN
+    `UNIQUE(alias_norm)`: znana przy TYM obiekcie → `(id, False, None)` bez eventu (idempotencja);
+    nowa → INSERT + `event(object.aliased)`; `(id, True, None)`. Znana przy INNYM obiekcie →
+    `(id, False, id_tamtego_obiektu)` bez zapisu i bez eventu: KONFLIKT należy do wołającego,
+    który zbiera go po unikalnej parze i zgłasza stan raz na przebieg (`resolver`,
+    `flag_object_alias_conflict_state`) - zdarzenie per wołanie byłoby historią bez końca, bo
+    przebieg woła tę funkcję per klatka. `source` ∈ `resolve.objects.ALIAS_SOURCES` - JEDEN
     właściciel enumu; wyliczanka w tym docstringu rozjeżdżała się z DDL-em o `review`, a DDL
     `frame.object_source` rozjeżdżał się z żywą bazą o cztery wartości. `region` w tym zbiorze
-    NIE występuje ŚWIADOMIE: kompleks
-    rozpoznaje się ze WSPÓŁRZĘDNYCH, więc nie ma nazwy do zapisania jako równoważność — a alias
-    z surowego stringa byłby cichym konfliktem, bo ta funkcja zwraca istniejący wiersz po samym
-    `alias_norm`, BEZ sprawdzenia `object_id` (zob. `resolve/regions.py`)."""
-    row = con.execute("SELECT id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
+    NIE występuje ŚWIADOMIE: kompleks rozpoznaje się ze WSPÓŁRZĘDNYCH, więc nie ma nazwy do
+    zapisania jako równoważność (zob. `resolve/regions.py`)."""
+    row = con.execute("SELECT id, object_id FROM object_alias WHERE alias_norm = ?",
+                      (alias_norm,)).fetchone()
     if row is not None:
-        return row[0], False
+        return AliasWrite(row[0], False, None if row[1] == object_id else row[1])
 
     with con:  # atomowo: INSERT object_alias + INSERT event
         cur = con.execute(
@@ -2211,7 +2304,97 @@ def add_object_alias(con, *, alias_norm, object_id, source, now, actor="resolver
         alias_id = cur.lastrowid
         emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
                    now=now, payload={"alias_norm": alias_norm, "source": source})
-    return alias_id, True
+    return AliasWrite(alias_id, True, None)
+
+
+class AliasRebind(NamedTuple):
+    """Wynik `rebind_object_alias`: czy równoważność przeszła do celu i ile klatek poszło za nią."""
+    rebound: bool
+    frames: int
+
+
+def rebind_object_alias(con, *, alias_norm, object_id, expected_object_id, now,
+                        actor="resolver"):
+    """Przepnij równoważność `alias_norm` z `expected_object_id` na `object_id` RAZEM z klatkami,
+    które dostały obiekt z tej równoważności - nazwa, która jest kluczem pary `catalog_xref`, idzie
+    do CELU pary (AR-135: para dopisana po fakcie zostawiała alias przy starym obiekcie, a klatki
+    z nagłówka szły już do celu). JEDNA transakcja `_immediate`: UPDATE aliasu (`source` staje się
+    `catalog_xref`, bo to para niesie teraz równoważność) + `object.alias_rebound` (stan sprzed),
+    potem każda klatka `object_source='alias'` starego obiektu, której zeznanie `OBJECT` jest tą
+    nazwą, z parą `object.unassigned`/`object.assigned` - jak `assign_object`. Awaria w połowie
+    cofa WSZYSTKO: osobne transakcje zostawiały alias przy celu, a klatki przy starym obiekcie na
+    zawsze (następny przebieg mija alias, który już wskazuje cel). Liczność aliasów się nie zmienia,
+    więc parytet `§5.9` zostaje domknięty.
+
+    CAS W `WHERE`, nie w odczycie przed transakcją: alias przechodzi tylko, gdy nadal wskazuje
+    `expected_object_id` i nie jest ręki; klatka - gdy nadal ma stary obiekt ze źródłem `alias`.
+    Zwraca `AliasRebind(False, 0)` bez zapisu, gdy: aliasu nie ma, wskazuje inny obiekt, ma
+    `source='user'` albo cel jest NAGROBKIEM (0040) lub go nie ma. RĘKA ZOSTAJE: równoważność
+    nauczona gestem i klatka ręki są zeznaniem człowieka - wołający zgłasza je jako konflikt, ta
+    klinga ich nie rusza także wtedy, gdy wołający przefiltrował źle. Alias na nagrobku przypinałby
+    do niego klatki szczeblem aliasu przebiegu, więc nagrobek celem nie jest."""
+    with _immediate(con):
+        cel = con.execute("SELECT retired_at FROM object WHERE id = ?", (object_id,)).fetchone()
+        row = con.execute(
+            "SELECT id, source FROM object_alias "
+            "WHERE alias_norm = ? AND object_id = ? AND source != 'user'",
+            (alias_norm, expected_object_id)).fetchone()
+        if cel is None or cel["retired_at"] is not None or row is None:
+            return AliasRebind(False, 0)
+        if con.execute(
+                "UPDATE object_alias SET object_id = ?, source = 'catalog_xref' "
+                "WHERE id = ? AND object_id = ? AND source != 'user'",
+                (object_id, row["id"], expected_object_id)).rowcount != 1:
+            return AliasRebind(False, 0)
+        emit_event(con, actor=actor, verb="object.alias_rebound", target=f"object:{object_id}",
+                   now=now, payload={"alias_norm": alias_norm, "source": row["source"],
+                                     "object_id": expected_object_id,
+                                     "next_object_id": object_id},
+                   reason="nazwa jest kluczem pary catalog_xref - równoważność idzie do celu pary")
+        klatki = 0
+        for f in con.execute(
+                "SELECT f.id AS fid, h.object_raw AS raw FROM frame f "
+                "JOIN header h ON h.frame_id = f.id "
+                "WHERE f.object_id = ? AND f.object_source = 'alias' ORDER BY f.id",
+                (expected_object_id,)).fetchall():
+            if f["raw"] is None or norm_alnum(str(f["raw"])) != alias_norm:
+                continue
+            if con.execute(
+                    "UPDATE frame SET object_id = ? "
+                    "WHERE id = ? AND object_id = ? AND object_source = 'alias'",
+                    (object_id, f["fid"], expected_object_id)).rowcount != 1:
+                continue
+            emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{f['fid']}",
+                       now=now, payload={"object_id": expected_object_id, "object_source": "alias"},
+                       reason="równoważność nazwy przepięta do celu pary catalog_xref")
+            emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{f['fid']}",
+                       now=now, payload={"object_id": object_id, "object_source": "alias"})
+            klatki += 1
+    return AliasRebind(True, klatki)
+
+
+def flag_object_alias_conflict_state(con, items, now, actor="resolver"):
+    """STAN konfliktów nazw osi obiektu po przebiegu - JEDNO zdarzenie
+    `object.alias_conflict_state` z pełną listą, emitowane WYŁĄCZNIE przy zmianie stanu wobec
+    ostatniego takiego zdarzenia (AR-135). `items` = `[alias_norm, object_id_zajmujący,
+    kanon_oczekiwany]`: nazwa, którą drabina daje dziś obiektowi `kanon_oczekiwany`, a równoważność
+    w bazie wiąże z innym. Kolejny przebieg z tym samym stanem jest ciszą; zejście do pustej listy
+    jest zmianą i niesie `count: 0` (konflikt rozstrzygnięty). Zwraca True, gdy zdarzenie poszło.
+
+    RAPORT, NIE ZAPIS - jak `flag_object_alias_conflicts`: rozstrzyga człowiek (wiersz Porządków
+    „Nazwa katalogowa wskazuje inny obiekt”, `gui.queries.xref_reconcile_rows`)."""
+    stan = sorted([str(a), int(o), str(c)] for a, o, c in items)
+    row = con.execute(
+        "SELECT payload FROM event WHERE verb = 'object.alias_conflict_state' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    bylo = json.loads(row[0])["items"] if row is not None and row[0] else []
+    if stan == bylo:
+        return False
+    with con:
+        emit_event(con, actor=actor, verb="object.alias_conflict_state", target="object:*",
+                   now=now, payload={"count": len(stan), "items": stan},
+                   reason="nazwa wskazuje w bazie inny obiekt niż drabina nazwy")
+    return True
 
 
 def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolver"):
@@ -2611,25 +2794,32 @@ def _object_target(con, canon, alias_norm):
 
 def _upsert_object_tx(con, *, canon, catalog, kind, alias_norm, actor, now):
     """Pod transakcją wołającego: obiekt celu gestu ręki (`INSERT object` + `object.upserted`, gdy
-    kanonu nie ma) i alias wpisanej nazwy (`source='user'` + `object.aliased`, gdy nowy) → id obiektu.
-    JEDNO miejsce dla obu klingi ręki (`user_assign_object`, `user_override_object`) - druga kopia
-    tej drabiny rozjechałaby się o pierwszy dopisany guard. Konflikt aliasu → `ValueError` PRZED
-    pierwszym zapisem (`_object_target`)."""
+    kanonu nie ma; nagrobek wraca do osi - `_unretire_object_tx`) i alias wpisanej nazwy
+    (`source='user'` + `object.aliased`, gdy nowy) → `(id obiektu, wynik ∈ Made, id aliasu
+    założonego TERAZ albo None)` - dwa ostatnie to ślad nagrobka gestu (0040). JEDNO miejsce dla obu
+    klingi ręki (`user_assign_object`, `user_override_object`) - druga kopia tej drabiny rozjechałaby
+    się o pierwszy dopisany guard. Konflikt aliasu → `ValueError` PRZED pierwszym zapisem
+    (`_object_target`)."""
     object_id, alias_znany = _object_target(con, canon, alias_norm)
+    wynik = Made.EXISTING
     if object_id is None:
         cur = con.execute(
             "INSERT INTO object(canon, catalog, kind) VALUES (?, ?, ?)",
             (canon, catalog, kind))
         object_id = cur.lastrowid
+        wynik = Made.CREATED
         emit_event(con, actor=actor, verb="object.upserted", target=f"object:{object_id}",
                    now=now, payload={"canon": canon, "catalog": catalog, "kind": kind})
+    elif _unretire_object_tx(con, object_id=object_id, canon=canon, now=now, actor=actor):
+        wynik = Made.UNRETIRED
+    alias_id = None
     if alias_norm is not None and not alias_znany:
-        con.execute(
+        alias_id = con.execute(
             "INSERT INTO object_alias(alias_norm, object_id, source) VALUES (?, ?, 'user')",
-            (alias_norm, object_id))
+            (alias_norm, object_id)).lastrowid
         emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
                    now=now, payload={"alias_norm": alias_norm, "source": "user"})
-    return object_id
+    return object_id, wynik, alias_id
 
 
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
@@ -2706,8 +2896,8 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
         raise ValueError(f"object_source '{object_source}' spoza OBJECT_SOURCES")
     with _immediate(con):
         actor = f"user:{uid}"
-        object_id = _upsert_object_tx(con, canon=canon, catalog=catalog, kind=kind,
-                                      alias_norm=alias_norm, actor=actor, now=now)
+        object_id, _, _ = _upsert_object_tx(con, canon=canon, catalog=catalog, kind=kind,
+                                            alias_norm=alias_norm, actor=actor, now=now)
 
         assigned = kind_skip = source_skip = drift = stacks = 0
         zapisane = []
@@ -2894,11 +3084,16 @@ class ObjectOverride:
     """Jedno nadpisanie obiektu klatki ręką - materiał cofnięcia. `before` = `(object_id,
     object_source, object_cleared_id)` klatki sprzed gestu, odczytane pod blokadą zapisu;
     `object_id` = obiekt, który gest zapisał (źródło `user`); `reason` = gest (`release_object`,
-    `object_change`) - trafia do pary verbów gestu i, z dopiskiem `_undo`, do pary jego cofnięcia."""
+    `object_change`) - trafia do pary verbów gestu i, z dopiskiem `_undo`, do pary jego cofnięcia.
+    `made` (∈ `Made`) i `alias_id` = co gest założył PO DRODZE do tej klatki: obiekt nowy albo
+    wskrzeszony i alias wpisanej nazwy - materiał śladu przebiegu, z którego cofnięcie zdejmuje
+    nagrobkiem to, co gest założył (0040, `apply_object_change_item`)."""
     frame_id: int
     before: tuple
     object_id: int
     reason: str
+    made: Made = Made.EXISTING
+    alias_id: int | None = None
 
 
 def user_override_object(con, *, frame_id, canon, expected, now, reason, catalog=None, kind=None,
@@ -2974,8 +3169,8 @@ def _override_object_tx(con, *, frame_id, canon, catalog, kind, alias_norm, expe
     before = (fr["object_id"], fr["object_source"], fr["object_cleared_id"])
     if before != tuple(expected):
         return "drift", None
-    object_id = _upsert_object_tx(con, canon=canon, catalog=catalog, kind=kind,
-                                  alias_norm=alias_norm, actor=actor, now=now)
+    object_id, made, alias_id = _upsert_object_tx(con, canon=canon, catalog=catalog, kind=kind,
+                                                  alias_norm=alias_norm, actor=actor, now=now)
     if fr["object_id"] is not None:
         emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
                    now=now, payload={"object_id": fr["object_id"],
@@ -2987,7 +3182,7 @@ def _override_object_tx(con, *, frame_id, canon, catalog, kind, alias_norm, expe
                payload={"object_id": object_id, "object_source": "user", "reason": reason,
                         "before": {"object_id": before[0], "object_source": before[1],
                                    "object_cleared_id": before[2]}})
-    return "assigned", ObjectOverride(frame_id, before, object_id, reason)
+    return "assigned", ObjectOverride(frame_id, before, object_id, reason, made, alias_id)
 
 
 def restore_object_override(con, *, change, now, uid="local"):
@@ -3322,12 +3517,15 @@ def flag_observatory_review_summary(con, items, now, actor="resolver"):
 
 
 def _telescope_row(con, telescope_id):
-    """Wiersz teleskopu albo `ValueError` (błąd wołania — id spoza listy GUI). Zwraca (label, status,
-    merged_into)."""
+    """Wiersz teleskopu albo `ValueError` (błąd wołania - id spoza listy GUI; nagrobek - 0040: osi
+    takiego teleskopu nie ma, więc gest ręki go nie zmienia). Zwraca (label, status, merged_into)."""
     row = con.execute(
-        "SELECT label, status, merged_into FROM telescope WHERE id = ?", (telescope_id,)).fetchone()
+        "SELECT label, status, merged_into, retired_at FROM telescope WHERE id = ?",
+        (telescope_id,)).fetchone()
     if row is None:
         raise ValueError(f"telescope:{telescope_id} nie istnieje")
+    if row["retired_at"] is not None:
+        raise ValueError(f"telescope:{telescope_id} to nagrobek - gest osi go nie zmienia")
     return row["label"], row["status"], row["merged_into"]
 
 
@@ -3492,12 +3690,16 @@ def valid_telescope_name(con, name):
     Projektowana od zera (bramka planu, uwaga `kimi`): `label_telescope` sprawdza tylko pustość,
     a UNIQUE NOCASE ma wyłącznie `telescop_canon`. Nowa nazwa staje się i kanonem, i etykietą, więc
     nie wolno jej zderzyć ani z kanonem (UNIQUE wybuchłby w środku transakcji), ani z etykietą innego
-    teleskopu (dwa wiersze osi wyglądałyby jak jeden). Porównanie bez wielkości liter."""
+    teleskopu (dwa wiersze osi wyglądałyby jak jeden). Porównanie bez wielkości liter.
+
+    NAZWA NAGROBKA NIE JEST ZAJĘTA (0040): teleskopu o tej nazwie na osi nie ma, a „Dopisz nowy…”
+    pod nią przywraca wiersz nagrobka (`user_assign_config_new_telescope`) zamiast wybuchać na UNIQUE."""
     tekst = str(name or "").strip()
     if not tekst:
         raise ValueError("nazwa teleskopu jest pusta")
     zajety = con.execute(
-        "SELECT id FROM telescope WHERE telescop_canon = ? OR label = ? COLLATE NOCASE LIMIT 1",
+        "SELECT id FROM telescope WHERE (telescop_canon = ? OR label = ? COLLATE NOCASE) "
+        "AND retired_at IS NULL LIMIT 1",
         (tekst, tekst)).fetchone()
     if zajety is not None:
         raise ValueError(f"nazwa „{tekst}” jest już zajęta (telescope:{zajety['id']})")
@@ -3505,13 +3707,15 @@ def valid_telescope_name(con, name):
 
 
 def _telescope_optics_row(con, telescope_id):
-    """Wiersz optyki KANONICZNEGO teleskopu albo `ValueError` (brak wiersza, wiersz scalony - optyka
-    scalonego opisywałaby oś, której już nie ma; lustro `set_telescope_park`)."""
+    """Wiersz optyki KANONICZNEGO teleskopu albo `ValueError` (brak wiersza, nagrobek, wiersz scalony -
+    optyka scalonego opisywałaby oś, której już nie ma; lustro `set_telescope_park`)."""
     row = con.execute(
-        "SELECT focal_nominal, f_ratio_nominal, focal_user, f_ratio_user, merged_into "
+        "SELECT focal_nominal, f_ratio_nominal, focal_user, f_ratio_user, merged_into, retired_at "
         "FROM telescope WHERE id = ?", (telescope_id,)).fetchone()
     if row is None:
         raise ValueError(f"telescope:{telescope_id} nie istnieje")
+    if row["retired_at"] is not None:
+        raise ValueError(f"telescope:{telescope_id} to nagrobek - optyki mu nie zapisuję")
     if row["merged_into"] is not None:
         raise ValueError(f"telescope:{telescope_id} jest scalony (merged_into={row['merged_into']}) "
                          "- optyka tylko dla kanonicznego")
@@ -3630,33 +3834,321 @@ def user_assign_config_new_telescope(con, *, frame_ids, name, focal_mm, f_ratio=
     z plików liczona TĄ SAMĄ derywacją co Dostawa (`grouper.optics_from_files`) na przypiętych klatkach.
 
     Walidacja WSZYSTKICH pól przed pierwszym DML (wspólne walidatory). Zero przypisanych klatek →
-    `ValueError` i wycofanie całości. Zwraca `(telescope_id, ConfigGesture)`."""
+    `ValueError` i wycofanie całości. Zwraca `(telescope_id, ConfigGesture)`.
+
+    NAZWA NAGROBKA (0040): wiersz nagrobka wraca do osi (`telescope.unretired` zamiast `proposed` -
+    wiersz nie powstaje drugi raz), a pola dostają wartości z okna tymi samymi gestami osi, także f/
+    i park pusty (okno pokazuje stan, który gest ma zapisać, nie pola sprzed nagrobka).
+
+    ŚLAD GESTU (`telescope_add`, 0040): teleskop i granice zdarzeń tej transakcji - z nich „Cofnij
+    dopisanie” (`undo_new_telescope`) odtwarza stan klatek sprzed gestu i odróżnia zdarzenia gestu
+    od późniejszych zdarzeń ręki."""
     focal_mm = valid_telescope_focal(focal_mm)
     f_ratio = None if f_ratio is None else valid_telescope_f_ratio(f_ratio)
     in_park = valid_telescope_park(in_park)
     via = f"add:{source_telescope_id}" if source_telescope_id is not None else "add"
     with atomic(con):
         nazwa = valid_telescope_name(con, name)
-        cur = con.execute(
-            "INSERT INTO telescope(telescop_canon, label, f_ratio_nominal, focal_nominal, "
-            "status, created_at) VALUES (?, NULL, NULL, NULL, 'proposed', ?)", (nazwa, now))
-        tid = cur.lastrowid
-        emit_event(con, actor=f"user:{uid}", verb="telescope.proposed", target=f"telescope:{tid}",
-                   now=now, payload={"telescop_canon": nazwa, "f_ratio_nominal": None,
-                                     "focal_nominal": None, "member_count": len(frame_ids),
-                                     "via": via})
+        grob = con.execute(
+            "SELECT id FROM telescope WHERE telescop_canon = ? AND retired_at IS NOT NULL",
+            (nazwa,)).fetchone()
+        if grob is None:
+            cur = con.execute(
+                "INSERT INTO telescope(telescop_canon, label, f_ratio_nominal, focal_nominal, "
+                "status, created_at) VALUES (?, NULL, NULL, NULL, 'proposed', ?)", (nazwa, now))
+            tid = cur.lastrowid
+            emit_event(con, actor=f"user:{uid}", verb="telescope.proposed",
+                       target=f"telescope:{tid}",
+                       now=now, payload={"telescop_canon": nazwa, "f_ratio_nominal": None,
+                                         "focal_nominal": None, "member_count": len(frame_ids),
+                                         "via": via})
+        else:
+            tid = grob["id"]
+            _unretire_telescope_tx(con, telescope_id=tid, now=now, actor=f"user:{uid}",
+                                   payload={"telescop_canon": nazwa,
+                                            "member_count": len(frame_ids), "via": via})
+        pierwsze = con.execute("SELECT max(id) FROM event").fetchone()[0]
         label_telescope(con, telescope_id=tid, label=nazwa, now=now, uid=uid)
         approve_telescope(con, telescope_id=tid, now=now, uid=uid)
         set_telescope_focal(con, telescope_id=tid, focal_mm=focal_mm, now=now, uid=uid)
         if f_ratio is not None:
             set_telescope_f_ratio(con, telescope_id=tid, f_ratio=f_ratio, now=now, uid=uid)
+        else:                                # nowy wiersz: bez zdarzenia; nagrobek: f/ z okna
+            clear_telescope_f_ratio(con, telescope_id=tid, now=now, uid=uid)
         set_telescope_park(con, telescope_id=tid, in_park=in_park, now=now, uid=uid, via=via)
         g = user_assign_config(con, frame_ids=frame_ids, telescope_id=tid, now=now, uid=uid,
                                overwrite=True)
         if not g.assigned:
             raise ValueError("żadna ze wskazanych klatek nie dostała zestawu - teleskop nie powstaje")
         # wartość z plików nowego teleskopu i źródeł odświeżył już `user_assign_config` (N2)
+        con.execute(
+            "INSERT INTO telescope_add(telescope_id, first_event_id, last_event_id, created_at) "
+            "VALUES (?, ?, (SELECT max(id) FROM event), ?)", (tid, pierwsze, now))
     return tid, g
+
+
+# ============================================================ nagrobek osi (0040, AR-133/AR-137, `Q8`)
+#
+# „Cofnij” gestu, który ZAŁOŻYŁ obiekt („Zmień obiekt…”) albo teleskop („Dopisz nowy…”), zdejmuje go
+# z list wyboru, gdy nie ma klatek ani faktów ręki spoza gestu - nagrobkiem (`retired_at`), nie
+# `DELETE`: wiersz, pola ręki i dziennik zostają. Założenie pod tą samą nazwą przywraca wiersz
+# (`*.unretired` w pisarzach osi). Jedna klinga dla obu osi, osobny literał SQL na oś.
+
+RETIRE_REFUSALS = ("frames", "cleared_memory", "live_run", "foreign_alias", "merged", "members",
+                   "profile", "calibration_fact", "hand_after", "undone", "source_retired")
+"""Powody odmowy nagrobka (`retire_orphan`) i cofnięcia dopisania (`undo_new_telescope`) - tokeny,
+z których powierzchnia składa zdanie (`object.config_undo_add.refused.<token>`, parytet w testach):
+  * `frames` - klatki wskazują encję (teleskop: przez zestaw);
+  * `cleared_memory` - nagrobek klatki pamięta ten obiekt (`object_cleared_id`, „Przywróć” by go wołał);
+  * `live_run` - inny niecofnięty przebieg „Zmień obiekt…” ma go w pozycji (cofnięcie by go przywróciło);
+  * `foreign_alias` - alias spoza gestu (ręka sprzed gestu, słownik, inny przebieg);
+  * `merged` / `members` - teleskop scalony albo ze członkami scalenia;
+  * `profile` / `calibration_fact` - profil kalibracji albo fakt przepisu klatki wskazuje teleskop;
+  * `hand_after` - zdarzenie ręki na teleskopie PO geście (etykieta, park, optyka zmienione później);
+  * `undone` - gest już cofnięty (wyłącznie `undo_new_telescope`);
+  * `source_retired` - klatka wróciłaby do zestawu teleskopu, który jest już nagrobkiem (późniejszy
+    gest przepiął klatki innego dopisania, a tamto cofnięto) - wyłącznie `undo_new_telescope`."""
+
+
+def _odmowa_nagrobka(con, *, axis, entity_id, trail, frames=True):
+    """Pod transakcją wołającego: powód odmowy nagrobka (`RETIRE_REFUSALS`) albo None. `trail` =
+    wiersz śladu gestu: przebieg (`object_change_run`) dla obiektu, `telescope_add` dla teleskopu.
+    `frames=False` pomija warunek klatek - cofnięcie dopisania pyta o resztę PRZED rozpięciem klatek,
+    żeby odmowa nie zostawiała pół-cofnięcia."""
+    if axis == "object":
+        if frames and con.execute("SELECT 1 FROM frame WHERE object_id = ? LIMIT 1",
+                                  (entity_id,)).fetchone() is not None:
+            return "frames"
+        if con.execute("SELECT 1 FROM frame WHERE object_cleared_id = ? LIMIT 1",
+                       (entity_id,)).fetchone() is not None:
+            return "cleared_memory"
+        if con.execute(
+                "SELECT 1 FROM pending_object_change p "
+                "JOIN object_change_run r ON r.run_id = p.run_id "
+                "WHERE r.run_id <> ? AND r.status <> 'undone' AND ? IN (p.object_id, "
+                "      p.before_object_id, p.expected_object_id, p.before_cleared_id, "
+                "      p.expected_cleared_id) LIMIT 1",
+                (trail["run_id"], entity_id)).fetchone() is not None \
+                or con.execute(
+                    "SELECT 1 FROM object_change_run WHERE run_id <> ? AND status <> 'undone' "
+                    "AND made_object_id = ? LIMIT 1",
+                    (trail["run_id"], entity_id)).fetchone() is not None:
+            return "live_run"
+        for a in con.execute("SELECT id, alias_norm FROM object_alias WHERE object_id = ?",
+                             (entity_id,)).fetchall():
+            if (a["id"], a["alias_norm"]) != (trail["made_alias_id"], trail["alias_norm"]):
+                return "foreign_alias"
+        return None
+    t = con.execute("SELECT merged_into FROM telescope WHERE id = ?", (entity_id,)).fetchone()
+    if t["merged_into"] is not None:
+        return "merged"
+    if con.execute("SELECT 1 FROM telescope WHERE merged_into = ? LIMIT 1",
+                   (entity_id,)).fetchone() is not None:
+        return "members"
+    if frames and con.execute(
+            "SELECT 1 FROM frame f JOIN config c ON c.id = f.config_id "
+            "WHERE c.telescope_id = ? LIMIT 1", (entity_id,)).fetchone() is not None:
+        return "frames"
+    if con.execute("SELECT 1 FROM calibration_profile WHERE telescope_id = ? LIMIT 1",
+                   (entity_id,)).fetchone() is not None:
+        return "profile"
+    if con.execute(
+            "SELECT 1 FROM calibration_fact WHERE key = 'telescope_id' "
+            "AND CAST(value AS INTEGER) = ? LIMIT 1", (entity_id,)).fetchone() is not None:
+        return "calibration_fact"
+    # Zdarzenia SAMEGO gestu (`proposed`/`unretired` → `labeled` → `approved` → optyka → `parked`
+    # i `config.*`) leżą w granicach śladu i powodem odmowy nie są; ręka PO geście - jest. Wartość
+    # z plików (`telescope.optics_derived`) faktem ręki nie jest, choć gest przypięcia klatek innego
+    # teleskopu liczy ją z aktorem `user:*` (`user_assign_config` → `refresh_all_optics`).
+    if con.execute(
+            "SELECT 1 FROM event WHERE target = ? AND actor LIKE 'user:%' AND id > ? "
+            "AND verb <> 'telescope.optics_derived' LIMIT 1",
+            (f"telescope:{entity_id}", trail["last_event_id"])).fetchone() is not None:
+        return "hand_after"
+    return None
+
+
+def _retire_orphan_tx(con, *, axis, entity_id, now, actor, run_id=None, add_id=None):
+    """Rdzeń `retire_orphan` BEZ własnej transakcji → powód odmowy (`RETIRE_REFUSALS`) albo None
+    (nagrobek postawiony albo encja już nim jest - bez zapisu i bez zdarzenia)."""
+    if axis == "object":
+        trail = con.execute(
+            "SELECT run_id, made_object_id, made_alias_id, alias_norm FROM object_change_run "
+            "WHERE run_id = ?", (run_id,)).fetchone()
+        if trail is None or trail["made_object_id"] != entity_id:
+            raise ValueError(f"przebieg {run_id!r} nie założył object:{entity_id} - nagrobek "
+                             "zdejmuje wyłącznie to, co gest założył")
+        row = con.execute("SELECT canon, retired_at FROM object WHERE id = ?",
+                          (entity_id,)).fetchone()
+        if row["retired_at"] is not None:
+            return None
+        powod = _odmowa_nagrobka(con, axis=axis, entity_id=entity_id, trail=trail)
+        if powod is not None:
+            return powod
+        for a in con.execute("SELECT id, alias_norm, source FROM object_alias WHERE object_id = ?",
+                             (entity_id,)).fetchall():
+            con.execute("DELETE FROM object_alias WHERE id = ?", (a["id"],))
+            emit_event(con, actor=actor, verb="object.alias_retired", target=f"object:{entity_id}",
+                       now=now, payload={"alias_norm": a["alias_norm"], "source": a["source"],
+                                         "run_id": run_id},
+                       reason="nazwa założona gestem zdjęta razem z obiektem po cofnięciu")
+        con.execute("UPDATE object SET retired_at = ? WHERE id = ?", (now, entity_id))
+        emit_event(con, actor=actor, verb="object.retired", target=f"object:{entity_id}", now=now,
+                   payload={"canon": row["canon"], "run_id": run_id})
+        return None
+    if axis != "telescope":
+        raise ValueError(f"oś nagrobka {axis!r} spoza ('object', 'telescope')")
+    trail = con.execute("SELECT id, telescope_id, last_event_id FROM telescope_add WHERE id = ?",
+                        (add_id,)).fetchone()
+    if trail is None or trail["telescope_id"] != entity_id:
+        raise ValueError(f"ślad dopisania {add_id!r} nie założył telescope:{entity_id} - nagrobek "
+                         "zdejmuje wyłącznie to, co gest założył")
+    row = con.execute("SELECT telescop_canon, retired_at FROM telescope WHERE id = ?",
+                      (entity_id,)).fetchone()
+    if row["retired_at"] is not None:
+        return None
+    powod = _odmowa_nagrobka(con, axis=axis, entity_id=entity_id, trail=trail)
+    if powod is not None:
+        return powod
+    con.execute("UPDATE telescope SET retired_at = ? WHERE id = ?", (now, entity_id))
+    emit_event(con, actor=actor, verb="telescope.retired", target=f"telescope:{entity_id}",
+               now=now, payload={"telescop_canon": row["telescop_canon"], "add_id": add_id})
+    return None
+
+
+def retire_orphan(con, *, axis, entity_id, now, uid="local", run_id=None, add_id=None):
+    """NAGROBEK OBIEKTU ALBO TELESKOPU, który gest założył (0040, decyzja `Q8`) - jedna transakcja
+    `_immediate` → powód odmowy (`RETIRE_REFUSALS`) albo None. Zwykle woła ją cofnięcie gestu
+    (`close_object_change_undo`, `undo_new_telescope`) w swojej transakcji przez rdzeń `_tx`.
+
+    `axis='object'` + `run_id` przebiegu „Zmień obiekt…”, który obiekt założył albo wskrzesił
+    (`made_object_id`). Warunki: 0 klatek z tym obiektem, 0 nagrobków klatek, które go pamiętają,
+    żaden inny niecofnięty przebieg nie ma go w pozycji ani w śladzie, aliasy wyłącznie z tego gestu
+    (`made_alias_id` + `alias_norm` przebiegu) - te dostają `object.alias_retired` i znikają, bo
+    alias wskazujący nagrobek przypinałby do niego klatki szczeblem aliasu resolvera.
+
+    `axis='telescope'` + `add_id` śladu „Dopisz nowy…”. Warunki: nie scalony i bez członków, 0 klatek
+    w jego zestawach, 0 profili kalibracji i faktów przepisu `telescope_id` wskazujących go, żadne
+    zdarzenie ręki na nim po geście. Pola ręki zostają (spis ręki nie widzi ubytku).
+
+    Zapis: `retired_at` + `object.retired`/`telescope.retired`. Encja już nagrobkiem → None bez
+    zapisu. Ślad, który nie nazywa tej encji → `ValueError` (EXPECT: nagrobek zdejmuje wyłącznie to,
+    co gest założył)."""
+    with _immediate(con):
+        return _retire_orphan_tx(con, axis=axis, entity_id=entity_id, now=now, actor=f"user:{uid}",
+                                 run_id=run_id, add_id=add_id)
+
+
+@dataclass(frozen=True)
+class NewTelescopeUndo:
+    """Wynik „Cofnij dopisanie” (`undo_new_telescope`). `refusal` (`RETIRE_REFUSALS`) przy
+    `restored == kept == 0` = cofnięcie odmówione bez zapisu; przy rozpiętych klatkach = teleskop
+    zostaje na osi (np. `frames` - klatki zmienione po geście albo przypięte przebiegiem)."""
+    telescope_id: int
+    restored: int = 0          # klatki z powrotem w stanie sprzed gestu
+    kept: int = 0              # klatki, których zestaw zmienił się po geście - zostają (CAS)
+    retired: bool = False      # teleskop zdjęty nagrobkiem
+    refusal: str | None = None
+
+
+def undo_new_telescope(con, *, telescope_id, now, uid="local"):
+    """„COFNIJ DOPISANIE” (AR-133, `Q8`) - ostatni niecofnięty gest „Dopisz nowy…” teleskopu,
+    JEDNA transakcja `atomic` → `NewTelescopeUndo`.
+
+    Kolejność: (1) warunki nagrobka poza klatkami (scalenie, profil, fakt przepisu, ręka po geście) -
+    odmowa = zero zapisu, bo teleskop żyje już poza gestem; (2) PLAN klatek gestu z par `config.*`
+    w granicach śladu, bez zapisu: wraca klatka, która dalej niesie zestaw gestu z ręki I nie ma
+    żadnego `config.assigned`/`config.unassigned` po geście (CAS wartości nie łapie sekwencji ABA -
+    przepięcie i powrót ręką do tego samego zestawu to decyzja późniejsza niż gest); reszta zostaje
+    (`kept`) - raport, nie nadpisanie; (3) odmowa `source_retired` bez zapisu, gdy któraś klatka
+    wróciłaby do zestawu nagrobka teleskopu (gest A → gest B na tych samych klatkach → cofnij A →
+    cofnij B); (4) zapis: para verbów jak każde przepięcie; bez `config.unassigned` w granicach -
+    do pustki, a `config.review` wraca wyłącznie wtedy, gdy powód był AKTYWNY przed gestem
+    (późniejszy niż ostatnie `config.assigned` klatki sprzed gestu - granica epizodu
+    `audit.config_review_reason_gap`); (5) nagrobek teleskopu (`_retire_orphan_tx` - pełne
+    warunki, w tym klatki); (6) wartość z plików teleskopów, do których klatki wróciły, tą samą
+    derywacją co Dostawa (`grouper.refresh_all_optics`); (7) ślad dostaje `undone_at`. Brak śladu
+    gestu dla teleskopu → `ValueError`."""
+    from .grouper import refresh_all_optics            # import odroczony - jak `user_assign_config`
+
+    actor = f"user:{uid}"
+    with atomic(con):
+        trail = con.execute(
+            "SELECT id, telescope_id, first_event_id, last_event_id, undone_at FROM telescope_add "
+            "WHERE telescope_id = ? ORDER BY id DESC LIMIT 1", (telescope_id,)).fetchone()
+        if trail is None:
+            raise ValueError(f"telescope:{telescope_id} nie ma śladu gestu „Dopisz nowy…”")
+        if trail["undone_at"] is not None:
+            return NewTelescopeUndo(telescope_id, refusal="undone")
+        powod = _odmowa_nagrobka(con, axis="telescope", entity_id=telescope_id, trail=trail,
+                                 frames=False)
+        if powod is not None:
+            return NewTelescopeUndo(telescope_id, refusal=powod)
+        gest = {}                                 # klatka → [zestaw gestu, stan sprzed]
+        for e in con.execute(
+                "SELECT verb, target, payload FROM event WHERE id BETWEEN ? AND ? "
+                "AND verb IN ('config.unassigned', 'config.assigned') AND target LIKE 'frame:%' "
+                "ORDER BY id", (trail["first_event_id"], trail["last_event_id"])).fetchall():
+            fid = int(e["target"][len("frame:"):])
+            ladunek = json.loads(e["payload"])
+            wpis = gest.setdefault(fid, [None, (None, None)])
+            if e["verb"] == "config.unassigned":
+                wpis[1] = (ladunek["config_id"], ladunek.get("config_source"))
+            else:
+                wpis[0] = ladunek["config_id"]
+        powroty, kept = [], 0
+        for fid, (cfg, przed) in sorted(gest.items()):
+            fr = con.execute("SELECT config_id, config_source FROM frame WHERE id = ?",
+                             (fid,)).fetchone()
+            if (fr is None or (fr["config_id"], fr["config_source"]) != (cfg, "user")
+                    or con.execute(
+                        "SELECT 1 FROM event WHERE target = ? AND id > ? "
+                        "AND verb IN ('config.assigned', 'config.unassigned') LIMIT 1",
+                        (f"frame:{fid}", trail["last_event_id"])).fetchone() is not None):
+                kept += 1
+                continue
+            if przed[0] is not None and con.execute(
+                    "SELECT 1 FROM config c JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+                    "JOIN telescope t ON t.id IN (tc.id, tc.canon_id) "
+                    "WHERE c.id = ? AND t.retired_at IS NOT NULL LIMIT 1",
+                    (przed[0],)).fetchone() is not None:
+                return NewTelescopeUndo(telescope_id, refusal="source_retired")
+            powroty.append((fid, cfg, przed))
+        restored = len(powroty)
+        zrodla = set()
+        for fid, cfg, (stary, stare_zrodlo) in powroty:
+            emit_event(con, actor=actor, verb="config.unassigned", target=f"frame:{fid}", now=now,
+                       payload={"config_id": cfg, "config_source": "user"},
+                       reason="cofnięcie dopisania teleskopu")
+            con.execute("UPDATE frame SET config_id = ?, config_source = ? WHERE id = ?",
+                        (stary, stare_zrodlo, fid))
+            if stary is not None:
+                emit_event(con, actor=actor, verb="config.assigned", target=f"frame:{fid}",
+                           now=now, payload={"config_id": stary, "config_source": stare_zrodlo},
+                           reason="cofnięcie dopisania teleskopu")
+                zrodla.add(con.execute("SELECT telescope_id FROM config WHERE id = ?",
+                                       (stary,)).fetchone()[0])
+                continue
+            przeglad = con.execute(
+                "SELECT reason FROM event WHERE verb = 'config.review' AND target = ? AND id < ? "
+                "AND id > COALESCE((SELECT max(a.id) FROM event a "
+                "                   WHERE a.verb = 'config.assigned' AND a.target = ? "
+                "                   AND a.id < ?), 0) "
+                "ORDER BY id DESC LIMIT 1",
+                (f"frame:{fid}", trail["first_event_id"], f"frame:{fid}",
+                 trail["first_event_id"])).fetchone()
+            if przeglad is not None:
+                emit_event(con, actor=actor, verb="config.review", target=f"frame:{fid}",
+                           now=now, reason=przeglad["reason"])
+        powod = _retire_orphan_tx(con, axis="telescope", entity_id=telescope_id, now=now,
+                                  actor=actor, add_id=trail["id"])
+        if powod is not None:
+            zrodla.add(telescope_id)              # teleskop zostaje z mniejszą liczbą klatek
+        if zrodla:
+            refresh_all_optics(con, now, actor=actor, telescope_ids=zrodla)
+        con.execute("UPDATE telescope_add SET undone_at = ? WHERE id = ?", (now, trail["id"]))
+    return NewTelescopeUndo(telescope_id, restored=restored, kept=kept, retired=powod is None,
+                            refusal=powod)
 
 
 # ============================================================ oś OBSERWATORIUM — zapis usera (GUI)
@@ -5348,9 +5840,9 @@ def apply_object_change_item(con, *, item_id, now, uid="local"):
     dostała inny, przeniesienie zawiozłoby go do folderu obiektu, którego klatka już nie ma."""
     with _immediate(con):
         p = con.execute(
-            "SELECT p.frame_id, p.location_id, p.object_change, p.object_id, p.expected_object_id, "
-            "       p.expected_source, p.expected_cleared_id, p.status, r.canon, r.catalog, r.kind, "
-            "       r.alias_norm "
+            "SELECT p.run_id, p.frame_id, p.location_id, p.object_change, p.object_id, "
+            "       p.expected_object_id, p.expected_source, p.expected_cleared_id, p.status, "
+            "       r.canon, r.catalog, r.kind, r.alias_norm "
             "FROM pending_object_change p JOIN object_change_run r ON r.run_id = p.run_id "
             "WHERE p.id = ?", (item_id,)).fetchone()
         if p is None:
@@ -5397,6 +5889,14 @@ def apply_object_change_item(con, *, item_id, now, uid="local"):
                 "UPDATE pending_object_change SET object_id = ?, before_object_id = ?, "
                 "before_source = ?, before_cleared_id = ? WHERE id = ?",
                 (zmiana.object_id, *zmiana.before, item_id))
+            # ŚLAD NAGROBKA (0040): co gest założył po drodze - w TEJ transakcji co `INSERT` albo
+            # wskrzeszenie obiektu i aliasu; z niego cofnięcie przebiegu zdejmuje założone.
+            if zmiana.made is not Made.EXISTING:
+                con.execute("UPDATE object_change_run SET made_object_id = ? WHERE run_id = ?",
+                            (zmiana.object_id, p["run_id"]))
+            if zmiana.alias_id is not None:
+                con.execute("UPDATE object_change_run SET made_alias_id = ? WHERE run_id = ?",
+                            (zmiana.alias_id, p["run_id"]))
     return werdykt
 
 
@@ -5494,6 +5994,29 @@ def set_object_change_run_status(con, *, run_id, status):
                           (status, run_id))
         if cur.rowcount != 1:
             raise ValueError(f"przebieg zmiany obiektu {run_id} nie istnieje")
+
+
+def close_object_change_undo(con, *, run_id, now, uid="local"):
+    """DOMKNIĘCIE COFNIĘCIA PRZEBIEGU (AR-137, `Q8`) - JEDNA transakcja: status `undone` i nagrobek
+    obiektu, który przebieg założył albo wskrzesił (`made_object_id`, `_retire_orphan_tx`). → powód
+    odmowy nagrobka (`RETIRE_REFUSALS`) albo None (zdjęty, nic do zdjęcia, przebieg już domknięty).
+
+    Nagrobek pada wyłącznie przy PRZEJŚCIU do `undone`: ponowne domknięcie domkniętego przebiegu nie
+    sięga po obiekt, który inny gest mógł w międzyczasie wskrzesić. Odmowa (obiekt ma klatki, alias
+    spoza gestu, inny żywy przebieg) zostawia obiekt na osi - to jest zwykły stan, nie błąd cofnięcia.
+    Przebieg nieznany → `ValueError` (EXPECT)."""
+    with _immediate(con):
+        r = con.execute("SELECT status, made_object_id FROM object_change_run WHERE run_id = ?",
+                        (run_id,)).fetchone()
+        if r is None:
+            raise ValueError(f"przebieg zmiany obiektu {run_id} nie istnieje")
+        if r["status"] == "undone":
+            return None
+        con.execute("UPDATE object_change_run SET status = 'undone' WHERE run_id = ?", (run_id,))
+        if r["made_object_id"] is None:
+            return None
+        return _retire_orphan_tx(con, axis="object", entity_id=r["made_object_id"], now=now,
+                                 actor=f"user:{uid}", run_id=run_id)
 
 
 def open_run_dir(con, *, run_id, path, action, now):
@@ -6647,10 +7170,12 @@ def set_telescope_park(con, *, telescope_id, in_park, now, uid="local", via=None
     in_park = valid_telescope_park(in_park)
     with _immediate(con):
         row = con.execute(
-            "SELECT telescop_canon, in_park, merged_into FROM telescope WHERE id = ?",
+            "SELECT telescop_canon, in_park, merged_into, retired_at FROM telescope WHERE id = ?",
             (telescope_id,)).fetchone()
         if row is None:
             raise ValueError(f"telescope:{telescope_id} nie istnieje")
+        if row["retired_at"] is not None:
+            raise ValueError(f"telescope:{telescope_id} to nagrobek - park go nie dotyczy")
         if row["merged_into"] is not None:
             raise ValueError(f"telescope:{telescope_id} jest scalony (merged_into="
                              f"{row['merged_into']}) — park tylko dla kanonicznego")

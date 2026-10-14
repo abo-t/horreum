@@ -415,10 +415,13 @@ def test_n21_okno_podaje_dzisiejsza_ogniskowa_zrodla(qapp, tmp_path):
     con.close()
 
 
-def test_n16_odmowa_klingi_wraca_do_okna_z_polami_i_zdanie_o_scaleniu(qapp, tmp_path, monkeypatch):
-    """N16: klinga odmawia (nazwa zajęta) → okno wraca z powodem, drugi przebieg zapisuje; zdanie po
-    geście mówi, jak cofnąć pomyłkę (scalenie na Osi). N4: gest odświeża Oś teleskopu sygnałem.
-    Mutanty: odmowa kończy gest; brak zdania o scaleniu; brak sygnału odświeżenia Osi."""
+def test_n16_odmowa_klingi_wraca_do_okna_z_polami_i_recepta_cofniecia(qapp, tmp_path, monkeypatch):
+    """N16: klinga odmawia (nazwa zajęta) → okno wraca z powodem, drugi przebieg zapisuje; po geście
+    pada recepta „Cofnij dopisanie” (AR-133) zamiast zdania o scaleniu - klik wraca klatki do zestawu
+    sprzed gestu i zdejmuje teleskop z Osi, zdanie wyniku mówi, ile klatek wróciło. N4: gest
+    odświeża Oś teleskopu sygnałem.
+    Mutanty: odmowa kończy gest; brak recepty; recepta bez wykonawcy; brak sygnału odświeżenia
+    Osi."""
     from horreum.gui import tasks as tasks_mod
     con, obce, rc8 = _baza(tmp_path)
     tv = tasks_mod.TasksView(con, now_fn=lambda: NOW)
@@ -446,13 +449,131 @@ def test_n16_odmowa_klingi_wraca_do_okna_z_polami_i_zdanie_o_scaleniu(qapp, tmp_
             odmowy.append(powod)
     import horreum.gui.app as app_mod
     monkeypatch.setattr(app_mod, "AssignConfigDialog", _Fake)
+    przed = {f: tuple(con.execute("SELECT config_id, config_source FROM frame WHERE id = ?",
+                                  (f,)).fetchone()) for f in obce}
     msgs = _komunikaty(v)
+    recepty = []
+    v.status_recipe.connect(recepty.append)
     v._on_set_config()
     assert len(odmowy) == 1 and "zajęta" in odmowy[0]
-    assert any("Scal „RC8 0.5x”" in m for m in msgs)
+    assert not any("Scal" in m for m in msgs)
+    [recepta] = recepty
+    assert recepta == i18n.t("object.config_undo_add", telescope="RC8 0.5x")
     nowy = con.execute("SELECT id FROM telescope WHERE telescop_canon = 'RC8 0.5x'").fetchone()[0]
-    assert nowy in {tv.axis_view.table.item(r, COL_ID).data(Qt.UserRole)
-                    for r in range(tv.axis_view.table.rowCount())}
+    def os_ids():
+        return {tv.axis_view.table.item(r, COL_ID).data(Qt.UserRole)
+                for r in range(tv.axis_view.table.rowCount())}
+    assert nowy in os_ids()
+    recepta.czlony[0].wykonaj()
+    assert (i18n.t_plural("object.config_undo_add.done", 2, telescope="RC8 0.5x")
+            + i18n.t("object.config_undo_add.retired", telescope="RC8 0.5x")) in msgs
+    assert {f: tuple(con.execute("SELECT config_id, config_source FROM frame WHERE id = ?",
+                                 (f,)).fetchone()) for f in obce} == przed
+    assert nowy not in os_ids()
+    con.close()
+
+
+def test_gospodarz_pokazuje_recepte_osi_w_porzadkach(qapp, tmp_path):
+    """Recepta gestu osi („Cofnij dopisanie”) staje na pasku gospodarza, gdy Porządki są widoczne -
+    klik paska wykonuje jej człon; poza Porządkami pasek jej nie bierze (mówi o innym ekranie).
+    Mutant: brak podpięcia `status_recipe` w `MainWindow` albo recepta na pasku z każdej strony."""
+    from horreum.gui.app import NAV_PORZADKI, NAV_ZBIORY, MainWindow
+    from horreum.gui.grid_model import CzlonRecepty, Recepta
+    con, _obce, _ = _baza(tmp_path)
+    con.close()
+    win = MainWindow(str(tmp_path / "o.db"))
+    try:
+        klik = []
+        recepta = Recepta([CzlonRecepty("Cofnij dopisanie „X”", lambda: klik.append(1))])
+        win._show_view(NAV_ZBIORY)
+        win.object_view.status_recipe.emit(recepta)
+        assert win._czlony_recepty != recepta.czlony
+        win._show_view(NAV_PORZADKI)
+        win.object_view.status_recipe.emit(recepta)
+        assert win._czlony_recepty == recepta.czlony
+        win._wykonaj_recepte()
+        assert klik == [1]
+    finally:
+        win.close()
+
+
+def test_os_teleskopu_cofa_dopisanie_po_restarcie_prawdziwym_klikiem(qapp, tmp_path):
+    """Trwała droga powrotu (AR-133, bramka `kimi` Z1): gest „Dopisz nowy…” zrobiony PRZED otwarciem
+    okna (recepta paska nie istnieje - restart), w Porządkach na Osi teleskopu wiersz tego teleskopu
+    ma czynny „Cofnij dopisanie”, wiersz teleskopu skanu - wygaszony; klik przycisku wraca klatki,
+    zdejmuje teleskop z listy i mówi zdaniem wyniku. Przeskok przez inną stronę nie gasi gestu.
+    Mutant: gest tylko na recepcie paska (po restarcie brak drogi powrotu); przycisk czynny dla
+    każdego wiersza."""
+    from horreum.gui.app import NAV_PORZADKI, NAV_ZBIORY, MainWindow
+    con, obce, rc8 = _baza(tmp_path)
+    przed = {f: tuple(con.execute("SELECT config_id, config_source FROM frame WHERE id = ?",
+                                  (f,)).fetchone()) for f in obce}
+    tid, _g = repo.user_assign_config_new_telescope(
+        con, frame_ids=obce, name="RC8 0.5x", focal_mm=800.0, in_park=1, source_telescope_id=rc8,
+        now=NOW)
+    con.close()
+    win = MainWindow(str(tmp_path / "o.db"))
+    try:
+        win._show_view(NAV_PORZADKI)
+        win._show_view(NAV_ZBIORY)
+        win._show_view(NAV_PORZADKI)
+        v = win.axis_view
+        msgs = _komunikaty(v)
+        v.table.selectRow(_wiersz(v, rc8))
+        assert not v.btn_undo_add.isEnabled()
+        v.table.selectRow(_wiersz(v, tid))
+        assert v.btn_undo_add.isEnabled()
+        v.btn_undo_add.click()
+        assert (i18n.t_plural("object.config_undo_add.done", 2, telescope="RC8 0.5x")
+                + i18n.t("object.config_undo_add.retired", telescope="RC8 0.5x")) in msgs
+        assert tid not in {v.table.item(r, COL_ID).data(Qt.UserRole)
+                           for r in range(v.table.rowCount())}
+        assert {f: tuple(win.con.execute("SELECT config_id, config_source FROM frame WHERE id = ?",
+                                         (f,)).fetchone()) for f in obce} == przed
+    finally:
+        win.close()
+
+
+def test_zdanie_cofniecia_gdy_zadna_klatka_nie_wrocila(qapp, tmp_path):
+    """Wszystkie klatki gestu przepięte ręką po geście: cofnięcie nic nie wraca - zdanie nie mówi
+    „Cofnięto dopisanie: 0 klatek wróciło”, tylko „żadna klatka nie wróciła”, a dalej ile zostało
+    i że teleskop (bez klatek) zszedł z osi (bramka `kimi` Z3).
+    Mutant: zdanie `done` z liczbą 0."""
+    con, obce, rc8 = _baza(tmp_path)
+    tid, _g = repo.user_assign_config_new_telescope(
+        con, frame_ids=obce, name="RC8 0.5x", focal_mm=800.0, in_park=1, source_telescope_id=rc8,
+        now=NOW)
+    repo.user_assign_config(con, frame_ids=obce, telescope_id=rc8, now=NOW, overwrite=True)
+    v = TelescopeAxisView(con, now_fn=lambda: NOW)
+    msgs = _komunikaty(v)
+    v.table.selectRow(_wiersz(v, tid))
+    v.btn_undo_add.click()
+    assert msgs[0] == (i18n.t("object.config_undo_add.nothing", telescope="RC8 0.5x")
+                       + i18n.t_plural("object.config_undo_add.kept", 2)
+                       + i18n.t("object.config_undo_add.retired", telescope="RC8 0.5x"))
+    assert "Cofnięto" not in msgs[0]
+    con.close()
+
+
+def test_cofniecie_dopisania_w_biegu_dostawy_czeka_i_oddaje_recepte(qapp, tmp_path):
+    """Klik „Cofnij dopisanie” w trakcie etapu Dostawy: zero zapisu, zdanie o czekaniu, a recepta
+    wraca (raport ją zgasił) - droga powrotu nie przepada razem z odmową.
+    Mutant: brak bramki `_busy` (zapis w trakcie etapu) albo odmowa bez ponownej recepty."""
+    con, obce, rc8 = _baza(tmp_path)
+    tid, _g = repo.user_assign_config_new_telescope(
+        con, frame_ids=obce, name="RC8 0.5x", focal_mm=800.0, in_park=1,
+        source_telescope_id=rc8, now=NOW)
+    v = ObjectAxisView(con, now_fn=lambda: NOW)
+    msgs, recepty = _komunikaty(v), []
+    v.status_recipe.connect(recepty.append)
+    v.set_busy(True)
+    n = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    v._recepta_cofniecia_dopisania(tid, "RC8 0.5x").czlony[0].wykonaj()
+    assert msgs == [i18n.t("object.config_undo_add.busy")] and len(recepty) == 1
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == n
+    v.set_busy(False)
+    recepty[0].czlony[0].wykonaj()
+    assert con.execute("SELECT retired_at FROM telescope WHERE id = ?", (tid,)).fetchone()[0] == NOW
     con.close()
 
 

@@ -21,6 +21,7 @@ from horreum.grouper import OPTICS_TOLERANCE, optics_from_files   # optyka teles
 from horreum.lineage import RAW_FLAT_WINDOW_DAYS, raw_flats_for   # surowe flaty teczek wydania
 from horreum.naming import header_dt
 from horreum.object_change import ObjectTarget             # cel gestu zmiany obiektu (AR-17)
+from horreum.object_change import ZdanieRdzenia            # powód bramki karty z kodem (AR-138)
 from horreum.resolve.paths import path_key                 # klucz ścieżki fizycznej (bez wielkości liter)
 from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w miejscu (0022)
                           INPLACE_OPEN_PHASES,        # ...i ich podzbiór otwarty
@@ -29,6 +30,7 @@ from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import folder_form      # forma folderu obiektu (D-1011-5 Q5)
+from horreum.resolve.catalog import xref_key_target  # nazwa-klucz pary catalog_xref (AR-135)
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.headers import (COPY_TESTIMONY_KEYWORDS, COPY_TESTIMONY_RULE, FAKTY_BIEZACE,
                                      copy_facts_state, copy_testimony)
@@ -278,7 +280,9 @@ def active_telescopes(con):
     sumuje się pod jednym kanonem. `LEFT JOIN` => teleskop bez klatek ma `frame_count=0` (nie znika).
     Frame z `config_id IS NULL` (review) NIE dołącza się do żadnego configu => poza sumą (poprawne —
     jest w delcie, nie na osi). Zwraca wiersze: id, telescop_canon, label, status, f_ratio_nominal,
-    focal_nominal, f_ratio_user, focal_user, frame_count (optyka: `telescope_focal`/`telescope_f_ratio`)."""
+    focal_nominal, f_ratio_user, focal_user, frame_count (optyka: `telescope_focal`/`telescope_f_ratio`).
+    Nagrobek (`retired_at`, 0040 - „Cofnij dopisanie”) na osi nie stoi: `LEFT JOIN` pokazałby go
+    z zerem klatek, czyli dokładnie tym wierszem, który cofnięcie zdjęło."""
     return con.execute(
         "SELECT t.id, t.telescop_canon, t.label, t.status, t.f_ratio_nominal, t.focal_nominal, "
         "       t.f_ratio_user, t.focal_user, COUNT(fr.id) AS frame_count "
@@ -286,10 +290,18 @@ def active_telescopes(con):
         "LEFT JOIN telescope_canonical tc ON tc.canon_id = t.id "
         "LEFT JOIN config c ON c.telescope_id = tc.id "
         "LEFT JOIN frame fr ON fr.config_id = c.id "
-        "WHERE t.merged_into IS NULL "
+        "WHERE t.merged_into IS NULL AND t.retired_at IS NULL "
         "GROUP BY t.id "
         "ORDER BY t.id"
     ).fetchall()
+
+
+def open_telescope_adds(con):
+    """Teleskopy z NIECOFNIĘTYM gestem „Dopisz nowy…” (`telescope_add.undone_at IS NULL`, 0040) -
+    `set[telescope_id]`. Oś teleskopu daje im gest „Cofnij dopisanie” (AR-133): stan z bazy, więc
+    droga powrotu przeżywa zgaszenie recepty paska, zmianę strony i restart."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT DISTINCT telescope_id FROM telescope_add WHERE undone_at IS NULL").fetchall()}
 
 
 def merged_under(con, canon_id):
@@ -1395,7 +1407,8 @@ def park_overview(con):
     Zwraca wiersze: id, telescop_canon, label, in_park, lights, last_seen — OBIE kolumny nazwy, bo
     wiersz musi przejść przez `telescope_label` (dialog „Park…" pokazuje nazwę USERA), a `canon`
     zostaje tożsamością zestawu i tokenem CLI `horreum park --add`. Kolumny optyki (`focal_nominal`,
-    `focal_user`, `f_ratio_nominal`, `f_ratio_user`) karmią listę wyboru po ogniskowej (AR-128)."""
+    `focal_user`, `f_ratio_nominal`, `f_ratio_user`) karmią listę wyboru po ogniskowej (AR-128).
+    Bez nagrobków (0040): teleskop zdjęty „Cofnij dopisanie” nie jest sprzętem do wyboru ani parku."""
     return con.execute(
         "SELECT t.id, t.telescop_canon, t.label, t.in_park, t.focal_nominal, t.focal_user, "
         "  t.f_ratio_nominal, t.f_ratio_user, "
@@ -1404,7 +1417,8 @@ def park_overview(con):
         "  (SELECT MAX(h.date_obs) FROM frame f JOIN config c ON c.id = f.config_id "
         "   JOIN header h ON h.frame_id = f.id "
         "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS last_seen "
-        "FROM telescope t WHERE t.merged_into IS NULL ORDER BY lights DESC"
+        "FROM telescope t WHERE t.merged_into IS NULL AND t.retired_at IS NULL "
+        "ORDER BY lights DESC"
     ).fetchall()
 
 
@@ -1425,12 +1439,12 @@ def object_ids_for_canons(con, canons):
 def telescope_facets(con):
     """Distinct KANONICZNE teleskopy (`merged_into IS NULL`) do kontrolki filtra — żeby filtr pokazywał
     realnie istniejące osie. `telescop_canon` służy za etykietę zastępczą, gdy `label` pusty (teleskop
-    jeszcze nienazwany - proposed). Zwraca: id, telescop_canon, label, f_ratio_nominal, focal_nominal,
-    f_ratio_user, focal_user."""
+    jeszcze nienazwany - proposed). Bez nagrobków (0040). Zwraca: id, telescop_canon, label,
+    f_ratio_nominal, focal_nominal, f_ratio_user, focal_user."""
     return con.execute(
         "SELECT id, telescop_canon, label, f_ratio_nominal, focal_nominal, f_ratio_user, focal_user "
         "FROM telescope "
-        "WHERE merged_into IS NULL ORDER BY id"
+        "WHERE merged_into IS NULL AND retired_at IS NULL ORDER BY id"
     ).fetchall()
 
 
@@ -1573,11 +1587,13 @@ def object_alias_index(con):
 
     Zakres = CAŁA biblioteka aliasów, nie tylko obiekty widocznego zbioru: szukajka chowa wiersze
     listy, a ta lista przychodzi z sibling-setu — filtrowanie mapy po zbiorze nic by nie oszczędziło,
-    a rozjechałoby dwa wejścia tego samego pytania. Zwraca dict[str, set[str]]."""
+    a rozjechałoby dwa wejścia tego samego pytania. Nagrobek (0040) bez wpisu - jego aliasy gest
+    cofnięcia zdejmuje, a filtr broni mapy, gdyby któryś przeżył. Zwraca dict[str, set[str]]."""
     idx = {}
     for canon, alias in con.execute(
             "SELECT o.canon AS canon, a.alias_norm AS alias_norm "
-            "FROM object_alias a JOIN object o ON o.id = a.object_id").fetchall():
+            "FROM object_alias a JOIN object o ON o.id = a.object_id "
+            "WHERE o.retired_at IS NULL").fetchall():
         idx.setdefault(canon, set()).add(alias)
     return idx
 
@@ -1637,14 +1653,28 @@ def recent_hand_objects(con, limit=5):
     ZNA TYLKO NADANIA, nie cofnięcia — świadomie, ale to nie jest darmowe: kanon zdjęty przed
     chwilą („Cofnij przypisanie") zostaje na szczycie listy. Broni przed przypadkowym wskrzeszeniem
     dysklozura po stronie gestu (skrót oddaje ster oknu, gdy ma zgasić nagrobek — `grid.py`), a nie
-    ten read-model; gdyby ta obrona kiedyś padła, TU jest drugie miejsce do naprawy."""
-    return con.execute(
-        "SELECT o.canon AS canon, o.catalog AS catalog, o.kind AS kind "
-        "FROM event e JOIN object o ON o.id = json_extract(e.payload, '$.object_id') "
-        "WHERE e.verb = 'object.assigned' "
-        "  AND json_extract(e.payload, '$.object_source') = 'user' "
-        "GROUP BY o.id ORDER BY MAX(e.id) DESC LIMIT ?",
-        (int(limit),)).fetchall()
+    ten read-model; gdyby ta obrona kiedyś padła, TU jest drugie miejsce do naprawy.
+
+    NAGROBEK OBIEKTU (0040, AR-137) WYPADA: „Cofnij” gestu, który obiekt założył, zdejmuje go z osi,
+    a dziennik dalej pamięta jego `object.assigned` - bez filtra skrót podawałby obiekt, którego
+    cofnięcie właśnie nie ma. Wybór tej nazwy przez okno i tak go wskrzesza (`repo._upsert_object_tx`).
+
+    STARA TOŻSAMOŚĆ PARY `catalog_xref` (AR-135) idzie do żywego celu (`xref_live_target`): skrót
+    podaje `NGC598` zamiast `M33` sprzed pary, a cel obecny już na liście nie dubluje się."""
+    wynik, widziane = [], set()
+    for r in con.execute(
+            "SELECT o.canon AS canon, o.catalog AS catalog, o.kind AS kind "
+            "FROM event e JOIN object o ON o.id = json_extract(e.payload, '$.object_id') "
+            "WHERE e.verb = 'object.assigned' "
+            "  AND json_extract(e.payload, '$.object_source') = 'user' "
+            "  AND o.retired_at IS NULL "
+            "GROUP BY o.id ORDER BY MAX(e.id) DESC LIMIT ?",
+            (int(limit),)).fetchall():
+        r = xref_live_target(con, r["canon"]) or r
+        if r["canon"] not in widziane:
+            widziane.add(r["canon"])
+            wynik.append(r)
+    return wynik
 
 
 def facet_filters(con, frame_ids):
@@ -2320,7 +2350,10 @@ def object_card_gate(r, *, card, form, canon, lookup):
 
     Kolejność bramek = kolejność z `object_card_form_rows` (powód ujednolicenia zostaje bajt
     w bajt); RAW i region rozstrzyga WOŁAJĄCY przed tą funkcją, bo dla zmiany obiektu nie są
-    pominięciem, tylko brakiem karty (RAW przenosi się bez karty, region karty nie ma)."""
+    pominięciem, tylko brakiem karty (RAW przenosi się bez karty, region karty nie ma).
+
+    Powód to `ZdanieRdzenia`: zdanie PL (wołający biorą je jak tekst) i kod z parametrami, z których
+    okno zmiany obiektu składa zdanie `objchg.gate.<kod>` w języku UI (AR-138)."""
     czlony = [c.strip() for c in card.split("_")] if card is not None and "_" in card else []
     # Fakty kopii zebrane starszą regułą koercji (AR-33) to „nie wiem", jak brak faktów.
     fakty_biezace = copy_facts_state(r["hdr_hash"], r["hdr_rule"]) == FAKTY_BIEZACE
@@ -2330,31 +2363,35 @@ def object_card_gate(r, *, card, form, canon, lookup):
         return trafienie.canon if trafienie is not None else None
 
     if r["n_present"] == 0:
-        return "brak obecnej kopii"
+        return ZdanieRdzenia("brak obecnej kopii", "no_present_copy")
     if r["n_present"] > 1:
-        return f"wiele obecnych kopii ({r['n_present']})"
+        return ZdanieRdzenia(f"wiele obecnych kopii ({r['n_present']})", "many_copies",
+                             n=r["n_present"])
     if r["compressed"]:
-        return "skompresowany master"
+        return ZdanieRdzenia("skompresowany master", "compressed")
     if r["degen"]:
-        return "tożsamość nieobliczalna (degenerat) - zapis rozdwoiłby klatkę"
+        return ZdanieRdzenia("tożsamość nieobliczalna (degenerat) - zapis rozdwoiłby klatkę",
+                             "degenerate")
     if r["header_hash"] is None:
-        return "brak header_hash - brak kontroli zapisu"
+        return ZdanieRdzenia("brak header_hash - brak kontroli zapisu", "no_header_hash")
     if r["unreadable_since"] is not None:
-        return "kopia oznaczona jako nieczytelna"
+        return ZdanieRdzenia("kopia oznaczona jako nieczytelna", "unreadable")
     if r["n_cards"] > 1:
-        return f"wiele kart OBJECT ({r['n_cards']})"
+        return ZdanieRdzenia(f"wiele kart OBJECT ({r['n_cards']})", "many_cards", n=r["n_cards"])
     if not fakty_biezace and r["n_absent"]:
-        return SKIP_COPY_WITHOUT_FACTS
+        return ZdanieRdzenia(SKIP_COPY_WITHOUT_FACTS, "copy_without_facts")
     if fakty_biezace and _to_text(r["hdr_object"]) != card:
-        return "kopia zeznaje inną kartę OBJECT niż klatka"
+        return ZdanieRdzenia("kopia zeznaje inną kartę OBJECT niż klatka", "copy_other_card")
     if form is None:
-        return SKIP_FORM_NOT_CANON
+        return ZdanieRdzenia(SKIP_FORM_NOT_CANON, "form_not_canon")
     if czlony and not all(_kanon(c) == canon for c in czlony):
-        return "sklejka oznaczeń - nie każdy człon wskazuje ten obiekt"
+        return ZdanieRdzenia("sklejka oznaczeń - nie każdy człon wskazuje ten obiekt",
+                             "joined_names")
     if card is not None and r["vtype"] != "str":
-        return f"karta OBJECT nietekstowa ({r['vtype']})"
+        return ZdanieRdzenia(f"karta OBJECT nietekstowa ({r['vtype']})", "card_not_text",
+                             vtype=r["vtype"])
     if r["filetype"] == "fits" and r["n_sum"]:
-        return "FITS z sumą kontrolną (CHECKSUM/DATASUM)"
+        return ZdanieRdzenia("FITS z sumą kontrolną (CHECKSUM/DATASUM)", "fits_checksum")
     return None
 
 
@@ -2480,23 +2517,106 @@ def object_target(con, text, *, alias_norm=None):
     plan (`SKIP_FORM_NOT_CANON`, obietnica „karta i folder razem”).
 
     Uszkodzony słownik obiektów własnych (`ValueError` drabiny) przechodzi do wołającego - okno
-    przypisania melduje go własnym zdaniem, a „nierozpoznana” byłoby nieprawdą o przyczynie."""
+    przypisania melduje go własnym zdaniem, a „nierozpoznana” byłoby nieprawdą o przyczynie.
+
+    NAZWA-KLUCZ PARY `catalog_xref` IDZIE DO CELU PARY (AR-135), także gdy w bazie stoi obiekt
+    o kanonie równym kluczowi (`M33` sprzed dopisania pary `M33 → NGC598`): taki obiekt to stara
+    tożsamość, a cel gestu ma być tym, co da przebieg - inaczej „Zmień obiekt…” z wiersza
+    Porządków przenosiłby klatki z powrotem do starego obiektu. Cel z drabiny istniejący wyłącznie
+    jako NAGROBEK (0040) to cel nieistniejący: `catalog`/`kind` daje tożsamość drabiny, a obiekt
+    wraca dopiero zapisem gestu. Dokładny kanon nagrobka spoza pary zostaje celem - gest pod tą
+    nazwą go wskrzesza (`repo._upsert_object_tx`)."""
     text = (text or "").strip()
     if not text:
         return None
-    row = con.execute("SELECT canon, catalog, kind FROM object WHERE canon = ?", (text,)).fetchone()
+    # Klucz pary z ŻYWYM celem - ta sama reguła co wybór z listy okna i skrót „ostatnio użyte”
+    # (`xref_live_target`); klucz bez żywego celu idzie drabiną niżej, nigdy do starego obiektu.
+    row = xref_live_target(con, text) if xref_key_target(text) is not None else con.execute(
+        "SELECT canon, catalog, kind FROM object WHERE canon = ?", (text,)).fetchone()
     if row is not None:
         canon, catalog, kind = row["canon"], row["catalog"], row["kind"]
     else:
         ident, _ = resolve_name(alias_lookup(con), text)
         if ident is None:
             return None
-        row = con.execute("SELECT canon, catalog, kind FROM object WHERE canon = ?",
-                          (ident.canon,)).fetchone()
+        row = con.execute("SELECT canon, catalog, kind FROM object "
+                          "WHERE canon = ? AND retired_at IS NULL", (ident.canon,)).fetchone()
         canon, catalog, kind = ((row["canon"], row["catalog"], row["kind"]) if row is not None
                                 else (ident.canon, ident.catalog, ident.kind))
     return ObjectTarget(canon=canon, catalog=catalog, kind=kind, alias_norm=alias_norm,
                         card_form=forma_karty_object(con, canon))
+
+
+def xref_live_target(con, canon):
+    """Wybór OBIEKTU `canon` → cel pary `catalog_xref`, gdy `canon` jest jej kluczem, a cel jest
+    ŻYWYM obiektem bazy: wiersz `(canon, catalog, kind)` celu; inaczej None (wybór zostaje przy
+    `canon`). JEDNA reguła (AR-135) dla każdej powierzchni, która wskazuje obiekt istniejący:
+    okna przypisania (wybór z listy „Istniejący obiekt”), skrótu „ostatnio użyte”
+    (`recent_hand_objects`) i celu gestu „Zmień obiekt…” (`object_target`). Bez niej stara
+    tożsamość `M33` sprzed pary `M33 → NGC598` przyjmowała klatki ręką obok celu pary.
+    Nagrobek (0040) celem nie jest - jak cel nieistniejący."""
+    cel = xref_key_target(canon)
+    if cel is None:
+        return None
+    return con.execute("SELECT canon, catalog, kind FROM object "
+                       "WHERE canon = ? AND retired_at IS NULL", (cel,)).fetchone()
+
+
+def xref_reconcile_rows(con):
+    """NAZWA KATALOGOWA WSKAZUJE INNY OBIEKT (AR-135) - predykat wiersza Porządków po wzroście
+    `catalog_xref`. Zwraca listę `(nazwa, kanon_obiektu, cel, frozenset[frame_id])`, posortowaną
+    po nazwie; JEDEN właściciel liczby wiersza, trimu perspektywy i zdania podpowiedzi.
+
+    POZYCJA WCHODZI w dwóch przypadkach, oba z klatkami (żywe lighty i stosy - nie wycofane, nie
+    zastąpione), bo gestem jest „Zmień obiekt…” na tych klatkach:
+      * OBIEKT, którego kanon jest kluczem pary o innym celu (`M33` założony przed parą
+        `M33 → NGC598`) - wszystkie jego klatki; `nazwa` = jego kanon;
+      * RÓWNOWAŻNOŚĆ, której nazwa jest kluczem pary, a wskazuje obiekt inny niż cel (przebieg
+        przepina takie sam - zostaje ręka albo cel bez obiektu) - klatki tego obiektu, których
+        zeznanie `OBJECT` jest tą nazwą; `nazwa` = klucz równoważności.
+
+    Stan, nie dziennik: pozycja znika, gdy klatki przejdą do celu. Obiekt opróżniony gestem nie
+    wchodzi (zero klatek) - jego los to osobna reguła cofania (AR-137)."""
+    # Kandydat = obiekt ŻYWY: nagrobek (0040) nie ma klatek z definicji, a jego nazwa nie jest
+    # tożsamością do uzgodnienia.
+    obiekty = {int(r["id"]): r["canon"] for r in con.execute(
+        "SELECT id, canon FROM object WHERE retired_at IS NULL").fetchall()}
+    kanon_klucz = {oid: cel for oid, c in obiekty.items()
+                   if (cel := xref_key_target(c)) is not None}
+    nazwy = {}                       # object_id -> {alias_norm: cel} równoważności poza celem pary
+    for r in con.execute("SELECT alias_norm, object_id FROM object_alias").fetchall():
+        cel = xref_key_target(r["alias_norm"])
+        oid = int(r["object_id"])
+        if cel is not None and oid in obiekty and obiekty[oid] != cel:
+            nazwy.setdefault(oid, {})[r["alias_norm"]] = cel
+    if not kanon_klucz and not nazwy:
+        return []
+    klatki = con.execute(
+        "SELECT f.id AS fid, f.object_id AS oid, h.object_raw AS raw FROM frame f "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.object_id IN (SELECT value FROM json_each(?)) "
+        "AND f.kind IN (SELECT value FROM json_each(?)) "
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL",
+        (json.dumps(sorted(set(kanon_klucz) | set(nazwy))),
+         json.dumps(sorted(LIGHT_KINDS)))).fetchall()
+    pozycje = {}                     # (nazwa, kanon_obiektu, cel) -> set[frame_id]
+    for k in klatki:
+        oid = int(k["oid"])
+        if oid in kanon_klucz:       # cały obiekt na liście - równoważności nic nie dokładają
+            pozycje.setdefault((obiekty[oid], obiekty[oid], kanon_klucz[oid]), set()).add(
+                int(k["fid"]))
+            continue
+        klucz = norm_alnum(_to_text(k["raw"]) or "")
+        cel = nazwy.get(oid, {}).get(klucz)
+        if cel is not None:
+            pozycje.setdefault((klucz, obiekty[oid], cel), set()).add(int(k["fid"]))
+    return [(n, c, t, frozenset(f)) for (n, c, t), f in sorted(pozycje.items())]
+
+
+def xref_reconcile_frame_ids(con):
+    """Klatki wiersza „Nazwa katalogowa wskazuje inny obiekt” - suma pozycji
+    `xref_reconcile_rows` (licznik Porządków i trim perspektywy). Zwraca set[int]."""
+    return set().union(*(f for _n, _c, _t, f in xref_reconcile_rows(con)))
 
 
 def location_lookup(con):
@@ -4518,7 +4638,9 @@ def find_rigs(con):
     ETYKIETA TA SAMA, CO NAZWA FOLDERU ZESTAWU W WYDANIU (`projection.zestawy_configow`, SPOT):
     user wpisuje to, co widzi w celu wydania, a druga reguła etykiety rozjechałaby się z nią przy
     pierwszej kolizji nazw (`_cfgN`). Config bez teleskopu albo bez kamery nie jest zestawem, który
-    da się wskazać - wypada (JOIN)."""
+    da się wskazać - wypada (JOIN). Zestaw nagrobka teleskopu (0040) też: jego config zostaje w bazie
+    po „Cofnij dopisanie”, ale sprzętu na osi już nie ma (nazwy folderów liczy pełna tabela -
+    `projection.zestawy_configow` bez filtra, stałe nazwy)."""
     from horreum import projection                     # leniwie: projection importuje queries
     foldery = projection.zestawy_configow(con)
     out, widziane = [], set()
@@ -4529,6 +4651,7 @@ def find_rigs(con):
             "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
             "JOIN telescope t ON t.id = tc.canon_id "
             "JOIN camera cam ON cam.id = c.camera_id "
+            "WHERE t.retired_at IS NULL "
             "ORDER BY c.id").fetchall():
         klucz = (r["telescope_id"], r["camera_id"])
         if klucz in widziane or r["config_id"] not in foldery:

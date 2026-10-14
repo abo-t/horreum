@@ -156,6 +156,7 @@ def test_strong_jest_rola_per_wiersz(qapp):
     assert lw2.itemDelegate()._is_strong(lw2.model().index(0, 0))
 
 
+@pytest.mark.zmienia_motyw          # przełącza kolory modułu świadomie (wracają też w `finally`)
 def test_use_theme_przelacza_kolor_czlonu_drugiego(qapp):
     """Kolor członu drugiego pochodzi z motywu (F6 §7, SPOT `theme.accents`) — nie jest hardcoded.
     Czytany NA ŻYWO w `paint`, więc przełączenie motywu + repaint wystarcza (bez `refresh_theme`)."""

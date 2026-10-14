@@ -635,6 +635,7 @@ def test_show_report_bez_werdyktu_nie_maluje(qapp, tmp_path, ustawienia, monkeyp
     con.close()
 
 
+@pytest.mark.zmienia_motyw          # przełącza kolory modułu świadomie (wracają też na końcu testu)
 def test_use_theme_przelacza_kolory_naglowka():
     """Kolory nagłówka idą Z MOTYWU (SPOT), nie z literałów — jak `grid.use_theme`."""
     pd_mod.use_theme("light")

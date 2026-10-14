@@ -78,6 +78,7 @@ class GroupSummary:
     giną focratio_* i telescopes_suspect, dochodzi telescop_missing)."""
     headers: int = 0
     telescopes_proposed: int = 0
+    telescopes_unretired: int = 0  # nagrobki teleskopu przywrócone do osi nazwą z nagłówka (0040)
     telescop_missing: int = 0      # klatki z nagłówkiem BEZ TELESCOP (→ config.review, stan)
     configs_proposed: int = 0
     configs_assigned: int = 0
@@ -239,7 +240,8 @@ def _soczewki_raw(con, canon, members):
 def run_grouper(con, now):
     """Po skanie: (1) wyłoń teleskopy z DISTINCT `TELESCOP.strip()` (RAW o kilku ogniskowych -
     per ogniskowa, `_soczewki_raw`); (2) config iloczyn
-    (telescope×camera) + link `frame.config_id`. Brak/pusty TELESCOP lub brak kamery →
+    (telescope×camera) + link `frame.config_id` klatek AKTYWNYCH (`superseded_by`/`retired_at`
+    NULL - AR-134, populacja kolejki przeglądu). Brak/pusty TELESCOP lub brak kamery →
     `config.review` (W4, zero cichego NULL; kolejka ze STANU `config_id IS NULL`). Zwraca
     `GroupSummary`. Idempotentny (propose_* i assign_config sprawdzają stan przed zapisem).
 
@@ -278,7 +280,8 @@ def run_grouper(con, now):
     rows = con.execute(
         "SELECT f.id AS fid, f.camera_id AS cam, f.kind AS kind, f.config_id AS cfg, "
         "       f.config_source AS cfg_src, f.filetype AS ft, "
-        "       h.telescop AS tel, h.focallen AS fl, h.focratio_raw AS fr "
+        "       h.telescop AS tel, h.focallen AS fl, h.focratio_raw AS fr, "
+        "       (f.superseded_by IS NULL AND f.retired_at IS NULL) AS aktywna "
         "FROM frame f JOIN header h ON h.frame_id = f.id").fetchall()
     s.headers = len(rows)
     oryginaly = {r["variant_frame_id"]: r["original_frame_id"] for r in con.execute(
@@ -313,14 +316,19 @@ def run_grouper(con, now):
         # (`optics_from_files` po fazie 2), bo dopiero wtedy wiadomo, które klatki oś mu przypisała.
         start = _optics([(m["kind"], m["fl"], m["fr"], m["cfg_src"] is not None) for m in members
                          if m["kind"] in OPTICS_EVIDENCE_KINDS])
-        tel_id, created = repo.propose_telescope(
+        tel_id, made = repo.propose_telescope(
             con, telescop_canon=canon, f_ratio_nominal=start.f_ratio,
             focal_nominal=start.focal, member_count=len(members), now=now)
-        s.telescopes_proposed += created
+        s.telescopes_proposed += made is repo.Made.CREATED
+        s.telescopes_unretired += made is repo.Made.UNRETIRED
         tel_ids[canon] = tel_id
 
-    # (2) config iloczyn + link frame.config_id (inwariant: config.camera_id == frame.camera_id)
-    for r in sorted(rows, key=lambda r: r["fid"] in oryginaly):     # warianty na koniec (faza 0)
+    # (2) config iloczyn + link frame.config_id (inwariant: config.camera_id == frame.camera_id).
+    # Wyłącznie klatki AKTYWNE (AR-134): zastąpiona i wycofana nie są robotą - bez liczenia, bez
+    # flagi przeglądu i bez przepięcia; populacja przebiegu = populacja kolejki ze stanu
+    # (`resolver.review_state`, ten sam predykat). Faza (1) czyta wszystkie nagłówki, jak dotąd.
+    aktywne = [r for r in rows if r["aktywna"]]
+    for r in sorted(aktywne, key=lambda r: r["fid"] in oryginaly):  # warianty na koniec (faza 0)
         if r["kind"] in NO_TELESCOPE_KINDS:
             s.calibration_off_axis += 1
             if r["cfg"] is not None and repo.unassign_config(con, frame_id=r["fid"], now=now):

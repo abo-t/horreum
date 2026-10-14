@@ -93,6 +93,19 @@ _ASSET = {"core": ("horreum.data", "targets_core.json"),
 # `_target`, przy kanonie, a nie pół planera dalej (EXPECT).
 TARGET_FIELDS = ("t", "r", "d", "a")
 
+# STATUS KATALOGOWY (pole `s`, K-3) - OSOBNO od typu. Typ (`t`) jest klasą astrofizyczną i steruje
+# kanałami (`required_channels`) oraz progami (`feasible`); status mówi, CO źródło twierdzi o tej
+# klasie: `confirmed` - potwierdzona widmem, `candidate` - kandydatka bez widma, `mimic` - obiekt
+# zgłoszony jako mgławica planetarna i odrzucony (typ = to, czym jest wg publikacji). Brak pola =
+# katalog nie podaje statusu (rekordy OpenNGC, Sh2, LBN…) i typ jest twierdzeniem katalogu.
+# Dwie wartości w jednym polu `t` zrobiłyby z kandydatki „PN” na ekranie, a z typu nieznanego
+# planerowi - cel odrzucony po cichu. `scripts/build_catalog.py` IMPORTUJE ten zbiór.
+CATALOG_STATUSES = frozenset({"confirmed", "candidate", "mimic"})
+# ZNACZEK statusu przy typie - JEDEN słownik dla każdej powierzchni: CLI (`horreum plan`) dokleja
+# znak ASCII, ekran planera bierze zdanie `planner.type_<status>` dla statusu ze znaczkiem.
+# Pusty znaczek = typ jest twierdzeniem źródła i stoi sam. Klucze = `CATALOG_STATUSES` (test).
+STATUS_MARKS = {"confirmed": "", "candidate": "?", "mimic": "~"}
+
 
 def target_fields_present(raw):
     """Ile pól CELU niesie surowy rekord assetu: `0` = rekord-nazwa, `len(TARGET_FIELDS)` = rekord-cel,
@@ -141,6 +154,7 @@ class Target:
     layer: str
     why: str | None
     size_source: str | None
+    status: str | None = None      # status katalogowy (`CATALOG_STATUSES`); None = katalog milczy
 
     @property
     def catalog_aliases(self):
@@ -335,9 +349,14 @@ def _target(raw, layer):
     if missing:
         raise ValueError(f"targets: rekord warstwy {layer!r} bez pól {missing} "
                          f"(kanon={raw.get('c')!r}) — asset jest niepełny")
+    status = _to_text(raw.get("s"))
+    if status is not None and status not in CATALOG_STATUSES:
+        raise ValueError(f"targets: rekord warstwy {layer!r} ma status {status!r} spoza "
+                         f"{sorted(CATALOG_STATUSES)} (kanon={raw.get('c')!r})")
     return Target(minor_arcmin=_to_float(raw.get("b")), mag=_to_float(raw.get("m")),
                   mag_from_b=bool(raw.get("mb")), aliases=tuple(raw.get("n") or ()),
-                  layer=layer, why=raw.get("why"), size_source=raw.get("size_source"), **fields)
+                  layer=layer, why=raw.get("why"), size_source=raw.get("size_source"),
+                  status=status, **fields)
 
 
 def feasible(t, rigs=(), *, min_size=6.0, min_dark=15.0, max_mag=13.0, min_fill=None,

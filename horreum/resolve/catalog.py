@@ -136,6 +136,19 @@ def xref(canon):
     return _xref_flat().get(canon, canon)
 
 
+def xref_key_target(text):
+    """Nazwa, która jest KLUCZEM pary `catalog_xref` → cel pary; każda inna → None (`M33` →
+    `NGC598`, `M 33` i klucz aliasu `M33` tak samo; `NGC598`, `M45`, `LMC` → None). JEDEN predykat
+    „ta nazwa należy do celu pary” dla kroku uzgodnienia przebiegu, celu gestu „Zmień obiekt…”
+    i wiersza Porządków (AR-135) - trzy kopie rozjechałyby się przy pierwszej nowej tabeli.
+    `split=False`: nazwa ma być oznaczeniem W CAŁOŚCI, nie pierwszym członem sklejki."""
+    cc = catalog_canon(text, split=False)
+    if cc is None:
+        return None
+    cel = xref(cc)
+    return cel if cel != cc else None
+
+
 # Etykieta katalogu z formy kanonicznej (prefiks). Dłuższe/specyficzne prefiksy PRZED krótszymi
 # (Ced/Cr/CTB przed C; vdB przed V; Barnard `B\d` osobno) — pierwsze trafienie wygrywa.
 _LABELS = [

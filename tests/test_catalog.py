@@ -265,3 +265,327 @@ def test_szukanie_M64_z_ekranu_trafia_NGC4826():
     stan = znajdz.resolve(znajdz.parse("m64"), kat)
     assert stan.facets == {"object": {"in": [[1, "NGC4826"]]}}
     assert stan.note_query is None and stan.unmatched == ()
+
+
+# --- D-1013-1: pełna tabela Messier → NGC/IC z VII/118 ---
+
+def test_messier_xref_PELNA_tabela_106_kluczy_M76_na_NGC650():
+    """Decyzja `Q9`: wszystkie 106 Messierów, które VII/118 wiąże z NGC/IC (110 minus M24, M40, M45,
+    M102). Dwie pozycje VII/118 z dwoma obiektami rozstrzyga kolumna M OpenNGC: M76 → NGC650
+    (NGC651 to druga połowa tego samego obiektu), M51 → NGC5194. Polityka pliku mówi to wprost."""
+    x = load_catalog_xref()
+    messier = x["messier_to_ngc"]
+    assert len(messier) == 106
+    assert set(messier) == {f"M{n}" for n in range(1, 111)} - {"M24", "M40", "M45", "M102"}
+    assert messier["M76"] == "NGC650" and messier["M51"] == "NGC5194"
+    assert (xref("M13"), xref("M25"), xref("M110")) == ("NGC6205", "IC4725", "NGC205")
+    for pole in ("_doc", "_zrodlo_messier"):
+        assert "pełna tabela z VII/118" in x[pole], pole
+
+
+@pytest.mark.parametrize("nazwa, cel", [
+    ("M33", "NGC598"), ("M 33", "NGC598"), ("Messier 33", "NGC598"), ("Sh2-190", "IC1805"),
+    ("NGC598", None), ("M45", None), ("LMC", None), ("", None), (None, None),
+    ("M33_NGC598", None),            # sklejka nie jest nazwą-kluczem (split=False)
+])
+def test_xref_key_target_jeden_predykat_nazwy_klucza(nazwa, cel):
+    from horreum.resolve.catalog import xref_key_target
+    assert xref_key_target(nazwa) == cel
+
+
+# --- AR-135: para dopisana do bazy, która zna już obiekt pod kluczem ---
+
+NOW_X = "2026-10-14T12:00:00"
+
+
+@pytest.fixture
+def bez_pary_M33():
+    """Stan SPRZED dopisania pary `M33 → NGC598`: `xref` czyta spłaszczoną tabelę przez
+    `_xref_flat`, więc podmieniamy ją bez pary; `_xref_reverse` ma własny cache - czyszczony po obu
+    stronach. Zwraca funkcję, która „dopisuje” parę (cofa podmianę). Własny `MonkeyPatch`, nie
+    fixture testu: cofnięcie w połowie testu nie może zdjąć cudzych podmian."""
+    from horreum.resolve import catalog as cat
+    pelna = dict(cat._xref_flat())
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cat, "_xref_flat", lambda: {k: v for k, v in pelna.items() if k != "M33"})
+    cat._xref_reverse.cache_clear()
+
+    def dopisz():
+        mp.undo()
+        cat._xref_reverse.cache_clear()
+    yield dopisz
+    mp.undo()
+    cat._xref_reverse.cache_clear()
+
+
+def _baza_M33(tmp_path, obiekty):
+    """Archiwum z lightami o zadanych kartach `OBJECT` (osobne piksele = osobne klatki)."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import db
+    from horreum.scan import scan_tree
+    con = db.open_db(str(tmp_path / "x.db"))
+    tree = tmp_path / "t"
+    tree.mkdir()
+    for n, obj in enumerate(obiekty, start=1):
+        hdu = fits.PrimaryHDU(data=np.full((4, 4), n, np.uint16))
+        for kw, val in (("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+                        ("IMAGETYP", "LIGHT"), ("OBJECT", obj)):
+            hdu.header[kw] = val
+        fits.HDUList([hdu]).writeto(str(tree / f"l{n}.fits"))
+    scan_tree(con, tree, now=NOW_X)
+    return con
+
+
+def _klatka(con, raw):
+    return con.execute("SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id "
+                       "WHERE h.object_raw = ?", (raw,)).fetchone()[0]
+
+
+def _stan(con, fid):
+    r = con.execute("SELECT o.canon AS canon, f.object_source AS src FROM frame f "
+                    "LEFT JOIN object o ON o.id = f.object_id WHERE f.id = ?", (fid,)).fetchone()
+    return r["canon"], r["src"]
+
+
+def _zdarzenia(con):
+    return con.execute("SELECT count(*) FROM event").fetchone()[0]
+
+
+def test_AR135_para_dopisana_po_fakcie_jedna_tozsamosc_i_wiersz_Porzadkow(tmp_path, bez_pary_M33):
+    """Baza sprzed pary niesie obiekt `M33` z aliasem z nagłówka, klatkami z nagłówka, klatką
+    z ALIASU (zeznanie `M-33`, którego gramatyka nie czyta) i klatką RĘKI. Po dopisaniu pary:
+
+      * predykat Porządków pokazuje obiekt `M33` z jego klatkami i nazywa cel (`NGC598`);
+      * `object_target("M33")` = cel pary, choć obiekt o kanonie `M33` dalej stoi w bazie;
+      * przebieg przenosi klatki z nagłówka, PRZEPINA równoważność `M33` na cel (klinga
+        `rebind_object_alias`), a klatka z aliasu idzie za nią w tym samym przebiegu - nazwa ma
+        JEDNĄ tożsamość: lookup aliasu, przebieg i wybór celu gestu mówią `NGC598`;
+      * ręka nietknięta: klatka i równoważność ręki zostają przy `M33`, predykat dalej ją pokazuje;
+      * drugi przebieg nie dopisuje ani jednego zdarzenia.
+
+    Mutant: `rebind_object_alias` zwraca False bez zapisu → lookup aliasu `M33` zostaje przy
+    starym obiekcie i asercja tożsamości czerwienieje."""
+    from horreum import repo
+    from horreum.gui import queries
+    from horreum.resolver import alias_lookup, run_resolver
+    con = _baza_M33(tmp_path, ["M 33", "M33", "M-33", "Triangulum Pinwheel"])
+    run_resolver(con, now=NOW_X)
+    run_resolver(con, now=NOW_X)          # drugi przebieg: alias `M33` już stoi, `M-33` go trafia
+    f1, f2, fa, fr = (_klatka(con, r) for r in ("M 33", "M33", "M-33", "Triangulum Pinwheel"))
+    assert [_stan(con, f) for f in (f1, f2, fa)] == [
+        ("M33", "header"), ("M33", "header"), ("M33", "alias")]
+    g = repo.user_assign_object(con, alias_norm="TRIANGULUMPINWHEEL", canon="M33",
+                                catalog="Messier", kind="deep_sky", frame_ids=[fr], now=NOW_X)
+    assert g.assigned == 1
+    assert queries.xref_reconcile_rows(con) == []          # bez pary nie ma czego uzgadniać
+
+    bez_pary_M33()                                          # para dopisana
+    assert queries.xref_reconcile_rows(con) == [
+        ("M33", "M33", "NGC598", frozenset({f1, f2, fa, fr}))]
+    assert queries.object_target(con, "M33").canon == "NGC598"
+
+    s = run_resolver(con, now=NOW_X)
+    assert (s.xref_aliases_rebound, s.xref_frames_followed, s.alias_conflicts) == (1, 1, 0)
+    assert [_stan(con, f) for f in (f1, f2, fa, fr)] == [
+        ("NGC598", "catalog_xref"), ("NGC598", "catalog_xref"), ("NGC598", "alias"),
+        ("M33", "user")]
+    assert alias_lookup(con)("M33")["canon"] == "NGC598" == queries.object_target(con, "M33").canon
+    assert alias_lookup(con)("TRIANGULUMPINWHEEL")["canon"] == "M33"     # ręka zostaje
+    assert con.execute("SELECT count(*) FROM object WHERE canon = 'NGC598'").fetchone()[0] == 1
+    przepiecie = con.execute("SELECT payload FROM event WHERE verb = 'object.alias_rebound'"
+                             ).fetchall()
+    assert len(przepiecie) == 1 and '"source": "header"' in przepiecie[0][0]
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'object.alias_conflict_state'"
+                       ).fetchone()[0] == 0
+    assert queries.xref_reconcile_rows(con) == [("M33", "M33", "NGC598", frozenset({fr}))]
+    assert queries.xref_reconcile_frame_ids(con) == {fr}
+
+    # raport Dostawy: przepięcie ma swój człon, a przebieg bez przepięć milczy (QUIET)
+    widok = pytest.importorskip("horreum.gui.pipeline").PipelineView
+    from horreum.gui import i18n
+    czlon = i18n.t_plural("pipeline.fmt.resolve_xref_rebound", 1, frames=1)
+    assert czlon in widok._format_resolve(None, s)
+
+    przed = _zdarzenia(con)
+    s2 = run_resolver(con, now=NOW_X)
+    assert _zdarzenia(con) == przed and s2.xref_aliases_rebound == 0
+    assert czlon not in widok._format_resolve(None, s2)
+    con.close()
+
+
+def test_AR135_rownowaznosc_RECZNA_zostaje_jako_konflikt_zgloszony_RAZ(tmp_path, bez_pary_M33):
+    """Równoważność `M33` postawiona RĘKĄ (`source='user'`) nie jest przepinana: `add_object_alias`
+    zwraca konflikt wołającemu, przebieg agreguje go po parze i zgłasza STAN jednym zdarzeniem,
+    a kolejny przebieg z tym samym stanem jest ciszą (nie per klatka, nie per przebieg)."""
+    from horreum import repo
+    from horreum.gui import queries
+    from horreum.resolver import run_resolver
+    con = _baza_M33(tmp_path, ["M 33", "Triangulum Pinwheel", "M  33"])
+    fr = _klatka(con, "Triangulum Pinwheel")
+    g = repo.user_assign_object(con, alias_norm="M33", canon="M33", catalog="Messier",
+                                kind="deep_sky", frame_ids=[fr], now=NOW_X)
+    assert g.assigned == 1
+    run_resolver(con, now=NOW_X)
+    oid_m33 = con.execute("SELECT id FROM object WHERE canon = 'M33'").fetchone()[0]
+    assert con.execute("SELECT source FROM object_alias WHERE alias_norm = 'M33'"
+                       ).fetchone()[0] == "user"
+
+    bez_pary_M33()
+    s = run_resolver(con, now=NOW_X)
+    assert (s.xref_aliases_rebound, s.alias_conflicts) == (0, 1)
+    widok = pytest.importorskip("horreum.gui.pipeline").PipelineView
+    from horreum.gui import i18n
+    assert (i18n.t_plural("pipeline.fmt.resolve_alias_conflict", 1)
+            in widok._format_resolve(None, s))                 # konflikt ma powierzchnię w raporcie
+    stan = con.execute("SELECT payload FROM event WHERE verb = 'object.alias_conflict_state'"
+                       ).fetchall()
+    assert len(stan) == 1 and f'"items": [["M33", {oid_m33}, "NGC598"]]' in stan[0][0]
+    assert con.execute("SELECT object_id FROM object_alias WHERE alias_norm = 'M33'"
+                       ).fetchone()[0] == oid_m33                      # ręka nietknięta
+    assert _stan(con, fr) == ("M33", "user")
+    assert [n for n, _c, _t, _f in queries.xref_reconcile_rows(con)] == ["M33"]
+
+    przed = _zdarzenia(con)
+    run_resolver(con, now=NOW_X)
+    assert _zdarzenia(con) == przed, "ten sam stan konfliktu - drugi przebieg jest ciszą"
+
+    # klinga wprost: konflikt wraca do wołającego, zero zapisu; przepięcie ręki odmówione
+    oid_cel = con.execute("SELECT id FROM object WHERE canon = 'NGC598'").fetchone()[0]
+    zapis = repo.add_object_alias(con, alias_norm="M33", object_id=oid_cel,
+                                  source="catalog_xref", now=NOW_X)
+    assert (zapis.created, zapis.conflict_object_id) == (False, oid_m33)
+    assert repo.rebind_object_alias(con, alias_norm="M33", object_id=oid_cel,
+                                    expected_object_id=oid_m33, now=NOW_X) == (False, 0)
+    assert _zdarzenia(con) == przed
+    con.close()
+
+
+def test_AR135_alias_i_klatki_JEDNA_transakcja_awaria_w_polowie_nie_zapisuje_nic(
+        tmp_path, bez_pary_M33, monkeypatch):
+    """Przepięcie równoważności `M33` i klatki z niej (`M-33`, źródło `alias`) to JEDNA klinga pod
+    `BEGIN IMMEDIATE`: awaria wstrzyknięta między zapisem aliasu a ruchem klatki cofa oba zapisy
+    (alias przy starym obiekcie, klatka przy nim, zero `object.alias_rebound`), a następny przebieg
+    dokańcza całość. Mutant: alias i klatki w osobnych transakcjach - po awarii alias wskazuje cel,
+    klatka zostaje przy `M33` na zawsze (kolejny przebieg mija alias, który już wskazuje cel)."""
+    from horreum import repo
+    from horreum.resolver import alias_lookup, run_resolver
+    con = _baza_M33(tmp_path, ["M 33", "M-33"])
+    run_resolver(con, now=NOW_X)
+    run_resolver(con, now=NOW_X)
+    fa = _klatka(con, "M-33")
+    assert _stan(con, fa) == ("M33", "alias")
+    bez_pary_M33()
+
+    prawdziwy = repo.emit_event
+
+    def awaria(con_, **kw):
+        if kw["verb"] == "object.assigned" and kw["target"] == f"frame:{fa}":
+            raise RuntimeError("awaria w połowie przepięcia")
+        return prawdziwy(con_, **kw)
+    monkeypatch.setattr(repo, "emit_event", awaria)
+    with pytest.raises(RuntimeError, match="w połowie"):
+        run_resolver(con, now=NOW_X)
+    assert alias_lookup(con)("M33")["canon"] == "M33"             # alias cofnięty razem z klatką
+    assert _stan(con, fa) == ("M33", "alias")
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'object.alias_rebound'"
+                       ).fetchone()[0] == 0
+    monkeypatch.setattr(repo, "emit_event", prawdziwy)
+    s = run_resolver(con, now=NOW_X)
+    assert (s.xref_aliases_rebound, s.xref_frames_followed) == (1, 1)
+    assert alias_lookup(con)("M33")["canon"] == "NGC598" and _stan(con, fa) == ("NGC598", "alias")
+    con.close()
+
+
+def test_AR135_okno_przypisania_i_skrot_ostatnio_uzyte_ida_do_celu_pary(tmp_path, bez_pary_M33):
+    """Pierwszeństwo pary obejmuje KAŻDĄ powierzchnię, która wskazuje obiekt istniejący, nie tylko
+    „Zmień obiekt…”: wybór starej tożsamości `M33` z listy okna przypisania zapisuje `NGC598` (żywy
+    cel pary) i mówi to zdaniem przed kliknięciem, a skrót „ostatnio użyte” podaje `NGC598` zamiast
+    `M33`. Jedna reguła: `queries.xref_live_target`. Mutant: okno bez reguły - `selected` niesie
+    `M33`, a zapis ręki trafia do starej tożsamości obok celu pary."""
+    from PySide6.QtWidgets import QApplication
+    from horreum import repo
+    from horreum.gui import i18n, queries
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    from horreum.resolver import run_resolver
+    QApplication.instance() or QApplication([])
+    con = _baza_M33(tmp_path, ["M 33", "Triangulum Pinwheel"])
+    run_resolver(con, now=NOW_X)
+    fr = _klatka(con, "Triangulum Pinwheel")
+    repo.user_assign_object(con, alias_norm="TRIANGULUMPINWHEEL", canon="M33", catalog="Messier",
+                            kind="deep_sky", frame_ids=[fr], now=NOW_X)
+    assert [r["canon"] for r in queries.recent_hand_objects(con)] == ["M33"]   # bez pary - M33
+    bez_pary_M33()
+    run_resolver(con, now=NOW_X)                         # `M 33` idzie do NGC598 - cel jest żywy
+    assert queries.xref_live_target(con, "M33")["canon"] == "NGC598"
+    assert queries.xref_live_target(con, "NGC598") is None
+
+    assert [r["canon"] for r in queries.recent_hand_objects(con)] == ["NGC598"]
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=1)
+    try:
+        idx = next(i for i in range(dlg.combo.count())
+                   if dlg.combo.itemData(i) is not None and dlg.combo.itemData(i)[1] == "M33")
+        dlg.combo.setCurrentIndex(idx)
+        assert dlg.canon_preview.text() == i18n.t("assign.xref_redirect", old="M33", new="NGC598")
+        dlg._validate_and_accept()
+        assert dlg.selected == ("NGC598", "NGC", None, None)
+    finally:
+        dlg.close()
+    con.close()
+
+
+def test_AR135_cel_pary_tylko_jako_NAGROBEK_to_cel_nieistniejacy(tmp_path, bez_pary_M33):
+    """Cel pary (`NGC598`) istnieje wyłącznie jako nagrobek (0040: gest go założył i „Cofnij” zdjął).
+    Równoważność `M33` z nagłówka NIE idzie na nagrobek - zostaje raportem konfliktu; klinga
+    przepięcia odmawia nagrobkowi wprost; wybór celu gestu bierze tożsamość z drabiny, nie
+    z nagrobka; nagrobek nie wstaje (klatek do niego nie ma - ręka trzyma swoje przy `M33`).
+    Mutant: cel przepięcia bez `retired_at IS NULL` - alias ląduje na nagrobku."""
+    from horreum import repo
+    from horreum.gui import queries
+    from horreum.resolver import alias_lookup, run_resolver
+    from test_nagrobek_osi import _cofnij_baze, _klatka_z_kopia, _nagrobek, _przebieg_bazy
+    con = _baza_M33(tmp_path, ["Triangulum Pinwheel"])
+    fr = _klatka(con, "Triangulum Pinwheel")
+    repo.user_assign_object(con, alias_norm="TRIANGULUMPINWHEEL", canon="M33", catalog="Messier",
+                            kind="deep_sky", frame_ids=[fr], now=NOW_X)
+    oid_m33 = con.execute("SELECT id FROM object WHERE canon = 'M33'").fetchone()[0]
+    assert repo.add_object_alias(con, alias_norm="M33", object_id=oid_m33, source="header",
+                                 now=NOW_X).created
+    sciezka = "R:\\ASTRO_\\LIGHTS\\g.fits"
+    fid, lid = _klatka_z_kopia(con, "gest", sciezka)
+    item = _przebieg_bazy(con, "R1", fid, lid, sciezka, "NGC598", (None, None, None))
+    assert _cofnij_baze(con, item, "R1") is None
+    oid_cel = con.execute("SELECT id FROM object WHERE canon = 'NGC598'").fetchone()[0]
+    assert _nagrobek(con, "object", oid_cel) is not None
+
+    bez_pary_M33()
+    s = run_resolver(con, now=NOW_X)
+    assert (s.xref_aliases_rebound, s.alias_conflicts) == (0, 1)
+    assert alias_lookup(con)("M33")["object_id"] == oid_m33
+    assert _nagrobek(con, "object", oid_cel) is not None
+    assert repo.rebind_object_alias(con, alias_norm="M33", object_id=oid_cel,
+                                    expected_object_id=oid_m33, now=NOW_X) == (False, 0)
+    cel = queries.object_target(con, "M33")
+    assert (cel.canon, cel.catalog) == ("NGC598", "NGC")      # nagrobek niósł `catalog` None
+    assert queries.xref_reconcile_rows(con) == [("M33", "M33", "NGC598", frozenset({fr}))]
+    con.close()
+
+
+def test_AR135_stan_konfliktow_zdarzenie_tylko_przy_zmianie(tmp_path):
+    """`flag_object_alias_conflict_state`: pusto bez historii - cisza; nowy stan - zdarzenie; ten
+    sam stan (w innej kolejności) - cisza; zejście do pustki - zdarzenie z `count: 0`."""
+    import json
+    from horreum import db, repo
+    con = db.open_db(str(tmp_path / "s.db"))
+    ile = lambda: con.execute(  # noqa: E731
+        "SELECT count(*) FROM event WHERE verb = 'object.alias_conflict_state'").fetchone()[0]
+    assert repo.flag_object_alias_conflict_state(con, [], NOW_X) is False and ile() == 0
+    a, b = ["M33", 1, "NGC598"], ["M1", 2, "NGC1952"]
+    assert repo.flag_object_alias_conflict_state(con, [a, b], NOW_X) is True and ile() == 1
+    assert repo.flag_object_alias_conflict_state(con, [b, a], NOW_X) is False and ile() == 1
+    assert repo.flag_object_alias_conflict_state(con, [], NOW_X) is True and ile() == 2
+    ostatni = con.execute("SELECT payload FROM event WHERE verb = 'object.alias_conflict_state' "
+                          "ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert json.loads(ostatni) == {"count": 0, "items": []}
+    assert repo.flag_object_alias_conflict_state(con, [], NOW_X) is False and ile() == 2
+    con.close()

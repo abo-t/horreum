@@ -366,6 +366,12 @@ PRESET_FILE_OBJECT_MISMATCH = "Plik nie zgadza się z obiektem"
 # (menu prawego kliku w tej perspektywie) - na życzenie, przez szufladę zapisu z cofnięciem.
 # Predykat `queries.f_ratio_mismatch_frame_ids`, ten sam co liczba wiersza Porządków.
 PRESET_F_RATIO_MISMATCH = "f/ niezgodna z teleskopem"
+# PRESET_XREF_RECONCILE - szesnasty bliźniak (AR-135). Para `catalog_xref` dopisana po fakcie
+# (`M33 → NGC598`) zostawia klatki ręki przy obiekcie o kanonie-kluczu i równoważności ręki przy
+# innym obiekcie niż cel. Robotą jest gest „Zmień obiekt…” na tych klatkach (cel podaje podpowiedź
+# wiersza Porządków). Predykat `queries.xref_reconcile_frame_ids`, ten sam co liczba wiersza.
+# Stała współdzielona z TasksView po nazwie.
+PRESET_XREF_RECONCILE = "Nazwa katalogowa wskazuje inny obiekt"
 # PRESET_READY_IMAGES - gotowe obrazy pogrupowane po stanie rodowodu. Bez flagi `only_*`: zbiór
 # niesie ISTNIEJĄCY facet Rodzaj (`master_light`), więc listwa pokazuje go jako wybór, a facet
 # „Rodowód" obok zawęża dalej jednym klikiem. Grupowanie po kolumnie „Rodowód" stawia stosy bez
@@ -404,6 +410,7 @@ PRESETS = {
     PRESET_FILE_OBJECT_MISMATCH: {"filter": None, "group_by": None,
                                   "only_file_object_mismatch": True},
     PRESET_F_RATIO_MISMATCH: {"filter": None, "group_by": None, "only_f_ratio_mismatch": True},
+    PRESET_XREF_RECONCILE: {"filter": None, "group_by": None, "only_xref_reconcile": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -429,6 +436,7 @@ _PRESET_LABELS = {
     PRESET_PENDING_FINISH: "perspective.pending_finish",
     PRESET_FILE_OBJECT_MISMATCH: "perspective.file_object_mismatch",
     PRESET_F_RATIO_MISMATCH: "perspective.f_ratio_mismatch",
+    PRESET_XREF_RECONCILE: "perspective.xref_reconcile",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -476,6 +484,7 @@ _TRIMY = (
     ("_only_pending_finish", "pending_finish_frame_ids"),
     ("_only_file_object_mismatch", "file_object_mismatch_frame_ids"),
     ("_only_f_ratio_mismatch", "f_ratio_mismatch_frame_ids"),
+    ("_only_xref_reconcile", "xref_reconcile_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model

@@ -181,7 +181,7 @@ def _view_row(row, result, rig_name):
     t = row.target
     return ViewRow(
         canon=t.canon,
-        type=t.type,
+        type=type_text(t),
         size=i18n.t("planner.arcmin", n=f"{t.major_arcmin:.0f}"),
         culmination=f"{row.window.max_alt_deg:.0f}°",
         window=f"{row.window.hours_above:.1f} h",
@@ -197,6 +197,20 @@ def _view_row(row, result, rig_name):
         source=row,
         fill_mosaic=fr is not None and fr.panels > 1,
     )
+
+
+def status_key(status):
+    """Status katalogowy celu (K-3) → klucz zdania podpisu typu albo None. Który status niesie
+    znaczek, mówi JEDEN słownik rdzenia (`targets.STATUS_MARKS`, ten sam czyta CLI); status bez
+    znaczka (`confirmed`, brak statusu) = sam typ, bo tam typ JEST twierdzeniem źródła."""
+    return f"planner.type_{status}" if T.STATUS_MARKS.get(status) else None
+
+
+def type_text(target):
+    """Podpis kolumny „Typ”: klasa z assetu, a przy kandydatce i mimice - razem ze statusem.
+    Surowy token przy kandydatce mówiłby „PN” o obiekcie, którego źródło za PN nie uznało."""
+    klucz = status_key(target.status)
+    return target.type if klucz is None else i18n.t(klucz, type=target.type)
 
 
 def recommend_text(channel, reason):

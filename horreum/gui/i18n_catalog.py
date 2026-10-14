@@ -1035,6 +1035,11 @@ CATALOG = {
         "pl": " · nowy obiekt: zapis założy go w bazie",
         "en": " · new object: saving creates it in the database",
     },
+    # AR-135: wybór z listy starej tożsamości pary katalogowej idzie do celu pary.
+    "assign.xref_redirect": {
+        "pl": "{old} to dziś {new} (para katalogowa) - klatki pójdą do {new}",
+        "en": "{old} is now {new} (catalog pair) - the frames go to {new}",
+    },
     # Zdanie na żywo pod polem nazwy: co wpisano → jaki kanon zapisze Horreum → jaka forma stanie
     # w nagłówku (`catalog.header_form`). Mówi to PRZED kliknięciem „Przypisz".
     "assign.canon_preview": {
@@ -1418,6 +1423,9 @@ CATALOG = {
     "planner.your_name": {"pl": "u Ciebie: {names}", "en": "your name: {names}"},
     "planner.gaps": {"pl": "brak {channels}", "en": "missing {channels}"},
     "planner.no_frames": {"pl": "bez klatek", "en": "no frames"},
+    # K-3: status katalogowy obok typu - kandydatka i mimika nigdy nie podpisują się samym „PN”.
+    "planner.type_candidate": {"pl": "{type} (kandydatka)", "en": "{type} (candidate)"},
+    "planner.type_mimic": {"pl": "{type} (mimika PN)", "en": "{type} (PN mimic)"},
     # I-2e — most rodowodu stosów do planera. „w obrazach" mówi o CZASIE, który realnie wszedł
     # w gotowy obraz; jest osobną liczbą od godzin zebranych i nie ma prawa brzmieć jak ich powtórka.
     "planner.integrated": {"pl": "w obrazach {hours}", "en": "in images {hours}"},
@@ -3801,6 +3809,20 @@ CATALOG = {
     # w dół), a przyczyna byłaby niewidzialna: człowiek czytałby, że przebieg nagle „naprawił"
     # coś sam. QUIET — doklejka wchodzi wyłącznie przy niezerowej liczbie, jak „odpięte" obok.
     "pipeline.fmt.group_by_hand": {"pl": " (zestaw ręką {n})", "en": " (setup by hand {n})"},
+    # Nagrobek osi (0040) wrócił na oś nazwą z pliku - to nie „nowy” wiersz, więc własny człon;
+    # wyłącznie przy niezerowej liczbie (QUIET).
+    "pipeline.fmt.group_unretired": {
+        "pl": {"one": " · {n} teleskop przywrócony na oś",
+               "few": " · {n} teleskopy przywrócone na oś",
+               "many": " · {n} teleskopów przywróconych na oś"},
+        "en": {"one": " · {n} telescope back on the axis",
+               "other": " · {n} telescopes back on the axis"}},
+    "pipeline.fmt.resolve_unretired": {
+        "pl": {"one": " · {n} obiekt przywrócony na oś",
+               "few": " · {n} obiekty przywrócone na oś",
+               "many": " · {n} obiektów przywróconych na oś"},
+        "en": {"one": " · {n} object back on the axis",
+               "other": " · {n} objects back on the axis"}},
     "pipeline.fmt.resolve": {
         "pl": "klatki {frames} · klatki light {lights} · obiekty nowe {obj_new} · "
               "przypisane {obj_assign} · przegląd {obj_review} (różnych {obj_distinct}) · "
@@ -3828,6 +3850,22 @@ CATALOG = {
               "rozstrzygnij ręcznie",
         "en": "  ⚠ {n} dictionary names already belong to another object — skipped, "
               "resolve by hand"},
+    # AR-135: uzgodnienie z tabelą `catalog_xref` - nazwa przepięta do celu pary (klatki z tej nazwy
+    # idą za nią) i nazwa, która w bazie wskazuje inny obiekt niż drabina (rozstrzyga człowiek).
+    "pipeline.fmt.resolve_xref_rebound": {
+        "pl": {"one": " · nazwa katalogowa przepięta do celu: {n} (klatek za nią: {frames})",
+               "few": " · nazwy katalogowe przepięte do celu: {n} (klatek za nimi: {frames})",
+               "many": " · nazw katalogowych przepiętych do celu: {n} (klatek za nimi: {frames})"},
+        "en": {"one": " · catalogue name moved to its target: {n} (frames followed: {frames})",
+               "other": " · catalogue names moved to their targets: {n} (frames followed: {frames})"}},
+    "pipeline.fmt.resolve_alias_conflict": {
+        "pl": {"one": "  ⚠ {n} nazwa wskazuje w bazie inny obiekt niż katalog - Porządki",
+               "few": "  ⚠ {n} nazwy wskazują w bazie inny obiekt niż katalog - Porządki",
+               "many": "  ⚠ {n} nazw wskazuje w bazie inny obiekt niż katalog - Porządki"},
+        "en": {"one": "  ⚠ {n} name points to another object than the catalogue "
+                      "- see Housekeeping",
+               "other": "  ⚠ {n} names point to another object than the catalogue "
+                        "- see Housekeeping"}},
     # E5-1: nagłówek wygrywa z potwierdzeniem ze ścieżki (header-primary), ale głośno. Dwie
     # doklejki, każda tylko gdy niezerowa (QUIET): inny obiekt = gest człowieka przegrał z plikiem
     # (ostrzeżenie), ten sam obiekt = zmieniło się tylko źródło (informacja).
@@ -5718,8 +5756,10 @@ CATALOG = {
                              "en": "copy without mtime - no anchor for the move"},
     "objchg.skip.no_object": {"pl": "klatka bez obiektu - nie ma czego uzgadniać",
                               "en": "frame without an object - nothing to align"},
-    "objchg.skip.bad_target": {"pl": "cel, którego system plików nie przyjmie: {detail}",
-                               "en": "a target the file system will not accept: {detail}"},
+    "objchg.skip.bad_target": {
+        "pl": "folder obiektu „{canon}” nie powstanie - system plików nie przyjmie tej nazwy",
+        "en": "the object folder “{canon}” cannot be created - the file system will not accept "
+              "this name"},
     "objchg.skip.off_position": {
         "pl": "plik nie stoi na pozycji obiektu w drzewie archiwum - nie ma folderu obiektu, do "
               "którego mógłby trafić",
@@ -5734,10 +5774,64 @@ CATALOG = {
         "pl": "karta OBJECT nie do zapisania ({detail}) - plik zostaje, bo karta i folder idą razem",
         "en": "the OBJECT card cannot be written ({detail}) - the file stays, because the card and "
               "the folder go together"},
+    # Powód bramki karty `OBJECT` (`queries.object_card_gate`, kod `ZdanieRdzenia`) - szczegół
+    # zdania `objchg.skip.card_skip` w języku UI (AR-138); PL = zdanie bramki znak w znak.
+    "objchg.gate.no_present_copy": {"pl": "brak obecnej kopii", "en": "no present copy"},
+    "objchg.gate.many_copies": {"pl": "wiele obecnych kopii ({n})",
+                                "en": "several present copies ({n})"},
+    "objchg.gate.compressed": {"pl": "skompresowany master", "en": "compressed master"},
+    "objchg.gate.degenerate": {
+        "pl": "tożsamość nieobliczalna (degenerat) - zapis rozdwoiłby klatkę",
+        "en": "identity cannot be computed (degenerate) - a write would split the frame"},
+    "objchg.gate.no_header_hash": {"pl": "brak header_hash - brak kontroli zapisu",
+                                   "en": "no header_hash - no write check"},
+    "objchg.gate.unreadable": {"pl": "kopia oznaczona jako nieczytelna",
+                               "en": "copy marked as unreadable"},
+    "objchg.gate.many_cards": {"pl": "wiele kart OBJECT ({n})", "en": "several OBJECT cards ({n})"},
+    "objchg.gate.copy_without_facts": {
+        "pl": "kopia bez zebranych faktów przy klatce z nieobecną kopią - zbierze je „Przyjmij "
+              "nowe”, gdy plik jest na dysku i nie czeka na dokończenie przerwanego zapisu",
+        "en": "a copy without collected facts in a frame with an absent copy - Receive new "
+              "collects them when the file is on disk and not waiting for an interrupted write "
+              "to finish"},
+    "objchg.gate.copy_other_card": {
+        "pl": "kopia zeznaje inną kartę OBJECT niż klatka",
+        "en": "the copy testifies a different OBJECT card than the frame"},
+    "objchg.gate.form_not_canon": {
+        "pl": "forma karty nie wraca do kanonu (kanon znany tylko z aliasu)",
+        "en": "the card form does not lead back to the canon (canon known only from an alias)"},
+    "objchg.gate.joined_names": {
+        "pl": "sklejka oznaczeń - nie każdy człon wskazuje ten obiekt",
+        "en": "joined designations - not every part points to this object"},
+    "objchg.gate.card_not_text": {"pl": "karta OBJECT nietekstowa ({vtype})",
+                                  "en": "non-text OBJECT card ({vtype})"},
+    "objchg.gate.fits_checksum": {"pl": "FITS z sumą kontrolną (CHECKSUM/DATASUM)",
+                                  "en": "FITS with a checksum (CHECKSUM/DATASUM)"},
     "objchg.skip.card_rule": {"pl": "karta OBJECT: {detail}", "en": "OBJECT card: {detail}"},
-    "objchg.skip.card_comment": {"pl": "karta OBJECT: {detail}", "en": "OBJECT card: {detail}"},
+    # Szczegóły odmowy karty i katalogu jako fakty rdzenia (AR-138): reguła karty FITS 4.0, długości
+    # komentarza przed i po układzie karty, rodzaj błędu systemu.
+    "objchg.skip.card_too_long": {
+        "pl": "karta OBJECT „{value}” za długa - znaków: {length}, rekord FITS mieści: {limit}",
+        "en": "the OBJECT card “{value}” is too long - {length} characters, a FITS record holds "
+              "{limit}"},
+    "objchg.skip.card_chars": {
+        "pl": "karta OBJECT „{value}” ma znaki spoza drukowalnego ASCII - nagłówek FITS ich nie "
+              "przyjmie",
+        "en": "the OBJECT card “{value}” has characters outside printable ASCII - a FITS header "
+              "will not take them"},
+    "objchg.skip.card_comment": {
+        "pl": "karta OBJECT: nowa wartość ucięłaby zastany komentarz karty z {before} do {after} "
+              "znaków (karta FITS po zmianie ma pole wartości stałego formatu) - plik zostaje, bo "
+              "karta i folder idą razem",
+        "en": "OBJECT card: the new value would cut the existing card comment from {before} to "
+              "{after} characters (a changed FITS card gets a fixed-format value field) - the file "
+              "stays, because the card and the folder go together"},
     "objchg.skip.dir_unreadable": {"pl": "katalog celu nieczytelny ({dir}): {detail}",
                                    "en": "target folder unreadable ({dir}): {detail}"},
+    "objchg.skip.dir_denied": {"pl": "katalog celu nieczytelny - brak dostępu: {dir}",
+                               "en": "target folder unreadable - access denied: {dir}"},
+    "objchg.skip.dir_missing": {"pl": "katalog celu nie istnieje na dysku: {dir}",
+                                "en": "the target folder does not exist on disk: {dir}"},
     "objchg.skip.file_in_dir_place": {"pl": "w miejscu katalogu celu stoi plik: {path}",
                                       "en": "a file stands where the target folder should be: "
                                             "{path}"},
@@ -5761,6 +5855,35 @@ CATALOG = {
     "objchg.skip.pair": {"pl": "para stosu jedzie razem - druga połowa pominięta: {inner}",
                          "en": "the stack pair moves together - the other half is skipped: "
                                "{inner}"},
+    # Ostrzeżenia po KODZIE (AR-138): planera (`object_change.WARNING_CODES`) i sterownika zapisu
+    # (`object_change.ZdanieRdzenia`) - zdanie w języku UI (`tekst_ostrzezenia`); wpis mnogi
+    # odmienia się przez parametr `n`. Ostrzeżenie bez kodu zostaje przy zdaniu rdzenia.
+    "objchg.warn.stack_split": {
+        "pl": {"one": "stos {stack}: gest przeniesie {moved} z {inputs} jego wejść - wejścia "
+                      "rozejdą się na {n} folder, a żniwa ustalają siedzibę stosu z jednego "
+                      "folderu lightów",
+               "few": "stos {stack}: gest przeniesie {moved} z {inputs} jego wejść - wejścia "
+                      "rozejdą się na {n} foldery, a żniwa ustalają siedzibę stosu z jednego "
+                      "folderu lightów",
+               "many": "stos {stack}: gest przeniesie {moved} z {inputs} jego wejść - wejścia "
+                       "rozejdą się na {n} folderów, a żniwa ustalają siedzibę stosu z jednego "
+                       "folderu lightów"},
+        "en": {"one": "stack {stack}: the gesture moves {moved} of its {inputs} inputs - the "
+                      "inputs will split across {n} folder, and the harvest takes the stack's "
+                      "home from one lights folder",
+               "other": "stack {stack}: the gesture moves {moved} of its {inputs} inputs - the "
+                        "inputs will split across {n} folders, and the harvest takes the stack's "
+                        "home from one lights folder"}},
+    "objchg.warn.dir_not_removed": {"pl": "katalog {dir} nie usunięty ({detail})",
+                                    "en": "folder {dir} not removed ({detail})"},
+    "objchg.warn.dir_uncertain": {
+        "pl": "katalog {dir}: zamiar założenia bez potwierdzenia, a katalog istnieje - własność "
+              "niepewna, zostaje do oka",
+        "en": "folder {dir}: intent to create it without confirmation, and the folder exists - "
+              "ownership uncertain, left for review"},
+    "objchg.warn.dir_not_empty": {
+        "pl": "katalog {dir}: założony przez gest, ale nie jest pusty - zostaje",
+        "en": "folder {dir}: created by the gesture, but it is not empty - it stays"},
     "objchg.replan_btn": {"pl": "Policz plan ponownie", "en": "Compute the plan again"},
     "objchg.skipped_head_done": {
         "pl": {"one": "Pominięto {n} klatkę - powód i plik:",
@@ -5888,6 +6011,19 @@ CATALOG = {
     "grid.criteria.only_file_object_mismatch": {
         "pl": "tylko plik niezgodny z obiektem (folder albo karta)",
         "en": "only files disagreeing with their object (folder or card)"},
+    # Wiersz Porządków AR-135 i jego perspektywa: para `catalog_xref` dopisana po fakcie.
+    "tasks.xref_reconcile_frames": {"pl": "Nazwa katalogowa wskazuje inny obiekt",
+                                    "en": "Catalog name points to another object"},
+    "tasks.xref_reconcile_tip": {
+        "pl": "Para katalogowa prowadzi nazwę do celu: {pairs}. Zaznacz klatki w perspektywie "
+              "i użyj „{change}” - cel stoi po strzałce.",
+        "en": "A catalog pair leads the name to its target: {pairs}. Select the frames in the "
+              "view and use “{change}” - the target follows the arrow."},
+    "perspective.xref_reconcile": {"pl": "Nazwa katalogowa wskazuje inny obiekt",
+                                   "en": "Catalog name points to another object"},
+    "grid.criteria.only_xref_reconcile": {
+        "pl": "tylko klatki obiektu, którego nazwę para katalogowa prowadzi do innego celu",
+        "en": "only frames whose object name a catalog pair leads to another target"},
     # Okna kart piszą w miejscu (AR-117) - zdanie mówi o drodze zapisu tylko przy spadku, językiem
     # człowieka (szczegół rdzenia - w podpowiedzi okna, nie w zdaniu).
     "wb.inplace_fallback": {
@@ -6080,7 +6216,84 @@ CATALOG = {
     "object.config_focal_info_empty": {
         "pl": "Ogniskowe w plikach zgadzają się z teleskopami - nic do wyboru.",
         "en": "Focal lengths in the files agree with the telescopes - nothing to pick."},
-    "object.config_new_telescope_undo": {
-        "pl": " Pomyłka? Scal „{telescope}” na Osi teleskopu z właściwym teleskopem.",
-        "en": " Mistake? Merge “{telescope}” into the right telescope on the Telescope axis."},
+    # „COFNIJ DOPISANIE” (AR-133, `Q8`): recepta paska po „Dopisz nowy…” i zdanie wyniku
+    # (`repo.undo_new_telescope` → `NewTelescopeUndo`). Powód odmowy to token klingi
+    # (`repo.RETIRE_REFUSALS`) - zdanie per token, parytet pinuje test toru.
+    "object.config_undo_add": {
+        "pl": "Cofnij dopisanie „{telescope}”",
+        "en": "Undo adding “{telescope}”"},
+    "object.config_undo_add.done": {
+        "pl": {"one": "Cofnięto dopisanie „{telescope}”: {n} klatka wróciła do zestawu sprzed gestu",
+               "few": "Cofnięto dopisanie „{telescope}”: {n} klatki wróciły do zestawu sprzed gestu",
+               "many": "Cofnięto dopisanie „{telescope}”: {n} klatek wróciło do zestawu sprzed "
+                       "gestu"},
+        "en": {"one": "Undid adding “{telescope}”: {n} frame is back on its setup from before",
+               "other": "Undid adding “{telescope}”: {n} frames are back on their setup from "
+                        "before"}},
+    "object.config_undo_add.kept": {
+        "pl": {"one": " · {n} klatka zostaje - jej zestaw zmienił się po geście",
+               "few": " · {n} klatki zostają - ich zestaw zmienił się po geście",
+               "many": " · {n} klatek zostaje - ich zestaw zmienił się po geście"},
+        "en": {"one": " · {n} frame stays - its setup changed after the gesture",
+               "other": " · {n} frames stay - their setup changed after the gesture"}},
+    "object.config_undo_add.retired": {
+        "pl": " · teleskop „{telescope}” zdjęty z osi",
+        "en": " · telescope “{telescope}” removed from the axis"},
+    "object.config_undo_add.stays": {
+        "pl": " · teleskop „{telescope}” zostaje: {reason}",
+        "en": " · telescope “{telescope}” stays: {reason}"},
+    "object.config_undo_add.refused": {
+        "pl": "Nie cofnięto dopisania „{telescope}”: {reason}",
+        "en": "Adding “{telescope}” not undone: {reason}"},
+    "object.config_undo_add.busy": {
+        "pl": "Trwa etap Dostawy - cofnięcie dopisania poczeka na jego koniec.",
+        "en": "A Delivery stage is running - undoing the addition waits for it to finish."},
+    "object.config_undo_add.refused.frames": {
+        "pl": "ma klatki przypisane poza gestem",
+        "en": "it has frames assigned outside the gesture"},
+    "object.config_undo_add.refused.cleared_memory": {
+        "pl": "nagrobek klatki pamięta ten obiekt",
+        "en": "a frame's tombstone remembers this object"},
+    "object.config_undo_add.refused.live_run": {
+        "pl": "dotyczy go inny niecofnięty gest „Zmień obiekt…”",
+        "en": "another “Change object…” gesture that is not undone involves it"},
+    "object.config_undo_add.refused.foreign_alias": {
+        "pl": "ma nazwę zapisaną poza gestem",
+        "en": "it has a name saved outside the gesture"},
+    "object.config_undo_add.refused.merged": {
+        "pl": "jest scalony z innym teleskopem",
+        "en": "it is merged into another telescope"},
+    "object.config_undo_add.refused.members": {
+        "pl": "scalono z nim inne teleskopy",
+        "en": "other telescopes are merged into it"},
+    "object.config_undo_add.refused.profile": {
+        "pl": "wskazuje go profil kalibracji",
+        "en": "a calibration profile points to it"},
+    "object.config_undo_add.refused.calibration_fact": {
+        "pl": "wskazuje go fakt przepisu kalibracji klatki",
+        "en": "a frame's calibration recipe fact points to it"},
+    "object.config_undo_add.refused.hand_after": {
+        "pl": "zmieniono go ręką po geście (etykieta, park albo optyka)",
+        "en": "it was changed by hand after the gesture (label, park or optics)"},
+    "object.config_undo_add.refused.undone": {
+        "pl": "to dopisanie jest już cofnięte",
+        "en": "this addition is already undone"},
+    "object.config_undo_add.refused.source_retired": {
+        "pl": "klatki wróciłyby do zestawu teleskopu, którego dopisanie cofnięto wcześniej",
+        "en": "the frames would return to a setup of a telescope whose addition was undone "
+              "earlier"},
+    # Zero klatek wróciło (wszystkie zmienione po geście) - zdanie nie mówi „cofnięto”, którego
+    # nie było; człony `kept` i `stays`/`retired` doklejają się jak przy cofnięciu.
+    "object.config_undo_add.nothing": {
+        "pl": "Dopisanie „{telescope}”: żadna klatka nie wróciła do zestawu sprzed gestu",
+        "en": "Adding “{telescope}”: no frame went back to its setup from before"},
+    # Gest Osi teleskopu („Cofnij dopisanie” przy zaznaczonym wierszu z niecofniętym śladem
+    # `telescope_add`) - trwała droga obok recepty paska, przeżywa przełączenie strony i restart.
+    "axis.tel.undo_add": {"pl": "Cofnij dopisanie", "en": "Undo adding"},
+    "axis.tel.undo_add_tip": {
+        "pl": "Teleskop dopisany oknem „Dopisz nowy…” - klatki wracają do zestawu sprzed gestu, "
+              "a teleskop schodzi z osi, gdy nie ma klatek ani zmian ręki po geście.",
+        "en": "Telescope added with “Add new…” - the frames go back to their setup from before, "
+              "and the telescope leaves the axis when it has no frames and no hand changes after "
+              "the gesture."},
 }

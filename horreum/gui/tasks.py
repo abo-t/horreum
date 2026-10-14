@@ -41,6 +41,7 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_F_RATIO_
                               PRESET_SUPERSEDED, PRESET_VANISHED, PRESET_WITHHELD_TESTIMONY,
                               PRESET_KEPT_COPIES,
                               zdanie_kopii_bez_zeznania)
+from horreum.gui.grid_model import PRESET_XREF_RECONCILE
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -102,6 +103,11 @@ _TASKS = [
     # (`queries.file_object_mismatch_frame_ids`, licznik w `_liczniki_osi`).
     ("file_object_mismatch_frames", "tasks.file_object_mismatch_frames",
      PRESET_FILE_OBJECT_MISMATCH),
+    # Wiersz AKCYJNY i ROBOTA (AR-135) - ta sama oś, czwarty stan: klatka MA obiekt, ale para
+    # `catalog_xref` dopisana po fakcie mówi, że jej obiekt to stara tożsamość celu pary (`M33`
+    # obok `NGC598`). Gest „Zmień obiekt…” na klatkach z perspektywy; cel podaje podpowiedź.
+    # Liczba, lista i zdanie czytają jeden predykat (`queries.xref_reconcile_rows`).
+    ("xref_reconcile_frames", "tasks.xref_reconcile_frames", PRESET_XREF_RECONCILE),
     # Wiersz AKCYJNY i ROBOTA (AR-121) - liczy PRZEBIEGI, nie klatki: gest „Zmień obiekt…” albo
     # „Uzgodnij pliki…”, który nie doszedł do końca (przerwanie, awaria procesu, pozycja w stanie
     # częściowym). Do tego wiersza drogą powrotu po zamknięciu okna było wyłącznie CLI z numerem
@@ -256,13 +262,19 @@ def _liczniki_osi(con):
         ten sam predykat, który przycina perspektywę pod klikiem (lista = liczba).
       * `object_change_interrupted` = przebiegi z `queries.interrupted_object_change_runs`
         (AR-121) - ta sama lista, z której klik bierze przebieg do okna.
+      * `xref_reconcile_frames` = klatki pozycji `queries.xref_reconcile_rows` (AR-135), a obok
+        pary „nazwa → cel” do zdania podpowiedzi (`xref_reconcile_pairs`) - jeden odczyt.
 
     Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
     1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów. Po AR-80 (kopia v36,
     2026-10-13): 1185 bez stanowiska - z 1223 zeszło 38 `master_dark`."""
     niezgodne = queries.copy_conflict_frame_ids(con)
     stan = resolver.review_state(con)
+    xref = queries.xref_reconcile_rows(con)
     return {
+        # AR-135: liczba klatek i pary „nazwa → cel” do zdania podpowiedzi - jeden odczyt predykatu.
+        "xref_reconcile_frames": len(set().union(*(f for _n, _c, _t, f in xref))),
+        "xref_reconcile_pairs": tuple(dict.fromkeys(f"{n} → {t}" for n, _c, t, _f in xref)),
         "config_review_frames": stan.no_config,
         # AR-128/AR-129: dwa kubełki optyki - właściciel predykatu `resolver.optics_mismatch_frame_ids`
         # (lista pod klikiem czyta TEN SAM zbiór; poza `total` kolejki przeglądu).
@@ -636,6 +648,11 @@ class TasksView(QWidget):
             elif key in _PODPOWIEDZI_OSI and n > 0:     # ta sama reguła zera co wyżej
                 klucz, nazwy = _PODPOWIEDZI_OSI[key]
                 tip = i18n.t(klucz, **{k: i18n.t(v) for k, v in nazwy.items()})
+            elif key == "xref_reconcile_frames" and n > 0:
+                # AR-135: zdanie NAZYWA cel - pary „nazwa → cel” ze stanu, gest z katalogu.
+                tip = i18n.t("tasks.xref_reconcile_tip",
+                             pairs=", ".join(state["xref_reconcile_pairs"]),
+                             change=i18n.t("grid.sel.object_change"))
             if robota != n:                             # część liczby z decyzją - nie robota
                 tip += _zdanie_podzbioru(key, n - robota)
             if czesciowe:

@@ -273,3 +273,167 @@ def test_slownik_deklaruje_rodzaj_i_katalog_zgodne_z_osią():
         assert (r.get("kind") or "own") in OBJECT_KINDS, f"{r['c']}: rodzaj spoza OBJECT_KINDS"
         assert r.get("catalog") is None, \
             f"{r['c']}: obiekt spoza gramatyki katalogowej nie ma prawa deklarować katalogu"
+
+
+# ================================================ producent: Messier, Arp (K-2), PN (K-3)
+# Producent chodzi po sieci, więc bateria testuje jego CZYSTE funkcje na danych z ręki, a skutek
+# przebudowy - na assecie w repo.
+
+def _producent():
+    import importlib.util
+    import pathlib
+    sciezka = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "build_catalog.py"
+    spec = importlib.util.spec_from_file_location("build_catalog_pod_test_asset", sciezka)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_build_record_zapisuje_oznaczenie_sprzed_i_po_xref():
+    """Messier z OpenNGC (kolumna M → `Row.names`) przeżywa `xref`: do `n` idzie forma sprzed
+    pary (`M27`) i forma po niej, własny kanon odpada. Przed poprawką gałąź zapisywała wyłącznie
+    formę po `xref`, czyli kanon rekordu - i Messier znikał z aliasów przy każdej przebudowie."""
+    prod = _producent()
+    row = prod.Row(ident="NGC6853", src="ngc", typ="PN", ra=299.9, dec=22.7, major=8.0,
+                   names=["M27", "IC 0410", "Dumbbell Nebula"], common=["Dumbbell Nebula"])
+    rec = prod.build_record([row])
+    assert rec["c"] == "NGC6853"
+    assert {"M27", "IC410", "Dumbbell Nebula"} <= set(rec["n"]) and "NGC6853" not in rec["n"]
+    assert "IC0410" not in rec["n"]                  # forma gramatyki, nie zapis z zerami
+
+
+@pytest.mark.parametrize("canon, messier", [("NGC6853", "M27"), ("NGC4826", "M64"),
+                                            ("NGC3587", "M97")])
+def test_messier_przezyl_przebudowe_assetu(wszystkie, canon, messier):
+    """Skutek poprawki na assecie: numer Messiera stoi w `n` celu, choć para `catalog_xref` czyni
+    go formą kanonu (pełna tabela, D-1013-1)."""
+    assert messier in _by_canon(wszystkie)[canon]["n"]
+
+
+def test_messier_w_assecie_nie_ubylo(wszystkie):
+    """Asset sprzed przebudowy niósł 42 numery Messiera w `n`; pełna tabela nie ma prawa ich zjeść."""
+    import re
+    mess = {a for r in wszystkie for a in r.get("n", ()) if re.fullmatch(r"M\d{1,3}", a)}
+    assert len(mess) >= 42, sorted(mess, key=lambda m: int(m[1:]))
+
+
+# Tabela oczekiwanych rozwinięć - KAŻDA trudna forma z raportu sondy (K-2) plus formy pokrewne.
+@pytest.mark.parametrize("nazwa, skladniki", [
+    ("NGC 6621 + 22", ("NGC6621", "NGC6622")),
+    ("NGC 4615+13+14", ("NGC4615", "NGC4613", "NGC4614")),
+    ("NGC 0772 + 770", ("NGC772", "NGC770")),
+    ("NGC 5829+IC4526", ("NGC5829", "IC4526")),
+    ("NGC 6365A + B", ("NGC6365A", "NGC6365B")),
+    ("NGC 3561A&B", ("NGC3561A", "NGC3561B")),
+    ("UGC 00212 +comp", ("UGC212",)),
+    ("NGC 7757(56?)", ("NGC7757",)),
+    ("MESSIER 65 + 66", ("M65", "M66")),
+    ("ESO 547-G002&3", ("ESO547-002", "ESO547-003")),
+    # formy pokrewne z tego samego atlasu
+    ("NGC 4038 + 39", ("NGC4038", "NGC4039")),
+    ("NGC 1232 + A", ("NGC1232", "NGC1232A")),
+    ("IC 3481+A + 83", ("IC3481", "IC3481A", "IC3483")),
+    ("NGC 5566 +60+69", ("NGC5566", "NGC5560", "NGC5569")),
+    ("NGC 5679A +B+C", ("NGC5679A", "NGC5679B", "NGC5679C")),
+    ("UGC 10169 + 164", ("UGC10169", "UGC10164")),
+    ("NGC 0833 Group", ("NGC833",)),
+    ("IC 1259 Field", ("IC1259",)),
+    ("NGC 2300+2276", ("NGC2300", "NGC2276")),
+    ("MESSIER 82", ("M82",)),
+    ("Stephan's Quint", ("HCG092",)),
+    # bez rozwinięcia - pominięte z licznikiem, nie zgadywane
+    ("MCG+03-34-012", ()), ("CGCG 011-053", ()), ("VV 445", ()), ("ARP 060", ()),
+    ("IC 029  8", ()), ("UGCA 173 + 174", ()), ("Wild's Triplet", ()), ("I Zw 167", ()),
+])
+def test_arp_parser_TABELA_trudnych_form(nazwa, skladniki):
+    assert _producent().parse_arp_name(nazwa) == skladniki
+
+
+def test_arp_alias_na_PIERWSZYM_skladniku_bez_nowych_rekordow():
+    """Decyzja `Q7`: Arp 244 → NGC4038 (nie NGC4039); składnik bez rekordu i nazwa bez rozwinięcia
+    są liczone, nie zgadywane; rekordów nie przybywa."""
+    prod = _producent()
+    recs = [{"c": "NGC4038", "n": ["Antennae"]}, {"c": "NGC4039"},
+            {"c": "NGC3623", "n": ["M65"]}]
+    stat = prod.attach_arp_aliases(recs, [(244, "NGC 4038 + 39"), (317, "MESSIER 65 + 66"),
+                                          (999, "NGC 9999"), (998, "VV 445")])
+    assert recs[0]["n"] == ["Antennae", "Arp 244"] and "n" not in recs[1]
+    assert "Arp 317" in recs[2]["n"] and len(recs) == 3
+    assert (stat["attached"], stat["no_target"], stat["unparsed"]) == (2, 1, 1)
+    # Symetria kluczy: rekord, którego KANON jest kluczem pary (`M66` bez rekordu `NGC3627`), jest
+    # trafiany po celu pary - tym samym kluczem, którym szukany jest składnik `MESSIER 66`.
+    klucz = [{"c": "M66"}]
+    assert prod.attach_arp_aliases(klucz, [(16, "MESSIER 66")])["attached"] == 1
+    assert klucz[0]["n"] == ["Arp 16"]
+
+
+def test_arp_w_assecie_aliasem_istniejacych_celow(wszystkie, assets):
+    """Arp nie wnosi kanonów; liczba aliasów `Arp N` w assecie = licznik producenta w `_meta`."""
+    b = _by_canon(wszystkie)
+    assert "Arp 244" in b["NGC4038"]["n"] and "Arp 244" not in b["NGC4039"].get("n", ())
+    assert "Arp 317" in b["NGC3623"]["n"] and "Arp 16" in b["NGC3627"]["n"]
+    assert not [r["c"] for r in wszystkie if r["c"].upper().startswith("ARP")]
+    arp = [a for r in wszystkie for a in r.get("n", ()) if a.startswith("Arp ")]
+    meta = next(s for s in assets["core"]["_meta"]["sources"] if s["key"] == "arp")
+    assert len(arp) == meta["aliases"]["attached"] > 50
+
+
+def test_pn_status_osobno_od_typu_i_licznosc_po_scaleniu(wszystkie):
+    """K-3: 132 obiekty ≥3′ Le Du 2022 = 27 potwierdzonych + 93 kandydatki + 12 mimik; po scaleniu
+    z decyzji (`StDr 17` = `Sh2-123`) każdy niesie status. Kandydatka ma klasę PN ZE statusem,
+    mimika - typ z publikacji (nie PN). PNG wyłącznie jako `PN G…`, nigdy gołe `G…`."""
+    from collections import Counter
+    from horreum.targets import CATALOG_STATUSES
+    z_statusem = [r for r in wszystkie if "s" in r]
+    assert Counter(r["s"] for r in z_statusem) == {"confirmed": 27, "candidate": 93, "mimic": 12}
+    assert {r["s"] for r in z_statusem} <= CATALOG_STATUSES
+    assert all(r["t"] == "PN" for r in z_statusem if r["s"] in ("confirmed", "candidate"))
+    assert not [r["c"] for r in z_statusem if r["s"] == "mimic" and r["t"] == "PN"]
+    for r in z_statusem:
+        png = [a for a in r.get("n", ()) if a.startswith("PN G")]
+        assert len(png) == 1, r["c"]
+        assert not [a for a in r.get("n", ()) if a[:1] == "G" and a[1:2].isdigit()], r["c"]
+        assert catalog_canon(png[0]) is None
+    b = _by_canon(wszystkie)
+    assert "StDr 17" in b["Sh2-123"]["n"] and (b["Sh2-123"]["t"], b["Sh2-123"]["s"]) == (
+        "PN", "confirmed")
+    assert "StDr 17" not in b
+    assert b["MoMi 2"]["s"] == "mimic" and "LBN340" in b       # no-merge: dwa rekordy
+    assert b["Sh2-215"]["s"] == "confirmed" and "Pa 167" in b["Sh2-215"]["n"]   # nazwa HASH
+
+
+def test_pn_decyzje_scalenia_jawne_i_zapisane_w_meta(assets):
+    """Każda kolizja K-3 ma decyzję z dowodem w tabeli producenta, a `_meta` assetu niesie te same
+    decyzje - asset mówi, co zrobiono z każdą kolizją."""
+    prod = _producent()
+    for (pn, inny), (decyzja, dowod) in prod.PN_DECYZJE.items():
+        assert decyzja in ("merge", "no-merge") and len(dowod) > 40, (pn, inny)
+    zapisane = assets["core"]["_meta"]["merge"]["pn_decisions"]
+    assert zapisane == {f"{a} / {b}": {"decision": d, "evidence": dowod}
+                        for (a, b), (d, dowod) in prod.PN_DECYZJE.items()}
+    assert any("Sh2-123: 15'x13' z Le Du" in n for n in assets["core"]["_meta"]["notes"])
+    assert set(prod.PN_ZAKRES) == set(prod.PN_STATUS)            # zakres domyślny `Q7`: 132
+
+
+def test_status_katalogowy_czyta_planer_i_podpisuje_przez_i18n():
+    """Czytelnik assetu zna status (`Target.status`), status spoza słownika to błąd pliku, a planer
+    nigdy nie podpisuje kandydatki samym „PN”."""
+    from horreum.gui import i18n, planner_model
+    from horreum.gui.i18n_catalog import CATALOG
+    surowy = {"c": "StDr 125", "t": "PN", "r": 79.3, "d": 44.2, "a": 6.2, "s": "candidate"}
+    t = targets._target(surowy, "core")
+    assert t.status == "candidate" and t.type == "PN"
+    assert planner_model.type_text(t) == i18n.t("planner.type_candidate", type="PN") != "PN"
+    mim = targets._target(dict(surowy, t="HII", s="mimic"), "core")
+    assert planner_model.type_text(mim) == i18n.t("planner.type_mimic", type="HII")
+    assert planner_model.type_text(targets._target(dict(surowy, s="confirmed"), "core")) == "PN"
+    # JEDEN słownik znaczków (`targets.STATUS_MARKS`) dla ekranu i CLI: każdy status ma wpis,
+    # a status ze znaczkiem ma zdanie ekranu - nowy status bez wpisu czerwieni ten test.
+    assert set(targets.STATUS_MARKS) == targets.CATALOG_STATUSES
+    for status, znak in targets.STATUS_MARKS.items():
+        assert (planner_model.status_key(status) in CATALOG) if znak else (
+            planner_model.status_key(status) is None), status
+    with pytest.raises(ValueError, match="status"):
+        targets._target(dict(surowy, s="prawie"), "core")
+    kandydatki = [x for x in targets.load_targets(targets.ALL_LAYERS) if x.status == "candidate"]
+    assert len(kandydatki) == 93 and all(x.type == "PN" for x in kandydatki)

@@ -124,10 +124,15 @@ def park(con):
     teleskopy — pusta krotka znaczyłaby „park pusty" i wygasiła planer do zera wierszy.
 
     Kanoniczność jak w `rigs`: teleskop scalony w inny odpada nawet oznaczony — park wskazywałby
-    wtedy oś, której już nie ma. Kolejność deterministyczna (kanon), bo trafia do raportu."""
+    wtedy oś, której już nie ma. Kolejność deterministyczna (kanon), bo trafia do raportu.
+
+    Nagrobek (0040) też odpada, choć niesie `in_park` sprzed cofnięcia (pól ręki nagrobek nie
+    zeruje): park złożony z samego nagrobka dałby planerowi krotkę bez zestawów zamiast `None`
+    i wygasił go do zera wierszy."""
     rows = con.execute(
         "SELECT telescop_canon FROM telescope "
-        "WHERE in_park = 1 AND merged_into IS NULL ORDER BY telescop_canon").fetchall()
+        "WHERE in_park = 1 AND merged_into IS NULL AND retired_at IS NULL "
+        "ORDER BY telescop_canon").fetchall()
     return tuple(r["telescop_canon"] for r in rows) or None
 
 

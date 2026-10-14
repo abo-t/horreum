@@ -710,6 +710,25 @@ def test_cli_plan_nie_migruje_i_daje_json(con, tmp_path, capsys):
     assert out["night"] == "2026-08-15" and out["site"]["name"] == "Będargowo"
     assert len(out["rows"]) == 3 and out["hidden"] > 0
     assert out["rigs"][0]["telescope"] == "A140R"
+    assert all(r["status"] in (None, "confirmed", "candidate", "mimic") for r in out["rows"])
+
+
+def test_cli_plan_status_katalogowy_przy_typie_kandydatka_nie_jest_golym_PN(con, tmp_path, capsys):
+    """K-3: asset niesie kandydatki i mimiki planetarek - tekst `horreum plan` dopisuje status do
+    typu („PN?”, „…~”), bo goły typ podpisałby kandydatkę jako potwierdzoną planetarkę."""
+    from horreum import cli
+    con.commit()
+    path = str(tmp_path / "h.db")
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--json", "--all"]) == 0
+    wiersze = json.loads(capsys.readouterr().out)["rows"]
+    kandydatki = [r["canon"] for r in wiersze if r["status"] == "candidate"][:3]
+    assert kandydatki, "asset bez kandydatki w planie nocy - test nie ma czego sprawdzić"
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--all"]) == 0
+    tekst = capsys.readouterr().out.splitlines()
+    for canon in kandydatki:
+        linia = next(x for x in tekst if x.strip().startswith(canon + " ") or
+                     x.strip().startswith(canon + "PN"))
+        assert "PN?" in linia, linia
 
 
 def test_cli_plan_kolumna_wypelnienia_i_filtr_kadru(con, tmp_path, capsys):
@@ -952,6 +971,9 @@ def test_zloty_cli_tekst_i_json_bez_progow_kadru_jak_przed_filtrem(con, tmp_path
     assert cli.main(argv + ["--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert all("fill_pct" in r for r in out["rows"])
+    # `status` (K-3, status katalogowy celu) doszedł do JSON po kotwicy - zdejmowany jak `fill_pct`;
+    # w tym planie żaden cel go nie niesie, więc reszta zostaje bajt w bajt jak w HEAD.
+    assert {r.pop("status") for r in out["rows"]} == {None}
     for r in out["rows"]:
         r.pop("fill_pct")
     dump = json.dumps(out, sort_keys=True, ensure_ascii=False).encode("utf-8")

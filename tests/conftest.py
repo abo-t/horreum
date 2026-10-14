@@ -1,11 +1,21 @@
 """Współdzielone fixture'y pytest. `s8` = deterministyczna baza §8 (PLAN_gui §8) - jeden builder
 dla testów logiki read-modelu (5.2) i przyszłych testów GUI; bez Qt, bez plików na dysku."""
+import sys
+
 import pytest
 
 from fixture_s8 import seed, seed_object_axis
 
 from horreum import db
 from horreum.gui import i18n   # Qt-wolny (słownik) - import bezpieczny bez PySide6
+
+ZMIENIA_MOTYW = "zmienia_motyw"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", f"{ZMIENIA_MOTYW}: test ŚWIADOMIE zmienia wygląd całej aplikacji (arkusz, styl, paleta, "
+        "font aplikacji, kolory modułów z `use_theme`); `_przywroc_wyglad_aplikacji` przywraca go bez alarmu")
 
 
 @pytest.fixture(autouse=True)
@@ -50,21 +60,63 @@ def _izoluj_qsettings(tmp_path_factory, monkeypatch):
     yield
 
 
+def _kolory_modulow():
+    """Słowniki kolorów, które `app.apply_theme` stawia przez `use_theme` modułów warstwy widżetów:
+    `{moduł: {nazwa: słownik}}`. Spis z `sys.modules`, nie ręczny (AR-136): moduł `horreum.gui.*`
+    z WŁASNYM `use_theme` na poziomie modułu i jego słowniki wartości `QColor` - nowy moduł z kolorami
+    motywu wchodzi do straży sam. `grid` z `use_theme` wziętym z `grid_model` się nie liczy: słownik
+    ma jednego właściciela, moduł, który funkcję definiuje."""
+    from PySide6.QtGui import QColor
+    out = {}
+    for nazwa, mod in list(sys.modules.items()):
+        if mod is None or not nazwa.startswith("horreum.gui."):
+            continue
+        funkcja = getattr(mod, "use_theme", None)
+        if not callable(funkcja) or getattr(funkcja, "__module__", None) != nazwa:
+            continue
+        out[nazwa] = {k: v for k, v in vars(mod).items()
+                      if isinstance(v, dict) and v and all(isinstance(c, QColor) for c in v.values())}
+    return out
+
+
+def _odbitka(slowniki):
+    from PySide6.QtGui import QColor
+    return {k: {klucz: QColor(c) for klucz, c in d.items()} for k, d in slowniki.items()}
+
+
+def _kolory_domyslne(nazwa, slowniki):
+    """Kolory modułu zaimportowanego dopiero W teście - stan z importu, czyli `use_theme(DEFAULT)`.
+    Liczone próbnym wołaniem na żywych słownikach, które od razu wracają: wzór bierze się z tej samej
+    funkcji, którą woła produkcja, a nie z drugiego spisu kolorów."""
+    from horreum.gui import theme
+    zapis = _odbitka(slowniki)
+    sys.modules[nazwa].use_theme(theme.DEFAULT)
+    wzor = _odbitka(slowniki)
+    for k, d in slowniki.items():
+        d.clear()
+        d.update(zapis[k])
+    return wzor
+
+
 @pytest.fixture(autouse=True)
-def _przywroc_wyglad_aplikacji():
-    """Wygląd CAŁEJ aplikacji - arkusz QSS, styl i paleta, czyli to, co stawia `app.apply_theme` -
-    wraca po teście do stanu sprzed niego (AR-79). `main()` i `_on_theme` stawiają motyw na
-    `QApplication`, która żyje całą sesję, więc motyw zostawał testom z kolejnych plików.
-    Dowód 2026-10-13: po `test_gui_mainwindow.py` (`main()` w teście startu z nowszą bazą) zostawał
-    arkusz motywu (821 znaków), a przy arkuszu aplikacji `setFont` rodzica nie schodzi do list
-    dzieci (listwa 14,4 pt, lista grupy 9,0 pt) - bramka listwy facetów mierzyła dwa razy ten sam
-    wiersz 12 px. Para plików zieleniała od samego zdjęcia arkusza; styl i paletę przywracamy, bo
-    stawia je ta sama funkcja.
+def _przywroc_wyglad_aplikacji(request):
+    """Wygląd CAŁEJ aplikacji - arkusz QSS, styl, paleta, font aplikacji i kolory modułów, czyli to,
+    co stawia `app.apply_theme` (plus `QApplication.setFont`) - wraca po teście do stanu sprzed niego
+    (AR-79, AR-136). `main()` i `_on_theme` stawiają motyw na `QApplication`, która żyje całą sesję,
+    więc motyw zostawał testom z kolejnych plików. Dowód 2026-10-13: po `test_gui_mainwindow.py`
+    zostawał arkusz motywu (821 znaków), a przy arkuszu aplikacji `setFont` rodzica nie schodzi do
+    list dzieci - bramka listwy facetów mierzyła dwa razy ten sam wiersz 12 px.
+
+    Przywrócenie NIE jest ciche (AR-136): test, który zmienił wygląd bez markera `zmienia_motyw`,
+    pada przy teardownie z listą zmienionych członów. Przeciek motywu był detektorem, który znalazł
+    AR-79 - samo przywrócenie gasiłoby taki sygnał bez śladu. Test zmieniający wygląd ŚWIADOMIE nosi
+    marker i zostawia sprzątanie tej fixture.
 
     Arkusz wraca pierwszy: przy czynnym arkuszu `style().name()` zwraca pusty napis (styl
     opakowany), więc styl porównujemy dopiero po nim. Aplikacja powstała W teście - stan zastany
     to świeża aplikacja: pusty arkusz i paleta bazowa (`QPalette()` bez ustawionych ról rozwiązuje
-    się do niej); styl zostaje, bo nazwy stylu domyślnego nie znamy przed powstaniem aplikacji."""
+    się do niej); styl i font zostają, bo ich wartości domyślnych nie znamy przed powstaniem
+    aplikacji."""
     try:
         from PySide6.QtGui import QPalette
         from PySide6.QtWidgets import QApplication
@@ -72,18 +124,37 @@ def _przywroc_wyglad_aplikacji():
         yield
         return
     app = QApplication.instance()
-    zastany = None if app is None else (app.styleSheet(), app.style().name(), app.palette())
+    zastany = None if app is None else (app.styleSheet(), app.style().name(), app.palette(),
+                                        QApplication.font())
+    kolory = {nazwa: _odbitka(slowniki) for nazwa, slowniki in _kolory_modulow().items()}
     yield
+    zmiany = []
+    for nazwa, slowniki in _kolory_modulow().items():
+        wzor = kolory[nazwa] if nazwa in kolory else _kolory_domyslne(nazwa, slowniki)
+        for k, d in slowniki.items():
+            if k in wzor and d != wzor[k]:
+                zmiany.append(f"{nazwa}.{k}")
+                d.clear()
+                d.update(wzor[k])
     app = QApplication.instance()
-    if app is None:
-        return
-    arkusz, styl, paleta = zastany or ("", "", QPalette())
-    if app.styleSheet() != arkusz:
-        app.setStyleSheet(arkusz)
-    if styl and app.style().name() != styl:
-        app.setStyle(styl)
-    if zastany is None or app.palette() != paleta:
-        app.setPalette(paleta)
+    if app is not None:
+        arkusz, styl, paleta, font = zastany or ("", "", QPalette(), None)
+        if app.styleSheet() != arkusz:
+            zmiany.append("arkusz")
+            app.setStyleSheet(arkusz)
+        if styl and app.style().name() != styl:
+            zmiany.append("styl")
+            app.setStyle(styl)
+        if zastany is None or app.palette() != paleta:
+            if zastany is not None:
+                zmiany.append("paleta")
+            app.setPalette(paleta)
+        if font is not None and QApplication.font() != font:
+            zmiany.append("font aplikacji")
+            QApplication.setFont(font)
+    if zmiany and request.node.get_closest_marker(ZMIENIA_MOTYW) is None:
+        pytest.fail(f"test zmienił wygląd aplikacji bez markera `{ZMIENIA_MOTYW}` (przywrócone): "
+                    + ", ".join(zmiany))
 
 
 _LIMIT_WATKU_MS = 10_000

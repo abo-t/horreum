@@ -1,5 +1,5 @@
 {"_meta":{
- "built": "2026-07-31",
+ "built": "2026-10-14",
  "floor_arcmin": 3.0,
  "floor_dark_arcmin": 8.0,
  "layer": "cirrus",
@@ -12,8 +12,26 @@
   ],
   "merged": {
    "alias": 84,
-   "canon": 4,
-   "position": 307
+   "canon": 6,
+   "position": 306
+  },
+  "pn_decisions": {
+   "MoMi 2 / LBN340": {
+    "decision": "no-merge",
+    "evidence": "mimika o nieznanej naturze (HASH `ooun`), zbieżność wyłącznie pozycyjna (0,9') bez nazwy wspólnej w żadnym źródle"
+   },
+   "Ou 4 / LBN453": {
+    "decision": "no-merge",
+    "evidence": "zbieżność wyłącznie pozycyjna (29,2' przy osi LBN453 100'); LBN453 należy do grupy Sh2-129, a Ou 4 leży w jej środku (1,6') jako osobny cel - bramka proporcji 69'/140' rozdziela je z Sh2-129, scalenie przez LBN453 zrobiłoby z Ou 4 alias Sh2-129"
+   },
+   "StDr 17 / LBN414": {
+    "decision": "no-merge",
+    "evidence": "zbieżność wyłącznie pozycyjna (4,1'), bez nazwy wspólnej w żadnym źródle; Sh2-123 i LBN414 są w assecie osobnymi rekordami, a scalenie skleiłoby je tranzytywnie przez StDr 17"
+   },
+   "StDr 17 / Sh2-123": {
+    "decision": "merge",
+    "evidence": "HASH (kolumna HName table1) nazywa StDr 17 `Sh2-123`; środki 4,5' przy osiach 15'x13' i 13' - jeden obiekt, typ PN z widma zastępuje typ Sh2 z definicji katalogu"
+   }
   },
   "ratio_min": 0.5,
   "tol_factor_major": 0.35
@@ -22,13 +40,16 @@
   "pozycje J2000 w stopniach; epoki zrodel znormalizowane po stronie VizieR",
   "rozmiar LDN = kolo rownowazne z pola Area (katalog nie podaje srednicy)",
   "typ zrodel bez wlasnej typologii przypisany z definicji katalogu",
-  "dane pochodne z OpenNGC (CC-BY-SA-4.0) — patrz PROVENANCE.md"
+  "status s (confirmed/candidate/mimic) tylko przy PN Le Du+ 2022 - typ t to klasa obiektu, status to twierdzenie zrodla",
+  "scalenie PN z decyzji (merge.pn_decisions): zwyciezca PN wnosi typ, pozycje i rozmiar (Sh2-123: 15'x13' z Le Du zamiast 13' Sharplessa), przegrany zostaje w n",
+  "Arp (VII/192) wylacznie jako alias pierwszego skladnika nazwy",
+  "dane pochodne z OpenNGC (CC-BY-SA-4.0) - patrz PROVENANCE.md"
  ],
  "sources": [
   {
    "key": "ngc",
    "license": "CC-BY-SA-4.0",
-   "rows": 11650,
+   "rows": 11653,
    "title": "OpenNGC NGC.csv",
    "url": "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
   },
@@ -73,6 +94,41 @@
    "rows": 295,
    "title": "Green Galactic SNR (VII/278)",
    "url": "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=VII/278&-out.max=unlimited&-out=SNR,RAJ2000,DEJ2000,MajDiam,MinDiam,Names"
+  },
+  {
+   "aliases": {
+    "ambiguous": 0,
+    "attached": 54,
+    "no_target": 239,
+    "rows": 338,
+    "unparsed": 45
+   },
+   "key": "arp",
+   "license": "CDS/VizieR",
+   "rows": 338,
+   "title": "Arp Atlas of Peculiar Galaxies (VII/192, arpord)",
+   "url": "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=VII/192/arpord&-out.max=unlimited&-out=Arp,Name"
+  },
+  {
+   "key": "pn",
+   "license": "CDS/VizieR",
+   "rows": 209,
+   "title": "PN potwierdzone Le Du+ 2022 (J/A+A/666/A152, table1)",
+   "url": "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=J/A+A/666/A152/table1&-out.max=unlimited&-out=Name,HName,PNG,Size,Status&-out.add=_RAJ2000,_DEJ2000"
+  },
+  {
+   "key": "pn_cand",
+   "license": "CDS/VizieR",
+   "rows": 610,
+   "title": "Kandydatki PN Le Du+ 2022 (J/A+A/666/A152, table2)",
+   "url": "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=J/A+A/666/A152/table2&-out.max=unlimited&-out=Name,PNG,Size,Status&-out.add=_RAJ2000,_DEJ2000"
+  },
+  {
+   "key": "pn_mimic",
+   "license": "CDS/VizieR",
+   "rows": 104,
+   "title": "Mimiki PN Le Du+ 2022 (J/A+A/666/A152, table3)",
+   "url": "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=J/A+A/666/A152/table3&-out.max=unlimited&-out=Name,PNG,Size,Status&-out.add=_RAJ2000,_DEJ2000"
   }
  ]
 },

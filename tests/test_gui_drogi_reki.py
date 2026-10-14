@@ -67,8 +67,9 @@ def test_wiersze_osi_licza_klatki_od_wlascicieli_predykatow(qapp, tmp_path):
             assert it.data(rows.SECONDARY) == f"{n}  ›"
             assert it.data(rows.STRONG) is True
             assert it.foreground().color() != tasks_mod._DIM["fg"]
-        # plakietka: 4 dotychczasowe wiersze robocze fikstury + dwa nowe
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"
+        # plakietka: 4 dotychczasowe wiersze robocze fikstury + dwa nowe + nazwa katalogowa
+        # obiektu `M42` fikstury (AR-135: stara tożsamość `NGC1976` z pary `catalog_xref`)
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (7)"
         assert "Przypisz zestaw…" in _wiersz(win, "config_review_frames").toolTip()
         assert "Wskaż stanowisko…" in _wiersz(win, "observatory_review_frames").toolTip()
     finally:

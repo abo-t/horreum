@@ -20,7 +20,7 @@ from . import repo
 from .grouper import NO_TELESCOPE_KINDS, OPTICS_EVIDENCE_KINDS, OPTICS_TOLERANCE
 from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
-from .resolve.catalog import catalog_canon, header_form
+from .resolve.catalog import catalog_canon, header_form, xref_key_target
 from .resolve.channel import frame_channel
 from .resolve.filters import normalize_filter
 from .resolve.objects import (STICKY_OBJECT_SOURCES, WEAK_OBJECT_SOURCES, ObjectIdentity,
@@ -43,6 +43,7 @@ class ResolveSummary:
     frames: int = 0                       # wszystkie frame'y z nagłówkiem
     light_frames: int = 0                 # light/master_light (kandydaci osi OBIEKT)
     objects_new: int = 0                  # nowe wiersze object (distinct kanon)
+    objects_unretired: int = 0            # nagrobki obiektu przywrócone do osi nazwą z pliku (0040)
     objects_assigned: int = 0             # light'y z przypisanym object_id
     objects_by_alias: int = 0             # z tego: przypisane przez ZAPISANY ALIAS (#8, P4)
     objects_by_region: int = 0            # z tego: przypisane ze WSPÓŁRZĘDNYCH (kompleks, #5)
@@ -63,6 +64,10 @@ class ResolveSummary:
     own_aliases_retired: int = 0          # równoważności zdjęte po edycji słownika (migracja)
     own_frames_unassigned: int = 0        # klatki odpięte razem z wycofaną równoważnością
     own_alias_conflicts: int = 0          # nazwy zajęte przez INNY obiekt (pominięte, → review)
+    # UZGODNIENIE Z `catalog_xref` (AR-135) - krok po zasiewie (`reconcile_xref_aliases`).
+    xref_aliases_rebound: int = 0         # równoważności przepięte do celu pary
+    xref_frames_followed: int = 0         # klatki z aliasu, które poszły za przepiętą równoważnością
+    alias_conflicts: int = 0              # nazwy wskazujące w bazie inny obiekt niż drabina (STAN)
     # SZCZEBEL ŚCIEŻKI (S2, D-OW-2/B) — PROPOZYCJE, nie zapisy. Przebieg nie rusza ani jednego
     # wiersza osi obiektu z tego tytułu; te dwie liczby są jedynym śladem szczebla w raporcie.
     path_proposed_frames: int = 0         # klatki, którym ścieżka proponuje kanon (do potwierdzenia)
@@ -104,7 +109,8 @@ def sync_own_aliases(con, now, s=None):
     z powodu danych, które user miał prawo stworzyć."""
     s = s if s is not None else ResolveSummary()
 
-    obiekty = {r["canon"]: r["id"] for r in con.execute("SELECT id, canon FROM object").fetchall()}
+    obiekty = {r["canon"]: r["id"] for r in con.execute(
+        "SELECT id, canon FROM object WHERE retired_at IS NULL").fetchall()}   # nagrobek bez zasiewu (AR-137)
     chciane = {}                                   # alias_norm -> object_id (tylko istniejące obiekty)
     for rec in load_own_objects():
         oid = obiekty.get(_to_text(rec.get("c")))
@@ -129,9 +135,8 @@ def sync_own_aliases(con, now, s=None):
         if czyj is not None:
             kolizje.append([key, czyj, oid])       # nazwa zajęta przez INNY obiekt — pomiń
             continue
-        _, created = repo.add_object_alias(con, alias_norm=key, object_id=oid,
-                                           source="curated", now=now)
-        s.own_aliases_seeded += created
+        s.own_aliases_seeded += repo.add_object_alias(con, alias_norm=key, object_id=oid,
+                                                      source="curated", now=now).created
 
     # WYCOFANIE: równoważności zasiane wcześniej, których asset już nie zna. Grupujemy po obiekcie,
     # bo klinga odpina klatki tego obiektu jednym przebiegiem.
@@ -148,6 +153,70 @@ def sync_own_aliases(con, now, s=None):
     if kolizje:
         s.own_alias_conflicts += len(kolizje)
         repo.flag_object_alias_conflicts(con, kolizje, now)
+    return s
+
+
+def reconcile_xref_aliases(con, now, s=None, konflikty_nazw=()):
+    """UZGODNIENIE równoważności z `catalog_xref` po przebiegu (AR-135) - DIFF-FIRST.
+
+    Para dopisana po fakcie (`M33 → NGC598` przy bazie, która zna już obiekt `M33`) przepina klatki
+    z nagłówka do celu - gramatyka stoi w drabinie nad aliasem - a równoważność nazwy zostawała przy
+    starym obiekcie po cichu. Dwie tożsamości jednego obiektu: wybór celu gestu i przebieg
+    wskazywały różne obiekty.
+
+    Krok, w kolejności:
+      * równoważność wskazująca obiekt inny niż cel pary - bo jej NAZWA jest kluczem pary
+        (`xref_key_target`) albo przebieg dał jej nazwę celowi pary, której kluczem jest kanon jej
+        obiektu (`konflikty_nazw`: nazwa potoczna starego obiektu) - idzie do celu klingą
+        `repo.rebind_object_alias`, gdy cel ISTNIEJE jako obiekt; klatki, które dostały obiekt
+        z tej równoważności (`object_source='alias'`, zeznanie = ta nazwa), idą za nią W TEJ SAMEJ
+        transakcji klingi, żeby następny przebieg był ciszą, a awaria nie rozdzieliła aliasu
+        i klatek;
+      * równoważności RĘKI (`source='user'`) klinga nie rusza - zostają jako konflikt;
+      * STAN konfliktów po przepięciach (nazwa, obiekt, który ją trzyma, kanon z drabiny) idzie do
+        `repo.flag_object_alias_conflict_state`, który emituje wyłącznie przy zmianie stanu.
+
+    Obiektu nie scala ani klatek z nagłówka czy ręki nie przenosi: obiekt o kanonie-kluczu
+    z klatkami rozstrzyga człowiek gestem „Zmień obiekt…” z wiersza Porządków
+    (`gui.queries.xref_reconcile_rows`). Ręka nietknięta."""
+    s = s if s is not None else ResolveSummary()
+    nazwy = set(konflikty_nazw)
+    # Cel przepięcia = obiekt ŻYWY. Nagrobek (0040) celem nie jest: cel pary istniejący wyłącznie
+    # jako nagrobek to cel nieistniejący - raport, nie zapis (wskrzesza go dopiero klatka albo gest).
+    obiekty = {r["canon"]: r["id"] for r in con.execute(
+        "SELECT id, canon FROM object WHERE retired_at IS NULL").fetchall()}
+    aliasy = con.execute(
+        "SELECT a.alias_norm AS key, a.object_id AS oid, a.source AS src, o.canon AS canon "
+        "FROM object_alias a JOIN object o ON o.id = a.object_id ORDER BY a.alias_norm").fetchall()
+    for r in aliasy:
+        cel = xref_key_target(r["key"])
+        if cel is None:
+            # Nazwa spoza gramatyki (potoczna): przepina się tylko wtedy, gdy przebieg dał ją
+            # celowi pary, której kluczem jest kanon jej obiektu - inny rozjazd jest raportem.
+            cel = next((k for a, k in nazwy if a == r["key"]
+                        and xref_key_target(r["canon"]) == k), None)
+            if cel is None:
+                continue
+        if cel == r["canon"]:
+            continue
+        nazwy.add((r["key"], cel))
+        cel_oid = obiekty.get(cel)
+        if r["src"] == "user" or cel_oid is None:
+            continue                           # ręka albo cel bez obiektu - raport, nie zapis
+        # Alias i klatki z niego - JEDNA transakcja klingi (awaria w połowie nie zostawia klatek
+        # przy starym obiekcie za aliasem, który już wskazuje cel).
+        wynik = repo.rebind_object_alias(con, alias_norm=r["key"], object_id=cel_oid,
+                                         expected_object_id=r["oid"], now=now)
+        s.xref_aliases_rebound += wynik.rebound
+        s.xref_frames_followed += wynik.frames
+
+    wlasciciel = {r["key"]: (r["oid"], r["canon"]) for r in con.execute(
+        "SELECT a.alias_norm AS key, a.object_id AS oid, o.canon AS canon "
+        "FROM object_alias a JOIN object o ON o.id = a.object_id").fetchall()}
+    stan = [[key, wlasciciel[key][0], kanon] for key, kanon in sorted(nazwy)
+            if key in wlasciciel and wlasciciel[key][1] != kanon]
+    s.alias_conflicts = len(stan)
+    repo.flag_object_alias_conflict_state(con, stan, now)
     return s
 
 
@@ -566,6 +635,7 @@ def run_resolver(con, now):
     unresolved = {}        # object_raw -> liczba (tylko light/master_light, obecny-nierozpoznany)
     filter_items = []      # (frame_id, filter_canon | None) do backfillu zbiorczego
     przeglosowane = []     # [frame_id, było, jest] (object_id) - przepięte ze źródła SŁABEGO (E5-1)
+    konflikty_nazw = set()  # (alias_norm, kanon drabiny) - nazwa zajęta przez inny obiekt (AR-135)
     for r in rows:
         # --- oś OBIEKT: kind-aware (kalibracja nie ma obiektu z definicji) ---
         if r["kind"] in LIGHT_KINDS:
@@ -641,12 +711,17 @@ def run_resolver(con, now):
                         if slabe:                   # E5-1: potwierdzenie ręki przegłosowane
                             przeglosowane.append([r["fid"], r["oid"], alias_oid])
                 elif ident is not None:
-                    oid, created = repo.upsert_object(
+                    oid, made = repo.upsert_object(
                         con, canon=ident.canon, catalog=ident.catalog, kind=ident.kind, now=now)
-                    s.objects_new += created
+                    s.objects_new += made is repo.Made.CREATED
+                    s.objects_unretired += made is repo.Made.UNRETIRED
                     if ident.alias_norm:    # region NIE aliasuje — rozpoznanie nie pochodzi z nazwy
-                        repo.add_object_alias(con, alias_norm=ident.alias_norm, object_id=oid,
-                                              source=ident.source, now=now)
+                        zapis = repo.add_object_alias(con, alias_norm=ident.alias_norm,
+                                                      object_id=oid, source=ident.source, now=now)
+                        # AR-135: nazwa zajęta przez INNY obiekt - para (nazwa, kanon), nie wpis
+                        # per klatka; stan zgłasza krok uzgodnienia raz na przebieg.
+                        if zapis.conflict_object_id is not None:
+                            konflikty_nazw.add((ident.alias_norm, ident.canon))
                     if repo.assign_object(con, frame_id=r["fid"], object_id=oid,
                                           object_source=ident.source, now=now):
                         s.objects_assigned += 1
@@ -694,6 +769,10 @@ def run_resolver(con, now):
     # zasiew wymaga ISTNIEJĄCEGO obiektu, a `LMC` powstaje dopiero, gdy szczebel słownika przypisze
     # pierwszą klatkę. Idempotentny, więc drugi przebieg jest ciszą.
     sync_own_aliases(con, now, s)
+
+    # UZGODNIENIE Z `catalog_xref` (AR-135) - po zasiewie, gdy wszystkie równoważności przebiegu
+    # już stoją: nazwa-klucz pary idzie do celu pary, konflikty zgłaszane stanem.
+    reconcile_xref_aliases(con, now, s, konflikty_nazw)
 
     # oś OBSERWATORIUM foldnięta tu (SPOT — jeden wjazd; callerzy bez zmian). GPS z `cards`, nie z pętli
     # `header` powyżej (osobny SELECT — SITELAT/SITELONG nie są polami gorącymi `header`).

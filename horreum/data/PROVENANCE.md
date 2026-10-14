@@ -21,6 +21,8 @@
 | **Lynds Dark Nebulae** `VII/7A` | VizieR (CDS) | CDS/VizieR — Lynds B.T., 1962, ApJS 7, 1 |
 | **van den Bergh (reflection)** `VII/21` | VizieR (CDS) | CDS/VizieR — van den Bergh S., 1966, AJ 71, 990 |
 | **Galactic SNR (Green)** `VII/278` | VizieR (CDS) | CDS/VizieR — Green D.A., Cavendish Laboratory |
+| **Arp Atlas of Peculiar Galaxies** `VII/192` (tabela `arpord`) | VizieR (CDS), `asu-tsv` | CDS/VizieR - Arp H., 1966, ApJS 14, 1 (wersja VizieR: Webb D.M., 1996). **Wyłącznie aliasy**, bez rekordów |
+| **Mgławice planetarne Le Du+ 2022** `J/A+A/666/A152` (`table1`-`table3`) | VizieR (CDS), `asu-tsv` | CDS/VizieR - Le Du P. i in., 2022, A&A 666, A152 |
 
 **Skutek licencyjny (świadomy):** asset jest utworem pochodnym m.in. od OpenNGC, więc **dane**
 w `targets_core.json`/`targets_cirrus.json` rozpowszechniamy na **CC-BY-SA-4.0**. Kod (`horreum/*.py`,
@@ -50,12 +52,46 @@ rozmycie granicy.
    filamentu to przybliżenie zawyżające zwartość — nie brać za pomiar.
 5. **Typ** dla źródeł bez własnej typologii przypisany z definicji katalogu (Sh2→`HII`, LBN→`EmN`,
    LDN→`DrkN`, vdB→`RfN`, Green→`SNR`).
+6. **Aliasy z `names`** (Identifiers OpenNGC, numer Messiera z kolumny M) wchodzą do `n` w formie
+   gramatyki SPRZED `xref` i PO nim, bez własnego kanonu: `M27` zostaje przy `NGC6853`, choć para
+   `M27 → NGC6853` czyni go formą kanonu (pełna tabela Messiera, D-1013-1). **Pełna tabela par
+   nie znaczy pełnego pokrycia puli celów planera:** para jest faktem dla resolvera (nazwa z pliku
+   trafia w kanon), a cel wchodzi do assetu na regułach puli - 57 ze 106 par prowadzi do obiektów
+   spoza niej (gromady bez mgławicy poza taksonomią, `M76`/`NGC650` z osią 1,1′ pod podłogą 3′,
+   `M73`/`NGC6994` typu `Other`). Asset niesie 49 numerów Messiera w `n`.
+7. **Arp (`VII/192`, K-2)** - numer Arpa (`Arp 244`) jako alias rekordu PIERWSZEGO składnika
+   z pola `Name` (`NGC 4038 + 39` → `NGC4038`). Zero nowych rekordów, pozycji i rozmiarów: `Size`
+   atlasu to bok zdjęcia, nie średnica galaktyki. Rozwinięcie nazwy jest jawne w producencie
+   (`parse_arp_name`: dopełnianie cyfr `NGC 4615+13+14`, składniki literowe `NGC 6365A + B`,
+   `ESO 547-G002&3`, odrzucony nawias `(56?)` i `+comp`), nazwy potoczne tylko pewne
+   (`ARP_NAZWY_POTOCZNE`: Kwintet Stephana = HCG 92, Holmberg II = UGC 4305). Budowa 2026-10-14:
+   338 wierszy, **54** aliasy na istniejących celach; pominięte: **239** bez rekordu celu
+   w assecie, **45** bez rozwinięcia nazwy (MCG/CGCG/VV/Mrk/IRAS, nazwy potoczne spoza tabeli),
+   **0** dwuznacznych. Liczniki jadą w `_meta.sources[arp].aliases`.
+8. **Mgławice planetarne Le Du+ 2022 (`J/A+A/666/A152`, K-3)** - trzy tabele publikacji, każda
+   z własnym STATUSEM katalogowym w polu `s`: `table1` → `confirmed` (PN potwierdzone widmem,
+   HASH T/L/P), `table2` → `candidate` (kandydatki bez widma), `table3` → `mimic` (zgłoszone jako
+   PN, okazały się czymś innym). Typ `t` jest klasą obiektu: `PN` dla potwierdzonych i kandydatek,
+   dla mimik typ z publikacji (`PN_MIMIKA_TYP`: HII, SNR, `SR?` → SNR, `iISM` → EmN, reszta → Neb).
+   Zakres = `PN_ZAKRES` (decyzja `Q7`: wszystkie trzy tabele; nad podłogą 3′ to **27 + 93 + 12 =
+   132**). `Size` w minutach łuku, osie z liczb pola (`15 x 13`). Oznaczenie: nazwa HASH, gdy zna ją
+   gramatyka (`Pa 167` → `Sh2-215`, `StDr 17` → `Sh2-123`), inaczej nazwa z tabeli (`StDr 61`);
+   PNG wyłącznie jako `PN G…` (gołe `G…` gramatyka czyta jako pozostałość Greena). **Scalanie
+   wyłącznie jawną decyzją** (`PN_DECYZJE`, dowód tożsamości przy każdej): `StDr 17` + `Sh2-123`
+   merge (nazwa HASH), `StDr 17`/`LBN414`, `MoMi 2`/`LBN340`, `Ou 4`/`LBN453` no-merge (zbieżność
+   wyłącznie pozycyjna); kolizja bez decyzji i decyzja bez kolizji są twardymi falsyfikatorami.
+   Skutek budowy 2026-10-14: **131** nowych rekordów rdzenia, `Sh2-123` z typem `PN` i statusem
+   `confirmed`; decyzje z dowodem jadą w `_meta.merge.pn_decisions`. Przy scaleniu z decyzji
+   zwycięzca PN wnosi typ, pozycję i ROZMIAR (`Sh2-123`: 15′×13′ z Le Du zamiast 13′ Sharplessa),
+   przegrany zostaje w `n` - to samo zdanie stoi w `_meta.notes`.
 
 ### Format
 
 Jeden rekord = jedna linia (czytelny diff przy podmianie katalogu), plik pozostaje legalnym JSON-em.
 Klucze: `c` kanon · `t` typ · `r`/`d` RA/Dec J2000 [°] · `a`/`b` oś większa/mniejsza [′] ·
-`m` magnitudo (+`mb`, gdy pochodzi z B — B−V galaktyk to +0,7…1,0 mag) · `n` aliasy i nazwy potoczne.
+`m` magnitudo (+`mb`, gdy pochodzi z B - B−V galaktyk to +0,7…1,0 mag) · `n` aliasy i nazwy potoczne ·
+`s` status katalogowy (`confirmed`/`candidate`/`mimic`, tylko rekordy Le Du; brak = katalog
+statusu nie podaje, typ jest jego twierdzeniem).
 
 ## `../resolve/data/objects_own.json` — obiekty bez wpisu katalogowego
 

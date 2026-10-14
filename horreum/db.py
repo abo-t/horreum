@@ -138,6 +138,10 @@ from importlib import resources
 # teleskopu z ręki obok wartości z plików (`*_nominal`). Backfill: teleskop powołany ręką
 # (`telescope.proposed` z aktorem `user:%`) dostaje wartości z payloadu tego zdarzenia + zdarzenie
 # z pochodzeniem; teleskopy automatu wchodzą z NULL.
+# 0040 to PRZYROST (ADD COLUMN + nowa tabela, AR-133/AR-137): nagrobek `object.retired_at`
+# i `telescope.retired_at` (CHECK: nie przy scaleniu), ślad przebiegu „Zmień obiekt…”
+# (`object_change_run.made_object_id`/`made_alias_id`) i ślad gestu „Dopisz nowy…” (`telescope_add`:
+# teleskop + granice zdarzeń gestu). Wchodzi PUSTE, bez backfillu - populacja na żywym archiwum 0/0.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -177,6 +181,7 @@ MIGRATIONS = [
     (37, "0037_withheld_write.sql"),
     (38, "0038_replace_intent.sql"),
     (39, "0039_telescope_optics_hand.sql"),
+    (40, "0040_axis_retired.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

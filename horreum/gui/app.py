@@ -333,6 +333,25 @@ class _OptykaEdycja(QStyledItemDelegate):
         QTimer.singleShot(0, lambda: self._on_commit(wiersz, kolumna, tekst))
 
 
+def zdanie_cofniecia_dopisania(wynik, telescope):
+    """Zdanie wyniku „Cofnij dopisanie” (`repo.NewTelescopeUndo`, AR-133) - JEDNO dla recepty paska
+    (oś obiektu) i gestu Osi teleskopu. Odmowa bez zapisu mówi powodem z tokenu klingi; cofnięcie
+    mówi, ile klatek wróciło (zero - osobnym zdaniem, bez „cofnięto”, którego nie było), ile zostało
+    i czy teleskop zszedł z osi."""
+    def powod(token):
+        return i18n.t(f"object.config_undo_add.refused.{token}")
+    if wynik.refusal is not None and not (wynik.restored or wynik.kept):
+        return i18n.t("object.config_undo_add.refused", telescope=telescope,
+                      reason=powod(wynik.refusal))
+    msg = (i18n.t_plural("object.config_undo_add.done", wynik.restored, telescope=telescope)
+           if wynik.restored else i18n.t("object.config_undo_add.nothing", telescope=telescope))
+    if wynik.kept:
+        msg += i18n.t_plural("object.config_undo_add.kept", wynik.kept)
+    return msg + (i18n.t("object.config_undo_add.retired", telescope=telescope) if wynik.retired
+                  else i18n.t("object.config_undo_add.stays", telescope=telescope,
+                              reason=powod(wynik.refusal)))
+
+
 class TelescopeAxisView(QWidget):
     """Osadzalny widok osi TELESKOP: lista kanonicznych teleskopów (lewa) + szczegół zaznaczonego
     (prawa: członkowie scaleni pod nim, zestawy, audyt). Akcje usera (`label`/`approve`/`merge`/
@@ -354,6 +373,7 @@ class TelescopeAxisView(QWidget):
         self._rows = {}                      # id → wiersz `active_telescopes` z ostatniego refresh
         self._pliki = {}                     # id → `FilesOptics` (wartość z plików) z ostatniego refresh
         self._busy = False                   # etap Dostawy pisze w tle - gesty optyki odmawiają (N8)
+        self._dopisane = set()               # teleskopy z niecofniętym „Dopisz nowy…” (AR-133)
         self._build_ui()
         self.refresh()
 
@@ -393,6 +413,13 @@ class TelescopeAxisView(QWidget):
         self.btn_approve = QPushButton(i18n.t("axis.tel.approve"))
         self.btn_approve.clicked.connect(self._on_approve)
         actions.addWidget(self.btn_approve)
+        # „Cofnij dopisanie” (AR-133) - TRWAŁA droga powrotu z „Dopisz nowy…”: recepta paska gaśnie
+        # z każdym raportem i zmianą strony, a ten przycisk czyta ślad gestu z bazy (`telescope_add`),
+        # więc przeżywa przełączenie ekranu i restart. Ta sama klinga i te same odmowy co recepta.
+        self.btn_undo_add = QPushButton(i18n.t("axis.tel.undo_add"))
+        self.btn_undo_add.setToolTip(i18n.t("axis.tel.undo_add_tip"))
+        self.btn_undo_add.clicked.connect(self._on_undo_add)
+        actions.addWidget(self.btn_undo_add)
         actions.addStretch(1)
         actions.addWidget(QLabel(i18n.t("axis.tel.merge_into")))
         self.combo_target = QComboBox()
@@ -454,6 +481,7 @@ class TelescopeAxisView(QWidget):
         try:
             rows = queries.active_telescopes(self.con)
             self._rows = {row["id"]: row for row in rows}
+            self._dopisane = queries.open_telescope_adds(self.con)
             # jedna derywacja „z plików" (AR-128) - ta sama, którą liczy Dostawa
             self._pliki = queries.optics_from_files(self.con)
             _przeladuj_wiersze(self.table, len(rows))
@@ -578,6 +606,7 @@ class TelescopeAxisView(QWidget):
             not self._busy and reka is not None
             and (reka["focal_user"] is not None or reka["f_ratio_user"] is not None))
         self.btn_restore_optics.setToolTip(self._zdanie_przywrocenia(reka))
+        self.btn_undo_add.setEnabled(not self._busy and tid in self._dopisane)
         self.btn_approve.setEnabled(tid is not None and self._selected_status() != "approved")
         # źródło mergowalne tylko gdy kanoniczne BEZ członków (inwariant głębokość ≤ 1, §3a) i JEST jakiś
         # realny cel (count>1: placeholder + ≥1 teleskop). Sam wybór celu rozstrzyga `_sync_merge_enabled`.
@@ -606,6 +635,7 @@ class TelescopeAxisView(QWidget):
             self.btn_merge.setEnabled(False)
             self.btn_unmerge.setEnabled(False)
             self.btn_restore_optics.setEnabled(False)
+            self.btn_undo_add.setEnabled(False)
             self.combo_target.setEnabled(False)
             self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)   # zamknij in-line edyt etykiety (T3)
         else:
@@ -696,6 +726,24 @@ class TelescopeAxisView(QWidget):
                         else i18n.t("axis.tel.optics_unchanged"))
         except ValueError as e:
             self._flash(i18n.t("axis.tel.optics_rejected", e=e))
+        finally:
+            self.refresh()
+
+    def _on_undo_add(self):
+        """„Cofnij dopisanie” zaznaczonego teleskopu (AR-133): `repo.undo_new_telescope` - ta sama
+        klinga i to samo zdanie wyniku co recepta paska (`zdanie_cofniecia_dopisania`). Widok wraca
+        do prawdy bazy zawsze - teleskop zdjęty nagrobkiem znika z listy. W trakcie etapu - odmowa
+        z komunikatem, jak reszta zapisów osi (N8)."""
+        tid = self._selected_telescope_id()
+        if tid is None or tid not in self._dopisane:
+            return
+        if self._busy:
+            self._flash(i18n.t("object.config_undo_add.busy"))
+            return
+        nazwa = queries.telescope_label(self._rows[tid])
+        try:
+            wynik = repo.undo_new_telescope(self.con, telescope_id=tid, now=self._now())
+            self._flash(zdanie_cofniecia_dopisania(wynik, nazwa))
         finally:
             self.refresh()
 
@@ -1765,6 +1813,9 @@ class ObjectAxisView(QWidget):
     # Gest „Przypisz zestaw…" zmienia oś TELESKOPU: liczbę klatek, wartość z plików, a „Dopisz
     # nowy…" dokłada wiersz (wizytacja N4) - gospodarz odświeża nią Oś teleskopu.
     telescope_axis_changed = Signal()
+    # Recepta paska po geście osi (`grid_model.Recepta` z wykonawcą) - „Cofnij dopisanie” po „Dopisz
+    # nowy…” (AR-133). Pada PO `status_message`, bo raport gasi receptę poprzedniego gestu.
+    status_recipe = Signal(object)
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
@@ -2821,7 +2872,7 @@ class ObjectAxisView(QWidget):
                 with busy.busy(self.status_message.emit,
                                i18n.t_plural("busy.saving_frames", len(frame_ids))):
                     if nowy is not None:
-                        _tid, g = repo.user_assign_config_new_telescope(
+                        telescope_id, g = repo.user_assign_config_new_telescope(
                             self.con, frame_ids=frame_ids, now=self._now(), **nowy)
                     else:
                         g = repo.user_assign_config(self.con, frame_ids=frame_ids,
@@ -2848,10 +2899,38 @@ class ObjectAxisView(QWidget):
             # czyimś materiałem. Mówimy GDZIE to przeliczyć, zamiast liczyć za usera przy okazji
             # innego gestu (takt należy do Dostawy, jak takt 3 przy naprawie nagłówka).
             msg += i18n.t("object.config_next_step")
-        if nowy is not None and g.assigned:
-            # „Dopisz nowy…" nie ma cofnięcia jednym gestem - zdanie wskazuje drogę (N16).
-            msg += i18n.t("object.config_new_telescope_undo", telescope=telescope_label)
         self.status_message.emit(msg)
+        self.refresh()
+        self.telescope_axis_changed.emit()
+        if nowy is not None and g.assigned:
+            # „Dopisz nowy…” ma cofnięcie JEDNYM kliknięciem (AR-133, `Q8`): recepta niesie
+            # teleskop, a klinga odtwarza stan sprzed gestu z jego trwałego śladu (`telescope_add`).
+            # Na końcu - raport odświeżenia (pusta biblioteka) zgasiłby receptę wysłaną wcześniej.
+            self.status_recipe.emit(self._recepta_cofniecia_dopisania(telescope_id,
+                                                                       telescope_label))
+
+    def _recepta_cofniecia_dopisania(self, telescope_id, telescope_label):
+        """Recepta „Cofnij dopisanie „X”” - człon z wykonawcą (`grid_model.CzlonRecepty`)."""
+        from horreum.gui.grid_model import CzlonRecepty, Recepta
+        return Recepta([CzlonRecepty(
+            i18n.t("object.config_undo_add", telescope=telescope_label),
+            lambda: self._on_cofnij_dopisanie(telescope_id, telescope_label))])
+
+    def _on_cofnij_dopisanie(self, telescope_id, telescope_label):
+        """Klik „Cofnij dopisanie” (AR-133): `repo.undo_new_telescope` - klatki gestu wracają do
+        zestawu sprzed gestu (CAS: klatka zmieniona po geście zostaje i jest policzona), teleskop
+        bez klatek i bez ręki po geście schodzi nagrobkiem z osi. Odmowa bez zapisu (teleskop żyje
+        już poza gestem: profil, scalenie, ręka po geście) mówi powodem z tokenu klingi.
+
+        W trakcie etapu Dostawy gest czeka jak inne zapisy osi - zdanie mówi dlaczego, a recepta
+        wraca na pasek (raport ją zgasił), żeby droga powrotu nie przepadła razem z odmową."""
+        if self._busy:
+            self.status_message.emit(i18n.t("object.config_undo_add.busy"))
+            self.status_recipe.emit(self._recepta_cofniecia_dopisania(telescope_id,
+                                                                       telescope_label))
+            return
+        wynik = repo.undo_new_telescope(self.con, telescope_id=telescope_id, now=self._now())
+        self.status_message.emit(zdanie_cofniecia_dopisania(wynik, telescope_label))
         self.refresh()
         self.telescope_axis_changed.emit()
 
@@ -3993,6 +4072,8 @@ class MainWindow(QMainWindow):
         for v in (tasks.axis_view, tasks.object_view, tasks.observatory_view):
             v.status_message.connect(
                 lambda msg: self._raport_miejsca(msg, STRONA_PORZADKI, wiaz=False))
+        # „Cofnij dopisanie” po „Dopisz nowy…” (AR-133) - recepta gestu osi na pasek gospodarza.
+        tasks.object_view.status_recipe.connect(self._recepta_porzadkow)
         tasks.open_collection.connect(self._on_open_collection)
         # Wiersz „Przerwane zmiany obiektu” (AR-121) otwiera okno przebiegu przez Zbiory - tam
         # mieszka mutex zapisu i odświeżenie zbioru oraz plakietki po zapisie albo cofnięciu.
@@ -4840,6 +4921,13 @@ class MainWindow(QMainWindow):
             self._przelicz_pasek()
         else:
             self.statusBar().setToolTip(self._pelna_recepta)
+
+    def _recepta_porzadkow(self, recepta):
+        """Recepta gestu osi w Porządkach („Cofnij dopisanie”, AR-133) - na pasek, gdy Porządki
+        widać. Przychodzi PO raporcie gestu, który zgasił receptę poprzedniego gestu, więc kolejność
+        daje widok: najpierw zdanie, potem przycisk drogi powrotu."""
+        if self._strona() == STRONA_PORZADKI:
+            self._pokaz_recepte(recepta)
 
     def _recepta_gridu(self, recepta):
         """Recepta z gridu - na pasek tylko przy widocznych Zbiorach (FH-2e). Grid składa ją ze

@@ -27,6 +27,8 @@ EXPECTED_TABLES = {
     "withheld_write",
     # 0038 - zamiar podmiany drogi atomowej (AR-64)
     "replace_intent",
+    # 0040 - ślad gestu „Dopisz nowy…” (AR-133)
+    "telescope_add",
 }
 
 
@@ -103,8 +105,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v39_po_migracji(tmp_path):
-    """0039 podnosi user_version do 39 (świeża baza leci 0002→…→0039 sekwencyjnie; 0025 = wersja
+def test_user_version_v40_po_migracji(tmp_path):
+    """0040 podnosi user_version do 40 (świeża baza leci 0002→…→0040 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -117,13 +119,15 @@ def test_user_version_v39_po_migracji(tmp_path):
     AR-17 krok 3; 0037 = zapis z zeznaniem wstrzymanym `withheld_write`, wiązanie
     `pending_changes.withheld_id` i wersja decyzji ręki `header_backups.hand_version`, AR-82;
     0038 = zamiar podmiany drogi atomowej `replace_intent`, AR-64; 0039 = optyka teleskopu z ręki
-    `telescope.focal_user`/`f_ratio_user`, AR-128).
+    `telescope.focal_user`/`f_ratio_user`, AR-128; 0040 = nagrobek `object`/`telescope.retired_at`,
+    ślad przebiegu `object_change_run.made_object_id`/`made_alias_id` i ślad gestu „Dopisz nowy…”
+    `telescope_add`, AR-133/AR-137).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 39
-    assert db.SCHEMA_VERSION == 39
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 40
+    assert db.SCHEMA_VERSION == 40
     con.close()
 
 
@@ -338,7 +342,7 @@ def test_0039_optyka_reki_backfill_z_payloadu_na_bazie_v38(tmp_path):
     kolumny = ("id, telescop_canon, label, f_ratio_nominal, focal_nominal, status, merged_into, "
                "created_at, in_park")
     przed = [tuple(r) for r in con.execute(f"SELECT {kolumny} FROM telescope ORDER BY id")]
-    assert db.migrate(con) == db.SCHEMA_VERSION == 39
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v40_po_migracji
     assert [tuple(r) for r in con.execute(f"SELECT {kolumny} FROM telescope ORDER BY id")] == przed
     reka = {r[0]: (r[1], r[2]) for r in con.execute(
         "SELECT id, focal_user, f_ratio_user FROM telescope")}
@@ -351,6 +355,51 @@ def test_0039_optyka_reki_backfill_z_payloadu_na_bazie_v38(tmp_path):
     for kol in ("focal_user", "f_ratio_user"):
         with pytest.raises(sqlite3.IntegrityError):
             con.execute(f"UPDATE telescope SET {kol} = 0 WHERE id = 1")
+    con.close()
+
+
+def test_0040_nagrobek_przyrost_na_bazie_v39_i_CHECK(tmp_path):
+    """0040 na bazie v39 z danymi: wiersze teleskopów, obiektów i przebiegów nietknięte, nowe kolumny
+    PUSTE (bez backfillu - populacja 0/0), `telescope_add` pusta, druga migracja = no-op. CHECK:
+    nagrobek teleskopu przy scaleniu odbity (oba kierunki - nagrobek scalonego i scalenie nagrobka),
+    pusty znacznik odbity, granice śladu gestu odwrócone odbite; `made_object_id` z FK.
+    Falsyfikatory: zdjęty CHECK `merged_into` przyjmuje nagrobek scalonego; backfill daje nie-NULL."""
+    path = str(tmp_path / "h.db")
+    con = _baza_v38_z_teleskopami(path)
+    con.close()
+    con = db.connect(path)
+    db._apply_migration(con, 39, db._migration_sql("0039_telescope_optics_hand.sql"))
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (1, 'NGC2632', 'NGC', 'deep_sky')")
+    con.execute("INSERT INTO object_change_run(run_id, mode, canon, catalog, kind, card_form, "
+                "created_at, status) VALUES ('R', 'change', 'NGC2632', 'NGC', 'deep_sky', 'NGC 2632', "
+                "'t', 'undone')")
+    con.commit()
+    przed = {t: [tuple(r) for r in con.execute(f"SELECT * FROM {t} ORDER BY 1")]
+             for t in ("telescope", "object", "object_change_run", "event")}
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    po = {t: [tuple(r)[:len(przed[t][0])] for r in con.execute(f"SELECT * FROM {t} ORDER BY 1")]
+          for t in przed}
+    assert po == przed
+    assert con.execute("SELECT count(*) FROM telescope WHERE retired_at IS NOT NULL").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM object WHERE retired_at IS NOT NULL").fetchone()[0] == 0
+    assert tuple(con.execute(
+        "SELECT made_object_id, made_alias_id FROM object_change_run").fetchone()) == (None, None)
+    assert con.execute("SELECT count(*) FROM telescope_add").fetchone()[0] == 0
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    con.execute("UPDATE telescope SET retired_at = 't' WHERE id = 1")             # korzeń - wolno
+    for zly in ("UPDATE telescope SET retired_at = 't' WHERE id = 3",             # scalony
+                "UPDATE telescope SET merged_into = 2 WHERE id = 1",              # nagrobek scalany
+                "UPDATE telescope SET retired_at = '' WHERE id = 2",
+                "UPDATE object SET retired_at = '' WHERE id = 1",
+                "UPDATE object_change_run SET made_object_id = 99 WHERE run_id = 'R'",
+                "INSERT INTO telescope_add(telescope_id, first_event_id, last_event_id, created_at) "
+                "VALUES (1, 5, 4, 't')",
+                "INSERT INTO telescope_add(telescope_id, first_event_id, last_event_id, created_at) "
+                "VALUES (99, 1, 2, 't')"):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(zly)
+    con.rollback()
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     con.close()
 
 

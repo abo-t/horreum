@@ -542,8 +542,7 @@ def test_po_migracji_reka_rc8r_przezywa_sprzeczne_zeznanie(tmp_path):
     for version, filename in db.MIGRATIONS:
         if version <= 38:
             db._apply_migration(con, version, db._migration_sql(filename))
-    tid, _ = repo.propose_telescope(con, telescop_canon="RC8R", focal_nominal=1200, now=NOW,
-                                    actor="user:local")
+    _teleskop_v38(con, "RC8R", focal=1200, actor="user:local")
     db.migrate(con)
     przed = _spis_z(con)
     cam = _kamera(con, "SONYA7S")
@@ -556,6 +555,22 @@ def test_po_migracji_reka_rc8r_przezywa_sprzeczne_zeznanie(tmp_path):
     gesty = audit.telescope_hand_gestures_since(con, przed.event_watermark)
     assert _spis_z(con).spadki(przed, gesty_teleskopu=gesty) == {}
     con.close()
+
+
+def _teleskop_v38(con, canon, *, focal, f_ratio=None, actor="grouper"):
+    """Wiersz osi teleskopu i jego `telescope.proposed` na bazie v38 - gołym SQL-em, tak jak pisała
+    go klinga tamtej wersji. Dzisiejsza `repo.propose_telescope` czyta nagrobek (`retired_at`,
+    0040), którego schemat v38 nie zna, więc nie buduje bazy sprzed migracji."""
+    tid = con.execute(
+        "INSERT INTO telescope(telescop_canon, label, f_ratio_nominal, focal_nominal, status, "
+        "created_at) VALUES (?, NULL, ?, ?, 'proposed', ?)", (canon, f_ratio, focal, NOW)).lastrowid
+    con.execute("INSERT INTO event(ts, actor, verb, target, payload) "
+                "VALUES (?, ?, 'telescope.proposed', ?, ?)",
+                (NOW, actor, f"telescope:{tid}",
+                 json.dumps({"telescop_canon": canon, "f_ratio_nominal": f_ratio,
+                             "focal_nominal": focal, "member_count": None})))
+    con.commit()
+    return tid
 
 
 # ------------------------------------------------------------ bramka kodu T24 (N1..N22)
@@ -571,8 +586,7 @@ def _baza_v38_a140r(path):
     _klatka(con, "p", telescop="A140R", focal=784, f_ratio=8.0, camera_id=cam)
     for i in range(5):
         _klatka(con, f"n{i}", telescop="A140R", focal=784, f_ratio=5.6, camera_id=cam)
-    tid, _ = repo.propose_telescope(con, telescop_canon="A140R", f_ratio_nominal=8.0,
-                                    focal_nominal=784, now=NOW)
+    tid = _teleskop_v38(con, "A140R", focal=784, f_ratio=8.0)
     cfg, _ = repo.propose_config(con, telescope_id=tid, camera_id=cam, now=NOW)
     for (fid,) in con.execute("SELECT id FROM frame").fetchall():
         repo.assign_config(con, frame_id=fid, config_id=cfg, now=NOW)

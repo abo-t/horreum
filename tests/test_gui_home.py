@@ -585,7 +585,7 @@ def test_start_na_Domu_i_sidebar_z_naglowkiem(qapp, tmp_path):
         assert win.nav.currentRow() == NAV_DOM and win.stack.currentIndex() == STRONA_DOM
         assert win.stack.currentWidget() is win.home_view
         assert [win.nav.item(i).text() for i in range(win.nav.count())] == [
-            "Dom", "Znajdź", "Więcej", "Dostawa", "Zbiory klasyczne", "Porządki (6)", "Planer"]
+            "Dom", "Znajdź", "Więcej", "Dostawa", "Zbiory klasyczne", "Porządki (7)", "Planer"]
         assert win.nav.item(NAV_WIECEJ).flags() == Qt.NoItemFlags
         win.show_find()
         assert win.stack.currentWidget() is win.znajdz_view
@@ -693,16 +693,17 @@ def test_kafle_prowadza_istniejacymi_drogami(qapp, tmp_path, monkeypatch):
 
 def test_popraw_N_to_ta_sama_liczba_co_plakietka(qapp, tmp_path):
     """Jeden sygnał stanu Porządków, dwa nośniki: plakietka sidebara i kafel Domu. Przy zerze oba
-    gołe (bez „· 0" i bez „(0)")."""
+    gołe (bez „· 0" i bez „(0)"). Siedem pozycji: fikstura niesie obiekt `M42` z klatkami - starą
+    tożsamość `NGC1976` z pary `catalog_xref` (AR-135)."""
     win = MainWindow(_s8(tmp_path))
     try:
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"
-        assert win.home_view.tile_popraw.text() == "Popraw · 6"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (7)"
+        assert win.home_view.tile_popraw.text() == "Popraw · 7"
         win.tasks_view.counts_changed.emit(0)
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki"
         assert win.home_view.tile_popraw.text() == "Popraw"
         win.tasks_view.refresh_counts()
-        assert win.home_view.tile_popraw.text() == "Popraw · 6"
+        assert win.home_view.tile_popraw.text() == "Popraw · 7"
     finally:
         win.close()
 

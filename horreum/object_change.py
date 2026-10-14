@@ -69,6 +69,21 @@ class ObjectChangeItem:
     object_change: bool            # czy baza zmienia obiekt tej klatki
 
 
+class ZdanieRdzenia(str):
+    """Zdanie rdzenia dla człowieka (PL) i jego KOD naraz - wzorzec `gui.grid_model.Recepta`.
+    Zdanie (`str`) czyta każdy, kto bierze je jak tekst: CLI, log, testy, sklejenie w dłuższe zdanie
+    (wynik sklejenia jest już zwykłym `str`). `code` i `params` (pary `(nazwa, wartość)`) bierze
+    powierzchnia mówiąca językiem UI - okno zmiany obiektu składa z nich swoje zdanie (AR-138).
+    Dziś: ostrzeżenia sterownika zapisu gestu (`writeback.ObjectChangeResult.warnings`) i powód
+    bramki karty `OBJECT` (`gui.queries.object_card_gate`)."""
+
+    def __new__(cls, text, code, **params):
+        self = super().__new__(cls, text)
+        self.code = code
+        self.params = tuple(params.items())
+        return self
+
+
 @dataclasses.dataclass(frozen=True)
 class ObjectChangeSkip:
     """Klatka, której gest nie ruszy - z powodem dla człowieka. `code` = rodzaj pominięcia, który
@@ -88,19 +103,32 @@ class ObjectChangeSkip:
 SKIP_UNCHANGED = "unchanged"
 # Komplet kodów pominięć planera - każdy ma zdanie `objchg.skip.<kod>` w katalogu okna (PL+EN,
 # test parytetu), a każde `_Odmowa`/pominięcie w tym module niesie jeden z nich (test AST).
+# Szczegół odmowy, który rdzeń zna jako fakt (reguła karty, długości komentarza, rodzaj błędu
+# katalogu), jest osobnym kodem z parametrami - nie prozą w parametrze zdania (AR-138).
 SKIP_CODES = frozenset({
     "kind_not_light", "retired", "superseded", "no_present_copy", "many_copies", "isolated",
     "no_mtime", "no_object", "bad_target", "off_position", "folder_twins", "card_skip",
-    "card_rule", "card_comment", "dir_unreadable", "file_in_dir_place", "variant_dir",
-    "variant_name", SKIP_UNCHANGED, "target_on_disk", "batch_collision", "target_in_db", "pair"})
+    "card_rule", "card_too_long", "card_chars", "card_comment", "dir_unreadable", "dir_denied",
+    "dir_missing", "file_in_dir_place", "variant_dir", "variant_name", SKIP_UNCHANGED,
+    "target_on_disk", "batch_collision", "target_in_db", "pair"})
+# Kody ostrzeżeń planera - każdy ma zdanie `objchg.warn.<kod>` w katalogu okna (PL+EN, test AST).
+WARNING_CODES = frozenset({"stack_split"})
 
 
 @dataclasses.dataclass(frozen=True)
 class ObjectChangeWarning:
     """Ostrzeżenie bez blokady - dziś: przeniesienie CZĘŚCI wejść stosu (żniwa liczą siedzibę stosu
-    z jednego folderu lightów). `frame_ids` = klatki planu, których dotyczy."""
+    z jednego folderu lightów). `frame_ids` = klatki planu, których dotyczy. Wzorzec pominięć
+    (AR-138): `code` (`WARNING_CODES`) i `params` (pary `(nazwa, wartość)`) okno składa w zdanie
+    `objchg.warn.<kod>` w języku UI; zdanie `text` (PL) zostaje zapasem dla kodu bez zdania."""
     frame_ids: tuple[int, ...]
     text: str
+    code: str | None = None
+    params: tuple = ()
+
+    def __post_init__(self):
+        if self.code is not None and self.code not in WARNING_CODES:
+            raise AssertionError(self.code)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -160,6 +188,14 @@ class _Dysk:
             else:
                 self._pamiec[klucz] = (set(nazwy), {n.casefold(): n for n in reversed(nazwy)})
         wynik = self._pamiec[klucz]
+        # Rodzaj błędu systemu to fakt (klasa wyjątku), nie proza: odmowa dostępu i brak katalogu
+        # mają własne zdania w języku UI; inny błąd niesie komunikat systemu jako szczegół.
+        if isinstance(wynik, PermissionError):
+            raise _Odmowa("dir_denied", f"katalog celu nieczytelny - brak dostępu: {katalog}",
+                          dir=katalog)
+        if isinstance(wynik, FileNotFoundError):
+            raise _Odmowa("dir_missing", f"katalog celu nie istnieje na dysku: {katalog}",
+                          dir=katalog)
         if isinstance(wynik, OSError):
             raise _Odmowa("dir_unreadable", f"katalog celu nieczytelny ({katalog}): {wynik}",
                           dir=katalog, detail=str(wynik))
@@ -232,18 +268,24 @@ def _powod_klatki(r, target):
     return None
 
 
-def _karta(r, comment_loss_route):
+def _karta(r, comment_loss_lengths):
     """`(card_op, card_new)` pozycji albo `_Odmowa`, gdy karta jest potrzebna, a zapisu nie będzie -
     wtedy plik zostaje w całości (D-1011-5 Q2: przeniesienie i karta razem albo wcale; RAW i region
     przy „Uzgodnij” karty nie mają, więc przenoszą się bez niej). Bramka bazy (`card_skip`, ta sama
     co w ujednoliceniu karty) plus dwie przepowiednie pisarza: reguły karty FITS 4.0
-    (`card_rules.card_violation`) i utrata zastanego komentarza (`writeback.comment_loss_route`) -
-    obie odmawiają w obu drogach zapisu, więc podgląd ma je pokazać, nie sterownik."""
+    (`card_rules.card_violation`) i utrata zastanego komentarza
+    (`writeback.comment_loss_lengths`) - obie odmawiają w obu drogach zapisu, więc podgląd ma je
+    pokazać, nie sterownik. Obie przepowiednie dają FAKTY (rodzaj naruszenia, długości), więc
+    odmowa niesie je parametrami zdania okna (AR-138)."""
     if not r["card_applicable"]:
         return None, None
     if r["card_skip"] is not None:
-        raise _Odmowa("card_skip", f"karta OBJECT nie do zapisania ({r['card_skip']}) - plik "
-                                   f"zostaje, bo karta i folder idą razem", detail=r["card_skip"])
+        # Powód bramki to `ZdanieRdzenia` (`gui.queries.object_card_gate`): kod i parametry idą
+        # do okna obok zdania - szczegół mówi się w języku UI (AR-138).
+        bramka = r["card_skip"]
+        raise _Odmowa("card_skip", f"karta OBJECT nie do zapisania ({bramka}) - plik zostaje, bo "
+                                   f"karta i folder idą razem", detail=str(bramka),
+                      gate=getattr(bramka, "code", None), gate_params=getattr(bramka, "params", ()))
     nowa = r["card_form"]
     if nowa is None:
         raise AssertionError(f"klatka {r['frame_id']}: karta do zapisu bez formy i bez powodu bramki")
@@ -251,12 +293,24 @@ def _karta(r, comment_loss_route):
         return None, nowa
     op = "set" if r["card_present"] else "add"         # pusta karta stoi w nagłówku - `set`
     naruszenie = card_rules.card_violation("OBJECT", nowa, None, new_card=op == "add")
-    if naruszenie is not None:
+    if naruszenie is not None and naruszenie.kind == "length":
+        raise _Odmowa("card_too_long", f"karta OBJECT „{nowa}” za długa - znaków: "
+                                       f"{naruszenie.length}, rekord FITS mieści: "
+                                       f"{naruszenie.limit}",
+                      value=nowa, length=naruszenie.length, limit=naruszenie.limit)
+    if naruszenie is not None and naruszenie.kind == "chars":
+        raise _Odmowa("card_chars", f"karta OBJECT „{nowa}” ma znaki spoza drukowalnego ASCII - "
+                                    f"nagłówek FITS ich nie przyjmie", value=nowa)
+    if naruszenie is not None:                         # nazwa karty - nieosiągalne dla `OBJECT`
         raise _Odmowa("card_rule", f"karta OBJECT: {naruszenie.reason}", detail=naruszenie.reason)
     if op == "set":
-        odmowa = comment_loss_route(r["filetype"], "OBJECT", nowa, r["card_comment"])
-        if odmowa is not None:
-            raise _Odmowa("card_comment", f"karta OBJECT: {odmowa}", detail=odmowa)
+        strata = comment_loss_lengths(r["filetype"], "OBJECT", nowa, r["card_comment"])
+        if strata is not None:
+            przed, po = strata
+            raise _Odmowa("card_comment", f"karta OBJECT: nowa wartość ucięłaby zastany komentarz "
+                                          f"karty z {przed} do {po} znaków (karta FITS po zmianie "
+                                          f"ma pole wartości stałego formatu) - plik zostaje, bo "
+                                          f"karta i folder idą razem", before=przed, after=po)
     return op, nowa
 
 
@@ -418,8 +472,11 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
                 cel = path_after_object_change(r["path"], canon, r["kind"], library_root,
                                                object_kind=rodzaj)
             except ValueError as exc:
-                raise _Odmowa("bad_target", f"cel, którego system plików nie przyjmie: {exc}",
-                              detail=str(exc)) from None
+                # Zdanie okna mówi o folderze kanonu (fakt rdzenia); powód `ValueError` z reguły
+                # formy folderu zostaje szczegółem zdania rdzenia (AR-138).
+                raise _Odmowa("bad_target", f"folder obiektu „{canon}” nie powstanie - system "
+                                            f"plików nie przyjmie tej nazwy ({exc})",
+                              canon=canon) from None
             if cel is None:
                 raise _Odmowa("off_position", "plik nie stoi na pozycji obiektu w drzewie archiwum "
                                               "- nie ma folderu obiektu, do którego mógłby trafić")
@@ -430,7 +487,7 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
                               canon=canon, twins=", ".join(r["folder_twins"]))
             if any(s.casefold() in EXCLUDED_DIR_NAMES for s in re.split(r"[\\/]+", cel)):
                 raise AssertionError(f"cel w drzewie roboczym (_WBPP/_Review): {cel}")
-            card_op, card_new = _karta(r, writeback.comment_loss_route)
+            card_op, card_new = _karta(r, writeback.comment_loss_lengths)
             glowa = ntpath.dirname(cel)
             sep = cel[len(glowa)] if cel[len(glowa):len(glowa) + 1] in ("\\", "/") else "\\"
             katalog, mkdirs = dysk.katalog(glowa, ntpath.dirname(r["path"]))
@@ -542,12 +599,16 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
         _, nazwa, wejscia = stosy[sid]
         foldery = {przeniesione.get(f, path_key(ntpath.dirname(sciezka))) for f, sciezka in wejscia}
         ruszone = tuple(sorted({f for f, _ in wejscia if f in przeniesione}))
+        ile_wejsc = len({f for f, _ in wejscia})
         if len(foldery) > 1:
             warnings.append(ObjectChangeWarning(
                 frame_ids=ruszone,
-                text=(f"stos {nazwa}: gest przeniesie {len(ruszone)} z {len({f for f, _ in wejscia})} "
-                      f"jego wejść - wejścia rozejdą się na {len(foldery)} folderów, a żniwa "
-                      f"ustalają siedzibę stosu z jednego folderu lightów")))
+                text=(f"stos {nazwa}: gest przeniesie {len(ruszone)} z {ile_wejsc} jego wejść - "
+                      f"wejścia rozejdą się między foldery (folderów: {len(foldery)}), a żniwa "
+                      f"ustalają siedzibę stosu z jednego folderu lightów"),
+                code="stack_split",
+                params=(("stack", nazwa), ("moved", len(ruszone)), ("inputs", ile_wejsc),
+                        ("n", len(foldery)))))
 
     items = tuple(ObjectChangeItem(
         frame_id=fid, location_id=int(wiersz[fid]["location_id"]), old_path=wiersz[fid]["path"],

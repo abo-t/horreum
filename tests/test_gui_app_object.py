@@ -3333,3 +3333,33 @@ def test_okna_kart_mowia_PLIK_ZAJETY_slowami_okna_ze_sciezka(sciezka_karty):
     assert i18n.t("objchg.reason.busy") + r" (R:\A\b.fits)" in zdanie, zdanie
     assert "PermissionError" not in zdanie and "\\\\" not in zdanie
     dlg.reject()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_okno_wyboru_obiektu_rosnie_gdy_zdania_sie_zawijaja(qapp, tmp_path, lang):
+    """Wizytacja natywna (W1): w oknie wyboru obiektu („Zmień obiekt…”, „Przypisz obiekt…”) po
+    wpisaniu nowej nazwy druga linia nagłówka i zdania „…zapis założy go w bazie” była ucięta
+    w pół wiersza - okno zostawało przy wysokości z otwarcia. Okno rośnie w górę po każdej zmianie
+    zawijanych zdań: każda etykieta ma co najmniej wysokość, której jej tekst potrzebuje przy jej
+    szerokości. Mutant: `_dopasuj_wysokosc` bez działania - etykiety ściśnięte."""
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "w1.db"))
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=2)
+    try:
+        dlg.head.setText(i18n.t_plural("grid.sel.object_change_pick_head", 2))
+        dlg.show()
+        dlg.resize(457, dlg.height())                 # szerokość okna z wizytacji natywnej
+        qapp.processEvents()
+        wysokosc = dlg.height()
+        dlg.designation.setText("NGC 7790")           # nazwa spoza bazy - zdanie „założy”
+        qapp.processEvents()
+        assert dlg.canon_preview.text().endswith(i18n.t("assign.creates_object"))
+        for etykieta in (dlg.head, dlg.canon_preview):
+            assert etykieta.isVisible()
+            assert etykieta.height() >= etykieta.heightForWidth(etykieta.width()), (
+                lang, etykieta.text(), etykieta.height(), etykieta.heightForWidth(etykieta.width()))
+        assert dlg.height() >= wysokosc                              # tylko w górę
+    finally:
+        dlg.close()
+        con.close()

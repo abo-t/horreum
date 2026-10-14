@@ -2139,11 +2139,42 @@ def test_pierwsza_lista_nie_nadpisuje_pola_w_ktorym_czlowiek_pisze(qapp, tmp_pat
     con.close()
 
 
-def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_path, ustawienia, monkeypatch):
+@pytest.mark.parametrize("szersza, skala", [
+    pytest.param(False, 1.0, id="sciezka_z_basetemp"),
+    pytest.param(True, 1.0, id="sciezka_szersza_od_okna"),
+    pytest.param(True, 1.6, id="sciezka_szersza_od_okna_font_x1_6", marks=pytest.mark.zmienia_motyw),
+])
+def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_path, ustawienia, monkeypatch,
+                                                                    szersza, skala):
     """Z kartami miejsce listy stoi od startu (pusta tabela, „Liczę wydania…”, zarezerwowany wiersz
-    zdania): lista i podgląd, które dochodzą z tła, nie przesuwają pola, „Wskaż…” ani „Zmień…”."""
+    zdania): lista i podgląd, które dochodzą z tła, nie przesuwają pola, „Wskaż…” ani „Zmień…”,
+    a okno nie zmienia szerokości.
+
+    AR-140: zdanie podglądu niesie ścieżkę wydania, a zawijanie łamie wiersz tylko na spacjach -
+    ścieżka dłuższa od okna poszerzała je samo (980 → 1126 px), wskazówka u góry traciła wiersz
+    i pole podjeżdżało o 14 px (`(254, 281, 253)` zamiast `(268, 295, 267)`). Wariant
+    `sciezka_z_basetemp` to dawny test bez zmian: długość ścieżki daje mu katalog tymczasowy pytesta,
+    więc o wyniku decydowało środowisko. Warianty `sciezka_szersza_od_okna` dokładają katalog
+    liczony z metryki fontu - ścieżka ~1,3 szerokości okna przy każdym foncie, także ×1,6
+    (`QApplication.setFont` przed otwarciem okna); sufit długości trzyma się MAX_PATH.
+    Falsyfikator: zdejmij `_szerokosc_od_okna` z `notice` → padają warianty `sciezka_szersza_od_okna`."""
+    import math
+
+    from PySide6.QtGui import QFont, QFontMetrics
+    if skala != 1.0:
+        font = QFont(QApplication.font())
+        font.setPointSizeF(font.pointSizeF() * skala)
+        QApplication.setFont(font)
     con, _profile, _flats = _baza(tmp_path)
-    work = tmp_path / "_WBPP"
+    glebia = 0
+    if szersza:
+        fm = QFontMetrics(QApplication.font())
+        okno = max(980, _dlg(con, tmp_path / "ARCH").minimumSizeHint().width())   # podłoga okna bez kart
+        wydanie = tmp_path / "_WBPP" / projection.OBJECT_NAMESPACE / "A"
+        najglebszy = wydanie / projection.OUTPUT_DIR / "master" / "masterFlat_A.xisf"
+        glebia = math.ceil((1.3 * okno - fm.horizontalAdvance(str(wydanie))) / fm.horizontalAdvance("x"))
+        glebia = min(max(glebia, 1), 255, 259 - len(str(najglebszy)) - 1)
+    work = (tmp_path / ("x" * glebia) if glebia else tmp_path) / "_WBPP"
     _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con), {"masterFlat_A.xisf": b"A"})
     _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
     gate, entered = _wolna_lista(monkeypatch)
@@ -2152,12 +2183,58 @@ def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_pa
     assert entered.wait(10)
     QTest.qWait(30)
     assert dlg.rel_notice.text() == "Liczę wydania na kartach…" and not dlg.rel_table.isHidden()
-    przed = (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y())
+    przed = (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y(), dlg.width())
     gate.set()
     assert _wait_until(lambda: dlg._rel_thread is None and dlg._dry_thread is None and dlg.btn_apply.isEnabled())
     QTest.qWait(30)
     assert dlg.rel_table.rowCount() == 1 and dlg.rel_notice.text() == ""
-    assert (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y()) == przed
+    if szersza:     # warunek wariantu: ścieżka w zdaniu podglądu naprawdę szersza od okna sprzed listy
+        assert str(work) in dlg.notice.text() and dlg.notice.minimumSizeHint().width() > przed[-1], (
+            f"głębokość {glebia} (sufit MAX_PATH) nie dała ścieżki szerszej od okna {przed[-1]} px")
+    assert (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y(), dlg.width()) == przed
+    con.close()
+
+
+# Ścieżka bez spacji, ~300 znaków: dłuższa od okna przy każdym foncie, zawijanie jej nie złamie.
+DLUGA_SCIEZKA = "R:\\ASTRO_\\" + "\\".join(["_WBPP_folder_roboczy_wydania"] * 11)
+
+
+@pytest.mark.parametrize("etykieta", ["notice", "rel_notice", "archive_warn"])
+def test_zdanie_ze_sciezka_nie_podnosi_podlogi_okna_i_oddaje_ja_cala(qapp, tmp_path, ustawienia, etykieta):
+    """AR-140 na każdej z trzech etykiet zdania stanu, które niosą ścieżkę (podgląd, lista wydań,
+    archiwum inne niż archiwum bazy): ścieżka dłuższa od okna nie podnosi podłogi jego szerokości -
+    podłoga z długą ścieżką = podłoga z krótką. Ucięta ścieżka ma drogę do pełnej treści: etykieta
+    zaznaczalna, pełny tekst pod kursorem. Okno bez kart i bez wątków; tekst przez setter okna.
+    Podłogę mierzymy po `activate()` układu: `archive_warn` siedzi w podukładzie wiersza, którego
+    zapamiętane minimum odświeża dopiero aktywacja (bez niej podłoga stała przy każdym tekście).
+
+    Falsyfikator: zdejmij `_szerokosc_od_okna` z danej etykiety → podłoga rośnie o szerokość ścieżki
+    (`notice`, `rel_notice`) albo etykieta nie jest zaznaczalna (`archive_warn`)."""
+    con, _profile, _flats = _baza(tmp_path)
+    dlg = _dlg(con, tmp_path / "ARCH")
+
+    def podloga():
+        dlg.layout().activate()
+        return dlg.minimumSizeHint().width()
+
+    def zdanie(sciezka):
+        if etykieta == "notice":
+            dlg._show_notice(i18n.t("harvest.manifest_note", path=sciezka))
+        elif etykieta == "rel_notice":
+            dlg._show_rel_notice(i18n.t("harvest.rel.failed", msg=sciezka), "error")
+        else:
+            dlg._db_archive = sciezka          # archiwum bazy inne niż archiwum okna
+            dlg._show_archive()
+        return getattr(dlg, etykieta)
+
+    zdanie("R:\\ASTRO_\\A")
+    krotka = podloga()
+    label = zdanie(DLUGA_SCIEZKA)
+    assert len(DLUGA_SCIEZKA) >= 300 and " " not in DLUGA_SCIEZKA and DLUGA_SCIEZKA in label.text()
+    assert not label.isHidden() and label.fontMetrics().horizontalAdvance(DLUGA_SCIEZKA) > krotka
+    assert podloga() == krotka
+    assert label.textInteractionFlags() & Qt.TextSelectableByMouse
+    assert label.toolTip() == label.text()
     con.close()
 
 

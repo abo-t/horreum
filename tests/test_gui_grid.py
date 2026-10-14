@@ -587,31 +587,55 @@ def _kadr_z_ucietym_brzegiem(lw, pelnych=7):
     lw.setFixedHeight(2 * lw.frameWidth() + pelnych * wiersz + wiersz // 2)
 
 
-def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp):
+@pytest.mark.parametrize("droga", ["font_listwy",
+                                   pytest.param("font_aplikacji_pod_arkuszem", marks=pytest.mark.zmienia_motyw)])
+def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp, droga):
     """W-6 (wizytacja 0810): sufit grupy krótkiej był stałą 72 px, a przy wierszu 16 px to 4,375
     wiersza - Rodzaj pokazywał połówkę `master_dark`, która czyta się jak ostatni wiersz, a nie jak
     zapowiedź dalszych. Sufit ma być wielokrotnością REALNEGO wiersza, więc bramka mierzy DWA fonty:
     stała px trafia w całe wiersze najwyżej przy jednym (tu 12 i 19 px, na pulpicie 16 px). Na
     liście stoi `✓` - pogrubiony wiersz ma mieć tę samą wysokość co reszta.
 
+    Dwie drogi (AR-136), każda z inną rolą:
+    * `font_listwy` - font ŻYWEJ listwy bez arkusza: strażnik przeliczania sufitu przy każdym
+      przeładowaniu;
+    * `font_aplikacji_pod_arkuszem` - arkusz motywu na aplikacji (`apply_theme`) i font przez
+      `QApplication.setFont`, listwa budowana od nowa przy każdym foncie: strażnik reguł arkusza dla
+      wierszy list (sufit z realnego wiersza pod QSS produkcji). Przy czynnym arkuszu font aplikacji
+      nie schodzi do list żywej listwy - droga bez przebudowy to `AR-144`, nie ten parametr.
+
     Listwa jest WYSOKA, żeby grupy krótkie stały na suficie: bramka mierzy sufit, a nie ściskanie
     przez layout przy niskim oknie.
 
-    Falsyfikator: przywróć w `_dopasuj_sufit` stałą 72 px → viewport 70 px przy wierszu 12 px
-    (5,83 wiersza); licz sufit tylko w konstruktorze → pada drugi font (48 px przy wierszu 19 px)."""
+    Falsyfikatory: przywróć w `_dopasuj_sufit` stałą 72 px → oba parametry padają (viewport 70 px
+    przy wierszu 12 px, 5,83 wiersza); licz sufit tylko w konstruktorze → pada `font_listwy` przy
+    drugim foncie (48 px przy wierszu 19 px), `font_aplikacji_pod_arkuszem` nie (listwa nowa)."""
     from PySide6.QtGui import QFont
+    from horreum.gui import app as app_mod, theme
     from horreum.gui.facets import _SHORT_ROWS
+    przez_aplikacje = droga == "font_aplikacji_pod_arkuszem"
+    if przez_aplikacje:
+        app_mod.apply_theme(qapp, theme.DEFAULT)
     wartosci = [(f"W{i}", f"W{i}", 9 - i) for i in range(7)]
     counts = {"object": [(1, "M31", 1)], "filter": wartosci, "kind": wartosci,
               "telescope": wartosci, "night": [("2025-01-01", "2025-01-01", 1)]}
     rail = _kadr_rail(qapp, counts, wys=900)
+    listwy = [rail]
     try:
         bazowy = rail.font()
         wiersze = set()
         for skala in (1.0, 1.6):
             font = QFont(bazowy)
             font.setPointSizeF(bazowy.pointSizeF() * skala)
-            rail.setFont(font)
+            if not przez_aplikacje:
+                rail.setFont(font)
+            elif skala != 1.0:
+                # Pod arkuszem font aplikacji nie schodzi do list ŻYWEJ listwy (zmierzone: listwa
+                # 14,4 pt, listy 9,0 pt), a produkcja stawia font, zanim powstaną widżety - listwa
+                # powstaje więc od nowa, przy nowym foncie aplikacji.
+                QApplication.setFont(font)
+                rail = _kadr_rail(qapp, counts, wys=900)
+                listwy.append(rail)
             rail.set_data(counts, {"kind": {"in": [["W0", "W0"]]}})
             _pompuj(qapp)
             for facet in ("filter", "kind", "telescope"):
@@ -623,7 +647,8 @@ def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp):
                 wiersze.add(wiersz)
         assert len(wiersze) == 2, f"oba fonty dały wiersz {wiersze} - bramka nie zmierzyła dwóch metryk"
     finally:
-        rail.hide()
+        for listwa in listwy:
+            listwa.hide()
 
 
 def test_facet_rail_klik_SPOZA_kadru_stawia_wybor_w_kadrze(qapp):

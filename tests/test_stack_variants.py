@@ -601,6 +601,357 @@ def test_grupy_wersji_nie_widza_wariantu_z_relacja(archiwum):
     assert stacks_w_grupach() == {r[0] for r in con.execute("SELECT id FROM frame").fetchall()}
 
 
+# ═══════════════════════════════════════════ samodzielny autocrop (Q13 = O2): lista ręki → STACKS
+
+SAM_KARTY = [("IMAGETYP", "'Master Light'"), ("INSTRUME", "'ZWO ASI2600MM Pro'"),
+             ("DATE-OBS", "'2025-12-20T20:00:00.000'"), ("DATE-END", "'2025-12-21T03:00:00.000'"),
+             ("FILTER", "'Ha'"), ("EXPTIME", "600.00"), ("TELESCOP", "'RC8'"),
+             ("OBJECT", "'NGC 224'")]
+KOLOR_KARTY = [("INSTRUME", "'ZWO ASI2600MC Pro'"), ("BAYERPAT", "'RGGB'"), ("TELESCOP", "'RC8'"),
+               ("EXPTIME", "300.00"), ("DATE-OBS", "'2025-09-01T20:00:00.000'")]
+
+
+@pytest.fixture
+def samodzielne(tmp_path):
+    """Archiwum po Dostawie: oryginał `NGC224` w `STACKS\\NGC224\\RC8_2600MM\\Ha` z dawną lokacją
+    w starym drzewie (para wariantu - punkt odniesienia reguły siedziby), lighty `NGC7000` na
+    kamerze kolorowej pod `LIGHTS\\…\\OSC` (bez stosów - świadek lightów). Stare drzewo: autocrop
+    pary (`V`), bliźniacze nazwy bez oryginału (`G1`, `G2`), kopia danych oryginału (`K`), autocrop
+    kolorowy `NGC 7000` i autocrop obiektu, którego baza nie zna."""
+    arch, old = tmp_path / "ARCH", tmp_path / "OLD"
+    oryg = _xisf(arch / "STACKS" / "NGC224" / "RC8_2600MM" / "Ha",
+                 "NGC224_2025-12-16_RC8_2600MM_Ha_600s_mono.xisf", b"\x01" * 64, ORYGINAL_KARTY)
+    _xisf(arch / "LIGHTS" / "NGC7000" / "RC8_2600MC" / "OSC", "l1.xisf", b"\x30" * 32,
+          KOLOR_KARTY + [("IMAGETYP", "'Light'"), ("OBJECT", "'NGC7000'")])
+    path_db = str(tmp_path / "h.db")
+    con = db.open_db(path_db)
+    scan.scan_tree(con, str(arch), now=NOW)
+    grouper.run_grouper(con, NOW)
+    resolver.run_resolver(con, NOW)
+    fid = con.execute("SELECT frame_id FROM location WHERE path LIKE '%mono.xisf'").fetchone()[0]
+    con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'VOL', ?, 0)",
+                (fid, str(old / "V" / STARA)))
+    con.commit()
+    para = _xisf(old / "V", AUTOCROP, b"\x02" * 48, OKNO)
+    zrodla = {
+        "G1": _xisf(old / "G1", AUTOCROP, b"\x11" * 48, SAM_KARTY),
+        "G2": _xisf(old / "G2", AUTOCROP, b"\x12" * 48, SAM_KARTY),
+        "K": _xisf(old / "K", AUTOCROP, b"\x01" * 64, SAM_KARTY),
+        "kolor": _xisf(old / "C", "masterLight_BIN-1_EXPOSURE-300.00s_FILTER-NoFilter_RGB_autocrop.xisf",
+                       b"\x31" * 48, KOLOR_KARTY + [("IMAGETYP", "'Master Light'"),
+                                                    ("FILTER", "'NoFilter'"), ("OBJECT", "'NGC 7000'")]),
+        "obcy": _xisf(old / "X", AUTOCROP, b"\x13" * 48,
+                      SAM_KARTY[:-1] + [("OBJECT", "'Zupelnie Wymyslona 77'")]),
+    }
+    lista = tmp_path / "lista.tsv"
+    with open(lista, "w", encoding="utf-8", newline="") as fh:
+        fh.write("status\tautocrop\tbajty\n")
+        for p in zrodla.values():
+            fh.write(f"no_original\t{p}\t{p.stat().st_size}\n")
+    return {"con": con, "db": path_db, "arch": arch, "old": old, "orig": oryg, "fid": fid,
+            "para": para, "src": {k: str(v) for k, v in zrodla.items()}, "lista": str(lista),
+            "tmp": tmp_path}
+
+
+def _plan_sam(s, zrodla=None, con=None):
+    return stack_variants.plan_standalone(
+        con or s["con"], str(s["old"]), zrodla if zrodla is not None else list(s["src"].values()),
+        library_root=str(s["arch"]))
+
+
+def _po_zrodle(plan):
+    return {i.src: i for i in plan.items}
+
+
+def test_samodzielny_cel_z_reguly_siedziby_wariantu_i_folderu_obiektu(samodzielne):
+    """Cel = `<folder_form(kanon)>\\<zestaw>\\<filtr>` z tych samych świadków, z których plan
+    wariantu bierze siedzibę pary: katalog celu samodzielnego autocropu tej samej osi = katalog
+    docelowy pary (wyliczony planem wariantu, nie literałem), a planer zmiany obiektu nie ma
+    dokąd go przenieść (wiersz Porządków „Plik nie zgadza się z obiektem” milczy o folderze)."""
+    s = samodzielne
+    (para,) = stack_variants.plan(s["con"], str(s["old"] / "V"), library_root=str(s["arch"])).items
+    assert para.status == "ready"
+    g1 = _po_zrodle(_plan_sam(s))[s["src"]["G1"]]
+    assert (g1.status, g1.canon, g1.witness) == ("standalone_ready", "NGC224", "stacks")
+    assert os.path.dirname(g1.dst) == para.target_dir == g1.seat
+    assert os.path.basename(g1.dst) == AUTOCROP, "oryginalna nazwa pliku"
+    assert path_after_object_change(g1.dst, "NGC224", STACK_KIND, str(s["arch"]),
+                                    object_kind="deep_sky") == g1.dst
+    assert not os.path.exists(g1.dst), "DRY nie kopiuje"
+
+
+def test_samodzielny_swiadek_lightow_OSC_to_NoFilter(samodzielne):
+    s = samodzielne
+    k = _po_zrodle(_plan_sam(s))[s["src"]["kolor"]]
+    assert (k.status, k.canon, k.witness) == ("standalone_ready", "NGC7000", "lights")
+    assert k.seat == str(s["arch"] / "STACKS" / "NGC7000" / "RC8_2600MC" / "NoFilter")
+
+
+def test_samodzielny_blizniacze_nazwy_dostaja_2_deterministycznie(samodzielne):
+    s = samodzielne
+    plan = _po_zrodle(_plan_sam(s))
+    g1, g2 = plan[s["src"]["G1"]], plan[s["src"]["G2"]]
+    assert g1.seat == g2.seat
+    assert os.path.basename(g1.dst) == AUTOCROP
+    assert os.path.basename(g2.dst) == AUTOCROP.replace(".xisf", "_2.xisf")
+    odwrotna = _po_zrodle(_plan_sam(s, list(reversed(list(s["src"].values())))))
+    assert {k: v.dst for k, v in odwrotna.items()} == {k: v.dst for k, v in plan.items()}
+
+
+def test_samodzielny_znane_dane_i_konflikty_z_powodem(samodzielne):
+    s = samodzielne
+    plan = _po_zrodle(_plan_sam(s))
+    k = plan[s["src"]["K"]]
+    assert (k.status, k.known_frame_id) == ("standalone_known", s["fid"]) and not k.applicable
+    obcy = plan[s["src"]["obcy"]]
+    assert (obcy.status, obcy.reason) == ("standalone_conflict", "no_object")
+    poza = str(s["tmp"] / "INNE" / AUTOCROP)
+    w_stacks = os.path.join(os.path.dirname(str(s["orig"])), AUTOCROP)
+    odm = _po_zrodle(_plan_sam(s, [poza, w_stacks]))
+    assert odm[poza].reason == "outside_root"
+    assert stack_variants.plan_standalone(
+        s["con"], str(s["arch"]), [w_stacks], library_root=str(s["arch"])).items[0].reason == "in_stacks"
+
+
+def test_samodzielny_apply_bez_zeznania_i_relacji_a_powtorka_istnieje(samodzielne):
+    s = samodzielne
+    plan = _plan_sam(s)
+    wyniki = {w.item.src: w.status for w in stack_variants.apply_standalone(plan, con=s["con"])}
+    assert wyniki == {s["src"]["G1"]: "placed", s["src"]["G2"]: "placed", s["src"]["kolor"]: "placed",
+                      s["src"]["K"]: "skipped", s["src"]["obcy"]: "skipped"}
+    for it in plan.items:
+        if it.applicable:
+            assert open(it.dst, "rb").read() == open(it.src, "rb").read()
+            assert os.path.exists(it.src), "źródło w starym drzewie zostaje"
+    zeznania = [n for _k, _d, pliki in os.walk(s["arch"]) for n in pliki
+                if n.startswith(projection.VARIANT_TESTIMONY_PREFIX)]
+    assert zeznania == []
+    assert s["con"].execute("SELECT count(*) FROM stack_variant_testimony").fetchone()[0] == 0
+    drugi = _plan_sam(s)
+    assert sorted(i.status for i in drugi.items if i.status != "standalone_conflict") == [
+        "standalone_exists"] * 3 + ["standalone_known"]
+    assert {w.status for w in stack_variants.apply_standalone(drugi, con=s["con"])
+            if w.item.applicable} == {"exists"}
+
+
+def test_samodzielny_obce_bajty_pod_celem_to_konflikt_bez_nadpisania(samodzielne):
+    s = samodzielne
+    cel = _po_zrodle(_plan_sam(s))[s["src"]["G1"]].dst
+    with open(cel, "wb") as fh:
+        fh.write(b"cudzy plik")
+    g1 = _po_zrodle(_plan_sam(s))[s["src"]["G1"]]
+    assert (g1.status, g1.reason, g1.detail) == ("standalone_conflict", "dst_taken", cel)
+    stack_variants.apply_standalone(_plan_sam(s), con=s["con"])
+    assert open(cel, "rb").read() == b"cudzy plik"
+
+
+def test_samodzielny_po_Dostawie_obiekt_z_naglowka_zestaw_i_cisza_Porzadkow(samodzielne):
+    """Pierwsza Dostawa po kopii: obiekt ze źródłem `header`, zestaw oryginału tej osi, zero relacji,
+    zero nowych wierszy „Plik nie zgadza się z obiektem”; plan po Dostawie - te same cele, `exists`."""
+    s = samodzielne
+    con = s["con"]
+    przed = queries.file_object_mismatch_frame_ids(con)
+    plan = _plan_sam(s)
+    stack_variants.apply_standalone(plan, con=con)
+    scan.scan_tree(con, str(s["arch"]), now=NOW)
+    grouper.run_grouper(con, NOW)
+    resolver.run_resolver(con, NOW)
+    cfg_oryg = con.execute("SELECT config_id FROM frame WHERE id = ?", (s["fid"],)).fetchone()[0]
+    nowe = {}
+    for it in plan.items:
+        if it.applicable:
+            nowe[it.src] = tuple(con.execute(
+                "SELECT f.id, o.canon, f.object_source, f.config_id FROM location l "
+                "JOIN frame f ON f.id = l.frame_id LEFT JOIN object o ON o.id = f.object_id "
+                "WHERE l.present = 1 AND l.path = ?", (it.dst,)).fetchone())
+    assert {v[1:3] for v in nowe.values()} == {("NGC224", "header"), ("NGC7000", "header")}
+    assert nowe[s["src"]["G1"]][3] == nowe[s["src"]["G2"]][3] == cfg_oryg
+    assert _relacja(con) == []
+    assert queries.file_object_mismatch_frame_ids(con) - przed == set()
+    po = _po_zrodle(_plan_sam(s))
+    assert {k: v.dst for k, v in po.items()} == {k: v.dst for k, v in _po_zrodle(plan).items()}
+    assert po[s["src"]["G2"]].status == po[s["src"]["G1"]].status == "standalone_exists"
+
+
+def test_samodzielny_cli_lista_DRY_i_apply(samodzielne, capsys):
+    from horreum import cli
+    s = samodzielne
+    s["con"].close()
+    argv = ["stack-versions", str(s["old"]), s["db"], "--archive", str(s["arch"]),
+            "--standalone", s["lista"]]
+    assert cli.main(argv) == 1, "konflikt (obcy obiekt) zostaje do ręki"
+    wyjscie = capsys.readouterr().out
+    assert "DRY" in wyjscie and "'standalone_ready': 3" in wyjscie and "'no_object': 1" in wyjscie
+    cel = s["arch"] / "STACKS" / "NGC224" / "RC8_2600MM" / "Ha" / AUTOCROP
+    assert not cel.exists()
+    assert cli.main(argv + ["--apply"]) == 1
+    assert cel.read_bytes() == open(s["src"]["G1"], "rb").read()
+    assert "'placed': 3" in capsys.readouterr().out
+    zla = s["tmp"] / "zla.tsv"
+    zla.write_text("sciezka\n" + s["src"]["G1"] + "\n", encoding="utf-8")
+    assert cli.main(argv[:-1] + [str(zla)]) == 2
+
+
+def test_samodzielny_znane_dane_wygrywaja_z_brakiem_osi(samodzielne):
+    """Dane znane bazie to druga kopia znanej klatki - także gdy obiektu, zestawu ani siedziby nie da
+    się wyliczyć: `standalone_known`, nie konflikt."""
+    s = samodzielne
+    bez_obiektu = _xisf(s["old"] / "K2", AUTOCROP, b"\x01" * 64,
+                        SAM_KARTY[:-1] + [("OBJECT", "'Zupelnie Wymyslona 77'")])
+    bez_zestawu = _xisf(s["old"] / "K3", AUTOCROP, b"\x01" * 64,
+                        [k for k in SAM_KARTY if k[0] != "TELESCOP"] + [("TELESCOP", "'Nieznany'")])
+    plan = _po_zrodle(_plan_sam(s, [str(bez_obiektu), str(bez_zestawu)]))
+    for p in (bez_obiektu, bez_zestawu):
+        it = plan[str(p)]
+        assert (it.status, it.reason, it.known_frame_id) == ("standalone_known", None, s["fid"])
+        assert it.detail == str(s["orig"])
+
+
+def test_samodzielny_swiadek_tylko_spod_korzenia_z_osia_obiektu_i_filtra(samodzielne):
+    """Kopie lighta tej osi poza `<korzeń>\\LIGHTS`, w folderze innego obiektu albo innego filtra nie
+    świadczą o zestawie - siedziba zostaje ta z kopii archiwum, bez `seat_ambiguous`."""
+    s = samodzielne
+    con = s["con"]
+    light = con.execute("SELECT frame_id FROM location WHERE path LIKE '%l1.xisf'").fetchone()[0]
+    for obca in (s["tmp"] / "F" / "work" / "LIGHTS" / "NGC7000" / "TmpRig" / "OSC" / "l1.xisf",
+                 s["arch"] / "LIGHTS" / "NGC7000" / "Inny" / "Ha" / "l1.xisf",
+                 s["arch"] / "LIGHTS" / "Veil" / "Inny2" / "OSC" / "l1.xisf",
+                 s["arch"] / "work" / "LIGHTS" / "NGC7000" / "Inny3" / "OSC" / "l1.xisf"):
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'VOL', ?, 1)",
+                    (light, str(obca)))
+    con.commit()
+    k = _po_zrodle(_plan_sam(s))[s["src"]["kolor"]]
+    assert (k.status, k.witness) == ("standalone_ready", "lights")
+    assert k.seat == str(s["arch"] / "STACKS" / "NGC7000" / "RC8_2600MC" / "NoFilter")
+
+
+def test_samodzielny_part_i_zajete_2_pod_celem(samodzielne):
+    s = samodzielne
+    plan = _po_zrodle(_plan_sam(s))
+    g1, g2 = plan[s["src"]["G1"]], plan[s["src"]["G2"]]
+    os.makedirs(g1.seat, exist_ok=True)
+    with open(g1.dst + projection.PART_SUFFIX, "wb") as fh:
+        fh.write(b"cudzy bieg")
+    with open(g2.dst, "wb") as fh:                               # cudzy `…_2` pod celem bliźniaka
+        fh.write(b"cudzy plik")
+    po = _po_zrodle(_plan_sam(s))
+    assert (po[g1.src].status, po[g1.src].reason, po[g1.src].detail) == (
+        "standalone_conflict", "dst_taken", g1.dst + projection.PART_SUFFIX)
+    assert (po[g2.src].status, po[g2.src].reason, po[g2.src].dst) == (
+        "standalone_conflict", "dst_taken", g2.dst)
+    stack_variants.apply_standalone(_plan_sam(s), con=s["con"])
+    assert open(g1.dst + projection.PART_SUFFIX, "rb").read() == b"cudzy bieg"
+    assert not os.path.exists(g1.dst) and open(g2.dst, "rb").read() == b"cudzy plik"
+    os.remove(g2.dst)
+    with open(g2.src, "rb") as zr, open(g2.dst, "wb") as fh:    # te same bajty pod `…_2`
+        fh.write(zr.read())
+    assert _po_zrodle(_plan_sam(s))[g2.src].status == "standalone_exists"
+
+
+def test_samodzielny_dryf_zrodla_przed_skrotem_exists_i_known(samodzielne):
+    """Skrót bez kopii (`exists`, `known`) dopiero po świeżym haszu źródła: plik podmieniony po
+    planie → `source_drift`, nic nie kopiujemy i nic nie uznajemy za istniejące."""
+    s = samodzielne
+    stack_variants.apply_standalone(_plan_sam(s), con=s["con"])
+    plan = _plan_sam(s)                                          # G1, G2, kolor: exists
+    kolor = _po_zrodle(plan)[s["src"]["kolor"]]
+    assert kolor.status == "standalone_exists"
+    przed = open(kolor.dst, "rb").read()
+    _xisf(s["old"] / "C", os.path.basename(kolor.src), b"\x41" * 48,
+          KOLOR_KARTY + [("IMAGETYP", "'Master Light'"), ("FILTER", "'NoFilter'"),
+                         ("OBJECT", "'NGC 7000'")])
+    (w,) = [w for w in stack_variants.apply_standalone(plan, con=s["con"]) if w.item.src == kolor.src]
+    assert w.status == "source_drift" and kolor.file_sha1 in w.reason
+    assert open(kolor.dst, "rb").read() == przed
+    os.remove(kolor.dst)
+    plan2 = _plan_sam(s)                                         # kolor znów ready, nowe bajty
+    k2 = _po_zrodle(plan2)[kolor.src]
+    assert k2.status == "standalone_ready"
+    s["con"].execute("INSERT INTO frame(kind, filetype, sha1_data, first_seen_at) "
+                     "VALUES ('master_light', 'xisf', ?, ?)", (k2.sha1_data, NOW))
+    s["con"].commit()                                            # baza poznała dane po planie...
+    _xisf(s["old"] / "C", os.path.basename(kolor.src), b"\x42" * 48, KOLOR_KARTY)   # ...a plik inny
+    (w2,) = [w for w in stack_variants.apply_standalone(plan2, con=s["con"]) if w.item.src == kolor.src]
+    assert w2.status == "source_drift" and not os.path.exists(kolor.dst)
+
+
+def test_samodzielny_blad_odczytu_to_unreadable_a_cli_bez_tracebacku(samodzielne, capsys):
+    from horreum import cli
+    s = samodzielne
+    brak = str(s["old"] / "znikl" / AUTOCROP)
+    it = _plan_sam(s, [brak]).items[0]
+    assert (it.status, it.reason) == ("standalone_conflict", "unreadable") and "Error" in it.detail
+    stack_variants.apply_standalone(_plan_sam(s), con=s["con"])
+    g1 = _po_zrodle(_plan_sam(s))[s["src"]["G1"]]
+
+    def _hasz(path):
+        if os.path.normcase(path) == os.path.normcase(g1.dst):
+            raise PermissionError("zerwany udzial")
+        return stack_variants.hashing.sha1_of(path)
+    it = _po_zrodle(stack_variants.plan_standalone(
+        s["con"], str(s["old"]), [g1.src], library_root=str(s["arch"]), sha1_fn=_hasz))[g1.src]
+    assert (it.status, it.reason) == ("standalone_conflict", "unreadable") and g1.dst in it.detail
+    lista = s["tmp"] / "brak.tsv"
+    lista.write_text(f"autocrop\n{brak}\n", encoding="utf-8")
+    s["con"].close()
+    assert cli.main(["stack-versions", str(s["old"]), s["db"], "--archive", str(s["arch"]),
+                     "--standalone", str(lista)]) == 1
+    assert "'unreadable': 1" in capsys.readouterr().out
+
+
+def _po_dostawie_sam(s):
+    stack_variants.apply_standalone(_plan_sam(s), con=s["con"])
+    scan.scan_tree(s["con"], str(s["arch"]), now=NOW)
+    grouper.run_grouper(s["con"], NOW)
+    resolver.run_resolver(s["con"], NOW)
+
+
+def test_plan_wariantow_po_samodzielnych_dane_w_STACKS_nie_blokuja(samodzielne):
+    """Zwykły plan wersji po APPLY samodzielnych i Dostawie: autocrop bez pary, którego dane leżą
+    już w `STACKS`, dostaje `present_in_stacks` (nie blokada, bez relacji i bez zeznania); autocrop
+    bez kopii w `STACKS` zostaje zablokowany."""
+    s = samodzielne
+    stat = lambda: {i.autocrop.src: i.status for i in stack_variants.plan(          # noqa: E731
+        s["con"], str(s["old"]), library_root=str(s["arch"])).items}
+    przed = stat()
+    assert przed[s["src"]["G1"]] == przed[s["src"]["G2"]] == "no_original"
+    _po_dostawie_sam(s)
+    p = stack_variants.plan(s["con"], str(s["old"]), library_root=str(s["arch"]))
+    po = {i.autocrop.src: i for i in p.items}
+    for k in ("G1", "G2", "kolor"):
+        assert po[s["src"][k]].status == "present_in_stacks" and not po[s["src"][k]].applicable
+    assert po[s["src"]["G2"]].detail.endswith(AUTOCROP.replace(".xisf", "_2.xisf"))
+    assert po[s["src"]["obcy"]].status == "no_original"
+    c = stack_variants.plan_counts(p)
+    assert "present_in_stacks" not in c["blocked"] and c["settled"] == 4    # G1, G2, kolor, K
+    assert {w.status for w in stack_variants.apply(p, con=s["con"], now=NOW)
+            if w.item.status == "present_in_stacks"} == {"skipped"}
+    assert _relacja(s["con"]) == []
+    zeznania = [r[0] for r in s["con"].execute("SELECT path FROM stack_variant_testimony")]
+    assert [os.path.basename(z) for z in zeznania] == [
+        projection.VARIANT_TESTIMONY_PREFIX + "_" + CEL.replace("M31", "NGC224").replace(".xisf", ".json")
+    ], "zeznanie wyłącznie pary V, żadnego przy samodzielnych"
+
+
+def test_samodzielny_jest_kandydatem_wersji_stosow(samodzielne):
+    """Decyzja przed Q13 = O2: samodzielny obraz bez relacji `stack_variant` JEST kandydatem
+    „Wersji stosów” (zapowiedziane: Veil Grupa-1, perspektywa 47 → 53) - bliźniaki G1 i G2
+    (to samo okno, te same osie) stają w jednej grupie."""
+    s = samodzielne
+    _po_dostawie_sam(s)
+    con = s["con"]
+    for fid in (r[0] for r in con.execute("SELECT id FROM frame WHERE kind = 'master_light'")):
+        con.execute("INSERT INTO integration(master_frame_id, created_at) VALUES (?, 't')", (fid,))
+    con.commit()
+    kopie = {r[0] for r in con.execute(
+        "SELECT frame_id FROM location WHERE present = 1 AND path LIKE ?",
+        ("%" + AUTOCROP.replace(".xisf", "%"),))}
+    kopie -= {r[0] for r in con.execute("SELECT frame_id FROM location WHERE path LIKE '%OLD%'")}
+    assert len(kopie) == 2
+    grupy = [{c["frame_id"] for c in g["members"]} for g in queries.stack_version_groups(con)]
+    assert any(kopie <= g for g in grupy)
+
+
 # ═══════════════════════════════════════════════════════════════════ E5-3: kotwica `STACKS`
 
 

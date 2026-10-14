@@ -247,11 +247,37 @@ _NAZWA_URZADZENIA = re.compile(r"(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?", re
 _SEGMENT_MAX = 255
 
 
+class FolderFormError(ValueError):
+    """Kanon, którego `folder_form` nie przyjmie - `ValueError` (każdy wołający łapie go jak dotąd,
+    tekst bez zmian) z KODEM reguły i jej parametrami (`FOLDER_RULE_CODES`): okno zmiany obiektu
+    mówi regułę zdaniem w języku UI (`objchg.folder.<kod>`, AR-141)."""
+
+    def __init__(self, message, code, **params):
+        super().__init__(message)
+        self.code = code
+        self.params = tuple(params.items())
+
+
+# Kody reguł formy folderu - każdy ma zdanie `objchg.folder.<kod>` w katalogu okna (PL+EN, test).
+FOLDER_RULE_CODES = frozenset({"empty", "edge_space", "slash_outside_comet", "reserved_dot",
+                               "forbidden_char", "device_name", "trailing_dot_space", "too_long"})
+
+
 def _zly_segment(forma):
-    """Czy `forma` NIE może być nazwą katalogu na Windows (powody wyżej)."""
-    return (forma in ("", ".", "..") or bool(_ZAKAZANE_W_SEGMENCIE.search(forma))
-            or bool(_NAZWA_URZADZENIA.fullmatch(forma)) or forma[-1] in ". "
-            or len(forma) > _SEGMENT_MAX)
+    """Reguła, której `forma` łamie jako nazwa katalogu na Windows (powody wyżej) → `(kod,
+    parametry)` z `FOLDER_RULE_CODES` albo `None` (forma przyjęta)."""
+    if forma in ("", ".", ".."):
+        return "reserved_dot", {}
+    zakazany = _ZAKAZANE_W_SEGMENCIE.search(forma)
+    if zakazany:
+        return "forbidden_char", {"char": repr(zakazany.group())}
+    if _NAZWA_URZADZENIA.fullmatch(forma):
+        return "device_name", {"name": forma}
+    if forma[-1] in ". ":
+        return "trailing_dot_space", {}
+    if len(forma) > _SEGMENT_MAX:
+        return "too_long", {"n": len(forma), "limit": _SEGMENT_MAX}
+    return None
 # Kanony komet w postaci, którą składa `resolve.solar`: oznaczenie IAU (`C/2023 A3`, opcjonalnie
 # z nazwą w nawiasie) albo kometa okresowa z numerem (`21P/Giacobini-Zinner`).
 _KOMETA_IAU = re.compile(r"^([CPDX])/(\d{4}) ([A-Z]\d{1,3})(?: \(([^()]+)\))?$")
@@ -267,7 +293,8 @@ def folder_form(canon):
     → `C2023A3_Tsuchinshan-ATLAS`; `21P/Giacobini-Zinner` → `21P_Giacobini-Zinner`; oznaczenie IAU
     bez nazwy (`C/2019 Y4`, kanon nieznanej komety) → `C2019Y4`.
 
-    EXPECT → `ValueError`: kanon pusty albo nietekstowy, z białym znakiem na brzegu, `/` poza
+    EXPECT → `FolderFormError` (`ValueError` z kodem reguły): kanon pusty albo nietekstowy, z białym
+    znakiem na brzegu, `/` poza
     gramatyką komety, wynik, którego Windows nie przyjmie jako katalogu (`_zly_segment`: znak
     zakazany, nazwa urządzenia, kropka lub spacja na końcu, ponad 255 znaków, `.`/`..`). Walidowany
     jest WYNIK, już po przekształceniu komety. Folder, którego system plików nie przyjmie, nie
@@ -276,8 +303,11 @@ def folder_form(canon):
     Forma komety NIE jest różnowartościowa (`(Foo Bar)` i `(Foo_Bar)` dają ten sam folder) - dwa
     kanony o jednej formie wykrywa read-model zmiany obiektu (`gui.queries.object_change_rows`,
     pole `folder_twins`), a planer odmawia takiego celu."""
-    if not isinstance(canon, str) or not canon or canon != canon.strip():
-        raise ValueError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}")
+    if not isinstance(canon, str) or not canon:
+        raise FolderFormError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}", "empty")
+    if canon != canon.strip():
+        raise FolderFormError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}",
+                              "edge_space")
     forma = canon
     if "/" in canon:
         m = _KOMETA_IAU.match(canon)
@@ -286,9 +316,12 @@ def folder_form(canon):
         else:
             m = _KOMETA_NUMEROWANA.match(canon)
             if m is None:
-                raise ValueError(f"kanon z '/' spoza gramatyki komety: {canon!r}")
+                raise FolderFormError(f"kanon z '/' spoza gramatyki komety: {canon!r}",
+                                      "slash_outside_comet")
             forma = f"{m.group(1)}_{m.group(2)}"
         forma = re.sub(r"\s+", "_", forma.strip())
-    if _zly_segment(forma):
-        raise ValueError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}")
+    regula = _zly_segment(forma)
+    if regula is not None:
+        raise FolderFormError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}", regula[0],
+                              **regula[1])
     return forma

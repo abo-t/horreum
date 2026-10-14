@@ -5,13 +5,14 @@ Pilnuje tego, co przy ekranie łatwo zgubić: chip zestawu jest SOCZEWKĄ (nic n
 się dla wybranego sprzętu TĄ SAMĄ funkcją co rdzeń), porządek listy należy do rdzenia, a predykat
 „Pokaż klatki celu" pada na pokryciu — bo pusty filtr pokazałby gridowi CAŁĄ bazę.
 """
+from dataclasses import replace
 from datetime import date
 
 import pytest
 
 from horreum import repo, targets
 from horreum.gui import planner_model as pm
-from horreum.gui import queries
+from horreum.gui import i18n, queries
 # Baza T4 (trzy zestawy o różnych ogniskowych + stanowisko) REUŻYTA, nie skopiowana — drugi taki
 # builder rozjechałby się z pierwszym przy najbliższej zmianie schematu (SPOT).
 from test_target_plan import _light, _park_ready, con    # noqa: F401
@@ -350,6 +351,168 @@ def test_naglowek_powstaje_z_wyniku_a_nie_z_pierwszego_wiersza(con):
     assert "2026-08-15" in pm.night_text(res)
     assert "Będargowo" in pm.night_text(res)
     assert pm.counts_text(res).startswith("Cele:")
+
+
+# ─────────────────────────────────────────────────────────── szukajka po kanonie (AR-146)
+
+def _stara_regula(pool, needle):
+    """Reguła szukajki sprzed AR-146 (goły podciąg bez wielkości liter) - wzorzec „nic, co trafiało,
+    nie przestaje trafiać"."""
+    igla = needle.casefold()
+    return {t.canon for t in pool
+            if igla in t.canon.casefold() or any(igla in a.casefold() for a in t.aliases)}
+
+
+def _trafione(pool, needle):
+    exact, rest = targets.find_matches(pool, needle)
+    return [t.canon for t in exact], {t.canon for t in exact + rest}
+
+
+def test_szukajka_trafia_po_kanonie_katalogowym():
+    """Wizytacja W4: „M27” i „Arp 244” trafiały, „M 27”, „Arp244” dawały 0 - filtr porównywał
+    surowy podciąg. Każdy zapis tego samego oznaczenia trafia ten sam rekord, DOKŁADNIE."""
+    pool = targets.load_targets(targets.ALL_LAYERS)
+    for zapis in ("M27", "M 27", "m27", "Messier 27"):
+        assert _trafione(pool, zapis)[0] == ["NGC6853"], zapis
+    for zapis in ("Arp 244", "Arp244", "arp 244"):
+        assert _trafione(pool, zapis)[0] == ["NGC4038"], zapis
+    assert _trafione(pool, "ngc 7000")[0] == ["NGC7000"]
+
+
+def test_szukajka_nie_gubi_niczego_co_trafiala():
+    """Podciąg zostaje BIT W BIT pod kanonem: nazwy własne, ukryte nazwy `PN G`, region, przykłady
+    z testów planera."""
+    pool = targets.load_targets(targets.ALL_LAYERS)
+    for igla in ("NGC7000", "CTB1", "IC410", "NGC6960", "PN G", "Veil", "Eagle Nebula",
+                 "Eastern Veil", "C4", "x", "M27", "Arp 244"):
+        stare = _stara_regula(pool, igla)
+        assert stare, igla
+        assert stare <= _trafione(pool, igla)[1], igla
+
+
+def test_szukajka_dokladne_przed_podciagiem(con):
+    """`sh2 13` to kanon `Sh2-13` i prefiks `Sh2-131`... - trafienie dokładne stoi na liście
+    pierwsze w porządku rady i pod każdą soczewką, mimo że klucz rady ustawiłby je inaczej."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), find="sh2 13", limit=None)
+    assert res.find_exact == frozenset({"Sh2-13"}) and len(res.rows) > 1
+    po_radzie = sorted(res.rows, key=targets._sort_key)
+    assert po_radzie[0].target.canon != "Sh2-13", "fixture bez przestawienia - test bez sensu"
+    assert res.rows[0].target.canon == "Sh2-13"
+    for order in (pm.ORDER_CORE, pm.ORDER_LENS):
+        for rig in (None,) + pm.rig_choices(res):
+            assert pm.view_rows(res, rig, order=order)[0].canon == "Sh2-13", (order, rig)
+
+
+def test_pusty_wynik_dla_nazwy_znanej_spoza_puli(con):
+    """„M13” dawało pusty stan „nie znam celu”, choć NGC6205 (gromada kulista) jest znany - asset
+    planera świadomie go nie bierze. Zdanie mówi, czym jest wpisana nazwa; typu dla obiektu spoza
+    assetu nie ma skąd wziąć, więc go nie zmyślamy."""
+    _park_ready(con)
+
+    def zdanie(igla, layers=targets.DEFAULT_LAYERS):
+        res = targets.plan(con, night=date(2026, 8, 15), find=igla, layers=layers, limit=None)
+        assert res.rows == ()
+        return pm.empty_find_text(res, igla)
+
+    assert zdanie("M 13") == "„M 13” = NGC6205, poza celami planera."
+    assert zdanie("NGC6205") == "„NGC6205”, poza celami planera."     # wpisane = kanon - bez „=”
+    assert zdanie("LMC") == "„LMC”, poza celami planera."             # rekord-nazwa
+    # Cel warstwy niewczytanej (cirrus przy domyślnym rdzeniu) NIE jest „poza celami planera".
+    assert zdanie("ldn 1235") == ("„ldn 1235” (DrkN) - cel spoza wczytanych warstw: "
+                                  "zaznacz „Pokaż cirrus (LBN/LDN)”, żeby go zobaczyć.")
+    assert zdanie("LDN 134").startswith("„LDN 134” = LBN10 (EmN) - cel spoza wczytanych warstw")
+    assert zdanie("NGC99999").startswith("Nie znam celu „NGC99999”")  # sam kształt to nie wiedza
+    assert zdanie("zzqq").startswith("Nie znam celu „zzqq”")
+    i18n.set_lang("en")
+    assert zdanie("M 13") == "“M 13” = NGC6205, not among the planner targets."
+
+
+def test_pusty_wynik_gdy_cel_chowa_filtr_statusu_nie_mowi_nie_znam(con):
+    """`find` przebija `skip`, ale nie jawny filtr statusu: NGC7000 bez oznaczenia przy statusie
+    „planned" daje pustą listę - cel JEST, więc „nie znam celu" byłoby nieprawdą."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), find="NGC 7000", status="planned",
+                       limit=None)
+    assert res.rows == () and res.counts["feasible"] == 1 and res.find_outside is None
+    # Zdanie nie zgaduje, KTÓRY filtr chowa (wołanie z `only_gaps`/`only_new` też tu trafia).
+    assert pm.empty_find_text(res, "NGC 7000") == (
+        "„NGC 7000” trafia 1 cel, ale chowają go bieżące filtry.")
+    gaps = targets.plan(con, night=date(2026, 8, 15), find="NGC 7000", only_new=True, limit=None)
+    if gaps.rows == ():
+        assert "bieżące filtry" in pm.empty_find_text(gaps, "NGC 7000")
+    i18n.set_lang("en")
+    assert pm.empty_find_text(res, "NGC 7000") == (
+        "“NGC 7000” matches 1 target, but the current filters hide it.")
+
+
+@pytest.mark.parametrize("nazwa, kanon", [("Heart Nebula", "IC1805"), ("Soul Nebula", "IC1848"),
+                                          ("Elephant's Trunk Nebula", "Sh2-131")])
+def test_nazwa_potoczna_resolvera_trafia_dokladnie(con, nazwa, kanon):
+    """Nazwy potoczne osi obiektu (`resolve.objects`), których asset nie nosi jako aliasu, dawały
+    pustą listę i zdanie „poza celami planera" o celu, który JEST w rdzeniu. Szukajka bierze klucz
+    z resolvera - trafienie dokładne."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), find=nazwa, limit=None)
+    assert kanon in res.find_exact and res.rows[0].target.canon == kanon
+    assert res.find_outside is None
+
+
+def test_find_outside_dla_kanonu_z_assetu_nie_mowi_poza(con):
+    """TARCZA: kanon, który jest w assecie, nigdy nie wraca jako „poza celami planera" (`target=None`)
+    - z puli wołania niesie `loaded=True`, z warstwy niewczytanej - swój rekord."""
+    for igla, kanon in (("M 27", "NGC6853"), ("Heart Nebula", "IC1805")):
+        out = targets.find_outside(igla)
+        assert out.target is not None and out.target.canon == kanon and out.loaded is True
+    cirrus = targets.find_outside("LDN 134")
+    assert cirrus.target.canon == "LBN10" and cirrus.loaded is False
+    assert targets.find_outside("M 13").target is None                 # gromady w assecie nie ma
+    # Zdanie dla rekordu z puli nie mówi „poza" (plan go tak nie poda, ale funkcja jest wspólna).
+    _park_ready(con)
+    pusty = targets.plan(con, night=date(2026, 8, 15), find="zzqq", limit=None)
+    zdanie = pm.empty_find_text(replace(pusty, find_outside=targets.find_outside("M 27")), "M 27")
+    assert "poza" not in zdanie and "bieżące filtry" in zdanie
+
+
+def test_warstwa_bez_przelacznika_nie_wybucha(con):
+    """Wołanie z innym zestawem warstw niż ekran (`layers=("cirrus",)`): cel rdzenia dostaje
+    zdanie z nazwą warstwy zamiast `KeyError`."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), find="NGC 7000", layers=("cirrus",),
+                       limit=None)
+    assert res.rows == () and res.find_outside.target.layer == "core"
+    assert pm.empty_find_text(res, "NGC 7000") == (
+        "„NGC 7000” (HII) - cel spoza wczytanych warstw: zaznacz „core”, żeby go zobaczyć.")
+
+
+# ─────────────────────────────────── przełącznik kandydatek i mimik PN (decyzja Zdzinia Q14)
+
+def test_przelacznik_pn_chowa_kandydatki_i_mimiki_zostawia_potwierdzone(con, res):
+    """Domyślnie wyłączony - odpowiedź bit w bit ta sama (bez klucza `hidden_by_pn`). Włączony
+    chowa `candidate` i `mimic` z licznikiem w nocie; `confirmed` i cele bez statusu zostają."""
+    assert res.pn_filter == "off" and "hidden_by_pn" not in res.counts
+    po_statusie = {}
+    for r in res.rows:
+        po_statusie.setdefault(r.target.status, set()).add(r.target.canon)
+    assert {"candidate", "mimic", "confirmed", None} <= set(po_statusie), po_statusie.keys()
+    on = targets.plan(con, night=date(2026, 8, 15), limit=None, hide_doubtful_pn=True)
+    zostaly = {r.target.canon for r in on.rows}
+    assert on.pn_filter == "on"
+    assert not (po_statusie["candidate"] | po_statusie["mimic"]) & zostaly
+    assert po_statusie["confirmed"] | po_statusie[None] <= zostaly
+    schowane = len(po_statusie["candidate"]) + len(po_statusie["mimic"])
+    assert on.counts["hidden_by_pn"] == schowane == len(res.rows) - len(on.rows)
+    noty = [t for _l, t in pm.header_notes(on)]
+    assert f"Przełącznik PN schował {schowane} " in " | ".join(noty)
+
+
+def test_przelacznik_pn_w_trybie_szukania_nieczynny(con, res):
+    """Jak filtr kadru: pytanie wprost bije przełącznik (`pn_filter='find'`), kandydatka się znajduje."""
+    kandydatka = next(r.target.canon for r in res.rows if r.target.status == "candidate")
+    found = targets.plan(con, night=date(2026, 8, 15), limit=None, hide_doubtful_pn=True,
+                         find=kandydatka)
+    assert found.pn_filter == "find" and "hidden_by_pn" not in found.counts
+    assert kandydatka in {r.target.canon for r in found.rows}
 
 
 def test_park_overview_ten_sam_material_co_cli(con):

@@ -1422,6 +1422,34 @@ def test_bez_folderu_roboczego_i_kart_zdanie_a_puste_karty_pamiec_pola(qapp, tmp
     con.close()
 
 
+def test_karta_bez_folderu_mowi_o_sobie_a_nie_o_braku_wydan(qapp, tmp_path, ustawienia, wybor_katalogu):
+    """AR-147: folder roboczy, którego nie ma na dysku (dysk niepodłączony), daje zdanie o brakującej
+    karcie w roli ostrzeżenia - nie „na kartach nie ma jeszcze wydań”; obok listy z innej karty to samo
+    zdanie stoi nad jej wydaniami, a dwie brakujące karty dostają formę mnogą."""
+    con, _profile, _flats = _baza(tmp_path)
+    brak = tmp_path / "F" / "ASTRO_" / "_WBPP"
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(brak))
+    dlg.show()
+    QTest.qWait(30)
+    assert dlg.rel_notice.text() == (f"Folder karty nie istnieje: {brak} - podłącz dysk albo ustaw folder "
+                                     "roboczy: Plik → Folder roboczy WBPP…")
+    assert dlg.rel_notice.property("role") == "warn" and dlg.rel_table.rowCount() == 0
+    work = tmp_path / "_WBPP"
+    _wydanie_obiektu(work, "IC1795", ts="2026-10-09T10:00:00+00:00", con=con)
+    dlg2 = _dlg(con, tmp_path / "ARCH", work_root=str(brak), release_roots=[str(work)])
+    dlg2.show()
+    QTest.qWait(30)
+    assert dlg2.rel_table.rowCount() == 1 and dlg2.rel_notice.text().startswith("Folder karty nie istnieje: ")
+    drugi = tmp_path / "G" / "_WBPP"
+    dlg3 = _dlg(con, tmp_path / "ARCH", work_root=str(brak), release_roots=[str(drugi)])
+    dlg3.show()
+    QTest.qWait(30)
+    assert dlg3.rel_notice.text().startswith(f"2 foldery kart nie istnieją: {brak}, {drugi} - ")
+    dlg3._on_releases_failed(dlg3._rel_gen, "OSError: x")    # lista, która padła, nie niesie braków dalej
+    assert dlg3._rel_missing == () and dlg3.rel_notice.property("role") == "error"
+    con.close()
+
+
 def test_wskaz_startuje_w_objects_folderu_roboczego(qapp, tmp_path, ustawienia, monkeypatch, wybor_katalogu):
     """„Wskaż…” startuje w `<folder roboczy>\\OBJECTS`, gdy istnieje; bez niego - w ostatnim wyjściu."""
     con, _profile, _flats = _baza(tmp_path)

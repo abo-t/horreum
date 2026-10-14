@@ -1590,6 +1590,25 @@ CATALOG = {
     },
     "planner.controls_state_rig": {"pl": " · filtr kadru: {filter}", "en": " · framing filter: {filter}"},
     "planner.controls_state_rig_off": {"pl": " (nieczynny)", "en": " (inactive)"},
+    # Q14: przełącznik kandydatek i mimik PN - wzór filtra kadru (domyślnie wyłączony, nazwany w tytule).
+    "planner.hide_pn": {"pl": "Ukryj kandydatki i mimiki PN", "en": "Hide PN candidates and mimics"},
+    "planner.hide_pn_tip": {
+        "pl": "Domyślnie wyłączony: chowa cele, które katalog podaje jako kandydatkę na mgławicę\n"
+              "planetarną (bez potwierdzenia widmem) albo mimikę (zgłoszoną jako PN i odrzuconą).\n"
+              "Potwierdzone PN i cele bez statusu zostają. Tryb szukania go pomija.",
+        "en": "Off by default: hides targets the catalog lists as a planetary nebula candidate\n"
+              "(no spectroscopic confirmation) or a mimic (reported as a PN and rejected).\n"
+              "Confirmed PNe and targets without a status stay. Search mode skips it.",
+    },
+    "planner.controls_state_pn": {"pl": " · bez kandydatek i mimik PN",
+                                  "en": " · no PN candidates or mimics"},
+    "planner.pn_hidden": {
+        "pl": {"one": "Przełącznik PN schował {n} kandydatkę lub mimikę.",
+               "few": "Przełącznik PN schował {n} kandydatki lub mimiki.",
+               "many": "Przełącznik PN schował {n} kandydatek lub mimik."},
+        "en": {"one": "The PN switch hid {n} candidate or mimic.",
+               "other": "The PN switch hid {n} candidates or mimics."},
+    },
     "planner.empty_rig": {
         "pl": "Żaden cel nie przeszedł bieżących progów i filtra kadru - poluzuj wypełnienie albo"
               " liczbę paneli.",
@@ -1611,6 +1630,24 @@ CATALOG = {
     "planner.empty_find": {
         "pl": "Nie znam celu „{needle}” — sprawdź nazwę albo oznaczenie katalogowe (np. NGC7000, Sh2-155).",
         "en": "I do not know the target “{needle}” — check the name or catalog id (e.g. NGC7000, Sh2-155).",
+    },
+    # AR-146: pusty wynik dla nazwy, którą katalog zna. `{name}` = `find_as` albo `find_self`.
+    "planner.find_as": {"pl": "„{needle}” = {canon}", "en": "“{needle}” = {canon}"},
+    "planner.find_self": {"pl": "„{needle}”", "en": "“{needle}”"},
+    "planner.empty_find_outside": {
+        "pl": "{name}, poza celami planera.",
+        "en": "{name}, not among the planner targets.",
+    },
+    "planner.empty_find_hidden": {
+        "pl": {"one": "„{needle}” trafia {n} cel, ale chowają go bieżące filtry.",
+               "few": "„{needle}” trafia {n} cele, ale chowają je bieżące filtry.",
+               "many": "„{needle}” trafia {n} celów, ale chowają je bieżące filtry."},
+        "en": {"one": "“{needle}” matches {n} target, but the current filters hide it.",
+               "other": "“{needle}” matches {n} targets, but the current filters hide them."},
+    },
+    "planner.empty_find_layer": {
+        "pl": "{name} ({type}) - cel spoza wczytanych warstw: zaznacz „{layer}”, żeby go zobaczyć.",
+        "en": "{name} ({type}) - a target outside the loaded layers: tick “{layer}” to see it.",
     },
     "planner.status_none": {"pl": "(bez oznaczenia)", "en": "(not marked)"},
     "planner.panel_of": {"pl": "Zaznaczony cel — {canon}", "en": "Selected target — {canon}"},
@@ -4728,6 +4765,24 @@ CATALOG = {
     "harvest.rel.none": {
         "pl": "Na kartach nie ma jeszcze wydań obiektu.", "en": "The cards hold no object releases yet.",
     },
+    "harvest.rel.missing_one": {
+        "pl": "Folder karty nie istnieje: {path} - podłącz dysk albo ustaw folder roboczy: Plik → Folder "
+              "roboczy WBPP…",
+        "en": "The card folder does not exist: {path} - connect the drive or set the working folder: File → "
+              "WBPP working folder…",
+    },
+    "harvest.rel.missing_many": {
+        "pl": {"one": "{n} folder karty nie istnieje: {paths} - podłącz dysk albo ustaw folder roboczy: Plik → "
+                      "Folder roboczy WBPP…",
+               "few": "{n} foldery kart nie istnieją: {paths} - podłącz dysk albo ustaw folder roboczy: Plik → "
+                      "Folder roboczy WBPP…",
+               "many": "{n} folderów kart nie istnieje: {paths} - podłącz dysk albo ustaw folder roboczy: Plik → "
+                       "Folder roboczy WBPP…"},
+        "en": {"one": "{n} card folder does not exist: {paths} - connect the drive or set the working folder: "
+                      "File → WBPP working folder…",
+               "other": "{n} card folders do not exist: {paths} - connect the drive or set the working folder: "
+                        "File → WBPP working folder…"},
+    },
     "harvest.rel.probing": {"pl": "Liczę wydania na kartach…", "en": "Counting the releases on the cards…"},
     "harvest.rel.failed": {"pl": "Lista wydań: {msg}", "en": "Release list: {msg}"},
     "harvest.rel.done_note": {
@@ -5733,6 +5788,265 @@ CATALOG = {
     # przeniesienia rdzenia po AR-125.
     "objchg.reason.busy": {"pl": "plik zajęty przez inny program - spróbuj ponownie za chwilę",
                            "en": "the file is in use by another program - try again in a moment"},
+    # Powody POZYCJI przebiegu po KODZIE (`item_reasons.ITEM_REASON_CODES`, AR-141) - zdanie
+    # w języku UI także dla powodu zapisanego w bazie (okno z Porządków); PL znak w znak jak zdanie
+    # rdzenia (test AST). `{inner}`/`{outer}`/`{detail}` = powód niższej warstwy: z kodem w języku
+    # UI, bez kodu (pisarz karty, tekst systemu) - znak w znak. Uwagi (`notes`) idą za zdaniem.
+    "objchg.item.rename_open": {
+        "pl": "przerwany rename tego pliku czeka na rozstrzygnięcie (zamiar otwarty) - powód "
+              "w wyniku rekoncyliacji",
+        "en": "an interrupted move of this file awaits resolution (intent open) - the reason is "
+              "in the reconciliation result"},
+    "objchg.item.no_location": {"pl": "brak location w bazie",
+                                "en": "no location in the database"},
+    "objchg.item.copy_gone": {"pl": "kopia zniknęła (present=0)",
+                              "en": "the copy is gone (present=0)"},
+    "objchg.item.path_moved": {
+        "pl": "kopia stoi pod inną ścieżką niż w podglądzie - odśwież podgląd",
+        "en": "the copy is at a different path than in the preview - refresh the preview"},
+    "objchg.item.no_mtime_anchor": {
+        "pl": "kopia bez kotwicy mtime z podglądu - gest nie wie, czy to ten sam plik",
+        "en": "the copy has no mtime anchor from the preview - the gesture cannot tell whether it "
+              "is the same file"},
+    "objchg.item.changed_since_preview": {
+        "pl": "plik zmieniony od podglądu (mtime w bazie) - odśwież podgląd",
+        "en": "the file changed since the preview (mtime in the database) - refresh the preview"},
+    "objchg.item.unreachable": {"pl": "plik nieosiągalny przed zapisem ({detail})",
+                                "en": "the file is unreachable before writing ({detail})"},
+    "objchg.item.changed_since_scan": {
+        "pl": "plik zmieniony od ostatniego skanu - Dostawa, potem gest ponownie",
+        "en": "the file changed since the last scan - run Intake, then the gesture again"},
+    "objchg.item.rename_bounced": {
+        "pl": "przeniesienie odbite w poprzedniej próbie (status {status}) - odśwież podgląd",
+        "en": "the move was refused in the previous attempt (status {status}) - refresh the "
+              "preview"},
+    "objchg.item.target_taken": {"pl": "cel zajęty w bazie (location:{location})",
+                                 "en": "the target is taken in the database (location:{location})"},
+    "objchg.item.header_changed": {
+        "pl": "nagłówek zmieniony od podglądu albo bez kotwicy (header_hash) - karta nie wejdzie; "
+              "odśwież podgląd",
+        "en": "the header changed since the preview or has no anchor (header_hash) - the card "
+              "will not go in; refresh the preview"},
+    "objchg.item.db_refused": {"pl": "zmiana obiektu odmówiona: {inner}",
+                               "en": "object change refused: {inner}"},
+    "objchg.item.copies_changed": {
+        "pl": "klatka nie ma dokładnie jednej obecnej kopii, tej z podglądu - kopia wjechała albo "
+              "zniknęła po podglądzie; odśwież podgląd",
+        "en": "the frame does not have exactly one present copy, the one from the preview - a copy "
+              "arrived or disappeared after the preview; refresh the preview"},
+    "objchg.item.drift_resumed": {
+        "pl": "obiekt klatki zmienił się po kroku bazy tej pozycji (przed awarią) - plik nie jest "
+              "dalej ruszany",
+        "en": "the frame's object changed after this item's database step (before the crash) - "
+              "the file is not touched further"},
+    "objchg.item.drift_resumed_undo": {
+        "pl": "obiekt klatki zmienił się po kroku bazy tej pozycji (przed awarią) - plik nie jest "
+              "dalej ruszany; resztę gestu zdejmuje cofnięcie przebiegu",
+        "en": "the frame's object changed after this item's database step (before the crash) - "
+              "the file is not touched further; undoing the run removes the rest of the gesture"},
+    "objchg.item.drift": {
+        "pl": "obiekt klatki zmienił się od podglądu (dryf) - pozycja nietknięta; odśwież podgląd",
+        "en": "the frame's object changed since the preview (drift) - item untouched; refresh the "
+              "preview"},
+    "objchg.item.dir_intent_failed": {
+        "pl": "zamiar katalogu {dir} nie zapisany ({detail}) - katalogu nie założono, pliku nie "
+              "ruszono",
+        "en": "the intent for folder {dir} was not saved ({detail}) - the folder was not created, "
+              "the file was not touched"},
+    "objchg.item.dir_create_failed": {
+        "pl": "katalogu {dir} nie da się założyć ({detail}) - pliku nie ruszono",
+        "en": "folder {dir} cannot be created ({detail}) - the file was not touched"},
+    "objchg.item.dir_unconfirmed": {
+        "pl": "katalog {dir} założony, ale jego potwierdzenie w bazie padło ({detail}) - zostaje do "
+              "oka, pliku nie ruszono",
+        "en": "folder {dir} was created, but confirming it in the database failed ({detail}) - it "
+              "stays for review, the file was not touched"},
+    "objchg.item.target_dir_missing": {
+        "pl": "katalog celu {dir} nie istnieje, a podgląd go nie zakładał - odśwież podgląd",
+        "en": "the target folder {dir} does not exist and the preview did not plan to create it - "
+              "refresh the preview"},
+    "objchg.item.rename_torn": {
+        "pl": "{inner}; baza pozycji jak po kroku bazy - miejsce pliku rozstrzyga rekoncyliacja "
+              "renamu, drogą dalej jest cofnięcie przebiegu",
+        "en": "{inner}; the item's database state is as after the database step - move "
+              "reconciliation decides where the file is, the way forward is undoing the run"},
+    "objchg.item.card_refused": {"pl": "karta odbita bez zapisu: {inner}",
+                                 "en": "card refused without writing: {inner}"},
+    "objchg.item.card_partial": {
+        "pl": "karta zapisana częściowo: {inner}; plik zostaje pod {path}, baza pozycji jak po "
+              "zapisie - najpierw naprawa karty wg powodu, potem ewentualnie cofnięcie przebiegu",
+        "en": "card partly written: {inner}; the file stays at {path}, the item's database state "
+              "is as after writing - first repair the card as the reason says, then undo the run "
+              "if needed"},
+    "objchg.item.card_prev_failed": {"pl": "karta z poprzedniej próby: {inner}",
+                                     "en": "card from the previous attempt: {inner}"},
+    "objchg.item.card_prev_refused": {"pl": "karta odbita w poprzedniej próbie: {inner}",
+                                      "en": "card refused in the previous attempt: {inner}"},
+    "objchg.item.inplace_fallback": {"pl": "droga dotychczasowa: {detail}",
+                                     "en": "previous route (whole file rewritten): {detail}"},
+    "objchg.item.confirmed_from_disk": {
+        "pl": "zapis potwierdzony z dysku po przerwanym commicie {commits} - nic do zapisania",
+        "en": "write confirmed from disk after the interrupted commit {commits} - nothing to "
+              "write"},
+    "objchg.item.file_not_back": {
+        "pl": "{outer}; plik NIE wrócił pod {path} ({inner}) - zostaje pod nową ścieżką, baza "
+              "pozycji jak po zapisie; drogą dalej jest cofnięcie przebiegu",
+        "en": "{outer}; the file did NOT return to {path} ({inner}) - it stays at the new path, "
+              "the item's database state is as after writing; the way forward is undoing the run"},
+    "objchg.item.undo_card": {"pl": "karta nie wróciła: {inner}",
+                              "en": "the card did not return: {inner}"},
+    "objchg.item.undo_file": {"pl": "plik nie wrócił: {inner}",
+                              "en": "the file did not return: {inner}"},
+    "objchg.item.undo_before_write": {
+        "pl": "przebieg cofnięty, zanim zapis doszedł do tej pozycji",
+        "en": "the run was undone before writing reached this item"},
+    "objchg.item.undo_refused_earlier": {"pl": "odmówione przy zapisie - nic do cofnięcia",
+                                         "en": "refused when writing - nothing to undo"},
+    "objchg.item.isolated_recover": {
+        "pl": "lokacja ma nieukończony zapis w miejscu (operacja {op_id}, {op_kind}, faza "
+              "{phase}) - plik jest izolowany; najpierw odzysk: „Przywróć nagłówek sprzed zapisu” "
+              "(`recover_torn({op_id})`)",
+        "en": "the location has an unfinished in-place write (operation {op_id}, {op_kind}, phase "
+              "{phase}) - the file is isolated; first recovery: “Restore the header from before "
+              "the write” (`recover_torn({op_id})`)"},
+    "objchg.item.isolated_finish": {
+        "pl": "lokacja ma nieukończony zapis w miejscu (operacja {op_id}, {op_kind}, faza "
+              "{phase}) - plik jest izolowany; najpierw dokończenie: „Dokończ zapis” "
+              "(`finish_inplace({op_id})`), a gdy kontrola danych nie przechodzi - powrót: "
+              "„Przywróć nagłówek sprzed zapisu” (`recover_torn({op_id})`)",
+        "en": "the location has an unfinished in-place write (operation {op_id}, {op_kind}, phase "
+              "{phase}) - the file is isolated; first finish: “Finish the write” "
+              "(`finish_inplace({op_id})`), and if the data check fails - way back: “Restore the "
+              "header from before the write” (`recover_torn({op_id})`)"},
+    "objchg.item.inplace_after_gate": {
+        "pl": "lokacja dostała zapis w miejscu (operacja {op_id}, {op_kind}, faza {phase}) po "
+              "bramce renamu - nagłówek, z którego pochodzi nowa nazwa, mógł się zmienić; renamu "
+              "nie było, plik nietknięty - odśwież podgląd nazw",
+        "en": "the location got an in-place write (operation {op_id}, {op_kind}, phase {phase}) "
+              "after the move gate - the header the new name comes from may have changed; no move "
+              "happened, the file is untouched - refresh the names preview"},
+    "objchg.item.src_missing": {"pl": "źródło nie istnieje na dysku",
+                                "en": "the source does not exist on disk"},
+    "objchg.item.dst_exists": {"pl": "cel już istnieje na dysku (anty-clobber)",
+                               "en": "the target already exists on disk (anti-clobber)"},
+    "objchg.item.busy": {
+        "pl": "plik zajęty przez inny program (WinError {winerror}, prób: {tries}) - spróbuj "
+              "ponownie za chwilę",
+        "en": "the file is in use by another program (WinError {winerror}, attempts: {tries}) - "
+              "try again in a moment"},
+    "objchg.item.torn_other": {
+        "pl": "plik PRZENIESIONY na {dst}, baza NIE przepięta ({detail}), a zamiar tej próby "
+              "rozstrzygnął inny proces (baza: {db_path}, zamiar: {in_flight}) - kompensacji nie "
+              "ma; sprawdź, gdzie stoi plik",
+        "en": "file MOVED to {dst}, database NOT updated ({detail}), and another process settled "
+              "this attempt's intent (database: {db_path}, intent: {in_flight}) - no "
+              "compensation; check where the file is"},
+    "objchg.item.returned_intent_left": {
+        "pl": "baza nie przyjęła przepięcia ({detail}) - plik wrócił pod nazwę {src}, ale zamiar "
+              "renamu nie zgaszony ({intent_detail}) - rekoncyliacja go zamknie",
+        "en": "the database did not accept the move ({detail}) - the file returned to {src}, but "
+              "the move intent is not cleared ({intent_detail}) - reconciliation will close it"},
+    "objchg.item.torn_db_not": {
+        "pl": "plik PRZENIESIONY na {dst}, ale baza NIE przepięta ({detail}) - zamiar renamu "
+              "zapisany: ponowienie albo cofnięcie przebiegu dokończy przepięcie",
+        "en": "file MOVED to {dst}, but database NOT updated ({detail}) - the move intent is "
+              "saved: retrying or undoing the run will finish the update"},
+    "objchg.item.returned": {
+        "pl": "baza nie przyjęła przepięcia ({detail}) - plik wrócił pod nazwę {src}; renamu nie "
+              "ma, można ponowić",
+        "en": "the database did not accept the move ({detail}) - the file returned to {src}; no "
+              "move happened, you can retry"},
+    "objchg.item.intent_not_saved": {
+        "pl": "zamiar renamu nie zapisany ({detail}) - renamu nie było, plik nietknięty",
+        "en": "the move intent was not saved ({detail}) - no move happened, the file is "
+              "untouched"},
+    "objchg.item.torn_unknown": {
+        "pl": "stan pliku nieznany po błędzie renamu ({inner}) - zamiar renamu zostaje: ponowienie "
+              "albo cofnięcie przebiegu rozstrzygnie, gdzie plik stoi",
+        "en": "file state unknown after a move error ({inner}) - the move intent stays: retrying "
+              "or undoing the run will decide where the file is"},
+    "objchg.item.intent_dropped": {
+        "pl": "zamiar renamu {rename_id} zgaszony przez inny proces - renamu nie było, plik "
+              "nietknięty; odśwież przebieg",
+        "en": "move intent {rename_id} was cleared by another process - no move happened, the "
+              "file is untouched; refresh the run"},
+    "objchg.item.target_taken_db": {
+        "pl": "cel zajęty w bazie: location:{location} ma już (volume={volume}, {path})",
+        "en": "the target is taken in the database: location:{location} already has "
+              "(volume={volume}, {path})"},
+    "objchg.item.not_on_run_path": {"pl": "plik nie stoi na ścieżce z przebiegu",
+                                    "en": "the file is not at the path from the run"},
+    "objchg.item.alias_conflict": {
+        "pl": "alias '{alias}' wskazuje już object:{object_id} - konflikt, zero zapisu",
+        "en": "alias '{alias}' already points to object:{object_id} - conflict, nothing written"},
+    "objchg.item.retired_via_xref": {
+        "pl": "obiekt '{canon}' to nagrobek, a jego kanon prowadzi dziś przez parę katalogową do "
+              "'{target}' - nagrobka nie wskrzeszam, celem jest '{target}'",
+        "en": "object '{canon}' is retired, and its canon now leads through a catalog pair to "
+              "'{target}' - the retired object is not revived, the target is '{target}'"},
+    "objchg.item.hand_newer_kept": {
+        "pl": "baza: klatka niesie już nowszą decyzję niż gest - zostaje",
+        "en": "database: the frame already carries a newer decision than the gesture - it stays"},
+    "objchg.item.undo_hand_newer": {
+        "pl": "baza: klatka niesie nowszą decyzję niż gest - obiekt zostaje",
+        "en": "database: the frame carries a newer decision than the gesture - the object stays"},
+    "objchg.item.testimony_withheld": {
+        "pl": "plik ZAPISANY (backup do cofnięcia w commicie {commit_id}), ale zeznanie klatki NIE "
+              "przyjęło zapisu - klatka ma {copies}, a głosem klatki mówi {lead}; zapis dokończy "
+              "się samo po wskazaniu tej kopii („Ta kopia prowadzi” w Zbiorach) albo gdy zostanie "
+              "jedyną obecną kopią klatki, inaczej „Cofnij”",
+        "en": "file WRITTEN (backup for undo in commit {commit_id}), but the frame testimony did "
+              "NOT accept the write - the frame has {copies}, and {lead} speaks for the frame; the "
+              "write finishes by itself once you point at this copy (“This copy leads” in "
+              "Collections) or once it is the frame's only present copy, otherwise “Undo”"},
+    "objchg.item.testimony_withheld_undo": {
+        "pl": "nagłówek PRZYWRÓCONY (commit {commit_id}), ale zeznanie klatki NIE wróciło - klatka "
+              "ma {copies}, a głosem klatki mówi {lead}; dokończy się samo po wskazaniu tej kopii "
+              "(„Ta kopia prowadzi” w Zbiorach) albo gdy zostanie jedyną obecną kopią klatki",
+        "en": "header RESTORED (commit {commit_id}), but the frame testimony did NOT come back - "
+              "the frame has {copies}, and {lead} speaks for the frame; it finishes by itself once "
+              "you point at this copy (“This copy leads” in Collections) or once it is the "
+              "frame's only present copy"},
+    "objchg.item.copies": {
+        "pl": {"one": "{n} obecną kopię", "few": "{n} obecne kopie", "many": "{n} obecnych kopii"},
+        "en": {"one": "{n} present copy", "other": "{n} present copies"}},
+    "objchg.item.lead_copy": {"pl": "kopia {path}", "en": "the copy {path}"},
+    "objchg.item.lead_none": {"pl": "żadna kopia jednoznacznie", "en": "no single copy"},
+    "objchg.item.withheld_completed": {
+        "pl": "dokończone: zeznanie klatki przyjęło zapisany nagłówek",
+        "en": "finished: the frame testimony accepted the written header"},
+    "objchg.item.withheld_superseded": {
+        "pl": "karta zapisana, potem zastąpiona nowszym stanem pliku - zeznanie z niej nie przeszło",
+        "en": "card written, then superseded by a newer state of the file - the testimony did not "
+              "take it"},
+    "objchg.item.hand_newer": {"pl": "nowsza decyzja ręki o obiekcie klatki zostaje",
+                               "en": "a newer manual decision about the frame's object stays"},
+    # Koperta prozy bez kodu (tekst systemu, pisarz karty), za którą stoi nota z kodem - proza znak
+    # w znak, nota w języku UI.
+    "objchg.item.prose": {"pl": "{text}", "en": "{text}"},
+    "objchg.item.hand_unknown": {
+        "pl": "wersja decyzji ręki sprzed aktualizacji nieznana - nagrobek zostaje do oka",
+        "en": "the version of the manual decision from before the update is unknown - the "
+              "exclusion stays for review"},
+    # Reguła formy folderu obiektu (`resolve.catalog.FOLDER_RULE_CODES`, AR-141) - szczegół
+    # pominięcia `bad_target` w języku UI.
+    "objchg.folder.empty": {"pl": "kanon pusty albo nie jest tekstem",
+                            "en": "the canon is empty or not text"},
+    "objchg.folder.edge_space": {"pl": "kanon zaczyna się albo kończy białym znakiem",
+                                 "en": "the canon starts or ends with whitespace"},
+    "objchg.folder.slash_outside_comet": {"pl": "„/” poza oznaczeniem komety",
+                                          "en": "“/” outside a comet designation"},
+    "objchg.folder.reserved_dot": {"pl": "nazwa „.” albo „..” jest zarezerwowana",
+                                   "en": "the name “.” or “..” is reserved"},
+    "objchg.folder.forbidden_char": {"pl": "znak zakazany w nazwie katalogu: {char}",
+                                     "en": "a character not allowed in a folder name: {char}"},
+    "objchg.folder.device_name": {"pl": "nazwa urządzenia Windows ({name})",
+                                  "en": "a Windows device name ({name})"},
+    "objchg.folder.trailing_dot_space": {
+        "pl": "kropka albo spacja na końcu nazwy (Windows ją zdejmuje)",
+        "en": "a dot or space at the end of the name (Windows strips it)"},
+    "objchg.folder.too_long": {"pl": "nazwa ma {n} znaków, a Windows przyjmuje najwyżej {limit}",
+                               "en": "the name has {n} characters, Windows accepts at most {limit}"},
     # Pominięcia planera po KODZIE (`object_change.SKIP_CODES`, `ObjectChangeSkip.params`) - zdanie
     # w języku UI; kod bez wpisu tutaj zostaje przy zdaniu rdzenia (`tekst_pominiecia`). Komplet
     # pinuje test parytetu (klucze składane w locie: `objchg.skip.<kod>`).
@@ -5757,9 +6071,10 @@ CATALOG = {
     "objchg.skip.no_object": {"pl": "klatka bez obiektu - nie ma czego uzgadniać",
                               "en": "frame without an object - nothing to align"},
     "objchg.skip.bad_target": {
-        "pl": "folder obiektu „{canon}” nie powstanie - system plików nie przyjmie tej nazwy",
+        "pl": "folder obiektu „{canon}” nie powstanie - system plików nie przyjmie tej nazwy "
+              "({detail})",
         "en": "the object folder “{canon}” cannot be created - the file system will not accept "
-              "this name"},
+              "this name ({detail})"},
     "objchg.skip.off_position": {
         "pl": "plik nie stoi na pozycji obiektu w drzewie archiwum - nie ma folderu obiektu, do "
               "którego mógłby trafić",

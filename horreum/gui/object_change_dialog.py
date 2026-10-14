@@ -53,7 +53,8 @@ from horreum.gui import i18n, queries
 from horreum.gui.i18n_catalog import CATALOG
 # Zdania wspólne okien zapisu mieszkają w `wb_worker` (jeden dom: czytelny powód rdzenia, status
 # wiersza ze spadkiem na drogę atomową, podział powodu spadku); `grid` importuje go i tak.
-from horreum.gui.wb_worker import czytelny_powod, podziel_powod_spadku, status_pozycji
+from horreum.gui.wb_worker import (czytelny_powod, podziel_powod_spadku, status_pozycji,
+                                   tekst_powodu)
 from horreum.resolve.paths import STACK_KIND, object_folder
 
 # Kolumny listy pozycji: plik dziś, plik po zmianie, karta `OBJECT` stara → nowa i - po biegu
@@ -98,6 +99,9 @@ def tekst_pominiecia(kod, params, powod):
     bramka, bramka_params = p.pop("gate", None), p.pop("gate_params", ())
     if bramka and f"objchg.gate.{bramka}" in CATALOG:      # szczegół bramki karty (AR-138)
         p["detail"] = i18n.t(f"objchg.gate.{bramka}", **dict(bramka_params))
+    regula, regula_params = p.pop("rule", None), p.pop("rule_params", ())
+    if regula and f"objchg.folder.{regula}" in CATALOG:   # reguła formy folderu (AR-141)
+        p["detail"] = i18n.t(f"objchg.folder.{regula}", **dict(regula_params))
     return czytelny_powod(i18n.t(klucz, **p))
 
 
@@ -363,7 +367,7 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
     # Uwagi: powody spoza spadku i to, co rdzeń dopisał ZA spadkiem (kopia pliku sprzed podmiany
     # zostawiona na dysku, nagrobek ręki - `podziel_powod_spadku`, jeden podział z oknami kart).
     uwagi = ([u for u in (podziel_powod_spadku(fr.reason)[1] for fr in atomowe) if u]
-             + [fr.reason for fr in z_powodem if fr not in atomowe])
+             + [tekst_powodu(fr.reason) for fr in z_powodem if fr not in atomowe])
     if cofniecie and res.withheld:                       # AR-82: karta wróciła, zeznanie nie
         msg += " · " + i18n.t_plural("grid.wb.undo_withheld", len(res.withheld))
     if atomowe:

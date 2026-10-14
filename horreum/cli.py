@@ -178,6 +178,11 @@ def _main(argv=None):
     p_sv.add_argument("--apply", action="store_true", help="WYKONAJ kopie (bez tego DRY)")
     p_sv.add_argument("--limit", type=int, default=0,
                       help="ile pozycji wypisać na status (0 = wszystkie)")
+    # Q13 = O2: autocropy bez oryginału z JAWNEJ listy ręki - samodzielne obrazy na miejscu
+    # kanonicznym `STACKS\<obiekt>\<zestaw>\<filtr>`, bez zeznania pary i bez relacji.
+    p_sv.add_argument("--standalone", default=None, metavar="LISTA.tsv",
+                      help="lista autocropow (TSV, kolumna 'autocrop') do STACKS jako samodzielne "
+                           "obrazy, bez pary z oryginalem; zrodla musza lezec pod root")
 
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
@@ -386,7 +391,7 @@ def _main(argv=None):
 
     p_hf = sub.add_parser("human-facts",
                           help="spis faktow zapisanych REKA (obiekt/config/rodowod/kalibracja/"
-                               "stanowisko/zeznanie klatki - testimony_hand); "
+                               "stanowisko/zeznanie klatki - testimony_hand/alias nazwy); "
                                "--baseline porownuje i zglasza UBYTKI kodem wyjscia")
     p_hf.add_argument("db", help="ścieżka pliku bazy")
     # JSON na STDOUT, nie `--save do pliku`: mutacja plików ma w tym pakiecie wąskie drzwi
@@ -569,7 +574,7 @@ def _main(argv=None):
             return 2
         con.close()
         print(json.dumps(_plan_json(result), ensure_ascii=False, indent=1) if args.json
-              else _format_plan(args.db, result))
+              else _format_plan(args.db, result, find=args.find))
         return 0
     if args.cmd == "park":
         return _cmd_park(args)
@@ -778,7 +783,7 @@ def _main(argv=None):
             con.close()
             raise db.SchemaTooNew(version)
         spis = audit.human_facts_census(con)
-        spadki, rozbior, rozbior_tel = {}, None, None
+        spadki, rozbior, rozbior_tel, rozbior_al = {}, None, None, None
         if args.baseline:
             with open(args.baseline, encoding="utf-8") as fh:
                 odniesienie = audit.HumanFacts(**json.load(fh))
@@ -789,9 +794,12 @@ def _main(argv=None):
             zdjete_reka = audit.calibration_hand_restored_since(con, odniesienie.event_watermark)
             # AR-128: zmiana pola osi teleskopu gestem reki po znaku wodnym - decyzja, nie ubytek.
             gesty_tel = audit.telescope_hand_gestures_since(con, odniesienie.event_watermark)
-            spadki = spis.spadki(odniesienie, przejete, zdjete_reka, gesty_tel)
+            # AR-145: alias reki zdjety nagrobkiem obiektu z przebiegu, ktory go zalozyl - gest.
+            zdjete_al = audit.alias_hand_retired_since(con, odniesienie.event_watermark)
+            spadki = spis.spadki(odniesienie, przejete, zdjete_reka, gesty_tel, zdjete_al)
             rozbior = spis.reka_obiektu(odniesienie, przejete)
             rozbior_tel = spis.reka_teleskopu(odniesienie, gesty_tel)
+            rozbior_al = spis.reka_aliasow(odniesienie, zdjete_al)
         con.close()
         if args.json:
             # Odniesienie niesie migawke tozsamosci osi obiektu i znak wodny dziennika - bez nich
@@ -802,10 +810,25 @@ def _main(argv=None):
             lines += [f"  {k:<18} {v}" for k, v in spis.counts.items()]
             if spis.telescope_hand is not None:
                 lines.append(f"  {'telescope_hand':<18} {len(spis.telescope_hand)} (rekordy osi teleskopu)")
+            lines.append(f"  {'alias_hand':<18} {len(spis.alias_hand)} (aliasy nazw z reki)")
             if args.baseline:
-                if rozbior_tel:
+                # Ta sama zasada dla osi teleskopu: spis bez migawki rekordow (odniesienie sprzed
+                # 0039 albo baza sprzed v39) mowi brak porownania wprost, zamiast milczec pod „BRAK”.
+                if rozbior_tel is None:
+                    lines.append("  os telescope_hand poza porownaniem (spis bez migawki "
+                                 "rekordow teleskopu)")
+                elif rozbior_tel:
                     lines += [f"  teleskop {tid}: pole {pole} {bylo!r} -> {jest!r} bez gestu reki"
                               for tid, pole, bylo, jest in rozbior_tel[:20]]
+                # Odniesienie sprzed osi aliasow: brak porownania mowimy WPROST - inaczej zdanie
+                # „ubytkow: BRAK” obejmowaloby os, ktorej ten pomiar nie sprawdzil.
+                if rozbior_al is None:
+                    lines.append("  odniesienie bez migawki aliasow reki - os alias_hand "
+                                 "poza porownaniem")
+                else:
+                    lines += [f"  alias {norm}: object:{bylo} -> "
+                              f"{'brak' if jest is None else f'object:{jest}'} bez gestu reki"
+                              for norm, bylo, jest in rozbior_al[:20]]
                 lines.append(f"  odniesienie: {args.baseline}")
                 if rozbior is None:
                     lines.append("  odniesienie bez migawki klatek - porownanie po sumach")
@@ -1536,8 +1559,32 @@ def _rig_filter_text(res):
     return ", ".join(parts)
 
 
-def _format_plan(db_path, res):
-    """Plan nocy do czytelnego ASCII (konsola Windows = cp1250 — bez znaków spoza ASCII)."""
+def _find_outside_text(needle, res):
+    """Pusty wynik `--find` dla nazwy, którą katalog zna (`targets.PlanResult.find_outside`,
+    AR-146) - jedna linia ASCII; `None`, gdy nazwy nie zna nikt (dotychczasowa cisza). Ta sama
+    odpowiedź co pusty stan ekranu planera: cel warstwy niewczytanej z typem i flagą, która go
+    pokaże, albo nazwa spoza celów planera - bez typu, bo nie ma go skąd wziąć."""
+    out = res.find_outside
+    if out is None or out.loaded:                        # rekord z puli wołania - nie jest „poza"
+        return None
+    from .resolve._text import norm_alnum, norm_ascii    # lazy, jak `targets` w komendzie `plan`
+    from .targets import ALL_LAYERS, STATUS_MARKS
+    # Echo wpisu JEDYNE w tym raporcie pochodzi od użytkownika, nie z gramatyki: wklejony
+    # półpauzą albo cudzysłowem typograficznym padłby na cp852 PO rachunku. Wpis spoza ASCII
+    # idzie przez `norm_ascii` (fold diakrytyków, znaki bez rozkładu wypadają).
+    echo = needle if needle.isascii() else norm_ascii(needle)
+    nazwa = (f'"{echo}"' if norm_alnum(needle) == norm_alnum(out.canon)
+             else f'"{echo}" = {out.canon}')
+    if out.target is None:
+        return f"  szukane {nazwa}: znane katalogowi, poza celami planera"
+    typ = out.target.type + STATUS_MARKS.get(out.target.status, "")
+    return (f"  szukane {nazwa} ({typ}): cel warstwy {out.target.layer}, poza wczytanymi "
+            f"(--layers {','.join(ALL_LAYERS)})")
+
+
+def _format_plan(db_path, res, find=None):
+    """Plan nocy do czytelnego ASCII (konsola Windows = cp1250 - bez znaków spoza ASCII).
+    `find` = tekst `--find` (do zdania pustego wyniku, `_find_outside_text`)."""
     site = res.site
     lines = [f"Horreum plan {db_path}: noc {res.night_date}, {site.name or 'stanowisko'} "
              f"({site.lat_deg:.2f}N {site.lon_deg:.2f}E)"]
@@ -1599,6 +1646,9 @@ def _format_plan(db_path, res):
             f"{row.target.major_arcmin:>5.0f}'{row.window.max_alt_deg:>6.1f}"
             f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{fill_txt:>4}  {cost_txt:<14}"
             f"{row.recommend or '-':<6}{plan_txt:<10}{_coverage_text(row)}")
+    outside = _find_outside_text(find, res) if find and not res.rows else None
+    if outside:
+        lines.append(outside)
     if res.hidden:
         lines.append(f"  ... {res.hidden} wierszy ukrytych limitem (--all zdejmuje)")
     if res.unmatched:
@@ -1661,6 +1711,13 @@ def _plan_json(res):
     if res.rig_filter != "off":
         out["rig_filter"] = {"state": res.rig_filter, "min_fill": res.min_fill,
                              "max_panels": res.max_panels}
+    # Blok WYŁĄCZNIE przy pustym `--find` dla nazwy znanej katalogowi (AR-146) - poza tym kształt
+    # odpowiedzi bez zmian. `layer`/`type` = rekord celu z warstwy niewczytanej, `null` = poza pulą.
+    if res.find_outside is not None:
+        t = res.find_outside.target
+        out["find_outside"] = {"canon": res.find_outside.canon,
+                               "layer": t.layer if t is not None else None,
+                               "type": t.type if t is not None else None}
     return out
 
 
@@ -1779,6 +1836,8 @@ def _stack_versions(con, args, harvest, resolver, stack_variants):
         print("stack-versions: baza nie zna korzenia archiwum - podaj --archive")
         return 2
     archiwum = harvest.library_root(archiwum)
+    if args.standalone:
+        return _stack_versions_standalone(con, args, archiwum, stack_variants)
     plan = stack_variants.plan(con, args.root, library_root=archiwum)
     c = stack_variants.plan_counts(plan)
     tryb = "APPLY" if args.apply else "DRY -- bez zmian na dysku"
@@ -1786,7 +1845,8 @@ def _stack_versions(con, args, harvest, resolver, stack_variants):
     print(f"  autocropy: {c['all']}; oryginal z dawnej lokacji: {c['location']} (okno zgodne "
           f"{c['location_window_agrees']}, okno zawiodlo {c['location_window_fails']}); z okna: "
           f"{c['window']}; do wykonania: {c['applicable']}; zablokowane: "
-          f"{sum(c['blocked'].values())} {dict(sorted(c['blocked'].items()))}")
+          f"{sum(c['blocked'].values())} {dict(sorted(c['blocked'].items()))}; "
+          f"juz w STACKS bez pary: {c['settled']}")
     wiersze = {}
     for it in plan.items:
         o = it.original
@@ -1816,6 +1876,49 @@ def _stack_versions(con, args, harvest, resolver, stack_variants):
     zle = any(w.status not in ("placed", "exists", "skipped") or w.testimony in zle_zeznanie
               for w in wyniki)
     return 1 if (zle or c["blocked"]) else 0
+
+
+def _stack_versions_standalone(con, args, archiwum, stack_variants):
+    """`stack-versions --standalone LISTA.tsv`: samodzielne autocropy z listy ręki
+    (`stack_variants.plan_standalone`, `apply_standalone`). Lista bez kolumny `autocrop` albo
+    nieczytelna → kod 2. Kod 1, gdy coś zostało: konflikt planu albo kopia nieudana; `known` (te
+    same dane co klatka bazy) to decyzja planu, nie zaległość. Plan czyta każdy plik w całości."""
+    try:
+        zrodla = stack_variants.read_standalone_list(args.standalone)
+    except (OSError, ValueError) as exc:
+        print(f"stack-versions: lista samodzielnych nieczytelna: {type(exc).__name__}: {exc}")
+        return 2
+    plan = stack_variants.plan_standalone(con, args.root, zrodla, library_root=archiwum)
+    c = stack_variants.standalone_counts(plan)
+    tryb = "APPLY" if args.apply else "DRY -- bez zmian na dysku"
+    print(f"Horreum stack-versions --standalone {args.standalone} -> {archiwum} ({tryb}):")
+    print(f"  pozycji: {c['all']}; statusy: {dict(sorted(c['status'].items()))}; "
+          f"konflikty: {dict(sorted(c['conflict'].items()))}")
+    wiersze = {}
+    for it in plan.items:
+        opis = f"    {it.src} -> {it.dst or '-'}"
+        if it.canon:
+            opis += f" | obiekt={it.canon} swiadek={it.witness or '-'}"
+        if it.reason or it.detail:
+            opis += f" | {it.reason or ''} {it.detail or ''}".rstrip()
+        wiersze.setdefault(it.status, []).append(opis)
+    for status in sorted(wiersze):
+        print(f"  [{status}] {len(wiersze[status])}")
+        for w in wiersze[status][:args.limit or None]:
+            print(w)
+    konflikt = bool(c["conflict"])
+    if not args.apply:
+        return 1 if konflikt else 0
+    wyniki = stack_variants.apply_standalone(plan, con=con)
+    licz = {}
+    dobre = ("placed", "exists", "skipped", "known")
+    for w in wyniki:
+        licz[w.status] = licz.get(w.status, 0) + 1
+        if w.status not in dobre:
+            print(f"  {w.status}: {w.item.src} -> {w.item.dst} | {w.reason}")
+    print(f"  wynik: {dict(sorted(licz.items()))}; obiekt i zestaw nada Dostawa po skanie STACKS")
+    zle = any(w.status not in dobre for w in wyniki)
+    return 1 if (zle or konflikt) else 0
 
 
 def _format_stack_lineage(db_path, s):

@@ -931,7 +931,8 @@ def _assert_stacks_library(dst, library_root):
 
 
 def copy_stack_variant(src, dst, *, expected_sha1, library_root, sha1_fn=hashing.sha1_of):
-    """Kopia wariantu kadru (autocrop) do biblioteki `STACKS` obok kopii oryginału - `(status, reason)`.
+    """Kopia autocropu do biblioteki `STACKS` - obok kopii oryginału (wariant pary) albo na miejsce
+    kanoniczne bez pary (samodzielny, `stack_variants.apply_standalone`) - `(status, reason)`.
 
     Ta sama klinga no-clobber z audytem bajtów co kopia stosu żniw (`copy_master`: `.part`, `fsync`,
     sha1 całego pliku == `expected_sha1`, publikacja `os.rename`), ten sam strażnik segmentu

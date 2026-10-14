@@ -1271,3 +1271,20 @@ def releases(roots, *, archive_root=None, con=None):
     rows.sort(key=lambda r: (_iso_timestamp(r.ts) is not None, _iso_timestamp(r.ts) or 0.0,
                              str(r.ts), r.object_root), reverse=True)
     return rows
+
+
+def missing_roots(roots):
+    """Karty listy wydań, których folderu NIE MA na dysku (dysk niepodłączony, karta po zmianie
+    dysku) - w kolejności `roots`, ta sama karta pod dwiema pisowniami raz (AR-147). `releases`
+    milczy o takiej karcie tak samo jak o karcie bez `OBJECTS`, a to dwa różne fakty: karta bez
+    wydań istnieje i jest pusta, brak karty mówi, że listy nie dało się policzyć. Odczyt dysku -
+    przy uśpionym udziale SMB wolny, więc wołający liczy go poza wątkiem GUI."""
+    brak, widziane = [], set()
+    for root in roots:
+        klucz = os.path.normcase(os.path.normpath(os.path.abspath(str(root))))
+        if klucz in widziane:
+            continue
+        widziane.add(klucz)
+        if not os.path.isdir(str(root)):
+            brak.append(str(root))
+    return tuple(brak)

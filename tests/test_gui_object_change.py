@@ -1684,6 +1684,155 @@ def test_status_spadku_z_BAZY_rozpoznaje_prefiks_rdzenia():
     assert status_pozycji(stan, None) == (stan, stan)
 
 
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_status_spadku_po_KODZIE_powodu_szczegol_z_parametru_a_uwagi_w_jezyku_UI(lang):
+    """AR-141: powód z kodem `inplace_fallback` (wynik biegu i wiersz bazy po 0041) rozpoznaje spadek
+    po KODZIE, bez prefiksu prozy; szczegół to parametr `detail` (także ze średnikiem w środku -
+    dawny podział prozy ciął go na pół), uwagi to lista `notes` w języku UI."""
+    from horreum.gui.wb_worker import status_pozycji
+    from horreum.item_reasons import PowodPozycji, dopisz
+    i18n.set_lang(lang)
+    szczegol = "karta OBJECT występuje 2 razy; druga w HDU 1"
+    powod = dopisz(PowodPozycji(f"{writeback.PREFIKS_DROGI_ATOMOWEJ}: {szczegol}",
+                                "inplace_fallback", detail=szczegol),
+                   PowodPozycji("nowsza decyzja ręki o obiekcie klatki zostaje", "hand_newer"))
+    stan = i18n.t("objchg.st.done")
+    oczekiwany = stan + i18n.t("objchg.st.reason", reason=i18n.t("objchg.st.rewritten") + "; "
+                               + i18n.t("objchg.item.hand_newer"))
+    for z_bazy in (True, False):
+        status, tip = status_pozycji(stan, powod, z_bazy=z_bazy)
+        assert status == oczekiwany
+        assert tip == status + "\n" + i18n.t("objchg.st.detail_tip", detail=szczegol)
+    if lang == "en":
+        assert not set(oczekiwany) & set("„ąćęłńóśźż"), oczekiwany
+
+
+_PROZA_ZAPASU = "zdanie rdzenia zachowane w bazie; druga część"
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("kod, args", [
+    ("busy", '{"winerror": 32}'),                                  # brak pola `tries`
+    ("inplace_fallback", "{}"),                                    # brak `detail`
+    ("inplace_fallback", '{"detail": 7}'),                         # `detail` nie-tekst
+    ("inplace_fallback", '{"detail": "x", "notes": "nie-lista"}'),  # uwagi nie-lista
+    ("copy_gone", '{"notes": 5}'),                                 # uwagi nie-lista
+    ("copy_gone", '{"notes": [{"foo": 1}]}'),                      # uwaga obcego kształtu
+    ("copy_gone", '{"notes": [7]}'),                               # uwaga nie-powód
+    ("db_refused", '{"inner": {"foo": 1}}'),                       # zagnieżdżenie obcego kształtu
+    ("db_refused", '{"inner": {"text": 1, "code": "x", "args": {}}}'),  # tekst nie-tekst
+    ("db_refused", '{"inner": {"text": "t", "code": "copy_gone", "args": []}}'),  # args nie-obiekt
+    ("unreachable", '{"detail": [1, 2]}'),                         # parametr złego typu
+    ("copies", '{"n": "dwa"}'),                                    # `n` wpisu mnogiego nie-liczbą
+    ("copies", '{"n": true}'),
+    ("copy_gone", "[1]"),                                          # JSON nie-obiekt
+    ("copy_gone", "{zly"),                                         # JSON uszkodzony
+    ("kod_spoza_zbioru", "{}"),                                    # kod nieznany
+])
+def test_powod_z_BAZY_spoza_kodeka_mowi_zachowana_proza_bez_wyjatku(kod, args, lang):
+    """AR-141 (S1, K2): odczyt i zdanie powodu z bazy są TOTALNE. Wiersz, który przeszedł CHECK 0041
+    (albo jego kopia zapisana serwisowo / innym programem na tym samym numerze schematu), z
+    parametrami, które nie wypełniają wpisu katalogu, mówi zachowaną prozą `reason` - zdanie okna,
+    status listy i podział spadku bez `KeyError`. Falsyfikator: render bez sprawdzenia pól -
+    `KeyError: 'tries'`/`'detail'` w oknie."""
+    from horreum import item_reasons
+    from horreum.gui.wb_worker import podziel_powod_spadku, status_pozycji, tekst_powodu
+    i18n.set_lang(lang)
+    powod = item_reasons.z_bazy(_PROZA_ZAPASU, kod, args)
+    assert str(powod) == _PROZA_ZAPASU
+    assert tekst_powodu(powod) == czytelny(_PROZA_ZAPASU)
+    stan = i18n.t("objchg.st.blocked")
+    status, _ = status_pozycji(stan, powod, z_bazy=True)
+    assert status == stan + i18n.t("objchg.st.reason", reason=czytelny(_PROZA_ZAPASU))
+    assert podziel_powod_spadku(powod) == ("zdanie rdzenia zachowane w bazie", "druga część")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_okno_z_PORZADKOW_na_wierszu_spoza_kodeka_mowi_proza(qapp, archiwum, lang):
+    """S1 na prawdziwej bazie: pozycje z kodem i parametrami, które przeszły CHECK 0041, ale nie
+    wypełniają wpisu (`busy` bez `tries`, `inplace_fallback` bez `detail`) - okno z Porządków się
+    otwiera, a status mówi zachowaną prozą rdzenia (zamiast `KeyError` w konstruktorze okna)."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
+    a = archiwum
+    i18n.set_lang(lang)
+    fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_b.fits", obj="NGC 3034", seed=2,
+                    date="2022-03-26T21:31:00")
+    plan, _ = policz_plan(a.con, [fa, fb], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    for p, kod, args in ((pa, "busy", '{"winerror": 32}'), (pb, "inplace_fallback", "{}")):
+        a.con.execute("UPDATE pending_object_change SET status = 'blocked', reason = ?, "
+                      "reason_code = ?, reason_args = ? WHERE old_path = ?",
+                      (f"proza {p.name}", kod, args, str(p)))
+    a.con.commit()
+    dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+    status = {r[0]: r[3] for r in _teksty(dlg.items_tree)}
+    zablok = i18n.t("objchg.st.blocked")
+    for p in (pa, pb):
+        assert status[str(p)] == zablok + i18n.t("objchg.st.reason", reason=f"proza {p.name}")
+    dlg.reject()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_okno_z_PORZADKOW_mowi_powod_pozycji_z_BAZY_w_jezyku_UI(qapp, archiwum, lang):
+    """AR-141 na PRAWDZIWYM sterowniku: powód pozycji leży w bazie z kodem (0041), więc okno
+    otwarte na przebiegu z Porządków mówi go w języku UI - plik zmieniony od skanu, cel zajęty
+    na dysku (powód warstwy renamu), karta dopisana drogą atomową (spadek po kodzie, szczegół
+    w podpowiedzi). ZŁOTE PL: zdanie okna == `czytelny_powod(proza rdzenia)` znak w znak. Wiersz
+    bez kodu (sprzed 0041) mówi prozą jak dotąd. Falsyfikator: `status_pozycji` bez gałęzi kodu -
+    EN po polsku."""
+    import os as _os
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
+    from horreum.gui.wb_worker import status_pozycji
+    a = archiwum
+    i18n.set_lang(lang)
+    fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", date="2022-03-26T21:31:00", seed=2)
+    fc, pc = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_c.fits", obj="NGC 3034", seed=3,
+                    date="2022-03-26T21:32:00")
+    plan, _ = policz_plan(a.con, [fa, fb, fc], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    st = _os.stat(pa)
+    _os.utime(pa, (st.st_atime, st.st_mtime + 10))              # zmiana pliku po skanie
+    cel_c = next(it.new_path for it in plan.items if it.frame_id == fc)
+    _os.makedirs(_os.path.dirname(cel_c), exist_ok=True)
+    with open(cel_c, "wb") as f:                                 # cel zajęty na dysku
+        f.write(b"obcy")
+    writeback.commit_object_change(a.con, plan.run_id, now=NOW)
+    wiersze = {r["old_path"]: r for r in a.con.execute(
+        "SELECT old_path, status, reason, reason_code FROM pending_object_change")}
+    assert {(wiersze[str(p)]["status"], wiersze[str(p)]["reason_code"]) for p in (pa, pb, pc)} == {
+        ("blocked", "changed_since_scan"), ("applied", "inplace_fallback"), ("blocked", "dst_exists")}
+    dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+    status = {r[0]: r[3] for r in _teksty(dlg.items_tree)}
+    tip = {dlg.items_tree.topLevelItem(i).text(0): dlg.items_tree.topLevelItem(i).toolTip(3)
+           for i in range(dlg.items_tree.topLevelItemCount())}
+    zablok = i18n.t("objchg.st.blocked")
+    assert status[str(pa)] == zablok + i18n.t("objchg.st.reason",
+                                              reason=i18n.t("objchg.item.changed_since_scan"))
+    assert status[str(pc)] == zablok + i18n.t("objchg.st.reason",
+                                              reason=i18n.t("objchg.item.dst_exists"))
+    assert status[str(pb)] == i18n.t("objchg.st.done") + i18n.t(
+        "objchg.st.reason", reason=i18n.t("objchg.st.rewritten"))
+    assert i18n.t("objchg.st.detail_tip", detail="").rstrip() in tip[str(pb)]
+    if lang == "pl":                                             # złote: PL okna = proza rdzenia
+        for p in (pa, pc):
+            assert status[str(p)] == zablok + i18n.t(
+                "objchg.st.reason", reason=czytelny(wiersze[str(p)]["reason"]))
+    else:
+        assert not any(set(s) & set("ąćęłńóśźż") for s in status.values()), status
+    dlg.reject()
+    # wiersz bez kodu (sprzed 0041) - proza jak dotąd
+    a.con.execute("UPDATE pending_object_change SET reason_code = NULL, reason_args = NULL "
+                  "WHERE old_path = ?", (str(pa),))
+    a.con.commit()
+    widok = queries.object_change_run_view(a.con, plan.run_id)
+    (bez_kodu,) = [it for it in widok["items"] if it["old_path"] == str(pa)]
+    assert type(bez_kodu["reason"]) is str
+    assert status_pozycji(zablok, bez_kodu["reason"], z_bazy=True)[0] == zablok + i18n.t(
+        "objchg.st.reason", reason=czytelny(wiersze[str(pa)]["reason"]))
+
+
 def _blad_os(klasa, winerror, komunikat, sciezka=None):
     """Powód tak, jak składa go rdzeń z wyjątku systemu (`f"{type(exc).__name__}: {exc}"`)."""
     exc = klasa(None, komunikat, sciezka, winerror)
@@ -2004,15 +2153,22 @@ def test_szczegol_odmowy_karty_i_celu_to_FAKTY_rdzenia_w_jezyku_UI(tmp_path, lan
         pominiete[fid] = plan.skipped[0]
     strata = writeback.comment_loss_lengths("fits", "OBJECT", "NGC 2632", "k" * 70)
     assert strata is not None and strata[0] == 70 > strata[1]
+    # AR-141: `bad_target` niesie regułę formy folderu kodem (`rule`), a zdanie obu języków -
+    # szczegół reguły z katalogu (`objchg.folder.<kod>`); proza rdzenia (`detail`) to zapas.
+    regula = "kanon obiektu nie może być nazwą katalogu: 'CON'"
     oczekiwane = {dluga: ("card_too_long", {"value": "X" * 70, "length": 70, "limit": 68}),
                   znak: ("card_chars", {"value": "NGC 2632 ±"}),
                   komentarz: ("card_comment", {"before": strata[0], "after": strata[1]}),
-                  urzadzenie: ("bad_target", {"canon": "CON"})}
+                  urzadzenie: ("bad_target", {"canon": "CON", "detail": regula,
+                                              "rule": "device_name",
+                                              "rule_params": (("name", "CON"),)})}
+    zdania = {"bad_target": {"canon": "CON",
+                             "detail": i18n.t("objchg.folder.device_name", name="CON")}}
     for fid, (kod, params) in oczekiwane.items():
         s = pominiete[fid]
         assert (s.code, dict(s.params)) == (kod, params), s
         tekst = tekst_pominiecia(s.code, s.params, s.reason)
-        assert tekst == czytelny(i18n.t(f"objchg.skip.{kod}", **params))
+        assert tekst == czytelny(i18n.t(f"objchg.skip.{kod}", **zdania.get(kod, params)))
         if lang == "en":
             assert not set(tekst) & set("„ąćęłńóśźż"), (kod, tekst)
     # zdanie rdzenia (zapas okna, PL) mówi te same fakty
@@ -2046,6 +2202,207 @@ def test_KAZDY_powod_bramki_karty_ma_zdanie_PL_i_EN_a_PL_to_zdanie_bramki():
             assert wpis["pl"] == zdanie.value, kod
         elif isinstance(zdanie, ast.Name):
             assert wpis["pl"] == getattr(queries, zdanie.id), kod
+
+
+def _zdanie_pl_z_fstringa(w, modul):
+    """Zdanie PL wywołania `PowodPozycji(zdanie, kod, **p)` jako WZÓR katalogu: literał wprost,
+    f-string z każdym `{wyrażenie}` zamienionym na `{nazwa}` parametru o TYM SAMYM wyrażeniu (AST),
+    stała modułu - jej wartością; nazwa (zdanie = parametr) → `{nazwa}`. Wyrażenie bez parametru =
+    AssertionError: zdanie PL mówiłoby coś, czego okno nie ma z czego złożyć."""
+    import ast
+    zdanie = w.args[0]
+    parametry = {ast.dump(k.value): k.arg for k in w.keywords}
+
+    def _pole(v):
+        if ast.dump(v) in parametry:
+            return "{" + parametry[ast.dump(v)] + "}"
+        assert isinstance(v, ast.Name) and isinstance(getattr(modul, v.id, None), str), ast.dump(v)
+        return getattr(modul, v.id)
+    if isinstance(zdanie, ast.Constant):
+        return zdanie.value
+    if isinstance(zdanie, ast.JoinedStr):
+        czesci = []
+        for c in zdanie.values:
+            if isinstance(c, ast.Constant):
+                czesci.append(c.value)
+            else:
+                assert c.conversion == -1 and c.format_spec is None, ast.dump(c)
+                czesci.append(_pole(c.value))
+        return "".join(czesci)
+    return _pole(zdanie)
+
+
+def _powody_pozycji():
+    """`kod → [(wzór PL, nazwy parametrów)]` z KAŻDEGO `PowodPozycji(...)` w `writeback` i `repo`."""
+    import ast
+    import inspect
+    from horreum import repo as repo_mod
+    out = {}
+    for modul in (writeback, repo_mod):
+        for w in ast.walk(ast.parse(inspect.getsource(modul))):
+            if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
+                    and w.func.id == "PowodPozycji"):
+                continue
+            assert isinstance(w.args[1], ast.Constant), ast.dump(w)
+            out.setdefault(w.args[1].value, []).append(
+                (_zdanie_pl_z_fstringa(w, modul), {k.arg for k in w.keywords}))
+    return out
+
+
+def test_KAZDY_kod_powodu_pozycji_ma_zdanie_PL_i_EN_a_PL_to_zdanie_rdzenia():
+    """AR-141: powody pozycji leżały w bazie po polsku. Każdy `PowodPozycji` sterownika zapisu
+    i klingi (AST) ma kod z `ITEM_REASON_CODES` (komplet - bez martwych kluczy), `objchg.item.<kod>`
+    w obu językach z tymi samymi polami (wpis mnogi: każda forma), pola ⊆ parametry rdzenia, EN bez
+    polskich znaków, a PL = zdanie rdzenia z polami zamiast wyrażeń - okno PL mówi znak w znak to,
+    co CLI i log. To samo dla reguł formy folderu (`objchg.folder.<kod>`)."""
+    import string
+    from horreum.item_reasons import ITEM_REASON_CODES, PARAM_KINDS
+    from horreum.resolve.catalog import FOLDER_RULE_CODES
+    kody = _powody_pozycji()
+    assert set(kody) == ITEM_REASON_CODES, set(kody) ^ ITEM_REASON_CODES
+
+    def pola(tekst):
+        return {f for _, f, _, _ in string.Formatter().parse(tekst) if f}
+    for kod, miejsca in kody.items():
+        wpis = CATALOG[f"objchg.item.{kod}"]
+        formy = {j: (list(wpis[j].values()) if isinstance(wpis[j], dict) else [wpis[j]])
+                 for j in ("pl", "en")}
+        pola_pl = {frozenset(pola(f)) for f in formy["pl"]}
+        assert len(pola_pl) == 1 and pola_pl == {frozenset(pola(f)) for f in formy["en"]}, kod
+        for wzor, parametry in miejsca:
+            assert wzor in formy["pl"], (kod, wzor)
+            assert set(next(iter(pola_pl))) <= parametry, (kod, parametry)
+            assert parametry <= set(PARAM_KINDS), (kod, parametry - set(PARAM_KINDS))  # S1
+        assert not any(set(f) & set("„ąćęłńóśźż") for f in formy["en"]), kod
+    assert {k.split(".", 2)[2] for k in CATALOG if k.startswith("objchg.item.")} == \
+        ITEM_REASON_CODES
+    assert {k.split(".", 2)[2] for k in CATALOG if k.startswith("objchg.folder.")} == \
+        FOLDER_RULE_CODES
+    for kod in FOLDER_RULE_CODES:
+        wpis = CATALOG[f"objchg.folder.{kod}"]
+        assert pola(wpis["pl"]) == pola(wpis["en"]), kod
+        assert not set(wpis["en"]) & set("„ąćęłńóśźż"), kod
+
+
+def test_ZLOTE_powody_dynamiczne_PL_okna_to_proza_rdzenia_a_EN_bez_polskiego(tmp_path, monkeypatch):
+    """AR-141 (Z8): złote zdania DYNAMICZNYCH powodów - z prawdziwych dróg rdzenia, nie z literałów
+    AST: izolacja (obie drogi naprawy), plik zajęty przy przeniesieniu, odmowa klingi zagnieżdżona
+    (konflikt aliasu), plik, który nie wrócił (odmowa karty + powód renamu), zeznanie wstrzymane
+    z odmianą liczby kopii (1 i 2) i głosem klatki. PL okna == `czytelny_powod(proza rdzenia)` znak
+    w znak; EN bez polskich liter poza prozą warstwy bez kodu (pisarz karty - granica)."""
+    import shutil
+    from test_object_change_write import _Scena
+    from horreum.gui.wb_worker import czytelny_powod, tekst_powodu
+    from horreum.item_reasons import PowodPozycji
+    powody = [writeback._powod_izolacji({"id": 7, "kind": "commit", "phase": faza})
+              for faza in ("writing", "written")]
+    assert [p.code for p in powody] == ["isolated_recover", "isolated_finish"]
+    zajety = OSError(None, "Proces nie może uzyskać dostępu do pliku", None, 32)
+    powody.append(writeback._powod_bledu_renamu(zajety, 3))
+    s = _Scena(tmp_path / "a")
+    m42, _ = repo.upsert_object(s.con, canon="M42", catalog="M", kind="deep_sky", now=NOW)
+    repo.add_object_alias(s.con, alias_norm="flamingstar", object_id=m42, source="user", now=NOW)
+    plan = s.plan(pozycje=[s.pozycja(0)])
+    plan = oc.ObjectChangePlan(plan.run_id, oc.ObjectTarget("IC405", "IC", "deep_sky",
+                                                            "flamingstar", "IC 405"), plan.items, ())
+    repo.stage_object_change(s.con, plan=plan, now=NOW)
+    powody += [fr.reason for fr in writeback.commit_object_change(s.con, plan.run_id,
+                                                                  now=NOW).blocked]
+    s2 = _Scena(tmp_path / "b")
+    zla = oc.ObjectChangeItem(**{**s2.pozycja(0).__dict__, "card_new": "IC 405ł"})
+    run = s2.stage(s2.plan(pozycje=[zla]))
+    monkeypatch.setattr(writeback, "_przenies_wstecz", lambda *a, **kw: writeback.RenameFileResult(
+        "blocked", PowodPozycji("plik nie stoi na ścieżce z przebiegu", "not_on_run_path")))
+    powody += [fr.reason for fr in writeback.commit_object_change(s2.con, run, now=NOW).failed]
+    monkeypatch.undo()
+    lok = s.con.execute("SELECT id FROM location WHERE path = ?", (str(s.stare[1]),)).fetchone()[0]
+    powody.append(repo.withheld_reason(s.con, location_id=lok, commit_id=5))
+    kopia = tmp_path / "a" / "INNE" / s.stare[1].name
+    kopia.parent.mkdir()
+    shutil.copyfile(s.stare[1], kopia)
+    from horreum import scan
+    scan.ingest_record(s.con, scan.scan_file(str(kopia)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())
+    powody.append(repo.withheld_reason(s.con, location_id=lok, commit_id=5, undo=True))
+    assert [p.code for p in powody[2:]] == ["busy", "db_refused", "file_not_back",
+                                            "testimony_withheld", "testimony_withheld_undo"]
+    assert [dict(p.params)["copies"].params for p in powody[-2:]] == [(("n", 1),), (("n", 2),)]
+    for lang in ("pl", "en"):
+        i18n.set_lang(lang)
+        for p in powody:
+            zdanie = tekst_powodu(p)
+            if lang == "pl":
+                assert zdanie == czytelny_powod(str(p)), (zdanie, str(p))
+            elif p.code != "file_not_back":              # odmowa karty niesie prozę pisarza
+                assert not set(zdanie) & set("„ąćęłńóśźż"), zdanie
+    i18n.set_lang("en")
+    assert "1 present copy" in tekst_powodu(powody[-2]) and "2 present copies" in tekst_powodu(
+        powody[-1])
+    s.con.close()
+    s2.con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_stale_modulowe_powodow_maja_zdanie_w_jezyku_UI(lang):
+    """AR-141 (K3): powody-stałe modułów (`repo._POWOD_NOWSZEJ_REKI`, `_BAZA_NOWSZA_*`,
+    `writeback._ZAMIAR_OTWARTY`…) - zbierane z OBIEKTÓW modułu w czasie biegu, nie z AST: każda ma
+    wpis katalogu, w PL mówi znak w znak prozą rdzenia, w EN bez polskich liter."""
+    from horreum import repo as repo_mod
+    from horreum.gui.wb_worker import czytelny_powod, tekst_powodu
+    from horreum.item_reasons import PowodPozycji
+    i18n.set_lang(lang)
+    stale = {f"{m.__name__}.{n}": v for m in (repo_mod, writeback) for n, v in vars(m).items()
+             if isinstance(v, PowodPozycji)}
+    assert {"horreum.repo._POWOD_NOWSZEJ_REKI", "horreum.repo._POWOD_REKI_NIEZNANEJ",
+            "horreum.repo._BAZA_NOWSZA_W_BIEGU", "horreum.repo._BAZA_NOWSZA_PRZY_COFNIECIU",
+            "horreum.writeback._ZAMIAR_OTWARTY"} <= set(stale), set(stale)
+    for nazwa, p in stale.items():
+        assert f"objchg.item.{p.code}" in CATALOG, nazwa
+        zdanie = tekst_powodu(p)
+        if lang == "pl":
+            assert zdanie == czytelny_powod(str(p)), nazwa
+        else:
+            assert not set(zdanie) & set("„ąćęłńóśźż"), (nazwa, zdanie)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("n, en", [(0, "0 present copies"), (1, "1 present copy"),
+                                   (2, "2 present copies"), (5, "5 present copies"),
+                                   (12, "12 present copies"), (22, "22 present copies")])
+def test_liczba_kopii_odmienia_sie_w_obu_jezykach(n, en, lang):
+    """K3: fragment liczby kopii zeznania wstrzymanego (`repo._kopie`) - PL odmiana rdzenia
+    (1 / 2-4 / 5+ / -naście) == wpis mnogi katalogu dla tych samych `n`, EN z formy `one`/`other`."""
+    from horreum import repo as repo_mod
+    from horreum.gui.wb_worker import tekst_powodu
+    i18n.set_lang(lang)
+    fragment = repo_mod._kopie(n)
+    assert fragment.code == "copies" and dict(fragment.params) == {"n": n}
+    assert tekst_powodu(fragment) == (str(fragment) if lang == "pl" else en)
+    assert str(fragment) == {0: "0 obecnych kopii", 1: "1 obecną kopię", 2: "2 obecne kopie",
+                             5: "5 obecnych kopii", 12: "12 obecnych kopii",
+                             22: "22 obecne kopie"}[n]
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("canon, regula, params", [
+    ("", "empty", {}), (" NGC1", "edge_space", {}), ("Foo/Bar", "slash_outside_comet", {}),
+    ("..", "reserved_dot", {}), ("NGC<1", "forbidden_char", {"char": "'<'"}),
+    ("nul.txt", "device_name", {"name": "nul.txt"}), ("NGC1.", "trailing_dot_space", {}),
+    ("X" * 256, "too_long", {"n": 256, "limit": 255})])
+def test_regula_folderu_ma_kod_a_komunikat_bez_zmian(canon, regula, params, lang):
+    """AR-141: `folder_form` odmawia `FolderFormError` (`ValueError` - wołający łapią jak dotąd)
+    z KODEM reguły i parametrami; zdanie reguły w języku UI z tych parametrów."""
+    from horreum.resolve.catalog import FolderFormError, folder_form
+    i18n.set_lang(lang)
+    with pytest.raises(FolderFormError) as odmowa:
+        folder_form(canon)
+    assert isinstance(odmowa.value, ValueError)
+    assert (odmowa.value.code, dict(odmowa.value.params)) == (regula, params)
+    assert str(odmowa.value).startswith(("kanon obiektu nie może być nazwą katalogu: ",
+                                         "kanon z '/' spoza gramatyki komety: "))
+    zdanie = i18n.t(f"objchg.folder.{regula}", **params)
+    if lang == "en":
+        assert not set(zdanie) & set("„ąćęłńóśźż"), zdanie
 
 
 # ═══════════════════════════════════════════════ ostrzeżenia planera i sterownika w języku UI

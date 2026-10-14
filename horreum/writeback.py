@@ -74,6 +74,7 @@ from . import exif, hashing, repo, scan
 from .card_rules import FITS_RECORD as _FITS_RECORD
 from .resolve.paths import path_key   # ścieżka FIZYCZNA (bez wielkości liter) - jak planer i straż
 from .object_change import ZdanieRdzenia   # ostrzeżenie gestu z kodem dla okna (AR-138)
+from .item_reasons import PowodPozycji, dopisz, powod_wyjatku   # powód pozycji z kodem (AR-141)
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
 # ============================================================ WRITER (port dawcy fits_io)
@@ -182,8 +183,12 @@ def _after_replace(path: str, written_hash: str, backup_text: str,
 
 
 def _dopisz(powod: str | None, dopisek: str | None) -> str | None:
-    """`powod; dopisek` z pominięciem pustych."""
-    return "; ".join(p for p in (powod, dopisek) if p) or None
+    """`powod; dopisek` z pominięciem pustych. Powód z kodem (`PowodPozycji`) zachowuje kod, a dopisek
+    idzie na jego listę uwag (`item_reasons.dopisz`, AR-141); część pusta oddaje drugą bez zmian.
+    Dopisek Z KODEM za prozą pisarza (bez kodu, Q1) - proza w kopercie `prose`, kod dopisku zostaje."""
+    if powod and isinstance(dopisek, PowodPozycji) and not isinstance(powod, PowodPozycji):
+        powod = PowodPozycji(powod, "prose", text=powod)
+    return dopisz(powod, dopisek)
 
 
 # ------------------------------------------------ PODMIANA SYSTEMOWA (AR-18)
@@ -2483,15 +2488,20 @@ def _kontrola_danych(rec, expect_sha1_data, kontrola) -> str | None:
 
 
 def _powod_izolacji(op) -> str:
-    """Powód odmowy mutacji pliku lokacji z operacją izolującą - z drogą naprawy właściwą fazie."""
-    odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({op['id']})")
-    dokonczenie = _droga(_GEST_DOKONCZ, f"finish_inplace({op['id']})")
-    droga = (f"najpierw odzysk: {odzysk}"
-             if op["phase"] in repo.INPLACE_OPEN_PHASES
-             else f"najpierw dokończenie: {dokonczenie}, a gdy kontrola danych nie przechodzi - "
-                  f"powrót: {odzysk}")
-    return (f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
-            f"{op['phase']}) - plik jest izolowany; {droga}")
+    """Powód odmowy mutacji pliku lokacji z operacją izolującą - z drogą naprawy właściwą fazie
+    (drogi jak `_droga`: „gest okna” (`wywołanie rdzenia`)). Kod drogi dla okna (AR-141)."""
+    if op["phase"] in repo.INPLACE_OPEN_PHASES:
+        return PowodPozycji(
+            f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
+            f"{op['phase']}) - plik jest izolowany; najpierw odzysk: „{_GEST_PRZYWROC}” "
+            f"(`recover_torn({op['id']})`)", "isolated_recover",
+            op_id=op["id"], op_kind=op["kind"], phase=op["phase"])
+    return PowodPozycji(
+        f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
+        f"{op['phase']}) - plik jest izolowany; najpierw dokończenie: „{_GEST_DOKONCZ}” "
+        f"(`finish_inplace({op['id']})`), a gdy kontrola danych nie przechodzi - powrót: "
+        f"„{_GEST_PRZYWROC}” (`recover_torn({op['id']})`)", "isolated_finish",
+        op_id=op["id"], op_kind=op["kind"], phase=op["phase"])
 
 
 def _powod_konfliktu(op) -> str:
@@ -3100,8 +3110,9 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
             return _ZapisLokacji(FileResult(location_id, path, "withheld", wstrzymane[0]["reason"],
                                             code=CODE_ZEZNANIE_WSTRZYMANE), dotknieto=True)
         if not rows:                    # przerwany commit TEGO przebiegu potwierdził dysk
-            reason = ("zapis potwierdzony z dysku po przerwanym commicie "
-                      f"{', '.join(str(z['commit_id']) for z in zalegle)} - nic do zapisania")
+            commity = ", ".join(str(z["commit_id"]) for z in zalegle)
+            reason = PowodPozycji(f"zapis potwierdzony z dysku po przerwanym commicie {commity} - "
+                                  f"nic do zapisania", "confirmed_from_disk", commits=commity)
             return _ZapisLokacji(FileResult(location_id, path, "applied", reason), dotknieto=True)
     # Generacja dziennika PRZED bramką: straż podmiany drogi atomowej odbije operację zaczętą
     # po tej chwili (plik tymczasowy powstanie ze stanu sprzed niej).
@@ -3166,7 +3177,10 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
                 res = WriteResult("blocked", f"nie mieści się w miejscu (tryb bez spadku): "
                                              f"{res.reason}", None)
             else:
-                droga = f"{PREFIKS_DROGI_ATOMOWEJ}: {res.reason}"
+                # Kod spadku i szczegół odmowy w miejscu osobno (AR-141): okno zmiany obiektu
+                # rozpoznaje spadek po kodzie także w powodzie pozycji zapisanym w bazie.
+                droga = PowodPozycji(f"{PREFIKS_DROGI_ATOMOWEJ}: {res.reason}", "inplace_fallback",
+                                     detail=res.reason)
                 res = None
     if res is None:
         res = write_changes(path, ops, expected, persist_backup=_persist,
@@ -3263,10 +3277,12 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
     def _zamknij(zeznanie):
         if not zeznanie:
             powod = repo.withheld_reason(con, location_id=location_id, commit_id=stan.commit_id)
+            # Pozycja gestu dostaje w TEJ transakcji powód wyniku lokacji - z uwagą o spadku na
+            # drogę atomową (AR-141: okno z Porządków mówi to samo, co okno po biegu).
             repo.withhold_write(con, kind="commit", location_id=location_id,
                                 commit_id=stan.commit_id, header_hash=res.post_hash,
                                 reason=powod, now=now, pending_ids=[r["id"] for r in rows],
-                                backup_id=backup_pliku[0])
+                                backup_id=backup_pliku[0], item_note=droga)
             wstrzymanie.append(powod)
             return
         uwaga = None
@@ -3342,9 +3358,11 @@ def rename_file(old_path, new_path) -> RenameFileResult:
     for proba, pauza in enumerate((*_PODMIANA_PONOWIENIA, None), start=1):
         try:
             if blad is None and not os.path.exists(old_path):
-                return RenameFileResult("blocked", "źródło nie istnieje na dysku")
+                return RenameFileResult("blocked", PowodPozycji("źródło nie istnieje na dysku",
+                                                                "src_missing"))
             if blad is None and os.path.exists(new_path):
-                return RenameFileResult("blocked", "cel już istnieje na dysku (anty-clobber)")
+                return RenameFileResult("blocked", PowodPozycji(
+                    "cel już istnieje na dysku (anty-clobber)", "dst_exists"))
             if blad is not None and not _na_miejscu(old_path, new_path):
                 return RenameFileResult("failed", _powod_bledu_renamu(blad, proba - 1))
             os.rename(old_path, new_path)
@@ -3362,9 +3380,9 @@ def _powod_bledu_renamu(exc, prob: int) -> str:
     """Powód porażki prymitywu renamu: plik zajęty zdaniem z receptą, każdy inny błąd surowo."""
     kod = getattr(exc, "winerror", None)
     if kod in _RENAME_ZAJETY:
-        return (f"plik zajęty przez inny program (WinError {kod}, prób: {prob}) - "
-                f"spróbuj ponownie za chwilę")
-    return f"{type(exc).__name__}: {exc}"
+        return PowodPozycji(f"plik zajęty przez inny program (WinError {kod}, prób: {prob}) - "
+                            f"spróbuj ponownie za chwilę", "busy", winerror=kod, tries=prob)
+    return f"{type(exc).__name__}: {exc}"           # tekst systemu - bez kodu (granica, AR-141)
 
 
 def renames_for_run(con, run_id):
@@ -3405,9 +3423,11 @@ def _powod_konfliktu_renamu(op) -> str:
     """Powód odmowy renamu pod strażą relokacji (`repo.InplaceConflict`)."""
     if op["phase"] in repo.INPLACE_ISOLATING_PHASES:
         return _powod_izolacji(op)
-    return (f"lokacja dostała zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
-            f"{op['phase']}) po bramce renamu - nagłówek, z którego pochodzi nowa nazwa, mógł się "
-            f"zmienić; renamu nie było, plik nietknięty - odśwież podgląd nazw")
+    return PowodPozycji(
+        f"lokacja dostała zapis w miejscu (operacja {op['id']}, {op['kind']}, faza {op['phase']}) "
+        f"po bramce renamu - nagłówek, z którego pochodzi nowa nazwa, mógł się zmienić; renamu nie "
+        f"było, plik nietknięty - odśwież podgląd nazw", "inplace_after_gate", op_id=op["id"],
+        op_kind=op["kind"], phase=op["phase"])
 
 
 def _przeszedl(src, dst) -> bool:
@@ -3453,9 +3473,12 @@ def _po_awarii_przepiecia(con, *, rename_id, location_id, src, dst, kierunek,
                 return RenameFileResult("applied", None)
             if stan.path != src or stan.in_flight != kierunek:
                 return RenameFileResult(
-                    "failed", f"plik PRZENIESIONY na {dst}, baza NIE przepięta ({blad}), a zamiar "
-                              f"tej próby rozstrzygnął inny proces (baza: {stan.path}, zamiar: "
-                              f"{stan.in_flight}) - kompensacji nie ma; sprawdź, gdzie stoi plik",
+                    "failed", PowodPozycji(
+                        f"plik PRZENIESIONY na {dst}, baza NIE przepięta ({blad}), a zamiar tej "
+                        f"próby rozstrzygnął inny proces (baza: {stan.path}, zamiar: "
+                        f"{stan.in_flight}) - kompensacji nie ma; sprawdź, gdzie stoi plik",
+                        "torn_other", dst=dst, detail=blad, db_path=stan.path,
+                        in_flight=stan.in_flight),
                     torn=True)
             cofniety = rename_file(dst, src)
             if cofniety.status != "applied":
@@ -3464,15 +3487,18 @@ def _po_awarii_przepiecia(con, *, rename_id, location_id, src, dst, kierunek,
             stan.zgas = True
     except Exception as exc2:  # noqa: BLE001 - baza milczy albo plik nie wrócił; zamiar zostaje
         if wrocil:
-            return RenameFileResult("failed", f"baza nie przyjęła przepięcia ({blad}) - plik wrócił "
-                                              f"pod nazwę {src}, ale zamiar renamu nie zgaszony "
-                                              f"({type(exc2).__name__}: {exc2}) - rekoncyliacja "
-                                              f"go zamknie")
-        return RenameFileResult("failed", f"plik PRZENIESIONY na {dst}, ale baza NIE przepięta "
-                                          f"({blad}) - zamiar renamu zapisany: ponowienie albo "
-                                          f"cofnięcie przebiegu dokończy przepięcie", torn=True)
-    return RenameFileResult("failed", f"baza nie przyjęła przepięcia ({blad}) - plik wrócił "
-                                      f"pod nazwę {src}; renamu nie ma, można ponowić")
+            blad_zamiaru = f"{type(exc2).__name__}: {exc2}"
+            return RenameFileResult("failed", PowodPozycji(
+                f"baza nie przyjęła przepięcia ({blad}) - plik wrócił pod nazwę {src}, ale zamiar "
+                f"renamu nie zgaszony ({blad_zamiaru}) - rekoncyliacja go zamknie",
+                "returned_intent_left", detail=blad, src=src, intent_detail=blad_zamiaru))
+        return RenameFileResult("failed", PowodPozycji(
+            f"plik PRZENIESIONY na {dst}, ale baza NIE przepięta ({blad}) - zamiar renamu zapisany: "
+            f"ponowienie albo cofnięcie przebiegu dokończy przepięcie", "torn_db_not", dst=dst,
+            detail=blad), torn=True)
+    return RenameFileResult("failed", PowodPozycji(
+        f"baza nie przyjęła przepięcia ({blad}) - plik wrócił pod nazwę {src}; renamu nie ma, "
+        f"można ponowić", "returned", detail=blad, src=src))
 
 
 def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_path, generation,
@@ -3493,8 +3519,10 @@ def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_p
     try:
         repo.open_rename_intent(con, rename_id=rename_id, direction=kierunek)
     except Exception as exc:  # noqa: BLE001 - bez zamiaru nie ruszamy pliku
-        return RenameFileResult("failed", f"zamiar renamu nie zapisany ({type(exc).__name__}: "
-                                          f"{exc}) - renamu nie było, plik nietknięty")
+        blad = f"{type(exc).__name__}: {exc}"
+        return RenameFileResult("failed", PowodPozycji(
+            f"zamiar renamu nie zapisany ({blad}) - renamu nie było, plik nietknięty",
+            "intent_not_saved", detail=blad))
     przeniesiony = False
     try:
         with repo.guard_file_rename(con, location_id=location_id, new_path=new_path,
@@ -3518,9 +3546,10 @@ def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_p
         if not przed_renamem and not _na_miejscu(old_path, new_path):
             powod = exc.wynik.reason if isinstance(exc, _RenameNieZaszedl) else \
                 f"{type(exc).__name__}: {exc}"
-            return RenameFileResult("failed", f"stan pliku nieznany po błędzie renamu ({powod}) - "
-                                              f"zamiar renamu zostaje: ponowienie albo cofnięcie "
-                                              f"przebiegu rozstrzygnie, gdzie plik stoi", torn=True)
+            return RenameFileResult("failed", PowodPozycji(
+                f"stan pliku nieznany po błędzie renamu ({powod}) - zamiar renamu zostaje: "
+                f"ponowienie albo cofnięcie przebiegu rozstrzygnie, gdzie plik stoi",
+                "torn_unknown", inner=powod), torn=True)
         try:
             repo.drop_rename_intent(con, rename_id=rename_id)
         except Exception:  # noqa: BLE001 - plik nietknięty; zamiar zgasi rekoncyliacja
@@ -3530,14 +3559,14 @@ def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_p
         if isinstance(exc, repo.InplaceConflict):
             return RenameFileResult("blocked", _powod_konfliktu_renamu(exc.op))
         if isinstance(exc, ValueError):                        # anty-clobber w bazie pod blokadą
-            return RenameFileResult("blocked", str(exc))
+            return RenameFileResult("blocked", powod_wyjatku(exc))
         return RenameFileResult("failed", f"{type(exc).__name__}: {exc}")
     return RenameFileResult("applied", None)
 
 
 _COFNIETO = "cofnięto (undo)"
-_ZAMIAR_OTWARTY = ("przerwany rename tego pliku czeka na rozstrzygnięcie (zamiar otwarty) - "
-                   "powód w wyniku rekoncyliacji")
+_ZAMIAR_OTWARTY = PowodPozycji("przerwany rename tego pliku czeka na rozstrzygnięcie (zamiar "
+                               "otwarty) - powód w wyniku rekoncyliacji", "rename_open")
 
 
 def reconcile_renames(con, *, now, volume=None) -> list[FileResult]:
@@ -4482,21 +4511,26 @@ def _zaloz_katalogi(con, run_id, katalogi, *, now, akcja) -> tuple[str | None, i
         try:
             dir_id = repo.open_run_dir(con, run_id=run_id, path=katalog, action=akcja, now=now)
         except Exception as exc:  # noqa: BLE001 - bez zamiaru katalogu nie zakładamy
-            return (f"zamiar katalogu {katalog} nie zapisany ({type(exc).__name__}: {exc}) - "
-                    f"katalogu nie założono, pliku nie ruszono"), zalozone
+            blad = f"{type(exc).__name__}: {exc}"
+            return PowodPozycji(f"zamiar katalogu {katalog} nie zapisany ({blad}) - katalogu nie "
+                                f"założono, pliku nie ruszono", "dir_intent_failed", dir=katalog,
+                                detail=blad), zalozone
         try:
             os.mkdir(katalog)
         except FileExistsError:
             continue                     # ktoś zdążył przed nami - zamiar zostaje bez `done_at`
         except OSError as exc:
-            return (f"katalogu {katalog} nie da się założyć ({type(exc).__name__}: {exc}) - "
-                    f"pliku nie ruszono"), zalozone
+            blad = f"{type(exc).__name__}: {exc}"
+            return PowodPozycji(f"katalogu {katalog} nie da się założyć ({blad}) - pliku nie "
+                                f"ruszono", "dir_create_failed", dir=katalog, detail=blad), zalozone
         zalozone += 1
         try:
             repo.finish_run_dir(con, dir_id=dir_id, now=now)
         except Exception as exc:  # noqa: BLE001 - katalog jest, potwierdzenia nie ma
-            return (f"katalog {katalog} założony, ale jego potwierdzenie w bazie padło "
-                    f"({type(exc).__name__}: {exc}) - zostaje do oka, pliku nie ruszono"), zalozone
+            blad = f"{type(exc).__name__}: {exc}"
+            return PowodPozycji(f"katalog {katalog} założony, ale jego potwierdzenie w bazie padło "
+                                f"({blad}) - zostaje do oka, pliku nie ruszono", "dir_unconfirmed",
+                                dir=katalog, detail=blad), zalozone
     return None, zalozone
 
 
@@ -4566,7 +4600,8 @@ def _przenies_wstecz(con, p, *, now, reason) -> RenameFileResult:
         return RenameFileResult("blocked", _powod_izolacji(izolujaca))
     loc = _location_rename(con, p["location_id"])
     if loc is None or path_key(loc["path"]) != path_key(p["new_path"]):
-        return RenameFileResult("blocked", "plik nie stoi na ścieżce z przebiegu")
+        return RenameFileResult("blocked", PowodPozycji("plik nie stoi na ścieżce z przebiegu",
+                                                        "not_on_run_path"))
     return _rename_pod_straza(con, rename_id=p["rename_id"], kierunek="undo",
                               location_id=p["location_id"], old_path=p["new_path"],
                               new_path=p["old_path"], generation=gen, now=now, status="skipped",
@@ -4583,9 +4618,10 @@ def _wycofaj_pozycje(con, p, status, powod, *, now, przeniesiony, code=None) -> 
     if przeniesiony:
         wynik = _przenies_wstecz(con, p, now=now, reason=f"{_COFNIETO} - {powod}")
         if wynik.status != "applied":
-            powod = (f"{powod}; plik NIE wrócił pod {p['old_path']} ({wynik.reason}) - zostaje pod "
-                     f"nową ścieżką, baza pozycji jak po zapisie; drogą dalej jest cofnięcie "
-                     f"przebiegu")
+            powod = PowodPozycji(
+                f"{powod}; plik NIE wrócił pod {p['old_path']} ({wynik.reason}) - zostaje pod nową "
+                f"ścieżką, baza pozycji jak po zapisie; drogą dalej jest cofnięcie przebiegu",
+                "file_not_back", outer=powod, path=p["old_path"], inner=wynik.reason)
             repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
                                            now=now)
             return FileResult(lid, p["new_path"], "failed", powod)
@@ -4605,8 +4641,13 @@ def _dryf_po_wznowieniu(con, p, *, now, przeniesiony) -> FileResult:
     zostalo = przeniesiony or con.execute(
         "SELECT object_id FROM pending_object_change WHERE id = ?", (p["id"],)).fetchone()[0] \
         is not None
-    powod = ("obiekt klatki zmienił się po kroku bazy tej pozycji (przed awarią) - plik nie jest "
-             "dalej ruszany" + ("; resztę gestu zdejmuje cofnięcie przebiegu" if zostalo else ""))
+    if zostalo:
+        powod = PowodPozycji("obiekt klatki zmienił się po kroku bazy tej pozycji (przed awarią) - "
+                             "plik nie jest dalej ruszany; resztę gestu zdejmuje cofnięcie "
+                             "przebiegu", "drift_resumed_undo")
+    else:
+        powod = PowodPozycji("obiekt klatki zmienił się po kroku bazy tej pozycji (przed awarią) - "
+                             "plik nie jest dalej ruszany", "drift_resumed")
     status = "failed" if zostalo else "skipped"
     _rozlicz_wpisy(con, p, "skipped", powod)
     repo.settle_object_change_item(con, item_id=p["id"], status=status, reason=powod, now=now)
@@ -4649,10 +4690,12 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
         repo.settle_object_change_item(con, item_id=p["id"], status="failed",
                                        reason=_ZAMIAR_OTWARTY, now=now)
         return FileResult(lid, p["old_path"], "failed", _ZAMIAR_OTWARTY)
+    # Każdy powód pozycji to `PowodPozycji` (AR-141): zdanie PL jak dotąd, kod i parametry dla okna
+    # - także po zapisie w bazie (`repo._set_object_change_reason_tx`).
     if loc is None:
-        return _odmowa("skipped", "brak location w bazie")
+        return _odmowa("skipped", PowodPozycji("brak location w bazie", "no_location"))
     if not loc["present"]:
-        return _odmowa("skipped", "kopia zniknęła (present=0)")
+        return _odmowa("skipped", PowodPozycji("kopia zniknęła (present=0)", "copy_gone"))
     izolujaca = repo.isolating_inplace_op(con, lid)
     if izolujaca is not None:
         return _odmowa("blocked", _powod_izolacji(izolujaca))
@@ -4663,47 +4706,58 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
     # `mtime` na dysku - gest nie zawiezie do folderu obiektu pliku, którego podgląd nie widział.
     tutaj = p["new_path"] if przeniesiony else p["old_path"]
     if path_key(loc["path"]) != path_key(tutaj):
-        return _odmowa("blocked", "kopia stoi pod inną ścieżką niż w podglądzie - odśwież podgląd")
+        return _odmowa("blocked", PowodPozycji("kopia stoi pod inną ścieżką niż w podglądzie - "
+                                               "odśwież podgląd", "path_moved"))
     if oczekujace or (p["rename_id"] is not None and not przeniesiony):
         if p["expected_mtime"] is None:
-            return _odmowa("blocked", "kopia bez kotwicy mtime z podglądu - gest nie wie, czy to "
-                                      "ten sam plik")
+            return _odmowa("blocked", PowodPozycji("kopia bez kotwicy mtime z podglądu - gest nie "
+                                                   "wie, czy to ten sam plik", "no_mtime_anchor"))
         if loc["mtime"] != p["expected_mtime"]:
-            return _odmowa("blocked", "plik zmieniony od podglądu (mtime w bazie) - odśwież "
-                                      "podgląd")
+            return _odmowa("blocked", PowodPozycji("plik zmieniony od podglądu (mtime w bazie) - "
+                                                   "odśwież podgląd", "changed_since_preview"))
         try:
             na_dysku = scan._mtime_iso(os.stat(loc["path"]))
         except OSError as exc:
-            return _odmowa("blocked", f"plik nieosiągalny przed zapisem ({type(exc).__name__}: "
-                                      f"{exc})")
+            blad = f"{type(exc).__name__}: {exc}"
+            return _odmowa("blocked", PowodPozycji(f"plik nieosiągalny przed zapisem ({blad})",
+                                                   "unreachable", detail=blad))
         if na_dysku != p["expected_mtime"]:
-            return _odmowa("blocked", "plik zmieniony od ostatniego skanu - Dostawa, potem gest "
-                                      "ponownie", code=CODE_CHANGED_SINCE_SCAN)
+            return _odmowa("blocked", PowodPozycji("plik zmieniony od ostatniego skanu - Dostawa, "
+                                                   "potem gest ponownie", "changed_since_scan"),
+                           code=CODE_CHANGED_SINCE_SCAN)
     if p["rename_id"] is not None and not przeniesiony:
         if p["rename_status"] != "pending":
-            return _odmowa("blocked", f"przeniesienie odbite w poprzedniej próbie (status "
-                                      f"{p['rename_status']}) - odśwież podgląd")
+            return _odmowa("blocked", PowodPozycji(
+                f"przeniesienie odbite w poprzedniej próbie (status {p['rename_status']}) - "
+                f"odśwież podgląd", "rename_bounced", status=p["rename_status"]))
         kolizja = repo.path_owner(con, volume=loc["volume"], path=p["new_path"], location_id=lid)
         if kolizja is not None:
-            return _odmowa("blocked", f"cel zajęty w bazie (location:{kolizja})")
+            return _odmowa("blocked", PowodPozycji(f"cel zajęty w bazie (location:{kolizja})",
+                                                   "target_taken", location=kolizja))
     if oczekujace and (oczekujace[0]["expected_header_hash"] is None
                        or loc["header_hash"] != oczekujace[0]["expected_header_hash"]):
-        return _odmowa("blocked", "nagłówek zmieniony od podglądu albo bez kotwicy (header_hash) - "
-                                  "karta nie wejdzie; odśwież podgląd")
+        return _odmowa("blocked", PowodPozycji("nagłówek zmieniony od podglądu albo bez kotwicy "
+                                               "(header_hash) - karta nie wejdzie; odśwież podgląd",
+                                               "header_changed"))
 
     # (1) BAZA
     try:
         werdykt = repo.apply_object_change_item(con, item_id=p["id"], now=now)
     except ValueError as exc:
-        return _odmowa("blocked", f"zmiana obiektu odmówiona: {exc}")
+        # Odmowa klingi z kodem (konflikt aliasu, nagrobek przez parę xref - `OdmowaZPowodem`)
+        # albo EXPECT prozą (`powod_wyjatku`).
+        odmowa = powod_wyjatku(exc)
+        return _odmowa("blocked", PowodPozycji(f"zmiana obiektu odmówiona: {odmowa}", "db_refused",
+                                               inner=odmowa))
     if werdykt == "copies":
-        return _odmowa("blocked", "klatka nie ma dokładnie jednej obecnej kopii, tej z podglądu - "
-                                  "kopia wjechała albo zniknęła po podglądzie; odśwież podgląd")
+        return _odmowa("blocked", PowodPozycji(
+            "klatka nie ma dokładnie jednej obecnej kopii, tej z podglądu - kopia wjechała albo "
+            "zniknęła po podglądzie; odśwież podgląd", "copies_changed"))
     if werdykt == "drift" and p["object_id"] is not None:
         return _dryf_po_wznowieniu(con, p, now=now, przeniesiony=przeniesiony)
     if werdykt == "drift":
-        return _odmowa("skipped", "obiekt klatki zmienił się od podglądu (dryf) - pozycja "
-                                  "nietknięta; odśwież podgląd")
+        return _odmowa("skipped", PowodPozycji("obiekt klatki zmienił się od podglądu (dryf) - "
+                                               "pozycja nietknięta; odśwież podgląd", "drift"))
 
     # (2) PRZENIESIENIE
     if p["rename_id"] is not None and not przeniesiony:
@@ -4714,8 +4768,9 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
             return _odmowa("blocked", powod)
         katalog_celu = os.path.dirname(p["new_path"])
         if not os.path.isdir(katalog_celu):
-            return _odmowa("blocked", f"katalog celu {katalog_celu} nie istnieje, a podgląd go nie "
-                                      f"zakładał - odśwież podgląd")
+            return _odmowa("blocked", PowodPozycji(
+                f"katalog celu {katalog_celu} nie istnieje, a podgląd go nie zakładał - odśwież "
+                f"podgląd", "target_dir_missing", dir=katalog_celu))
         ruch = _rename_pod_straza(con, rename_id=p["rename_id"], kierunek="commit", location_id=lid,
                                   old_path=p["old_path"], new_path=p["new_path"], generation=gen,
                                   now=now, status="applied", gest=_GEST)
@@ -4724,8 +4779,9 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
                                    status="failed" if ruch.status == "failed" else "blocked",
                                    reason=ruch.reason)
             if ruch.torn:
-                powod = (f"{ruch.reason}; baza pozycji jak po kroku bazy - miejsce pliku "
-                         f"rozstrzyga rekoncyliacja renamu, drogą dalej jest cofnięcie przebiegu")
+                powod = PowodPozycji(f"{ruch.reason}; baza pozycji jak po kroku bazy - miejsce "
+                                     f"pliku rozstrzyga rekoncyliacja renamu, drogą dalej jest "
+                                     f"cofnięcie przebiegu", "rename_torn", inner=ruch.reason)
                 repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
                                                now=now)
                 return FileResult(lid, p["old_path"], "failed", powod)
@@ -4744,12 +4800,16 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
             return FileResult(lid, zapis.wynik.path, "withheld", zapis.wynik.reason,
                               code=CODE_ZEZNANIE_WSTRZYMANE)
         if zapis.wynik.status != "applied":
+            # Powód pisarza karty zostaje prozą w `inner` (warstwa bez kodu - granica AR-141).
             if not zapis.dotknieto:
-                return _odmowa("blocked", f"karta odbita bez zapisu: {zapis.wynik.reason}",
-                               code=zapis.wynik.code)
-            powod = (f"karta zapisana częściowo: {zapis.wynik.reason}; plik zostaje pod "
-                     f"{zapis.wynik.path}, baza pozycji jak po zapisie - najpierw naprawa karty "
-                     f"wg powodu, potem ewentualnie cofnięcie przebiegu")
+                return _odmowa("blocked", PowodPozycji(
+                    f"karta odbita bez zapisu: {zapis.wynik.reason}", "card_refused",
+                    inner=zapis.wynik.reason), code=zapis.wynik.code)
+            powod = PowodPozycji(
+                f"karta zapisana częściowo: {zapis.wynik.reason}; plik zostaje pod "
+                f"{zapis.wynik.path}, baza pozycji jak po zapisie - najpierw naprawa karty wg "
+                f"powodu, potem ewentualnie cofnięcie przebiegu", "card_partial",
+                inner=zapis.wynik.reason, path=zapis.wynik.path)
             repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
                                            now=now)
             return FileResult(lid, zapis.wynik.path, "failed", powod)
@@ -4762,11 +4822,13 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
             return FileResult(lid, loc["path"], "withheld", zly["reason"],
                               code=CODE_ZEZNANIE_WSTRZYMANE)
         if zly["status"] == "failed":
-            powod = f"karta z poprzedniej próby: {zly['reason']}"
+            powod = PowodPozycji(f"karta z poprzedniej próby: {zly['reason']}", "card_prev_failed",
+                                 inner=zly["reason"])
             repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
                                            now=now)
             return FileResult(lid, loc["path"], "failed", powod)
-        return _odmowa("blocked", f"karta odbita w poprzedniej próbie: {zly['reason']}")
+        return _odmowa("blocked", PowodPozycji(f"karta odbita w poprzedniej próbie: {zly['reason']}",
+                                               "card_prev_refused", inner=zly["reason"]))
     repo.settle_object_change_item(con, item_id=p["id"], status="applied", reason=uwaga, now=now)
     teraz = _location_rename(con, lid)
     return FileResult(lid, teraz["path"], "applied", uwaga, code=kod)
@@ -4890,8 +4952,9 @@ def _cofnij_pozycje(con, p, *, now, liczniki) -> FileResult:
         for b in _backupy_lokacji(con, p["run_id"], lid):
             cofniecie = _cofnij_lokacje(con, b["commit_id"], b, now=now)
             if cofniecie.wynik.status != "restored" and not cofniecie.juz:
-                return _stop(cofniecie.wynik.status, cofniecie.wynik.path,
-                             f"karta nie wróciła: {cofniecie.wynik.reason}")
+                return _stop(cofniecie.wynik.status, cofniecie.wynik.path, PowodPozycji(
+                    f"karta nie wróciła: {cofniecie.wynik.reason}", "undo_card",
+                    inner=cofniecie.wynik.reason))
         repo.set_object_change_undo_phase(con, item_id=p["id"], phase="card")
         faza = "card"
     if faza == "card":
@@ -4901,12 +4964,14 @@ def _cofnij_pozycje(con, p, *, now, liczniki) -> FileResult:
             powod, zalozone = _zaloz_katalogi(con, p["run_id"], brak, now=now, akcja="restored")
             liczniki["created"] += zalozone
             if powod is not None:
-                return _stop("blocked", p["new_path"], f"plik nie wrócił: {powod}")
+                return _stop("blocked", p["new_path"], PowodPozycji(f"plik nie wrócił: {powod}",
+                                                                    "undo_file", inner=powod))
             ruch = _przenies_wstecz(con, p, now=now, reason=_COFNIETO)
             if ruch.status != "applied":
                 return _stop("blocked" if ruch.status == "blocked" else "failed",
                              p["old_path"] if ruch.torn else p["new_path"],
-                             f"plik nie wrócił: {ruch.reason}")
+                             PowodPozycji(f"plik nie wrócił: {ruch.reason}", "undo_file",
+                                          inner=ruch.reason))
         repo.set_object_change_undo_phase(con, item_id=p["id"], phase="file")
     uwaga = repo.undo_object_change_db(con, item_id=p["id"], now=now)
     teraz = _location_rename(con, lid)
@@ -4962,11 +5027,12 @@ def undo_object_change(con, run_id, *, now,
         if p["status"] == "blocked":
             loc = _location_rename(con, p["location_id"])
             wynik = FileResult(p["location_id"], "" if loc is None else loc["path"], "skipped",
-                               "odmówione przy zapisie - nic do cofnięcia")
+                               PowodPozycji("odmówione przy zapisie - nic do cofnięcia",
+                                            "undo_refused_earlier"))
         elif p["status"] == "pending" and _bez_sladu(con, p):
-            wynik = _wycofaj_pozycje(con, p, "skipped", "przebieg cofnięty, zanim zapis doszedł "
-                                                        "do tej pozycji", now=now,
-                                     przeniesiony=False)
+            wynik = _wycofaj_pozycje(con, p, "skipped", PowodPozycji(
+                "przebieg cofnięty, zanim zapis doszedł do tej pozycji", "undo_before_write"),
+                now=now, przeniesiony=False)
         else:
             wynik = _cofnij_pozycje(con, p, now=now, liczniki=liczniki)
         kubly[wynik.status].append(wynik)

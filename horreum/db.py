@@ -142,6 +142,9 @@ from importlib import resources
 # i `telescope.retired_at` (CHECK: nie przy scaleniu), ślad przebiegu „Zmień obiekt…”
 # (`object_change_run.made_object_id`/`made_alias_id`) i ślad gestu „Dopisz nowy…” (`telescope_add`:
 # teleskop + granice zdarzeń gestu). Wchodzi PUSTE, bez backfillu - populacja na żywym archiwum 0/0.
+# 0041 to PRZYROST (ADD COLUMN, AR-141): `pending_object_change.reason_code`/`reason_args` - kod
+# i parametry powodu pozycji obok prozy (okno mówi zdaniem w języku UI). Wchodzą PUSTE, bez
+# backfillu - wiersz bez kodu zostaje przy prozie (na żywym archiwum 1 powód na 427 pozycji).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -182,6 +185,7 @@ MIGRATIONS = [
     (38, "0038_replace_intent.sql"),
     (39, "0039_telescope_optics_hand.sql"),
     (40, "0040_axis_retired.sql"),
+    (41, "0041_object_change_reason_code.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

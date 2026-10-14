@@ -581,6 +581,20 @@ class HumanFacts:
     (`telescope_hand_gestures_since`): zmiana ręki ręką nie jest wycofaniem. Nowe rekordy wolno
     dodać. `None` = odniesienie sprzed 0039 - oś poza porównaniem."""
 
+    alias_hand: tuple | None = None
+    """OŚ ALIASÓW RĘKI - czternasta oś (AR-145): MIGAWKA REKORDÓW `(id, alias_norm, object_id)`
+    równoważności nazwy nauczonych gestem człowieka (`object_alias.source='user'`), posortowana po id.
+
+    Ręka obiektu to nie tylko klatki: alias zapisany gestem („Przypisz obiekt…”, „Zmień obiekt…”)
+    przypina szczeblem aliasu resolvera każdą PRZYSZŁĄ klatkę z tą nazwą. Liczba nie wystarcza -
+    przepięcie aliasu na inny obiekt (`UPDATE object_alias SET object_id`) liczności nie zmienia.
+    Ubytkiem jest więc alias odniesienia, którego klucza nie ma już wśród aliasów ręki albo który
+    wskazuje inny obiekt - chyba że wiersz zdjął nagrobek obiektu z przebiegu, który ten alias
+    założył (`alias_hand_retired_since`). Tożsamość PO KLUCZU (`alias_norm` jest UNIQUE), nie po
+    `id`: ta sama nazwa przy tym samym obiekcie pod nowym `id` (cofnięcie i ponowienie gestu) to ten
+    sam fakt ręki. Nowe aliasy wolno dodać. `None` = odniesienie sprzed tej osi - oś poza
+    porównaniem: ani ubytku, ani zdania o jego braku (`human-facts` mówi to wprost)."""
+
     def __post_init__(self):
         # Odniesienie z JSON-a niesie listę; spis z bazy krotkę. Jedna postać, żeby równość spisów
         # mówiła o faktach, a nie o drodze, którą przyszły.
@@ -590,6 +604,9 @@ class HumanFacts:
         if self.telescope_hand is not None:
             object.__setattr__(self, "telescope_hand", tuple(sorted(
                 _telescope_hand_record(r) for r in self.telescope_hand)))
+        if self.alias_hand is not None:
+            object.__setattr__(self, "alias_hand", tuple(sorted(
+                (int(aid), str(norm), int(oid)) for aid, norm, oid in self.alias_hand)))
 
     @property
     def counts(self):
@@ -614,7 +631,24 @@ class HumanFacts:
                                        else list(self.object_hand_frames)),
                 "telescope_hand": (None if self.telescope_hand is None
                                    else [list(r) for r in self.telescope_hand]),
+                "alias_hand": (None if self.alias_hand is None
+                               else [list(r) for r in self.alias_hand]),
                 "event_watermark": self.event_watermark}
+
+    def reka_aliasow(self, wczesniej, zdjete=frozenset()):
+        """Ubytki osi aliasów ręki PO KLUCZU - posortowana krotka `(alias_norm, object_id_było,
+        object_id_jest)`, gdzie `jest` = None, gdy aliasu ręki pod tym kluczem już nie ma (wiersz
+        skasowany albo źródło przestało być `user`), albo `None`, gdy któryś spis nie niesie migawki.
+        `zdjete` = `{(id, alias_norm, object_id)}` zdjęte nagrobkiem obiektu z przebiegu, który je
+        założył (`alias_hand_retired_since`) - wyjaśnione, nie ubytek. Cały rekord, nie samo `id`:
+        SQLite używa ponownie id skasowanego najwyższego wiersza (0040), więc zdjęcie innego aliasu
+        pod tym samym id nie ma prawa wyjaśnić ubytku tego."""
+        if wczesniej.alias_hand is None or self.alias_hand is None:
+            return None
+        teraz = {norm: oid for _aid, norm, oid in self.alias_hand}
+        return tuple(sorted(
+            (rec[1], rec[2], teraz.get(rec[1])) for rec in wczesniej.alias_hand
+            if teraz.get(rec[1]) != rec[2] and rec not in zdjete))
 
     def reka_teleskopu(self, wczesniej, gesty=frozenset()):
         """Ubytki osi teleskopu PO REKORDACH - posortowana krotka `(id, pole, było, jest)`, albo
@@ -646,7 +680,8 @@ class HumanFacts:
         zniknely = set(wczesniej.object_hand_frames) - set(self.object_hand_frames)
         return tuple(sorted(zniknely - przejete)), tuple(sorted(zniknely & przejete))
 
-    def spadki(self, wczesniej, przejete=frozenset(), zdjete_reka=0, gesty_teleskopu=frozenset()):
+    def spadki(self, wczesniej, przejete=frozenset(), zdjete_reka=0, gesty_teleskopu=frozenset(),
+               zdjete_aliasy=frozenset()):
         """Osie, na których fakt ręki UBYŁ wobec wcześniejszego spisu — `{oś: (było, jest)}`.
 
         Pusty słownik == warunek dotrzymany. WZROST NIE JEST NARUSZENIEM: nowy materiał wolno
@@ -665,13 +700,22 @@ class HumanFacts:
         nie większy od niej jest wyjaśniony, większy zostaje ubytkiem w całości.
 
         OŚ TELESKOPU PO REKORDACH (AR-128): ubytek, gdy `reka_teleskopu` zwraca choć jedną pozycję -
-        para `(było, jest)` to wtedy liczba rekordów i liczba ich naruszeń."""
+        para `(było, jest)` to wtedy liczba rekordów i liczba ich naruszeń.
+
+        OŚ ALIASÓW RĘKI PO KLUCZU (AR-145): ubytek, gdy `reka_aliasow` zwraca choć jedną pozycję -
+        para `(było, jest)` = liczba aliasów odniesienia i ile z nich przetrwało nietkniętych.
+        `zdjete_aliasy` = `alias_hand_retired_since` (nagrobek obiektu z przebiegu, który alias
+        założył)."""
         ubytki = {k: (v, self.counts[k]) for k, v in wczesniej.counts.items() if self.counts[k] < v}
         teleskop = self.reka_teleskopu(wczesniej, gesty_teleskopu)
         if teleskop:
             naruszone = {t[0] for t in teleskop}
             ubytki["telescope_hand"] = (len(wczesniej.telescope_hand),
                                         len(wczesniej.telescope_hand) - len(naruszone))
+        aliasy = self.reka_aliasow(wczesniej, zdjete_aliasy)
+        if aliasy:
+            ubytki["alias_hand"] = (len(wczesniej.alias_hand),
+                                    len(wczesniej.alias_hand) - len(aliasy))
         kal = ubytki.get("calibration_links")
         if kal is not None and kal[0] - kal[1] <= zdjete_reka:
             ubytki.pop("calibration_links")
@@ -756,6 +800,38 @@ def _telescope_hand(con):
         "ORDER BY id").fetchall())
 
 
+def _alias_hand(con):
+    """Migawka osi aliasów ręki: `(id, alias_norm, object_id)` każdego aliasu `source='user'`, po id.
+    Tabela jest od 0002, więc migawka powstaje na każdej bazie. `user` jest jedynym źródłem aliasu
+    od ręki w `ALIAS_SOURCES` - pisze je wyłącznie gest (`repo._upsert_object_tx`)."""
+    return tuple((int(r[0]), r[1], int(r[2])) for r in con.execute(
+        "SELECT id, alias_norm, object_id FROM object_alias WHERE source = 'user' "
+        "ORDER BY id").fetchall())
+
+
+def alias_hand_retired_since(con, watermark):
+    """`{(id, alias_norm, object_id)}` aliasów ręki zdjętych NAGROBKIEM OBIEKTU po znaku wodnym -
+    wyjaśnienie ubytków osi `alias_hand` w `HumanFacts.spadki`. READ-ONLY. `None` → pusty zbiór.
+
+    JEDYNY DOWÓD to ślad klingi (`repo._retire_orphan_tx` w cofnięciu „Zmień obiekt…”):
+    `object.alias_retired` z aktorem `user:*` i źródłem `user`, którego `run_id` wskazuje przebieg,
+    który TEN alias założył (`made_alias_id`, `alias_norm` przebiegu i `made_object_id` = cel
+    zdarzenia). Nagrobek zdejmuje wyłącznie alias własnego gestu (odmowa `foreign_alias`), więc alias
+    ręki sprzed gestu tą drogą nie znika - a gdyby zniknął, zostaje ubytkiem. Przepięcia aliasu ręki
+    nie robi dziś żaden gest (`repo.rebind_object_alias` omija `source='user'`), więc przepięcie
+    wyjaśnienia nie ma. Baza sprzed 0040 nie ma śladu przebiegu ani nagrobka: pusty zbiór."""
+    if watermark is None or con.execute("PRAGMA user_version").fetchone()[0] < 40:
+        return frozenset()
+    return frozenset((int(r[0]), r[1], int(r[2])) for r in con.execute(
+        "SELECT r.made_alias_id, r.alias_norm, r.made_object_id FROM event e "
+        "JOIN object_change_run r ON r.run_id = json_extract(e.payload, '$.run_id') "
+        "WHERE e.id > ? AND e.verb = 'object.alias_retired' AND e.actor LIKE 'user:%' "
+        "AND json_extract(e.payload, '$.source') = 'user' "
+        "AND json_extract(e.payload, '$.alias_norm') = r.alias_norm "
+        "AND e.target = 'object:' || r.made_object_id AND r.made_alias_id IS NOT NULL",
+        (watermark,)).fetchall())
+
+
 def calibration_hand_restored_since(con, watermark):
     """Ile wskazań kalibratora RĘKĄ zdjął gest „Przywróć automat” PO znaku wodnym `watermark` -
     `int`. READ-ONLY. Dowodem jest wyłącznie ślad klingi (`repo.unlink_calibration`):
@@ -815,6 +891,7 @@ def human_facts_census(con):
         testimony_hand=_testimony_hand(con),
         notes_hand=_notes_hand(con),
         telescope_hand=_telescope_hand(con),
+        alias_hand=_alias_hand(con),
     )
 
 

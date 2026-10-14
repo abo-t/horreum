@@ -727,6 +727,13 @@ class PlannerView(QWidget):
         self.cirrus = QCheckBox(i18n.t("planner.layer_cirrus"))   # D-0731-9: domyślnie OFF
         self.cirrus.toggled.connect(self._queue_replan)
         form.addRow("", self.cirrus)
+        # Kandydatki i mimiki PN (`Q14`): CHOWA cele, więc jak filtr kadru - domyślnie wyłączony,
+        # pamiętany w `QSettings`, nazwany w tytule zwiniętego paska i z licznikiem w nocie.
+        self.hide_pn = QCheckBox(i18n.t("planner.hide_pn"))
+        self.hide_pn.setToolTip(i18n.t("planner.hide_pn_tip"))
+        self.hide_pn.setChecked(self._read_setting("hide_pn", 0.0) == 1.0)
+        self.hide_pn.toggled.connect(self._on_hide_pn_toggled)
+        form.addRow("", self.hide_pn)
 
         self.status_combo = QComboBox()
         self.status_combo.addItem(i18n.t("planner.status_any"), None)
@@ -816,6 +823,8 @@ class PlannerView(QWidget):
         self._settings.setValue(_SETTINGS_PREFIX + "max_panels", self.max_panels.value())
         self._settings.setValue(_SETTINGS_PREFIX + "max_panels_on",
                                 1.0 if self.max_panels_on.isChecked() else 0.0)
+        self._settings.setValue(_SETTINGS_PREFIX + "hide_pn",
+                                1.0 if self.hide_pn.isChecked() else 0.0)
 
     def _on_reset_thresholds(self):
         """Wszystkie progi na domyślne + JEDEN re-plan. `_loading` tłumi sygnały pośrednie, więc
@@ -831,6 +840,7 @@ class PlannerView(QWidget):
             self.min_fill.setValue(_MIN_FILL_DEFAULT)
             self.max_panels_on.setChecked(False)
             self.max_panels.setValue(_MAX_PANELS_DEFAULT)
+            self.hide_pn.setChecked(False)
         finally:
             self._loading = False
         self.max_cost.setEnabled(False)
@@ -885,6 +895,11 @@ class PlannerView(QWidget):
         self._sync_controls_title()
         self._queue_replan()
 
+    def _on_hide_pn_toggled(self, _on):
+        self._save_thresholds()
+        self._sync_controls_title()
+        self._queue_replan()
+
     def _on_max_cost_toggled(self, on):
         self.max_cost.setEnabled(on)
         self._save_thresholds()
@@ -916,6 +931,12 @@ class PlannerView(QWidget):
             # rachunek nie zrobił. Wynik jeszcze bez filtra (`off`, bieg w locie) dopisku nie daje;
             # `_on_done` odświeża tytuł, gdy przyjdzie świeży.
             if self._result is not None and self._result.rig_filter not in ("off", "on"):
+                text += i18n.t("planner.controls_state_rig_off")
+        # Przełącznik PN tą samą regułą: nazwany, gdy włączony; „nieczynny" z policzonego wyniku
+        # (tryb szukania go pomija).
+        if self.hide_pn.isChecked():
+            text += i18n.t("planner.controls_state_pn")
+            if self._result is not None and self._result.pn_filter == "find":
                 text += i18n.t("planner.controls_state_rig_off")
         self.controls_toggle.setText(text)
 
@@ -1026,7 +1047,8 @@ class PlannerView(QWidget):
                 "min_hours": self.min_hours.value(),
                 "max_cost": self.max_cost.value() if self.max_cost_on.isChecked() else None,
                 "min_fill": self.min_fill.value() / 100.0 if self.min_fill_on.isChecked() else None,
-                "max_panels": self.max_panels.value() if self.max_panels_on.isChecked() else None}
+                "max_panels": self.max_panels.value() if self.max_panels_on.isChecked() else None,
+                "hide_doubtful_pn": self.hide_pn.isChecked()}
 
     def _queue_replan(self, *_a):
         if not self._loading:
@@ -1211,7 +1233,7 @@ class PlannerView(QWidget):
         typed = (self._keep_canon, self.panel_note.text()) if self.panel_note.isModified() else None
         self.model.set_rows(rows)
         empty = not rows
-        self.empty_note.setText(i18n.t("planner.empty_find", needle=self.find_edit.text().strip())
+        self.empty_note.setText(pm.empty_find_text(self._result, self.find_edit.text().strip())
                                 if self.find_edit.text().strip()
                                 else i18n.t("planner.empty_rig" if self._result.rig_filter == "on"
                                             else "planner.empty"))

@@ -42,7 +42,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0038 replace_intent (zamiar podmiany drogi atomowej, AR-64)
     # + 0039 telescope.focal_user + f_ratio_user (optyka teleskopu z ręki, AR-128)
     # + 0040 nagrobek object/telescope.retired_at + ślady gestów (cofnięcie zdejmuje, AR-133/AR-137)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 40
+    # + 0041 pending_object_change.reason_code + reason_args (kod powodu pozycji, AR-141)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 41
     con.close()
 
 

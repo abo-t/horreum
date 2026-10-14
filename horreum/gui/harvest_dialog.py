@@ -554,6 +554,7 @@ class HarvestReleasesWorker(QObject):
     końca i nikt jej nie odbiera. Funkcję bierze z modułu rdzenia W CHWILI biegu (seam testowy)."""
 
     done = Signal(int, object)        # (generacja, [ReleaseRow])
+    missing = Signal(int, object)     # (generacja, karty bez folderu) - przed `done` tej generacji
     failed = Signal(int, str)         # (generacja, komunikat)
     finished = Signal()
 
@@ -575,9 +576,11 @@ class HarvestReleasesWorker(QObject):
             finally:
                 if own:
                     con.close()
+            brak = harvest.missing_roots(self._roots)
         except Exception as exc:                     # lista pada szczerze, nie cichą śmiercią wątku
             self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
         else:
+            self.missing.emit(self._gen, brak)
             self.done.emit(self._gen, rows)
         finally:
             self.finished.emit()
@@ -675,6 +678,7 @@ class HarvestDialog(QDialog):
         self._rel_pending = False        # zamówienie przyszło w biegu listy → świeża lista po sprzątnięciu
         self._rel_started = False        # pierwsza lista przyszła (wybór startowy zrobiony albo oddany polu)
         self._releases = []              # wiersze listy wydań w kolejności tabeli
+        self._rel_missing = ()           # karty bez folderu na dysku z ostatniej listy (AR-147)
         self.setWindowTitle(i18n.t("harvest.title"))
         self.setModal(True)
         self.resize(980, 600)
@@ -1311,6 +1315,7 @@ class HarvestDialog(QDialog):
             self._show_rel_notice(i18n.t("harvest.rel.probing"))
         worker = HarvestReleasesWorker(self._rel_roots, self._rel_gen, archive_root=self._archive_root,
                                        db_path=self._db_path, con=None if self._db_path else self.con)
+        worker.missing.connect(self._on_releases_missing)
         worker.done.connect(self._on_releases_done)
         worker.failed.connect(self._on_releases_failed)
         self._rel_worker = worker
@@ -1345,6 +1350,13 @@ class HarvestDialog(QDialog):
         self._zwolnij_gdy_wolne()                    # lista dobiegła po zamknięciu - okno może zniknąć
 
     @Slot(int, object)
+    def _on_releases_missing(self, gen, roots):
+        """Karty bez folderu z listy bieżącej generacji - zdanie nad listą czyta je w `_fill_releases`
+        (sygnał przychodzi przed `done` tej samej generacji); lista starszego zamówienia odpada."""
+        if not self._closing and gen == self._rel_gen:
+            self._rel_missing = tuple(roots)
+
+    @Slot(int, object)
     def _on_releases_done(self, gen, rows):
         """Lista bieżącej generacji: tabela, zaznaczenie za polem, a przy PIERWSZEJ liście - wybór
         startowy. Wybór startowy zaznacza najnowsze wydanie z kandydatami i sonduje jego `out`, ale
@@ -1376,6 +1388,7 @@ class HarvestDialog(QDialog):
         if gen != self._rel_gen:
             self._rel_pending = True
             return
+        self._rel_missing = ()                       # braki kart należą do listy, która się udała
         self._show_rel_notice(i18n.t("harvest.rel.failed", msg=msg), "error")
         if not self._rel_started:
             self._rel_started = True
@@ -1408,9 +1421,20 @@ class HarvestDialog(QDialog):
         finally:
             self.rel_table.blockSignals(blocked)
         self._render_release_states()
-        self._show_rel_notice("" if rows else i18n.t("harvest.rel.none"))
+        self._show_rel_notice(*self._zdanie_listy(rows))
         path = self._requested[0] if self._requested is not None else clean_path(self.edit_output.text())
         self._select_release_for(path)
+
+    def _zdanie_listy(self, rows):
+        """`(zdanie, rola)` nad listą wydań: karta bez folderu na dysku mówi o SOBIE w roli ostrzeżenia
+        (AR-147) - także obok listy z innych kart, bo jej wydań lista nie policzyła - a zdanie o pustych
+        kartach zostaje dla kart, które istnieją i nie mają wydań. Pusty tekst = lista mówi sama."""
+        brak = self._rel_missing
+        if len(brak) == 1:
+            return i18n.t("harvest.rel.missing_one", path=brak[0]), "warn"
+        if brak:
+            return i18n.t_plural("harvest.rel.missing_many", len(brak), paths=", ".join(brak)), "warn"
+        return ("" if rows else i18n.t("harvest.rel.none")), None
 
     def _take_lineage(self, rows):
         """Stosy z listy, których rodowodu dokładnego baza nie ma (AR-104: zwykłe „Zamknij”, potem

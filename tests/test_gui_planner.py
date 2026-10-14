@@ -438,6 +438,58 @@ def test_szukanie_pomija_progi_i_mowi_o_tym(view):
     assert "POMIJA" in view.notes_label.text().upper()
 
 
+def test_szukanie_po_kanonie_i_zdanie_dla_nazwy_spoza_puli(view):
+    """AR-146 na ekranie: „M 27” trafia jak „M27”, a „M 13” zamiast „nie znam celu” mówi, że to
+    NGC6205 i że planer świadomie go nie bierze."""
+    view.find_edit.setText("M 27")
+    view.replan()
+    assert [view.model.row_at(r).canon for r in range(view.model.rowCount())] == ["NGC6853"]
+    view.find_edit.setText("M 13")
+    view.replan()
+    assert view.model.rowCount() == 0 and not view.empty_note.isHidden()
+    assert view.empty_note.text() == "„M 13” = NGC6205, poza celami planera."
+
+
+def test_przelacznik_pn_domyslnie_wylaczony_wlaczony_tnie_i_nazywa_sie(view):
+    """Q14: przełącznik kandydatek i mimik PN na wzór filtra kadru - domyślnie wyłączony, włączony
+    tnie listę, tytuł zwiniętego paska go nazywa, nota mówi ile schował; w trybie szukania
+    tytuł mówi „nieczynny"."""
+    assert view.hide_pn.isChecked() is False and view._params()["hide_doubtful_pn"] is False
+    assert view._result.pn_filter == "off"
+    assert "PN" not in view.controls_toggle.text()
+    base = view.model.rowCount()
+    kandydatka = next(view.model.row_at(r).canon for r in range(base)
+                      if view.model.row_at(r).source.target.status == "candidate")
+    view.hide_pn.setChecked(True)
+    view.replan()
+    assert view._result.pn_filter == "on"
+    assert 0 < view.model.rowCount() < base
+    assert kandydatka not in {view.model.row_at(r).canon for r in range(view.model.rowCount())}
+    assert "bez kandydatek i mimik PN" in view.controls_toggle.text()
+    assert "Przełącznik PN schował" in view.notes_label.text()
+    view.find_edit.setText(kandydatka)
+    view.replan()
+    assert [view.model.row_at(r).canon for r in range(view.model.rowCount())][0] == kandydatka
+    assert view.controls_toggle.text().endswith("bez kandydatek i mimik PN (nieczynny)")
+
+
+def test_przelacznik_pn_przezywa_zamkniecie_i_reset_go_gasi(qapp, tmp_path, ustawienia):
+    con = _seed(str(tmp_path / "pn.db"))
+    first = PlannerView(con, db_path=None)
+    first.hide_pn.setChecked(True)
+    first.close()
+    assert float(ustawienia.value("planner/hide_pn")) == 1.0
+    second = PlannerView(con, db_path=None)
+    try:
+        assert second.hide_pn.isChecked() is True and second._params()["hide_doubtful_pn"] is True
+        second._on_reset_thresholds()
+        assert second.hide_pn.isChecked() is False
+        assert float(ustawienia.value("planner/hide_pn")) == 0.0
+    finally:
+        second.close()
+        con.close()
+
+
 def test_status_filtruje_a_kuratela_widac_w_kolumnie(view):
     canon = view.model.row_at(0).canon
     repo.set_target_plan(view.con, canon=canon, status="planned", priority=1, now=NOW)

@@ -105,8 +105,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v40_po_migracji(tmp_path):
-    """0040 podnosi user_version do 40 (świeża baza leci 0002→…→0040 sekwencyjnie; 0025 = wersja
+def test_user_version_v41_po_migracji(tmp_path):
+    """0041 podnosi user_version do 41 (świeża baza leci 0002→…→0041 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -121,13 +121,57 @@ def test_user_version_v40_po_migracji(tmp_path):
     0038 = zamiar podmiany drogi atomowej `replace_intent`, AR-64; 0039 = optyka teleskopu z ręki
     `telescope.focal_user`/`f_ratio_user`, AR-128; 0040 = nagrobek `object`/`telescope.retired_at`,
     ślad przebiegu `object_change_run.made_object_id`/`made_alias_id` i ślad gestu „Dopisz nowy…”
-    `telescope_add`, AR-133/AR-137).
+    `telescope_add`, AR-133/AR-137; 0041 = kod i parametry powodu pozycji
+    `pending_object_change.reason_code`/`reason_args`, AR-141).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 40
-    assert db.SCHEMA_VERSION == 40
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 41
+    assert db.SCHEMA_VERSION == 41
+    con.close()
+
+
+def test_0041_kod_powodu_pozycji_przyrost_na_bazie_v40_i_CHECK(tmp_path):
+    """AR-141: 0041 na bazie v40 z pozycją niosącą prozę - kolumny kodu wchodzą PUSTE (bez
+    backfillu), proza nietknięta co do znaku, druga migracja = no-op. CHECK (baza = ostatnia bramka):
+    kod bez prozy, parametry bez kodu, kod bez parametrów i parametry nie-obiekt JSON odbite;
+    trójka z kodeka `item_reasons` wchodzi i wraca tym samym powodem."""
+    from horreum import item_reasons
+    con = _baza_v35_z_kopia(str(tmp_path / "h.db"))
+    for version, filename in db.MIGRATIONS:
+        if 35 < version <= 40:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    proza = "PermissionError: [WinError 32] plik zajęty: 'R:\\\\L\\\\a.fits'"
+    con.execute("INSERT INTO object_change_run(run_id, mode, created_at) VALUES ('R', 'align', 't')")
+    con.execute("INSERT INTO pending_object_change(id, run_id, frame_id, location_id, old_path, "
+                "object_change, status, reason) VALUES (1, 'R', 1, 1, 'R:\\L\\a.fits', 0, "
+                "'blocked', ?)", (proza,))
+    con.commit()
+    assert db._user_version(con) == 40
+    assert db.migrate(con) == db.SCHEMA_VERSION == 41
+    assert tuple(con.execute("SELECT reason, reason_code, reason_args FROM pending_object_change"
+                             ).fetchone()) == (proza, None, None)
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    zle = ((None, "copy_gone", "{}"),          # kod bez prozy
+           ("x", None, "{}"),                  # parametry bez kodu
+           ("x", "copy_gone", None),           # kod bez parametrów
+           ("x", "copy_gone", "[1]"),          # parametry nie-obiekt
+           ("x", "copy_gone", "{zły"),         # nie-JSON
+           ("x", "", "{}"))                    # kod pusty
+    for trojka in zle:
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute("UPDATE pending_object_change SET reason = ?, reason_code = ?, "
+                        "reason_args = ? WHERE id = 1", trojka)
+    powod = item_reasons.PowodPozycji(
+        "plik nie wrócił: zrodlo nie istnieje", "undo_file",
+        inner=item_reasons.PowodPozycji("zrodlo nie istnieje", "src_missing"))
+    con.execute("UPDATE pending_object_change SET reason = ?, reason_code = ?, reason_args = ? "
+                "WHERE id = 1", item_reasons.do_bazy(powod))
+    wrocil = item_reasons.z_bazy(*con.execute(
+        "SELECT reason, reason_code, reason_args FROM pending_object_change").fetchone())
+    assert wrocil == powod and wrocil.code == "undo_file"
+    assert dict(wrocil.params)["inner"].code == "src_missing"
     con.close()
 
 

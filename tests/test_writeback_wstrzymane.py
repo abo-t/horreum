@@ -442,6 +442,41 @@ def test_cofniecie_gestu_niesie_wstrzymanie_po_wznowieniu(tmp_path, monkeypatch)
     s.con.close()
 
 
+def test_pozycja_wstrzymana_po_spadku_niesie_w_bazie_to_co_wynik(tmp_path, monkeypatch):
+    """AR-141 (Q4/Z4): karta spada na drogę atomową, a zeznanie klatki zapisu nie przyjmuje (druga
+    kopia). Wynik biegu dopisywał drogę do powodu, a pozycja w bazie jej nie miała - okno
+    z Porządków mówiło mniej niż okno po biegu. Teraz `withhold_write(item_note=)` niesie notę
+    spadku do pozycji W TEJ transakcji: proza pozycji == proza wyniku, kod `testimony_withheld`
+    z fragmentami (`copies`, `lead_*`) i notą `inplace_fallback`. Falsyfikator: wstrzymanie bez
+    `item_note` - proza pozycji krótsza o drogę."""
+    from horreum import item_reasons
+    s, run = _scena_gestu(tmp_path)
+    prawdziwa = repo.apply_object_change_item
+
+    def _baza_potem_kopia(con, **kw):
+        wynik = prawdziwa(con, **kw)
+        kopia = tmp_path / "INNE" / "a.fits"
+        kopia.parent.mkdir(exist_ok=True)
+        shutil.copyfile(s.stare[0], kopia)
+        _wczytaj(con, kopia)
+        return wynik
+    monkeypatch.setattr(repo, "apply_object_change_item", _baza_potem_kopia)
+    monkeypatch.setattr(writeback, "write_changes_inplace",
+                        lambda *a, **kw: writeback.Fallback("karta poza zapisem w miejscu"))
+    wynik = writeback.commit_object_change(s.con, run, now=NOW)
+    monkeypatch.undo()
+    (fr,) = wynik.withheld
+    assert fr.reason.endswith("; droga dotychczasowa: karta poza zapisem w miejscu"), fr.reason
+    powod = item_reasons.z_bazy(*s.con.execute(
+        "SELECT reason, reason_code, reason_args FROM pending_object_change").fetchone())
+    assert str(powod) == fr.reason and powod.code == "testimony_withheld"
+    p = dict(powod.params)
+    assert dict(p["copies"].params) == {"n": 2} and p["lead"].code in ("lead_copy", "lead_none")
+    assert [(n.code, dict(n.params)) for n in p["notes"]] == [
+        ("inplace_fallback", {"detail": "karta poza zapisem w miejscu"})]
+    s.con.close()
+
+
 # ============================================================ zdania powierzchni
 
 

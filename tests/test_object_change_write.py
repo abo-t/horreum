@@ -785,3 +785,228 @@ def test_cofniecie_wraca_przy_sciezce_bazy_w_innej_wielkosci_liter(tmp_path):
     con.commit()
     cofniecie = writeback.undo_object_change(con, run, now=NOW)
     assert len(cofniecie.applied) == 1 and _sha1(s.stare[2]) == s.sha1[2]
+
+
+# ============================================================ powód pozycji z kodem w bazie (AR-141)
+
+
+def _trojka(con, run_id="R1"):
+    """`(reason, reason_code, reason_args)` pierwszej pozycji przebiegu."""
+    return tuple(con.execute("SELECT reason, reason_code, reason_args FROM pending_object_change "
+                             "WHERE run_id = ? ORDER BY id", (run_id,)).fetchone())
+
+
+def _powod_bazy(con, run_id="R1"):
+    from horreum import item_reasons
+    return item_reasons.z_bazy(*_trojka(con, run_id))
+
+
+def _args(powod):
+    return dict(powod.params)
+
+
+@pytest.mark.parametrize("scena", ["karta", "dryf", "mtime", "alias"])
+def test_powod_pozycji_w_bazie_ma_kod_a_proza_to_proza_wyniku(tmp_path, scena):
+    """AR-141: odmowy sterownika zapisują w pozycji KOD z parametrami obok prozy (0041). Proza
+    w bazie = proza wyniku biegu (CLI, log), a powód z bazy wraca z tym samym kodem i tymi samymi
+    parametrami - także powodem niższej warstwy w `inner` (odmowa klingi z kodem; proza pisarza
+    karty bez kodu). Falsyfikator: `settle_object_change_item` bez trójki - kod NULL."""
+    s = _Scena(tmp_path)
+    con = s.con
+    pozycja = s.pozycja(0)
+    target = None
+    if scena == "karta":
+        pozycja = oc.ObjectChangeItem(**{**pozycja.__dict__, "card_new": "IC 405ł"})
+    elif scena == "mtime":
+        pozycja = oc.ObjectChangeItem(**{**pozycja.__dict__, "expected_mtime": None})
+    elif scena == "alias":
+        m42, _ = repo.upsert_object(con, canon="M42", catalog="M", kind="deep_sky", now=NOW)
+        repo.add_object_alias(con, alias_norm="flamingstar", object_id=m42, source="user", now=NOW)
+        target = oc.ObjectTarget("IC405", "IC", "deep_sky", "flamingstar", "IC 405")
+    plan = s.plan(pozycje=[pozycja])
+    if target is not None:
+        plan = oc.ObjectChangePlan(plan.run_id, target, plan.items, ())
+    run = s.stage(plan)
+    if scena == "dryf":
+        m42, _ = repo.upsert_object(con, canon="M42", catalog="M", kind="deep_sky", now=NOW)
+        repo.assign_object(con, frame_id=_wiersz(con, s.stare[0])["frame_id"], object_id=m42,
+                           object_source="header", now=NOW)
+    wynik = writeback.commit_object_change(con, run, now=NOW)
+    (fr,) = wynik.blocked + wynik.skipped
+    oczekiwany = {"karta": "card_refused", "dryf": "drift", "mtime": "no_mtime_anchor",
+                  "alias": "db_refused"}[scena]
+    z_bazy = _powod_bazy(con)
+    assert _trojka(con)[0] == fr.reason and fr.reason.code == z_bazy.code == oczekiwany
+    assert _args(z_bazy) == _args(fr.reason)
+    if scena == "alias":                       # odmowa klingi z kodem w `inner` (Q6)
+        inner = _args(z_bazy)["inner"]
+        assert (inner.code, _args(inner)) == ("alias_conflict",
+                                              {"alias": "flamingstar", "object_id": m42})
+    if scena == "karta":                       # pisarz karty bez kodu - proza w `inner` (granica)
+        assert type(_args(z_bazy)["inner"]) is str
+        cof = writeback.undo_object_change(con, run, now=NOW)
+        assert [r.reason.code for r in cof.skipped] == ["undo_refused_earlier"]
+
+
+def test_doklejka_CAS_reki_to_nota_z_kodem_a_proza_bez_zmian(tmp_path, monkeypatch):
+    """Odmowa karty po kroku bazy, gdy klatka niesie już nowszą decyzję ręki: wycofanie CAS-em
+    odmawia, klinga dokleja zdanie „baza: … zostaje” - w bazie jako nota `hand_newer_kept` przy
+    kodzie odmowy, proza znak w znak jak dotąd (`; ` + zdanie)."""
+    s = _Scena(tmp_path)
+    con = s.con
+    run = s.stage(s.plan(pozycje=[s.pozycja(0)]))
+
+    def _reka_i_odmowa(con_, stan, lid, rows, **kw):
+        _reka_na_m42(con_, s.nowe[0], _oid(con_, "IC405"))
+        return writeback._ZapisLokacji(writeback.FileResult(lid, str(s.nowe[0]), "blocked",
+                                                            "odmowa pisarza"))
+    monkeypatch.setattr(writeback, "_zapisz_lokacje", _reka_i_odmowa)
+    wynik = writeback.commit_object_change(con, run, now=NOW)
+    (fr,) = wynik.blocked
+    z_bazy = _powod_bazy(con)
+    assert str(z_bazy) == (f"{fr.reason}; baza: klatka niesie już nowszą decyzję niż gest - "
+                           f"zostaje")
+    assert z_bazy.code == "card_refused" and _args(z_bazy)["inner"] == "odmowa pisarza"
+    assert [n.code for n in _args(z_bazy)["notes"]] == ["hand_newer_kept"]
+
+
+def test_plik_ktory_nie_wrocil_niesie_kod_odmowy_i_kod_powrotu(tmp_path, monkeypatch):
+    """Odmowa karty po przeniesieniu, a powrót pliku odbity: pozycja 'failed' z kodem
+    `file_not_back` - `outer` = odmowa karty, `inner` = powód warstwy renamu Z KODEM."""
+    from horreum.item_reasons import PowodPozycji
+    s = _Scena(tmp_path)
+    con = s.con
+    zla = oc.ObjectChangeItem(**{**s.pozycja(0).__dict__, "card_new": "IC 405ł"})
+    run = s.stage(s.plan(pozycje=[zla]))
+    monkeypatch.setattr(writeback, "_przenies_wstecz", lambda *a, **kw: writeback.RenameFileResult(
+        "blocked", PowodPozycji("plik nie stoi na ścieżce z przebiegu", "not_on_run_path")))
+    (fr,) = writeback.commit_object_change(con, run, now=NOW).failed
+    z_bazy = _powod_bazy(con)
+    assert str(z_bazy) == fr.reason and z_bazy.code == "file_not_back"
+    assert (_args(z_bazy)["outer"].code, _args(z_bazy)["inner"].code) == ("card_refused",
+                                                                          "not_on_run_path")
+    assert _args(z_bazy)["path"] == str(s.stare[0])
+
+
+def test_cofniecie_zatrzymane_ma_kod_a_awans_fazy_czysci_trojke(tmp_path, monkeypatch):
+    """Cofnięcie zatrzymane na powrocie pliku: powód `undo_file` z kodem renamu w `inner` (faza
+    `card`). Ponowienie przy nowszej decyzji ręki w bazie domyka pozycję z `undo_hand_newer`, a awans
+    fazy czyści CAŁĄ trójkę (kod nie zostaje przy pozycji bez powodu)."""
+    from horreum.item_reasons import PowodPozycji
+    s = _Scena(tmp_path)
+    con = s.con
+    run = s.stage(s.plan(pozycje=[s.pozycja(0)]))
+    assert len(writeback.commit_object_change(con, run, now=NOW).applied) == 1
+    prawdziwy = writeback._przenies_wstecz
+    monkeypatch.setattr(writeback, "_przenies_wstecz", lambda *a, **kw: writeback.RenameFileResult(
+        "blocked", PowodPozycji("plik nie stoi na ścieżce z przebiegu", "not_on_run_path")))
+    (fr,) = writeback.undo_object_change(con, run, now=NOW).blocked
+    z_bazy = _powod_bazy(con)
+    assert str(z_bazy) == fr.reason and z_bazy.code == "undo_file"
+    assert _args(z_bazy)["inner"].code == "not_on_run_path"
+    monkeypatch.setattr(writeback, "_przenies_wstecz", prawdziwy)
+    _reka_na_m42(con, s.nowe[0], _oid(con, "IC405"))
+    (fr,) = writeback.undo_object_change(con, run, now=NOW).applied
+    assert fr.reason.code == "undo_hand_newer" and _powod_bazy(con).code == "undo_hand_newer"
+    con.execute("UPDATE pending_object_change SET undo_phase = NULL, status = 'applied'")
+    con.commit()
+    repo.set_object_change_undo_phase(con, item_id=_pozycje(con)[0]["id"], phase="card")
+    assert _trojka(con) == (None, None, None)
+
+
+def test_powod_przezywa_copy_deepcopy_i_pickle_z_zagniezdzeniem():
+    """AR-141 (S2): `PowodPozycji` to podklasa `str` z obowiązkowym kodem - dawny protokół `str`
+    odtwarzał obiekt samym tekstem (`TypeError` w `copy`, `deepcopy`, `pickle`, `dataclasses.asdict`).
+    Odtworzenie zachowuje tekst, kod, parametry, powód zagnieżdżony i uwagi."""
+    import copy
+    import dataclasses
+    import pickle
+    from horreum.item_reasons import PowodPozycji, dopisz
+    inner = PowodPozycji("źródło nie istnieje na dysku", "src_missing")
+    powod = dopisz(PowodPozycji("plik nie wrócił: źródło nie istnieje na dysku", "undo_file",
+                                inner=inner),
+                   PowodPozycji("nowsza decyzja ręki o obiekcie klatki zostaje", "hand_newer"))
+    # pickle wyłącznie na obiekcie zbudowanym w tym teście (round-trip protokołu), bez danych z zewnątrz
+    kopie = [copy.copy(powod), copy.deepcopy(powod),
+             pickle.loads(pickle.dumps(powod, protocol=pickle.HIGHEST_PROTOCOL)),
+             pickle.loads(pickle.dumps(powod, protocol=0)),
+             dataclasses.asdict(writeback.FileResult(1, "p", "blocked", powod))["reason"]]
+    for k in kopie:
+        assert type(k) is PowodPozycji and str(k) == str(powod) and k.code == "undo_file"
+        p = dict(k.params)
+        assert (p["inner"].code, str(p["inner"])) == ("src_missing", str(inner))
+        assert [(n.code, str(n)) for n in p["notes"]] == [
+            ("hand_newer", "nowsza decyzja ręki o obiekcie klatki zostaje")]
+
+
+def test_dopisz_noty_z_kodem_do_prozy_to_jawna_granica():
+    """AR-141 (K1): nota z kodem doklejona do prozy bez kodu gubiła kod po cichu. `dopisz` odmawia
+    (`ValueError`, EXPECT); pisarz (`writeback._dopisz`) i doklejka klingi owijają prozę w kopertę
+    `prose` - zdanie znak w znak, nota z kodem zostaje na liście uwag."""
+    from horreum.item_reasons import PowodPozycji, dopisz
+    nota = PowodPozycji("baza: klatka niesie już nowszą decyzję niż gest - zostaje",
+                        "hand_newer_kept")
+    with pytest.raises(ValueError, match="kopert"):
+        dopisz("proza systemu", nota)
+    assert dopisz(None, nota) is nota and dopisz("a", "b") == "a; b" and dopisz("a", None) == "a"
+    wynik = writeback._dopisz("proza pisarza", nota)
+    assert str(wynik) == f"proza pisarza; {nota}" and wynik.code == "prose"
+    assert dict(wynik.params)["text"] == "proza pisarza"
+    assert [n.code for n in dict(wynik.params)["notes"]] == ["hand_newer_kept"]
+    assert writeback._dopisz("a", "b") == "a; b" and type(writeback._dopisz("a", "b")) is str
+
+
+def test_doklejka_CAS_reki_do_prozy_bez_kodu_idzie_w_kopercie(tmp_path, monkeypatch):
+    """K1 na prawdziwej klindze: odmowa pozycji gołą prozą (tekst spoza warstw z kodem) po kroku
+    bazy przy nowszej decyzji ręki - doklejka nie wywraca rozliczenia, proza znak w znak jak dotąd,
+    a w bazie koperta `prose` z notą `hand_newer_kept`."""
+    s = _Scena(tmp_path)
+    con = s.con
+    run = s.stage(s.plan(pozycje=[s.pozycja(0)]))
+
+    def _reka_i_proza(con_, run_id, katalogi, *, now, akcja):
+        _reka_na_m42(con_, s.stare[0], _oid(con_, "IC405"))
+        return "odmowa prozą", 0
+    monkeypatch.setattr(writeback, "_zaloz_katalogi", _reka_i_proza)
+    (fr,) = writeback.commit_object_change(con, run, now=NOW).blocked
+    z_bazy = _powod_bazy(con)
+    assert fr.reason == "odmowa prozą"
+    assert str(z_bazy) == "odmowa prozą; baza: klatka niesie już nowszą decyzję niż gest - zostaje"
+    assert z_bazy.code == "prose" and [n.code for n in _args(z_bazy)["notes"]] == ["hand_newer_kept"]
+
+
+def test_meta_powod_pozycji_bez_golej_prozy_i_jeden_pisarz_trojki():
+    """AR-141 (Z7): (1) sterownik zapisu oddaje powód pozycji wyłącznie jako `PowodPozycji` albo
+    zmienną - żadne wywołanie rozliczenia pozycji (`repo.settle_object_change_item`,
+    `set_object_change_undo_phase`, `_odmowa`, `_stop`, `_wycofaj_pozycje`) nie bierze literału ani
+    f-stringu (nowe miejsce z gołą prozą = zdanie, którego okno nie powie w języku UI); (2) w `repo`
+    powód pozycji ustawia WYŁĄCZNIE `_set_object_change_reason_tx` - żaden inny SQL nie pisze
+    `reason` tabeli `pending_object_change` (proza i kod nie mogą się rozjechać)."""
+    import ast
+    import inspect
+    import re
+    rozliczenia = {"settle_object_change_item": "reason", "set_object_change_undo_phase": "reason",
+                   "_odmowa": 1, "_stop": 2, "_wycofaj_pozycje": 3}
+    wywolania = 0
+    for w in ast.walk(ast.parse(inspect.getsource(writeback))):
+        if not isinstance(w, ast.Call):
+            continue
+        nazwa = w.func.attr if isinstance(w.func, ast.Attribute) else getattr(w.func, "id", None)
+        if nazwa not in rozliczenia:
+            continue
+        wywolania += 1
+        gdzie = rozliczenia[nazwa]
+        arg = (next((k.value for k in w.keywords if k.arg == gdzie), None) if isinstance(gdzie, str)
+               else (w.args[gdzie] if len(w.args) > gdzie else None))
+        assert not isinstance(arg, (ast.JoinedStr, ast.Constant)) or (
+            isinstance(arg, ast.Constant) and arg.value is None), ast.unparse(w)
+    assert wywolania > 25, wywolania
+    zapis_powodu = re.compile(r"UPDATE pending_object_change SET[^;]*\breason\b")
+    trafienia = []
+    for f in (n for n in ast.walk(ast.parse(inspect.getsource(repo)))
+              if isinstance(n, ast.FunctionDef)):
+        for c in ast.walk(f):
+            if isinstance(c, ast.Constant) and isinstance(c.value, str) and zapis_powodu.search(
+                    c.value):
+                trafienia.append(f.name)
+    assert trafienia == ["_set_object_change_reason_tx"], trafienia

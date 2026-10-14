@@ -33,6 +33,7 @@ import re
 import uuid
 
 from . import card_rules, naming
+from .resolve.catalog import FolderFormError   # reguła formy folderu z kodem (AR-141)
 from .resolve.frames import LIGHT_KINDS
 from .resolve.paths import STACK_KIND, object_from_path, path_after_object_change, path_key
 
@@ -471,12 +472,18 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
             try:
                 cel = path_after_object_change(r["path"], canon, r["kind"], library_root,
                                                object_kind=rodzaj)
-            except ValueError as exc:
-                # Zdanie okna mówi o folderze kanonu (fakt rdzenia); powód `ValueError` z reguły
-                # formy folderu zostaje szczegółem zdania rdzenia (AR-138).
+            except FolderFormError as exc:
+                # Zdanie okna mówi o folderze kanonu (fakt rdzenia), a REGUŁA formy folderu jest
+                # kodem z parametrami - okno mówi ją w języku UI (`objchg.folder.<kod>`, AR-141).
                 raise _Odmowa("bad_target", f"folder obiektu „{canon}” nie powstanie - system "
                                             f"plików nie przyjmie tej nazwy ({exc})",
-                              canon=canon) from None
+                              canon=canon, detail=str(exc), rule=exc.code,
+                              rule_params=exc.params) from None
+            except ValueError as exc:
+                # Inny EXPECT drogi celu (rodzaj obiektu spoza `OBJECT_KINDS`) - szczegół prozą.
+                raise _Odmowa("bad_target", f"folder obiektu „{canon}” nie powstanie - system "
+                                            f"plików nie przyjmie tej nazwy ({exc})",
+                              canon=canon, detail=str(exc)) from None
             if cel is None:
                 raise _Odmowa("off_position", "plik nie stoi na pozycji obiektu w drzewie archiwum "
                                               "- nie ma folderu obiektu, do którego mógłby trafić")

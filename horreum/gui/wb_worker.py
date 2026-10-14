@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import string
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from horreum import db, lead_copy, writeback
 from horreum.gui import i18n
+from horreum.item_reasons import PowodPozycji, param_ok   # powód pozycji z kodem (AR-141)
 from horreum.gui.i18n_catalog import CATALOG
 
 
@@ -274,7 +276,7 @@ def zdanie_wyniku_zapisu(res, noun_key):
     summary = " · ".join(parts)
     detail = next((fr.reason for fr in (res.failed + wstrzymane + res.blocked) if fr.reason), None)
     if detail:
-        summary += i18n.t("grid.wb.detail_sep", detail=czytelny_powod(detail))
+        summary += i18n.t("grid.wb.detail_sep", detail=tekst_powodu(detail))
     return summary
 
 
@@ -305,13 +307,31 @@ def bez_prefiksu_spadku(reason):
     return reason
 
 
+def _spadek_z_kodu(reason):
+    """Czy powód to spadek z kodem i parametrami w kontrakcie (`detail` tekstem, uwagi krotką
+    powodów) - wtedy dzieli się go po parametrach; inaczej (także zapis spoza kodeka) - prozą."""
+    if not (isinstance(reason, PowodPozycji) and reason.code == "inplace_fallback"):
+        return False
+    p = dict(reason.params)
+    return isinstance(p.get("detail"), str) and _uwagi_poprawne(p.get("notes", ()))
+
+
 def podziel_powod_spadku(reason):
     """Powód pliku zapisanego drogą atomową → `(szczegół, uwaga | None)`. Rdzeń skleja go
     (`writeback._dopisz`, separator `; `) z prefiksu drogi, szczegółu odmowy zapisu w miejscu
     („operacja add/str na OBJECT…” - żargon, idzie do podpowiedzi) i uwag dopisanych za nim
     (kopia pliku sprzed podmiany zostawiona na dysku, nagrobek ręki - to są fakty dla człowieka
     i zostają w zdaniu). JEDEN podział dla trzech okien: „Zmień obiekt…”, „Napraw nagłówek…”,
-    „Zatwierdź ze ścieżki…” (okna kart gubiły uwagę o kopii `*.horreum-kopia`)."""
+    „Zatwierdź ze ścieżki…” (okna kart gubiły uwagę o kopii `*.horreum-kopia`).
+
+    Powód z kodem spadku (`PowodPozycji` `inplace_fallback`, AR-141) dzieli się po PARAMETRACH, nie
+    po prozie: szczegół = `detail`, uwagi = lista `notes` w języku UI (`tekst_powodu`). Podział
+    prozy zostaje dla powodu bez kodu (wiersz bazy sprzed 0041) i dla parametrów spoza kontraktu
+    (`detail` nie-tekst, uwagi nie-lista powodów - zapis spoza kodeka; podział totalny)."""
+    if _spadek_z_kodu(reason):
+        p = dict(reason.params)
+        uwagi = [tekst_powodu(n) for n in p.get("notes", ())]
+        return p["detail"], ("; ".join(uwagi) or None)
     szczegol, _, uwaga = bez_prefiksu_spadku(reason or "").partition("; ")
     return szczegol, (uwaga or None)
 
@@ -353,17 +373,20 @@ def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
     rdzenia (`czytelny_powod`). SPADEK KARTY NA DROGĘ ATOMOWĄ mówi tym samym zdaniem człowieka, co
     wynik okna (`objchg.st.rewritten`, bliźniak `wb.inplace_fallback`), a nie żargonem rdzenia -
     szczegół schodzi do podpowiedzi, uwaga dopisana przez rdzeń za spadkiem zostaje w statusie
-    (`podziel_powod_spadku`). Spadek rozpoznaje KOD wyniku (`CODE_INPLACE_FALLBACK`, jak zdanie
-    wyniku); wiersz z bazy (`z_bazy`, wejście z Porządków) kodu nie niesie, więc tam rozpoznaje go
-    prefiks rdzenia (`PREFIKS_DROGI_ATOMOWEJ`)."""
+    (`podziel_powod_spadku`). Spadek rozpoznaje KOD - wyniku (`CODE_INPLACE_FALLBACK`, jak zdanie
+    wyniku) albo powodu (`PowodPozycji` `inplace_fallback`, także z bazy po 0041, AR-141); wiersz
+    z bazy bez kodu (`z_bazy`, sprzed 0041) rozpoznaje prefiks rdzenia (`PREFIKS_DROGI_ATOMOWEJ`).
+    Każdy inny powód mówi zdaniem w języku UI (`tekst_powodu`)."""
     if not powod:
         return stan, stan
     szczegol = None
-    if (kod == writeback.CODE_INPLACE_FALLBACK
-            or (z_bazy and powod.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ))):
+    if (kod == writeback.CODE_INPLACE_FALLBACK or _spadek_z_kodu(powod)
+            or (z_bazy and not _spadek_z_kodu(powod)
+                and getattr(powod, "code", None) in (None, "inplace_fallback")
+                and powod.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ))):
         szczegol, uwaga = podziel_powod_spadku(powod)
         powod = i18n.t("objchg.st.rewritten") + (f"; {uwaga}" if uwaga else "")
-    status = stan + i18n.t("objchg.st.reason", reason=czytelny_powod(powod))
+    status = stan + i18n.t("objchg.st.reason", reason=tekst_powodu(powod))
     if szczegol is None:
         return status, status
     return status, status + "\n" + i18n.t("objchg.st.detail_tip", detail=szczegol)
@@ -402,6 +425,58 @@ def czytelny_powod(tekst):
 
     tekst = _OS_ZAJETY.sub(_zajety, tekst)
     return _REPR_SCIEZKI.sub(lambda m: "'" + _bez_repr(m.group(1)) + "'", tekst)
+
+
+def tekst_powodu(powod):
+    """Powód rdzenia w języku UI (AR-141): `PowodPozycji` z wpisem `objchg.item.<kod>` → zdanie
+    katalogu z parametrami (wpis mnogi odmienia parametr `n`); parametr-powód (`inner`, `outer`,
+    fragmenty zdania) tą samą drogą, a proza warstwy bez kodu (pisarz karty, tekst systemu) znak
+    w znak przez `czytelny_powod` - jawna granica. Uwagi (`notes`) idą za zdaniem po `; `, jak
+    w rdzeniu. Powód bez kodu albo kod bez wpisu → `czytelny_powod` (dotychczasowe zdanie PL).
+    W PL wynik = `czytelny_powod(zdanie rdzenia)` - test złoty i test AST katalogu.
+
+    TOTALNE: powód, którego parametry nie pokrywają pól wpisu w języku UI (brak pola, zły typ, `n`
+    wpisu mnogiego nie-liczbą, uwagi nie-lista powodów - zapis spoza kodeka), mówi zachowaną prozą
+    rdzenia, nigdy wyjątkiem w oknie. Kompletność sprawdza raz `_zdanie_z_kodu`, nie łapanie błędu."""
+    if isinstance(powod, PowodPozycji):
+        zdanie = _zdanie_z_kodu(powod)
+        if zdanie is not None:
+            return zdanie
+        return czytelny_powod(str(powod))
+    return czytelny_powod(powod)
+
+
+def _uwagi_poprawne(uwagi):
+    return isinstance(uwagi, tuple) and all(isinstance(n, str) for n in uwagi)
+
+
+def _zdanie_z_kodu(powod):
+    """Zdanie wpisu `objchg.item.<kod>` w języku UI albo `None`, gdy wpisu nie ma albo parametry
+    powodu go nie wypełniają: każde pole szablonu (każdej formy wpisu mnogiego) ma parametr, każdy
+    parametr ma rodzaj z kontraktu (`item_reasons.PARAM_KINDS`: tekst albo liczba całkowita),
+    uwagi to krotka powodów."""
+    wpis = CATALOG.get(f"objchg.item.{powod.code}")
+    if not isinstance(wpis, dict):
+        return None
+    forma = wpis.get(i18n.current_lang()) or wpis.get(i18n.DEFAULT)
+    szablony = list(forma.values()) if isinstance(forma, dict) else [forma]
+    p = dict(powod.params)
+    uwagi = p.pop("notes", ())
+    if not _uwagi_poprawne(uwagi) or not all(param_ok(k, v) for k, v in p.items()):
+        return None
+    pola = {f for s in szablony if isinstance(s, str)
+            for _, f, _, _ in string.Formatter().parse(s) if f}
+    if not pola <= set(p):
+        return None
+    p = {k: tekst_powodu(v) if isinstance(v, str) else v for k, v in p.items()}
+    if isinstance(forma, dict):
+        n = p.pop("n", None)
+        if not isinstance(n, int) or isinstance(n, bool):
+            return None
+        tekst = i18n.t_plural(f"objchg.item.{powod.code}", n, **p)
+    else:
+        tekst = i18n.t(f"objchg.item.{powod.code}", **p)
+    return "; ".join([tekst, *(tekst_powodu(u) for u in uwagi)])
 
 
 def zdanie_commitu_kart(res, applied_key, *, w_miejscu=False):

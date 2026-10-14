@@ -54,7 +54,9 @@ from . import sky
 from .gui.queries import (all_frame_ids, integrated_exposure, object_exposure,
                           stack_locations)
 from .resolve._coerce import _to_float, _to_text
-from .resolve.catalog import catalog_canon, xref
+from .resolve._text import norm_alnum
+from .resolve.catalog import catalog_canon, xref, xref_aliases
+from .resolve.objects import resolve_object
 
 # ─────────────────────────────────────────────────────── taksonomia (JEDEN właściciel — T3 §3)
 # Tokeny typu OpenNGC. `scripts/build_catalog.py` IMPORTUJE te zbiory zamiast trzymać kopię.
@@ -105,6 +107,10 @@ CATALOG_STATUSES = frozenset({"confirmed", "candidate", "mimic"})
 # znak ASCII, ekran planera bierze zdanie `planner.type_<status>` dla statusu ze znaczkiem.
 # Pusty znaczek = typ jest twierdzeniem źródła i stoi sam. Klucze = `CATALOG_STATUSES` (test).
 STATUS_MARKS = {"confirmed": "", "candidate": "?", "mimic": "~"}
+# Statusy, które chowa przełącznik „ukryj kandydatki i mimiki PN" (`plan(hide_doubtful_pn=True)`,
+# decyzja Zdzinia `Q14`): kandydatka bez widma i obiekt zgłoszony jako PN i odrzucony. Potwierdzona
+# i cel bez statusu (katalog milczy) zostają.
+DOUBTFUL_PN_STATUSES = frozenset({"candidate", "mimic"})
 
 
 def target_fields_present(raw):
@@ -166,6 +172,33 @@ class Target:
             if c:
                 out.append(xref(c))
         return tuple(out)
+
+    @functools.cached_property
+    def find_keys(self):
+        """Klucze szukajki planera (`find_matches`, AR-146), liczone RAZ na rekord: pula żyje
+        w cache'u `_load_stamped`, a szukajka biegnie przy każdym znaku, więc gramatyka katalogowa
+        aliasów per znak kosztowałaby tysiące `catalog_canon` na jedno wpisanie. `cached_property`
+        pisze do `__dict__` rekordu z pominięciem `__setattr__`, więc działa na zamrożonym
+        rekordzie i nie wchodzi do `==`/`hash` (te liczą wyłącznie pola).
+
+        `catalog` - kanon i aliasy katalogowe PO `xref` (ta sama forma co `catalog_aliases`),
+        `alnum` - kanon i wszystkie aliasy przez `norm_alnum`, `hay_fold`/`hay_alnum` - te same
+        nazwy sklejone znakiem `\\x00`, którego wpisany tekst nie niesie, więc podciąg nie przejdzie
+        przez granicę dwóch nazw, a jedno `in` zastępuje pętlę po aliasach."""
+        names = (self.canon,) + self.aliases
+        alnum = tuple(norm_alnum(n) for n in names)
+        return _FindKeys(catalog=frozenset((self.canon,) + self.catalog_aliases),
+                         alnum=frozenset(a for a in alnum if a),
+                         hay_fold="\x00".join(names).casefold(),
+                         hay_alnum="\x00".join(alnum))
+
+
+@dataclass(frozen=True)
+class _FindKeys:
+    catalog: frozenset
+    alnum: frozenset
+    hay_fold: str
+    hay_alnum: str
 
 
 @dataclass(frozen=True)
@@ -283,6 +316,14 @@ class PlanResult:
     min_fill: float | None = None
     max_panels: int | None = None
     rig_filter: str = "off"
+    # Tryb `find` (AR-146): kanony trafione DOKŁADNIE (kanon katalogowy albo cała nazwa) - stoją na
+    # liście przed trafieniami podciągu, także pod soczewką ekranu. `find_outside` - odpowiedź na
+    # pusty wynik, gdy wpisaną nazwę zna katalog, a nie pula tego wołania (`find_outside()`).
+    find_exact: frozenset = frozenset()
+    find_outside: object = None
+    # Przełącznik kandydatek i mimik PN (`DOUBTFUL_PN_STATUSES`): `off` (nie proszono) · `on`
+    # (chowa, licznik `counts['hidden_by_pn']`) · `find` (tryb szukania go pomija, jak filtr kadru).
+    pn_filter: str = "off"
 
 
 # ─────────────────────────────────────────────────────── asset
@@ -398,6 +439,79 @@ def rig_fits(framing, *, min_fill=None, max_panels=None):
     if min_fill is not None and framing.frame_fill < min_fill:
         return False
     return max_panels is None or framing.panels <= max_panels
+
+
+def find_matches(pool, needle):
+    """Szukajka planera (tryb `find`, AR-146): `(dokładne, podciąg)` - dwie krotki rekordów `pool`
+    w porządku puli, rozłączne.
+
+    DOKŁADNE: wpisany tekst przez gramatykę katalogową i `xref` (`M 27`, `m27`, `M27` → `NGC6853`)
+    trafia kanon albo alias katalogowy rekordu; drugą drogą cała nazwa po `norm_alnum` równa
+    kanonowi albo aliasowi (`Arp244` = `Arp 244`, gramatyka katalogowa `Arp` nie zna). Klucz
+    katalogowy daje resolver osi obiektu (`resolve_object`, bez gałęzi cięcia - wpisana nazwa ma
+    być oznaczeniem W CAŁOŚCI): gramatyka + `xref`, a także nazwy potoczne resolvera, których
+    asset nie nosi jako aliasu („Heart Nebula" → `IC1805`) - jedna droga z osią obiektu, nie kopia
+    jej tabeli.
+
+    PODCIĄG: dotychczasowa reguła (surowy tekst bez wielkości liter w kanonie albo aliasie) BIT
+    W BIT - nic, co trafiało, nie przestaje - plus ten sam podciąg po `norm_alnum`, więc
+    oznaczenie w trakcie pisania (`sh2 13` → `Sh2-131`) i zapis bez spacji trafiają jak ze spacją.
+    Pusty klucz `norm_alnum` (sam znak spoza ASCII) nie trafia wszystkiego - druga droga milczy.
+
+    Wpisany tekst przechodzi resolver RAZ na wołanie, nazwy rekordów RAZ na rekord
+    (`Target.find_keys`)."""
+    fold = str(needle or "").casefold()
+    n = str(needle or "").strip()
+    if not n:
+        return (), ()
+    alnum = norm_alnum(n)
+    ident = resolve_object(n, split=False)
+    key = ident.canon if ident is not None else None
+    exact, rest = [], []
+    for t in pool:
+        k = t.find_keys
+        if (key is not None and key in k.catalog) or (alnum and alnum in k.alnum):
+            exact.append(t)
+        elif fold in k.hay_fold or (alnum and alnum in k.hay_alnum):
+            rest.append(t)
+    return tuple(exact), tuple(rest)
+
+
+@dataclass(frozen=True)
+class FindOutside:
+    """Pusty wynik szukajki dla nazwy, którą katalog ZNA (AR-146). `canon` - kanon po `xref`;
+    `target` - rekord celu, gdy kanon JEST w assecie: z warstwy, której wołanie nie wczytało
+    (cirrus przy domyślnym rdzeniu), albo - `loaded=True` - z puli samego wołania (wtedy pusta
+    lista znaczy „chowają go filtry", nie „poza"). `None` wyłącznie dla nazwy, której nie ma
+    jako celu w żadnej warstwie (gromada wycięta przy budowie assetu, rekord-nazwa `LMC`) - wtedy
+    typu nie ma skąd wziąć: asset nie trzyma rekordów, które odrzucił, a gramatyka i `xref` typu
+    nie niosą."""
+    canon: str
+    target: Target | None = None
+    loaded: bool = False
+
+
+def find_outside(needle, layers=DEFAULT_LAYERS):
+    """`FindOutside` dla nazwy, którą katalog zna, albo `None` (nazwa nieznana - dotychczasowy
+    pusty stan). `plan` woła ją, gdy szukajka nie trafiła NIC we wczytanych warstwach.
+
+    Dwa świadectwa, w kolejności: (1) dokładne trafienie w PEŁNYM assecie - klucz `find_matches`
+    to kanon z resolvera osi obiektu, więc TARCZA jest konstrukcyjna: kanon, który istnieje
+    w assecie w dowolnej warstwie, wraca ze swoim rekordem i nigdy jako „poza celami planera";
+    rekord z puli wołania ma pierwszeństwo przed rekordem warstwy niewczytanej. (2) resolver
+    (`resolve_object`) - ale samo przejście gramatyki NIE jest świadectwem istnienia (`NGC99999`
+    ma kształt oznaczenia), więc źródło `header` liczy się tylko wtedy, gdy kanon jest celem
+    pary `xref` (`NGC6205` ← `M13`). Równoważność, nazwa potoczna i słownik obiektów własnych są
+    danymi, nie kształtem."""
+    loaded = set(layers) | {"curated"}
+    exact, _rest = find_matches(load_targets(ALL_LAYERS), needle)
+    if exact:
+        t = min(exact, key=lambda t: t.layer not in loaded)     # pierwszy z puli, inaczej pierwszy
+        return FindOutside(canon=t.canon, target=t, loaded=t.layer in loaded)
+    ident = resolve_object(str(needle or "").strip(), split=False)
+    if ident is None or (ident.source == "header" and not xref_aliases(ident.canon)):
+        return None
+    return FindOutside(canon=ident.canon)
 
 
 def resolve_plan_canon(needle, layers=ALL_LAYERS):
@@ -813,7 +927,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
          min_size=6.0, min_dark=15.0, max_mag=13.0, min_alt=30.0, min_hours=1.0,
          max_cost=None, overlap=0.10, v_zen=sky.V_ZEN_DEFAULT, k_ext=sky.K_EXT_DEFAULT,
          only_gaps=False, only_new=False, status=None, find=None, limit=None, step_min=5,
-         min_fill=None, max_panels=None):
+         min_fill=None, max_panels=None, hide_doubtful_pn=False):
     """Pełna odpowiedź planera dla jednej nocy (READ-ONLY).
 
     KOLEJNOŚĆ JEST KOLEJNOŚCIĄ KOSZTU: progi typo-zależne (arytmetyka) → filtr kadru na żądanie
@@ -830,7 +944,13 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     `find` ma semantykę WYSZUKIWANIA, nie filtra wyniku: pomija progi i przedcięcie (pytasz
     o konkretny obiekt — masz dostać jego okno, nawet gdy nigdy nie wschodzi) i dopasowuje po
     kanonie ORAZ po WSZYSTKICH aliasach, także potocznych. To jedyne miejsce, gdzie nazwa potoczna
-    ma głos: „Eagle Nebula" zwróci OBA rekordy, które ją noszą.
+    ma głos: „Eagle Nebula" zwróci OBA rekordy, które ją noszą. Dopasowanie to `find_matches`
+    (kanon katalogowy przed podciągiem, AR-146); pusty wynik dla nazwy znanej katalogowi niesie
+    `PlanResult.find_outside`.
+
+    `hide_doubtful_pn` (`Q14`, domyślnie WYŁĄCZONY) chowa cele o statusie z `DOUBTFUL_PN_STATUSES`
+    z licznikiem `counts['hidden_by_pn']` (klucz WYŁĄCZNIE przy włączonym - domyślna odpowiedź bit
+    w bit ta sama). `find` go pomija jak filtr kadru (`pn_filter='find'`): pytasz o ten obiekt.
 
     KURATELA (T4): `park=None` bierze park z bazy (`sky.park`); jawna lista go BIJE, bo wołanie
     jest silniejsze niż stan trwały. Cel oznaczony `skip` znika z listy Z LICZNIKIEM
@@ -874,13 +994,16 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     else:
         rig_filter = "on"
     fit = {"min_fill": min_fill, "max_panels": max_panels} if rig_filter == "on" else {}
+    pn_filter = "off" if not hide_doubtful_pn else "find" if find else "on"
 
+    exact_canons, outside = frozenset(), None
     if find:
-        needle = find.casefold()
-        pool = [t for t in targets
-                if needle in t.canon.casefold()
-                or any(needle in a.casefold() for a in t.aliases)]
+        exact, rest = find_matches(targets, find)
+        exact_canons = frozenset(t.canon for t in exact)
+        pool = list(exact + rest)
         after_thresholds = len(pool)
+        if not pool:
+            outside = find_outside(find, layers)
     else:
         pool = [t for t in targets
                 if feasible(t, min_size=min_size, min_dark=min_dark, max_mag=max_mag)]
@@ -893,7 +1016,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
         pool = [t for t in pool
                 if 90.0 - abs(site.lat_deg - t.dec_deg) >= min_alt - _CUT_MARGIN]
 
-    rows, hidden_by_status = [], 0
+    rows, hidden_by_status, hidden_by_pn = [], 0, 0
     for t in pool:
         # Kuratela ROZSTRZYGA PRZED rachunkiem nieba (najdroższym krokiem): cel skreślony nie ma
         # po co przechodzić przez siatkę Słońca. `find` i jawny `status` przebijają ukrycie.
@@ -904,6 +1027,11 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                 continue
         elif mark_status == "skip" and not find:
             hidden_by_status += 1
+            continue
+        # Status katalogowy - jak kuratela: przed rachunkiem nieba i z licznikiem. Po filtrze
+        # kurateli, więc cel schowany już przez nią nie liczy się drugi raz.
+        if pn_filter == "on" and t.status in DOUBTFUL_PN_STATUSES:
+            hidden_by_pn += 1
             continue
         window = sky.visibility_window(t.ra_deg, t.dec_deg, site, night_date, min_alt=min_alt,
                                        step_min=step_min, v_zen=v_zen, k_ext=k_ext, night=nw)
@@ -933,6 +1061,10 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     # przed „widoczny" postawiłby na czele cel pod horyzontem. Priorytet zostaje kolumną i filtrem;
     # ewentualny przełącznik porządku to sort WTÓRNY w widoku, nie zmiana tego klucza.
     rows.sort(key=_sort_key)
+    if exact_canons:
+        # Pytanie wprost: trafienie dokładne przed podciągiem (AR-146) - sort STABILNY, więc w obu
+        # grupach zostaje porządek rady.
+        rows.sort(key=lambda r: r.target.canon not in exact_canons)
     # liczniki opisują NOC, nie wyświetloną listę — dlatego przed limitem (firsthand: „12 widocznych"
     # przy `--limit 12` opisywało długość ekranu, nie niebo)
     counts = {"pool": len(targets), "feasible": after_thresholds, "above_horizon": len(pool),
@@ -942,6 +1074,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
               "hidden_by_status": hidden_by_status}
     if fit:
         counts["hidden_by_rig"] = after_type - after_thresholds
+    if pn_filter == "on":
+        counts["hidden_by_pn"] = hidden_by_pn
     hidden = 0
     if limit is not None and len(rows) > limit:
         hidden = len(rows) - limit
@@ -962,7 +1096,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                       park=tuple(park or ()), park_source=park_source,
                       park_without_rigs=park_without_rigs,
                       orphan_marks=orphan_marks(con),
-                      min_fill=min_fill, max_panels=max_panels, rig_filter=rig_filter)
+                      min_fill=min_fill, max_panels=max_panels, rig_filter=rig_filter,
+                      find_exact=exact_canons, find_outside=outside, pn_filter=pn_filter)
 
 
 def _night_moon(site, nw, *, v_zen, k_ext):

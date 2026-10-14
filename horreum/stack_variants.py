@@ -41,9 +41,16 @@ przeniesienie oryginału do biblioteki to inna operacja niż dołożenie wariant
 nazwa archiwalna oryginału z członem `autocrop` (`naming.variant_stack_name` - powód tam). Pliki
 z drugim znacznikiem pochodnej (`_autocrop_DBE`, `autocropSPCC`) są poza planem
 (`scan.is_derived_name`) - to obróbka, nie wariant stosu.
+
+SAMODZIELNY AUTOCROP (decyzja Zdzinia Q13 = O2, 2026-10-14): autocrop bez oryginału, wskazany ręką
+na JAWNEJ liście (`plan_standalone`, `apply_standalone`), jedzie do `STACKS` jako zwykły gotowy
+obraz - bez zeznania pary i bez relacji, od razu na miejsce kanoniczne `<obiekt>\<zestaw>\<filtr>`
+pod oryginalną nazwą pliku. Obiekt i zestaw nada mu pierwsza Dostawa z jego własnych kart
+(`OBJECT`, `TELESCOP`); plan liczy tylko, GDZIE ma leżeć - opis przy `plan_standalone`.
 """
 from __future__ import annotations
 
+import csv
 import dataclasses
 import hashlib
 import json
@@ -51,9 +58,15 @@ import os
 import re
 
 from . import hashing, naming, projection, repo, scan
+from .gui import queries
+from .resolve.cameras import camera_identity
+from .resolve.catalog import folder_form
 from .resolve.filters import normalize_filter
+from .resolve.headers import extract_header
+from .resolve.frames import kind_dir_segments
 from .resolve.paths import STACKS_DIR
 from .resolve.stack import read_testimony
+from .resolver import alias_snapshot, library_root_from_db, resolve_name
 
 AUTOCROP = "autocrop"
 _AUTOCROP_TOKEN = re.compile(r"_autocrop(?=[._])", re.IGNORECASE)
@@ -65,6 +78,11 @@ APPLICABLE = ("ready", "dst_exists")
 BLOCKED = ("header_unreadable", "location_ambiguous", "window_ambiguous", "no_original",
            "original_absent", "original_outside_stacks", "original_many_seats",
            "original_name_conflict", "no_seat", "name_invalid", "name_taken")
+#: Pozycje rozstrzygnięte bez pary: dane autocropu mają już obecną kopię w `STACKS` (samodzielny obraz
+#: z `apply_standalone` albo ta sama kopia, którą wiezie inna pozycja) - ani robota, ani blokada.
+SETTLED = ("present_in_stacks",)
+#: Blokady bez pary, które `plan` sprawdza po `sha1_data` (`_settle_present`).
+_PAIRLESS = ("no_original", "window_ambiguous", "name_taken")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -337,13 +355,36 @@ def _reserve(items):
     return tuple(out)
 
 
-def plan(con, root, *, library_root, read_header=_read_header, should_cancel=None):
+def _settle_present(con, items, stacks_root, read_data):
+    """Blokada bez pary (`_PAIRLESS`), której dane mają już obecną kopię w `STACKS` → `present_in_stacks`
+    (`detail` = ta kopia). Pełny odczyt pliku (`read_data` - `sha1_data`) WYŁĄCZNIE dla takich pozycji:
+    nazwa i rozmiar nie są tożsamością. Relacji ani zeznania nie dotyka. Plik nieczytelny albo bez
+    `sha1_data` zostaje przy swojej blokadzie."""
+    out = []
+    for it in items:
+        if it.status in _PAIRLESS:
+            try:
+                sha = read_data(it.autocrop.src).sha1_data
+            except OSError:
+                sha = None
+            kopie = [p for p in queries.present_paths_by_sha1_data(con, sha)
+                     if _under(p, stacks_root)] if sha else []
+            if kopie:
+                it = dataclasses.replace(it, status="present_in_stacks", detail=kopie[0])
+        out.append(it)
+    return tuple(out)
+
+
+def plan(con, root, *, library_root, read_header=_read_header, read_data=scan.scan_file,
+         should_cancel=None):
     """Plan wersji (DRY): autocropy spod `root` → `VariantPlan`. ZERO zapisu - baza i nagłówki
     plików wyłącznie do odczytu. `library_root` = korzeń archiwum (biblioteka `STACKS` pod nim).
 
     Pozycja `ready` ma cel wolny, `dst_exists` - pod celem coś leży (`apply` sprawdzi bajty: te same =
-    ponowienie, inne = konflikt). Każdy inny status to blokada z `BLOCKED`. Kandydaci okna liczeni
-    są dla każdej pozycji z czytelnym nagłówkiem - porównanie świadków (a) i (b) jest częścią raportu."""
+    ponowienie, inne = konflikt). `present_in_stacks` (`SETTLED`) - autocrop bez pary, którego dane
+    już leżą w `STACKS` (`_settle_present`, Q13 = O2: samodzielny obraz po `apply_standalone`). Każdy
+    inny status to blokada z `BLOCKED`. Kandydaci okna liczeni są dla każdej pozycji z czytelnym
+    nagłówkiem - porównanie świadków (a) i (b) jest częścią raportu."""
     if not library_root:
         raise ValueError("plan wersji bez korzenia archiwum (library_root)")
     stacks_root = os.path.join(str(library_root), STACKS_DIR.upper())
@@ -358,22 +399,25 @@ def plan(con, root, *, library_root, read_header=_read_header, should_cancel=Non
         if should_cancel is not None and should_cancel():
             break
         items.append(_plan_item(con, src, size, klatki, okna, stacks_root, read_header))
-    return VariantPlan(root=str(root), library_root=str(library_root), items=_reserve(items))
+    return VariantPlan(root=str(root), library_root=str(library_root),
+                       items=_settle_present(con, _reserve(items), stacks_root, read_data))
 
 
 def plan_counts(variant_plan):
-    """Liczby raportu: wszystkie, z oryginałem po świadku, zgodność okna przy (a), blokady per powód."""
+    """Liczby raportu: wszystkie, z oryginałem po świadku, zgodność okna przy (a), blokady per powód,
+    rozstrzygnięte bez pary (`SETTLED`)."""
     items = variant_plan.items
     z_lokacji = [i for i in items if i.original is not None and i.original.source == "location"]
     blokady = {}
     for i in items:
-        if not i.applicable:
+        if not i.applicable and i.status not in SETTLED:
             blokady[i.status] = blokady.get(i.status, 0) + 1
     return {"all": len(items), "location": len(z_lokacji),
             "location_window_agrees": sum(1 for i in z_lokacji if i.window_agrees),
             "location_window_fails": sum(1 for i in z_lokacji if not i.window_agrees),
             "window": sum(1 for i in items if i.original is not None and i.original.source == "window"),
-            "applicable": sum(1 for i in items if i.applicable), "blocked": blokady}
+            "applicable": sum(1 for i in items if i.applicable), "blocked": blokady,
+            "settled": sum(1 for i in items if i.status in SETTLED)}
 
 
 def pair_id(original_sha1_data, variant_sha1_data, variant=AUTOCROP):
@@ -569,3 +613,326 @@ def link_from_testimonies(con, now):
         repo.settle_variant_testimony(con, path=row["path"], fingerprint=row["fingerprint"],
                                       outcome=wynik, now=now)
     return s
+
+
+# ═══════════════════════════════════════════════════ SAMODZIELNY AUTOCROP (decyzja Q13 = O2)
+
+#: Kolumna ścieżki źródła na liście decyzji (format listy pozycji zablokowanych planu wersji).
+STANDALONE_LIST_COLUMN = AUTOCROP
+#: Statusy, które `apply_standalone` wykonuje. `standalone_known` (te same dane co klatka bazy -
+#: druga kopia, nie nowy obraz) i `standalone_conflict` (powód w `reason`) zostają, jak są.
+STANDALONE_APPLICABLE = ("standalone_ready", "standalone_exists")
+#: Powody konfliktu - tokeny; szczegół jako DANE w `detail`.
+STANDALONE_REASONS = ("outside_root", "in_stacks", "not_autocrop", "unreadable", "no_object",
+                      "no_rig", "no_seat", "seat_ambiguous", "dst_taken")
+
+
+@dataclasses.dataclass(frozen=True)
+class StandaloneItem:
+    """Pozycja planu samodzielnego. `seat` = katalog `<obiekt>\\<zestaw>\\<filtr>` pod `STACKS`
+    archiwum, `witness` = skąd wiadomo o zestawie i filtrze (`stacks` | `lights`), `dst` = cel
+    kopii. `sha1_data` i `file_sha1` z odczytu planu - `apply` przyjmie wyłącznie te bajty.
+    `known_frame_id` = klatka bazy o tych samych danych (`standalone_known`)."""
+    src: str
+    status: str
+    reason: str | None = None
+    detail: str | None = None
+    canon: str | None = None
+    seat: str | None = None
+    witness: str | None = None
+    dst: str | None = None
+    sha1_data: str | None = None
+    file_sha1: str | None = None
+    known_frame_id: int | None = None
+
+    @property
+    def applicable(self):
+        return self.status in STANDALONE_APPLICABLE
+
+
+@dataclasses.dataclass(frozen=True)
+class StandalonePlan:
+    root: str
+    library_root: str
+    items: tuple
+
+
+def read_standalone_list(path):
+    """Lista decyzji ręki → ścieżki źródeł w kolejności pliku. TSV z nagłówkiem i kolumną
+    `autocrop` (tak wygląda lista pozycji zablokowanych planu wersji); puste wiersze pomija.
+    Brak kolumny → `ValueError`."""
+    with open(path, encoding="utf-8", newline="") as fh:
+        czytnik = csv.DictReader(fh, delimiter="\t")
+        if STANDALONE_LIST_COLUMN not in (czytnik.fieldnames or ()):
+            raise ValueError(f"lista bez kolumny {STANDALONE_LIST_COLUMN!r}: {path}")
+        return [w[STANDALONE_LIST_COLUMN].strip() for w in czytnik
+                if (w.get(STANDALONE_LIST_COLUMN) or "").strip()]
+
+
+def _rig(con, karty, naglowek):
+    """Zestaw z kart TĄ SAMĄ regułą co grouper: teleskop = `TELESCOP` po `strip()` (kolumna
+    `header.telescop`) → kanoniczny korzeń (`telescope_canonical`), kamera = `camera_identity`
+    → `camera.model_canon`. `(teleskop, kamera, is_mono kamery)` albo None, gdy baza którejś osi
+    nie zna."""
+    teleskop = (karty["telescop"] or "").strip()
+    tel = con.execute(
+        "SELECT tc.canon_id FROM telescope t JOIN telescope_canonical tc ON tc.id = t.id "
+        "WHERE t.telescop_canon = ?", (teleskop,)).fetchone() if teleskop else None
+    kamera = camera_identity(naglowek, raw_format=False, kind="master_light")
+    cam = con.execute("SELECT id, is_mono FROM camera WHERE model_canon = ?",
+                      (kamera.model_canon,)).fetchone() if kamera is not None else None
+    if tel is None or cam is None:
+        return None
+    return tel["canon_id"], cam["id"], cam["is_mono"]
+
+
+def _rel_dirs(path, base):
+    """Katalogi ścieżki pod `base` (bez nazwy pliku) albo None, gdy plik nie leży pod `base`."""
+    if not _under(path, base):
+        return None
+    seg = [s for s in re.split(r"[\\/]+", os.path.relpath(os.path.dirname(str(path)), base)) if s]
+    return None if any(s in (".", "..") for s in seg) else seg
+
+
+def _seat_witnesses(con, object_id, folder, rig, filter_canon, db_root):
+    """Zestaw siedziby ze ŚWIADKÓW archiwum, nie ze złożenia nazwy: foldery zestawu to konwencja
+    Custosa (`76EDPH_2600MM`), a etykieta Horreum (`projection.zestawy_configow`) brzmi
+    `76EDPH_ASI2600MM` - złożona założyłaby równoległe drzewo obok wariantów (harvest `_rig_tails`).
+
+    Folder filtra to fakt osi, nie świadka: `projection._filter_segment` (pusty filtr na kamerze
+    kolorowej → `OSC`, w drzewie stosów `NoFilter` - konwencja żniw i `_proposed_seat`; na mono albo
+    kamerze nierozstrzygniętej pusty filtr to `_UNSET`). Świadek = obecna kopia klatki aktywnej tej
+    samej osi (obiekt, teleskop kanoniczny + kamera, filtr), której katalog to DOKŁADNIE
+    `<korzeń bazy>\\STACKS\\<folder obiektu>\\<zestaw>\\<filtr stosu>` (siedziba 78 wariantów - katalog
+    kopii oryginału) albo `<korzeń bazy>\\<marker lightów>\\<folder obiektu>\\<zestaw>\\<filtr lightu>`
+    (siedziba stosów żniw, bez kategorii). Kopie spoza korzenia archiwum i katalogi o innym folderze
+    obiektu albo filtra nie świadczą. Stosy przed lightami.
+    `(świadek, {zestaw bez wielkości liter: zestaw}, folder filtra stosu)`."""
+    filtr_lightu = projection._filter_segment(filter_canon, rig[2])
+    filtr_stosu = _NOFILTER if filtr_lightu == projection._OSC else filtr_lightu
+    db_stacks = os.path.join(db_root, STACKS_DIR.upper())
+    znaczniki = kind_dir_segments()
+    stosy, lighty = {}, {}
+    for r in con.execute(
+            "SELECT f.kind, l.path FROM frame f "
+            "JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+            "JOIN config c ON c.id = f.config_id "
+            "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+            "WHERE f.kind IN ('master_light', 'light') AND f.object_id = ? AND tc.canon_id = ? "
+            "AND c.camera_id = ? AND f.filter_canon IS ? "
+            "AND f.retired_at IS NULL AND f.superseded_by IS NULL ORDER BY l.id",
+            (object_id, rig[0], rig[1], filter_canon)).fetchall():
+        if r["kind"] == "master_light":
+            seg, filtr, cel = _rel_dirs(r["path"], db_stacks), filtr_stosu, stosy
+        else:
+            seg, filtr, cel = _rel_dirs(r["path"], db_root), filtr_lightu, lighty
+            if seg is None or not seg or znaczniki.get(seg[0].strip().lower()) != "light":
+                continue
+            seg = seg[1:]
+        if (seg is not None and len(seg) == 3 and seg[0].casefold() == folder.casefold()
+                and seg[2].casefold() == filtr.casefold()):
+            cel.setdefault(seg[1].casefold(), seg[1])
+    return ("stacks", stosy, filtr_stosu) if stosy else ("lights", lighty, filtr_stosu)
+
+
+def _standalone_item(con, src, root, stacks_root, db_root, lookup, read):
+    """Pozycja przed rezerwacją nazwy: odmowa z powodem albo `standalone_ready` z siedzibą.
+    Obiekt z karty `OBJECT` drabiną resolvera (`resolve_name` - nagłówek; region nie, bo to
+    inferencja, a cel kopii ma stać na zeznaniu), folder obiektu = `folder_form(kanon)` - ta sama
+    forma, której wymaga wiersz Porządków „Plik nie zgadza się z obiektem” (`path_after_object_change`).
+
+    ZNANE DANE PRZED OSIAMI: `sha1_data`, które baza już zna, to druga kopia znanej klatki - niezależnie
+    od tego, czy obiekt, zestaw i siedzibę da się wyliczyć. Odmowa po odczycie takiej pozycji zostaje
+    `standalone_known` (`known_frame_id` niesie każda pozycja ze znanymi danymi; pierwszeństwo celu
+    na dysku rozstrzyga `_standalone_targets`). Błąd I/O odczytu → odmowa `unreadable`, nie wyjątek."""
+    znana = None                                         # klatka bazy o tych danych (po odczycie)
+
+    def odmowa(reason, detail=None, **pola):
+        if znana is not None:
+            return StandaloneItem(src, "standalone_known", detail=znana[1], **pola)
+        return StandaloneItem(src, "standalone_conflict", reason, detail, **pola)
+
+    db_stacks = os.path.join(db_root, STACKS_DIR.upper())
+    if not _under(src, root):
+        return odmowa("outside_root", str(root))
+    if _under(src, stacks_root) or _under(src, db_stacks):
+        return odmowa("in_stacks")
+    if not is_autocrop_master(os.path.basename(src)):
+        return odmowa("not_autocrop")
+    try:
+        rec = read(src)
+    except OSError as exc:
+        return odmowa("unreadable", f"{type(exc).__name__}: {exc}")
+    if rec.header is None or rec.sha1_data is None:
+        return odmowa("unreadable", rec.error)
+    znana = queries.frame_by_sha1_data(con, rec.sha1_data)
+    tozsamosc = {"sha1_data": rec.sha1_data, "file_sha1": rec.file_sha1,
+                 "known_frame_id": None if znana is None else znana[0]}
+    naglowek = {str(k).upper(): v for k, v in rec.header.items()}
+    karty = extract_header(naglowek)
+    ident, oid = (resolve_name(lookup, karty["object_raw"]) if karty["object_raw"]
+                  else (None, None))
+    if ident is None:
+        return odmowa("no_object", karty["object_raw"], **tozsamosc)
+    try:
+        folder = folder_form(ident.canon)
+    except ValueError as exc:
+        return odmowa("no_object", str(exc), canon=ident.canon, **tozsamosc)
+    if oid is None:
+        r = con.execute("SELECT id FROM object WHERE canon = ?", (ident.canon,)).fetchone()
+        oid = None if r is None else r["id"]
+    rig = _rig(con, karty, naglowek)
+    if rig is None:
+        return odmowa("no_rig", f"TELESCOP={karty['telescop']!r} INSTRUME={karty['instrume']!r}",
+                      canon=ident.canon, **tozsamosc)
+    filtr = normalize_filter(karty["filter_raw"])
+    swiadek, zestawy, filtr_dir = (_seat_witnesses(con, oid, folder, rig, filtr, db_root)
+                                   if oid is not None else ("stacks", {}, None))
+    if not zestawy:
+        return odmowa("no_seat", f"{ident.canon} telescope={rig[0]} camera={rig[1]} filter={filtr}",
+                      canon=ident.canon, **tozsamosc)
+    if len(zestawy) > 1:
+        return odmowa("seat_ambiguous", " | ".join(z for _k, z in sorted(zestawy.items())),
+                      canon=ident.canon, **tozsamosc)
+    (zestaw,) = zestawy.values()
+    return StandaloneItem(src, "standalone_ready", canon=ident.canon, witness=swiadek,
+                          seat=os.path.join(stacks_root, folder, zestaw, filtr_dir), **tozsamosc)
+
+
+def _numbered(name, n):
+    """`n`-ta nazwa pliku w kolizji: 1 → nazwa bez zmian, dalej końcówka `_<n>` przed rozszerzeniem."""
+    if n == 1:
+        return name
+    stem, ext = os.path.splitext(name)
+    return f"{stem}_{n}{ext}"
+
+
+def _standalone_targets(con, items, sha1_fn):
+    """Cel każdej pozycji z siedzibą i jej status. Nazwa = oryginalna nazwa pliku; kolizja w obrębie
+    planu (bliźniacze nazwy z dwóch katalogów starego drzewa w jednej siedzibie) → `_2`, `_3`…
+    w kolejności ścieżek źródłowych - rezerwacja nie patrzy na dysk ani na bazę, więc drugi plan
+    (po kopii, po Dostawie) daje te same cele. Potem, w tej kolejności: te same bajty pod celem →
+    `standalone_exists` (cel na dysku wyprzedza bazę - po Dostawie kopia jest i „u celu”, i znana);
+    dane znane bazie (`known_frame_id`, `_standalone_item`) → `standalone_known`; `.part` albo inne
+    bajty pod celem → `dst_taken`. Błąd I/O przy haszu celu → `unreadable` z celem i treścią błędu."""
+    zajete, out = set(), []
+    for it in items:
+        if it.seat is None:
+            out.append(it)
+            continue
+        n = 1
+        while _key(os.path.join(it.seat, _numbered(os.path.basename(it.src), n))) in zajete:
+            n += 1
+        dst = os.path.join(it.seat, _numbered(os.path.basename(it.src), n))
+        zajete.add(_key(dst))
+        it = dataclasses.replace(it, dst=dst)
+        try:
+            u_celu = os.path.isfile(dst) and sha1_fn(dst) == it.file_sha1
+        except OSError as exc:
+            out.append(dataclasses.replace(it, status="standalone_conflict", reason="unreadable",
+                                           detail=f"{dst}: {type(exc).__name__}: {exc}"))
+            continue
+        if u_celu:
+            it = dataclasses.replace(it, status="standalone_exists")
+        elif it.known_frame_id is not None:
+            znana = queries.frame_by_sha1_data(con, it.sha1_data)
+            it = dataclasses.replace(it, status="standalone_known",
+                                     detail=None if znana is None else znana[1])
+        elif os.path.lexists(dst + projection.PART_SUFFIX):
+            it = dataclasses.replace(it, status="standalone_conflict", reason="dst_taken",
+                                     detail=dst + projection.PART_SUFFIX)
+        elif os.path.lexists(dst):
+            it = dataclasses.replace(it, status="standalone_conflict", reason="dst_taken", detail=dst)
+        out.append(it)
+    return tuple(out)
+
+
+def plan_standalone(con, root, sources, *, library_root, read=scan.scan_file,
+                    sha1_fn=hashing.sha1_of, should_cancel=None):
+    """Plan samodzielnych autocropów (DRY): JAWNA lista źródeł (`read_standalone_list` - decyzja
+    ręki, nie wyliczenie ze statusów planu wersji) → `StandalonePlan`. ZERO zapisu.
+
+    Każdy plik jest czytany w całości (`read` = `scan.scan_file`: `sha1_data` i sha1 pliku jednym
+    przebiegiem) - bez `sha1_data` plan nie odróżni nowego obrazu od drugiej kopii znanej klatki.
+    Pozycja: źródło pod `root` i poza `STACKS`, nazwa autocropu (`is_autocrop_master`); obiekt
+    z `OBJECT`, zestaw z `TELESCOP` + kamery, filtr z `FILTER` (`_standalone_item`); zestaw i filtr
+    siedziby od świadków archiwum (`_seat_witnesses`); nazwa i status (`_standalone_targets`).
+    Pozycje w kolejności ścieżek źródłowych (bez wielkości liter), duplikaty listy raz.
+
+    `library_root` = korzeń archiwum celu (kopia na scratchu pisze tam, gdzie wskazała ręka);
+    świadkowie siedziby to kopie pod korzeniem, który zna baza (`library_root_from_db`; bez niego -
+    `library_root`). Pusty `library_root` → `ValueError`. Błąd I/O pozycji kończy się jej odmową
+    `unreadable`, nie wyjątkiem planu."""
+    if not library_root:
+        raise ValueError("plan samodzielnych bez korzenia archiwum (library_root)")
+    stacks_root = os.path.join(str(library_root), STACKS_DIR.upper())
+    db_root = library_root_from_db(con) or str(library_root)
+    lookup = alias_snapshot(con).get
+    zrodla = sorted({_key(s): str(s) for s in sources}.values(), key=_key)
+    items = []
+    for src in zrodla:
+        if should_cancel is not None and should_cancel():
+            break
+        items.append(_standalone_item(con, src, root, stacks_root, db_root, lookup, read))
+    return StandalonePlan(root=str(root), library_root=str(library_root),
+                          items=_standalone_targets(con, items, sha1_fn))
+
+
+def standalone_counts(standalone_plan):
+    """Liczby raportu: pozycje per status i konflikty per powód."""
+    statusy, powody = {}, {}
+    for it in standalone_plan.items:
+        statusy[it.status] = statusy.get(it.status, 0) + 1
+        if it.reason is not None:
+            powody[it.reason] = powody.get(it.reason, 0) + 1
+    return {"all": len(standalone_plan.items), "status": statusy, "conflict": powody}
+
+
+@dataclasses.dataclass(frozen=True)
+class StandaloneRow:
+    item: StandaloneItem
+    status: str        # placed | exists | conflict | verify_bad | error | known | source_drift | skipped
+    reason: str | None = None
+
+
+def apply_standalone(standalone_plan, *, con, sha1_fn=hashing.sha1_of, should_cancel=None,
+                     progress=None):
+    """Wykonaj pozycje `STANDALONE_APPLICABLE` - kopia `projection.copy_stack_variant` (strażnik
+    `STACKS`, `.part`, `fsync`, sha1 całego pliku równe `file_sha1` z planu, publikacja bez
+    nadpisania; te same bajty pod celem → `exists`). BEZ zeznania pary i bez relacji: obraz nie ma
+    oryginału, obiekt i zestaw da mu Dostawa z jego kart. Pozycja `standalone_ready`, której dane
+    baza poznała między planem a kopią → `known`, nic nie kopiujemy. Pozostałe statusy → `skipped`.
+    Błąd I/O → `error` i następna pozycja. Zwraca `[StandaloneRow]`.
+
+    SKRÓT BEZ KOPII PO ŚWIEŻYM HASZU ŹRÓDŁA: `exists` i `known` nie czytają bajtów źródła w klindze
+    (kopia sprawdza `.part` wobec `file_sha1`, skrót nie kopiuje), więc przed każdym z nich źródło
+    jest haszowane ponownie - inne bajty niż w planie → `source_drift` z oboma haszami, nic nie
+    kopiujemy (plik podmieniony po DRY to nowe dane, które plan widział jako inne)."""
+    out = []
+    for n, item in enumerate(standalone_plan.items, 1):
+        if should_cancel is not None and should_cancel():
+            break
+        if not item.applicable:
+            out.append(StandaloneRow(item, "skipped", item.reason or item.status))
+            continue
+        try:
+            znana = (queries.frame_by_sha1_data(con, item.sha1_data)
+                     if item.status == "standalone_ready" else None)
+            if znana is not None or item.status == "standalone_exists":
+                teraz = sha1_fn(item.src)
+                if teraz != item.file_sha1:
+                    out.append(StandaloneRow(item, "source_drift",
+                                             f"sha1 {teraz} != {item.file_sha1}"))
+                    continue
+            if znana is not None:
+                out.append(StandaloneRow(item, "known", f"frame_id={znana[0]}"))
+                continue
+            status, reason = projection.copy_stack_variant(
+                item.src, item.dst, expected_sha1=item.file_sha1,
+                library_root=standalone_plan.library_root, sha1_fn=sha1_fn)
+            out.append(StandaloneRow(item, status, reason))
+        except OSError as exc:
+            out.append(StandaloneRow(item, "error", f"{type(exc).__name__}: {exc}"))
+        if progress is not None:
+            progress(n, len(standalone_plan.items), item.src)
+    return out

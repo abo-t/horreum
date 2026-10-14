@@ -713,6 +713,45 @@ def test_cli_plan_nie_migruje_i_daje_json(con, tmp_path, capsys):
     assert all(r["status"] in (None, "confirmed", "candidate", "mimic") for r in out["rows"])
 
 
+def test_cli_plan_find_mowi_o_nazwie_znanej_spoza_puli(con, tmp_path, capsys):
+    """AR-146: pusty `--find` dla nazwy, którą katalog zna, nie milczy - jedna linia ASCII (konsola
+    cp1250/cp852) i blok `find_outside` w JSON; nazwa nieznana i trafienie - bez linii i bez bloku."""
+    from horreum import cli
+    con.commit()
+    path = str(tmp_path / "h.db")
+    noc = ["--night", "2026-08-15"]
+
+    def tekst(*flagi):
+        assert cli.main(["plan", path, *noc, *flagi]) == 0
+        return capsys.readouterr().out.splitlines()
+
+    def szukane(linie):
+        return [x for x in linie if x.strip().startswith("szukane ")]
+
+    linia = szukane(tekst("--find", "M 13"))
+    assert linia == ['  szukane "M 13" = NGC6205: znane katalogowi, poza celami planera']
+    linia[0].encode("ascii")                                        # bez znaków spoza ASCII
+    assert szukane(tekst("--find", "LDN 134")) == [
+        '  szukane "LDN 134" = LBN10 (EmN): cel warstwy cirrus, poza wczytanymi '
+        '(--layers core,cirrus)']
+    assert szukane(tekst("--find", "LMC")) == [
+        '  szukane "LMC": znane katalogowi, poza celami planera']
+    assert szukane(tekst("--find", "zzqq")) == [] and szukane(tekst("--find", "M 27")) == []
+    assert szukane(tekst("--find", "Heart Nebula")) == []           # nazwa potoczna = trafienie
+    # Echo wpisu spoza ASCII (półpauza U+2013 i `ł` wklejone z WWW) - linia zostaje ASCII.
+    linia = szukane(tekst("--find", "Wielki" + chr(0x2013) + "Obłok Magellana"))
+    assert linia == ['  szukane "WIELKIOBLOK MAGELLANA" = LMC: znane katalogowi, poza celami planera']
+    linia[0].encode("cp852")
+    assert cli.main(["plan", path, *noc, "--json", "--find", "LDN 134"]) == 0
+    assert json.loads(capsys.readouterr().out)["find_outside"] == {
+        "canon": "LBN10", "layer": "cirrus", "type": "EmN"}
+    assert cli.main(["plan", path, *noc, "--json", "--find", "M 13"]) == 0
+    assert json.loads(capsys.readouterr().out)["find_outside"] == {
+        "canon": "NGC6205", "layer": None, "type": None}
+    assert cli.main(["plan", path, *noc, "--json", "--find", "M 27"]) == 0
+    assert "find_outside" not in json.loads(capsys.readouterr().out)
+
+
 def test_cli_plan_status_katalogowy_przy_typie_kandydatka_nie_jest_golym_PN(con, tmp_path, capsys):
     """K-3: asset niesie kandydatki i mimiki planetarek - tekst `horreum plan` dopisuje status do
     typu („PN?”, „…~”), bo goły typ podpisałby kandydatkę jako potwierdzoną planetarkę."""

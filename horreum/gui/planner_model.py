@@ -36,6 +36,7 @@ from dataclasses import dataclass
 
 from horreum import targets as T
 from horreum.gui import i18n, portfolio
+from horreum.resolve._text import norm_alnum
 
 # Kolejność kanałów w opisie pokrycia — RGB pierwszy, potem wąskie (jak w CLI `_coverage_text`).
 _CHANNELS = (T.RGB,) + T.NARROW_CHANNELS
@@ -136,12 +137,18 @@ def view_rows(result, rig_name=None, order=ORDER_CORE):
     rows = tuple(_view_row(r, result, rig_name) for r in result.rows
                  if lens_fits(r, result, rig_name))
     if order != ORDER_LENS:
-        if rig_name is None:
-            return rows
-        return tuple(sorted(rows, key=lambda v: _core_lens_key(v, result, rig_name)))
-    # `sorted` jest STABILNY, więc remis (ten sam kadr, to samo wypełnienie) zostaje rozstrzygnięty
-    # porządkiem rdzenia — dwa przebiegi dają ten sam plik i nie ma tu drugiego klucza do utrzymania.
-    return tuple(sorted(rows, key=lambda v: _lens_key(v, result, rig_name)))
+        if rig_name is not None:
+            rows = tuple(sorted(rows, key=lambda v: _core_lens_key(v, result, rig_name)))
+    else:
+        # `sorted` jest STABILNY, więc remis (ten sam kadr, to samo wypełnienie) zostaje
+        # rozstrzygnięty porządkiem rdzenia - dwa przebiegi dają ten sam plik i nie ma tu drugiego
+        # klucza do utrzymania.
+        rows = tuple(sorted(rows, key=lambda v: _lens_key(v, result, rig_name)))
+    if result.find_exact:
+        # Tryb `find`: trafienie dokładne przed podciągiem w KAŻDYM porządku (AR-146) - rdzeń tak
+        # oddaje listę, a soczewka nie ma prawa zepchnąć odpowiedzi na pytanie wprost pod podciąg.
+        rows = tuple(sorted(rows, key=lambda v: v.canon not in result.find_exact))
+    return rows
 
 
 # Ile członów `targets._sort_key` stoi PRZED kubełkiem kadru (widoczny, ma-lukę). Widok bierze je
@@ -363,6 +370,8 @@ def header_notes(result, rig_name=None):
     if result.counts.get("hidden_by_status"):
         notes.append(("info", i18n.t("planner.hidden_by_status",
                                      n=result.counts["hidden_by_status"])))
+    if result.counts.get("hidden_by_pn"):
+        notes.append(("info", i18n.t_plural("planner.pn_hidden", result.counts["hidden_by_pn"])))
     for rig in result.skipped_rigs:
         notes.append(("info", i18n.t("planner.rig_skipped", name=rig.telescope,
                                      reason=rig.reason)))
@@ -370,6 +379,41 @@ def header_notes(result, rig_name=None):
     if hidden:
         notes.append(("info", i18n.t_plural("planner.lens_hidden", hidden, name=rig_name)))
     return tuple(notes)
+
+
+# Warstwa assetu, której wołanie nie wczytało → klucz etykiety przełącznika, który ją włącza.
+# Ekran zawsze wczytuje rdzeń i plik człowieka (`curated`), więc z ekranu poza wołaniem bywa
+# wyłącznie cirrus. Wołanie z innym zestawem warstw (`layers=("cirrus",)`) dostaje w zdaniu
+# nazwę warstwy - ta funkcja jest wspólna, a zdanie bez przełącznika jest lepsze niż wyjątek.
+_LAYER_TOGGLE_KEYS = {"cirrus": "planner.layer_cirrus"}
+
+
+def empty_find_text(result, needle):
+    """Pusty stan trybu `find` (AR-146). Nazwa nieznana - dotychczasowe „nie znam celu". Nazwa,
+    którą katalog zna (`PlanResult.find_outside`), dostaje zdanie, CZYM jest i dlaczego jej nie
+    ma na liście: cel warstwy niewczytanej (z typem i przełącznikiem, który ją pokaże) albo nazwa
+    spoza celów planera - bez typu, bo obiektów odrzuconych przy budowie assetu nie opisuje żadne
+    źródło w repo. Wpisane równe kanonowi (`NGC6205`, `LMC`) nie powtarza się po „=”.
+
+    Szukajka TRAFIŁA (`counts['feasible']` w trybie `find` = trafienia w puli; albo rekord z puli
+    wołania w `find_outside`), a lista jest pusta: cel jest, chowają go bieżące filtry (status
+    kurateli, próg kosztu, a z wołań spoza ekranu także `only_gaps`/`only_new`) - „nie znam”
+    byłoby nieprawdą, a wyliczanie jednego z nich zgadywaniem."""
+    out = result.find_outside
+    hits = result.counts.get("feasible") or (1 if out is not None and out.loaded else 0)
+    if hits:
+        return i18n.t_plural("planner.empty_find_hidden", hits, needle=needle)
+    if out is None:
+        return i18n.t("planner.empty_find", needle=needle)
+    if norm_alnum(needle) == norm_alnum(out.canon):
+        name = i18n.t("planner.find_self", needle=needle)
+    else:
+        name = i18n.t("planner.find_as", needle=needle, canon=out.canon)
+    if out.target is None:
+        return i18n.t("planner.empty_find_outside", name=name)
+    klucz = _LAYER_TOGGLE_KEYS.get(out.target.layer)
+    return i18n.t("planner.empty_find_layer", name=name, type=type_text(out.target),
+                  layer=i18n.t(klucz) if klucz else out.target.layer)
 
 
 def night_text(result):

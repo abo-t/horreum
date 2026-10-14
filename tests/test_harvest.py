@@ -1411,6 +1411,17 @@ def _zeznanie_zniw(katalog, statusy, *, ts=TS):
     return projection.write_harvest_manifest(str(katalog), payload, now=ts)
 
 
+def test_missing_roots_tylko_karty_bez_folderu_raz_na_pisownie(tmp_path):
+    """AR-147: karta bez folderu na dysku jest brakiem, karta istniejąca bez `OBJECTS` - nie (to karta
+    bez wydań); ta sama karta pod dwiema pisowniami liczy się raz, kolejność jak w `roots`."""
+    pusta = tmp_path / "_WBPP"
+    pusta.mkdir()
+    brak = tmp_path / "F" / "_WBPP"
+    drugi = tmp_path / "G"
+    assert harvest.missing_roots([str(pusta), str(brak), str(brak).upper(), str(drugi)]) == (str(brak), str(drugi))
+    assert harvest.missing_roots([str(pusta)]) == ()
+
+
 def test_releases_bez_wyjscia_czeka_na_wbpp(tmp_path):
     root = _wydanie_na_dysku(tmp_path)
     [row] = harvest.releases([str(tmp_path / "_WBPP")])

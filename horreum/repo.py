@@ -22,6 +22,8 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import NamedTuple
 
+from .item_reasons import (OdmowaZPowodem,    # powód pozycji zmiany obiektu z kodem (AR-141) - liść
+                           PowodPozycji, dopisz, do_bazy)
 from .resolve.paths import path_key           # klucz ścieżki fizycznej - jeden dla podglądu planera
                                                 # i straży relokacji (liść `resolve`, bez cyklu)
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
@@ -1946,8 +1948,10 @@ def _unretire_object_tx(con, *, object_id, canon, now, actor):
         return False                                  # żywy - strażnik pary go nie dotyczy
     cel = xref(canon)
     if cel != canon:
-        raise ValueError(f"obiekt '{canon}' to nagrobek, a jego kanon prowadzi dziś przez parę "
-                         f"katalogową do '{cel}' - nagrobka nie wskrzeszam, celem jest '{cel}'")
+        raise OdmowaZPowodem(PowodPozycji(
+            f"obiekt '{canon}' to nagrobek, a jego kanon prowadzi dziś przez parę katalogową do "
+            f"'{cel}' - nagrobka nie wskrzeszam, celem jest '{cel}'", "retired_via_xref",
+            canon=canon, target=cel))
     if con.execute("UPDATE object SET retired_at = NULL WHERE id = ? AND retired_at IS NOT NULL",
                    (object_id,)).rowcount != 1:
         return False
@@ -2787,8 +2791,9 @@ def _object_target(con, canon, alias_norm):
     existing = None if alias_norm is None else con.execute(
         "SELECT object_id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
     if existing is not None and existing[0] != object_id:
-        raise ValueError(
-            f"alias '{alias_norm}' wskazuje już object:{existing[0]} - konflikt, zero zapisu")
+        raise OdmowaZPowodem(PowodPozycji(
+            f"alias '{alias_norm}' wskazuje już object:{existing[0]} - konflikt, zero zapisu",
+            "alias_conflict", alias=alias_norm, object_id=existing[0]))
     return object_id, existing is not None
 
 
@@ -4816,9 +4821,9 @@ def _hand_version_of_location(con, location_id):
     return None if loc is None else _hand_version(con, loc["frame_id"])
 
 
-_POWOD_NOWSZEJ_REKI = "nowsza decyzja ręki o obiekcie klatki zostaje"
-_POWOD_REKI_NIEZNANEJ = ("wersja decyzji ręki sprzed aktualizacji nieznana - nagrobek zostaje do "
-                         "oka")
+_POWOD_NOWSZEJ_REKI = PowodPozycji("nowsza decyzja ręki o obiekcie klatki zostaje", "hand_newer")
+_POWOD_REKI_NIEZNANEJ = PowodPozycji("wersja decyzji ręki sprzed aktualizacji nieznana - nagrobek "
+                                     "zostaje do oka", "hand_unknown")
 
 
 def _clear_tombstone_same_hand_tx(con, *, frame_id, hand_version, commit_id, location_id, now,
@@ -4859,7 +4864,7 @@ def clear_tombstone_after_write(con, *, frame_id, backup_id, commit_id, location
 
 
 def withhold_write(con, *, kind, location_id, commit_id, header_hash, reason, now, pending_ids=(),
-                   inplace_op_id=None, backup_id=None, actor="user:local"):
+                   inplace_op_id=None, backup_id=None, actor="user:local", item_note=None):
     """ZAPIS WSTRZYMANY - jedna transakcja (albo transakcja wołającego w `atomic`): wiersz
     `withheld_write` i wpisy stagingu `pending_ids` → 'failed' z `reason` i wiązaniem `withheld_id`.
     Zwraca `id` wstrzymania. Kontrakt pól w `_withhold_write_tx`."""
@@ -4867,11 +4872,12 @@ def withhold_write(con, *, kind, location_id, commit_id, header_hash, reason, no
         return _withhold_write_tx(con, kind=kind, location_id=location_id, commit_id=commit_id,
                                   header_hash=header_hash, reason=reason, now=now,
                                   pending_ids=pending_ids, inplace_op_id=inplace_op_id,
-                                  backup_id=backup_id, actor=actor)
+                                  backup_id=backup_id, actor=actor, item_note=item_note)
 
 
 def _withhold_write_tx(con, *, kind, location_id, commit_id, header_hash, reason, now,
-                       pending_ids=(), inplace_op_id=None, backup_id=None, actor="user:local"):
+                       pending_ids=(), inplace_op_id=None, backup_id=None, actor="user:local",
+                       item_note=None):
     """Rdzeń `withhold_write` BEZ własnej transakcji.
 
       * `kind='commit'` wymaga `backup_id` (EXPECT): wersja decyzji ręki przychodzi z backupu,
@@ -4883,8 +4889,10 @@ def _withhold_write_tx(con, *, kind, location_id, commit_id, header_hash, reason
     źródło: `run_id` commitu), żeby dokończenie domknęło też ją. Przy `kind='commit'` pozycja
     dostaje 'failed' z tym samym powodem W TEJ transakcji (B4): status pozycji i wstrzymanie
     powstają razem, więc dokończenie z innego połączenia nie trafi na pozycję jeszcze 'pending',
-    a sterownik gestu nie nadpisze potem pozycji już domkniętej. `actor` = aktor zapisu: pod nim
-    skan dociąga później zeznanie przy dokończeniu (B8), nie pod własnym."""
+    a sterownik gestu nie nadpisze potem pozycji już domkniętej. `item_note` = uwaga dopisana
+    WYŁĄCZNIE do powodu pozycji (spadek karty na drogę atomową, AR-141): pozycja mówi to samo, co
+    wynik sterownika, a wpisy stagingu i wiersz wstrzymania zostają przy `reason`. `actor` = aktor
+    zapisu: pod nim skan dociąga później zeznanie przy dokończeniu (B8), nie pod własnym."""
     if kind not in ("commit", "undo"):
         raise ValueError(f"rodzaj wstrzymania {kind!r} spoza ('commit', 'undo')")
     loc = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
@@ -4917,37 +4925,49 @@ def _withhold_write_tx(con, *, kind, location_id, commit_id, header_hash, reason
         "UPDATE pending_changes SET status = 'failed', reason = ?, withheld_id = ? "
         "WHERE id IN (SELECT value FROM json_each(?))", (reason, wid, ids))
     if item is not None and kind == "commit":
-        con.execute("UPDATE pending_object_change SET status = 'failed', reason = ? "
-                    "WHERE id = ? AND status IN ('pending', 'failed')", (reason, item["id"]))
+        if con.execute("UPDATE pending_object_change SET status = 'failed' "
+                       "WHERE id = ? AND status IN ('pending', 'failed')", (item["id"],)).rowcount:
+            _set_object_change_reason_tx(con, item["id"], dopisz(reason, item_note))
     return wid
+
+
+def _kopie(n):
+    """Fragment „N obecnych kopii” z odmianą PL (1 / 2-4 / 5+ / -naście) - kod `copies`, okno odmienia
+    go w języku UI z parametru `n` (wpis mnogi `objchg.item.copies`)."""
+    if n == 1:
+        return PowodPozycji(f"{n} obecną kopię", "copies", n=n)
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return PowodPozycji(f"{n} obecne kopie", "copies", n=n)
+    return PowodPozycji(f"{n} obecnych kopii", "copies", n=n)
 
 
 def withheld_reason(con, *, location_id, commit_id, undo=False):
     """ZDANIE DLA CZŁOWIEKA o zapisie wstrzymanym (jedno źródło dla pisarza i skanu): co leży na
-    dysku, czyj głos niesie zeznanie klatki i jak zapis się dokończy. `undo=True` - cofnięcie."""
+    dysku, czyj głos niesie zeznanie klatki i jak zapis się dokończy. `undo=True` - cofnięcie.
+    `PowodPozycji` (AR-141): liczba kopii i głos klatki to powody-fragmenty z kodem, więc okno
+    zmiany obiektu składa zdanie w języku UI także z powodu pozycji zapisanego w bazie."""
     loc = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
     frame_id = loc["frame_id"]
     n = con.execute("SELECT count(*) FROM location WHERE frame_id = ? AND present = 1",
                     (frame_id,)).fetchone()[0]
     wiodaca = lead_location(con, frame_id)
-    glos = "żadna kopia jednoznacznie"
+    glos = PowodPozycji("żadna kopia jednoznacznie", "lead_none")
     if wiodaca is not None:
         sciezka = con.execute("SELECT path FROM location WHERE id = ?", (wiodaca,)).fetchone()[0]
-        glos = f"kopia {sciezka}"
-    if n == 1:
-        kopie = "1 obecną kopię"
-    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        kopie = f"{n} obecne kopie"
-    else:
-        kopie = f"{n} obecnych kopii"
-    dokonczenie = ("dokończy się samo po wskazaniu tej kopii („Ta kopia prowadzi” w Zbiorach) albo "
-                   "gdy zostanie jedyną obecną kopią klatki")
+        glos = PowodPozycji(f"kopia {sciezka}", "lead_copy", path=sciezka)
+    kopie = _kopie(n)
     if undo:
-        return (f"nagłówek PRZYWRÓCONY (commit {commit_id}), ale zeznanie klatki NIE wróciło - "
-                f"klatka ma {kopie}, a głosem klatki mówi {glos}; {dokonczenie}")
-    return (f"plik ZAPISANY (backup do cofnięcia w commicie {commit_id}), ale zeznanie klatki NIE "
-            f"przyjęło zapisu - klatka ma {kopie}, a głosem klatki mówi {glos}; zapis "
-            f"{dokonczenie}, inaczej „Cofnij”")
+        return PowodPozycji(
+            f"nagłówek PRZYWRÓCONY (commit {commit_id}), ale zeznanie klatki NIE wróciło - klatka "
+            f"ma {kopie}, a głosem klatki mówi {glos}; dokończy się samo po wskazaniu tej kopii "
+            f"(„Ta kopia prowadzi” w Zbiorach) albo gdy zostanie jedyną obecną kopią klatki",
+            "testimony_withheld_undo", commit_id=commit_id, copies=kopie, lead=glos)
+    return PowodPozycji(
+        f"plik ZAPISANY (backup do cofnięcia w commicie {commit_id}), ale zeznanie klatki NIE "
+        f"przyjęło zapisu - klatka ma {kopie}, a głosem klatki mówi {glos}; zapis dokończy się "
+        f"samo po wskazaniu tej kopii („Ta kopia prowadzi” w Zbiorach) albo gdy zostanie jedyną "
+        f"obecną kopią klatki, inaczej „Cofnij”", "testimony_withheld", commit_id=commit_id,
+        copies=kopie, lead=glos)
 
 
 def open_withheld(con, location_id):
@@ -5044,20 +5064,18 @@ def _settle_withheld_tx(con, *, location_id, frame_id, sha1_data, header_hash, t
             _zastap_pozycje(con, w)
             wynik.append((w["id"], "superseded"))
         elif testimony_ok:
-            powod = "dokończone: zeznanie klatki przyjęło zapisany nagłówek"
+            powod = PowodPozycji("dokończone: zeznanie klatki przyjęło zapisany nagłówek",
+                                 "withheld_completed")
             if w["object_written"]:
-                uwaga = _clear_tombstone_same_hand_tx(
+                powod = dopisz(powod, _clear_tombstone_same_hand_tx(
                     con, frame_id=frame_id, hand_version=w["hand_version"],
-                    commit_id=w["commit_id"], location_id=location_id, now=now, actor=actor)
-                if uwaga is not None:
-                    powod += f"; {uwaga}"
+                    commit_id=w["commit_id"], location_id=location_id, now=now, actor=actor))
             con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = 'completed' "
                         "WHERE id = ?", (now, w["id"]))
             con.execute("UPDATE pending_changes SET status = 'applied', reason = ? "
                         "WHERE withheld_id = ? AND status = 'failed'", (powod, w["id"]))
             if w["item_id"] is not None and w["kind"] == "commit":
-                con.execute("UPDATE pending_object_change SET status = 'applied', reason = ? "
-                            "WHERE id = ? AND status = 'failed'", (powod, w["item_id"]))
+                _domknij_pozycje_wstrzymana(con, w["item_id"], powod)
             wynik.append((w["id"], "completed"))
     return wynik
 
@@ -5068,11 +5086,17 @@ def _zastap_pozycje(con, w):
     być „stanem częściowym” w Porządkach, a powód mówi prawdę o karcie. Cofnięcie przebiegu działa
     dalej jak dla pozycji zapisanej."""
     if w["item_id"] is not None and w["kind"] == "commit":
-        con.execute(
-            "UPDATE pending_object_change SET status = 'applied', reason = ? "
-            "WHERE id = ? AND status = 'failed'",
-            ("karta zapisana, potem zastąpiona nowszym stanem pliku - zeznanie z niej nie przeszło",
-             w["item_id"]))
+        _domknij_pozycje_wstrzymana(con, w["item_id"], PowodPozycji(
+            "karta zapisana, potem zastąpiona nowszym stanem pliku - zeznanie z niej nie przeszło",
+            "withheld_superseded"))
+
+
+def _domknij_pozycje_wstrzymana(con, item_id, powod):
+    """Pozycja gestu 'failed' po wstrzymaniu → 'applied' z powodem (dokończenie albo zastąpienie);
+    pozycja w innym stanie zostaje nietknięta. Pod transakcją wołającego."""
+    if con.execute("UPDATE pending_object_change SET status = 'applied' "
+                   "WHERE id = ? AND status = 'failed'", (item_id,)).rowcount:
+        _set_object_change_reason_tx(con, item_id, powod)
 
 
 def settle_withheld(con, *, location_id, frame_id, sha1_data, header_hash, testimony_ok, now,
@@ -5488,8 +5512,9 @@ def _relocation_target(con, location_id, new_path):
         raise ValueError(f"location:{location_id} nie istnieje")
     clash = path_owner(con, volume=row["volume"], path=new_path, location_id=location_id)
     if clash is not None:
-        raise ValueError(
-            f"cel zajęty w bazie: location:{clash} ma już (volume={row['volume']}, {new_path})")
+        raise OdmowaZPowodem(PowodPozycji(
+            f"cel zajęty w bazie: location:{clash} ma już (volume={row['volume']}, {new_path})",
+            "target_taken_db", location=clash, volume=row["volume"], path=new_path))
     return row["path"]
 
 
@@ -5595,8 +5620,9 @@ def guard_file_rename(con, *, location_id, new_path, generation, now, actor="use
             zamiar = con.execute("SELECT in_flight FROM pending_renames WHERE id = ?",
                                  (rename_id,)).fetchone()
             if zamiar is None or zamiar["in_flight"] != kierunek:
-                raise ValueError(f"zamiar renamu {rename_id} zgaszony przez inny proces - renamu "
-                                 f"nie było, plik nietknięty; odśwież przebieg")
+                raise OdmowaZPowodem(PowodPozycji(
+                    f"zamiar renamu {rename_id} zgaszony przez inny proces - renamu nie było, plik "
+                    f"nietknięty; odśwież przebieg", "intent_dropped", rename_id=rename_id))
         old_path = _relocation_target(con, location_id, new_path)
         yield
         _apply_relocation(con, location_id=location_id, old_path=old_path, new_path=new_path,
@@ -5933,14 +5959,32 @@ def settle_object_change_item(con, *, item_id, status, reason, now, restore=Fals
         if restore and zmiana is not None:
             wycofano = _restore_override_tx(con, change=zmiana, now=now, actor=f"user:{uid}")
             if not wycofano:
-                reason = (f"{reason}; " if reason else "") + ("baza: klatka niesie już nowszą "
-                                                               "decyzję niż gest - zostaje")
+                if reason and not isinstance(reason, PowodPozycji):
+                    # Proza bez kodu (tekst systemu, EXPECT) w kopercie - nota zachowuje kod.
+                    reason = PowodPozycji(reason, "prose", text=reason)
+                reason = dopisz(reason, _BAZA_NOWSZA_W_BIEGU)
             con.execute(
                 "UPDATE pending_object_change SET object_id = NULL, before_object_id = NULL, "
                 "before_source = NULL, before_cleared_id = NULL WHERE id = ?", (item_id,))
-        con.execute("UPDATE pending_object_change SET status = ?, reason = ? WHERE id = ?",
-                    (status, reason, item_id))
+        con.execute("UPDATE pending_object_change SET status = ? WHERE id = ?", (status, item_id))
+        _set_object_change_reason_tx(con, item_id, reason)
     return wycofano
+
+
+# Uwagi klingi do powodu pozycji (AR-141): wycofanie kroku bazy w biegu i cofnięcie bazy, które
+# zastały nowszą decyzję ręki - klatka zostaje przy niej.
+_BAZA_NOWSZA_W_BIEGU = PowodPozycji("baza: klatka niesie już nowszą decyzję niż gest - zostaje",
+                                    "hand_newer_kept")
+_BAZA_NOWSZA_PRZY_COFNIECIU = PowodPozycji("baza: klatka niesie nowszą decyzję niż gest - obiekt "
+                                           "zostaje", "undo_hand_newer")
+
+
+def _set_object_change_reason_tx(con, item_id, powod):
+    """JEDYNY pisarz powodu pozycji (AR-141, meta-test): trójka `reason`/`reason_code`/`reason_args`
+    z kodeka `item_reasons.do_bazy` jednym UPDATE - proza i kod nigdy się nie rozjadą (CHECK 0041).
+    `powod` = `PowodPozycji`, proza bez kodu albo `None` (czyści trójkę). Pod transakcją wołającego."""
+    con.execute("UPDATE pending_object_change SET reason = ?, reason_code = ?, reason_args = ? "
+                "WHERE id = ?", (*do_bazy(powod), item_id))
 
 
 def set_object_change_undo_phase(con, *, item_id, phase, reason=None):
@@ -5954,14 +5998,14 @@ def set_object_change_undo_phase(con, *, item_id, phase, reason=None):
         if row is None:
             raise ValueError(f"pozycja zmiany obiektu {item_id} nie istnieje")
         if phase is None:
-            con.execute("UPDATE pending_object_change SET reason = ? WHERE id = ?", (reason, item_id))
+            _set_object_change_reason_tx(con, item_id, reason)
             return
         if (phase not in _ETAPY_COFNIECIA[1:] or row["undo_phase"] not in _ETAPY_COFNIECIA
                 or _ETAPY_COFNIECIA.index(phase) != _ETAPY_COFNIECIA.index(row["undo_phase"]) + 1):
             raise ValueError(f"faza cofnięcia {row['undo_phase']!r} → {phase!r} - poza kolejnością "
                              f"{_ETAPY_COFNIECIA}")
-        con.execute("UPDATE pending_object_change SET undo_phase = ?, reason = ? WHERE id = ?",
-                    (phase, reason, item_id))
+        con.execute("UPDATE pending_object_change SET undo_phase = ? WHERE id = ?", (phase, item_id))
+        _set_object_change_reason_tx(con, item_id, reason)
 
 
 def undo_object_change_db(con, *, item_id, now, uid="local"):
@@ -5978,9 +6022,10 @@ def undo_object_change_db(con, *, item_id, now, uid="local"):
         uwaga = None
         if zmiana is not None and not _restore_override_tx(con, change=zmiana, now=now,
                                                           actor=f"user:{uid}"):
-            uwaga = "baza: klatka niesie nowszą decyzję niż gest - obiekt zostaje"
-        con.execute("UPDATE pending_object_change SET status = 'undone', undo_phase = 'db', "
-                    "reason = ? WHERE id = ?", (uwaga, item_id))
+            uwaga = _BAZA_NOWSZA_PRZY_COFNIECIU
+        con.execute("UPDATE pending_object_change SET status = 'undone', undo_phase = 'db' "
+                    "WHERE id = ?", (item_id,))
+        _set_object_change_reason_tx(con, item_id, uwaga)
     return uwaga
 
 

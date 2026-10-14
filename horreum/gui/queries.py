@@ -16,6 +16,7 @@ import ntpath
 import os
 import re
 
+from horreum import item_reasons                    # kodek powodu pozycji zmiany obiektu (AR-141)
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.grouper import OPTICS_TOLERANCE, optics_from_files   # optyka teleskopu (AR-128)
 from horreum.lineage import RAW_FLAT_WINDOW_DAYS, raw_flats_for   # surowe flaty teczek wydania
@@ -2893,8 +2894,9 @@ def object_change_run_view(con, run_id):
     awaria po ostatniej pozycji, przed domknięciem przebiegu, zostawia `staged` bez `pending`)
     i `items` - per pozycja: `frame_id`, `location_id`, `old_path` (ścieżka z podglądu), `path`
     (gdzie lokacja stoi w bazie TERAZ), `new_path` (cel przeniesienia albo None), `status`
-    i `reason` pozycji, `card_op`/`card_old`/`card_new` (wpis stagingu karty `OBJECT` tego
-    przebiegu albo None - pozycja bez zmiany karty)."""
+    i `reason` pozycji (`item_reasons.PowodPozycji` z kodem albo proza wiersza bez kodu, AR-141),
+    `card_op`/`card_old`/`card_new` (wpis stagingu karty `OBJECT` tego przebiegu albo None -
+    pozycja bez zmiany karty)."""
     run = con.execute("SELECT run_id, mode, canon, catalog, kind, alias_norm, card_form, status "
                       "FROM object_change_run WHERE run_id = ?", (run_id,)).fetchone()
     if run is None:
@@ -2904,12 +2906,16 @@ def object_change_run_view(con, run_id):
               if run["mode"] == "change" else None)
     items = [dict(r) for r in con.execute(
         "SELECT p.frame_id, p.location_id, p.old_path, l.path, r.new_path, p.status, p.reason, "
+        "       p.reason_code, p.reason_args, "
         "       c.op AS card_op, c.old_value AS card_old, c.new_value AS card_new "
         "FROM pending_object_change p JOIN location l ON l.id = p.location_id "
         "LEFT JOIN pending_renames r ON r.id = p.rename_id "
         "LEFT JOIN pending_changes c ON c.run_id = p.run_id AND c.location_id = p.location_id "
         "     AND c.keyword = 'OBJECT' "
         "WHERE p.run_id = ? ORDER BY p.id", (run_id,)).fetchall()]
+    for it in items:            # powód z kodem (0041, AR-141) - okno mówi go w języku UI
+        it["reason"] = item_reasons.z_bazy(it["reason"], it.pop("reason_code"),
+                                           it.pop("reason_args"))
     staged = run["status"] == "staged"
     pending = sum(1 for it in items if it["status"] == "pending") if staged else 0
     return {"run_id": run["run_id"], "status": run["status"], "target": target,

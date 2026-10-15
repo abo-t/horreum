@@ -2423,6 +2423,81 @@ def test_pusta_noc_obrazu_zostaje_na_ekranie_z_receptą(view, gcon):
     assert "wybierz inną noc" in bar.note.full_text()
 
 
+def test_panel_mowi_ile_klatek_pominal_jako_nowsze_niz_obraz(view, gcon):
+    """AR-150: propozycja pomija klatki zrobione po zintegrowaniu obrazu (`creation_time`), a panel
+    mówi ile - przy każdej nocy, bo pominięcie dotyczy obrazu, nie wybranej nocy. Zero = cisza:
+    stos bez daty zapisu w pliku nie dostaje zdania.
+
+    Falsyfikator: zgub `after_integration=` w wołaniu `set_lineage` (`grid.py`) albo człon
+    `po_obrazie` w `_fill_night` → zdanie nie pada, choć noc z 25.04 zniknęła z listy."""
+    _seed_stos_z_kandydatami(gcon)
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert "nowsz" not in bar.note.full_text(), "bez creation_time nic nie pominięto - cisza"
+
+    gcon.execute("UPDATE integration SET creation_time = '2023-04-21T20:30:00Z' WHERE id = 5")
+    gcon.commit()
+    view._refresh_lineage()
+    assert bar.combo_night.count() == 1 and bar.items.count() == 1      # zostaje klatka 20:00
+    zdanie = grid_mod.i18n.t_plural("grid.lin.cand.after_integration", 2)
+    assert zdanie in bar.note.full_text()
+    assert "Pominięte 2 klatki nowsze niż obraz" in zdanie
+
+
+def test_obraz_ktorego_CALY_material_powstal_pozniej_nie_slyszy_ze_archiwum_jest_puste(view, gcon):
+    """Ta sama lekcja co RAW bez zegara (bramka 3a): „archiwum nie ma ani jednej klatki" o obrazie,
+    którego klatki SĄ, tylko powstały po nim, byłoby twierdzeniem fałszywym. Pustkę tłumaczy wtedy
+    zdanie o klatkach nowszych niż obraz - a NAGŁÓWEK powodu `no_candidates` mówi węziej, że
+    pasujące klatki powstały po obrazie (wizytacja natywna: „nie ma w archiwum ani jednej pasującej
+    klatki" tuż nad „Pominiętych 66 klatek…" czytało się jak sprzeczność), w obu językach.
+
+    Falsyfikator: zdejmij gałąź `no_candidates_after_integration` w `set_lineage` → nagłówek wraca
+    do „nie ma w archiwum ani jednej pasującej klatki"."""
+    _seed_stos_z_kandydatami(gcon, reason="no_candidates")
+    gcon.execute("UPDATE header SET date_obs = '2023-04-21T20:40:00' WHERE frame_id = 20")
+    gcon.execute("UPDATE integration SET creation_time = '2023-04-21T20:30:00Z' WHERE id = 5")
+    gcon.commit()
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    nota = bar.note.full_text()
+    assert bar.combo_night.currentData() == "2023-04-21" and bar.items.count() == 0
+    assert "Pominięte 3 klatki nowsze niż obraz" in nota
+    assert "nie ma ani jednej klatki" not in nota, f"klatki są, tylko powstały później: {nota!r}"
+    naglowek = bar.head.text()
+    assert naglowek == grid_mod.i18n.t("grid.lin.reason.no_candidates_after_integration")
+    assert "powstały dopiero po zintegrowaniu" in naglowek
+    assert "ani jednej" not in naglowek, f"nagłówek przeczy nocie: {naglowek!r}"
+
+    grid_mod.i18n.set_lang("en")                    # conftest zeruje język przed każdym testem
+    view._refresh_lineage()
+    assert bar.head.text() == ("Unknown source: the archive's matching frames were all shot after "
+                               "this image was integrated.")
+    assert "Skipped 3 frames newer than the image" in bar.note.full_text()
+
+
+@pytest.mark.parametrize("n, fraza", [
+    (1, "Pominięta 1 klatka nowsza"), (2, "Pominięte 2 klatki nowsze"),
+    (5, "Pominiętych 5 klatek nowszych"), (12, "Pominiętych 12 klatek nowszych"),
+    (22, "Pominięte 22 klatki nowsze")])
+def test_zdanie_o_klatkach_po_zintegrowaniu_sie_odmienia(n, fraza):
+    """Liczba bywa jedynką i dwunastką - zdanie idzie `t_plural` z formami one/few/many, jak
+    sąsiednie zdania propozycji (`grid.lin.cand.empty_night`, `grid.lin.cand.no_reference`)."""
+    assert grid_mod.i18n.t_plural("grid.lin.cand.after_integration", n).startswith(fraza)
+
+
+@pytest.mark.parametrize("n, fraza", [(1, "1 frame"), (2, "2 frames"), (22, "22 frames")])
+def test_zdanie_o_klatkach_po_zintegrowaniu_EN_one_other(n, fraza):
+    """Forma angielska tego samego zdania (one/other) - bez polskich liter."""
+    grid_mod.i18n.set_lang("en")
+    try:
+        zdanie = grid_mod.i18n.t_plural("grid.lin.cand.after_integration", n)
+    finally:
+        grid_mod.i18n.set_lang("pl")
+    assert fraza in zdanie and zdanie.isascii(), zdanie
+
+
 def test_potwierdzenie_propozycji_domyka_stos_i_zdejmuje_go_z_kubelka(view, gcon):
     """CAŁA DROGA poz. 4 w jednym teście: propozycja → werdykt ręki → obraz ma rodowód → wypada
     z kubełka Porządków. Ostatni człon nie jest ozdobą: werdykt ręki ma rangę najwyższą, więc

@@ -325,13 +325,14 @@ def podziel_powod_spadku(reason):
     „Zatwierdź ze ścieżki…” (okna kart gubiły uwagę o kopii `*.horreum-kopia`).
 
     Powód z kodem spadku (`PowodPozycji` `inplace_fallback`, AR-141) dzieli się po PARAMETRACH, nie
-    po prozie: szczegół = `detail`, uwagi = lista `notes` w języku UI (`tekst_powodu`). Podział
+    po prozie: szczegół = `detail`, uwagi = lista `notes` - oba w języku UI (`tekst_powodu`). Podział
     prozy zostaje dla powodu bez kodu (wiersz bazy sprzed 0041) i dla parametrów spoza kontraktu
     (`detail` nie-tekst, uwagi nie-lista powodów - zapis spoza kodeka; podział totalny)."""
     if _spadek_z_kodu(reason):
         p = dict(reason.params)
         uwagi = [tekst_powodu(n) for n in p.get("notes", ())]
-        return p["detail"], ("; ".join(uwagi) or None)
+        # Szczegół = powód odmowy zapisu w miejscu - z kodem (AR-148), więc też w języku UI.
+        return tekst_powodu(p["detail"]), ("; ".join(uwagi) or None)
     szczegol, _, uwaga = bez_prefiksu_spadku(reason or "").partition("; ")
     return szczegol, (uwaga or None)
 
@@ -340,8 +341,8 @@ def zdanie_drogi_zapisu(res):
     """Człon o SPADKU na drogę atomową przy zapisie w miejscu (AR-117) albo `""`.
 
     Okna kart piszą w miejscu (`commit_inplace`), bo pełne przepisanie pliku po SMB zrywa
-    dowiązania `_WBPP`. Plik, w którym zapis w miejscu się nie kwalifikuje (FITS umie w miejscu
-    wyłącznie podmienić istniejącą kartę), rdzeń zapisuje drogą atomową i znaczy kodem
+    dowiązania `_WBPP`. Plik, w którym zapis w miejscu się nie kwalifikuje (np. FITS bez zapasu
+    nagłówka na dopisaną kartę), rdzeń zapisuje drogą atomową i znaczy kodem
     (`spadek_na_droge_atomowa`). `applied` bez tego kodu to co innego (np. zapis potwierdzony
     z dysku po przerwanym commicie - nic nie przepisano). Droga zapisu jest szczegółem, dopóki
     wszystko poszło w miejscu, więc człon mówi wyłącznie o spadku: ile plików przepisano w całości
@@ -468,7 +469,9 @@ def _zdanie_z_kodu(powod):
             for _, f, _, _ in string.Formatter().parse(s) if f}
     if not pola <= set(p):
         return None
-    p = {k: tekst_powodu(v) if isinstance(v, str) else v for k, v in p.items()}
+    # Parametr-lista (`features`, `paths`, AR-148): elementy w języku UI, złączone jak w rdzeniu.
+    p = {k: (", ".join(tekst_powodu(x) for x in v) if isinstance(v, (list, tuple))
+             else tekst_powodu(v) if isinstance(v, str) else v) for k, v in p.items()}
     if isinstance(forma, dict):
         n = p.pop("n", None)
         if not isinstance(n, int) or isinstance(n, bool):

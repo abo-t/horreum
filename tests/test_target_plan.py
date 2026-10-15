@@ -338,6 +338,77 @@ def test_literowka_dostaje_kandydatow_nie_cisze():
     assert targets.resolve_plan_canon("zzzzz") == (None, ())
 
 
+# Wpis → (dokładne trafienia szukajki, wynik oznaczenia). `None` w drugim polu = brak trafienia
+# dokładnego: oznaczenie oddaje wtedy najbliższych po podciągu (sprawdzane niżej regułą, nie listą
+# - lista zależy od zawartości assetu).
+_FORMY = [
+    ("M 27", {"NGC6853"}, ("NGC6853", ())),
+    ("m27", {"NGC6853"}, ("NGC6853", ())),
+    ("M27", {"NGC6853"}, ("NGC6853", ())),
+    ("NGC6853", {"NGC6853"}, ("NGC6853", ())),
+    ("Arp244", {"NGC4038"}, ("NGC4038", ())),                 # cała nazwa po `norm_alnum`
+    ("Arp 244", {"NGC4038"}, ("NGC4038", ())),
+    ("Heart Nebula", {"IC1805"}, ("IC1805", ())),             # nazwa potoczna resolvera
+    ("Eastern Veil", {"NGC6992", "NGC6995"}, (None, ("NGC6992", "NGC6995"))),   # dwuznaczna
+    ("sh2 131", {"Sh2-131"}, ("Sh2-131", ())),
+    ("G024.7+00.6", {"G024.7+00.6"}, ("G024.7+00.6", ())),    # znak rozróżnia dwa obiekty
+    ("NGC70", set(), None),                                   # literówka: najbliżsi
+    ("NGC 7oo0", set(), (None, ())),                          # literówka bez podobnych
+    ("", set(), (None, ())),
+    ("zzqq", set(), (None, ())),                              # nazwa spoza katalogu
+    ("M 13", set(), (None, ())),                              # znana katalogowi, poza celami
+]
+
+
+@pytest.mark.parametrize("wpis, dokladne, oznaczenie", _FORMY)
+def test_szukajka_i_oznaczenie_celu_mowia_jednym_glosem(wpis, dokladne, oznaczenie):
+    """AR-149: oznaczenie celu (`resolve_plan_canon`, CLI `horreum target`) trzymało własną kopię
+    reguły „ta nazwa to ten cel” i rozjeżdżało się ze szukajką planera: „Arp244” i „Heart Nebula”
+    szukajka znajdowała, a oznaczenie odmawiało. Jedna tabela form dla obu wołających: dokładne
+    trafienie szukajki == kanon oznaczenia, kilka trafień == kandydaci (nigdy cichy wybór), zero ==
+    najbliżsi z podciągu szukajki, do 5.
+
+    Jawnie nazwana różnica: szukajka w `plan` biegnie po warstwach WCZYTANYCH, oznaczenie po
+    wszystkich - tabela porównuje obie na pełnym assecie (cel spoza wczytanych warstw dostaje
+    w `plan` zdanie `find_outside`, nie trafienie)."""
+    exact, rest = targets.find_matches(targets.load_targets(targets.ALL_LAYERS), wpis)
+    trafione = {t.canon for t in exact}
+    assert trafione == dokladne
+    wynik = targets.resolve_plan_canon(wpis)
+    if oznaczenie is not None:
+        assert wynik == oznaczenie
+    if len(trafione) == 1:
+        assert wynik == (next(iter(trafione)), ())
+    elif trafione:
+        assert wynik == (None, tuple(sorted(trafione)))
+    else:
+        assert wynik == (None, tuple(sorted({t.canon for t in rest})[:5]))
+        assert oznaczenie is not None or wynik[1], "literówka bez kandydatów - fikstura bez sensu"
+
+
+def test_oznaczenie_przycina_wpis_jak_stara_regula():
+    """Szukajka trzyma surowy tekst (AR-146: nic, co trafiało, nie przestaje), ale oznaczenie celu
+    przycinało wpis przed szukaniem. Wpis z samymi znakami spoza `norm_alnum` (` + `) bez przycięcia
+    szukałby podciągu ze spacjami i nie dostał najbliższych, które stara reguła oddawała."""
+    przyciety = targets.resolve_plan_canon("+")
+    assert przyciety[0] is None and przyciety[1], "asset bez kanonu ze znakiem + - fikstura bez sensu"
+    assert targets.resolve_plan_canon(" + ") == przyciety
+    assert targets.resolve_plan_canon("  M 27 ") == ("NGC6853", ())
+
+
+def test_szczebel_katalogowy_bije_nazwe_a_rekord_nazwy_zostaje_na_liscie():
+    """`norm_alnum` gubi znak: `G024.7+00.6` i `G024.7-00.6` (dwa obiekty Greena) mają jeden klucz
+    nazwy. Bez szczebli szukajka dawała oba jako DOKŁADNE, a oznaczenie wybrałoby jeden z nich
+    tylko dzięki starej kopii reguły. Szczebel katalogowy rozstrzyga; rekord trafiony samą nazwą
+    schodzi do podciągu - nie znika z listy szukajki."""
+    pool = targets.load_targets(targets.ALL_LAYERS)
+    for wpis, lustro in (("G024.7+00.6", "G024.7-00.6"), ("G024.7-00.6", "G024.7+00.6")):
+        exact, rest = targets.find_matches(pool, wpis)
+        assert [t.canon for t in exact] == [wpis]
+        assert lustro in {t.canon for t in rest}
+        assert targets.resolve_plan_canon(wpis) == (wpis, ())
+
+
 # ─────────────────────────────────────────────────────────────── CLI
 
 def test_cli_park_dodaje_i_odmawia_nieznanego(tmp_path, capsys, con):

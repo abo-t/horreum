@@ -43,7 +43,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0039 telescope.focal_user + f_ratio_user (optyka teleskopu z ręki, AR-128)
     # + 0040 nagrobek object/telescope.retired_at + ślady gestów (cofnięcie zdejmuje, AR-133/AR-137)
     # + 0041 pending_object_change.reason_code + reason_args (kod powodu pozycji, AR-141)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 41
+    # + 0042 reason_code + reason_args w pending_changes/pending_renames/withheld_write (AR-148)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 42
     con.close()
 
 

@@ -175,11 +175,11 @@ class Target:
 
     @functools.cached_property
     def find_keys(self):
-        """Klucze szukajki planera (`find_matches`, AR-146), liczone RAZ na rekord: pula żyje
-        w cache'u `_load_stamped`, a szukajka biegnie przy każdym znaku, więc gramatyka katalogowa
-        aliasów per znak kosztowałaby tysiące `catalog_canon` na jedno wpisanie. `cached_property`
-        pisze do `__dict__` rekordu z pominięciem `__setattr__`, więc działa na zamrożonym
-        rekordzie i nie wchodzi do `==`/`hash` (te liczą wyłącznie pola).
+        """Klucze szukajki planera i oznaczenia celu (`find_matches`, AR-146/AR-149), liczone RAZ
+        na rekord: pula żyje w cache'u `_load_stamped`, a szukajka biegnie przy każdym znaku, więc
+        gramatyka katalogowa aliasów per znak kosztowałaby tysiące `catalog_canon` na jedno
+        wpisanie. `cached_property` pisze do `__dict__` rekordu z pominięciem `__setattr__`, więc
+        działa na zamrożonym rekordzie i nie wchodzi do `==`/`hash` (te liczą wyłącznie pola).
 
         `catalog` - kanon i aliasy katalogowe PO `xref` (ta sama forma co `catalog_aliases`),
         `alnum` - kanon i wszystkie aliasy przez `norm_alnum`, `hay_fold`/`hay_alnum` - te same
@@ -325,6 +325,14 @@ class PlanResult:
     # (chowa, licznik `counts['hidden_by_pn']`) · `find` (tryb szukania go pomija, jak filtr kadru).
     pn_filter: str = "off"
 
+    @property
+    def find_hits(self):
+        """Trafienia szukajki w puli wołania (tryb `find`): `counts['feasible']` w tym trybie liczy
+        trafienia, a rekord z puli w `find_outside` (`loaded=True`) to co najmniej jedno. Jedno
+        źródło dla pustego stanu ekranu (`planner_model.empty_find_text`) i zdania CLI `--find`."""
+        out = self.find_outside
+        return self.counts.get("feasible") or (1 if out is not None and out.loaded else 0)
+
 
 # ─────────────────────────────────────────────────────── asset
 
@@ -442,16 +450,23 @@ def rig_fits(framing, *, min_fill=None, max_panels=None):
 
 
 def find_matches(pool, needle):
-    """Szukajka planera (tryb `find`, AR-146): `(dokładne, podciąg)` - dwie krotki rekordów `pool`
-    w porządku puli, rozłączne.
+    """Szukajka planera (tryb `find`, AR-146) i JEDYNA reguła „ta nazwa to ten cel": oznaczenie
+    celu (`resolve_plan_canon`) stoi na niej, nie na własnej kopii (AR-149). `(dokładne, podciąg)` -
+    dwie krotki rekordów `pool` w porządku puli, rozłączne.
 
-    DOKŁADNE: wpisany tekst przez gramatykę katalogową i `xref` (`M 27`, `m27`, `M27` → `NGC6853`)
-    trafia kanon albo alias katalogowy rekordu; drugą drogą cała nazwa po `norm_alnum` równa
-    kanonowi albo aliasowi (`Arp244` = `Arp 244`, gramatyka katalogowa `Arp` nie zna). Klucz
-    katalogowy daje resolver osi obiektu (`resolve_object`, bez gałęzi cięcia - wpisana nazwa ma
-    być oznaczeniem W CAŁOŚCI): gramatyka + `xref`, a także nazwy potoczne resolvera, których
-    asset nie nosi jako aliasu („Heart Nebula" → `IC1805`) - jedna droga z osią obiektu, nie kopia
-    jej tabeli.
+    DOKŁADNE - DWA SZCZEBLE W KOLEJNOŚCI PEWNOŚCI, dokładne są rekordy PIERWSZEGO, który coś
+    trafił. (1) Klucz katalogowy: wpisany tekst przez resolver osi obiektu (`resolve_object`, bez
+    gałęzi cięcia - wpisana nazwa ma być oznaczeniem W CAŁOŚCI) trafia kanon albo alias katalogowy
+    rekordu: gramatyka + `xref` (`M 27`, `m27`, `M27` → `NGC6853`), a także nazwy potoczne
+    resolvera, których asset nie nosi jako aliasu („Heart Nebula" → `IC1805`) - jedna droga z osią
+    obiektu, nie kopia jej tabeli. (2) Cała nazwa po `norm_alnum` równa kanonowi albo aliasowi,
+    także potocznemu (`Arp244` = `Arp 244`, gramatyka katalogowa `Arp` nie zna).
+
+    Szczebel drugi liczy się WYŁĄCZNIE, gdy pierwszy milczy: `norm_alnum` gubi znak, więc
+    `G024.7+00.6` i `G024.7-00.6` (dwa obiekty Greena) mają jeden klucz nazwy, a gramatyka je
+    rozróżnia. Rekord trafiony samą nazwą obok trafienia katalogowego schodzi do podciągu -
+    zostaje na liście, za oznaczeniem, które wpisano. Dwa rekordy JEDNEGO szczebla zostają
+    dokładne oba („Eastern Veil" nosi NGC6992 i NGC6995) - wybór między nimi należy do człowieka.
 
     PODCIĄG: dotychczasowa reguła (surowy tekst bez wielkości liter w kanonie albo aliasie) BIT
     W BIT - nic, co trafiało, nie przestaje - plus ten sam podciąg po `norm_alnum`, więc
@@ -467,14 +482,18 @@ def find_matches(pool, needle):
     alnum = norm_alnum(n)
     ident = resolve_object(n, split=False)
     key = ident.canon if ident is not None else None
-    exact, rest = [], []
+    tagged = []                            # (rekord, szczebel): 0 klucz, 1 nazwa, 2 podciąg
     for t in pool:
         k = t.find_keys
-        if (key is not None and key in k.catalog) or (alnum and alnum in k.alnum):
-            exact.append(t)
+        if key is not None and key in k.catalog:
+            tagged.append((t, 0))
+        elif alnum and alnum in k.alnum:
+            tagged.append((t, 1))
         elif fold in k.hay_fold or (alnum and alnum in k.hay_alnum):
-            rest.append(t)
-    return tuple(exact), tuple(rest)
+            tagged.append((t, 2))
+    best = min((s for _t, s in tagged if s < 2), default=None)
+    return (tuple(t for t, s in tagged if s == best),
+            tuple(t for t, s in tagged if s != best))
 
 
 @dataclass(frozen=True)
@@ -517,35 +536,27 @@ def find_outside(needle, layers=DEFAULT_LAYERS):
 def resolve_plan_canon(needle, layers=ALL_LAYERS):
     """Wejście użytkownika → KANON KATALOGU dla kuratelii. Zwraca `(kanon, kandydaci)`.
 
-    Trzy drogi w kolejności pewności: kanon (bez względu na wielkość liter) → alias KATALOGOWY przez
-    gramatykę resolvera (`M42` → `NGC1976`) → nazwa potoczna. Nazwa potoczna bywa DWUZNACZNA
-    (zmierzone w T3: „Eastern Veil" wskazuje NGC6992 **i** NGC6995), więc kolizja zwraca
-    `(None, kandydaci)` — zapis kuratelii na losowym z dwóch rekordów byłby cichym wyborem za
-    użytkownika. Nic nie trafione → `(None, najbliżsi po podciągu)`, żeby literówka dostała
-    odpowiedź, a nie ciszę.
+    REGUŁA JEST JEDNA - `find_matches`, ta sama co szukajki planera (AR-149). Do tej pory
+    oznaczenie trzymało własną, starszą kopię (kanon → `catalog_canon`+`xref` → alias) i rozjeżdżało
+    się ze szukajką: „Arp244" i „Heart Nebula" szukajka znajdowała, a `horreum target` odmawiał.
+    Kolejność pewności żyje w szczeblach `find_matches` (klucz katalogowy przed całą nazwą).
+
+    Dokładne trafienia jednego kanonu → `(kanon, ())`. Kilku kanonów → `(None, kandydaci)`: nazwa
+    potoczna bywa DWUZNACZNA (zmierzone w T3: „Eastern Veil" wskazuje NGC6992 **i** NGC6995),
+    a zapis kuratelii na losowym z dwóch rekordów byłby cichym wyborem za użytkownika. Nic
+    dokładnego → `(None, najbliżsi po podciągu)` do 5, żeby literówka dostała odpowiedź, a nie
+    ciszę.
 
     Szukamy we WSZYSTKICH warstwach: cel z cirrusu wolno oznaczyć, mając wczytany rdzeń."""
-    pool = load_targets(tuple(layers))
-    n = str(needle or "").strip()
-    if not n:
-        return None, ()
-    fold = n.casefold()
-    hits = [t for t in pool if t.canon.casefold() == fold]
-    if not hits:
-        cc = catalog_canon(n)
-        key = xref(cc) if cc else None
-        if key:
-            hits = [t for t in pool if t.canon == key or key in t.catalog_aliases]
-    if not hits:
-        hits = [t for t in pool if any(a.casefold() == fold for a in t.aliases)]
-    canons = sorted({t.canon for t in hits})
+    # Oznaczenie przycina wpis PRZED regułą (jak stara kopia): szukajka trzyma surowy tekst bit w bit,
+    # a wpis z samymi znakami spoza `norm_alnum` („ + ”) inaczej nie dostałby najbliższych.
+    exact, rest = find_matches(load_targets(tuple(layers)), str(needle or "").strip())
+    canons = sorted({t.canon for t in exact})
     if len(canons) == 1:
         return canons[0], ()
     if canons:
         return None, tuple(canons)
-    near = sorted({t.canon for t in pool if fold in t.canon.casefold()
-                   or any(fold in a.casefold() for a in t.aliases)})
-    return None, tuple(near[:5])
+    return None, tuple(sorted({t.canon for t in rest})[:5])
 
 
 def plan_marks(con):

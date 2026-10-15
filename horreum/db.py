@@ -145,6 +145,10 @@ from importlib import resources
 # 0041 to PRZYROST (ADD COLUMN, AR-141): `pending_object_change.reason_code`/`reason_args` - kod
 # i parametry powodu pozycji obok prozy (okno mówi zdaniem w języku UI). Wchodzą PUSTE, bez
 # backfillu - wiersz bez kodu zostaje przy prozie (na żywym archiwum 1 powód na 427 pozycji).
+# 0042 to PRZYROST (ADD COLUMN, AR-148): `reason_code`/`reason_args` obok prozy w `pending_changes`,
+# `pending_renames` i `withheld_write` - kod powodu warstwy pisarza karty i renamu (okna zapisu mówią
+# w języku UI także powodem przeczytanym z bazy). Wchodzą PUSTE, bez backfillu (na żywym archiwum
+# 1 + 63 + 1 wierszy z prozą).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -186,6 +190,7 @@ MIGRATIONS = [
     (39, "0039_telescope_optics_hand.sql"),
     (40, "0040_axis_retired.sql"),
     (41, "0041_object_change_reason_code.sql"),
+    (42, "0042_writer_reason_code.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

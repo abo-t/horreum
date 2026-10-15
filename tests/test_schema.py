@@ -105,8 +105,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v41_po_migracji(tmp_path):
-    """0041 podnosi user_version do 41 (świeża baza leci 0002→…→0041 sekwencyjnie; 0025 = wersja
+def test_user_version_v42_po_migracji(tmp_path):
+    """0042 podnosi user_version do 42 (świeża baza leci 0002→…→0042 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -122,13 +122,14 @@ def test_user_version_v41_po_migracji(tmp_path):
     `telescope.focal_user`/`f_ratio_user`, AR-128; 0040 = nagrobek `object`/`telescope.retired_at`,
     ślad przebiegu `object_change_run.made_object_id`/`made_alias_id` i ślad gestu „Dopisz nowy…”
     `telescope_add`, AR-133/AR-137; 0041 = kod i parametry powodu pozycji
-    `pending_object_change.reason_code`/`reason_args`, AR-141).
+    `pending_object_change.reason_code`/`reason_args`, AR-141; 0042 = kod i parametry powodu
+    warstwy pisarza karty i renamu w `pending_changes`/`pending_renames`/`withheld_write`, AR-148).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 41
-    assert db.SCHEMA_VERSION == 41
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 42
+    assert db.SCHEMA_VERSION == 42
     con.close()
 
 
@@ -149,7 +150,7 @@ def test_0041_kod_powodu_pozycji_przyrost_na_bazie_v40_i_CHECK(tmp_path):
                 "'blocked', ?)", (proza,))
     con.commit()
     assert db._user_version(con) == 40
-    assert db.migrate(con) == db.SCHEMA_VERSION == 41
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v42_po_migracji
     assert tuple(con.execute("SELECT reason, reason_code, reason_args FROM pending_object_change"
                              ).fetchone()) == (proza, None, None)
     assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
@@ -172,6 +173,60 @@ def test_0041_kod_powodu_pozycji_przyrost_na_bazie_v40_i_CHECK(tmp_path):
         "SELECT reason, reason_code, reason_args FROM pending_object_change").fetchone())
     assert wrocil == powod and wrocil.code == "undo_file"
     assert dict(wrocil.params)["inner"].code == "src_missing"
+    con.close()
+
+
+def test_0042_kody_powodow_pisarza_przyrost_na_bazie_v41_i_CHECK(tmp_path):
+    """AR-148: 0042 na bazie v41 z prozą we wpisie karty, wierszu renamu i wstrzymaniu - kolumny kodu
+    wchodzą PUSTE we wszystkich trzech tabelach (bez backfillu), proza nietknięta co do znaku, druga
+    migracja = no-op. CHECK każdej tabeli (baza = ostatnia bramka): kod bez prozy (tam, gdzie proza
+    bywa NULL), parametry bez kodu, kod bez parametrów, parametry nie-obiekt i nie-JSON, kod pusty -
+    odbite; trójka z kodeka `item_reasons` wchodzi i wraca tym samym powodem (z listą cech)."""
+    from horreum import item_reasons
+    con = _baza_v35_z_kopia(str(tmp_path / "h.db"))
+    for version, filename in db.MIGRATIONS:
+        if 35 < version <= 41:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    proza = "plik ZAPISANY (backup do cofnięcia w commicie 1), ale zeznanie klatki NIE przyjęło zapisu"
+    con.execute("INSERT INTO commits(id, run_id, applied_at) VALUES (1, 'R', 't')")
+    con.execute("INSERT INTO withheld_write(id, kind, location_id, frame_id, commit_id, header_hash, "
+                "object_written, reason, actor, opened_at) VALUES (1, 'commit', 1, 1, 1, 'h', 0, ?, "
+                "'user:local', 't')", (proza,))
+    con.execute("INSERT INTO pending_changes(id, run_id, location_id, keyword, op, status, reason, "
+                "withheld_id) VALUES (1, 'R', 1, 'OBJECT', 'set', 'failed', ?, 1)", (proza,))
+    con.execute("UPDATE pending_renames SET status = 'skipped', reason = 'cofnięto (undo)' WHERE id = 1")
+    con.commit()
+    assert db._user_version(con) == 41
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v42_po_migracji
+    tabele = ("pending_changes", "pending_renames", "withheld_write")
+    assert [tuple(con.execute(f"SELECT reason, reason_code, reason_args FROM {t}").fetchone())
+            for t in tabele] == [(proza, None, None), ("cofnięto (undo)", None, None),
+                                 (proza, None, None)]
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    zle = (("x", None, "{}"),                  # parametry bez kodu
+           ("x", "copy_gone", None),           # kod bez parametrów
+           ("x", "copy_gone", "[1]"),          # parametry nie-obiekt
+           ("x", "copy_gone", "{zły"),         # nie-JSON
+           ("x", "", "{}"))                    # kod pusty
+    for t in tabele:
+        # kod bez prozy - w tabelach, w których proza bywa NULL (proza wstrzymania jest NOT NULL)
+        trojki = zle + (((None, "copy_gone", "{}"),) if t != "withheld_write" else ())
+        for trojka in trojki:
+            with pytest.raises(sqlite3.IntegrityError):
+                con.execute(f"UPDATE {t} SET reason = ?, reason_code = ?, reason_args = ? "
+                            f"WHERE id = 1", trojka)
+    cechy = [item_reasons.PowodPozycji("rozmiar", "feat_size"),
+             item_reasons.PowodPozycji("nagłówek", "feat_header")]
+    powod = item_reasons.PowodPozycji(
+        "plik zmienił się między odczytem a podmianą (rozmiar, nagłówek)", "changed_in_window",
+        features=cechy)
+    for t in tabele:
+        con.execute(f"UPDATE {t} SET reason = ?, reason_code = ?, reason_args = ? WHERE id = 1",
+                    item_reasons.do_bazy(powod))
+        wrocil = item_reasons.z_bazy(*con.execute(
+            f"SELECT reason, reason_code, reason_args FROM {t}").fetchone())
+        assert wrocil == powod and wrocil.code == "changed_in_window", t
+        assert [c.code for c in dict(wrocil.params)["features"]] == ["feat_size", "feat_header"], t
     con.close()
 
 

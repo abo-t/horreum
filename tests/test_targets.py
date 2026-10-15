@@ -752,6 +752,28 @@ def test_cli_plan_find_mowi_o_nazwie_znanej_spoza_puli(con, tmp_path, capsys):
     assert "find_outside" not in json.loads(capsys.readouterr().out)
 
 
+def test_cli_plan_find_cel_schowany_filtrem_nie_milczy(con, tmp_path, capsys):
+    """`--find` przebija progi i `skip`, ale nie `--status`/`--max-cost`/`--gaps`/`--new`: cel
+    trafiony w puli i schowany takim filtrem dawał pustą listę BEZ zdania - jak nazwa nieznana.
+    Odpowiednik zdania ekranu „chowają go bieżące filtry" (`planner_model.empty_find_text`),
+    ASCII. Lista ucięta samym limitem ma własne zdanie, więc tego nie dostaje."""
+    from horreum import cli
+    con.commit()
+    path = str(tmp_path / "h.db")
+    noc = ["--night", "2026-08-15"]
+
+    def szukane(*flagi):
+        assert cli.main(["plan", path, *noc, "--find", "NGC 7000", *flagi]) == 0
+        return [x for x in capsys.readouterr().out.splitlines() if x.strip().startswith("szukane ")]
+
+    linia = szukane("--status", "planned")
+    assert linia == ['  szukane "NGC 7000": trafien 1, ale chowaja je filtry '
+                     '(--status/--max-cost/--gaps/--new)']
+    linia[0].encode("ascii")
+    assert szukane() == []                                          # trafienie na liście
+    assert szukane("--limit", "0") == []                            # limit, nie filtr
+
+
 def test_cli_plan_status_katalogowy_przy_typie_kandydatka_nie_jest_golym_PN(con, tmp_path, capsys):
     """K-3: asset niesie kandydatki i mimiki planetarek - tekst `horreum plan` dopisuje status do
     typu („PN?”, „…~”), bo goły typ podpisałby kandydatkę jako potwierdzoną planetarkę."""

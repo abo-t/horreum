@@ -216,7 +216,13 @@ def test_liczby_ROZDZIELAJA_folder_od_nowej_nazwy_a_dopisanie_karty_FITS_jest_oz
         qapp, con, rdzen):
     """Przeniesienie do innego folderu i nowa nazwa w TYM SAMYM folderze to dwie liczby (folder
     porównany fizycznie - bez wielkości liter, jak `R:`). Dopisanie karty do FITS jest w podglądzie
-    oznaczone „cały plik przepisany”; XISF dopisuje w miejscu, więc bez oznaczenia."""
+    oznaczone prawdą o wszystkich wynikach (AR-118): w miejscu, gdy plik na to pozwala (zapas
+    nagłówka), inaczej cały plik przepisany albo odmowa z powodem przy pozycji - zapas nie jest
+    jedynym warunkiem (skompresowany HDU idzie atomowo, `CHECKSUM`/`DATASUM` odmawia). XISF
+    dopisuje w miejscu, więc bez oznaczenia.
+
+    Układ (AR-118, pomiar natywny): w KOMÓRCE krótki znacznik, pełne zdanie w jej podpowiedzi i RAZ
+    pod listą - pełne zdanie w każdym wierszu FITS zabierało kolumnie ścieżek szerokość."""
     nazwa = dataclasses.replace(_pozycja(1), new_path=STARY.lower() + r"\nowa1.fits", mkdirs=())
     fits_add = dataclasses.replace(_pozycja(2), card_op="add", card_old=None)
     xisf_add = dataclasses.replace(_pozycja(3), old_path=rf"{STARY}\f3.xisf",
@@ -228,11 +234,43 @@ def test_liczby_ROZDZIELAJA_folder_od_nowej_nazwy_a_dopisanie_karty_FITS_jest_oz
     assert dlg.counts.text() == i18n.t("objchg.counts", robota=3, folder=2, nazwa=1, karty=3,
                                        katalogi=3, usunie=1, obiekt=3, bez_zmian=0, pominie=0)
     assert STARY in dlg.counts.toolTip()
-    karty = [dlg.items_tree.topLevelItem(i).text(2) for i in range(3)]
-    assert not karty[0].endswith(i18n.t("objchg.card_rewrite"))
-    assert karty[1].endswith(i18n.t("objchg.card_rewrite"))
-    assert not karty[2].endswith(i18n.t("objchg.card_rewrite"))
+    wiersze = [dlg.items_tree.topLevelItem(i) for i in range(3)]
+    znacznik, zdanie = i18n.t("objchg.card_add_fits_short"), i18n.t("objchg.card_add_fits")
+    assert [w.text(2).endswith(znacznik) for w in wiersze] == [False, True, False]
+    assert not any(zdanie in w.text(2) for w in wiersze)              # komórka bez pełnego zdania
+    assert [zdanie in w.toolTip(2) for w in wiersze] == [False, True, False]
+    assert wiersze[1].text(2) in wiersze[1].toolTip(2)
+    assert dlg.card_note.text() == zdanie and not dlg.card_note.isHidden()
     dlg.reject()
+
+
+def test_kolumna_karty_NIE_ZJADA_sciezek_sufit_wzgledny_do_okna(qapp, con, rdzen):
+    """AR-118 (pomiar natywny): kolumna karty była `ResizeToContents` i z pełnym zdaniem dopisania
+    zabierała 869 z 1100 px - ścieżki spadały do ~100 px, status po zapisie do ~70 px. Teraz kolumna
+    jest `Interactive` z szerokością z treści i sufitem względnym do okna - bez pikseli platformy:
+    karta dłuższa niż sufit staje na suficie, ścieżki zostają `Stretch`. Plan bez dopisania do FITS
+    nie pokazuje zdania pod listą.
+
+    Falsyfikator: `ResizeToContents` z powrotem albo bez sufitu → asercje trybu i szerokości."""
+    from PySide6.QtWidgets import QHeaderView
+    from horreum.gui.object_change_dialog import ObjectChangeDialog
+    dluga = dataclasses.replace(_pozycja(1), card_op="add", card_old=None, card_new="N" * 68)
+    rdzen.plany = [_plan(items=(dluga, _pozycja(2)), skipped=()), _plan(items=(_pozycja(3),),
+                                                                       skipped=())]
+    dlg = _okno(qapp, con)
+    hdr = dlg.items_tree.header()
+    assert hdr.sectionResizeMode(2) == QHeaderView.Interactive
+    assert [hdr.sectionResizeMode(c) for c in (0, 1)] == [QHeaderView.Stretch] * 2
+    sufit = int(dlg.width() * ObjectChangeDialog._KARTA_MAX_UDZIAL)
+    assert dlg.items_tree.columnWidth(2) == sufit                     # długa karta: na suficie
+    assert not dlg.card_note.isHidden()
+    dlg._licz_plan()                                                  # plan bez dopisania do FITS
+    assert 0 < dlg.items_tree.columnWidth(2) < sufit and dlg.card_note.isHidden()
+    dlg.reject()
+    pl, en = CATALOG["objchg.card_add_fits"]["pl"], CATALOG["objchg.card_add_fits"]["en"]
+    assert all(s in pl for s in ("w miejscu", "zapas w nagłówku", "cały plik przepisany", "odmowa"))
+    assert all(s in en for s in ("in place", "room in the header", "rewritten", "refused"))
+    assert not set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ") & set(en)
 
 
 def test_zdanie_wyniku_liczy_spadek_UWAGI_i_numer_przebiegu():
@@ -422,7 +460,10 @@ class _Archiwum:
         self.db_path = str(tmp_path / "arch.db")
         self.con = db.open_db(self.db_path)
 
-    def fits(self, rel, *, obj=None, date="2022-03-26T21:30:12", seed=0, canon="NGC3034"):
+    def fits(self, rel, *, obj=None, date="2022-03-26T21:30:12", seed=0, canon="NGC3034",
+             bez_zapasu=False):
+        """`bez_zapasu` - `END` na ostatnim rekordzie bloku 2880 B, bez pustych kart: dopisanie
+        karty nie ma w nagłówku miejsca i rdzeń spada na drogę atomową (AR-118)."""
         import numpy as np
         from astropy.io import fits
         from horreum import scan
@@ -434,6 +475,10 @@ class _Archiwum:
         hdu.header["DATE-OBS"] = date
         if obj is not None:
             hdu.header["OBJECT"] = obj
+        i = 0
+        while bez_zapasu and (len(hdu.header) + 1) % 36:
+            hdu.header[f"PAD{i}"] = i
+            i += 1
         hdu.writeto(str(p))
         scan.ingest_record(self.con, scan.scan_file(str(p)), volume="VOL", now=NOW,
                            summary=scan.ScanSummary())
@@ -458,30 +503,40 @@ def archiwum(tmp_path):
 
 
 def test_CYKL_na_PRAWDZIWYM_sterowniku_lista_wynik_Cofnij_bajty_jak_przed(qapp, archiwum):
-    """Bez atrapy rdzenia: FITS z kartą (podmiana w miejscu) i FITS bez karty (dopisanie - FITS
-    w miejscu tego nie umie, spadek na drogę atomową). Podgląd mówi o przepisaniu pliku przed
-    kliknięciem, wynik liczy spadek, „Cofnij” przywraca pliki pod stare ścieżki co do bajtu."""
+    """Bez atrapy rdzenia: FITS z kartą (podmiana w miejscu), FITS bez karty z zapasem nagłówka
+    (dopisanie W MIEJSCU, AR-118) i FITS bez karty bez zapasu (`END` na ostatnim rekordzie bloku -
+    spadek na drogę atomową). Podgląd mówi o obu drogach dopisania przed kliknięciem, wynik liczy
+    jeden spadek, zapis w miejscu zostawia plik tym samym plikiem (`st_ino`), a „Cofnij” przywraca
+    pliki pod stare ścieżki co do bajtu."""
     from astropy.io import fits
     a = archiwum
     fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a_FLATGRP_NOFLAT_OSC.fits", obj="NGC 3034",
                     seed=1)
     fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", date="2022-03-26T21:31:00", seed=2)
-    przed = {pa: _sha1(pa), pb: _sha1(pb)}
+    fc, pc = a.fits(r"LIGHTS\NGC3034\RC6\OSC\c.fits", date="2022-03-26T21:32:00", seed=3,
+                    bez_zapasu=True)
+    przed = {pa: _sha1(pa), pb: _sha1(pb), pc: _sha1(pc)}
+    ino = {p: os.stat(p).st_ino for p in (pa, pb, pc)}
     cel = queries.object_target(a.con, "M 44")
-    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb])
-    karty = [dlg.items_tree.topLevelItem(i).text(2) for i in range(2)]
+    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb, fc])
+    karty = [dlg.items_tree.topLevelItem(i).text(2) for i in range(3)]
     assert karty[0] == "'NGC 3034' → 'NGC 2632'"
-    assert karty[1].endswith(i18n.t("objchg.card_rewrite"))
+    assert karty[1].endswith(i18n.t("objchg.card_add_fits_short"))
+    assert karty[2].endswith(i18n.t("objchg.card_add_fits_short"))
+    assert dlg.card_note.text() == i18n.t("objchg.card_add_fits") and not dlg.card_note.isHidden()
     dlg.action_btn.click()
     nowe = [a.root / r"LIGHTS\NGC2632\RC6\OSC\NGC2632_a_FLATGRP_NOFLAT_OSC.fits",   # człon obiektu
-            a.root / r"LIGHTS\NGC2632\RC6\OSC\b.fits"]                       # nazwa bez obiektu
-    assert all(p.exists() for p in nowe) and not pa.exists() and not pb.exists()
-    assert [fits.getheader(str(p))["OBJECT"] for p in nowe] == ["NGC 2632", "NGC 2632"]
-    assert dlg.status.text().startswith(i18n.t("objchg.res.applied", n=2))
-    assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()
+            a.root / r"LIGHTS\NGC2632\RC6\OSC\b.fits",                       # nazwa bez obiektu
+            a.root / r"LIGHTS\NGC2632\RC6\OSC\c.fits"]
+    assert all(p.exists() for p in nowe) and not any(p.exists() for p in (pa, pb, pc))
+    assert [fits.getheader(str(p))["OBJECT"] for p in nowe] == ["NGC 2632"] * 3
+    assert [os.stat(n).st_ino == ino[s] for n, s in zip(nowe, (pa, pb, pc))] == [True, True, False]
+    assert dlg.status.text().startswith(i18n.t("objchg.res.applied", n=3))
+    assert dlg.card_note.isHidden()                  # po biegu drogę pliku mówi jego status
+    assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()     # tylko plik bez zapasu
     assert not dlg.undo_btn.isHidden()
     dlg.undo_btn.click()
-    assert {p: _sha1(p) for p in (pa, pb)} == przed
+    assert {p: _sha1(p) for p in (pa, pb, pc)} == przed
     assert not (a.root / "LIGHTS" / "NGC2632").exists()   # katalogi gestu zdjęte
     assert dlg.undo_btn.isHidden()
     dlg.reject()
@@ -1777,17 +1832,18 @@ def test_okno_z_PORZADKOW_na_wierszu_spoza_kodeka_mowi_proza(qapp, archiwum, lan
 def test_okno_z_PORZADKOW_mowi_powod_pozycji_z_BAZY_w_jezyku_UI(qapp, archiwum, lang):
     """AR-141 na PRAWDZIWYM sterowniku: powód pozycji leży w bazie z kodem (0041), więc okno
     otwarte na przebiegu z Porządków mówi go w języku UI - plik zmieniony od skanu, cel zajęty
-    na dysku (powód warstwy renamu), karta dopisana drogą atomową (spadek po kodzie, szczegół
-    w podpowiedzi). ZŁOTE PL: zdanie okna == `czytelny_powod(proza rdzenia)` znak w znak. Wiersz
-    bez kodu (sprzed 0041) mówi prozą jak dotąd. Falsyfikator: `status_pozycji` bez gałęzi kodu -
-    EN po polsku."""
+    na dysku (powód warstwy renamu), karta dopisana drogą atomową - plik bez zapasu nagłówka,
+    AR-118 (spadek po kodzie, szczegół w podpowiedzi). ZŁOTE PL: zdanie okna ==
+    `czytelny_powod(proza rdzenia)` znak w znak. Wiersz bez kodu (sprzed 0041) mówi prozą jak
+    dotąd. Falsyfikator: `status_pozycji` bez gałęzi kodu - EN po polsku."""
     import os as _os
     from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
     from horreum.gui.wb_worker import status_pozycji
     a = archiwum
     i18n.set_lang(lang)
     fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
-    fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", date="2022-03-26T21:31:00", seed=2)
+    fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", date="2022-03-26T21:31:00", seed=2,
+                    bez_zapasu=True)
     fc, pc = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_c.fits", obj="NGC 3034", seed=3,
                     date="2022-03-26T21:32:00")
     plan, _ = policz_plan(a.con, [fa, fb, fc], target=queries.object_target(a.con, "M 44"))
@@ -2207,8 +2263,9 @@ def test_KAZDY_powod_bramki_karty_ma_zdanie_PL_i_EN_a_PL_to_zdanie_bramki():
 def _zdanie_pl_z_fstringa(w, modul):
     """Zdanie PL wywołania `PowodPozycji(zdanie, kod, **p)` jako WZÓR katalogu: literał wprost,
     f-string z każdym `{wyrażenie}` zamienionym na `{nazwa}` parametru o TYM SAMYM wyrażeniu (AST),
-    stała modułu - jej wartością; nazwa (zdanie = parametr) → `{nazwa}`. Wyrażenie bez parametru =
-    AssertionError: zdanie PL mówiłoby coś, czego okno nie ma z czego złożyć."""
+    stała modułu - jej wartością; nazwa (zdanie = parametr) → `{nazwa}`; `", ".join(lista)` →
+    `{nazwa}` parametru-listy `lista` (AR-148: okno składa listę po `, `, jak rdzeń). Wyrażenie bez
+    parametru = AssertionError: zdanie PL mówiłoby coś, czego okno nie ma z czego złożyć."""
     import ast
     zdanie = w.args[0]
     parametry = {ast.dump(k.value): k.arg for k in w.keywords}
@@ -2216,6 +2273,10 @@ def _zdanie_pl_z_fstringa(w, modul):
     def _pole(v):
         if ast.dump(v) in parametry:
             return "{" + parametry[ast.dump(v)] + "}"
+        if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "join"
+                and isinstance(v.func.value, ast.Constant) and v.func.value.value == ", "
+                and len(v.args) == 1 and ast.dump(v.args[0]) in parametry):
+            return "{" + parametry[ast.dump(v.args[0])] + "}"
         assert isinstance(v, ast.Name) and isinstance(getattr(modul, v.id, None), str), ast.dump(v)
         return getattr(modul, v.id)
     if isinstance(zdanie, ast.Constant):
@@ -2610,9 +2671,11 @@ def test_okno_KASUJE_sie_po_exec_a_gospodarz_czyta_je_jeszcze_po_powrocie(
 
 # ═══════════════════════════════════════════════ „Napraw nagłówek…”: rozmiar od treści, powód
 
-def _bezimienne(root, con, foldery):
+def _bezimienne(root, con, foldery, *, bez_zapasu=()):
     """Po dwa FITS-y lightów BEZ karty OBJECT w każdym folderze obiektu, wciągnięte skanem - kubełek
-    „Napraw nagłówek…” (propozycja nazwy z dwóch zgodnych świadków ścieżki)."""
+    „Napraw nagłówek…” (propozycja nazwy z dwóch zgodnych świadków ścieżki). Foldery z `bez_zapasu`
+    mają `END` na ostatnim rekordzie bloku 2880 B: dopisanie karty nie ma w nagłówku miejsca, więc
+    rdzeń spada na drogę atomową (AR-118)."""
     import numpy as np
     from astropy.io import fits
     from horreum import scan
@@ -2624,6 +2687,10 @@ def _bezimienne(root, con, foldery):
             hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + 10 * g + k)
             hdu.header["IMAGETYP"] = "Light"
             hdu.header["DATE-OBS"] = f"2023-01-03T20:00:{k:02d}"
+            i = 0
+            while folder in bez_zapasu and (len(hdu.header) + 1) % 36:
+                hdu.header[f"PAD{i}"] = i
+                i += 1
             hdu.writeto(str(p))
             scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
                                summary=scan.ScanSummary())
@@ -2681,18 +2748,20 @@ def test_Napraw_naglowek_etykieta_grupy_OD_FOLDERU_OBIEKTU_i_odmieniona_liczba(q
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
-def test_Napraw_naglowek_rozmiar_OD_TRESCI_i_powod_spadku_jezykiem_czlowieka(qapp, tmp_path, lang):
-    """Wizytacja bs (W11): okno otwierało się 256×220 (wiersze grup za suwakiem) i mówiło powód
-    spadku żargonem rdzenia. Teraz: szerokość mieści całe wiersze grup (najdłuższy realny folder
-    obiektu archiwum - kometa) bez poziomego suwaka, wysokość wszystkie grupy, a zapis nie rozpycha
-    okna (przyciski „Cofnij”/„Rozwiąż teraz” policzone z góry); sufit - część ekranu. Zdanie mówi
-    „cały plik przepisany”, szczegół rdzenia jest w podpowiedzi zdania."""
+def test_Napraw_naglowek_rozmiar_OD_TRESCI_a_zapis_nie_rozpycha_okna(qapp, tmp_path, lang):
+    """Wizytacja bs (W11): okno otwierało się 256×220 (wiersze grup za suwakiem). Teraz: szerokość
+    mieści całe wiersze grup (najdłuższy realny folder obiektu archiwum - kometa) bez poziomego
+    suwaka, wysokość wszystkie grupy, a zapis nie rozpycha okna (przyciski „Cofnij”/„Rozwiąż teraz”
+    policzone z góry); sufit - część ekranu. Zdanie o spadku na drogę atomową i szczegół rdzenia
+    w podpowiedzi - osobny test bez geometrii
+    (`test_Napraw_naglowek_szczegol_spadku_w_podpowiedzi_w_jezyku_UI`)."""
     from horreum.gui.app import RepairHeaderDialog
     from horreum.gui.config_dialog import _SCREEN_FRAC
     i18n.set_lang(lang)
     con = db.open_db(str(tmp_path / "n.db"))
     _bezimienne(tmp_path / "ASTRO_", con,
-                ["NGC7635", "C2023A3_Tsuchinshan-ATLAS", "Sh2-229", "IC405"])
+                ["NGC7635", "C2023A3_Tsuchinshan-ATLAS", "Sh2-229", "IC405"],
+                bez_zapasu=("Sh2-229",))
     dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
                              db_path=queries.db_path_of(con), now_fn=lambda: NOW)
     dlg._runner.async_ok = False
@@ -2713,9 +2782,33 @@ def test_Napraw_naglowek_rozmiar_OD_TRESCI_i_powod_spadku_jezykiem_czlowieka(qap
     QCoreApplication.processEvents()
     assert not dlg.undo_btn.isHidden() and not dlg.resolve_btn.isHidden()
     assert dlg.size() == przed                                 # zapis nie rozpycha okna
-    assert i18n.t("wb.inplace_fallback", n=8) in dlg.status.text()
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_szczegol_spadku_w_podpowiedzi_w_jezyku_UI(qapp, tmp_path, lang):
+    """Karta idzie W MIEJSCU tam, gdzie nagłówek ma zapas (AR-118); o plikach bez zapasu zdanie mówi
+    „cały plik przepisany” językiem człowieka, a szczegół rdzenia (brak miejsca, z odmienioną liczbą
+    rekordów) jest w podpowiedzi zdania - w języku UI. Bez `show()` i geometrii okna: asercje
+    rozmiaru (test obok) zależą od ekranu i nie zasłaniają tych."""
+    from horreum.gui.app import RepairHeaderDialog
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "n.db"))
+    _bezimienne(tmp_path / "ASTRO_", con,
+                ["NGC7635", "C2023A3_Tsuchinshan-ATLAS", "Sh2-229", "IC405"],
+                bez_zapasu=("Sh2-229",))
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    dlg._runner.async_ok = False
+    dlg._on_save()
+    QCoreApplication.processEvents()
+    assert i18n.t("wb.inplace_fallback", n=2) in dlg.status.text()    # dwa pliki bez zapasu
     assert writeback.PREFIKS_DROGI_ATOMOWEJ not in dlg.status.text()
-    assert "add/str" not in dlg.status.text() and "add/str" in dlg.status.toolTip()
+    szczegol = {"pl": "potrzebuje 1 wolnego rekordu",                 # szczegół w języku UI
+                "en": "needs 1 free record"}[lang]
+    assert szczegol not in dlg.status.text()
+    assert szczegol in dlg.status.toolTip(), dlg.status.toolTip()
     dlg._on_undo()
     assert dlg.status.toolTip() == ""
     dlg.reject()

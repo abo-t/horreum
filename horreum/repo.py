@@ -22,8 +22,8 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import NamedTuple
 
-from .item_reasons import (OdmowaZPowodem,    # powód pozycji zmiany obiektu z kodem (AR-141) - liść
-                           PowodPozycji, dopisz, do_bazy)
+from .item_reasons import (OdmowaZPowodem,    # powód z kodem (AR-141, AR-148) - liść
+                           PowodPozycji, dopisz, dopisz_z_koperta, do_bazy, z_bazy)
 from .resolve.paths import path_key           # klucz ścieżki fizycznej - jeden dla podglądu planera
                                                 # i straży relokacji (liść `resolve`, bez cyklu)
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
@@ -3347,12 +3347,12 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, te
             uwaga = _clear_tombstone_same_hand_tx(con, frame_id=frame_id, hand_version=reka,
                                                   commit_id=commit_id, location_id=location_id,
                                                   now=now, actor=actor)
-        powod = f"potwierdzone skanem: nagłówek na dysku = zapisany w commicie {commit_id}"
-        con.execute(
-            "UPDATE pending_changes SET status = 'applied', reason = ? "
-            "WHERE run_id = ? AND location_id = ? AND status = 'failed' AND inplace_op_id IS NULL "
-            "AND withheld_id IS NULL",
-            (powod if uwaga is None else f"{powod}; {uwaga}", row["run_id"], location_id))
+        powod = PowodPozycji(f"potwierdzone skanem: nagłówek na dysku = zapisany w commicie "
+                             f"{commit_id}", "confirmed_by_scan", commit_id=commit_id)
+        ids = [w["id"] for w in wpisy]
+        con.execute("UPDATE pending_changes SET status = 'applied' "
+                    "WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))
+        _set_pending_reason_tx(con, ids, dopisz(powod, uwaga))
     return commit_id
 
 
@@ -4492,11 +4492,22 @@ def stage_pending_many(con, *, run_id, previews):
 
 
 def set_pending_status(con, *, pending_id, status, reason=None):
-    """Ustaw status wpisu stagingu ('applied'|'failed'|'skipped'|'blocked') + powód. Transient.
-    W zakresie `atomic` dołącza do niego (commit drogą atomową zamyka plik jedną transakcją)."""
+    """Ustaw status wpisu stagingu ('applied'|'failed'|'skipped'|'blocked') + powód (`PowodPozycji`,
+    proza albo `None`). Transient. W zakresie `atomic` dołącza do niego (commit drogą atomową zamyka
+    plik jedną transakcją)."""
     with _tx(con):
-        con.execute("UPDATE pending_changes SET status = ?, reason = ? WHERE id = ?",
-                    (status, reason, pending_id))
+        con.execute("UPDATE pending_changes SET status = ? WHERE id = ?", (status, pending_id))
+        _set_pending_reason_tx(con, [pending_id], reason)
+
+
+def _set_pending_reason_tx(con, ids, powod):
+    """JEDYNY pisarz powodu wpisu stagingu karty (AR-148, meta-test): trójka `reason`/`reason_code`/
+    `reason_args` z kodeka `item_reasons.do_bazy` jednym UPDATE dla wpisów `ids` - proza i kod nigdy
+    się nie rozjadą (CHECK 0042). `powod` = `PowodPozycji`, proza bez kodu albo `None` (czyści
+    trójkę). Pod transakcją wołającego."""
+    con.execute("UPDATE pending_changes SET reason = ?, reason_code = ?, reason_args = ? "
+                "WHERE id IN (SELECT value FROM json_each(?))",
+                (*do_bazy(powod), json.dumps([int(i) for i in ids])))
 
 
 def clear_pending_for_run(con, run_id):
@@ -4784,12 +4795,12 @@ def settle_backup_attempt(con, *, backup_id, pending_ids, testimony_ok, now, wit
             uwaga = _clear_tombstone_same_hand_tx(
                 con, frame_id=loc["frame_id"], hand_version=b["hand_version"],
                 commit_id=b["commit_id"], location_id=b["location_id"], now=now, actor=actor)
-        powod = (f"potwierdzone z dysku: nagłówek na dysku = zapisany w commicie {b['commit_id']} "
-                 f"(przerwany przed potwierdzeniem podmiany)")
-        con.execute(
-            "UPDATE pending_changes SET status = 'applied', reason = ? "
-            "WHERE id IN (SELECT value FROM json_each(?))",
-            (powod if uwaga is None else f"{powod}; {uwaga}", ids))
+        powod = PowodPozycji(f"potwierdzone z dysku: nagłówek na dysku = zapisany w commicie "
+                             f"{b['commit_id']} (przerwany przed potwierdzeniem podmiany)",
+                             "confirmed_from_disk_cut", commit_id=b["commit_id"])
+        con.execute("UPDATE pending_changes SET status = 'applied' "
+                    "WHERE id IN (SELECT value FROM json_each(?))", (ids,))
+        _set_pending_reason_tx(con, pending_ids, dopisz(powod, uwaga))
     return len(wpisy)
 
 
@@ -4914,16 +4925,19 @@ def _withhold_write_tx(con, *, kind, location_id, commit_id, header_hash, reason
     item = con.execute(
         "SELECT p.id FROM pending_object_change p JOIN commits c ON c.run_id = p.run_id "
         "WHERE c.id = ? AND p.location_id = ?", (commit_id, location_id)).fetchone()
+    # Trójka powodu z kodeka (AR-148): nota cofnięcia czytana z bazy (`open_undo_withheld_for_item`)
+    # mówi w języku UI. Ten INSERT to JEDYNY pisarz `withheld_write.reason` (meta-test).
     wid = con.execute(
         "INSERT INTO withheld_write(kind, location_id, frame_id, commit_id, inplace_op_id, item_id, "
-        "header_hash, object_written, hand_version, reason, actor, opened_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "header_hash, object_written, hand_version, reason, reason_code, reason_args, actor, "
+        "opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (kind, location_id, loc["frame_id"], commit_id, inplace_op_id,
-         None if item is None else item["id"], header_hash, zapisal_obiekt, reka, reason, actor,
-         now)).lastrowid
+         None if item is None else item["id"], header_hash, zapisal_obiekt, reka, *do_bazy(reason),
+         actor, now)).lastrowid
     con.execute(
-        "UPDATE pending_changes SET status = 'failed', reason = ?, withheld_id = ? "
-        "WHERE id IN (SELECT value FROM json_each(?))", (reason, wid, ids))
+        "UPDATE pending_changes SET status = 'failed', withheld_id = ? "
+        "WHERE id IN (SELECT value FROM json_each(?))", (wid, ids))
+    _set_pending_reason_tx(con, [int(i) for i in pending_ids], reason)
     if item is not None and kind == "commit":
         if con.execute("UPDATE pending_object_change SET status = 'failed' "
                        "WHERE id = ? AND status IN ('pending', 'failed')", (item["id"],)).rowcount:
@@ -4998,11 +5012,16 @@ def has_failed_atomic_rows(con, location_id):
 
 
 def open_undo_withheld_for_item(con, item_id):
-    """Otwarte wstrzymanie COFNIĘCIA związane z pozycją gestu (`id`, `reason`) albo `None` -
-    sterownik cofnięcia gestu czyta je z bazy, więc przeżywa wznowienie po fazie karty."""
-    return con.execute(
-        "SELECT id, reason FROM withheld_write WHERE item_id = ? AND kind = 'undo' "
-        "AND settled_at IS NULL ORDER BY id DESC LIMIT 1", (item_id,)).fetchone()
+    """Otwarte wstrzymanie COFNIĘCIA związane z pozycją gestu (`{"id", "reason"}`) albo `None` -
+    sterownik cofnięcia gestu czyta je z bazy, więc przeżywa wznowienie po fazie karty. `reason`
+    odtworzony z trójki (`item_reasons.z_bazy`, AR-148): z kodem, gdy wiersz go niesie (od 0042),
+    inaczej proza."""
+    row = con.execute(
+        "SELECT id, reason, reason_code, reason_args FROM withheld_write WHERE item_id = ? "
+        "AND kind = 'undo' AND settled_at IS NULL ORDER BY id DESC LIMIT 1", (item_id,)).fetchone()
+    if row is None:
+        return None
+    return {"id": row["id"], "reason": z_bazy(row["reason"], row["reason_code"], row["reason_args"])}
 
 
 def close_withheld_undone(con, *, commit_id, location_id, now):
@@ -5015,17 +5034,30 @@ def close_withheld_undone(con, *, commit_id, location_id, now):
             "SELECT id FROM withheld_write WHERE commit_id = ? AND location_id = ? "
             "AND kind = 'commit' AND settled_at IS NULL", (commit_id, location_id)).fetchall()
         for r in rows:
-            _zamknij_wstrzymanie(con, r["id"], "undone", now,
-                                 "commit cofnięty, zanim zeznanie klatki przyjęło zapis")
+            _zamknij_wstrzymanie(con, r["id"], "undone", now, _WSTRZYMANIE_COFNIETE)
     return bool(rows)
 
 
+# Dopiski zamknięcia wstrzymania do powodu wpisów stagingu (AR-148: z kodem - nota w języku UI).
+_WSTRZYMANIE_COFNIETE = PowodPozycji("commit cofnięty, zanim zeznanie klatki przyjęło zapis",
+                                     "withheld_undone")
+_WSTRZYMANIE_INNA_KLATKA = PowodPozycji("zapis zastąpiony: lokacja należy już do innej klatki",
+                                        "withheld_other_frame")
+_WSTRZYMANIE_NOWSZY_STAN = PowodPozycji("zapis zastąpiony nowszym stanem pliku (inny nagłówek na "
+                                        "dysku)", "withheld_newer_header")
+
+
 def _zamknij_wstrzymanie(con, withheld_id, jak, now, dopisek):
+    """Zamknięcie wstrzymania (`jak`) i dopisek do powodu jego wpisów stagingu. Dopisek idzie przez
+    kodek, nie sklejeniem w SQL (AR-148): proza i kod wpisu nie mogą się rozjechać - proza wynikowa
+    jest ta sama co dawne `COALESCE(reason || '; ', '') || dopisek`, a nota trafia na listę `notes`
+    (proza wiersza bez kodu jedzie w kopercie `prose`)."""
     con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = ? WHERE id = ?",
                 (now, jak, withheld_id))
-    con.execute(
-        "UPDATE pending_changes SET reason = COALESCE(reason || '; ', '') || ? "
-        "WHERE withheld_id = ?", (dopisek, withheld_id))
+    for w in con.execute("SELECT id, reason, reason_code, reason_args FROM pending_changes "
+                         "WHERE withheld_id = ?", (withheld_id,)).fetchall():
+        powod = z_bazy(w["reason"], w["reason_code"], w["reason_args"])
+        _set_pending_reason_tx(con, [w["id"]], dopisz_z_koperta(powod, dopisek))
 
 
 def _settle_withheld_tx(con, *, location_id, frame_id, sha1_data, header_hash, testimony_ok, now,
@@ -5054,13 +5086,11 @@ def _settle_withheld_tx(con, *, location_id, frame_id, sha1_data, header_hash, t
                                 (w["frame_id"],)).fetchone()
         if (loc is None or w["frame_id"] != frame_id or loc["frame_id"] != w["frame_id"]
                 or tozsamosc is None or tozsamosc["sha1_data"] != sha1_data):
-            _zamknij_wstrzymanie(con, w["id"], "superseded", now,
-                                 "zapis zastąpiony: lokacja należy już do innej klatki")
+            _zamknij_wstrzymanie(con, w["id"], "superseded", now, _WSTRZYMANIE_INNA_KLATKA)
             _zastap_pozycje(con, w)
             wynik.append((w["id"], "superseded"))
         elif header_hash != w["header_hash"]:
-            _zamknij_wstrzymanie(con, w["id"], "superseded", now,
-                                 "zapis zastąpiony nowszym stanem pliku (inny nagłówek na dysku)")
+            _zamknij_wstrzymanie(con, w["id"], "superseded", now, _WSTRZYMANIE_NOWSZY_STAN)
             _zastap_pozycje(con, w)
             wynik.append((w["id"], "superseded"))
         elif testimony_ok:
@@ -5072,8 +5102,12 @@ def _settle_withheld_tx(con, *, location_id, frame_id, sha1_data, header_hash, t
                     commit_id=w["commit_id"], location_id=location_id, now=now, actor=actor))
             con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = 'completed' "
                         "WHERE id = ?", (now, w["id"]))
-            con.execute("UPDATE pending_changes SET status = 'applied', reason = ? "
-                        "WHERE withheld_id = ? AND status = 'failed'", (powod, w["id"]))
+            wpisy = [r["id"] for r in con.execute(
+                "SELECT id FROM pending_changes WHERE withheld_id = ? AND status = 'failed'",
+                (w["id"],))]
+            con.execute("UPDATE pending_changes SET status = 'applied' "
+                        "WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(wpisy),))
+            _set_pending_reason_tx(con, wpisy, powod)
             if w["item_id"] is not None and w["kind"] == "commit":
                 _domknij_pozycje_wstrzymana(con, w["item_id"], powod)
             wynik.append((w["id"], "completed"))
@@ -5400,8 +5434,9 @@ def finish_inplace_op(con, *, op_id, now, testimony_ok, withheld_reason=None,
             uwaga = _clear_tombstone_same_hand_tx(
                 con, frame_id=loc["frame_id"], hand_version=None if reka is None else reka[0],
                 commit_id=op["commit_id"], location_id=op["location_id"], now=now, actor=actor)
-        con.execute("UPDATE pending_changes SET status = 'applied', reason = ? "
-                    "WHERE inplace_op_id = ?", (uwaga, op_id))
+        con.execute("UPDATE pending_changes SET status = 'applied' WHERE inplace_op_id = ?",
+                    (op_id,))
+        _set_pending_reason_tx(con, [r["id"] for r in rows], uwaga)
         if op["kind"] == "undo" and op["commit_id"] is not None:
             # Cofnięcie w miejscu odtwarza nagrobek zgaszony przez cofany commit (AR-38) - w tej
             # samej transakcji co faza `synced`, więc nie wyprzedzi ani nie zgubi dokończenia.
@@ -5437,8 +5472,11 @@ def revert_inplace_op(con, *, op_id, now, reason, expect_phase="written", actor=
         op = _op_in_phase(con, op_id, expect_phase)
         con.execute("UPDATE inplace_op SET phase = 'recovered', reason = ?, closed_at = ? "
                     "WHERE id = ? AND phase = ?", (reason, now, op_id, expect_phase))
-        con.execute("UPDATE pending_changes SET status = 'failed', reason = ? "
-                    "WHERE inplace_op_id = ?", (reason, op_id))
+        wpisy = [r["id"] for r in con.execute(
+            "SELECT id FROM pending_changes WHERE inplace_op_id = ?", (op_id,))]
+        con.execute("UPDATE pending_changes SET status = 'failed' WHERE inplace_op_id = ?",
+                    (op_id,))
+        _set_pending_reason_tx(con, wpisy, reason)
         loc = con.execute("SELECT mtime FROM location WHERE id = ?",
                           (op["location_id"],)).fetchone()
         con.execute("UPDATE location SET mtime = NULL WHERE id = ?", (op["location_id"],))
@@ -5464,14 +5502,20 @@ def release_inplace_op(con, *, op_id, now, reason, expect_phase=None, actor="use
     with _immediate(con):
         row = con.execute("SELECT location_id, phase FROM inplace_op WHERE id = ?",
                           (op_id,)).fetchone()
+        # Odmowy z kodem (`OdmowaZPowodem` to `ValueError` - wołający łapią jak dotąd, tekst bez
+        # zmian), żeby wynik zwolnienia mówił w języku UI (AR-148).
         if row is None or row["phase"] not in INPLACE_ISOLATING_PHASES:
-            raise ValueError(f"operacja {op_id} nie izoluje lokacji - nie ma czego zwalniać")
+            raise OdmowaZPowodem(PowodPozycji(
+                f"operacja {op_id} nie izoluje lokacji - nie ma czego zwalniać",
+                "release_refused_db", op_id=op_id))
         oczekiwana = row["phase"] if expect_phase is None else expect_phase
         cur = con.execute("UPDATE inplace_op SET phase = 'released', reason = ?, closed_at = ? "
                           "WHERE id = ? AND phase = ?", (reason, now, op_id, oczekiwana))
         if cur.rowcount != 1:
-            raise ValueError(f"operacja {op_id} jest w fazie {row['phase']}, nie {oczekiwana} - "
-                             f"inny proces zmienił ją po odczycie, zwolnienia nie ma")
+            raise OdmowaZPowodem(PowodPozycji(
+                f"operacja {op_id} jest w fazie {row['phase']}, nie {oczekiwana} - inny proces "
+                f"zmienił ją po odczycie, zwolnienia nie ma", "release_phase_changed", op_id=op_id,
+                phase=row["phase"], expected=oczekiwana))
         emit_event(con, actor=actor, verb="location.writeback_released",
                    target=f"location:{row['location_id']}", now=now,
                    payload={"inplace_op": op_id, "phase_before": row["phase"]}, reason=reason)
@@ -5633,8 +5677,17 @@ def guard_file_rename(con, *, location_id, new_path, generation, now, actor="use
 
 def _zamknij_wiersz_renamu(con, rename_id, status, reason):
     """Status wiersza stagingu + zgaszenie zamiaru pod transakcją wołającego."""
-    con.execute("UPDATE pending_renames SET status = ?, reason = ?, in_flight = NULL WHERE id = ?",
-                (status, reason, rename_id))
+    con.execute("UPDATE pending_renames SET status = ?, in_flight = NULL WHERE id = ?",
+                (status, rename_id))
+    _set_rename_reason_tx(con, rename_id, reason)
+
+
+def _set_rename_reason_tx(con, rename_id, powod):
+    """JEDYNY pisarz powodu wiersza stagingu renamu (AR-148, meta-test): trójka `reason`/
+    `reason_code`/`reason_args` z kodeka `item_reasons.do_bazy` jednym UPDATE (CHECK 0042).
+    `powod` = `PowodPozycji`, proza bez kodu albo `None`. Pod transakcją wołającego."""
+    con.execute("UPDATE pending_renames SET reason = ?, reason_code = ?, reason_args = ? "
+                "WHERE id = ?", (*do_bazy(powod), rename_id))
 
 
 def open_rename_intent(con, *, rename_id, direction):
@@ -5656,7 +5709,12 @@ def open_rename_intent(con, *, rename_id, direction):
 class RenameIntentChanged(Exception):
     """Zamiar renamu albo miejsce pliku zmieniły się między obserwacją wołającego a transakcją
     rozstrzygnięcia - inny proces (kompensacja albo rekoncyliacja) zdążył go rozstrzygnąć. Zero
-    zapisu; wołający melduje i zostawia sprawę następnemu przebiegowi (AR-56)."""
+    zapisu; wołający melduje i zostawia sprawę następnemu przebiegowi (AR-56). Tekst wyjątku =
+    zdanie PL powodu, `powod` = ten sam powód z kodem (AR-148, `item_reasons.powod_wyjatku`)."""
+
+    def __init__(self, powod):
+        super().__init__(str(powod))
+        self.powod = powod
 
 
 def settle_rename_intent(con, *, rename_id, location_id, status, reason, now, relocate_to=None,
@@ -5678,11 +5736,13 @@ def settle_rename_intent(con, *, rename_id, location_id, status, reason, now, re
             row = con.execute("SELECT in_flight FROM pending_renames WHERE id = ?",
                               (rename_id,)).fetchone()
             if row is None or row["in_flight"] != expect_in_flight:
-                raise RenameIntentChanged(f"zamiar renamu {rename_id} rozstrzygnięty przez inny "
-                                          f"proces po obserwacji dysku")
+                raise RenameIntentChanged(PowodPozycji(
+                    f"zamiar renamu {rename_id} rozstrzygnięty przez inny proces po obserwacji "
+                    f"dysku", "intent_settled_elsewhere", rename_id=rename_id))
         if potwierdz is not None and not potwierdz():
-            raise RenameIntentChanged(f"plik renamu {rename_id} zmienił miejsce po obserwacji "
-                                      f"dysku")
+            raise RenameIntentChanged(PowodPozycji(
+                f"plik renamu {rename_id} zmienił miejsce po obserwacji dysku", "intent_file_moved",
+                rename_id=rename_id))
         if relocate_to is not None:
             old_path = _relocation_target(con, location_id, relocate_to)
             if old_path != relocate_to:
@@ -5714,8 +5774,8 @@ def set_rename_status(con, *, rename_id, status, reason=None):
     Zamiaru (`in_flight`) NIE rusza - jego cyklem rządzą `open_rename_intent`/`drop_rename_intent`,
     straż relokacji i rekoncyliacja (AR-29)."""
     with con:
-        con.execute("UPDATE pending_renames SET status = ?, reason = ? WHERE id = ?",
-                    (status, reason, rename_id))
+        con.execute("UPDATE pending_renames SET status = ? WHERE id = ?", (status, rename_id))
+        _set_rename_reason_tx(con, rename_id, reason)
 
 
 def drop_rename_intent(con, *, rename_id):

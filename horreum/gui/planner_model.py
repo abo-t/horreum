@@ -400,7 +400,7 @@ def empty_find_text(result, needle):
     kurateli, próg kosztu, a z wołań spoza ekranu także `only_gaps`/`only_new`) - „nie znam”
     byłoby nieprawdą, a wyliczanie jednego z nich zgadywaniem."""
     out = result.find_outside
-    hits = result.counts.get("feasible") or (1 if out is not None and out.loaded else 0)
+    hits = result.find_hits
     if hits:
         return i18n.t_plural("planner.empty_find_hidden", hits, needle=needle)
     if out is None:

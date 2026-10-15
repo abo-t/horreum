@@ -3037,7 +3037,10 @@ def _czeka_na_reke(con, r):
         return True
     if r["unresolved_reason"] == REASON_NO_OBJECT:
         return True
-    noce, raw_bez_zegara = propose_lineage_candidates(con, r["master_frame_id"])
+    # Klatki po zintegrowaniu obrazu (trzecia wartość, AR-150) nie są robotą dla ręki - nie ma czego
+    # w nich potwierdzić, więc stos PO WERDYKTACH, któremu zostały tylko one, z kubełka wypada. Stos
+    # bez werdyktu czeka dalej (wyżej) - panel mówi wtedy, ile klatek pominął jako nowsze niż obraz.
+    noce, raw_bez_zegara, _ = propose_lineage_candidates(con, r["master_frame_id"])
     return raw_bez_zegara > 0 or any(n.frames for n in noce)
 
 

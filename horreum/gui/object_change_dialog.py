@@ -114,7 +114,9 @@ def tekst_ostrzezenia(kod, params, tekst):
     klucz = f"objchg.warn.{kod}" if kod else None
     if klucz not in CATALOG:
         return str(tekst)
-    p = dict(params)
+    # Parametr-powód z kodem (rekoncyliacja renamu, AR-148) też w języku UI.
+    from horreum.item_reasons import PowodPozycji
+    p = {k: tekst_powodu(v) if isinstance(v, PowodPozycji) else v for k, v in params}
     if isinstance(CATALOG[klucz]["pl"], dict):
         return i18n.t_plural(klucz, p.pop("n"), **p)
     return i18n.t(klucz, **p)
@@ -532,10 +534,20 @@ class ObjectChangeDialog(QDialog):
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(_COL_STARA, QHeaderView.Stretch)
         hdr.setSectionResizeMode(_COL_NOWA, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(_COL_KARTA, QHeaderView.ResizeToContents)
+        # Karta: szerokość z treści, ale z sufitem (`_dopasuj_karte`) - kolumna karty nie zjada
+        # ścieżek ani statusu (AR-118: pełne zdanie dopisania w każdym wierszu FITS zabierało przy
+        # `ResizeToContents` 869 z 1100 px).
+        hdr.setSectionResizeMode(_COL_KARTA, QHeaderView.Interactive)
         hdr.setSectionResizeMode(_COL_STATUS, QHeaderView.Stretch)
         self.items_tree.setColumnHidden(_COL_STATUS, True)
         lay.addWidget(self.items_tree, 1)
+        # Pełne zdanie o dopisaniu karty do FITS RAZ pod listą (w komórkach krótki znacznik, zdanie
+        # w ich podpowiedzi) - widoczne, gdy plan ma choć jedną taką pozycję (`_wypelnij`).
+        self.card_note = QLabel("")
+        self.card_note.setWordWrap(True)
+        self.card_note.setProperty("role", "secondary")
+        self.card_note.setVisible(False)
+        lay.addWidget(self.card_note)
 
         self.warnings = QLabel("")
         self.warnings.setWordWrap(True)
@@ -736,9 +748,14 @@ class ObjectChangeDialog(QDialog):
             if it.mkdirs:
                 w.setToolTip(_COL_NOWA, (it.new_path or "") + "\n"
                              + i18n.t("objchg.mkdirs_tip", dirs="\n".join(it.mkdirs)))
+            self._podpowiedz_karty(w, it.card_op, it.old_path)
             w.setData(_COL_STARA, Qt.UserRole, it.frame_id)
             self.items_tree.addTopLevelItem(w)
             self._wiersze[it.location_id] = w
+        self._dopasuj_karte()
+        self.card_note.setText(i18n.t("objchg.card_add_fits"))
+        self.card_note.setVisible(any(self._dopisanie_fits(it.card_op, it.old_path)
+                                      for it in plan.items))
 
         ostrzezenia = [tekst_ostrzezenia(o.code, o.params, o.text) for o in plan.warnings]
         self.warnings.setText("\n".join(ostrzezenia))
@@ -803,10 +820,12 @@ class ObjectChangeDialog(QDialog):
             ustaw_sciezke(w, _COL_STARA, it["old_path"], self._korzen)
             ustaw_sciezke(w, _COL_NOWA, it["path"], self._korzen)
             w.setToolTip(_COL_STATUS, tip)
+            self._podpowiedz_karty(w, it["card_op"], it["old_path"])
             w.setData(_COL_STARA, Qt.UserRole, it["frame_id"])
             self.items_tree.addTopLevelItem(w)
             self._wiersze[it["location_id"]] = w
             self._jest[it["location_id"]] = it["path"]
+        self._dopasuj_karte()
         self.counts.setVisible(False)
         self.status.setText(i18n.t("objchg.res.run", run_id=self._run_id).lstrip(" ·"))
         self._sync_akcji()
@@ -852,6 +871,7 @@ class ObjectChangeDialog(QDialog):
             w.setToolTip(_COL_STATUS, tip)
         self.counts.setVisible(False)
         self.warnings.setVisible(False)       # ostrzeżenia planera mówią w czasie przyszłym, jak liczby
+        self.card_note.setVisible(False)      # zdanie podglądu; drogę pliku mówi teraz jego status
         pominiete = sum(g.childCount() for g in (self.skipped_tree.topLevelItem(i)
                                                  for i in range(self.skipped_tree.topLevelItemCount())))
         self.skipped_head.setText(i18n.t_plural("objchg.skipped_head_done", pominiete))
@@ -869,19 +889,54 @@ class ObjectChangeDialog(QDialog):
         h = t.header().sizeHint().height() + widoczne * wiersz + 2 * t.frameWidth() + 4
         t.setFixedHeight(min(_POMINIECIA_MAX_PX, h))
 
+    # Sufit kolumny karty: część szerokości okna. Reszta należy do ścieżek (podgląd) i statusu
+    # (po biegu) - o tym, który plik i co się z nim stało, mówią one, nie karta.
+    _KARTA_MAX_UDZIAL = 0.34
+
+    def _dopasuj_karte(self):
+        """Kolumna karty = szerokość najdłuższej treści (wiersze i nagłówek) z sufitem
+        `_KARTA_MAX_UDZIAL` szerokości okna; dłuższa karta elizuje się, pełna treść jest
+        w podpowiedzi komórki. Liczone z metryki fontu listy, nie z `sizeHintForColumn` - ten
+        widzi tylko wiersze w polu widoku, a lista wypełnia się także przed pokazaniem okna."""
+        t = self.items_tree
+        fm = t.fontMetrics()
+        teksty = [t.topLevelItem(i).text(_COL_KARTA) for i in range(t.topLevelItemCount())]
+        teksty.append(t.headerItem().text(_COL_KARTA))
+        tresc = max(fm.horizontalAdvance(x) for x in teksty) + 3 * fm.averageCharWidth()
+        t.setColumnWidth(_COL_KARTA, min(tresc, int(self.width() * self._KARTA_MAX_UDZIAL)))
+
+    @staticmethod
+    def _dopisanie_fits(card_op, path):
+        """Pozycja DOPISUJE kartę do FITS - jej droga zapisu zależy od pliku (`_tekst_karty`)."""
+        return card_op == "add" and not path.lower().endswith(_XISF)
+
+    def _podpowiedz_karty(self, w, card_op, path):
+        """Podpowiedź komórki karty: jej pełna treść, a przy dopisaniu do FITS także pełne zdanie
+        o drodze zapisu (w komórce stoi krótki znacznik)."""
+        tekst = w.text(_COL_KARTA)
+        if self._dopisanie_fits(card_op, path):
+            tekst = f"{tekst}\n{i18n.t('objchg.card_add_fits')}"
+        w.setToolTip(_COL_KARTA, tekst)
+
     @staticmethod
     def _tekst_karty(card_op, card_old, card_new, path):
         """Karta `OBJECT` pozycji: stara → nowa, albo stan bez zmiany (karta już w formie albo
-        format bez karty - RAW). DOPISANIE karty do FITS jest oznaczone: zapis w miejscu umie
-        w FITS wyłącznie podmienić istniejącą kartę, więc ten plik rdzeń przepisze w całości (droga
-        atomowa) - człowiek ma to wiedzieć przed kliknięciem, nie dopiero ze zdania wyniku."""
+        format bez karty - RAW). DOPISANIE karty do FITS jest oznaczone KRÓTKIM znacznikiem
+        (`objchg.card_add_fits_short`): rdzeń dopisuje ją w miejscu tylko wtedy, gdy plik na to
+        pozwala - zapas nagłówka (pusta karta na końcu albo wolny rekord za `END`, AR-118) i pozostałe
+        bramki zapisu w miejscu. Inaczej przepisuje cały plik (droga atomowa, np. bez zapasu albo
+        skompresowany HDU) albo odmawia z powodem przy pozycji (np. `CHECKSUM`/`DATASUM`). Tego baza
+        nie zna, więc pełne zdanie o wszystkich wynikach (`objchg.card_add_fits`) stoi raz pod listą
+        i w podpowiedzi komórki - człowiek ma to wiedzieć przed kliknięciem, a drogę konkretnego
+        pliku podaje zdanie wyniku. Pełne zdanie w każdym wierszu zabierało kolumnie ścieżek
+        szerokość (zmierzone natywnie przy 1100 px okna)."""
         if card_op is None:
             return (i18n.t("objchg.card_kept", value=repr(card_old)) if card_old
                     else i18n.t("objchg.card_none"))
         stara = repr(card_old) if card_old is not None else i18n.t("objchg.card_absent")
         tekst = i18n.t("objchg.card_change", old=stara, new=repr(card_new))
-        if card_op == "add" and not path.lower().endswith(_XISF):
-            tekst += i18n.t("objchg.card_rewrite")
+        if ObjectChangeDialog._dopisanie_fits(card_op, path):
+            tekst += i18n.t("objchg.card_add_fits_short")
         return tekst
 
     # ---------------------------------------------------------------- stan akcji

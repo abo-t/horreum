@@ -74,7 +74,8 @@ from . import exif, hashing, repo, scan
 from .card_rules import FITS_RECORD as _FITS_RECORD
 from .resolve.paths import path_key   # ścieżka FIZYCZNA (bez wielkości liter) - jak planer i straż
 from .object_change import ZdanieRdzenia   # ostrzeżenie gestu z kodem dla okna (AR-138)
-from .item_reasons import PowodPozycji, dopisz, powod_wyjatku   # powód pozycji z kodem (AR-141)
+from .item_reasons import (ITEM_REASON_CODES, PowodPozycji,   # powód z kodem (AR-141, AR-148)
+                           dopisz_z_koperta, powod_wyjatku, z_bazy)
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
 # ============================================================ WRITER (port dawcy fits_io)
@@ -138,6 +139,22 @@ CODE_ZEZNANIE_WSTRZYMANE = "testimony_withheld"
 CODE_POWROT_WYPARTEJ = "displaced_return"
 PREFIKS_DROGI_ATOMOWEJ = "droga dotychczasowa"
 
+# Powody-stałe pisarza (AR-148): to samo zdanie w wielu bramkach, z kodem dla okna.
+_RAW_READ_ONLY = PowodPozycji("format RAW jest read-only (#2)", "raw_read_only")
+# Kontrola `header_hash` mówi tą samą prozą na obu drogach (testy, CLI), ale prawdą swojej drogi
+# w oknie: zapis porównuje z nagłówkiem ze STAGINGU (`write_changes`, `_xisf_prepare`, plan zapisu
+# w miejscu), cofnięcie atomowe - z nagłówkiem zapisanym przez COMMIT (`write_full_header`:
+# `_plan_przywrocenia`, drogi semantyczne).
+_HEADER_HASH_MISMATCH = PowodPozycji("header_hash mismatch", "header_hash_mismatch")
+_UNDO_HEADER_CHANGED = PowodPozycji("header_hash mismatch", "undo_header_changed")
+_BRAK_LOCATION = PowodPozycji("brak location w bazie", "no_location")
+_KOPIA_ZNIKNELA = PowodPozycji("kopia zniknęła (present=0)", "copy_gone")
+
+
+def _brak_operacji(op_id) -> PowodPozycji:
+    """Powód gestu izolacji, którego operacji nie ma w dzienniku `inplace_op`."""
+    return PowodPozycji(f"brak operacji {op_id}", "no_operation", op_id=op_id)
+
 
 # ============================================================ REGUŁY KARTY (jeden właściciel)
 # Właściciel reguł karty FITS 4.0 to `card_rules` - moduł bez astropy, bo pyta go też czysty silnik
@@ -172,23 +189,23 @@ def _after_replace(path: str, written_hash: str, backup_text: str,
     try:
         post = _post_hash(path)
     except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
-        return WriteResult("failed", _dopisz(f"plik PODMIENIONY, ale odczyt po zapisie padł - "
-                                             f"{type(exc).__name__}: {exc}", uwaga),
-                           written_hash, backup_text)
+        blad = f"{type(exc).__name__}: {exc}"
+        return WriteResult("failed", _dopisz(PowodPozycji(
+            f"plik PODMIENIONY, ale odczyt po zapisie padł - {blad}", "verify_read_failed",
+            detail=blad), uwaga), written_hash, backup_text)
     if post != written_hash:
-        return WriteResult("failed", _dopisz("plik PODMIENIONY, ale odczyt po zapisie pokazuje inny "
-                                             "nagłówek niż zapisany", uwaga),
-                           written_hash, backup_text)
+        return WriteResult("failed", _dopisz(PowodPozycji(
+            "plik PODMIENIONY, ale odczyt po zapisie pokazuje inny nagłówek niż zapisany",
+            "verify_mismatch"), uwaga), written_hash, backup_text)
     return WriteResult("applied", uwaga, post, backup_text)
 
 
 def _dopisz(powod: str | None, dopisek: str | None) -> str | None:
     """`powod; dopisek` z pominięciem pustych. Powód z kodem (`PowodPozycji`) zachowuje kod, a dopisek
     idzie na jego listę uwag (`item_reasons.dopisz`, AR-141); część pusta oddaje drugą bez zmian.
-    Dopisek Z KODEM za prozą pisarza (bez kodu, Q1) - proza w kopercie `prose`, kod dopisku zostaje."""
-    if powod and isinstance(dopisek, PowodPozycji) and not isinstance(powod, PowodPozycji):
-        powod = PowodPozycji(powod, "prose", text=powod)
-    return dopisz(powod, dopisek)
+    Dopisek Z KODEM za prozą bez kodu (tekst systemu) - proza w kopercie `prose`, kod dopisku zostaje
+    (`item_reasons.dopisz_z_koperta` - ta sama reguła co dopiski klingi)."""
+    return dopisz_z_koperta(powod, dopisek)
 
 
 # ------------------------------------------------ PODMIANA SYSTEMOWA (AR-18)
@@ -244,19 +261,32 @@ def _odcisk(fh, offset: int, length: int) -> _Odcisk:
                    _probe(fh, offset, length, st.st_size))
 
 
+# Cechy pliku w powodach rozjazdu (AR-148): fragmenty z kodem, które okno nazywa w języku UI, a rdzeń
+# skleja po `, ` jak dotąd (parametr-lista `features`).
+_CECHA_INO = PowodPozycji("st_ino", "feat_ino")
+_CECHA_ROZMIAR = PowodPozycji("rozmiar", "feat_size")
+_CECHA_MTIME = PowodPozycji("mtime", "feat_mtime")
+_CECHA_NAGLOWEK = PowodPozycji("nagłówek", "feat_header")
+_CECHA_PROBKA = PowodPozycji("próbka danych", "feat_sample")
+_CECHA_ROZMIAR_PLIKU = PowodPozycji("rozmiar pliku", "feat_file_size")
+_CECHA_BAJTY_NAGLOWKA = PowodPozycji("bajty nagłówka", "feat_header_bytes")
+_CECHA_HEADER_HASH = PowodPozycji("header_hash", "feat_header_hash")
+
+
 def _rozjazd_odcisku(sciezka: str, odcisk: _Odcisk, *, z_mtime: bool = True) -> list[str]:
-    """Czym plik `sciezka` różni się od odcisku - nazwy cech; pusta lista = niczym. `z_mtime=False`
-    dla pliku, który sami przenieśliśmy podmianą (system może scalić mu znaczniki czasu)."""
+    """Czym plik `sciezka` różni się od odcisku - cechy (`PowodPozycji` z kodem `feat_*`); pusta
+    lista = niczym. `z_mtime=False` dla pliku, który sami przenieśliśmy podmianą (system może
+    scalić mu znaczniki czasu)."""
     with open(sciezka, "rb") as fh:
         st = os.fstat(fh.fileno())
         fh.seek(odcisk.offset)
         region = fh.read(len(odcisk.region))
         probka = _probe(fh, odcisk.offset, len(odcisk.region), st.st_size)
-    return [nazwa for nazwa, zgodne in (
-        ("st_ino", not (odcisk.ino and st.st_ino) or st.st_ino == odcisk.ino),
-        ("rozmiar", st.st_size == odcisk.size),
-        ("mtime", not z_mtime or st.st_mtime_ns == odcisk.mtime_ns),
-        ("nagłówek", region == odcisk.region), ("próbka danych", probka == odcisk.probka))
+    return [cecha for cecha, zgodne in (
+        (_CECHA_INO, not (odcisk.ino and st.st_ino) or st.st_ino == odcisk.ino),
+        (_CECHA_ROZMIAR, st.st_size == odcisk.size),
+        (_CECHA_MTIME, not z_mtime or st.st_mtime_ns == odcisk.mtime_ns),
+        (_CECHA_NAGLOWEK, region == odcisk.region), (_CECHA_PROBKA, probka == odcisk.probka))
         if not zgodne]
 
 
@@ -444,22 +474,28 @@ def _czy_zaszla(path: str, tmp: str, kopia: str, blad: OSError | None) -> bool:
     if blad is None:
         if jest_sciezka and jest_kopia:
             return True
-        raise _PodmianaRozdarta(f"system zgłosił podmianę, ale kopii pliku wypartego ({kopia}) "
-                                f"brak - nie da się sprawdzić, czy ktoś zmienił plik w oknie "
-                                f"podmiany", zaszla=jest_sciezka, zachowaj_tmp=not jest_sciezka)
+        raise _PodmianaRozdarta(PowodPozycji(
+            f"system zgłosił podmianę, ale kopii pliku wypartego ({kopia}) brak - nie da się "
+            f"sprawdzić, czy ktoś zmienił plik w oknie podmiany", "replace_copy_missing",
+            copy=kopia), zaszla=jest_sciezka, zachowaj_tmp=not jest_sciezka)
     if jest_sciezka:
         return jest_kopia
+    blad_podmiany = str(blad)
     if jest_kopia:
         try:
             _kopia_na_miejsce(kopia, path)
         except OSError as exc:
-            raise _PodmianaRozdarta(f"podmiana przerwana ({blad}): oryginał leży pod {kopia}, a pod "
-                                    f"{path} pliku nie ma; powrót kopii też padł ({exc}) - przenieś "
-                                    f"{kopia} na {path} ręcznie", zaszla=False) from exc
+            blad_powrotu = str(exc)
+            raise _PodmianaRozdarta(PowodPozycji(
+                f"podmiana przerwana ({blad_podmiany}): oryginał leży pod {kopia}, a pod {path} "
+                f"pliku nie ma; powrót kopii też padł ({blad_powrotu}) - przenieś {kopia} na "
+                f"{path} ręcznie", "replace_cut_copy_back_failed", detail=blad_podmiany,
+                copy=kopia, path=path, error=blad_powrotu), zaszla=False) from exc
         return False
-    raise _PodmianaRozdarta(f"podmiana przerwana ({blad}): ani {path}, ani kopia {kopia} nie "
-                            f"istnieją - dane pliku są w pliku tymczasowym {tmp}, zostaje na dysku",
-                            zaszla=False, zachowaj_tmp=True)
+    raise _PodmianaRozdarta(PowodPozycji(
+        f"podmiana przerwana ({blad_podmiany}): ani {path}, ani kopia {kopia} nie istnieją - dane "
+        f"pliku są w pliku tymczasowym {tmp}, zostaje na dysku", "replace_cut_both_missing",
+        detail=blad_podmiany, path=path, copy=kopia, tmp=tmp), zaszla=False, zachowaj_tmp=True)
 
 
 def _oddaj_wyparty(path: str, kopia: str, rozjazd: list[str], nasza: _Odcisk) -> None:
@@ -477,31 +513,46 @@ def _oddaj_wyparty(path: str, kopia: str, rozjazd: list[str], nasza: _Odcisk) ->
 
     Wyłącznie droga BEZ zamiaru podmiany (cofnięcie atomowe): zapis z zamiarem oddaje cudzą wersję
     automatem rekoncyliacji (`_WypartaDoPowrotu` → `_rekoncyliuj_zamiar`, AR-64 C3)."""
-    zmiana = f"plik zmienił się między odczytem a podmianą ({', '.join(rozjazd)})"
+    zmiana = _zmiana_w_oknie(rozjazd)
     zwrotna = _nazwa_kopii(path)
     blad = _replace_z_ponowieniem(path, kopia, zwrotna)
     try:
         zaszedl = _czy_zaszla(path, kopia, zwrotna, blad)
     except _PodmianaRozdarta as exc:
-        raise _PodmianaRozdarta(f"{zmiana}; powrót wersji innego pisarza ({kopia}) przerwany: "
-                                f"{exc.reason}", zaszla=False, zachowaj_tmp=True) from exc
+        raise _PodmianaRozdarta(PowodPozycji(
+            f"{zmiana}; powrót wersji innego pisarza ({kopia}) przerwany: {exc.reason}",
+            "return_cut", change=zmiana, copy=kopia, inner=exc.reason),
+            zaszla=False, zachowaj_tmp=True) from exc
     if not zaszedl:
-        raise _PodmianaRozdarta(
+        blad_powrotu = str(blad)
+        raise _PodmianaRozdarta(PowodPozycji(
             f"{zmiana} - pod {path} stoi wersja zbudowana ze stanu SPRZED tej zmiany, a wersja "
-            f"innego pisarza leży pod {kopia}; jej powrót padł ({blad}) - przenieś {kopia} na "
-            f"{path} ręcznie", zaszla=True)
+            f"innego pisarza leży pod {kopia}; jej powrót padł ({blad_powrotu}) - przenieś {kopia} "
+            f"na {path} ręcznie", "return_failed_manual", change=zmiana, path=path, copy=kopia,
+            detail=blad_powrotu), zaszla=True)
     try:
         obca = _rozjazd_odcisku(zwrotna, nasza, z_mtime=False)
     except OSError as exc:
-        obca = [f"nieczytelny ({exc})"]
+        blad_odczytu = str(exc)
+        obca = [PowodPozycji(f"nieczytelny ({blad_odczytu})", "feat_unreadable",
+                             detail=blad_odczytu)]
     if obca:
-        raise _PodmianaRozdarta(
+        raise _PodmianaRozdarta(PowodPozycji(
             f"{zmiana}, a w oknie powrotu kolejny pisarz zmienił plik ({', '.join(obca)}): pod "
             f"{path} wersja innego pisarza z okna podmiany, pod {zwrotna} wersja wyparta w oknie "
-            f"powrotu - obie zostają, rozstrzygnij ręcznie; zmiana NIE zapisana", zaszla=False)
+            f"powrotu - obie zostają, rozstrzygnij ręcznie; zmiana NIE zapisana", "third_writer",
+            change=zmiana, features=obca, path=path, copy=zwrotna), zaszla=False)
     uwaga = _usun_kopie(zwrotna)
-    raise _PodmianaOdbita(_dopisz(f"{zmiana} - wersja innego pisarza wróciła na miejsce, zmiana NIE "
-                                  f"zapisana; ponów po odświeżeniu stagingu", uwaga))
+    raise _PodmianaOdbita(_dopisz(PowodPozycji(
+        f"{zmiana} - wersja innego pisarza wróciła na miejsce, zmiana NIE zapisana; ponów po "
+        f"odświeżeniu stagingu", "other_writer_returned", change=zmiana), uwaga))
+
+
+def _zmiana_w_oknie(rozjazd) -> PowodPozycji:
+    """Fragment „plik zmienił się między odczytem a podmianą (cechy)” - cechy z kodem
+    (`_rozjazd_odcisku`), okno nazywa je w języku UI (AR-148)."""
+    return PowodPozycji(f"plik zmienił się między odczytem a podmianą ({', '.join(rozjazd)})",
+                        "changed_in_window", features=rozjazd)
 
 
 def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=None, *,
@@ -542,14 +593,15 @@ def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=N
             try:
                 rozjazd = _rozjazd_odcisku(kopia, odcisk)
             except OSError as exc:
-                raise _PodmianaRozdarta(f"plik podmieniony, ale kopii pliku wypartego nie da się "
-                                        f"przeczytać ({exc}) - zostaje pod {kopia}", zaszla=True) \
-                    from exc
+                blad_odczytu = str(exc)
+                raise _PodmianaRozdarta(PowodPozycji(
+                    f"plik podmieniony, ale kopii pliku wypartego nie da się przeczytać "
+                    f"({blad_odczytu}) - zostaje pod {kopia}", "displaced_unreadable",
+                    detail=blad_odczytu, copy=kopia), zaszla=True) from exc
             if rozjazd and zamiar is not None:
                 # C3: powrót cudzej wersji idzie WYŁĄCZNIE wspólnym automatem rekoncyliacji
                 # (trwałe fazy w osobnych transakcjach) - po wycofaniu straży, nie w niej.
-                raise _WypartaDoPowrotu(f"plik zmienił się między odczytem a podmianą "
-                                        f"({', '.join(rozjazd)})")
+                raise _WypartaDoPowrotu(_zmiana_w_oknie(rozjazd))
             if rozjazd:
                 _oddaj_wyparty(path, kopia, rozjazd, nasza)
             if blad is None and po_podmianie is not None:
@@ -567,13 +619,16 @@ def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=N
     except Exception:  # noqa: BLE001 - podmiana już zaszła (docstring)
         potwierdzone = False
     if zaszla and not potwierdzone and zamiar is not None:
-        uwaga = (f"potwierdzenie podmiany w bazie przepadło - kopia pliku sprzed zapisu zostaje pod "
-                 f"{kopia} do rekoncyliacji (następny zapis albo cofnięcie tej lokacji)")
+        uwaga = PowodPozycji(
+            f"potwierdzenie podmiany w bazie przepadło - kopia pliku sprzed zapisu zostaje pod "
+            f"{kopia} do rekoncyliacji (następny zapis albo cofnięcie tej lokacji)",
+            "confirm_lost_copy_kept", copy=kopia)
     elif zaszla and not potwierdzone:
         # C6: bez zamiaru (cofnięcie) nie ma backupu do rekoncyliacji - kopii nikt nie sprzątnie.
-        uwaga = (f"zamknięcie transakcji podmiany padło - kopia pliku sprzed tej operacji została "
-                 f"pod {kopia} i nic jej nie sprzątnie; zgodna z plikiem sprzed operacji - po "
-                 f"sprawdzeniu można ją skasować ręcznie")
+        uwaga = PowodPozycji(
+            f"zamknięcie transakcji podmiany padło - kopia pliku sprzed tej operacji została pod "
+            f"{kopia} i nic jej nie sprzątnie; zgodna z plikiem sprzed operacji - po sprawdzeniu "
+            f"można ją skasować ręcznie", "close_failed_copy_left", copy=kopia)
     else:
         uwaga = _usun_kopie(kopia) if zaszla else None
     if blad is not None:
@@ -592,8 +647,10 @@ def _usun_kopie(kopia: str) -> str | None:
             return None
         except OSError as exc:
             if pauza is None:
-                return (f"kopia pliku sprzed podmiany została pod {kopia} ({type(exc).__name__}: "
-                        f"{exc}) - zgodna z plikiem sprzed zapisu, można ją skasować")
+                blad = f"{type(exc).__name__}: {exc}"
+                return PowodPozycji(f"kopia pliku sprzed podmiany została pod {kopia} ({blad}) - "
+                                    f"zgodna z plikiem sprzed zapisu, można ją skasować",
+                                    "copy_not_removed", copy=kopia, detail=blad)
             time.sleep(pauza)
     return None
 
@@ -743,11 +800,13 @@ def _powod_ucietego_komentarza(kw: str, przed: int, po: int) -> str:
     """Jedno brzmienie odmowy AR-7 - dla pisarza (`_fits_comment_loss`) i podglądu planu
     (`comment_loss_route`), żeby plan mówił DOKŁADNIE to, co potem powiedziałby zapis. Z długości
     komentarza przed i po układzie karty - tych samych faktów, które `comment_loss_lengths` daje
-    powierzchniom mówiącym własnym językiem (AR-138)."""
-    return (f"zmiana wartości karty {kw} ucięłaby zastany komentarz z {przed} do "
-            f"{po} znaków (karta FITS po zmianie ma pole wartości stałego formatu) "
-            f"- plik nietknięty; zapisz zmianę razem z komentarzem skróconym do "
-            f"{po} znaków albo wybierz krótszą wartość")
+    powierzchniom mówiącym własnym językiem (AR-138). Z kodem (AR-148) - okna zapisu mówią to samo
+    zdanie w języku UI."""
+    return PowodPozycji(f"zmiana wartości karty {kw} ucięłaby zastany komentarz z {przed} do "
+                        f"{po} znaków (karta FITS po zmianie ma pole wartości stałego formatu) "
+                        f"- plik nietknięty; zapisz zmianę razem z komentarzem skróconym do "
+                        f"{po} znaków albo wybierz krótszą wartość", "comment_cut", keyword=kw,
+                        before=przed, after=po)
 
 
 def _is_xisf(path) -> bool:
@@ -809,7 +868,7 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
     wersja wraca na miejsce. `confirm_backup()` = potwierdzenie backupu w bazie w transakcji straży
     (AR-40) - wyłącznie po podmianie zgłoszonej przez system i zgodnej rewalidacji."""
     if _is_raw(path):
-        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+        return WriteResult("blocked", _RAW_READ_ONLY, None)
     if _is_xisf(path):
         return write_xisf_changes(path, ops, expected_hash, persist_backup=persist_backup,
                                   replace_guard=replace_guard, confirm_backup=confirm_backup)
@@ -824,7 +883,7 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
                 hdr = hdu.header
                 current = scan._header_hash(hdr)
                 if expected_hash is not None and current != expected_hash:
-                    return WriteResult("blocked", "header_hash mismatch", None)
+                    return WriteResult("blocked", _HEADER_HASH_MISMATCH, None)
                 # Nowa karta = `add` ALBO `set` na karcie nieobecnej - tę `_apply_op` dopisuje po
                 # cichu (semantyka astropy), więc jej nazwa też jest treścią wniesioną przez łatę.
                 powod = _ops_violation(
@@ -855,9 +914,7 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
             try:
                 persist_backup(backup_text, written_hash, zamiar)
             except Exception as exc:  # noqa: BLE001 - bez backupu nie podmieniamy
-                return WriteResult("failed", f"backup do cofnięcia NIE powstał, więc podmiany nie "
-                                             f"było - plik nietknięty: {type(exc).__name__}: {exc}",
-                                   None)
+                return WriteResult("failed", _backup_nie_powstal(exc), None)
         uwaga = _podmien(tmp, path, replace_guard, odcisk, confirm_backup,
                          zamiar=zamiar if persist_backup is not None else None)
         tmp = None
@@ -876,6 +933,14 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
     finally:
         _sprzatnij_tmp(tmp, zachowaj_tmp)
     return _after_replace(path, written_hash, backup_text, uwaga)   # T3: hash z ZAPISANEGO pliku
+
+
+def _backup_nie_powstal(exc) -> PowodPozycji:
+    """Powód drogi atomowej (FITS i XISF), gdy backup do cofnięcia nie wszedł do bazy przed
+    podmianą - pliku nie ruszono."""
+    blad = f"{type(exc).__name__}: {exc}"
+    return PowodPozycji(f"backup do cofnięcia NIE powstał, więc podmiany nie było - plik "
+                        f"nietknięty: {blad}", "backup_not_saved", detail=blad)
 
 
 def _sprzatnij_tmp(tmp: str | None, zachowaj: bool) -> None:
@@ -918,7 +983,7 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
     i powód „cofnięte semantycznie".
     Pod blokadą i z podmianą systemową jak `write_changes` (AR-18)."""
     if _is_raw(path):
-        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+        return WriteResult("blocked", _RAW_READ_ONLY, None)
     path = os.fspath(path)
     xisf = _is_xisf(path)
     tmp: str | None = None
@@ -941,12 +1006,8 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
                     raise ValueError("region backupu w bieżącym pliku czyta się innym nagłówkiem "
                                      "niż zapisany w backupie - plik nietknięty")
                 bajtowo = None if env.file_sha1 is None else sha1_tmp == env.file_sha1
-                nota = {True: None,
-                        None: "nagłówek przywrócony bajt w bajt; całego pliku nie porównano - "
-                              "backup commitu nie niesie sha1 pliku sprzed zapisu",
-                        False: f"{_COFNIETE_SEMANTYCZNIE} - nagłówek przywrócony bajt w bajt, ale "
-                               f"plik różni się od stanu sprzed commitu poza nagłówkiem (sha1 "
-                               f"całego pliku)"}[bajtowo]
+                nota = {True: None, None: _NOTA_BAJTOWO_BEZ_PLIKU,
+                        False: _NOTA_SEMANTYCZNIE_POZA_NAGLOWKIEM}[bajtowo]
             else:
                 tekst = env.header_text() if env is not None else header_text
                 semantyczny = (_xisf_semantyczny(path, fh, tekst, expected_hash) if xisf
@@ -955,8 +1016,7 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
                     return semantyczny
                 tmp, written_hash, odcisk = semantyczny
                 bajtowo = False
-                nota = (f"{_COFNIETE_SEMANTYCZNIE} - nagłówek odtworzony z treści backupu, bajty "
-                        f"pliku inne niż przed commitem")
+                nota = _NOTA_SEMANTYCZNIE
         uwaga = _podmien(tmp, path, replace_guard, odcisk)
         tmp = None
     except _XisfRefusal as ref:
@@ -978,6 +1038,16 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
 
 
 _COFNIETE_SEMANTYCZNIE = "cofnięte semantycznie"
+# Noty cofnięcia atomowego o bajtach pliku (AR-19) - z kodem dla okna (AR-148).
+_NOTA_BAJTOWO_BEZ_PLIKU = PowodPozycji(
+    "nagłówek przywrócony bajt w bajt; całego pliku nie porównano - backup commitu nie niesie sha1 "
+    "pliku sprzed zapisu", "undo_bytes_unverified")
+_NOTA_SEMANTYCZNIE_POZA_NAGLOWKIEM = PowodPozycji(
+    f"{_COFNIETE_SEMANTYCZNIE} - nagłówek przywrócony bajt w bajt, ale plik różni się od stanu "
+    f"sprzed commitu poza nagłówkiem (sha1 całego pliku)", "undo_semantic_outside")
+_NOTA_SEMANTYCZNIE = PowodPozycji(
+    f"{_COFNIETE_SEMANTYCZNIE} - nagłówek odtworzony z treści backupu, bajty pliku inne niż przed "
+    f"commitem", "undo_semantic")
 
 
 def _xisf_bloki(xml: bytes) -> list[str]:
@@ -998,7 +1068,7 @@ def _plan_przywrocenia(path: str, fh, env: RegionBackup, expected_hash: str | No
     if _is_xisf(path):
         meta = _read_xisf_or_refuse(path)
         if expected_hash is not None and meta.header_hash != expected_hash:
-            return WriteResult("blocked", "header_hash mismatch", None)
+            return WriteResult("blocked", _UNDO_HEADER_CHANGED, None)
         if env.fmt != "xisf" or env.offset != 0 or meta.first_attachment != len(env.region):
             return None
         (hlen,) = struct.unpack("<I", env.region[8:12])
@@ -1014,6 +1084,9 @@ def _plan_przywrocenia(path: str, fh, env: RegionBackup, expected_hash: str | No
         return [env.region, (meta.first_attachment, None)], odcisk
     granice = _fits_hdu_bounds(path, expected_hash)
     if isinstance(granice, WriteResult):
+        # Granice dzieli plan zapisu w miejscu (nagłówek od stagingu); tu cofnięcie - od commitu.
+        if granice.reason is _HEADER_HASH_MISMATCH:
+            granice = dataclasses.replace(granice, reason=_UNDO_HEADER_CHANGED)
         return granice
     if isinstance(granice, Fallback) or env.fmt != "fits":
         return None
@@ -1041,7 +1114,7 @@ def _fits_semantyczny(path: str, fh, tekst: str, expected_hash: str | None):
             index, hdu = scan._select_hdu(hdul)
             current = scan._header_hash(hdu.header)
             if expected_hash is not None and current != expected_hash:
-                return WriteResult("blocked", "header_hash mismatch", None)
+                return WriteResult("blocked", _UNDO_HEADER_CHANGED, None)
             info = hdul.fileinfo(index)
             start, data_start = info["hdrLoc"], info["datLoc"]
             hdu.header = fits.Header.fromstring(tekst)
@@ -1062,7 +1135,7 @@ def _xisf_semantyczny(path: str, fh, xml_text: str, expected_hash: str | None):
     | `WriteResult('blocked')`. Hash zapisanego XML-a znany bez odczytu (D-X-3)."""
     meta = _read_xisf_or_refuse(path)
     if expected_hash is not None and meta.header_hash != expected_hash:
-        return WriteResult("blocked", "header_hash mismatch", None)
+        return WriteResult("blocked", _UNDO_HEADER_CHANGED, None)
     xml = xml_text.encode("utf-8")
     try:
         region = scan.build_xisf_header_region(meta, xml)
@@ -1126,7 +1199,9 @@ def _read_xisf_or_refuse(path):
     except OSError:
         raise
     except Exception as exc:  # noqa: BLE001 — czytnik zgłasza format wieloma typami (w tym ParseError)
-        raise _XisfRefusal(f"nagłówek XISF nieczytelny — {type(exc).__name__}: {exc}") from exc
+        blad = f"{type(exc).__name__}: {exc}"
+        raise _XisfRefusal(PowodPozycji(f"nagłówek XISF nieczytelny - {blad}", "xisf_unreadable",
+                                        detail=blad)) from exc
 
 
 def _xisf_gates(meta) -> None:
@@ -1135,10 +1210,12 @@ def _xisf_gates(meta) -> None:
     Bramka tożsamości ma bliźniaka w bazie (`macro.resolve_target` czyta
     `frame.sha1_data_uncomputable`) — ta tutaj domyka wywołanie pisarza z pominięciem makra."""
     if meta.keyword_images > 1:
-        raise _XisfRefusal("karty pod wieloma <Image> — cel zapisu niejednoznaczny (D-X-11)")
+        raise _XisfRefusal(PowodPozycji(
+            "karty pod wieloma <Image> - cel zapisu niejednoznaczny (D-X-11)", "xisf_many_images"))
     if meta.image_span is None:
-        raise _XisfRefusal("tożsamość nieobliczalna (brak obrazu-attachmentu) — "
-                           "zapis rozdwoiłby klatkę (D-X-13)")
+        raise _XisfRefusal(PowodPozycji(
+            "tożsamość nieobliczalna (brak obrazu-attachmentu) - zapis rozdwoiłby klatkę (D-X-13)",
+            "xisf_no_identity"))
 
 
 def _xisf_property_patch(meta, keyword, idx, new_text):
@@ -1175,13 +1252,17 @@ def _xisf_property_patch(meta, keyword, idx, new_text):
         z_karty = scan.encode_xisf_value(rule(stara_karta), xml, span)
         nowa = scan.encode_xisf_value(rule(new_text), xml, span)
     except (TypeError, ValueError) as exc:
-        raise _XisfRefusal(f"własność {pid}: reguła nie liczy się dla {new_text!r} "
-                           f"({type(exc).__name__}: {exc})") from exc
+        blad = f"{type(exc).__name__}: {exc}"
+        raise _XisfRefusal(PowodPozycji(
+            f"własność {pid}: reguła nie liczy się dla {repr(new_text)} ({blad})", "xisf_prop_rule",
+            prop=pid, value=repr(new_text), detail=blad)) from exc
     if z_karty != obecna:
-        raise _XisfRefusal(
+        raise _XisfRefusal(PowodPozycji(
             f"własność {pid} = {obecna.decode('utf-8', 'replace')}, a z karty {keyword}="
-            f"{stara_karta!r} wychodzi {z_karty.decode('utf-8', 'replace')} — konwencji tego pliku "
-            f"NIE ROZUMIEM, więc jej nie ruszam")
+            f"{repr(stara_karta)} wychodzi {z_karty.decode('utf-8', 'replace')} - konwencji tego "
+            f"pliku NIE ROZUMIEM, więc jej nie ruszam", "xisf_prop_mismatch", prop=pid,
+            current=obecna.decode('utf-8', 'replace'), keyword=keyword, card=repr(stara_karta),
+            derived=z_karty.decode('utf-8', 'replace')))
     return (*span, nowa)
 
 
@@ -1211,8 +1292,9 @@ def _xisf_add_patch(meta, keyword: str, new_text: str, comment) -> tuple[int, in
     except scan.XisfTargetMissing:
         pass
     else:
-        raise _XisfRefusal(f"karta {keyword} już istnieje — 'add' dopisałby drugą; zmiana wartości "
-                           f"idzie przez 'set'")
+        raise _XisfRefusal(PowodPozycji(
+            f"karta {keyword} już istnieje - 'add' dopisałby drugą; zmiana wartości idzie przez "
+            f"'set'", "xisf_card_exists", keyword=keyword))
     target = _XISF_PROPERTY_TARGETS.get(keyword)
     if target is not None:
         try:
@@ -1222,9 +1304,10 @@ def _xisf_add_patch(meta, keyword: str, new_text: str, comment) -> tuple[int, in
         except scan.XisfValueUnreachable as exc:
             raise _XisfRefusal(str(exc)) from exc
         else:
-            raise _XisfRefusal(
-                f"plik nie ma karty {keyword}, ale ma własność {target[0]} — dopisanie karty "
-                f"mogłoby mu zaprzeczyć, a bramki zrozumienia nie ma na czym postawić")
+            raise _XisfRefusal(PowodPozycji(
+                f"plik nie ma karty {keyword}, ale ma własność {target[0]} - dopisanie karty "
+                f"mogłoby mu zaprzeczyć, a bramki zrozumienia nie ma na czym postawić",
+                "xisf_prop_without_card", keyword=keyword, prop=target[0]))
     try:
         offset, blob = scan.build_fits_keyword_element(
             xml, keyword=keyword, value=new_text, comment=comment)
@@ -1252,8 +1335,9 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
     patches: list[tuple[int, int, bytes]] = []
     for op in ops:
         if op.op not in ("set", "add"):
-            raise _XisfRefusal(f"operacja '{op.op}' na XISF nie istnieje — writeback zna 'set' "
-                               f"i 'add'")
+            raise _XisfRefusal(PowodPozycji(
+                f"operacja '{op.op}' na XISF nie istnieje - writeback zna 'set' i 'add'",
+                "xisf_bad_op", op=op.op))
         keyword, idx = op.keyword.strip().upper(), op.idx or 0
         new_text = str(op.value)
         if op.op == "add":
@@ -1262,14 +1346,18 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
         try:
             span = scan.locate_value_span(xml, keyword=keyword, idx=idx)
         except scan.XisfTargetMissing as exc:
-            raise _XisfRefusal(f"{exc} — 'set' nie zakłada karty; dopisanie idzie przez "
-                               f"'add' (P6d)") from exc
+            brak = str(exc)                    # zdanie czytnika `scan` - granica bez kodu
+            raise _XisfRefusal(PowodPozycji(
+                f"{brak} - 'set' nie zakłada karty; dopisanie idzie przez 'add' (P6d)",
+                "xisf_set_missing", detail=brak)) from exc
         patches.append((*span, scan.quote_fits(new_text, xml[span[0]:span[1]])))
         if op.comment is not None:
             try:
                 cspan = scan.locate_value_span(xml, keyword=keyword, idx=idx, attr="comment")
             except scan.XisfTargetMissing as exc:
-                raise _XisfRefusal(f"{exc} — dodanie atrybutu poza P6 (D-X-12)") from exc
+                brak = str(exc)                # zdanie czytnika `scan` - granica bez kodu
+                raise _XisfRefusal(PowodPozycji(f"{brak} - dodanie atrybutu poza P6 (D-X-12)",
+                                                "xisf_attr_missing", detail=brak)) from exc
             patches.append((*cspan, scan.encode_xisf_value(op.comment, xml, cspan)))
         prop = _xisf_property_patch(meta, keyword, idx, new_text)
         if prop is not None:
@@ -1300,10 +1388,14 @@ def _xisf_backup_text(meta) -> str:
     try:
         text = meta.xml_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise _XisfRefusal(f"nagłówek nie jest tekstem UTF-8 — backup do undo niemożliwy ({exc})")
+        blad = str(exc)
+        raise _XisfRefusal(PowodPozycji(
+            f"nagłówek nie jest tekstem UTF-8 - backup do undo niemożliwy ({blad})", "xisf_not_utf8",
+            detail=blad))
     if text.encode("utf-8") != meta.xml_bytes:
-        raise _XisfRefusal("nagłówek nie przechodzi round-tripu bajty→tekst→bajty — "
-                           "backup do undo byłby nieodwracalny")
+        raise _XisfRefusal(PowodPozycji(
+            "nagłówek nie przechodzi round-tripu bajty→tekst→bajty - backup do undo byłby "
+            "nieodwracalny", "xisf_no_roundtrip"))
     return text
 
 
@@ -1390,7 +1482,7 @@ def _xisf_prepare(path: str, ops: list[WriteOp], expected_hash: str | None):
     `header_hash` - powód „header_hash mismatch", jak w FITS), awaria - każdy inny wyjątek."""
     meta = _read_xisf_or_refuse(path)
     if expected_hash is not None and meta.header_hash != expected_hash:
-        raise _XisfRefusal("header_hash mismatch")
+        raise _XisfRefusal(_HEADER_HASH_MISMATCH)
     _xisf_gates(meta)
     powod = _ops_violation(ops, lambda op: op.op == "add")   # `set` nie zakłada karty (niżej)
     if powod is not None:
@@ -1450,9 +1542,7 @@ def write_xisf_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
             try:
                 persist_backup(backup_text, written_hash, zamiar)
             except Exception as exc:  # noqa: BLE001 - bez backupu nie podmieniamy
-                return WriteResult("failed", f"backup do cofnięcia NIE powstał, więc podmiany nie "
-                                             f"było - plik nietknięty: {type(exc).__name__}: {exc}",
-                                   None)
+                return WriteResult("failed", _backup_nie_powstal(exc), None)
         uwaga = _podmien(tmp, path, replace_guard, odcisk, confirm_backup,
                          zamiar=zamiar if persist_backup is not None else None)
         tmp = None
@@ -1541,11 +1631,13 @@ def write_xisf_full_header(path, header_text: str, expected_hash: str | None) ->
 # każde inne undo idzie drogą atomową (`write_full_header`).
 #
 # SPADEK NA DROGĘ DOTYCHCZASOWĄ (`Fallback`) wyłącznie PRZED jakimkolwiek zapisem i backupem:
-# FITS, gdy łata nie mieści się w tym samym 80-bajtowym rekordzie z zastanym komentarzem, gdy
-# karta występuje więcej niż raz, gdy operacja to `add` albo wartość nietekstowa. FITS z kartą
-# `CHECKSUM`/`DATASUM` to ODMOWA ('blocked'), nie spadek: zapis w miejscu unieważniłby sumę, a obie
-# drogi jej dziś nie przeliczają. XISF spadku NIE MA: region nagłówka XISF ma stały rozmiar w obu
-# drogach, więc brak rezerwy odmawia tak samo tu, jak w pliku tymczasowym.
+# FITS, gdy łata nie mieści się w jednym 80-bajtowym rekordzie, gdy karta `set` występuje więcej
+# niż raz, gdy `add` dopisuje kartę, która już jest, gdy dopisanie nie ma w nagłówku miejsca
+# (pusta karta na końcu albo wolny rekord za `END` w ostatnim bloku 2880 B) albo gdy wartość jest
+# nietekstowa. FITS z kartą `CHECKSUM`/`DATASUM` to ODMOWA ('blocked'), nie spadek: zapis
+# w miejscu unieważniłby sumę, a obie drogi jej dziś nie przeliczają. XISF spadku NIE MA: region
+# nagłówka XISF ma stały rozmiar w obu drogach, więc brak rezerwy odmawia tak samo tu, jak w pliku
+# tymczasowym.
 
 _PROBE_BYTES = 1 << 16    # próbka: przed regionem, początek danych, koniec pliku (po 64 KiB)
 # Karty układu danych FITS (+ `NAXISn`): przywrócenie w miejscu wymaga, żeby były TE SAME - inaczej
@@ -1786,7 +1878,7 @@ def _fits_region_checked(fh, start: int, data_start: int, expected_hash: str | N
     hdr = fits.Header.fromstring(raw.decode("latin-1"))
     biezacy = scan._header_hash(hdr)
     if expected_hash is not None and biezacy != expected_hash:
-        return WriteResult("blocked", "header_hash mismatch", None)
+        return WriteResult("blocked", _HEADER_HASH_MISMATCH, None)
     if _fits_layout(hdr) != uklad:
         raise ValueError("FITS: układ danych z uchwytu inny niż z parsera")
     return raw, biezacy
@@ -1804,8 +1896,8 @@ def _fits_card_image(keyword: str, value: str, comment: str) -> tuple[bytes | No
         zgodna = (len(image) == _FITS_RECORD and back.keyword == keyword
                   and back.value == value.rstrip() and (back.comment or "") == (comment or ""))
     if not zgodna:
-        return None, (f"karta {keyword} z zastanym komentarzem nie mieści się w jednym rekordzie "
-                      f"80 znaków")
+        return None, PowodPozycji(f"karta {keyword} z zastanym komentarzem nie mieści się w jednym "
+                                  f"rekordzie 80 znaków", "fb_card_too_long", keyword=keyword)
     return image.encode("ascii"), None
 
 
@@ -1817,22 +1909,92 @@ def _fits_hdu_bounds(path: str, expected_hash: str | None):
         hdr = hdu.header
         biezacy = scan._header_hash(hdr)
         if expected_hash is not None and biezacy != expected_hash:
-            return WriteResult("blocked", "header_hash mismatch", None)
+            return WriteResult("blocked", _HEADER_HASH_MISMATCH, None)
         if isinstance(hdu, fits.CompImageHDU):
-            return Fallback("skompresowany master - nagłówek kafelkowy układa astropy")
+            return Fallback(PowodPozycji("skompresowany master - nagłówek kafelkowy układa astropy",
+                                         "fb_compressed"))
         info = hdul.fileinfo(index)
         return hdr, info["hdrLoc"], info["datLoc"], biezacy
+
+
+_FITS_WOLNY_REKORD = b" " * _FITS_RECORD
+
+
+def _wolne_rekordy(n: int) -> PowodPozycji:
+    """Fragment „N wolnych rekordów” w dopełniaczu z odmianą PL (1 / reszta) - kod `free_records`,
+    okno odmienia go w języku UI z parametru `n` (wpis mnogi, wzór `repo._kopie`)."""
+    if n == 1:
+        return PowodPozycji(f"{n} wolnego rekordu", "free_records", n=n)
+    return PowodPozycji(f"{n} wolnych rekordów", "free_records", n=n)
+
+
+def _fits_zloz_region(raw: bytes, ops: list[WriteOp], obrazy: dict[str, bytes]):
+    """Region nagłówka FITS po łacie, złożony z rekordów → `(nowy region, karty oczekiwane)` albo
+    `Fallback`. `raw` = region sprawdzony (`_fits_region_checked`), `obrazy` = obraz 80 B każdej
+    karty łaty (`set` i `add`).
+
+    KOLEJNOŚĆ KART daje astropy: `_apply_op` - ta sama funkcja, która łata drogę atomową - na
+    nagłówku z TYCH bajtów. Dopisaną kartę astropy stawia za ostatnią kartą zwykłą, przed końcowym
+    blokiem COMMENT/HISTORY/pustych, i zużywa pustą kartę z końca (`Header.append`, `useblanks`;
+    zmierzone 2026-10-15, astropy 8.0). BAJTY daje plik: karta zastana wraca swoimi rekordami bajt
+    w bajt (z kontynuacjami CONTINUE - ta sama reguła co `Header.fromstring`), karta łaty dostaje
+    swój obraz. Karty ponad zużyte puste przesuwają `END` w dół o tyle wolnych rekordów (80 spacji)
+    za `END` w ostatnim bloku 2880 B; brak → `Fallback`. Długość regionu, liczba bloków i początek
+    danych zostają.
+
+    Karty oczekiwane = nagłówek wyroczni wyrenderowany i przeczytany z powrotem TĄ SAMĄ funkcją co
+    skan - to, co droga atomowa zapisuje na poziomie NAGŁÓWKA. Jej PLIK różni się jeszcze kartami
+    skali: `writeto` przy danych pseudo-unsigned (`BZERO` bez `BSCALE`, NINA) dopisuje `BSCALE`
+    i przenosi `BZERO` na koniec, a zapis w miejscu kart układu nie rusza."""
+    rekordy = [raw[i:i + _FITS_RECORD] for i in range(0, len(raw), _FITS_RECORD)]
+    koniec = rekordy.index(_FITS_END_RECORD)
+    poczatki = [i for i in range(koniec) if i == 0 or rekordy[i][:8] != b"CONTINUE"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wyrocznia = fits.Header.fromstring(raw.decode("latin-1"))
+        if len(poczatki) != len(wyrocznia.cards):
+            raise ValueError("FITS: rekordy nagłówka nie składają się w karty tak jak u astropy")
+        zrodlo = {id(c): b"".join(rekordy[a:b])
+                  for c, a, b in zip(wyrocznia.cards, poczatki, poczatki[1:] + [koniec])}
+        for op in ops:
+            _apply_op(wyrocznia, op)
+        nowe = []
+        for c in wyrocznia.cards:
+            if c.keyword in obrazy:
+                nowe.append(obrazy[c.keyword])
+            elif id(c) in zrodlo:
+                nowe.append(zrodlo[id(c)])
+            else:
+                raise ValueError(f"FITS: astropy założył kartę {c.keyword!r} spoza łaty")
+        want = scan._parse_cards(fits.Header.fromstring(wyrocznia.tostring()))
+    przyrost = sum(len(r) for r in nowe) // _FITS_RECORD - koniec
+    if przyrost < 0:
+        raise ValueError(f"FITS: łata w miejscu ubyła {-przyrost} rekordów nagłówka")
+    wolne = 0
+    while koniec + 1 + wolne < len(rekordy) and rekordy[koniec + 1 + wolne] == _FITS_WOLNY_REKORD:
+        wolne += 1
+    if wolne < przyrost:
+        potrzebne = _wolne_rekordy(przyrost)
+        return Fallback(PowodPozycji(
+            f"brak miejsca w nagłówku FITS: dopisanie potrzebuje {potrzebne} za END w ostatnim "
+            f"bloku 2880 B, a jest {wolne} - nagłówek urósłby o blok i przesunął dane",
+            "fb_no_room", needed=potrzebne, free=wolne))
+    nowy = b"".join(nowe) + _FITS_END_RECORD + raw[(koniec + 1 + przyrost) * _FITS_RECORD:]
+    return nowy, want
 
 
 def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | None):
     """Plan zapisu w miejscu dla FITS (pod blokadą) → `_InplacePlan` | `Fallback` | `WriteResult`.
 
-    Kwalifikuje się wyłącznie `set` WARTOŚCI TEKSTOWEJ na karcie tekstowej występującej dokładnie
-    raz, której nowy obraz (z ZASTANYM komentarzem - tu komentarz nie ginie) mieści się w jednym
-    rekordzie; karta, która się nie mieści, spada na drogę atomową, a tam odmawia
-    `_fits_comment_loss` (AR-7). Karta jest podmieniana w TYM SAMYM 80-bajtowym slocie, więc liczba
-    kart, bloków 2880 B i długość nagłówka zostają. Kontrola hasha i reguły karty stoją PRZED
-    kwalifikacją, więc odmawiają tak samo jak droga atomowa; `CHECKSUM`/`DATASUM` → odmowa."""
+    Kwalifikują się operacje na WARTOŚCI TEKSTOWEJ zwykłej karty (nie komentarzowej, nie układu
+    danych): `set` karty tekstowej występującej dokładnie raz i `add` karty, której w nagłówku nie
+    ma (AR-118). Obraz karty (`_fits_card_image`) niesie komentarz jak u `_apply_op`: z operacji,
+    a przy `set` bez komentarza - ZASTANY (tu komentarz nie ginie); karta, która się nie mieści
+    w jednym rekordzie, spada na drogę atomową, a tam odmawia `_fits_comment_loss` (AR-7). Region
+    składa `_fits_zloz_region`: `set` w TYM SAMYM slocie, `add` tam, gdzie postawiłby ją astropy,
+    w zapasie nagłówka (pusta karta na końcu albo wolny rekord za `END`) - liczba bloków 2880 B
+    i długość nagłówka zostają, brak zapasu → `Fallback`. Kontrola hasha i reguły karty stoją
+    PRZED kwalifikacją, więc odmawiają tak samo jak droga atomowa; `CHECKSUM`/`DATASUM` → odmowa."""
     granice = _fits_hdu_bounds(path, expected_hash)
     if not isinstance(granice, tuple):
         return granice
@@ -1842,46 +2004,64 @@ def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | N
         return WriteResult("blocked", powod, None)
     sumy = [k for k in _FITS_SUM_KEYWORDS if k in hdr]
     if sumy:
-        return WriteResult("blocked", f"FITS z sumą kontrolną ({', '.join(sumy)}) - zapis nagłówka "
-                                      f"unieważniłby ją, a pisarz jej nie przelicza", None)
-    obrazy: dict[str, tuple[bytes, str]] = {}
+        return WriteResult("blocked", PowodPozycji(
+            f"FITS z sumą kontrolną ({', '.join(sumy)}) - zapis nagłówka unieważniłby ją, a pisarz "
+            f"jej nie przelicza", "checksum_present", sums=sumy), None)
+    obrazy: dict[str, bytes] = {}
+    podmieniane: list[str] = []
     for op in ops:
         kw = op.keyword.strip().upper()
-        if op.op != "set" or op.value_type != "str":
-            return Fallback(f"operacja {op.op}/{op.value_type} na {kw} - układ karty zostaje "
-                            f"przy astropy")
+        if op.op not in ("set", "add") or op.value_type != "str":
+            return Fallback(PowodPozycji(
+                f"operacja {op.op}/{op.value_type} na {kw} - układ karty zostaje przy astropy",
+                "fb_op_kind", op=op.op, value_type=op.value_type, keyword=kw))
         if kw in _FITS_NOT_INPLACE or kw in _FITS_LAYOUT_KEYWORDS or kw in obrazy:
-            return Fallback(f"karta {kw} nie jest zwykłą kartą tekstową")
+            return Fallback(PowodPozycji(f"karta {kw} nie jest zwykłą kartą tekstową",
+                                         "fb_not_text_card", keyword=kw))
         ile = _count_keyword(hdr, kw)
-        if ile != 1 or op.idx not in (None, 0):
-            return Fallback(f"karta {kw} występuje {ile} razy")
-        card = hdr.cards[kw]
-        if not isinstance(card.value, str):
-            return Fallback(f"zastana wartość {kw} nie jest tekstem")
-        image, powod = _fits_card_image(kw, str(op.value), card.comment)
+        if op.op == "add":
+            if ile:
+                return Fallback(PowodPozycji(
+                    f"karta {kw} już jest w nagłówku - dopisanie rozstrzyga droga atomowa",
+                    "fb_card_present", keyword=kw))
+            komentarz = op.comment or ""
+        else:
+            if ile != 1 or op.idx not in (None, 0):
+                return Fallback(PowodPozycji(f"karta {kw} występuje {ile} razy", "fb_card_count",
+                                             keyword=kw, n=ile))
+            card = hdr.cards[kw]
+            if not isinstance(card.value, str):
+                return Fallback(PowodPozycji(f"zastana wartość {kw} nie jest tekstem",
+                                             "fb_value_not_text", keyword=kw))
+            komentarz = op.comment if op.comment is not None else card.comment
+            podmieniane.append(kw)
+        image, powod = _fits_card_image(kw, str(op.value), komentarz)
         if image is None:
             return Fallback(powod)
-        obrazy[kw] = (image, str(op.value))
-    want = [dataclasses.replace(c, value_raw=obrazy[c.keyword][1].rstrip())
-            if c.keyword in obrazy else c for c in scan._parse_cards(hdr)]
+        obrazy[kw] = image
     uklad = _fits_layout(hdr)
     sprawdzony = _fits_region_checked(fh, start, data_start, biezacy, uklad)
     if isinstance(sprawdzony, WriteResult):
         return sprawdzony
     raw, _ = sprawdzony
     records = [raw[i:i + _FITS_RECORD] for i in range(0, len(raw), _FITS_RECORD)]
-    for kw, (image, _) in obrazy.items():
+    for kw in podmieniane:
         nazwa = kw.ljust(8).encode("ascii")
         trafienia = [i for i, r in enumerate(records) if r[:8] == nazwa and r[8:10] == b"= "]
         if len(trafienia) != 1:
-            return Fallback(f"karta {kw} stoi w {len(trafienia)} rekordach wartości")
+            return Fallback(PowodPozycji(f"karta {kw} stoi w {len(trafienia)} rekordach wartości",
+                                         "fb_card_records", keyword=kw, n=len(trafienia)))
         i = trafienia[0]
         if i + 1 < len(records) and records[i + 1][:8] == b"CONTINUE":
-            return Fallback(f"karta {kw} ma kontynuację CONTINUE")
-        records[i] = image
-    new_raw = b"".join(records)
+            return Fallback(PowodPozycji(f"karta {kw} ma kontynuację CONTINUE", "fb_continue",
+                                         keyword=kw))
+    zlozony = _fits_zloz_region(raw, ops, obrazy)
+    if isinstance(zlozony, Fallback):
+        return zlozony
+    new_raw, want = zlozony
     # Weryfikacja łaty PRZED zapisem (bliźniak `_xisf_verify`): karty z nowego nagłówka, wyłuskane
-    # TĄ SAMĄ funkcją co skan, == karty sprzed łaty z podmienioną wartością; układ danych bez zmian.
+    # TĄ SAMĄ funkcją co skan, == karty, które daje `_apply_op` drogi atomowej (kolejność
+    # włącznie); układ danych bez zmian.
     new_hdr = fits.Header.fromstring(new_raw.decode("latin-1"))
     if scan._parse_cards(new_hdr) != want or _fits_layout(new_hdr) != uklad:
         raise ValueError("FITS: karty po łacie w miejscu rozjechały się z oczekiwanymi")
@@ -1972,12 +2152,16 @@ def _faza(journal, faza, reason=None) -> str | None:
     """Przejście fazy w dzienniku → `None` albo powód porażki. Porażka znaczy, że operacja zostaje
     w fazie `writing` (otwarta, izolowana), więc wołający MUSI potraktować zapis jako NIEUKOŃCZONY
     ('failed'), a nie dopisać powód do sukcesu (astra, 2026-09-27): baza nie wie, że zapis się
-    udał, i jedyną uczciwą drogą dalej jest odzysk."""
+    udał, i jedyną uczciwą drogą dalej jest odzysk.
+
+    `reason` fazy trafia do `inplace_op.reason` (`repo.set_inplace_op_phase`) - JAWNA granica bez
+    kodu (AR-148): kolumna niesie samą prozę, 0042 jej nie dotyka, a okno jej nie czyta."""
     try:
         journal.phase(faza, reason)
     except Exception as exc:  # noqa: BLE001
-        return f"faza '{faza}' NIE zapisana w dzienniku ({type(exc).__name__}: {exc}) - lokacja " \
-               f"zostaje izolowana"
+        blad = f"{type(exc).__name__}: {exc}"
+        return PowodPozycji(f"faza '{faza}' NIE zapisana w dzienniku ({blad}) - lokacja zostaje "
+                            f"izolowana", "phase_not_saved", phase=faza, detail=blad)
     return None
 
 
@@ -2001,19 +2185,19 @@ def _apply_inplace(plan: _InplacePlan, fh, journal,
         size = st.st_size
         fh.seek(plan.region_start)
         if fh.read(len(plan.old_region)) != plan.old_region:
-            return WriteResult("blocked", "nagłówek na dysku zmienił się między odczytem "
-                                          "a zapisem - plik nietknięty", None)
+            return WriteResult("blocked", PowodPozycji("nagłówek na dysku zmienił się między "
+                                                       "odczytem a zapisem - plik nietknięty",
+                                                       "header_moved_before_write"), None)
         kotwica = koperta_sha1 = None
         if anchor is not None:
             if (anchor.strict or anchor.file_sha1 is None
                     or scan._mtime_iso(st) != anchor.mtime):
                 kotwica = _sha1_uchwytu(fh)
                 if anchor.file_sha1 is not None and kotwica != anchor.file_sha1:
-                    return WriteResult("blocked", "plik zmienił się od ostatniego skanu (sha1 "
-                                                  "całego pliku inny niż w bazie) - kontrola danych "
-                                                  "po zapisie nie miałaby kotwicy; najpierw skan, "
-                                                  "plik nietknięty", None,
-                                       code=CODE_CHANGED_SINCE_SCAN)
+                    return WriteResult("blocked", PowodPozycji(
+                        "plik zmienił się od ostatniego skanu (sha1 całego pliku inny niż w bazie) "
+                        "- kontrola danych po zapisie nie miałaby kotwicy; najpierw skan, plik "
+                        "nietknięty", "anchor_mismatch"), None, code=CODE_CHANGED_SINCE_SCAN)
                 if anchor.file_sha1 is None:
                     koperta_sha1 = kotwica      # baza kotwicy nie miała - koperta ją niesie
             else:
@@ -2027,9 +2211,10 @@ def _apply_inplace(plan: _InplacePlan, fh, journal,
         try:
             journal.begin(spec, backup_text)
         except Exception as exc:  # noqa: BLE001 - bez dziennika i backupu nie piszemy
-            return WriteResult("failed", f"backup/dziennik operacji NIE powstał, więc zapisu nie "
-                                         f"było - plik nietknięty: {type(exc).__name__}: {exc}",
-                               None)
+            blad = f"{type(exc).__name__}: {exc}"
+            return WriteResult("failed", PowodPozycji(
+                f"backup/dziennik operacji NIE powstał, więc zapisu nie było - plik nietknięty: "
+                f"{blad}", "journal_not_saved", detail=blad), None)
         ruszony = True
         if zakres != (0, 0):
             fh.seek(plan.region_start + zakres[0])
@@ -2039,19 +2224,20 @@ def _apply_inplace(plan: _InplacePlan, fh, journal,
     except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
         if not ruszony:
             return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
-        powod = f"zapis w miejscu przerwany - bajty nagłówka mogły się zmienić: " \
-                f"{type(exc).__name__}: {exc}"
+        blad = f"{type(exc).__name__}: {exc}"
+        powod = PowodPozycji(f"zapis w miejscu przerwany - bajty nagłówka mogły się zmienić: "
+                             f"{blad}", "inplace_cut", detail=blad)
         dopisek = _faza(journal, "unverified", powod)
-        return WriteResult("failed", f"{powod}; {dopisek}" if dopisek else powod,
-                           plan.post_hash, backup_text, in_place=True)
+        return WriteResult("failed", _dopisz(powod, dopisek), plan.post_hash, backup_text,
+                           in_place=True)
     wynik = _verify_inplace(plan, size, probka, backup_text)
     dopisek = _faza(journal, "written" if wynik.status == "applied" else "unverified", wynik.reason)
     if dopisek and wynik.status == "applied":
-        return WriteResult("failed", f"plik ZMIENIONY w miejscu i zweryfikowany, ale {dopisek} - "
-                                     f"operacja NIEUKOŃCZONA", plan.post_hash, backup_text,
-                           in_place=True)
+        return WriteResult("failed", PowodPozycji(
+            f"plik ZMIENIONY w miejscu i zweryfikowany, ale {dopisek} - operacja NIEUKOŃCZONA",
+            "inplace_unfinished", inner=dopisek), plan.post_hash, backup_text, in_place=True)
     if dopisek:
-        wynik = dataclasses.replace(wynik, reason=f"{wynik.reason}; {dopisek}")
+        wynik = dataclasses.replace(wynik, reason=_dopisz(wynik.reason, dopisek))
     return wynik
 
 
@@ -2068,31 +2254,49 @@ def _verify_inplace(plan: _InplacePlan, size: int, probka, backup_text) -> Write
             probka_po = _probe(fh, plan.region_start, len(plan.new_region), size_po)
         post = _post_hash(plan.path)
     except Exception as exc:  # noqa: BLE001
-        return WriteResult("failed", f"plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta "
-                                     f"padł - {type(exc).__name__}: {exc}",
-                           plan.post_hash, backup_text, in_place=True)
-    rozjazdy = [nazwa for nazwa, zgodne in (
-        ("rozmiar pliku", size_po == size), ("bajty nagłówka", region_po == plan.new_region),
-        ("próbka danych", probka_po == probka), ("header_hash", post == plan.post_hash))
+        blad = f"{type(exc).__name__}: {exc}"
+        return WriteResult("failed", PowodPozycji(
+            f"plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta padł - {blad}",
+            "inplace_verify_failed", detail=blad), plan.post_hash, backup_text, in_place=True)
+    rozjazdy = [cecha for cecha, zgodne in (
+        (_CECHA_ROZMIAR_PLIKU, size_po == size), (_CECHA_BAJTY_NAGLOWKA, region_po == plan.new_region),
+        (_CECHA_PROBKA, probka_po == probka), (_CECHA_HEADER_HASH, post == plan.post_hash))
         if not zgodne]
     if rozjazdy:
-        return WriteResult("failed", f"plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta "
-                                     f"nie zgadza się: {', '.join(rozjazdy)}",
-                           plan.post_hash, backup_text, in_place=True)
+        return WriteResult("failed", PowodPozycji(
+            f"plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta nie zgadza się: "
+            f"{', '.join(rozjazdy)}", "inplace_verify_mismatch", features=rozjazdy),
+            plan.post_hash, backup_text, in_place=True)
     return WriteResult("applied", None, post, backup_text, in_place=True)
 
 
-def inplace_route(filetype, keyword: str, value: str, value_type, comment) -> str | None:
-    """PRZEWIDYWANIE drogi zapisu `set` jednej karty tekstowej z faktów bazy, bez otwierania pliku
+def inplace_route(filetype, keyword: str, value: str, value_type, comment, *,
+                  op: str = "set") -> str | None:
+    """PRZEWIDYWANIE drogi zapisu jednej karty tekstowej z faktów bazy, bez otwierania pliku
     (podgląd planu): `None` = w miejscu, tekst = powód drogi dotychczasowej. Reguła mieszczenia się
     karty FITS jest TA SAMA, której używa pisarz (`_fits_card_image`), więc podgląd i zapis nie mogą
     się rozjechać co do rekordu 80 znaków; resztę (liczba kart, CONTINUE, sumy kontrolne)
-    rozstrzyga pisarz na pliku. XISF → `None`: brak rezerwy odmawia tak samo w obu drogach."""
+    rozstrzyga pisarz na pliku. XISF → `None`: brak rezerwy odmawia tak samo w obu drogach.
+
+    `op="add"` (AR-118): FITS dopisuje kartę w miejscu wyłącznie w zapasie nagłówka (pusta karta na
+    końcu albo wolny rekord za `END` w ostatnim bloku 2880 B), a tego baza nie zna - mieszcząca się
+    karta dostaje więc powód „zależy od pliku”, nie `None`, który obiecałby zapis w miejscu."""
     if filetype == "xisf":
         return None
     if value_type != "str":
-        return f"zastana wartość {keyword} nie jest tekstem"
-    return _fits_card_image(keyword, value, comment or "")[1]
+        if op == "add":
+            return PowodPozycji(f"operacja {op}/{value_type} na {keyword} - układ karty zostaje "
+                                f"przy astropy", "fb_op_kind", op=op, value_type=value_type,
+                                keyword=keyword)
+        return PowodPozycji(f"zastana wartość {keyword} nie jest tekstem", "fb_value_not_text",
+                            keyword=keyword)
+    powod = _fits_card_image(keyword, value, comment or "")[1]
+    if powod is None and op == "add":
+        return PowodPozycji(
+            f"zależy od pliku: dopisanie karty {keyword} do FITS idzie w miejscu, gdy nagłówek ma "
+            f"zapas (pusta karta na końcu albo wolny rekord za END w ostatnim bloku 2880 B), "
+            f"inaczej przepisuje cały plik", "route_depends", keyword=keyword)
+    return powod
 
 
 def comment_loss_route(filetype, keyword: str, value: str, comment) -> str | None:
@@ -2132,9 +2336,10 @@ def _pod_blokada(path: str, dzialanie) -> WriteResult | Fallback:
         if wynik is None:
             return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
         if isinstance(wynik, WriteResult):
-            dopisek = f"zamknięcie uchwytu padło - {type(exc).__name__}: {exc}"
-            return dataclasses.replace(
-                wynik, reason=f"{wynik.reason}; {dopisek}" if wynik.reason else dopisek)
+            blad = f"{type(exc).__name__}: {exc}"
+            dopisek = PowodPozycji(f"zamknięcie uchwytu padło - {blad}", "handle_close_failed",
+                                   detail=blad)
+            return dataclasses.replace(wynik, reason=_dopisz(wynik.reason, dopisek))
     return wynik
 
 
@@ -2147,7 +2352,7 @@ def write_changes_inplace(path, ops: list[WriteOp], expected_hash: str | None, *
     `None` = bez dziennika (testy pisarza). `anchor` = kotwica bazy (`FileAnchor`, zob.
     `_apply_inplace`). RAW → odmowa (#2)."""
     if _is_raw(path):
-        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+        return WriteResult("blocked", _RAW_READ_ONLY, None)
     path = os.fspath(path)
     journal = journal or _NullJournal()
 
@@ -2170,22 +2375,25 @@ def restore_inplace(path, backup: RegionBackup, *, op_new_region: bytes, op_file
     hashu); region = stan sprzed commitu → 'blocked' „już cofnięte"; inny region → 'blocked'.
     `anchor` = kotwica bazy jak w `write_changes_inplace`."""
     if _is_raw(path):
-        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+        return WriteResult("blocked", _RAW_READ_ONLY, None)
     path = os.fspath(path)
     journal = journal or _NullJournal()
 
     def _dzialanie(fh):
         st = os.fstat(fh.fileno())
         if st.st_size != op_file_size or (op_file_ino and st.st_ino and st.st_ino != op_file_ino):
-            return Fallback("plik podmieniony od commitu (rozmiar/st_ino) - cofnięcie atomowe")
+            return Fallback(PowodPozycji("plik podmieniony od commitu (rozmiar/st_ino) - cofnięcie "
+                                         "atomowe", "fb_replaced_since_commit"))
         fh.seek(backup.offset)
         biezacy = fh.read(len(backup.region))
         if biezacy == backup.region:
-            return WriteResult("blocked", "już cofnięte - region nagłówka jest stanem sprzed commitu",
+            return WriteResult("blocked", PowodPozycji("już cofnięte - region nagłówka jest stanem "
+                                                       "sprzed commitu", "undo_already_region"),
                                None)
         if biezacy != op_new_region:
-            return WriteResult("blocked", "plik zmienił się od commitu - region nagłówka nie jest "
-                                          "tym, który commit zapisał", None)
+            return WriteResult("blocked", PowodPozycji("plik zmienił się od commitu - region "
+                                                       "nagłówka nie jest tym, który commit zapisał",
+                                                       "undo_region_changed"), None)
         plan = _InplacePlan(backup.fmt, path, backup.offset, biezacy, backup.region, op_post_hash,
                             backup.pre_hash)
         return _apply_inplace(plan, fh, journal, anchor)
@@ -2215,7 +2423,7 @@ def recover_region(path, spec: OpSpec) -> WriteResult:
     nierozstrzygalne, instrukcja ręczna). Zapis dotyka wyłącznie zakresu operacji, więc przerwany
     odzysk zostawia znów stan pośredni i da się go ponowić."""
     if _is_raw(path):
-        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+        return WriteResult("blocked", _RAW_READ_ONLY, None)
     path = os.fspath(path)
     return _pod_blokada(path, lambda fh: _odzysk_pod_blokada(fh, path, spec))
 
@@ -2229,14 +2437,54 @@ _GEST_PRZYWROC = "Przywróć nagłówek sprzed zapisu"
 _GEST_ZWOLNIJ = "Zwolnij plik do skanu…"
 
 
-def _droga(gest, wywolanie) -> str:
-    """Droga dalej w powodzie: „gest okna” (`wywołanie rdzenia`)."""
-    return f"„{gest}” (`{wywolanie}`)"
+def _droga_dokoncz(op_id) -> PowodPozycji:
+    """Droga dalej w powodzie: „Dokończ zapis” (`finish_inplace(N)`) - fragment z kodem
+    (`way_finish`, AR-148): okno mówi nazwą gestu w języku UI."""
+    return PowodPozycji(f"„{_GEST_DOKONCZ}” (`finish_inplace({op_id})`)", "way_finish", op_id=op_id)
 
 
-_RECZNA = ("nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację: "
-           f"w Zbiorach zaznacz klatkę i z menu prawego kliku wybierz „{_GEST_ZWOLNIJ}” "
-           "(`writeback.release_isolation`)")
+def _droga_przywroc(op_id) -> PowodPozycji:
+    """Droga dalej w powodzie: „Przywróć nagłówek sprzed zapisu” (`recover_torn(N)`) - fragment
+    z kodem (`way_restore`)."""
+    return PowodPozycji(f"„{_GEST_PRZYWROC}” (`recover_torn({op_id})`)", "way_restore",
+                        op_id=op_id)
+
+
+# Recepta ręczna (fragment z kodem `way_manual`): plik, którego odzysk nie rozstrzygnie.
+_RECZNA = PowodPozycji(
+    f"nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację: w Zbiorach "
+    f"zaznacz klatkę i z menu prawego kliku wybierz „{_GEST_ZWOLNIJ}” "
+    f"(`writeback.release_isolation`)", "way_manual")
+# Kody niosące drogę wyjścia z izolacji (AR-148): wynik, który JUŻ mówi, jak wyjść, nie dostaje
+# drugiej recepty zwolnienia ręką (`_zapisz_lokacje`, `_niesie_droge`). Zbiór JAWNY = kody, których
+# zdanie spełnia DOKŁADNIE predykat dawnego parsera prozy: niesie `recover_torn` albo całą receptę
+# ręczną `_RECZNA`. NIE cała rodzina `way_*` (`way_finish`/`way_retry*` tego nie niosą, a `isolated_*`
+# niosą spoza rodziny) i NIE `finish_failed_isolated_release` (sam wynik tej recepty - niesie
+# `release_isolation(…)`, ale nie całe `_RECZNA`). Równość z katalogiem pilnuje test (`test_powody_pisarza`).
+_KODY_DROGI = frozenset({"way_restore", "way_manual", "isolated_recover", "isolated_finish"})
+_INNY_PLIK = PowodPozycji(f"inny plik niż w chwili zapisu (rozmiar/st_ino); {_RECZNA}",
+                          "inplace_other_file", way=_RECZNA)
+
+
+def _niesie_droge(powod) -> bool:
+    """Czy powód (z parametrami i uwagami, rekurencyjnie) niesie drogę wyjścia z izolacji: odzysk
+    (`recover_torn`) albo receptę ręczną - po KODZIE (`_KODY_DROGI`), nie po prozie (AR-148;
+    dawniej `"recover_torn" in reason or _RECZNA in reason`).
+
+    Granice wobec dawnego parsera: proza NIE jest przeszukiwana - ani goły tekst w parametrze
+    (`detail` z tekstem wyjątku), ani powód odczytany z bazy jako proza (wiersz sprzed 0042,
+    `reason_args` spoza kodeka). Równoważność z dawnym parserem w wyniku dokończenia
+    (`_zapisz_lokacje`) trzyma też człon `status == "failed"` przed tym wywołaniem: wyjątek
+    dokończenia wraca jako 'failed', więc jego tekst parsera nie dotyka."""
+    if not isinstance(powod, PowodPozycji):
+        return False
+    if powod.code in _KODY_DROGI:
+        return True
+    for _, wartosc in powod.params:
+        wartosci = wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)
+        if any(_niesie_droge(w) for w in wartosci):
+            return True
+    return False
 
 
 def _odzysk_pod_blokada(fh, path: str, spec: OpSpec) -> WriteResult:
@@ -2245,8 +2493,7 @@ def _odzysk_pod_blokada(fh, path: str, spec: OpSpec) -> WriteResult:
     st = os.fstat(fh.fileno())
     if st.st_size != spec.file_size or (spec.file_ino and st.st_ino
                                         and st.st_ino != spec.file_ino):
-        return WriteResult("blocked", f"inny plik niż w chwili zapisu (rozmiar/st_ino); {_RECZNA}",
-                           None)
+        return WriteResult("blocked", _INNY_PLIK, None)
     fh.seek(spec.region_offset)
     biezacy = fh.read(len(spec.old_region))
     if not _stan_posredni(biezacy, spec):
@@ -2256,10 +2503,11 @@ def _odzysk_pod_blokada(fh, path: str, spec: OpSpec) -> WriteResult:
         except Exception:  # noqa: BLE001
             czytelny = False
         if czytelny:
-            return WriteResult("blocked", "to nie jest rozdarcie tej operacji - nagłówek jest "
-                                          "czytelny, ale to nie jest żaden stan pośredni "
-                                          "zapisu (obca zmiana); odzysk odmawia", None)
-        return WriteResult("blocked", f"to nie jest rozdarcie tej operacji; {_RECZNA}", None)
+            return WriteResult("blocked", PowodPozycji(
+                "to nie jest rozdarcie tej operacji - nagłówek jest czytelny, ale to nie jest żaden "
+                "stan pośredni zapisu (obca zmiana); odzysk odmawia", "not_torn_readable"), None)
+        return WriteResult("blocked", PowodPozycji(f"to nie jest rozdarcie tej operacji; {_RECZNA}",
+                                                   "not_torn_manual", way=_RECZNA), None)
     plan = _InplacePlan(spec.fmt, path, spec.region_offset, biezacy, spec.old_region, "",
                         spec.pre_hash)
     return _apply_inplace(plan, fh, _NullJournal())
@@ -2269,13 +2517,20 @@ def _odzysk_pod_blokada(fh, path: str, spec: OpSpec) -> WriteResult:
 
 
 def pending_for_run(con, run_id):
-    """Wpisy stagingu przebiegu (do commitu i do szuflady GUI). Kolejność `id` = kolejność stagingu."""
+    """Wpisy stagingu przebiegu (do commitu i do szuflady GUI). Kolejność `id` = kolejność stagingu.
+    Powód wpisu czyta `_powod_wiersza` (trójka z kodem, 0042)."""
     return con.execute(
         "SELECT id, location_id, keyword, idx, op, old_value, new_value, new_type, new_comment, "
-        "       expected_header_hash, status, reason, withheld_id "
+        "       expected_header_hash, status, reason, reason_code, reason_args, withheld_id "
         "FROM pending_changes WHERE run_id = ? ORDER BY id",
         (run_id,),
     ).fetchall()
+
+
+def _powod_wiersza(r):
+    """Powód wpisu stagingu karty z trójki bazy (AR-148): `PowodPozycji`, gdy wiersz niesie kod,
+    proza wiersza sprzed 0042 albo `None`; odczyt totalny (`item_reasons.z_bazy`)."""
+    return z_bazy(r["reason"], r["reason_code"], r["reason_args"])
 
 
 def backups_for_commit(con, commit_id):
@@ -2467,29 +2722,31 @@ def _kontrola_danych(rec, expect_sha1_data, kontrola) -> str | None:
     utrwalenia pozwala liczyć kontrolę od nowa przy każdym ponowieniu - w tym samym pełnym odczycie,
     który zwykła ścieżka i tak robi (bez osobnego odczytu, AR-24)."""
     if expect_sha1_data is not None and rec.sha1_data != expect_sha1_data:
-        return (f"plik ZMIENIONY, ale sha1_data po zapisie ({rec.sha1_data}) różni się od "
-                f"tożsamości klatki - baza NIE zsynchronizowana")
+        return PowodPozycji(f"plik ZMIENIONY, ale sha1_data po zapisie ({rec.sha1_data}) różni się "
+                            f"od tożsamości klatki - baza NIE zsynchronizowana",
+                            "data_identity_changed", sha1=rec.sha1_data)
     if kontrola is None:
         return None
     if rec.header_hash != kontrola.header_hash:
-        return ("plik ZMIENIONY, ale nagłówek na dysku nie jest tym, który operacja zapisała "
-                "(header_hash) - baza NIE zsynchronizowana")
+        return PowodPozycji("plik ZMIENIONY, ale nagłówek na dysku nie jest tym, który operacja "
+                            "zapisała (header_hash) - baza NIE zsynchronizowana",
+                            "check_header_other")
     if kontrola.anchor_sha1 is None:
-        return ("brak kotwicy sha1 pliku sprzed zapisu - kontrola bajtów poza nagłówkiem "
-                "niemożliwa, baza NIE zsynchronizowana")
+        return PowodPozycji("brak kotwicy sha1 pliku sprzed zapisu - kontrola bajtów poza "
+                            "nagłówkiem niemożliwa, baza NIE zsynchronizowana", "check_no_anchor")
     if rec.file_sha1_substituted is None:
         raise ValueError("rekord bez sha1 z podstawionym starym regionem - kontrola danych wymaga "
                          "skanu przez _skan_kontrolny(path, kontrola)")
     if rec.file_sha1_substituted != kontrola.anchor_sha1:
-        return ("plik ZMIENIONY, a bajty POZA regionem nagłówka różnią się od pliku sprzed "
-                "zapisu (sha1 pliku z podstawionym starym regionem != kotwica operacji) - "
-                "baza NIE zsynchronizowana")
+        return PowodPozycji("plik ZMIENIONY, a bajty POZA regionem nagłówka różnią się od pliku "
+                            "sprzed zapisu (sha1 pliku z podstawionym starym regionem != kotwica "
+                            "operacji) - baza NIE zsynchronizowana", "check_outside_changed")
     return None
 
 
 def _powod_izolacji(op) -> str:
     """Powód odmowy mutacji pliku lokacji z operacją izolującą - z drogą naprawy właściwą fazie
-    (drogi jak `_droga`: „gest okna” (`wywołanie rdzenia`)). Kod drogi dla okna (AR-141)."""
+    (drogi jak `_droga_*`: „gest okna” (`wywołanie rdzenia`)). Kod drogi dla okna (AR-141)."""
     if op["phase"] in repo.INPLACE_OPEN_PHASES:
         return PowodPozycji(
             f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
@@ -2508,9 +2765,11 @@ def _powod_konfliktu(op) -> str:
     """Powód odmowy podmiany drogą atomową (`repo.InplaceConflict`, straż podmiany)."""
     if op["phase"] in repo.INPLACE_ISOLATING_PHASES:
         return _powod_izolacji(op)
-    return (f"lokacja dostała zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
-            f"{op['phase']}) po odczycie pliku do podmiany - plik tymczasowy powstał ze stanu "
-            f"sprzed niego; podmiany nie było, plik nietknięty - ponów po odświeżeniu stagingu")
+    return PowodPozycji(
+        f"lokacja dostała zapis w miejscu (operacja {op['id']}, {op['kind']}, faza {op['phase']}) "
+        f"po odczycie pliku do podmiany - plik tymczasowy powstał ze stanu sprzed niego; podmiany "
+        f"nie było, plik nietknięty - ponów po odświeżeniu stagingu", "inplace_after_read",
+        op_id=op["id"], op_kind=op["kind"], phase=op["phase"])
 
 
 def _kotwica_operacji(con, op, loc) -> str | None:
@@ -2562,10 +2821,10 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
     razem - porażka zamknięcia cofa też wjazd, a ponowienie liczy wszystko od nowa."""
     op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
     if op is None:
-        return WriteResult("failed", f"brak operacji {op_id}", None)
+        return WriteResult("failed", _brak_operacji(op_id), None)
     loc = _location(con, int(op["location_id"]))
     if loc is None:
-        return WriteResult("failed", "brak location w bazie", None)
+        return WriteResult("failed", _BRAK_LOCATION, None)
     spec = _spec_z_operacji(op)
     kontrola = _KontrolaDanych(spec.region_offset, spec.old_region,
                                _kotwica_operacji(con, op, loc), spec.post_hash)
@@ -2573,25 +2832,29 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
     def _dzialanie(fh):
         faza = repo.inplace_op_phase(con, op_id)
         if faza != "written":
-            return WriteResult("blocked", f"operacja {op_id} jest w fazie {faza}, nie czeka na "
-                                          f"dokończenie", None)
+            return WriteResult("blocked", PowodPozycji(
+                f"operacja {op_id} jest w fazie {faza}, nie czeka na dokończenie",
+                "finish_not_waiting", op_id=op_id, phase=faza), None)
         if repo.newer_inplace_op(con, location_id=loc["id"], op_id=op_id):
-            return WriteResult("blocked", f"lokacja ma operację nowszą niż {op_id} - dokończenie "
-                                          f"odmawia", None)
+            return WriteResult("blocked", PowodPozycji(
+                f"lokacja ma operację nowszą niż {op_id} - dokończenie odmawia", "finish_newer_op",
+                op_id=op_id), None)
         st = os.fstat(fh.fileno())
         if st.st_size != spec.file_size or (spec.file_ino and st.st_ino
                                             and st.st_ino != spec.file_ino):
-            return WriteResult("blocked", f"inny plik niż w chwili zapisu (rozmiar/st_ino); "
-                                          f"{_RECZNA}", None)
+            return WriteResult("blocked", _INNY_PLIK, None)
         fh.seek(spec.region_offset)
         biezacy = fh.read(len(spec.new_region))
         if biezacy != spec.new_region:
-            droga = (f"przerwany powrót tej operacji - ponów: "
-                     f"{_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}"
+            droga = (PowodPozycji(f"przerwany powrót tej operacji - ponów: "
+                                  f"{_droga_przywroc(op_id)}", "way_resume_return",
+                                  way=_droga_przywroc(op_id))
                      if _stan_posredni(biezacy, spec) else _RECZNA)
-            return WriteResult("blocked", f"region nagłówka na dysku nie jest wynikiem operacji "
-                                          f"{op_id} - plik zmienił się od zapisu; {droga}", None)
-        ponow = f"ponów: {_droga(_GEST_DOKONCZ, f'finish_inplace({op_id})')}"
+            return WriteResult("blocked", PowodPozycji(
+                f"region nagłówka na dysku nie jest wynikiem operacji {op_id} - plik zmienił się "
+                f"od zapisu; {droga}", "finish_region_changed", op_id=op_id, way=droga), None)
+        ponow = PowodPozycji(f"ponów: {_droga_dokoncz(op_id)}", "way_retry",
+                             way=_droga_dokoncz(op_id))
         cofany = op["commit_id"] if op["kind"] == "undo" else None
         zamkniete: list[bool] = []         # B2: TO cofnięcie zamknęło otwarte wstrzymanie commitu
         zamkniecie: list = []              # (id wstrzymania | None, powód) z transakcji re-syncu
@@ -2621,24 +2884,31 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
                             expect_sha1_data=loc["sha1_data"], kontrola=kontrola,
                             przed_wciagnieciem=_przed, w_transakcji=_zamknij)
         except Exception as exc:  # noqa: BLE001 - wsad idzie dalej, operacja zostaje `written`
+            blad = f"{type(exc).__name__}: {exc}"
             if padlo_zamkniecie:
-                return WriteResult("failed", f"faza 'synced' NIE zapisana ({type(exc).__name__}: "
-                                             f"{exc}), a z nią re-sync bazy - jedna transakcja "
-                                             f"cofnięta w całości; {ponow}", None)
-            return WriteResult("failed", f"plik ZMIENIONY, ale re-sync padł - "
-                                         f"{type(exc).__name__}: {exc}; {ponow}", None)
+                return WriteResult("failed", PowodPozycji(
+                    f"faza 'synced' NIE zapisana ({blad}), a z nią re-sync bazy - jedna transakcja "
+                    f"cofnięta w całości; {ponow}", "synced_not_saved", detail=blad, way=ponow),
+                    None)
+            return WriteResult("failed", PowodPozycji(
+                f"plik ZMIENIONY, ale re-sync padł - {blad}; {ponow}", "resync_failed_retry",
+                detail=blad, way=ponow), None)
         if wynik.niezgodne is not None:
-            return WriteResult("failed", f"{wynik.niezgodne}; kontrola danych NIE przeszła - droga "
-                                         f"powrotu: {_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}"
-                                         f" przywraca stary nagłówek w miejscu i zwalnia plik do "
-                                         f"pełnego skanu", None)
+            return WriteResult("failed", PowodPozycji(
+                f"{wynik.niezgodne}; kontrola danych NIE przeszła - droga powrotu: "
+                f"{_droga_przywroc(op_id)} przywraca stary nagłówek w miejscu i zwalnia plik do "
+                f"pełnego skanu", "check_failed_way_back", inner=wynik.niezgodne,
+                way=_droga_przywroc(op_id)), None)
         wstrzymanie, powod = zamkniecie[0]
         if wstrzymanie is not None:            # AR-82: plik zgodny, zeznanie przy innej kopii
             return WriteResult("applied", powod, spec.post_hash, code=CODE_ZEZNANIE_WSTRZYMANE)
-        # Z8: powód wpisów niesie prawdę o nagrobku, który został mimo karty `OBJECT`.
-        uwaga = con.execute("SELECT reason FROM pending_changes WHERE inplace_op_id = ? "
-                            "AND reason IS NOT NULL LIMIT 1", (op_id,)).fetchone()
-        return WriteResult("applied", None if uwaga is None else uwaga[0], spec.post_hash)
+        # Z8: powód wpisów niesie prawdę o nagrobku, który został mimo karty `OBJECT` - trójka
+        # z kodem (0042, AR-148), więc okno mówi ją w języku UI.
+        uwaga = con.execute("SELECT reason, reason_code, reason_args FROM pending_changes "
+                            "WHERE inplace_op_id = ? AND reason IS NOT NULL LIMIT 1",
+                            (op_id,)).fetchone()
+        return WriteResult("applied", None if uwaga is None else _powod_wiersza(uwaga),
+                           spec.post_hash)
     return _pod_blokada(loc["path"], _dzialanie)
 
 
@@ -2652,10 +2922,10 @@ def finish_inplace(con, op_id, *, now) -> FileResult:
     domknięta, plik zgodny, a zeznanie klatki nie przyjęło zapisu operacji `commit`."""
     op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
     if op is None:
-        return FileResult(0, "", "failed", f"brak operacji {op_id}")
+        return FileResult(0, "", "failed", _brak_operacji(op_id))
     loc = _location(con, int(op["location_id"]))
     if loc is None:
-        return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
+        return FileResult(int(op["location_id"]), "", "failed", _BRAK_LOCATION)
     res = _dokoncz(con, op_id, now=now)
     status = ("withheld" if res.code == CODE_ZEZNANIE_WSTRZYMANE and op["kind"] == "commit"
               else res.status)
@@ -2683,9 +2953,11 @@ def _rekoncyliuj_backupy(con, zalegle, loc, *, now) -> str | None:
             if powod is not None:
                 return powod
     except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
-        return (f"backup commitu {zalegle[0]['commit_id']} czeka na potwierdzenie podmiany, a "
-                f"rekoncyliacja z dyskiem padła ({type(exc).__name__}: {exc}) - lokacja zablokowana "
-                f"do ponowienia")
+        blad = f"{type(exc).__name__}: {exc}"
+        return PowodPozycji(
+            f"backup commitu {zalegle[0]['commit_id']} czeka na potwierdzenie podmiany, a "
+            f"rekoncyliacja z dyskiem padła ({blad}) - lokacja zablokowana do ponowienia",
+            "backup_reconcile_failed", commit_id=zalegle[0]["commit_id"], detail=blad)
     return None
 
 
@@ -2723,8 +2995,9 @@ def _rekoncyliuj_backup(con, b, loc, *, now) -> str | None:
 def _po_odmowie(con, b, loc) -> str | None:
     """Po `repo.BackupAlreadySettled`: backup nadal niepotwierdzony to błąd, nie sukces."""
     if any(z["id"] == b["id"] for z in repo.pending_header_backups(con, loc["id"])):
-        return (f"backup commitu {b['commit_id']} nadal niepotwierdzony po odmowie "
-                f"rozstrzygnięcia - lokacja zablokowana do ponowienia")
+        return PowodPozycji(f"backup commitu {b['commit_id']} nadal niepotwierdzony po odmowie "
+                            f"rozstrzygnięcia - lokacja zablokowana do ponowienia",
+                            "backup_still_pending", commit_id=b["commit_id"])
     return None
 
 
@@ -2746,8 +3019,10 @@ def _potwierdz_z_dysku(con, b, loc, *, now, intent_outcome=None) -> str | None:
     wynik = _resync(con, loc["path"], loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
                     przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz)
     if wynik.niezgodne is not None:
-        return (f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na dysku "
-                f"leży wersja tego commitu, ale {wynik.niezgodne}")
+        return PowodPozycji(f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na "
+                            f"dysku leży wersja tego commitu, ale {wynik.niezgodne}",
+                            "backup_confirm_blocked", commit_id=b["commit_id"],
+                            inner=wynik.niezgodne)
     return None
 
 
@@ -2801,15 +3076,16 @@ def _rekoncyliuj_zamiar(con, b, zamiar, loc, *, now) -> str | None:
         # ścieżką to zmiana poza programem, którą odbije kotwica stagingu, jak przed zamiarem.
         zostaja = [s for s in sciezki if s != p and os.path.exists(s)]
         slad = ([p] if os.path.exists(p) else []) + zostaja
-        powod = None if not zostaja else (
+        powod = None if not zostaja else PowodPozycji(
             f"przerwany commit {cid}: stanu plików nie da się dowieść pełnym sha1 - zostają do "
             f"oka: {', '.join(zostaja)}; zmiana NIE potwierdzona, cofnięcie tego commitu nic nie "
-            f"ruszy")
+            f"ruszy", "commit_cut_unproven", commit_id=cid, paths=zostaja)
         return _werdykt("kept", None, powod, slad)
 
-    powrot = (f"przerwany commit {cid}: inny program zmienił plik w oknie podmiany - jego wersja "
-              f"wróciła pod ścieżkę, zmiana NIE zapisana, cofnięcie tego commitu nic nie ruszy; "
-              f"odśwież staging i zatwierdź ponownie")
+    powrot = PowodPozycji(
+        f"przerwany commit {cid}: inny program zmienił plik w oknie podmiany - jego wersja wróciła "
+        f"pod ścieżkę, zmiana NIE zapisana, cofnięcie tego commitu nic nie ruszy; odśwież staging "
+        f"i zatwierdź ponownie", "commit_cut_other_returned", commit_id=cid)
     try:
         if zamiar["phase"] in ("returning", "returned"):
             return _dokoncz_powrot(con, b, loc, p, k, z, n, now=now, werdykt=_werdykt,
@@ -2848,8 +3124,9 @@ def _rekoncyliuj_zamiar(con, b, zamiar, loc, *, now) -> str | None:
 
 
 def _nie_usunieta(commit_id, sciezka) -> str:
-    return (f"przerwany commit {commit_id}: rozpoznanej kopii {sciezka} nie dało się usunąć - "
-            f"lokacja zablokowana, ponowienie zapisu albo cofnięcia dokończy rekoncyliację")
+    return PowodPozycji(f"przerwany commit {commit_id}: rozpoznanej kopii {sciezka} nie dało się "
+                        f"usunąć - lokacja zablokowana, ponowienie zapisu albo cofnięcia dokończy "
+                        f"rekoncyliację", "commit_cut_copy_left", commit_id=commit_id, path=sciezka)
 
 
 def _powrot_b(con, b, loc, p, k, z, n, *, now, werdykt, zostaw, powrot) -> str | None:
@@ -2860,12 +3137,17 @@ def _powrot_b(con, b, loc, p, k, z, n, *, now, werdykt, zostaw, powrot) -> str |
     try:
         zaszedl = _czy_zaszla(p, k, z, blad)
     except _PodmianaRozdarta as exc:
-        return f"przerwany commit {b['commit_id']}: powrót wersji innego pisarza przerwany - {exc.reason}"
+        return PowodPozycji(f"przerwany commit {b['commit_id']}: powrót wersji innego pisarza "
+                            f"przerwany - {exc.reason}", "commit_cut_return_cut",
+                            commit_id=b["commit_id"], inner=exc.reason)
     if not zaszedl:
-        return (f"przerwany commit {b['commit_id']}: powrót wersji innego pisarza pod ścieżkę nie "
-                f"zaszedł ({blad}) - pod {p} nasza wersja, wersja innego pisarza pod {k}, obie "
-                f"zostają; ponowienie zapisu albo cofnięcia tej lokacji dokończy powrót, a gdy "
-                f"plik pozostaje zajęty - przenieś {k} na {p} ręcznie")
+        blad_powrotu = str(blad)
+        return PowodPozycji(
+            f"przerwany commit {b['commit_id']}: powrót wersji innego pisarza pod ścieżkę nie "
+            f"zaszedł ({blad_powrotu}) - pod {p} nasza wersja, wersja innego pisarza pod {k}, obie "
+            f"zostają; ponowienie zapisu albo cofnięcia tej lokacji dokończy powrót, a gdy plik "
+            f"pozostaje zajęty - przenieś {k} na {p} ręcznie", "commit_cut_return_failed",
+            commit_id=b["commit_id"], detail=blad_powrotu, path=p, copy=k)
     return _dokoncz_powrot(con, b, loc, p, k, z, n, now=now, werdykt=werdykt, zostaw=zostaw,
                            powrot=powrot)
 
@@ -2910,8 +3192,9 @@ def _potwierdz_pod_blokada(con, b, loc, n, *, now, kopia_a=None) -> str | None:
     jedyną kopię wersji sprzed zapisu, a ponowienie trafi w gałąź „K = A, P inne” (`kept`)."""
     with _exclusive(loc["path"]) as fh:
         if (_sha1_uchwytu(fh), os.fstat(fh.fileno()).st_size) != n:
-            return (f"backup commitu {b['commit_id']}: plik zmienił się w trakcie rekoncyliacji - "
-                    f"lokacja zablokowana do ponowienia")
+            return PowodPozycji(f"backup commitu {b['commit_id']}: plik zmienił się w trakcie "
+                                f"rekoncyliacji - lokacja zablokowana do ponowienia",
+                                "backup_changed_during", commit_id=b["commit_id"])
         powod = _potwierdz_z_dysku(con, b, loc, now=now, intent_outcome="replaced")
     if powod is None and kopia_a is not None and _usun_kopie(kopia_a) is not None:
         return None                      # commit potwierdzony; nieusunięta kopia A to tylko resztka
@@ -2926,8 +3209,9 @@ def _odswiez_po_powrocie(con, loc, *, now) -> str | None:
         scan.ingest_record(con, scan.scan_file(loc["path"]), volume=loc["volume"], now=now,
                            summary=scan.ScanSummary(), actor="user:local")
     except Exception as exc:  # noqa: BLE001 - znacznik odczytu zostaje
-        return (f"baza nie odczytała jeszcze wróconej wersji ({type(exc).__name__}: {exc}) - "
-                f"najbliższy skan przeczyta plik od nowa")
+        blad = f"{type(exc).__name__}: {exc}"
+        return PowodPozycji(f"baza nie odczytała jeszcze wróconej wersji ({blad}) - najbliższy skan "
+                            f"przeczyta plik od nowa", "returned_not_read", detail=blad)
     return None
 
 
@@ -3081,15 +3365,15 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
 
     loc = _location(con, location_id)
     if loc is None:
-        _mark(rows, "failed", "brak location w bazie")
-        return _ZapisLokacji(FileResult(location_id, "", "failed", "brak location w bazie"))
+        _mark(rows, "failed", _BRAK_LOCATION)
+        return _ZapisLokacji(FileResult(location_id, "", "failed", _BRAK_LOCATION))
     path = loc["path"]
     if not loc["present"]:
-        reason = "kopia zniknęła (present=0)"
+        reason = _KOPIA_ZNIKNELA
         _mark(rows, "skipped", reason)
         return _ZapisLokacji(FileResult(location_id, path, "skipped", reason))
     if loc["compressed"]:
-        reason = "skompresowany master - edycja poza krokiem 4"
+        reason = PowodPozycji("skompresowany master - edycja poza krokiem 4", "compressed_master")
         _mark(rows, "skipped", reason)
         return _ZapisLokacji(FileResult(location_id, path, "skipped", reason))
     # BRAMKA BACKUPU NIEPOTWIERDZONEGO (AR-40): przerwany commit drogi atomowej tej lokacji
@@ -3107,7 +3391,8 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
                       if r["id"] in teraz and teraz[r["id"]]["withheld_id"] is not None]
         rows = [r for r in rows if r["id"] in teraz and teraz[r["id"]]["status"] == "pending"]
         if not rows and wstrzymane:     # dysk potwierdził zapis, zeznanie go nie przyjęło (AR-82)
-            return _ZapisLokacji(FileResult(location_id, path, "withheld", wstrzymane[0]["reason"],
+            return _ZapisLokacji(FileResult(location_id, path, "withheld",
+                                            _powod_wiersza(wstrzymane[0]),
                                             code=CODE_ZEZNANIE_WSTRZYMANE), dotknieto=True)
         if not rows:                    # przerwany commit TEGO przebiegu potwierdził dysk
             commity = ", ".join(str(z["commit_id"]) for z in zalegle)
@@ -3174,8 +3459,9 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
             anchor=FileAnchor(loc["file_sha1"], loc["mtime"], strict=not fallback))
         if isinstance(res, Fallback):
             if not fallback:
-                res = WriteResult("blocked", f"nie mieści się w miejscu (tryb bez spadku): "
-                                             f"{res.reason}", None)
+                res = WriteResult("blocked", PowodPozycji(
+                    f"nie mieści się w miejscu (tryb bez spadku): {res.reason}", "no_fallback",
+                    detail=res.reason), None)
             else:
                 # Kod spadku i szczegół odmowy w miejscu osobno (AR-141): okno zmiany obiektu
                 # rozpoznaje spadek po kodzie także w powodzie pozycji zapisanym w bazie.
@@ -3212,8 +3498,9 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
             # 'failed' po backupie = wyjątek przy samej podmianie: na zerwanym udziale podmiana
             # mogła zajść mimo błędu. Backup zostaje NIEPOTWIERDZONY (AR-40) - następny commit
             # albo cofnięcie tej lokacji najpierw rozstrzyga go z dyskiem.
-            reason = (f"{res.reason}; podmiana niepotwierdzona, backup do cofnięcia zapisany "
-                      f"w commicie {stan.commit_id}")
+            reason = PowodPozycji(f"{res.reason}; podmiana niepotwierdzona, backup do cofnięcia "
+                                  f"zapisany w commicie {stan.commit_id}", "replace_unconfirmed",
+                                  inner=res.reason, commit_id=stan.commit_id)
         _mark(rows, status, reason)
         return _ZapisLokacji(FileResult(location_id, path, status, reason, code=res.code),
                              dotknieto=bool(backup_pliku) and status == "failed")
@@ -3222,11 +3509,16 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         # Backup JEST (powstał przed zapisem), więc undo cofnie plik, o ile leży na nim to, co
         # zapisaliśmy (`post_hash`); plik rozdarty w miejscu naprawia `recover_torn`. Re-syncu
         # NIE robimy - baza opisuje bajty POTWIERDZONE. Nagrobek ręki też zostaje.
-        naprawa = (f"; lokacja IZOLOWANA od skanu, odzysk: "
-                   f"{_droga(_GEST_PRZYWROC, f'recover_torn({dziennik.op_id})')}"
-                   if res.in_place else "")
-        reason = (f"{res.reason}; backup do cofnięcia zapisany w commicie {stan.commit_id}"
-                  f"{naprawa}")
+        if res.in_place:
+            reason = PowodPozycji(
+                f"{res.reason}; backup do cofnięcia zapisany w commicie {stan.commit_id}; lokacja "
+                f"IZOLOWANA od skanu, odzysk: {_droga_przywroc(dziennik.op_id)}",
+                "backup_saved_in_isolated", inner=res.reason, commit_id=stan.commit_id,
+                way=_droga_przywroc(dziennik.op_id))
+        else:
+            reason = PowodPozycji(f"{res.reason}; backup do cofnięcia zapisany w commicie "
+                                  f"{stan.commit_id}", "backup_saved_in", inner=res.reason,
+                                  commit_id=stan.commit_id)
         _mark(rows, "failed", reason)
         return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
     if res.in_place:
@@ -3237,14 +3529,20 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         koniec = _dokoncz(con, dziennik.op_id, now=now)
         if koniec.status != "applied":
             # Zwolnienie ręką = gest okna albo rdzeń pod blokadą pliku (`release_isolation`),
-            # nie klinga bazy. Powód z receptą `_RECZNA` już ją niesie - drugi raz nie.
-            droga_dalej = ("" if koniec.status == "failed" or "recover_torn" in koniec.reason
-                           or _RECZNA in koniec.reason
-                           else ", zwolnienie ręką: w Zbiorach z menu prawego kliku "
-                                "„Zwolnij plik do skanu…” albo "
-                                f"writeback.release_isolation({dziennik.op_id})")
-            reason = (f"{koniec.reason}; backup do cofnięcia zapisany w commicie "
-                      f"{stan.commit_id}; lokacja IZOLOWANA od skanu{droga_dalej}")
+            # nie klinga bazy. Powód, który już niesie drogę wyjścia (odzysk albo receptę ręczną),
+            # drugiej nie dostaje - rozpoznanie po KODZIE fragmentu `way_*` (AR-148).
+            if koniec.status == "failed" or _niesie_droge(koniec.reason):
+                reason = PowodPozycji(f"{koniec.reason}; backup do cofnięcia zapisany w commicie "
+                                      f"{stan.commit_id}; lokacja IZOLOWANA od skanu",
+                                      "finish_failed_isolated", inner=koniec.reason,
+                                      commit_id=stan.commit_id)
+            else:
+                reason = PowodPozycji(
+                    f"{koniec.reason}; backup do cofnięcia zapisany w commicie {stan.commit_id}; "
+                    f"lokacja IZOLOWANA od skanu, zwolnienie ręką: w Zbiorach z menu prawego kliku "
+                    f"„{_GEST_ZWOLNIJ}” albo writeback.release_isolation({dziennik.op_id})",
+                    "finish_failed_isolated_release", inner=koniec.reason,
+                    commit_id=stan.commit_id, op_id=dziennik.op_id)
             _mark(rows, "failed", reason)
             return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
         if koniec.code == CODE_ZEZNANIE_WSTRZYMANE:
@@ -3303,9 +3601,13 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
         # przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej naprawi ponowny
         # re-skan (T8) - ta droga lokacji nie izoluje.
-        niezgodne = f"plik ZMIENIONY, ale re-sync padł - {type(exc).__name__}: {exc}"
+        blad = f"{type(exc).__name__}: {exc}"
+        niezgodne = PowodPozycji(f"plik ZMIENIONY, ale re-sync padł - {blad}", "resync_failed",
+                                 detail=blad)
     if niezgodne is not None:
-        reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {stan.commit_id}"
+        reason = PowodPozycji(f"{niezgodne}; backup do cofnięcia zapisany w commicie "
+                              f"{stan.commit_id}", "backup_saved_in", inner=niezgodne,
+                              commit_id=stan.commit_id)
         _mark(rows, "failed", reason)
         return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
     if wstrzymanie:
@@ -3564,7 +3866,7 @@ def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_p
     return RenameFileResult("applied", None)
 
 
-_COFNIETO = "cofnięto (undo)"
+_COFNIETO = PowodPozycji("cofnięto (undo)", "rename_undone")
 _ZAMIAR_OTWARTY = PowodPozycji("przerwany rename tego pliku czeka na rozstrzygnięcie (zamiar "
                                "otwarty) - powód w wyniku rekoncyliacji", "rename_open")
 
@@ -3596,10 +3898,22 @@ def reconcile_renames(con, *, now, volume=None) -> list[FileResult]:
         try:
             wyniki.append(_rozstrzygnij_zamiar(con, r, now=now))
         except Exception as exc:  # noqa: BLE001 - jeden zamiar nie przerywa etapu, w którym go liczymy
-            wyniki.append(FileResult(r["location_id"], r["old_path"], "blocked",
-                                     f"rekoncyliacja padła ({type(exc).__name__}: {exc}) - "
-                                     f"zamiar zostaje"))
+            blad = f"{type(exc).__name__}: {exc}"
+            wyniki.append(FileResult(r["location_id"], r["old_path"], "blocked", PowodPozycji(
+                f"rekoncyliacja padła ({blad}) - zamiar zostaje", "reconcile_failed",
+                detail=blad)))
     return wyniki
+
+
+# Celowo INNE zdanie niż `_BRAK_LOCATION` („brak location w bazie”, kod `no_location`): rekoncyliacja
+# renamu mówi tak od zawsze, a proza zostaje znak w znak - stąd osobny kod.
+_BRAK_LOCATION_WIERSZA = PowodPozycji("brak location", "no_location_row")
+
+
+def _dysk_milczy(exc) -> PowodPozycji:
+    """Powód rekoncyliacji zamiaru, gdy dysk nie odpowiada na pytanie o plik - zamiar zostaje."""
+    blad = str(exc)
+    return PowodPozycji(f"dysk nie odpowiada ({blad}) - zamiar zostaje", "disk_silent", detail=blad)
 
 
 def _rozstrzygnij_zamiar(con, r, *, now) -> FileResult:
@@ -3607,16 +3921,21 @@ def _rozstrzygnij_zamiar(con, r, *, now) -> FileResult:
     loc = _location_rename(con, lid)
     if loc is None:
         repo.settle_rename_intent(con, rename_id=rid, location_id=lid, status="failed",
-                                  reason="brak location", now=now)
-        return FileResult(lid, stara, "reconciled", "brak location - zamiar zamknięty")
+                                  reason=_BRAK_LOCATION_WIERSZA, now=now)
+        return FileResult(lid, stara, "reconciled", PowodPozycji(
+            "brak location - zamiar zamknięty", "intent_closed_no_location"))
     try:
         pod_stara, pod_nowa = os.path.exists(stara), os.path.exists(nowa)
     except OSError as exc:
-        return FileResult(lid, stara, "blocked", f"dysk nie odpowiada ({exc}) - zamiar zostaje")
+        return FileResult(lid, stara, "blocked", _dysk_milczy(exc))
     if pod_stara == pod_nowa:
-        stan = "pod obiema nazwami" if pod_stara else "pod żadną z nazw"
-        return FileResult(lid, stara, "blocked",
-                          f"plik {stan} ({stara} / {nowa}) - zamiar zostaje, rozstrzyga człowiek")
+        if pod_stara:
+            return FileResult(lid, stara, "blocked", PowodPozycji(
+                f"plik pod obiema nazwami ({stara} / {nowa}) - zamiar zostaje, rozstrzyga człowiek",
+                "intent_both_names", src=stara, dst=nowa))
+        return FileResult(lid, stara, "blocked", PowodPozycji(
+            f"plik pod żadną z nazw ({stara} / {nowa}) - zamiar zostaje, rozstrzyga człowiek",
+            "intent_no_name", src=stara, dst=nowa))
     tam = nowa if pod_nowa else stara
     if tam == nowa:
         status, powod = "applied", None
@@ -3629,22 +3948,23 @@ def _rozstrzygnij_zamiar(con, r, *, now) -> FileResult:
         try:
             mtime = scan._mtime_iso(os.stat(tam))
         except OSError as exc:
-            return FileResult(lid, tam, "blocked", f"dysk nie odpowiada ({exc}) - zamiar zostaje")
+            return FileResult(lid, tam, "blocked", _dysk_milczy(exc))
         if loc["mtime"] is None or mtime != loc["mtime"]:
-            return FileResult(lid, tam, "blocked",
-                              f"plik pod {tam} ma mtime {mtime}, kopia w bazie {loc['mtime']} - "
-                              f"to może nie być ten plik; zamiar zostaje, rozstrzyga człowiek")
+            return FileResult(lid, tam, "blocked", PowodPozycji(
+                f"plik pod {tam} ma mtime {mtime}, kopia w bazie {loc['mtime']} - to może nie być "
+                f"ten plik; zamiar zostaje, rozstrzyga człowiek", "intent_mtime_differs", path=tam,
+                mtime=mtime, db_mtime=loc["mtime"]))
         # `mtime` da się przenieść kopiowaniem, treści nie: zamiarów jest garstka, więc pełny odczyt
         # pliku jest tani wobec przepięcia lokacji na obcy plik.
         if loc["file_sha1"] is not None:
             try:
                 sha = hashing.sha1_of(tam)
             except OSError as exc:
-                return FileResult(lid, tam, "blocked", f"dysk nie odpowiada ({exc}) - zamiar zostaje")
+                return FileResult(lid, tam, "blocked", _dysk_milczy(exc))
             if sha != loc["file_sha1"]:
-                return FileResult(lid, tam, "blocked",
-                                  f"plik pod {tam} ma inną treść niż kopia w bazie (sha1) - to nie "
-                                  f"jest ten plik; zamiar zostaje, rozstrzyga człowiek")
+                return FileResult(lid, tam, "blocked", PowodPozycji(
+                    f"plik pod {tam} ma inną treść niż kopia w bazie (sha1) - to nie jest ten plik; "
+                    f"zamiar zostaje, rozstrzyga człowiek", "intent_sha1_differs", path=tam))
         relocate_to = tam
     inna = stara if tam == nowa else nowa
 
@@ -3657,14 +3977,21 @@ def _rozstrzygnij_zamiar(con, r, *, now) -> FileResult:
                                   now=now, relocate_to=relocate_to, expect_in_flight=r["in_flight"],
                                   potwierdz=_wciaz_tam)
     except repo.RenameIntentChanged as exc:
-        return FileResult(lid, tam, "blocked", f"{exc} - nic nie zmieniono, następna rekoncyliacja "
-                                               f"zobaczy stan bieżący")
+        zmiana = powod_wyjatku(exc)
+        return FileResult(lid, tam, "blocked", PowodPozycji(
+            f"{zmiana} - nic nie zmieniono, następna rekoncyliacja zobaczy stan bieżący",
+            "intent_changed", inner=zmiana))
     except ValueError as exc:                     # cel zajęty w bazie przez inną lokację
-        return FileResult(lid, tam, "blocked",
-                          f"{exc} - skan wciągnął plik jako nową kopię; zamiar zostaje (lokacja "
-                          f"{lid} pod {loc['path']} niesie historię renamu)")
-    opis = f"baza przepięta na {tam}" if relocate_to else f"baza zgodna z plikiem ({tam})"
-    return FileResult(lid, tam, "reconciled", opis)
+        zajety = powod_wyjatku(exc)
+        return FileResult(lid, tam, "blocked", PowodPozycji(
+            f"{zajety} - skan wciągnął plik jako nową kopię; zamiar zostaje (lokacja {lid} pod "
+            f"{loc['path']} niesie historię renamu)", "intent_target_taken", inner=zajety,
+            location=lid, path=loc["path"]))
+    if relocate_to:
+        return FileResult(lid, tam, "reconciled", PowodPozycji(
+            f"baza przepięta na {tam}", "reconciled_relocated", path=tam))
+    return FileResult(lid, tam, "reconciled", PowodPozycji(
+        f"baza zgodna z plikiem ({tam})", "reconciled_in_sync", path=tam))
 
 
 def commit_renames(con, run_id, *, now,
@@ -3710,12 +4037,13 @@ def commit_renames(con, run_id, *, now,
             continue
         loc = _location_rename(con, location_id)
         if loc is None:
-            repo.set_rename_status(con, rename_id=rid, status="failed", reason="brak location")
-            failed.append(FileResult(location_id, old_path, "failed", "brak location"))
+            repo.set_rename_status(con, rename_id=rid, status="failed",
+                                   reason=_BRAK_LOCATION_WIERSZA)
+            failed.append(FileResult(location_id, old_path, "failed", _BRAK_LOCATION_WIERSZA))
             _report(old_path, "failed")
             continue
         if not loc["present"]:
-            reason = "kopia zniknęła (present=0)"
+            reason = _KOPIA_ZNIKNELA
             repo.set_rename_status(con, rename_id=rid, status="skipped", reason=reason)
             skipped.append(FileResult(location_id, old_path, "skipped", reason))
             _report(old_path, "skipped")
@@ -3732,7 +4060,8 @@ def commit_renames(con, run_id, *, now,
             continue
         # Kotwica anty-stale: plik nietknięty od podglądu (mtime + ścieżka).
         if loc["mtime"] != r["expected_mtime"] or loc["path"] != old_path:
-            reason = "plik zmieniony od podglądu (mtime/ścieżka)"
+            reason = PowodPozycji("plik zmieniony od podglądu (mtime/ścieżka)",
+                                  "rename_changed_since_preview")
             repo.set_rename_status(con, rename_id=rid, status="blocked", reason=reason)
             blocked.append(FileResult(location_id, old_path, "blocked", reason))
             _report(old_path, "blocked")
@@ -3742,7 +4071,8 @@ def commit_renames(con, run_id, *, now,
             "SELECT id FROM location WHERE volume = ? AND path = ? AND id <> ?",
             (loc["volume"], new_path, location_id)).fetchone()
         if db_clash is not None:
-            reason = f"cel zajęty w bazie (location:{db_clash['id']})"
+            reason = PowodPozycji(f"cel zajęty w bazie (location:{db_clash['id']})", "target_taken",
+                                  location=db_clash["id"])
             repo.set_rename_status(con, rename_id=rid, status="blocked", reason=reason)
             blocked.append(FileResult(location_id, old_path, "blocked", reason))
             _report(old_path, "blocked")
@@ -3808,7 +4138,7 @@ def undo_renames(con, run_id, *, now,
             continue
         loc = _location_rename(con, location_id)
         if loc is None or loc["path"] != new_path:
-            reason = "plik nie stoi na nazwie z commitu"
+            reason = PowodPozycji("plik nie stoi na nazwie z commitu", "not_on_commit_name")
             blocked.append(FileResult(location_id, new_path, "blocked", reason))
             _report(new_path, "blocked")
             continue
@@ -3971,8 +4301,10 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
             niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect,
                                 przed_wciagnieciem=_przed, w_transakcji=_nagrobek).niezgodne
         except Exception as exc:  # noqa: BLE001 - nagłówek przywrócony, pętla idzie dalej
-            niezgodne = (f"nagłówek PRZYWRÓCONY, ale re-sync padł - {type(exc).__name__}: {exc}; "
-                         f"ponowne undo dokończy samą synchronizację")
+            blad = f"{type(exc).__name__}: {exc}"
+            niezgodne = PowodPozycji(f"nagłówek PRZYWRÓCONY, ale re-sync padł - {blad}; ponowne "
+                                     f"undo dokończy samą synchronizację", "undo_resync_failed",
+                                     detail=blad)
         if niezgodne is not None:
             return _pad(loc, path, niezgodne)
         if wstrzymanie:
@@ -3993,9 +4325,11 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         if wynik.status == "applied":
             return _CofniecieLokacji(FileResult(loc["id"], path, "restored", powod))
         if wynik.status == "blocked":
-            return _blok(loc, path, f"{wynik.reason}; lokacja IZOLOWANA od skanu")
-        return _pad(loc, path, f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja IZOLOWANA od "
-                               f"skanu - ponowne undo dokończy samą synchronizację")
+            return _blok(loc, path, PowodPozycji(f"{wynik.reason}; lokacja IZOLOWANA od skanu",
+                                                 "isolated_suffix", inner=wynik.reason))
+        return _pad(loc, path, PowodPozycji(
+            f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja IZOLOWANA od skanu - ponowne undo "
+            f"dokończy samą synchronizację", "undo_finish_failed", inner=wynik.reason))
 
     def _blok(loc, path, powod, juz=False):
         return _CofniecieLokacji(FileResult(loc["id"], path, "blocked", powod), juz=juz)
@@ -4005,8 +4339,7 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
 
     loc = _location(con, int(b["location_id"]))
     if loc is None:
-        return _CofniecieLokacji(FileResult(int(b["location_id"]), "", "failed",
-                                            "brak location w bazie"))
+        return _CofniecieLokacji(FileResult(int(b["location_id"]), "", "failed", _BRAK_LOCATION))
     path = loc["path"]
     # Zwykłe cofnięcie tylko dla podmian potwierdzonych (AR-40): backup niepotwierdzony tej
     # lokacji (dowolnego commitu) rozstrzyga najpierw dysk.
@@ -4018,29 +4351,32 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         loc = _location(con, loc["id"])
         if con.execute("SELECT unreplaced_at FROM header_backups WHERE id = ?",
                        (b["id"],)).fetchone()[0] is not None:
-            return _blok(loc, path, "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na "
-                                    "dysku nagłówek sprzed commitu) - nie ma czego cofać", juz=True)
+            return _blok(loc, path, PowodPozycji(
+                "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na dysku nagłówek sprzed "
+                "commitu) - nie ma czego cofać", "undo_not_replaced"), juz=True)
     op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
     op_u = _ostatnia_operacja(con, commit_id, loc["id"], "undo")
     otwarta = next((o for o in (op_u, op_c)
                     if o is not None and o["phase"] in repo.INPLACE_OPEN_PHASES), None)
     if otwarta is not None:
-        odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({otwarta['id']})")
-        return _pad(loc, path, f"przerwany zapis w miejscu (operacja {otwarta['id']}, "
-                               f"{otwarta['kind']}) - lokacja izolowana; najpierw {odzysk}")
+        return _pad(loc, path, PowodPozycji(
+            f"przerwany zapis w miejscu (operacja {otwarta['id']}, {otwarta['kind']}) - lokacja "
+            f"izolowana; najpierw {_droga_przywroc(otwarta['id'])}", "undo_open_op",
+            op_id=otwarta["id"], op_kind=otwarta["kind"], way=_droga_przywroc(otwarta["id"])))
     if op_u is not None and op_u["phase"] == "written":
-        return _dokoncz_undo(loc, path, op_u["id"], "nagłówek był już przywrócony - dokończono "
-                                                    "synchronizację bazy")
+        return _dokoncz_undo(loc, path, op_u["id"], _UNDO_DOKONCZONA_SYNCHRONIZACJA)
     if op_u is not None and op_u["phase"] == "synced":
-        return _blok(loc, path, "już cofnięte (operacja cofnięcia zamknięta)", juz=True)
+        return _blok(loc, path, PowodPozycji("już cofnięte (operacja cofnięcia zamknięta)",
+                                             "undo_already_op"), juz=True)
     if op_c is not None and op_c["phase"] == "written":
         # Commit zapisał i zweryfikował plik, ale jego re-sync padł (lokacja izolowana). Cofamy
         # dopiero stan, który baza zna: najpierw dokończenie commitu, potem zwykłe cofnięcie.
         koniec = _dokoncz(con, op_c["id"], now=now)
         if koniec.status != "applied":
-            return (_pad if koniec.status == "failed" else _blok)(
-                loc, path, f"commit nie jest dokończony (operacja {op_c['id']}): "
-                           f"{koniec.reason}; lokacja IZOLOWANA od skanu")
+            return (_pad if koniec.status == "failed" else _blok)(loc, path, PowodPozycji(
+                f"commit nie jest dokończony (operacja {op_c['id']}): {koniec.reason}; lokacja "
+                f"IZOLOWANA od skanu", "undo_commit_unfinished", op_id=op_c["id"],
+                inner=koniec.reason))
         op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
         loc = _location(con, loc["id"])         # kotwica i mtime po dokończeniu commitu
     gen = repo.inplace_generation(con)          # przed bramką - dla straży podmiany atomowej
@@ -4050,7 +4386,9 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
     try:
         env = RegionBackup.decode(b["header_text"])
     except ValueError as exc:
-        return _pad(loc, path, f"uszkodzona koperta backupu: {exc}")
+        blad = str(exc)
+        return _pad(loc, path, PowodPozycji(f"uszkodzona koperta backupu: {blad}",
+                                            "backup_envelope_broken", detail=blad))
 
     if env is not None and op_c is not None and op_c["phase"] == "synced":
         class _Dziennik:
@@ -4074,10 +4412,12 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
                 return _dokoncz_undo(loc, path, dziennik.op_id, None)
             if res.status == "blocked":
                 return _blok(loc, path, res.reason)
-            odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({dziennik.op_id})")
-            dopisek = (f"; lokacja IZOLOWANA od skanu, odzysk: {odzysk}"
-                       if res.in_place else "")
-            return _pad(loc, path, f"{res.reason}{dopisek}")
+            if not res.in_place:
+                return _pad(loc, path, res.reason)
+            return _pad(loc, path, PowodPozycji(
+                f"{res.reason}; lokacja IZOLOWANA od skanu, odzysk: "
+                f"{_droga_przywroc(dziennik.op_id)}", "undo_partial_isolated", inner=res.reason,
+                way=_droga_przywroc(dziennik.op_id)))
 
     # Droga atomowa: najpierw rozpoznanie „już przywrócone" z pliku i kompletu faktów bazy.
     try:
@@ -4096,10 +4436,9 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         except OSError:
             mtime = None
         if loc["header_hash"] == przywrocony and loc["mtime"] == mtime:
-            return _blok(loc, path, "już cofnięte - nagłówek i baza opisują stan sprzed commitu",
-                         juz=True)
-        return _sync(loc, path, loc["sha1_data"],
-                     "nagłówek był już przywrócony - dokończono synchronizację bazy")
+            return _blok(loc, path, PowodPozycji("już cofnięte - nagłówek i baza opisują stan "
+                                                 "sprzed commitu", "undo_already"), juz=True)
+        return _sync(loc, path, loc["sha1_data"], _UNDO_DOKONCZONA_SYNCHRONIZACJA)
     res = write_full_header(
         path, b["header_text"], b["post_hash"],
         replace_guard=lambda: repo.guard_file_replace(con, location_id=loc["id"], generation=gen))
@@ -4116,9 +4455,14 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         # Podmiana zaszła, weryfikacja po niej nie (AR-8): re-syncu NIE ma - baza opisuje bajty
         # potwierdzone, jak po 'failed' commitu. Drogą naprawy jest skan albo ponowne undo,
         # które rozpozna przywrócony nagłówek po bajtach regionu.
-        return _pad(loc, path, f"{res.reason}; baza NIE zsynchronizowana - przeskanuj plik albo "
-                               f"ponów cofnięcie")
+        return _pad(loc, path, PowodPozycji(
+            f"{res.reason}; baza NIE zsynchronizowana - przeskanuj plik albo ponów cofnięcie",
+            "undo_not_synced", inner=res.reason))
     return _pad(loc, path, res.reason)
+
+
+_UNDO_DOKONCZONA_SYNCHRONIZACJA = PowodPozycji(
+    "nagłówek był już przywrócony - dokończono synchronizację bazy", "undo_sync_finished")
 
 
 def recover_torn(con, op_id, *, now) -> FileResult:
@@ -4148,17 +4492,17 @@ def recover_torn(con, op_id, *, now) -> FileResult:
     pomija."""
     op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
     if op is None:
-        return FileResult(0, "", "failed", f"brak operacji {op_id}")
+        return FileResult(0, "", "failed", _brak_operacji(op_id))
     loc = _location(con, int(op["location_id"]))
     if loc is None:
-        return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
+        return FileResult(int(op["location_id"]), "", "failed", _BRAK_LOCATION)
     path = loc["path"]
     if op["phase"] == "written":
         return _powrot_z_written(con, op, loc, now=now)
     if op["phase"] not in repo.INPLACE_OPEN_PHASES:
-        return FileResult(loc["id"], path, "blocked",
-                          f"operacja {op_id} nie jest otwarta ({op['phase']}) - odzysk dotyczy "
-                          f"wyłącznie przerwanego zapisu")
+        return FileResult(loc["id"], path, "blocked", PowodPozycji(
+            f"operacja {op_id} nie jest otwarta ({op['phase']}) - odzysk dotyczy wyłącznie "
+            f"przerwanego zapisu", "recover_not_open", op_id=op_id, phase=op["phase"]))
     spec = _spec_z_operacji(op)
     kontrola = _KontrolaDanych(spec.region_offset, spec.old_region,
                                _kotwica_operacji(con, op, loc), spec.pre_hash)
@@ -4166,22 +4510,26 @@ def recover_torn(con, op_id, *, now) -> FileResult:
     def _dzialanie(fh):
         faza = repo.inplace_op_phase(con, op_id)
         if faza not in repo.INPLACE_OPEN_PHASES:
-            return WriteResult("blocked", f"operacja {op_id} przestała być otwarta ({faza}) - "
-                                          f"odzysk odmawia", None)
+            return WriteResult("blocked", PowodPozycji(
+                f"operacja {op_id} przestała być otwarta ({faza}) - odzysk odmawia",
+                "recover_closed_meanwhile", op_id=op_id, phase=faza), None)
         if repo.newer_inplace_op(con, location_id=loc["id"], op_id=op_id):
-            return WriteResult("blocked", f"lokacja ma operację nowszą niż {op_id} - odzysk "
-                                          f"odmawia, żeby nie cofnąć późniejszego zapisu", None)
+            return WriteResult("blocked", PowodPozycji(
+                f"lokacja ma operację nowszą niż {op_id} - odzysk odmawia, żeby nie cofnąć "
+                f"późniejszego zapisu", "recover_newer_op", op_id=op_id), None)
         res = _odzysk_pod_blokada(fh, path, spec)
         if res.status != "applied":
             return res
-        ponow = (f"operacja zostaje otwarta, ponów "
-                 f"{_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}")
+        ponow = PowodPozycji(f"operacja zostaje otwarta, ponów {_droga_przywroc(op_id)}",
+                             "way_retry_open", way=_droga_przywroc(op_id))
         try:
             niezgodne = _resync(con, path, loc["volume"], now=now,
                                 expect_sha1_data=loc["sha1_data"], kontrola=kontrola).niezgodne
         except Exception as exc:  # noqa: BLE001 - czkawka odczytu nie jest werdyktem
-            return WriteResult("failed", f"region przywrócony, ale re-sync padł - "
-                                         f"{type(exc).__name__}: {exc}; {ponow}", None)
+            blad = f"{type(exc).__name__}: {exc}"
+            return WriteResult("failed", PowodPozycji(
+                f"region przywrócony, ale re-sync padł - {blad}; {ponow}", "recover_resync_failed",
+                detail=blad, way=ponow), None)
         if niezgodne is not None:          # werdykt kontroli danych - droga powrotu, nie ponowienie
             return _zwolnij_do_skanu(con, op_id, faza, niezgodne, now=now, ponow=ponow)
         try:
@@ -4189,9 +4537,10 @@ def recover_torn(con, op_id, *, now) -> FileResult:
                                       reason="region stary przywrócony (recover_torn)",
                                       expect_phase=faza)
         except Exception as exc:  # noqa: BLE001
-            return WriteResult("failed", f"region przywrócony i baza zsynchronizowana, ale faza "
-                                         f"'recovered' NIE zapisana ({type(exc).__name__}: {exc});"
-                                         f" {ponow}", None)
+            blad = f"{type(exc).__name__}: {exc}"
+            return WriteResult("failed", PowodPozycji(
+                f"region przywrócony i baza zsynchronizowana, ale faza 'recovered' NIE zapisana "
+                f"({blad}); {ponow}", "recover_phase_not_saved", detail=blad, way=ponow), None)
         return res
     wynik = _pod_blokada(path, _dzialanie)
     status = "restored" if wynik.status == "applied" else wynik.status
@@ -4224,44 +4573,48 @@ def _powrot_z_written(con, op, loc, *, now) -> FileResult:
     spec = _spec_z_operacji(op)
     kontrola = _KontrolaDanych(spec.region_offset, spec.old_region,
                                _kotwica_operacji(con, op, loc), spec.post_hash)
-    ponow = (f"operacja zostaje 'written', ponów "
-             f"{_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}")
+    ponow = PowodPozycji(f"operacja zostaje 'written', ponów {_droga_przywroc(op_id)}",
+                         "way_retry_written", way=_droga_przywroc(op_id))
 
     def _dzialanie(fh):
         faza = repo.inplace_op_phase(con, op_id)
         if faza != "written":
-            return WriteResult("blocked", f"operacja {op_id} jest w fazie {faza}, nie 'written' - "
-                                          f"powrót odmawia", None)
+            return WriteResult("blocked", PowodPozycji(
+                f"operacja {op_id} jest w fazie {faza}, nie 'written' - powrót odmawia",
+                "return_not_written", op_id=op_id, phase=faza), None)
         if repo.newer_inplace_op(con, location_id=loc["id"], op_id=op_id):
-            return WriteResult("blocked", f"lokacja ma operację nowszą niż {op_id} - powrót "
-                                          f"odmawia, żeby nie cofnąć późniejszego zapisu", None)
+            return WriteResult("blocked", PowodPozycji(
+                f"lokacja ma operację nowszą niż {op_id} - powrót odmawia, żeby nie cofnąć "
+                f"późniejszego zapisu", "return_newer_op", op_id=op_id), None)
         st = os.fstat(fh.fileno())
         if st.st_size != spec.file_size or (spec.file_ino and st.st_ino
                                             and st.st_ino != spec.file_ino):
-            return WriteResult("blocked", f"inny plik niż w chwili zapisu (rozmiar/st_ino); "
-                                          f"{_RECZNA}", None)
+            return WriteResult("blocked", _INNY_PLIK, None)
         fh.seek(spec.region_offset)
         biezacy = fh.read(len(spec.new_region))
         if not _stan_posredni(biezacy, spec):
-            return WriteResult("blocked", f"region nagłówka nie jest ani wynikiem operacji {op_id}, "
-                                          f"ani stanem pośrednim jej powrotu; {_RECZNA}", None)
+            return WriteResult("blocked", PowodPozycji(
+                f"region nagłówka nie jest ani wynikiem operacji {op_id}, ani stanem pośrednim jej "
+                f"powrotu; {_RECZNA}", "return_region_foreign", op_id=op_id, way=_RECZNA), None)
         if biezacy == spec.new_region:
             try:
                 niezgodne = _kontrola_danych(_skan_kontrolny(path, kontrola), loc["sha1_data"],
                                              kontrola)
             except Exception as exc:  # noqa: BLE001 - czkawka odczytu nie jest werdyktem
-                return WriteResult("failed", f"odczyt kontrolny padł - {type(exc).__name__}: "
-                                             f"{exc}; {ponow}", None)
+                blad = f"{type(exc).__name__}: {exc}"
+                return WriteResult("failed", PowodPozycji(
+                    f"odczyt kontrolny padł - {blad}; {ponow}", "return_read_failed", detail=blad,
+                    way=ponow), None)
             if niezgodne is None:
-                return WriteResult("blocked", f"kontrola danych operacji {op_id} przechodzi - "
-                                              f"zapis jest poprawny, powrót go nie cofa; dokończ: "
-                                              f"{_droga(_GEST_DOKONCZ, f'finish_inplace({op_id})')}",
-                                   None)
+                return WriteResult("blocked", PowodPozycji(
+                    f"kontrola danych operacji {op_id} przechodzi - zapis jest poprawny, powrót go "
+                    f"nie cofa; dokończ: {_droga_dokoncz(op_id)}", "return_check_passes",
+                    op_id=op_id, way=_droga_dokoncz(op_id)), None)
         else:
-            niezgodne = "przerwany wcześniejszy powrót tej operacji"
+            niezgodne = PowodPozycji("przerwany wcześniejszy powrót tej operacji", "return_resumed")
         res = _odzysk_pod_blokada(fh, path, spec)
         if res.status != "applied":
-            return WriteResult(res.status, f"{res.reason}; {ponow}", None)
+            return WriteResult(res.status, _dopisz(res.reason, ponow), None)
         return _zwolnij_do_skanu(con, op_id, faza, niezgodne, now=now, ponow=ponow)
     wynik = _pod_blokada(path, _dzialanie)
     status = "restored" if wynik.status == "applied" else wynik.status
@@ -4276,14 +4629,17 @@ def _zwolnij_do_skanu(con, op_id, faza, niezgodne, *, now, ponow) -> WriteResult
     wpisy stagingu operacji 'failed' z tym samym powodem, `location.mtime` → NULL (pełny skan).
     Porażka transakcji → 'failed' z `ponow`: operacja zostaje w swojej fazie, a ponowienie jest
     bezpieczne - region stary to też stan pośredni, więc drugi przebieg nic nie pisze."""
-    prawda = (f"plik zmienił się poza nagłówkiem od ostatniego skanu albo przy zapisie "
-              f"({niezgodne}) - zapis cofnięty: stary nagłówek przywrócony w miejscu "
-              f"(operacja {op_id}), przeskanuj plik")
+    prawda = PowodPozycji(f"plik zmienił się poza nagłówkiem od ostatniego skanu albo przy zapisie "
+                          f"({niezgodne}) - zapis cofnięty: stary nagłówek przywrócony w miejscu "
+                          f"(operacja {op_id}), przeskanuj plik", "reverted_rescan",
+                          inner=niezgodne, op_id=op_id)
     try:
         repo.revert_inplace_op(con, op_id=op_id, now=now, reason=prawda, expect_phase=faza)
     except Exception as exc:  # noqa: BLE001
-        return WriteResult("failed", f"stary nagłówek przywrócony, ale faza 'recovered' NIE "
-                                     f"zapisana ({type(exc).__name__}: {exc}); {ponow}", None)
+        blad = f"{type(exc).__name__}: {exc}"
+        return WriteResult("failed", PowodPozycji(
+            f"stary nagłówek przywrócony, ale faza 'recovered' NIE zapisana ({blad}); {ponow}",
+            "revert_phase_not_saved", detail=blad, way=ponow), None)
     return WriteResult("applied", prawda, None)
 
 
@@ -4310,10 +4666,10 @@ def release_isolation(con, op_id, *, now, reason) -> FileResult:
     którego program nie mógł otworzyć."""
     op = con.execute("SELECT location_id FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
     if op is None:
-        return FileResult(0, "", "failed", f"brak operacji {op_id}")
+        return FileResult(0, "", "failed", _brak_operacji(op_id))
     loc = _location(con, int(op["location_id"]))
     if loc is None:
-        return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
+        return FileResult(int(op["location_id"]), "", "failed", _BRAK_LOCATION)
     path = loc["path"]
     wynik = None
     otwarty = False
@@ -4325,10 +4681,10 @@ def release_isolation(con, op_id, *, now, reason) -> FileResult:
         if otwarty and wynik is None:
             return FileResult(loc["id"], path, "failed", f"{type(exc).__name__}: {exc}")
         if not otwarty and getattr(exc, "winerror", None) in _LOCK_TRANSIENT:
-            return FileResult(loc["id"], path, "blocked",
-                              "plik jest otwarty do zapisu przez inny proces (zapis albo odzysk "
-                              "nagłówka w toku) - zwolnienie czeka na jego koniec, żeby skan nie "
-                              "przeczytał rozdartego nagłówka; ponów po zakończeniu tamtego zapisu")
+            return FileResult(loc["id"], path, "blocked", PowodPozycji(
+                "plik jest otwarty do zapisu przez inny proces (zapis albo odzysk nagłówka "
+                "w toku) - zwolnienie czeka na jego koniec, żeby skan nie przeczytał rozdartego "
+                "nagłówka; ponów po zakończeniu tamtego zapisu", "release_file_busy"))
         if not otwarty:
             wynik = _zwolnij_reka(con, op_id, now=now, reason=reason,
                                   bez_blokady=f"{type(exc).__name__}: {exc}")
@@ -4343,16 +4699,19 @@ def _zwolnij_reka(con, op_id, *, now, reason, bez_blokady=None) -> tuple[str, st
     try:
         faza = repo.inplace_op_phase(con, op_id)
         if faza not in repo.INPLACE_ISOLATING_PHASES:
-            return "blocked", (f"operacja {op_id} nie izoluje już lokacji (faza {faza}) - "
-                               f"nie ma czego zwalniać")
+            return "blocked", PowodPozycji(f"operacja {op_id} nie izoluje już lokacji (faza "
+                                           f"{faza}) - nie ma czego zwalniać",
+                                           "release_not_isolating", op_id=op_id, phase=faza)
         repo.release_inplace_op(con, op_id=op_id, now=now, reason=reason, expect_phase=faza)
     except ValueError as exc:                      # CAS: faza zmieniona w międzyczasie
-        return "blocked", str(exc)
+        # Odmowa klingi z kodem (`OdmowaZPowodem` to `ValueError`): tekst = `str(exc)` bez zmian.
+        return "blocked", powod_wyjatku(exc)
     except Exception as exc:  # noqa: BLE001
         return "failed", f"{type(exc).__name__}: {exc}"
     if bez_blokady is not None:
-        return "released", (f"pliku nie da się otworzyć ({bez_blokady}) - zwolniono bez blokady "
-                            f"pliku")
+        return "released", PowodPozycji(f"pliku nie da się otworzyć ({bez_blokady}) - zwolniono "
+                                        f"bez blokady pliku", "released_without_lock",
+                                        detail=bez_blokady)
     return "released", None
 
 
@@ -4374,6 +4733,14 @@ def _uwaga_niepewnej_wlasnosci(katalog) -> ZdanieRdzenia:
     return ZdanieRdzenia(f"katalog {katalog}: zamiar założenia bez potwierdzenia, a katalog "
                          f"istnieje - własność niepewna, zostaje do oka", "dir_uncertain",
                          dir=katalog)
+
+
+def _ostrzezenia_rekoncyliacji(con, *, now) -> list[ZdanieRdzenia]:
+    """Ostrzeżenia gestu z rekoncyliacji przerwanych renamów na wejściu (zamiar, którego dysk nie
+    rozstrzygnął): „ścieżka: powód” z kodem `rename_reconcile` - okno mówi je w języku UI, powód
+    rekoncyliacji (z kodem) jako parametr `detail` (AR-148; dawniej goły f-string)."""
+    return [ZdanieRdzenia(f"{r.path}: {r.reason}", "rename_reconcile", path=r.path, detail=r.reason)
+            for r in reconcile_renames(con, now=now) if r.status == "blocked"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4429,10 +4796,11 @@ def _pozycje_przebiegu(con, run_id):
 
 
 def _karty_lokacji(con, run_id, location_id):
-    """Wpisy stagingu karty pozycji (przebieg + lokacja), w kolejności stagingu."""
+    """Wpisy stagingu karty pozycji (przebieg + lokacja), w kolejności stagingu; powód wpisu czyta
+    `_powod_wiersza`."""
     return con.execute(
         "SELECT id, location_id, keyword, idx, op, old_value, new_value, new_type, new_comment, "
-        "       expected_header_hash, status, reason, withheld_id "
+        "       expected_header_hash, status, reason, reason_code, reason_args, withheld_id "
         "FROM pending_changes WHERE run_id = ? AND location_id = ? ORDER BY id",
         (run_id, location_id)).fetchall()
 
@@ -4616,7 +4984,8 @@ def _wycofaj_pozycje(con, p, status, powod, *, now, przeniesiony, code=None) -> 
     dalej (cofnięcie przebiegu), a baza zostaje przy nowym obiekcie - zgodna z miejscem pliku."""
     lid = p["location_id"]
     if przeniesiony:
-        wynik = _przenies_wstecz(con, p, now=now, reason=f"{_COFNIETO} - {powod}")
+        wynik = _przenies_wstecz(con, p, now=now, reason=PowodPozycji(
+            f"{_COFNIETO} - {powod}", "rename_undone_because", inner=powod))
         if wynik.status != "applied":
             powod = PowodPozycji(
                 f"{powod}; plik NIE wrócił pod {p['old_path']} ({wynik.reason}) - zostaje pod nową "
@@ -4817,18 +5186,19 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
     elif karty and any(r["status"] != "applied" for r in karty):
         # Wpisy karty rozliczone przed awarią bez zapisu pozycji: 'failed' mógł ruszyć bajty.
         zly = next(r for r in karty if r["status"] != "applied")
+        poprzedni = _powod_wiersza(zly)        # z kodem, gdy wpis go niesie (0042, AR-148)
         if zly["withheld_id"] is not None:     # AR-82: karta zapisana, zeznanie wstrzymane
             # Status pozycji nadało wstrzymanie (B4) - bez ponownego rozliczenia.
-            return FileResult(lid, loc["path"], "withheld", zly["reason"],
+            return FileResult(lid, loc["path"], "withheld", poprzedni,
                               code=CODE_ZEZNANIE_WSTRZYMANE)
         if zly["status"] == "failed":
-            powod = PowodPozycji(f"karta z poprzedniej próby: {zly['reason']}", "card_prev_failed",
-                                 inner=zly["reason"])
+            powod = PowodPozycji(f"karta z poprzedniej próby: {poprzedni}", "card_prev_failed",
+                                 inner=poprzedni)
             repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
                                            now=now)
             return FileResult(lid, loc["path"], "failed", powod)
-        return _odmowa("blocked", PowodPozycji(f"karta odbita w poprzedniej próbie: {zly['reason']}",
-                                               "card_prev_refused", inner=zly["reason"]))
+        return _odmowa("blocked", PowodPozycji(f"karta odbita w poprzedniej próbie: {poprzedni}",
+                                               "card_prev_refused", inner=poprzedni))
     repo.settle_object_change_item(con, item_id=p["id"], status="applied", reason=uwaga, now=now)
     teraz = _location_rename(con, lid)
     return FileResult(lid, teraz["path"], "applied", uwaga, code=kod)
@@ -4883,8 +5253,7 @@ def commit_object_change(con, run_id, *, now,
     if przebieg["status"] in ("undoing", "undone"):
         raise ValueError(f"przebieg zmiany obiektu {run_id} jest cofany albo cofnięty - zapis go "
                          f"nie wznowi; nowy gest to nowy podgląd")
-    ostrzezenia = [f"{r.path}: {r.reason}" for r in reconcile_renames(con, now=now)
-                   if r.status == "blocked"]
+    ostrzezenia = _ostrzezenia_rekoncyliacji(con, now=now)
     _rekoncyliuj_katalogi(con, run_id, now=now)
     pozycje = [p for p in _pozycje_przebiegu(con, run_id) if p["status"] == "pending"]
     total = len(pozycje)
@@ -5005,8 +5374,7 @@ def undo_object_change(con, run_id, *, now,
         raise ValueError(f"przebieg zmiany obiektu {run_id} nie istnieje")
     if przebieg["status"] != "undone":
         repo.set_object_change_run_status(con, run_id=run_id, status="undoing")
-    ostrzezenia = [f"{r.path}: {r.reason}" for r in reconcile_renames(con, now=now)
-                   if r.status == "blocked"]
+    ostrzezenia = _ostrzezenia_rekoncyliacji(con, now=now)
     _rekoncyliuj_katalogi(con, run_id, now=now)
     pozycje = [p for p in _pozycje_przebiegu(con, run_id)
                if p["status"] in ("applied", "failed", "pending", "blocked")]

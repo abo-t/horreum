@@ -439,6 +439,10 @@ def test_cofniecie_gestu_niesie_wstrzymanie_po_wznowieniu(tmp_path, monkeypatch)
     cof = writeback.undo_object_change(s.con, run, now=NOW)
     assert len(cof.applied) == 1 and cof.withheld == cof.applied, cof
     assert cof.withheld[0].code == writeback.CODE_ZEZNANIE_WSTRZYMANE
+    # AR-148: nota wstrzymania czytana Z BAZY (`withheld_write`, 0042) niesie kod - nie prozę.
+    nota = cof.withheld[0].reason
+    assert "testimony_withheld_undo" in {nota.code, *(n.code for n in dict(nota.params).get(
+        "notes", ()))}, nota
     s.con.close()
 
 
@@ -762,6 +766,10 @@ def test_zwykly_zapis_nie_gasi_decyzji_reki_z_okna(tmp_path, monkeypatch, inplac
     assert bool(res.in_place) is inplace and zdanie in (fr.reason or ""), res
     (wpis,) = _wpisy(con)
     assert wpis["status"] == "applied" and zdanie in wpis["reason"], wpis
+    # AR-148: uwaga z KODEM - w wyniku (w miejscu czytana z bazy przez dokończenie) i we wpisie.
+    kod = {"nowa_decyzja": "hand_newer", "wersja_nieznana": "hand_unknown"}[okno]
+    assert fr.reason.code == kod, fr.reason
+    assert con.execute("SELECT reason_code FROM pending_changes").fetchone()[0] == kod
     assert _zrodlo(con, lok["frame_id"]) == "user_cleared"
     assert _ev(con, "object.tombstone_cleared") == 0
     con.close()

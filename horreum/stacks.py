@@ -512,16 +512,16 @@ class CandidateNight:
 
 
 def propose_lineage_candidates(con, master_frame_id):
-    """PROPOZYCJA MATERIAŁU dla stosu bez rodowodu — noce z kandydatami. Czysty odczyt, zero zapisu.
+    """PROPOZYCJA MATERIAŁU dla stosu bez rodowodu - noce z kandydatami. Czysty odczyt, zero zapisu.
 
     DLACZEGO ISTNIEJE: dobór automatu pyta o OKNO (`DATE-OBS`…`DATE-END`), a 30 stosów archiwum ma
-    okno ZDEGENEROWANE — `DATE-END` opisuje jedną klatkę zamiast serii (pułapka 1, `resolve/stack.py`:
+    okno ZDEGENEROWANE - `DATE-END` opisuje jedną klatkę zamiast serii (pułapka 1, `resolve/stack.py`:
     23 z 84 masterów starszego rocznika). Zepsuty jest KONIEC; początek zostaje początkiem pierwszego
     suba. Propozycja bierze więc tę samą oś co okno, tylko zamiast końca stawia NOC.
 
     OSIE ZGODNOŚCI TE SAME, CO W DOBORZE, i to jest cały warunek uczciwości tej listy: obiekt,
     filtr, teleskop, próg ekspozycji (`exposure_matches`, D-DR-2). Oś, której master NIE ZNA, nie
-    zawęża — dokładnie jak w `_in_window`. Luźniejsza reguła bez tych osi nie byłaby propozycją,
+    zawęża - dokładnie jak w `_in_window`. Luźniejsza reguła bez tych osi nie byłaby propozycją,
     tylko spisem klatek obiektu.
 
     OŚ TELESKOPU NA NOCY MASTERA IDZIE TĄ SAMĄ REGUŁĄ CO DOBÓR (B3a-2) - `_telescope_rule`, wołana,
@@ -544,7 +544,7 @@ def propose_lineage_candidates(con, master_frame_id):
     NIE ZAPISUJE I NIE UDAJE FAKTU (lustro `propose_offset_minutes` i szczebla ścieżki S2): zwraca
     KANDYDATÓW, a rodowód powstaje dopiero werdyktem ręki (`repo.judge_integration_input`,
     `asserted_by='user'`). Maszyna nie ma czym rozstrzygnąć, z czego powstał obraz, którego własny
-    nagłówek tego nie mówi — ale umie pokazać, co tej nocy leżało w archiwum.
+    nagłówek tego nie mówi - ale umie pokazać, co tej nocy leżało w archiwum.
 
     NOC MASTERA WCHODZI ZAWSZE, TAKŻE PUSTA, i to jest odpowiedź na POMIAR, nie ozdoba: 5 stosów
     (`no_candidates`) nie ma materiału w swojej nocy, choć obiekt ma go setki w innych nocach
@@ -554,56 +554,81 @@ def propose_lineage_candidates(con, master_frame_id):
     KOLEJNOŚĆ = ODLEGŁOŚĆ OD NOCY MASTERA, nie chronologia: sesja przesunięta o dzień jest
     kandydatem znacznie mocniejszym niż ta sprzed roku, a pierwsze pozycje listy czyta się najuważniej.
 
-    KLATKA JUŻ OSĄDZONA NIE WRACA jako propozycja — ani potwierdzona, ani odrzucona. Werdykt
+    KLATKA JUŻ OSĄDZONA NIE WRACA jako propozycja - ani potwierdzona, ani odrzucona. Werdykt
     „to NIE jest materiał tego obrazu" ma zostać werdyktem; lista, która go co chwilę przywraca,
     kazałaby wydawać go w kółko.
 
-    KANDYDAT RAW PRZY NIEZNANYM ODNIESIENIU NIE WCHODZI I NIE PRZEPADA PO CICHU — granica
+    KANDYDAT RAW PRZY NIEZNANYM ODNIESIENIU NIE WCHODZI I NIE PRZEPADA PO CICHU - granica
     przeniesiona z `_in_window` RAZEM Z JEJ DRUGĄ POŁOWĄ (EXIF niesie czas LOKALNY, XISF UTC).
     Bez odniesienia nie da się powiedzieć, do której NOCY taka klatka należy, więc do listy nie
-    wchodzi — ale wraca DRUGĄ WARTOŚCIĄ ZWROTU, bo „kandydaci są, tylko liczą w innym zegarze"
+    wchodzi - ale wraca DRUGĄ WARTOŚCIĄ ZWROTU, bo „kandydaci są, tylko liczą w innym zegarze"
     to inna recepta niż „kandydatów nie ma". Bramka pakietu 3a (0808) zmierzyła, ile kosztowało
     przepisanie samego pominięcia bez tej wartości: **6 z 35** obrazów kubełka (6× LMC, po 36
     kandydatów przechodzących KAŻDĄ oś) dostawało pustą listę pod zdaniem „archiwum nie ma ani
-    jednej klatki tego obiektu" — twierdzeniem FAŁSZYWYM — a gest odniesienia był dla nich
+    jednej klatki tego obiektu" - twierdzeniem FAŁSZYWYM - a gest odniesienia był dla nich
     strukturalnie nieosiągalny, bo `_plan` kończy na `degenerate_window` PRZED `_in_window`,
     więc powodu `offset_unknown` te stosy nie dostaną nigdy.
 
-    PASMO ±SUFIT Z `_in_window` TU NIE OBOWIĄZUJE — świadomie, nie przez pominięcie. Tam licznik
+    PASMO ±SUFIT Z `_in_window` TU NIE OBOWIĄZUJE - świadomie, nie przez pominięcie. Tam licznik
     pilnował WĄSKIEGO okna (minuty), więc RAW z innej nocy trzeba było odsiać, żeby recepta nie
     wysyłała człowieka do gestu bez prawa zadziałania. Tu pula jest już przycięta obiektem,
-    filtrem, teleskopem i progiem ekspozycji, a powierzchnia oddaje WSZYSTKIE noce do wyboru —
+    filtrem, teleskopem i progiem ekspozycji, a powierzchnia oddaje WSZYSTKIE noce do wyboru -
     więc każdy taki kandydat realnie pojawi się na liście po wskazaniu odniesienia. Zmierzone:
     wskazanie propozycji rdzenia (`+120`) daje 0 → 36 klatek, sześć razy na sześć.
 
-    Zwraca `(tuple[CandidateNight, …], raw_bez_odniesienia)`; pusta krotka = nie ma czego
-    proponować (brak obiektu, brak czasu ekspozycji albo brak `DATE-OBS` — zmierzone: 1 stos z 35)."""
+    KLATKA ZROBIONA PO ZINTEGROWANIU OBRAZU NIE JEST KANDYDATEM (AR-150, decyzja Zdzinia `O1`:
+    „rodowód nie może proponować flatów nowszych niż master"). Plik, który powstał po chwili
+    zapisu stosu (`integration.creation_time`, `XISF:CreationTime`), nie mógł do niego wejść, więc
+    propozycja go pomija - i nie przemilcza: liczba wraca TRZECIĄ WARTOŚCIĄ ZWROTU (wzór licznika
+    RAW-ów bez odniesienia), bo „klatki są, tylko powstały później" to inna odpowiedź niż „klatek
+    nie ma". Panel bez tej reguły podsuwał noce PO obrazie jak każde inne, a werdykt ręki nie ma
+    czym ich odróżnić: zmierzone na kopii żywej bazy - 9 stosów NGC7635 ma 270 wejść potwierdzonych
+    ręką, zrobionych po `creation_time` swojego stosu.
+    ZEGAR PORÓWNANIA JEST JEDEN - UTC. `creation_time` pisze UTC z sufiksem `Z` (zmierzone: 290 z 290
+    wartości, w pliku własność typu `String`; luka do sygnatury integracji ma medianę 11-13 min ZIMĄ
+    I LATEM - czas lokalny dałby zimą co najmniej 60, latem 120), `date_obs` FITS/XISF też, a RAW
+    przechodzi na UTC wskazanym odniesieniem, zanim stanie do porównania. RAW BEZ ODNIESIENIA nie
+    jest tu ani odcinany, ani liczony: nie wiadomo, kiedy powstał, więc zostaje w liczniku klatek
+    czekających na zegar. Master BEZ `creation_time` (albo z wartością bez sufiksu `Z`, której strefy
+    nie znamy) nie odcina niczego - oś, której master nie zna, nie zawęża. Licznik odsiewa teleskop PER KLATKĘ (granica licznika RAW-ów wyżej): na nocy mastera
+    z kartą-śmieciem klatka obcego teleskopu po zintegrowaniu nie zostanie policzona - populacja
+    rozjazdu teleskopu: 0. Porównanie ostre (`>`), po pełnych sekundach (`header_dt`).
+
+    Zwraca `(tuple[CandidateNight, …], raw_bez_odniesienia, po_zintegrowaniu)`; pusta krotka = nie
+    ma czego proponować (brak obiektu, brak czasu ekspozycji albo brak `DATE-OBS` - zmierzone: 1 stos
+    z 35)."""
     row = con.execute(
         "SELECT f.id AS frame_id, f.object_id, f.filter_canon, h.raw_json, "
-        "       tc.canon_id AS telescope_id, i.id AS integration_id, i.utc_offset_min "
+        "       tc.canon_id AS telescope_id, i.id AS integration_id, i.utc_offset_min, "
+        "       i.creation_time "
         "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
         "LEFT JOIN integration i ON i.master_frame_id = f.id "
         "WHERE f.id = ?", (master_frame_id,)).fetchone()
     if row is None or row["object_id"] is None:
-        return (), 0
+        return (), 0, 0
     t = rstack.read_testimony(json.loads(row["raw_json"]) if row["raw_json"] else {}, None)
     exptime = _to_float(t.exptime)
     start = t.window_start
     if start is None or not exptime:
-        return (), 0
+        return (), 0, 0
     osadzone = {int(r[0]) for r in con.execute(
         "SELECT input_frame_id FROM integration_input WHERE integration_id = ?",
         (row["integration_id"],)).fetchall()} if row["integration_id"] else set()
     noc_mastera = _night_key(start)
+    # UTC (`Z`) - patrz docstring; None nie tnie. Wartość BEZ sufiksu `Z` też nie tnie: `header_dt`
+    # strefę gubi, a czas lokalny przyciąłby propozycję w złej osi bez śladu (populacja dziś 0 z 290).
+    ct = row["creation_time"]
+    zintegrowany = header_dt(ct) if isinstance(ct, str) and ct.rstrip().endswith("Z") else None
     wg_nocy = {}
     raw_bez_odniesienia = 0
+    po_zintegrowaniu = 0
     for r in _window_candidates(con, object_id=row["object_id"], exptime=exptime):
         if r["frame_id"] in osadzone:
             continue
         if not exposure_matches(r["exptime"], exptime):
-            continue                       # SQL dał NADZBIÓR (pas ± sufit) — próg rozstrzyga tu
+            continue                       # SQL dał NADZBIÓR (pas ± sufit) - próg rozstrzyga tu
         if row["filter_canon"] and r["filter_canon"] != row["filter_canon"]:
             continue
         # TELESKOP NIE ODSIEWA TU - rozstrzyga go reguła niżej, po podziale na noce (B3a-2).
@@ -614,7 +639,7 @@ def propose_lineage_candidates(con, master_frame_id):
         if r["filetype"] == "raw":
             # `is None` WYSTARCZA I NIE POTRZEBUJE DRUGIEJ OCHRONY. `integration.utc_offset_min`
             # jest kolumną INTEGER (0016), a jej jedyny pisarz `repo.set_integration_offset`
-            # odrzuca wszystko poza `int`/`None` — token `offset_unknown` mieszka w CHECK-u
+            # odrzuca wszystko poza `int`/`None` - token `offset_unknown` mieszka w CHECK-u
             # SĄSIEDNIEJ kolumny `unresolved_reason` i tutaj nie ma jak trafić. Pin imienny, bo
             # bramka pakietu 3a (0808) dostała ten sam fałszywy zarzut od DWÓCH silników naraz:
             # oba czytały nazwę tokenu jako wartość offsetu i proponowały strażnika na stan
@@ -624,6 +649,13 @@ def propose_lineage_candidates(con, master_frame_id):
                     raw_bez_odniesienia += 1  # NIE `continue` po cichu - patrz docstring
                 continue
             czas -= timedelta(minutes=row["utc_offset_min"])
+        if zintegrowany is not None and czas > zintegrowany:
+            # PO ZINTEGROWANIU OBRAZU - nie mogła do niego wejść (AR-150). Odcięcie stoi PRZED
+            # podziałem na noce, bo taka klatka nie ma też prawa głosować w regule teleskopu nocy
+            # mastera; licznik odsiewa teleskop per klatkę - granica w docstringu.
+            if not obcy:
+                po_zintegrowaniu += 1
+            continue
         wg_nocy.setdefault(_night_key(czas), []).append(r)
     rozjazd_mastera = False
     for n in list(wg_nocy):
@@ -639,7 +671,7 @@ def propose_lineage_candidates(con, master_frame_id):
                        telescope_mismatch=(n == noc_mastera and rozjazd_mastera))
         for n in sorted(wg_nocy, key=lambda n: (n != noc_mastera,
                                                 abs((_date(n) - _date(noc_mastera)).days), n))
-    ), raw_bez_odniesienia
+    ), raw_bez_odniesienia, po_zintegrowaniu
 
 
 def _night_key(t):

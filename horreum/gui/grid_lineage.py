@@ -156,17 +156,19 @@ class LineageBar(QWidget):
         self._busy = False
         self._offset_hint = None        # propozycja z rdzenia (`stacks.propose_offset_minutes`)
         self._nights = ()               # propozycje z rdzenia (`stacks.propose_lineage_candidates`)
-        self._raw_bez_odniesienia = 0   # druga wartość tamtego zwrotu — kandydaci bez zegara
+        self._raw_bez_odniesienia = 0   # druga wartość tamtego zwrotu - kandydaci bez zegara
+        self._po_zintegrowaniu = 0      # trzecia - klatki zrobione po zintegrowaniu obrazu (AR-150)
         self._note_base = ""            # nota sprzed trybu propozycji (combo jej nie zjada)
         self._warn_base = ""            # ostrzeżenie sprzed trybu propozycji (noc dokłada swoje)
         self.set_lineage(None, [])
 
     def set_lineage(self, head, inputs, *, hint=None, candidates=(), raw_unreferenced=0,
-                    candidate_paths=None):
+                    after_integration=0, candidate_paths=None):
         """Wypełnij panel. `head` = wiersz `queries.stack_lineage_head` (albo `None`), `inputs` =
         wiersze `queries.stack_lineage_inputs`, `hint` = gotowe zdanie, gdy nie ma czego pokazać
-        (złe zaznaczenie / rodowód nieliczony), `candidates` + `raw_unreferenced` = obie wartości
-        zwrotu `stacks.propose_lineage_candidates`. Zero SQL i zero decyzji — sama prezentacja.
+        (złe zaznaczenie / rodowód nieliczony), `candidates` + `raw_unreferenced` +
+        `after_integration` = trzy wartości zwrotu `stacks.propose_lineage_candidates`. Zero SQL
+        i zero decyzji - sama prezentacja.
 
         PROPOZYCJE WCHODZĄ TYLKO W PUSTKĘ i to jest granica, nie optymalizacja: gdy stos MA wejścia,
         lista jest zapisem faktu, a doklejenie do niej ofert kazałoby odróżniać jedno od drugiego
@@ -175,7 +177,11 @@ class LineageBar(QWidget):
         `raw_unreferenced` PRZYCHODZI OSOBNO, BO NIESIE INNĄ RECEPTĘ NIŻ PUSTA LISTA: „kandydaci są,
         tylko nie znam zegara tego obrazu" prowadzi do gestu odniesienia, a „nie ma kandydatów" nie
         prowadzi nigdzie. Bez tej wartości panel mówił 6 obrazom kubełka, że archiwum jest puste,
-        gdy stało w nim po 36 klatek (bramka pakietu 3a, 0808)."""
+        gdy stało w nim po 36 klatek (bramka pakietu 3a, 0808).
+
+        `after_integration` IDZIE TĄ SAMĄ DROGĄ I Z TEGO SAMEGO POWODU (AR-150): klatki zrobione po
+        zintegrowaniu obrazu propozycja pomija, a panel mówi ile - inaczej obraz, którego cały
+        materiał powstał później, słyszałby, że archiwum nie ma ani jednej klatki."""
         self.items.clear()
         self.items.setMaximumHeight(_LINEAGE_LIST_MAX_H)   # oś kalibracji zaniża sufit do treści
         self._head = head
@@ -184,6 +190,7 @@ class LineageBar(QWidget):
         # z trybu propozycji i licznik kandydatów mówiłby o POPRZEDNIM obrazie.
         self._nights = ()
         self._raw_bez_odniesienia = raw_unreferenced
+        self._po_zintegrowaniu = after_integration
         if head is None:
             # Brak materiału ZAWSZE mówi zdaniem — także w stanie startowym, zanim ktokolwiek
             # cokolwiek zaznaczył. Pusty panel bez wyjaśnienia czyta się jak awaria.
@@ -224,9 +231,16 @@ class LineageBar(QWidget):
             # ZDANIE POWODU MÓWI TYLKO TO, CO SPRAWDZONO (wizytacja natywna): `no_candidates` znaczy
             # „okno NAGŁÓWKA nic nie wybrało", a nie „archiwum nic nie ma" - pod spodem stoi noc
             # obrazu z dziesiątkami kandydatów. Przy materiale w propozycji powód mówi węziej.
-            if (head["unresolved_reason"] == REASON_NO_CANDIDATES_TOKEN and not _lineage_stale(head)
-                    and any(n.frames for n in candidates)):
-                powod = i18n.t("grid.lin.reason.no_candidates_window")
+            # Ta sama węższa mowa, gdy CAŁY pasujący materiał powstał po zintegrowaniu obrazu
+            # (AR-150): „nie ma ani jednej pasującej klatki" nad notą „pominiętych 66 klatek
+            # nowszych niż obraz" jest prawdą o oknie, ale czyta się jak sprzeczność - bliźniak
+            # zdania, które nota wypiera w `_fill_night`. Liczba zostaje w nocie. RAW bez zegara
+            # wyklucza ten wariant: o nim nie wiadomo, kiedy powstał.
+            if head["unresolved_reason"] == REASON_NO_CANDIDATES_TOKEN and not _lineage_stale(head):
+                if any(n.frames for n in candidates):
+                    powod = i18n.t("grid.lin.reason.no_candidates_window")
+                elif after_integration and not raw_unreferenced:
+                    powod = i18n.t("grid.lin.reason.no_candidates_after_integration")
             self.head.setText(powod)
             self.note.set_full_text(info)
             if candidates:
@@ -319,19 +333,28 @@ class LineageBar(QWidget):
             self.items.addItem(it)
         widac_liste = self.items.count() > 0
         gdzie_indziej = sum(len(n.frames) for n in self._nights) - len(klatki)
-        # TRZY RÓŻNE PUSTKI, TRZY RECEPTY — i to jest sedno naprawy z bramki 3a. „Nie ma nic"
+        # TRZY RÓŻNE PUSTKI, TRZY RECEPTY - i to jest sedno naprawy z bramki 3a. „Nie ma nic"
         # i „są klatki, których nie umiem umieścić w czasie" prowadzą w zupełnie inne miejsca:
         # pierwsze donikąd, drugie wprost do gestu odniesienia (przycisk niżej sam się zapala).
         # Wspólne zdanie kłamało 6 obrazom kubełka, że archiwum jest puste, gdy stało w nim po 36.
+        #
+        # KLATKI PO ZINTEGROWANIU OBRAZU (AR-150) MÓWIĄ WŁASNYM ZDANIEM PRZY KAŻDEJ NOCY, bo
+        # pominięcie dotyczy obrazu, nie wybranej nocy; zero = cisza. To zdanie wypiera też
+        # „archiwum nie ma ani jednej klatki" - klatki SĄ, tylko powstały po obrazie.
+        po_obrazie = (i18n.t_plural("grid.lin.cand.after_integration", self._po_zintegrowaniu)
+                      if self._po_zintegrowaniu else "")
         if klatki:
             podpowiedz = ""
         elif gdzie_indziej:
             podpowiedz = i18n.t_plural("grid.lin.cand.empty_night", gdzie_indziej)
         elif self._raw_bez_odniesienia:
             podpowiedz = i18n.t_plural("grid.lin.cand.no_reference", self._raw_bez_odniesienia)
+        elif po_obrazie:
+            podpowiedz = ""
         else:
             podpowiedz = i18n.t("grid.lin.cand.empty_all", n=0)
-        self.note.set_full_text(" · ".join(x for x in (self._note_base, podpowiedz) if x))
+        self.note.set_full_text(" · ".join(x for x in (self._note_base, podpowiedz, po_obrazie)
+                                           if x))
         # ROZJAZD TELESKOPU NOCY (B3a-2) - to samo zdanie, co przy gotowym rodowodzie, bo to ten
         # sam fakt z tej samej reguły (`stacks._telescope_rule`): klatki tej nocy zapisał inny
         # teleskop niż karta obrazu. Stoi przy NOCY, nie przy obrazie - przełączenie na inną noc
@@ -372,10 +395,11 @@ class LineageBar(QWidget):
         to robota na jedno kliknięcie, nie brak; luka - wygaszona, bo archiwum nie ma czego dać."""
         self.items.clear()
         self._head = None
-        # OŚ KALIBRACJI TO WYJŚCIE Z TRYBU PROPOZYCJI (G2-3d) - obie wartości gasną, bo obie opisują
+        # OŚ KALIBRACJI TO WYJŚCIE Z TRYBU PROPOZYCJI (G2-3d) - wszystkie wartości gasną, bo opisują
         # materiał POPRZEDNIEGO obrazu. `set_lineage` zeruje je swoją drogą; ta metoda go nie woła.
         self._nights = ()
         self._raw_bez_odniesienia = 0
+        self._po_zintegrowaniu = 0
         self._relacje = list(relations)
         self._light_id = light_frame_id
         for r in relations:

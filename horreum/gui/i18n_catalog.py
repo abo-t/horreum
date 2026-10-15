@@ -2858,6 +2858,17 @@ CATALOG = {
                "other": "There are {n} matching DSLR frames, but this image's clock is unknown - "
                         "point the time reference with the button below."},
     },
+    # KLATKI ZROBIONE PO ZINTEGROWANIU OBRAZU (AR-150): propozycja je pomija, bo nie mogły do niego
+    # wejść, a zdanie mówi ile - „klatki są, tylko powstały później" to inna odpowiedź niż pustka.
+    # Liczba się odmienia (1 klatka, 2 klatki, 5 klatek, 12 klatek, 22 klatki).
+    "grid.lin.cand.after_integration": {
+        "pl": {"one": "Pominięta {n} klatka nowsza niż obraz (zrobiona po jego zintegrowaniu).",
+               "few": "Pominięte {n} klatki nowsze niż obraz (zrobione po jego zintegrowaniu).",
+               "many": "Pominiętych {n} klatek nowszych niż obraz (zrobionych po jego "
+                       "zintegrowaniu)."},
+        "en": {"one": "Skipped {n} frame newer than the image (shot after it was integrated).",
+               "other": "Skipped {n} frames newer than the image (shot after it was integrated)."},
+    },
     "grid.lin.offset": {
         "pl": "Wskaż odniesienie czasu…",
         "en": "Set time reference…",
@@ -2997,6 +3008,14 @@ CATALOG = {
         "pl": "Nie wiem, z czego powstał: okno nagłówka nie wybrało żadnej klatki - poniżej materiał "
               "do potwierdzenia.",
         "en": "Unknown source: the header window picked no frame - material to confirm below.",
+    },
+    # Bliźniak wariantu wyżej (AR-150): pasujący materiał JEST, ale cały powstał po zintegrowaniu
+    # obrazu - bez liczby, bo liczbę niesie nota (`grid.lin.cand.after_integration`).
+    "grid.lin.reason.no_candidates_after_integration": {
+        "pl": "Nie wiem, z czego powstał: pasujące klatki są w archiwum, ale wszystkie powstały "
+              "dopiero po zintegrowaniu tego obrazu.",
+        "en": "Unknown source: the archive's matching frames were all shot after this image was "
+              "integrated.",
     },
     # Recepta „Cofnij" po werdykcie ręki - powrót do stanu sprzed gestu (D-1011-4).
     "grid.lin.undo": {"pl": "Cofnij werdykt", "en": "Undo the verdict"},
@@ -6028,6 +6047,654 @@ CATALOG = {
         "pl": "wersja decyzji ręki sprzed aktualizacji nieznana - nagrobek zostaje do oka",
         "en": "the version of the manual decision from before the update is unknown - the "
               "exclusion stays for review"},
+    # --- Powody warstwy pisarza karty i renamu (AR-148) - ta sama rodzina `objchg.item.<kod>`:
+    # jedna przestrzeń kodów powodów rdzenia zapisu (pozycje gestu, renam, pisarz karty, cofnięcie,
+    # odzysk); PL znak w znak jak zdanie rdzenia (test AST), `{detail}` z tekstem systemu zostaje
+    # prozą.
+    # Fragmenty powodów: drogi wyjścia z izolacji (gest okna + wywołanie rdzenia; etykiety EN =
+    # `grid.inplace.*`) i cechy rozjazdu pliku (lista `features`).
+    "objchg.item.way_finish": {
+        "pl": "„Dokończ zapis” (`finish_inplace({op_id})`)",
+        "en": "“Finish the write” (`finish_inplace({op_id})`)"},
+    "objchg.item.way_restore": {
+        "pl": "„Przywróć nagłówek sprzed zapisu” (`recover_torn({op_id})`)",
+        "en": "“Restore the header from before the write” (`recover_torn({op_id})`)"},
+    "objchg.item.way_manual": {
+        "pl": "nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację: w "
+              "Zbiorach zaznacz klatkę i z menu prawego kliku wybierz „Zwolnij plik do skanu…” "
+              "(`writeback.release_isolation`)",
+        "en": "undecidable - restore the file from a full copy by hand, then release the "
+              "isolation: in Collections select the frame and pick “Release the file to the "
+              "scan…” from the right-click menu (`writeback.release_isolation`)"},
+    "objchg.item.way_resume_return": {
+        "pl": "przerwany powrót tej operacji - ponów: {way}",
+        "en": "an interrupted way back of this operation - retry: {way}"},
+    "objchg.item.way_retry": {"pl": "ponów: {way}", "en": "retry: {way}"},
+    "objchg.item.way_retry_open": {
+        "pl": "operacja zostaje otwarta, ponów {way}",
+        "en": "the operation stays open, retry {way}"},
+    "objchg.item.way_retry_written": {
+        "pl": "operacja zostaje 'written', ponów {way}",
+        "en": "the operation stays 'written', retry {way}"},
+    "objchg.item.changed_in_window": {
+        "pl": "plik zmienił się między odczytem a podmianą ({features})",
+        "en": "the file changed between reading and replacing ({features})"},
+    "objchg.item.feat_ino": {"pl": "st_ino", "en": "st_ino"},
+    "objchg.item.feat_size": {"pl": "rozmiar", "en": "size"},
+    "objchg.item.feat_mtime": {"pl": "mtime", "en": "mtime"},
+    "objchg.item.feat_header": {"pl": "nagłówek", "en": "header"},
+    "objchg.item.feat_sample": {"pl": "próbka danych", "en": "data sample"},
+    "objchg.item.feat_unreadable": {"pl": "nieczytelny ({detail})", "en": "unreadable ({detail})"},
+    "objchg.item.feat_file_size": {"pl": "rozmiar pliku", "en": "file size"},
+    "objchg.item.feat_header_bytes": {"pl": "bajty nagłówka", "en": "header bytes"},
+    "objchg.item.feat_header_hash": {"pl": "header_hash", "en": "header_hash"},
+    # Pisarz karty: droga atomowa, podmiana systemowa, cofnięcie atomowe.
+    "objchg.item.verify_read_failed": {
+        "pl": "plik PODMIENIONY, ale odczyt po zapisie padł - {detail}",
+        "en": "file REPLACED, but reading it back after writing failed - {detail}"},
+    "objchg.item.verify_mismatch": {
+        "pl": "plik PODMIENIONY, ale odczyt po zapisie pokazuje inny nagłówek niż zapisany",
+        "en": "file REPLACED, but reading it back shows a different header than the one written"},
+    "objchg.item.replace_copy_missing": {
+        "pl": "system zgłosił podmianę, ale kopii pliku wypartego ({copy}) brak - nie da się "
+              "sprawdzić, czy ktoś zmienił plik w oknie podmiany",
+        "en": "the system reported the replacement, but the copy of the displaced file ({copy}) "
+              "is missing - there is no way to check whether someone changed the file during the "
+              "replacement"},
+    "objchg.item.replace_cut_copy_back_failed": {
+        "pl": "podmiana przerwana ({detail}): oryginał leży pod {copy}, a pod {path} pliku nie "
+              "ma; powrót kopii też padł ({error}) - przenieś {copy} na {path} ręcznie",
+        "en": "replacement interrupted ({detail}): the original is at {copy}, and there is no "
+              "file at {path}; moving the copy back failed too ({error}) - move {copy} to {path} "
+              "by hand"},
+    "objchg.item.replace_cut_both_missing": {
+        "pl": "podmiana przerwana ({detail}): ani {path}, ani kopia {copy} nie istnieją - dane "
+              "pliku są w pliku tymczasowym {tmp}, zostaje na dysku",
+        "en": "replacement interrupted ({detail}): neither {path} nor the copy {copy} exists - "
+              "the file's data is in the temporary file {tmp}, which stays on disk"},
+    "objchg.item.return_cut": {
+        "pl": "{change}; powrót wersji innego pisarza ({copy}) przerwany: {inner}",
+        "en": "{change}; returning the other writer's version ({copy}) was interrupted: {inner}"},
+    "objchg.item.return_failed_manual": {
+        "pl": "{change} - pod {path} stoi wersja zbudowana ze stanu SPRZED tej zmiany, a wersja "
+              "innego pisarza leży pod {copy}; jej powrót padł ({detail}) - przenieś {copy} na "
+              "{path} ręcznie",
+        "en": "{change} - {path} holds a version built from the state BEFORE that change, and the "
+              "other writer's version is at {copy}; returning it failed ({detail}) - move {copy} "
+              "to {path} by hand"},
+    "objchg.item.third_writer": {
+        "pl": "{change}, a w oknie powrotu kolejny pisarz zmienił plik ({features}): pod {path} "
+              "wersja innego pisarza z okna podmiany, pod {copy} wersja wyparta w oknie powrotu - "
+              "obie zostają, rozstrzygnij ręcznie; zmiana NIE zapisana",
+        "en": "{change}, and during the way back yet another writer changed the file "
+              "({features}): {path} holds the other writer's version from the replacement window, "
+              "{copy} holds the version displaced during the way back - both stay, decide by "
+              "hand; the change was NOT written"},
+    "objchg.item.other_writer_returned": {
+        "pl": "{change} - wersja innego pisarza wróciła na miejsce, zmiana NIE zapisana; ponów po "
+              "odświeżeniu stagingu",
+        "en": "{change} - the other writer's version is back in place, the change was NOT "
+              "written; retry after refreshing the staging"},
+    "objchg.item.displaced_unreadable": {
+        "pl": "plik podmieniony, ale kopii pliku wypartego nie da się przeczytać ({detail}) - "
+              "zostaje pod {copy}",
+        "en": "file replaced, but the copy of the displaced file cannot be read ({detail}) - it "
+              "stays at {copy}"},
+    "objchg.item.confirm_lost_copy_kept": {
+        "pl": "potwierdzenie podmiany w bazie przepadło - kopia pliku sprzed zapisu zostaje pod "
+              "{copy} do rekoncyliacji (następny zapis albo cofnięcie tej lokacji)",
+        "en": "confirming the replacement in the database was lost - the copy of the file from "
+              "before the write stays at {copy} for reconciliation (the next write or undo of "
+              "this location)"},
+    "objchg.item.close_failed_copy_left": {
+        "pl": "zamknięcie transakcji podmiany padło - kopia pliku sprzed tej operacji została pod "
+              "{copy} i nic jej nie sprzątnie; zgodna z plikiem sprzed operacji - po sprawdzeniu "
+              "można ją skasować ręcznie",
+        "en": "closing the replacement transaction failed - the copy of the file from before this "
+              "operation stays at {copy} and nothing will clean it up; it matches the file from "
+              "before the operation - after checking you can delete it by hand"},
+    "objchg.item.copy_not_removed": {
+        "pl": "kopia pliku sprzed podmiany została pod {copy} ({detail}) - zgodna z plikiem "
+              "sprzed zapisu, można ją skasować",
+        "en": "the copy of the file from before the replacement stays at {copy} ({detail}) - it "
+              "matches the file from before the write, you can delete it"},
+    "objchg.item.comment_cut": {
+        "pl": "zmiana wartości karty {keyword} ucięłaby zastany komentarz z {before} do {after} "
+              "znaków (karta FITS po zmianie ma pole wartości stałego formatu) - plik nietknięty; "
+              "zapisz zmianę razem z komentarzem skróconym do {after} znaków albo wybierz krótszą "
+              "wartość",
+        "en": "changing the value of card {keyword} would cut the existing comment from {before} "
+              "to {after} characters (after the change the FITS card has a fixed-format value "
+              "field) - file untouched; write the change together with a comment shortened to "
+              "{after} characters or pick a shorter value"},
+    "objchg.item.raw_read_only": {
+        "pl": "format RAW jest read-only (#2)",
+        "en": "RAW format is read-only (#2)"},
+    "objchg.item.header_hash_mismatch": {
+        "pl": "header_hash mismatch",
+        "en": "header_hash mismatch - the header changed since staging"},
+    "objchg.item.undo_header_changed": {
+        "pl": "header_hash mismatch",
+        "en": "header_hash mismatch - the header changed since the commit"},
+    "objchg.item.backup_not_saved": {
+        "pl": "backup do cofnięcia NIE powstał, więc podmiany nie było - plik nietknięty: "
+              "{detail}",
+        "en": "the backup for undo was NOT saved, so no replacement happened - file untouched: "
+              "{detail}"},
+    "objchg.item.undo_bytes_unverified": {
+        "pl": "nagłówek przywrócony bajt w bajt; całego pliku nie porównano - backup commitu nie "
+              "niesie sha1 pliku sprzed zapisu",
+        "en": "header restored byte for byte; the whole file was not compared - the commit's "
+              "backup carries no sha1 of the file from before the write"},
+    "objchg.item.undo_semantic_outside": {
+        "pl": "cofnięte semantycznie - nagłówek przywrócony bajt w bajt, ale plik różni się od "
+              "stanu sprzed commitu poza nagłówkiem (sha1 całego pliku)",
+        "en": "restored semantically - header restored byte for byte, but the file differs from "
+              "its state before the commit outside the header (sha1 of the whole file)"},
+    "objchg.item.undo_semantic": {
+        "pl": "cofnięte semantycznie - nagłówek odtworzony z treści backupu, bajty pliku inne niż "
+              "przed commitem",
+        "en": "restored semantically - header rebuilt from the backup's content, the file's bytes "
+              "differ from before the commit"},
+    # Pisarz XISF (`_XisfRefusal`); `{detail}` z czytnika `scan` zostaje prozą (granica).
+    "objchg.item.xisf_unreadable": {
+        "pl": "nagłówek XISF nieczytelny - {detail}",
+        "en": "XISF header unreadable - {detail}"},
+    "objchg.item.xisf_many_images": {
+        "pl": "karty pod wieloma <Image> - cel zapisu niejednoznaczny (D-X-11)",
+        "en": "cards under several <Image> elements - the write target is ambiguous (D-X-11)"},
+    "objchg.item.xisf_no_identity": {
+        "pl": "tożsamość nieobliczalna (brak obrazu-attachmentu) - zapis rozdwoiłby klatkę "
+              "(D-X-13)",
+        "en": "identity cannot be computed (no image attachment) - the write would split the "
+              "frame in two (D-X-13)"},
+    "objchg.item.xisf_prop_rule": {
+        "pl": "własność {prop}: reguła nie liczy się dla {value} ({detail})",
+        "en": "property {prop}: the rule cannot be computed for {value} ({detail})"},
+    "objchg.item.xisf_prop_mismatch": {
+        "pl": "własność {prop} = {current}, a z karty {keyword}={card} wychodzi {derived} - "
+              "konwencji tego pliku NIE ROZUMIEM, więc jej nie ruszam",
+        "en": "property {prop} = {current}, but card {keyword}={card} gives {derived} - I do NOT "
+              "UNDERSTAND this file's convention, so I leave it alone"},
+    "objchg.item.xisf_card_exists": {
+        "pl": "karta {keyword} już istnieje - 'add' dopisałby drugą; zmiana wartości idzie przez "
+              "'set'",
+        "en": "card {keyword} already exists - 'add' would write a second one; changing the value "
+              "goes through 'set'"},
+    "objchg.item.xisf_prop_without_card": {
+        "pl": "plik nie ma karty {keyword}, ale ma własność {prop} - dopisanie karty mogłoby mu "
+              "zaprzeczyć, a bramki zrozumienia nie ma na czym postawić",
+        "en": "the file has no card {keyword}, but it has property {prop} - adding the card could "
+              "contradict it, and there is nothing to base an understanding check on"},
+    "objchg.item.xisf_bad_op": {
+        "pl": "operacja '{op}' na XISF nie istnieje - writeback zna 'set' i 'add'",
+        "en": "operation '{op}' does not exist for XISF - writeback knows 'set' and 'add'"},
+    "objchg.item.xisf_set_missing": {
+        "pl": "{detail} - 'set' nie zakłada karty; dopisanie idzie przez 'add' (P6d)",
+        "en": "{detail} - 'set' does not create a card; adding one goes through 'add' (P6d)"},
+    "objchg.item.xisf_attr_missing": {
+        "pl": "{detail} - dodanie atrybutu poza P6 (D-X-12)",
+        "en": "{detail} - adding an attribute is outside P6 (D-X-12)"},
+    "objchg.item.xisf_not_utf8": {
+        "pl": "nagłówek nie jest tekstem UTF-8 - backup do undo niemożliwy ({detail})",
+        "en": "the header is not UTF-8 text - a backup for undo is impossible ({detail})"},
+    "objchg.item.xisf_no_roundtrip": {
+        "pl": "nagłówek nie przechodzi round-tripu bajty→tekst→bajty - backup do undo byłby "
+              "nieodwracalny",
+        "en": "the header does not survive the bytes→text→bytes round trip - a backup for undo "
+              "would be irreversible"},
+    # Zapis w miejscu i odzysk rozdartego nagłówka.
+    "objchg.item.phase_not_saved": {
+        "pl": "faza '{phase}' NIE zapisana w dzienniku ({detail}) - lokacja zostaje izolowana",
+        "en": "phase '{phase}' NOT saved in the journal ({detail}) - the location stays isolated"},
+    "objchg.item.header_moved_before_write": {
+        "pl": "nagłówek na dysku zmienił się między odczytem a zapisem - plik nietknięty",
+        "en": "the header on disk changed between reading and writing - file untouched"},
+    "objchg.item.anchor_mismatch": {
+        "pl": "plik zmienił się od ostatniego skanu (sha1 całego pliku inny niż w bazie) - "
+              "kontrola danych po zapisie nie miałaby kotwicy; najpierw skan, plik nietknięty",
+        "en": "the file changed since the last scan (sha1 of the whole file differs from the "
+              "database) - the data check after writing would have no anchor; scan first, file "
+              "untouched"},
+    "objchg.item.journal_not_saved": {
+        "pl": "backup/dziennik operacji NIE powstał, więc zapisu nie było - plik nietknięty: "
+              "{detail}",
+        "en": "the backup/journal of the operation was NOT saved, so no write happened - file "
+              "untouched: {detail}"},
+    "objchg.item.inplace_cut": {
+        "pl": "zapis w miejscu przerwany - bajty nagłówka mogły się zmienić: {detail}",
+        "en": "in-place write interrupted - the header bytes may have changed: {detail}"},
+    "objchg.item.inplace_unfinished": {
+        "pl": "plik ZMIENIONY w miejscu i zweryfikowany, ale {inner} - operacja NIEUKOŃCZONA",
+        "en": "file CHANGED in place and verified, but {inner} - operation UNFINISHED"},
+    "objchg.item.inplace_verify_failed": {
+        "pl": "plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta padł - {detail}",
+        "en": "file CHANGED in place, but the client's control read failed - {detail}"},
+    "objchg.item.inplace_verify_mismatch": {
+        "pl": "plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta nie zgadza się: {features}",
+        "en": "file CHANGED in place, but the client's control read does not match: {features}"},
+    "objchg.item.handle_close_failed": {
+        "pl": "zamknięcie uchwytu padło - {detail}",
+        "en": "closing the handle failed - {detail}"},
+    "objchg.item.fb_replaced_since_commit": {
+        "pl": "plik podmieniony od commitu (rozmiar/st_ino) - cofnięcie atomowe",
+        "en": "file replaced since the commit (size/st_ino) - atomic undo"},
+    "objchg.item.fb_card_too_long": {
+        "pl": "karta {keyword} z zastanym komentarzem nie mieści się w jednym rekordzie 80 znaków",
+        "en": "card {keyword} with the existing comment does not fit in one 80-character record"},
+    "objchg.item.fb_compressed": {
+        "pl": "skompresowany master - nagłówek kafelkowy układa astropy",
+        "en": "compressed master - astropy lays out the tiled header"},
+    "objchg.item.checksum_present": {
+        "pl": "FITS z sumą kontrolną ({sums}) - zapis nagłówka unieważniłby ją, a pisarz jej nie "
+              "przelicza",
+        "en": "FITS with a checksum ({sums}) - writing the header would invalidate it, and the "
+              "writer does not recompute it"},
+    "objchg.item.fb_op_kind": {
+        "pl": "operacja {op}/{value_type} na {keyword} - układ karty zostaje przy astropy",
+        "en": "operation {op}/{value_type} on {keyword} - the card layout stays with astropy"},
+    "objchg.item.fb_not_text_card": {
+        "pl": "karta {keyword} nie jest zwykłą kartą tekstową",
+        "en": "card {keyword} is not an ordinary text card"},
+    "objchg.item.fb_card_present": {
+        "pl": "karta {keyword} już jest w nagłówku - dopisanie rozstrzyga droga atomowa",
+        "en": "card {keyword} is already in the header - the atomic route decides the addition"},
+    "objchg.item.fb_card_count": {
+        "pl": "karta {keyword} występuje {n} razy",
+        "en": "card {keyword} occurs {n} times"},
+    "objchg.item.fb_value_not_text": {
+        "pl": "zastana wartość {keyword} nie jest tekstem",
+        "en": "the existing value of {keyword} is not text"},
+    "objchg.item.fb_card_records": {
+        "pl": "karta {keyword} stoi w {n} rekordach wartości",
+        "en": "card {keyword} stands in {n} value records"},
+    "objchg.item.fb_continue": {
+        "pl": "karta {keyword} ma kontynuację CONTINUE",
+        "en": "card {keyword} has a CONTINUE continuation"},
+    "objchg.item.fb_no_room": {
+        "pl": "brak miejsca w nagłówku FITS: dopisanie potrzebuje {needed} za END w ostatnim bloku "
+              "2880 B, a jest {free} - nagłówek urósłby o blok i przesunął dane",
+        "en": "no room in the FITS header: the addition needs {needed} after END in the last "
+              "2880 B block, and the block has {free} - the header would grow by a block and "
+              "shift the data"},
+    "objchg.item.free_records": {
+        "pl": {"one": "{n} wolnego rekordu", "few": "{n} wolnych rekordów",
+               "many": "{n} wolnych rekordów"},
+        "en": {"one": "{n} free record", "other": "{n} free records"}},
+    "objchg.item.route_depends": {
+        "pl": "zależy od pliku: dopisanie karty {keyword} do FITS idzie w miejscu, gdy nagłówek ma "
+              "zapas (pusta karta na końcu albo wolny rekord za END w ostatnim bloku 2880 B), "
+              "inaczej przepisuje cały plik",
+        "en": "depends on the file: adding card {keyword} to FITS goes in place when the header "
+              "has spare room (an empty card at the end or a free record after END in the last "
+              "2880 B block), otherwise the whole file is rewritten"},
+    "objchg.item.undo_already_region": {
+        "pl": "już cofnięte - region nagłówka jest stanem sprzed commitu",
+        "en": "already undone - the header region is the state from before the commit"},
+    "objchg.item.undo_region_changed": {
+        "pl": "plik zmienił się od commitu - region nagłówka nie jest tym, który commit zapisał",
+        "en": "the file changed since the commit - the header region is not the one the commit "
+              "wrote"},
+    "objchg.item.inplace_other_file": {
+        "pl": "inny plik niż w chwili zapisu (rozmiar/st_ino); {way}",
+        "en": "a different file than at write time (size/st_ino); {way}"},
+    "objchg.item.not_torn_readable": {
+        "pl": "to nie jest rozdarcie tej operacji - nagłówek jest czytelny, ale to nie jest żaden "
+              "stan pośredni zapisu (obca zmiana); odzysk odmawia",
+        "en": "this is not a tear of this operation - the header is readable, but it is not any "
+              "intermediate state of the write (foreign change); recovery refuses"},
+    "objchg.item.not_torn_manual": {
+        "pl": "to nie jest rozdarcie tej operacji; {way}",
+        "en": "this is not a tear of this operation; {way}"},
+    # Orkiestracja zapisu kart: kontrola danych, dokończenie, rekoncyliacja backupu, wynik lokacji.
+    "objchg.item.data_identity_changed": {
+        "pl": "plik ZMIENIONY, ale sha1_data po zapisie ({sha1}) różni się od tożsamości klatki - "
+              "baza NIE zsynchronizowana",
+        "en": "file CHANGED, but sha1_data after writing ({sha1}) differs from the frame's "
+              "identity - database NOT synchronized"},
+    "objchg.item.check_header_other": {
+        "pl": "plik ZMIENIONY, ale nagłówek na dysku nie jest tym, który operacja zapisała "
+              "(header_hash) - baza NIE zsynchronizowana",
+        "en": "file CHANGED, but the header on disk is not the one the operation wrote "
+              "(header_hash) - database NOT synchronized"},
+    "objchg.item.check_no_anchor": {
+        "pl": "brak kotwicy sha1 pliku sprzed zapisu - kontrola bajtów poza nagłówkiem "
+              "niemożliwa, baza NIE zsynchronizowana",
+        "en": "no sha1 anchor of the file from before the write - checking bytes outside the "
+              "header is impossible, database NOT synchronized"},
+    "objchg.item.check_outside_changed": {
+        "pl": "plik ZMIENIONY, a bajty POZA regionem nagłówka różnią się od pliku sprzed zapisu "
+              "(sha1 pliku z podstawionym starym regionem != kotwica operacji) - baza NIE "
+              "zsynchronizowana",
+        "en": "file CHANGED, and the bytes OUTSIDE the header region differ from the file before "
+              "the write (sha1 of the file with the old region substituted != the operation's "
+              "anchor) - database NOT synchronized"},
+    "objchg.item.inplace_after_read": {
+        "pl": "lokacja dostała zapis w miejscu (operacja {op_id}, {op_kind}, faza {phase}) po "
+              "odczycie pliku do podmiany - plik tymczasowy powstał ze stanu sprzed niego; "
+              "podmiany nie było, plik nietknięty - ponów po odświeżeniu stagingu",
+        "en": "the location got an in-place write (operation {op_id}, {op_kind}, phase {phase}) "
+              "after the file was read for replacement - the temporary file was built from the "
+              "state before it; no replacement happened, the file is untouched - retry after "
+              "refreshing the staging"},
+    "objchg.item.no_operation": {"pl": "brak operacji {op_id}", "en": "no operation {op_id}"},
+    "objchg.item.finish_not_waiting": {
+        "pl": "operacja {op_id} jest w fazie {phase}, nie czeka na dokończenie",
+        "en": "operation {op_id} is in phase {phase}, it is not waiting to be finished"},
+    "objchg.item.finish_newer_op": {
+        "pl": "lokacja ma operację nowszą niż {op_id} - dokończenie odmawia",
+        "en": "the location has an operation newer than {op_id} - finishing refuses"},
+    "objchg.item.finish_region_changed": {
+        "pl": "region nagłówka na dysku nie jest wynikiem operacji {op_id} - plik zmienił się od "
+              "zapisu; {way}",
+        "en": "the header region on disk is not the result of operation {op_id} - the file "
+              "changed since the write; {way}"},
+    "objchg.item.synced_not_saved": {
+        "pl": "faza 'synced' NIE zapisana ({detail}), a z nią re-sync bazy - jedna transakcja "
+              "cofnięta w całości; {way}",
+        "en": "phase 'synced' NOT saved ({detail}), and with it the database re-sync - one "
+              "transaction rolled back as a whole; {way}"},
+    "objchg.item.resync_failed_retry": {
+        "pl": "plik ZMIENIONY, ale re-sync padł - {detail}; {way}",
+        "en": "file CHANGED, but the re-sync failed - {detail}; {way}"},
+    "objchg.item.check_failed_way_back": {
+        "pl": "{inner}; kontrola danych NIE przeszła - droga powrotu: {way} przywraca stary "
+              "nagłówek w miejscu i zwalnia plik do pełnego skanu",
+        "en": "{inner}; the data check did NOT pass - the way back: {way} restores the old header "
+              "in place and releases the file to a full scan"},
+    "objchg.item.backup_reconcile_failed": {
+        "pl": "backup commitu {commit_id} czeka na potwierdzenie podmiany, a rekoncyliacja z "
+              "dyskiem padła ({detail}) - lokacja zablokowana do ponowienia",
+        "en": "the backup of commit {commit_id} awaits confirmation of the replacement, and "
+              "reconciliation with the disk failed ({detail}) - the location is blocked until "
+              "retried"},
+    "objchg.item.backup_still_pending": {
+        "pl": "backup commitu {commit_id} nadal niepotwierdzony po odmowie rozstrzygnięcia - "
+              "lokacja zablokowana do ponowienia",
+        "en": "the backup of commit {commit_id} is still unconfirmed after the settlement was "
+              "refused - the location is blocked until retried"},
+    "objchg.item.backup_confirm_blocked": {
+        "pl": "backup commitu {commit_id} czeka na potwierdzenie podmiany; na dysku leży wersja "
+              "tego commitu, ale {inner}",
+        "en": "the backup of commit {commit_id} awaits confirmation of the replacement; the disk "
+              "holds this commit's version, but {inner}"},
+    "objchg.item.commit_cut_unproven": {
+        "pl": "przerwany commit {commit_id}: stanu plików nie da się dowieść pełnym sha1 - "
+              "zostają do oka: {paths}; zmiana NIE potwierdzona, cofnięcie tego commitu nic nie "
+              "ruszy",
+        "en": "interrupted commit {commit_id}: the state of the files cannot be proven with a "
+              "full sha1 - left for review: {paths}; the change is NOT confirmed, undoing this "
+              "commit will touch nothing"},
+    "objchg.item.commit_cut_other_returned": {
+        "pl": "przerwany commit {commit_id}: inny program zmienił plik w oknie podmiany - jego "
+              "wersja wróciła pod ścieżkę, zmiana NIE zapisana, cofnięcie tego commitu nic nie "
+              "ruszy; odśwież staging i zatwierdź ponownie",
+        "en": "interrupted commit {commit_id}: another program changed the file during the "
+              "replacement - its version is back at the path, the change was NOT written, undoing "
+              "this commit will touch nothing; refresh the staging and confirm again"},
+    "objchg.item.commit_cut_copy_left": {
+        "pl": "przerwany commit {commit_id}: rozpoznanej kopii {path} nie dało się usunąć - "
+              "lokacja zablokowana, ponowienie zapisu albo cofnięcia dokończy rekoncyliację",
+        "en": "interrupted commit {commit_id}: the recognized copy {path} could not be deleted - "
+              "the location is blocked; retrying the write or the undo will finish the "
+              "reconciliation"},
+    "objchg.item.commit_cut_return_cut": {
+        "pl": "przerwany commit {commit_id}: powrót wersji innego pisarza przerwany - {inner}",
+        "en": "interrupted commit {commit_id}: returning the other writer's version was "
+              "interrupted - {inner}"},
+    "objchg.item.commit_cut_return_failed": {
+        "pl": "przerwany commit {commit_id}: powrót wersji innego pisarza pod ścieżkę nie zaszedł "
+              "({detail}) - pod {path} nasza wersja, wersja innego pisarza pod {copy}, obie "
+              "zostają; ponowienie zapisu albo cofnięcia tej lokacji dokończy powrót, a gdy plik "
+              "pozostaje zajęty - przenieś {copy} na {path} ręcznie",
+        "en": "interrupted commit {commit_id}: returning the other writer's version to the path "
+              "did not happen ({detail}) - {path} holds our version, {copy} holds the other "
+              "writer's version, both stay; retrying the write or the undo of this location will "
+              "finish the way back, and if the file stays in use - move {copy} to {path} by hand"},
+    "objchg.item.backup_changed_during": {
+        "pl": "backup commitu {commit_id}: plik zmienił się w trakcie rekoncyliacji - lokacja "
+              "zablokowana do ponowienia",
+        "en": "the backup of commit {commit_id}: the file changed during reconciliation - the "
+              "location is blocked until retried"},
+    "objchg.item.returned_not_read": {
+        "pl": "baza nie odczytała jeszcze wróconej wersji ({detail}) - najbliższy skan przeczyta "
+              "plik od nowa",
+        "en": "the database has not read the returned version yet ({detail}) - the next scan will "
+              "read the file again"},
+    "objchg.item.compressed_master": {
+        "pl": "skompresowany master - edycja poza krokiem 4",
+        "en": "compressed master - editing is outside step 4"},
+    "objchg.item.no_fallback": {
+        "pl": "nie mieści się w miejscu (tryb bez spadku): {detail}",
+        "en": "does not fit in place (mode without fallback): {detail}"},
+    "objchg.item.replace_unconfirmed": {
+        "pl": "{inner}; podmiana niepotwierdzona, backup do cofnięcia zapisany w commicie "
+              "{commit_id}",
+        "en": "{inner}; replacement unconfirmed, the backup for undo is saved in commit "
+              "{commit_id}"},
+    "objchg.item.backup_saved_in": {
+        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}",
+        "en": "{inner}; the backup for undo is saved in commit {commit_id}"},
+    "objchg.item.backup_saved_in_isolated": {
+        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja IZOLOWANA od "
+              "skanu, odzysk: {way}",
+        "en": "{inner}; the backup for undo is saved in commit {commit_id}; the location is "
+              "ISOLATED from the scan, recovery: {way}"},
+    "objchg.item.finish_failed_isolated": {
+        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja IZOLOWANA od "
+              "skanu",
+        "en": "{inner}; the backup for undo is saved in commit {commit_id}; the location is "
+              "ISOLATED from the scan"},
+    "objchg.item.finish_failed_isolated_release": {
+        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja IZOLOWANA od "
+              "skanu, zwolnienie ręką: w Zbiorach z menu prawego kliku „Zwolnij plik do skanu…” "
+              "albo writeback.release_isolation({op_id})",
+        "en": "{inner}; the backup for undo is saved in commit {commit_id}; the location is "
+              "ISOLATED from the scan, release by hand: in Collections pick “Release the file to "
+              "the scan…” from the right-click menu, or writeback.release_isolation({op_id})"},
+    "objchg.item.resync_failed": {
+        "pl": "plik ZMIENIONY, ale re-sync padł - {detail}",
+        "en": "file CHANGED, but the re-sync failed - {detail}"},
+    # Renam: staging, rekoncyliacja zamiarów, cofnięcie.
+    "objchg.item.rename_undone": {"pl": "cofnięto (undo)", "en": "undone"},
+    "objchg.item.rename_undone_because": {
+        "pl": "cofnięto (undo) - {inner}",
+        "en": "undone - {inner}"},
+    "objchg.item.reconcile_failed": {
+        "pl": "rekoncyliacja padła ({detail}) - zamiar zostaje",
+        "en": "reconciliation failed ({detail}) - the intent stays"},
+    "objchg.item.no_location_row": {"pl": "brak location", "en": "no location"},
+    "objchg.item.intent_closed_no_location": {
+        "pl": "brak location - zamiar zamknięty",
+        "en": "no location - intent closed"},
+    "objchg.item.disk_silent": {
+        "pl": "dysk nie odpowiada ({detail}) - zamiar zostaje",
+        "en": "the disk does not respond ({detail}) - the intent stays"},
+    "objchg.item.intent_both_names": {
+        "pl": "plik pod obiema nazwami ({src} / {dst}) - zamiar zostaje, rozstrzyga człowiek",
+        "en": "the file is under both names ({src} / {dst}) - the intent stays, a person decides"},
+    "objchg.item.intent_no_name": {
+        "pl": "plik pod żadną z nazw ({src} / {dst}) - zamiar zostaje, rozstrzyga człowiek",
+        "en": "the file is under neither name ({src} / {dst}) - the intent stays, a person "
+              "decides"},
+    "objchg.item.intent_mtime_differs": {
+        "pl": "plik pod {path} ma mtime {mtime}, kopia w bazie {db_mtime} - to może nie być ten "
+              "plik; zamiar zostaje, rozstrzyga człowiek",
+        "en": "the file at {path} has mtime {mtime}, the copy in the database {db_mtime} - this "
+              "may not be the same file; the intent stays, a person decides"},
+    "objchg.item.intent_sha1_differs": {
+        "pl": "plik pod {path} ma inną treść niż kopia w bazie (sha1) - to nie jest ten plik; "
+              "zamiar zostaje, rozstrzyga człowiek",
+        "en": "the file at {path} has different content than the copy in the database (sha1) - it "
+              "is not the same file; the intent stays, a person decides"},
+    "objchg.item.intent_changed": {
+        "pl": "{inner} - nic nie zmieniono, następna rekoncyliacja zobaczy stan bieżący",
+        "en": "{inner} - nothing changed, the next reconciliation will see the current state"},
+    "objchg.item.intent_target_taken": {
+        "pl": "{inner} - skan wciągnął plik jako nową kopię; zamiar zostaje (lokacja {location} "
+              "pod {path} niesie historię renamu)",
+        "en": "{inner} - the scan pulled the file in as a new copy; the intent stays (location "
+              "{location} at {path} carries the move history)"},
+    "objchg.item.reconciled_relocated": {
+        "pl": "baza przepięta na {path}",
+        "en": "database moved to {path}"},
+    "objchg.item.reconciled_in_sync": {
+        "pl": "baza zgodna z plikiem ({path})",
+        "en": "database matches the file ({path})"},
+    "objchg.item.rename_changed_since_preview": {
+        "pl": "plik zmieniony od podglądu (mtime/ścieżka)",
+        "en": "the file changed since the preview (mtime/path)"},
+    "objchg.item.not_on_commit_name": {
+        "pl": "plik nie stoi na nazwie z commitu",
+        "en": "the file is not at the name from the commit"},
+    "objchg.item.intent_settled_elsewhere": {
+        "pl": "zamiar renamu {rename_id} rozstrzygnięty przez inny proces po obserwacji dysku",
+        "en": "move intent {rename_id} was settled by another process after the disk was observed"},
+    "objchg.item.intent_file_moved": {
+        "pl": "plik renamu {rename_id} zmienił miejsce po obserwacji dysku",
+        "en": "the file of move {rename_id} changed place after the disk was observed"},
+    # Cofnięcie commitu, odzysk, droga powrotu, zwolnienie izolacji.
+    "objchg.item.undo_resync_failed": {
+        "pl": "nagłówek PRZYWRÓCONY, ale re-sync padł - {detail}; ponowne undo dokończy samą "
+              "synchronizację",
+        "en": "header RESTORED, but the re-sync failed - {detail}; another undo will finish only "
+              "the database synchronization"},
+    "objchg.item.isolated_suffix": {
+        "pl": "{inner}; lokacja IZOLOWANA od skanu",
+        "en": "{inner}; the location is ISOLATED from the scan"},
+    "objchg.item.undo_finish_failed": {
+        "pl": "nagłówek PRZYWRÓCONY, ale {inner}; lokacja IZOLOWANA od skanu - ponowne undo "
+              "dokończy samą synchronizację",
+        "en": "header RESTORED, but {inner}; the location is ISOLATED from the scan - another "
+              "undo will finish only the database synchronization"},
+    "objchg.item.undo_not_replaced": {
+        "pl": "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na dysku nagłówek sprzed "
+              "commitu) - nie ma czego cofać",
+        "en": "reconciliation with the disk: the commit did not replace this file (the disk holds "
+              "the header from before the commit) - nothing to undo"},
+    "objchg.item.undo_open_op": {
+        "pl": "przerwany zapis w miejscu (operacja {op_id}, {op_kind}) - lokacja izolowana; "
+              "najpierw {way}",
+        "en": "interrupted in-place write (operation {op_id}, {op_kind}) - the location is "
+              "isolated; first {way}"},
+    "objchg.item.undo_sync_finished": {
+        "pl": "nagłówek był już przywrócony - dokończono synchronizację bazy",
+        "en": "the header was already restored - the database synchronization is finished"},
+    "objchg.item.undo_already_op": {
+        "pl": "już cofnięte (operacja cofnięcia zamknięta)",
+        "en": "already undone (the undo operation is closed)"},
+    "objchg.item.undo_commit_unfinished": {
+        "pl": "commit nie jest dokończony (operacja {op_id}): {inner}; lokacja IZOLOWANA od skanu",
+        "en": "the commit is not finished (operation {op_id}): {inner}; the location is ISOLATED "
+              "from the scan"},
+    "objchg.item.backup_envelope_broken": {
+        "pl": "uszkodzona koperta backupu: {detail}",
+        "en": "damaged backup envelope: {detail}"},
+    "objchg.item.undo_partial_isolated": {
+        "pl": "{inner}; lokacja IZOLOWANA od skanu, odzysk: {way}",
+        "en": "{inner}; the location is ISOLATED from the scan, recovery: {way}"},
+    "objchg.item.undo_already": {
+        "pl": "już cofnięte - nagłówek i baza opisują stan sprzed commitu",
+        "en": "already undone - the header and the database describe the state from before the "
+              "commit"},
+    "objchg.item.undo_not_synced": {
+        "pl": "{inner}; baza NIE zsynchronizowana - przeskanuj plik albo ponów cofnięcie",
+        "en": "{inner}; database NOT synchronized - scan the file or retry the undo"},
+    "objchg.item.recover_not_open": {
+        "pl": "operacja {op_id} nie jest otwarta ({phase}) - odzysk dotyczy wyłącznie przerwanego "
+              "zapisu",
+        "en": "operation {op_id} is not open ({phase}) - recovery applies only to an interrupted "
+              "write"},
+    "objchg.item.recover_closed_meanwhile": {
+        "pl": "operacja {op_id} przestała być otwarta ({phase}) - odzysk odmawia",
+        "en": "operation {op_id} stopped being open ({phase}) - recovery refuses"},
+    "objchg.item.recover_newer_op": {
+        "pl": "lokacja ma operację nowszą niż {op_id} - odzysk odmawia, żeby nie cofnąć "
+              "późniejszego zapisu",
+        "en": "the location has an operation newer than {op_id} - recovery refuses, so as not to "
+              "undo a later write"},
+    "objchg.item.recover_resync_failed": {
+        "pl": "region przywrócony, ale re-sync padł - {detail}; {way}",
+        "en": "region restored, but the re-sync failed - {detail}; {way}"},
+    "objchg.item.recover_phase_not_saved": {
+        "pl": "region przywrócony i baza zsynchronizowana, ale faza 'recovered' NIE zapisana "
+              "({detail}); {way}",
+        "en": "region restored and database synchronized, but phase 'recovered' NOT saved "
+              "({detail}); {way}"},
+    "objchg.item.return_not_written": {
+        "pl": "operacja {op_id} jest w fazie {phase}, nie 'written' - powrót odmawia",
+        "en": "operation {op_id} is in phase {phase}, not 'written' - the way back refuses"},
+    "objchg.item.return_newer_op": {
+        "pl": "lokacja ma operację nowszą niż {op_id} - powrót odmawia, żeby nie cofnąć "
+              "późniejszego zapisu",
+        "en": "the location has an operation newer than {op_id} - the way back refuses, so as not "
+              "to undo a later write"},
+    "objchg.item.return_region_foreign": {
+        "pl": "region nagłówka nie jest ani wynikiem operacji {op_id}, ani stanem pośrednim jej "
+              "powrotu; {way}",
+        "en": "the header region is neither the result of operation {op_id} nor an intermediate "
+              "state of its way back; {way}"},
+    "objchg.item.return_read_failed": {
+        "pl": "odczyt kontrolny padł - {detail}; {way}",
+        "en": "the control read failed - {detail}; {way}"},
+    "objchg.item.return_check_passes": {
+        "pl": "kontrola danych operacji {op_id} przechodzi - zapis jest poprawny, powrót go nie "
+              "cofa; dokończ: {way}",
+        "en": "the data check of operation {op_id} passes - the write is correct, the way back "
+              "does not undo it; finish: {way}"},
+    "objchg.item.return_resumed": {
+        "pl": "przerwany wcześniejszy powrót tej operacji",
+        "en": "an earlier way back of this operation was interrupted"},
+    "objchg.item.reverted_rescan": {
+        "pl": "plik zmienił się poza nagłówkiem od ostatniego skanu albo przy zapisie ({inner}) - "
+              "zapis cofnięty: stary nagłówek przywrócony w miejscu (operacja {op_id}), "
+              "przeskanuj plik",
+        "en": "the file changed outside the header since the last scan or during the write "
+              "({inner}) - the write was undone: the old header restored in place (operation "
+              "{op_id}), scan the file"},
+    "objchg.item.revert_phase_not_saved": {
+        "pl": "stary nagłówek przywrócony, ale faza 'recovered' NIE zapisana ({detail}); {way}",
+        "en": "the old header restored, but phase 'recovered' NOT saved ({detail}); {way}"},
+    "objchg.item.release_file_busy": {
+        "pl": "plik jest otwarty do zapisu przez inny proces (zapis albo odzysk nagłówka w toku) "
+              "- zwolnienie czeka na jego koniec, żeby skan nie przeczytał rozdartego nagłówka; "
+              "ponów po zakończeniu tamtego zapisu",
+        "en": "the file is open for writing by another process (a write or a header recovery in "
+              "progress) - the release waits for it to end, so that the scan does not read a torn "
+              "header; retry after that write finishes"},
+    "objchg.item.release_not_isolating": {
+        "pl": "operacja {op_id} nie izoluje już lokacji (faza {phase}) - nie ma czego zwalniać",
+        "en": "operation {op_id} no longer isolates the location (phase {phase}) - nothing to "
+              "release"},
+    "objchg.item.released_without_lock": {
+        "pl": "pliku nie da się otworzyć ({detail}) - zwolniono bez blokady pliku",
+        "en": "the file cannot be opened ({detail}) - released without a file lock"},
+    "objchg.item.release_refused_db": {
+        "pl": "operacja {op_id} nie izoluje lokacji - nie ma czego zwalniać",
+        "en": "operation {op_id} does not isolate the location - nothing to release"},
+    "objchg.item.release_phase_changed": {
+        "pl": "operacja {op_id} jest w fazie {phase}, nie {expected} - inny proces zmienił ją po "
+              "odczycie, zwolnienia nie ma",
+        "en": "operation {op_id} is in phase {phase}, not {expected} - another process changed it "
+              "after reading, no release"},
+    # Klinga (`repo`): potwierdzenia wpisów stagingu, dopiski zamknięcia wstrzymania.
+    "objchg.item.confirmed_by_scan": {
+        "pl": "potwierdzone skanem: nagłówek na dysku = zapisany w commicie {commit_id}",
+        "en": "confirmed by scan: the header on disk = the one written in commit {commit_id}"},
+    "objchg.item.confirmed_from_disk_cut": {
+        "pl": "potwierdzone z dysku: nagłówek na dysku = zapisany w commicie {commit_id} "
+              "(przerwany przed potwierdzeniem podmiany)",
+        "en": "confirmed from disk: the header on disk = the one written in commit {commit_id} "
+              "(interrupted before the replacement was confirmed)"},
+    "objchg.item.withheld_undone": {
+        "pl": "commit cofnięty, zanim zeznanie klatki przyjęło zapis",
+        "en": "commit undone before the frame testimony accepted the write"},
+    "objchg.item.withheld_other_frame": {
+        "pl": "zapis zastąpiony: lokacja należy już do innej klatki",
+        "en": "write superseded: the location already belongs to another frame"},
+    "objchg.item.withheld_newer_header": {
+        "pl": "zapis zastąpiony nowszym stanem pliku (inny nagłówek na dysku)",
+        "en": "write superseded by a newer state of the file (a different header on disk)"},
     # Reguła formy folderu obiektu (`resolve.catalog.FOLDER_RULE_CODES`, AR-141) - szczegół
     # pominięcia `bad_target` w języku UI.
     "objchg.folder.empty": {"pl": "kanon pusty albo nie jest tekstem",
@@ -6199,6 +6866,9 @@ CATALOG = {
     "objchg.warn.dir_not_empty": {
         "pl": "katalog {dir}: założony przez gest, ale nie jest pusty - zostaje",
         "en": "folder {dir}: created by the gesture, but it is not empty - it stays"},
+    # Zamiar przerwanego renamu, którego rekoncyliacja na wejściu gestu nie rozstrzygnęła (AR-148):
+    # `{detail}` = powód rekoncyliacji z kodem (`objchg.item.*`) w języku UI.
+    "objchg.warn.rename_reconcile": {"pl": "{path}: {detail}", "en": "{path}: {detail}"},
     "objchg.replan_btn": {"pl": "Policz plan ponownie", "en": "Compute the plan again"},
     "objchg.skipped_head_done": {
         "pl": {"one": "Pominięto {n} klatkę - powód i plik:",
@@ -6206,8 +6876,14 @@ CATALOG = {
                "many": "Pominięto {n} klatek - powody i pliki:"},
         "en": {"one": "Skipped {n} frame - reason and file:",
                "other": "Skipped {n} frames - reasons and files:"}},
-    "objchg.card_rewrite": {"pl": " · cały plik przepisany (FITS: dopisanie karty)",
-                            "en": " · whole file rewritten (FITS: card added)"},
+    "objchg.card_add_fits": {"pl": "FITS: karta dopisana w miejscu, gdy plik na to pozwala "
+                                   "(zapas w nagłówku); inaczej cały plik przepisany albo odmowa "
+                                   "z powodem przy pozycji.",
+                             "en": "FITS: card added in place when the file allows it (room in "
+                                   "the header); otherwise the whole file is rewritten or the "
+                                   "write is refused with a reason on the item."},
+    "objchg.card_add_fits_short": {"pl": " · FITS: dopisanie karty",
+                                   "en": " · FITS: card added"},
     "objchg.err.stage": {"pl": "Zapis planu do bazy odmówiony: {msg}",
                          "en": "Saving the plan to the database was refused: {msg}"},
     "objchg.res.notes": {"pl": " · z uwagą: {n} - {note}", "en": " · with a note: {n} - {note}"},

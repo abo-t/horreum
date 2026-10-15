@@ -1559,13 +1559,20 @@ def _rig_filter_text(res):
     return ", ".join(parts)
 
 
-def _find_outside_text(needle, res):
+def _find_empty_text(needle, res):
     """Pusty wynik `--find` dla nazwy, którą katalog zna (`targets.PlanResult.find_outside`,
     AR-146) - jedna linia ASCII; `None`, gdy nazwy nie zna nikt (dotychczasowa cisza). Ta sama
     odpowiedź co pusty stan ekranu planera: cel warstwy niewczytanej z typem i flagą, która go
-    pokaże, albo nazwa spoza celów planera - bez typu, bo nie ma go skąd wziąć."""
+    pokaże, albo nazwa spoza celów planera - bez typu, bo nie ma go skąd wziąć.
+
+    Szukajka TRAFIŁA w puli wołania (`counts['feasible']` w trybie `find` = trafienia), a lista
+    jest pusta: cel jest, chowają go filtry, których `--find` nie pomija (status kurateli, próg
+    kosztu, luki, nowe) - zdanie ekranu „chowają go bieżące filtry"
+    (`planner_model.empty_find_text`), bez zgadywania, który z nich. Lista ucięta samym limitem
+    ma własne zdanie (`--all`)."""
     out = res.find_outside
-    if out is None or out.loaded:                        # rekord z puli wołania - nie jest „poza"
+    hits = res.find_hits
+    if (out is None and not hits) or res.hidden:
         return None
     from .resolve._text import norm_alnum, norm_ascii    # lazy, jak `targets` w komendzie `plan`
     from .targets import ALL_LAYERS, STATUS_MARKS
@@ -1573,6 +1580,9 @@ def _find_outside_text(needle, res):
     # półpauzą albo cudzysłowem typograficznym padłby na cp852 PO rachunku. Wpis spoza ASCII
     # idzie przez `norm_ascii` (fold diakrytyków, znaki bez rozkładu wypadają).
     echo = needle if needle.isascii() else norm_ascii(needle)
+    if hits:
+        return (f'  szukane "{echo}": trafien {hits}, ale chowaja je filtry '
+                f'(--status/--max-cost/--gaps/--new)')
     nazwa = (f'"{echo}"' if norm_alnum(needle) == norm_alnum(out.canon)
              else f'"{echo}" = {out.canon}')
     if out.target is None:
@@ -1584,7 +1594,7 @@ def _find_outside_text(needle, res):
 
 def _format_plan(db_path, res, find=None):
     """Plan nocy do czytelnego ASCII (konsola Windows = cp1250 - bez znaków spoza ASCII).
-    `find` = tekst `--find` (do zdania pustego wyniku, `_find_outside_text`)."""
+    `find` = tekst `--find` (do zdania pustego wyniku, `_find_empty_text`)."""
     site = res.site
     lines = [f"Horreum plan {db_path}: noc {res.night_date}, {site.name or 'stanowisko'} "
              f"({site.lat_deg:.2f}N {site.lon_deg:.2f}E)"]
@@ -1646,9 +1656,9 @@ def _format_plan(db_path, res, find=None):
             f"{row.target.major_arcmin:>5.0f}'{row.window.max_alt_deg:>6.1f}"
             f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{fill_txt:>4}  {cost_txt:<14}"
             f"{row.recommend or '-':<6}{plan_txt:<10}{_coverage_text(row)}")
-    outside = _find_outside_text(find, res) if find and not res.rows else None
-    if outside:
-        lines.append(outside)
+    empty = _find_empty_text(find, res) if find and not res.rows else None
+    if empty:
+        lines.append(empty)
     if res.hidden:
         lines.append(f"  ... {res.hidden} wierszy ukrytych limitem (--all zdejmuje)")
     if res.unmatched:

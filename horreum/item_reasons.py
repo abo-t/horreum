@@ -1,23 +1,27 @@
-"""POWODY POZYCJI gestu „Zmień obiekt…”/„Uzgodnij” (AR-141) - zdanie PL rdzenia RAZEM z kodem
-i parametrami, także po zapisie w bazie.
+"""POWODY RDZENIA ZAPISU - zdanie PL RAZEM z kodem i parametrami, także po zapisie w bazie: pozycje
+gestu „Zmień obiekt…”/„Uzgodnij” (AR-141), warstwa renamu, pisarz karty, cofnięcie, odzysk i zwolnienie
+izolacji (AR-148).
 
-Pozycja przebiegu (`pending_object_change`) niosła powód wyłącznie jako polską prozę, a okno otwierane
-z Porządków czyta go z bazy - samo i18n okna nie miało z czego złożyć zdania w języku UI. Teraz każdy
-powód pozycji to `PowodPozycji`: zdanie PL (`str` - CLI, log, testy i sklejenia biorą je jak tekst,
+Pozycja przebiegu (`pending_object_change`), wpis stagingu karty i renamu (`pending_changes`,
+`pending_renames`) i zapis wstrzymany (`withheld_write`) niosły powód wyłącznie jako polską prozę, a okna
+zapisu i rdzeń czytają go z bazy - samo i18n okna nie miało z czego złożyć zdania w języku UI. Teraz
+każdy powód to `PowodPozycji`: zdanie PL (`str` - CLI, log, testy i sklejenia biorą je jak tekst,
 znak w znak jak dotąd) + `code` + `params`. Okno składa z nich zdanie `objchg.item.<kod>`
-(`gui.wb_worker.tekst_powodu`); proza bez kodu (wiersz sprzed 0041, powód warstwy bez kodu) zostaje
-zdaniem PL.
+(`gui.wb_worker.tekst_powodu`); proza bez kodu (wiersz sprzed 0041/0042, tekst systemu, odmowa czytnika
+`scan` i reguły karty `card_rules`) zostaje zdaniem PL.
 
 DLACZEGO LIŚĆ: powody piszą sterownik zapisu (`writeback`) i klinga (`repo`: wstrzymanie zapisu,
 dokończenie, doklejka CAS ręki), a czyta GUI. Repo nie importuje planera (`object_change`), więc
 nośnik nie mieszka obok `ZdanieRdzenia` - tu, bez importów projektu i bez SQL. Kodek (`do_bazy` /
-`z_bazy`) jest jeden: zapisuje go wyłącznie `repo._set_object_change_reason_tx`, odczytuje
-`gui.queries.object_change_run_view`.
+`z_bazy`) jest jeden: zapisują go wyłącznie pisarze trójki w `repo` (`_set_object_change_reason_tx`,
+`_set_pending_reason_tx`, `_set_rename_reason_tx`, INSERT `withheld_write`), odczytują
+`gui.queries.object_change_run_view` i czytelnicy wierszy stagingu w `writeback`.
 
-ZAGNIEŻDŻENIE: powód niższej warstwy jedzie PARAMETREM (`inner`, w `file_not_back` też `outer`) -
-`PowodPozycji` (renam, izolacja, katalogi, klinga - warstwy z kodem) albo zwykły `str` (pisarz karty,
-tekst `OSError` w języku systemu): jawna granica, zdanie UI wstawia taki tekst znak w znak. Uwagi
-doklejane za powodem (`; `, `dopisz`) to lista `notes` - lista powodów, nie sklejona proza.
+ZAGNIEŻDŻENIE: powód niższej warstwy jedzie PARAMETREM (`inner`, `detail`, `way`, w `file_not_back`
+też `outer`) - `PowodPozycji` (warstwy z kodem) albo zwykły `str` (tekst `OSError` w języku systemu,
+odmowa czytnika `scan`): jawna granica, zdanie UI wstawia taki tekst znak w znak. Uwagi doklejane za
+powodem (`; `, `dopisz`) to lista `notes` - lista powodów, nie sklejona proza. Lista cech
+(`features`, `paths`) to parametr rodzaju `list` - okno składa ją po `, `, jak rdzeń.
 """
 
 import json
@@ -49,19 +53,79 @@ ITEM_REASON_CODES = frozenset({
     "hand_newer", "hand_unknown",
     # koperta prozy bez kodu, do której dokleja się nota z kodem (`dopisz`) - granica jawna
     "prose",
+    # --- warstwa pisarza karty i renamu (AR-148) ---
+    # fragmenty: drogi wyjścia z izolacji (gest okna + wywołanie rdzenia), cechy rozjazdu pliku
+    "way_finish", "way_restore", "way_manual", "way_resume_return", "way_retry", "way_retry_open",
+    "way_retry_written", "changed_in_window", "feat_ino", "feat_size", "feat_mtime", "feat_header",
+    "feat_sample", "feat_unreadable", "feat_file_size", "feat_header_bytes", "feat_header_hash",
+    # pisarz karty: droga atomowa, podmiana systemowa, cofnięcie atomowe
+    "verify_read_failed", "verify_mismatch", "replace_copy_missing", "replace_cut_copy_back_failed",
+    "replace_cut_both_missing", "return_cut", "return_failed_manual", "third_writer",
+    "other_writer_returned", "displaced_unreadable", "confirm_lost_copy_kept",
+    "close_failed_copy_left", "copy_not_removed", "comment_cut", "raw_read_only",
+    "header_hash_mismatch", "backup_not_saved", "undo_bytes_unverified", "undo_semantic_outside",
+    "undo_semantic", "undo_header_changed",
+    # pisarz XISF (`_XisfRefusal`)
+    "xisf_unreadable", "xisf_many_images", "xisf_no_identity", "xisf_prop_rule", "xisf_prop_mismatch",
+    "xisf_card_exists", "xisf_prop_without_card", "xisf_bad_op", "xisf_set_missing",
+    "xisf_attr_missing", "xisf_not_utf8", "xisf_no_roundtrip",
+    # zapis w miejscu i odzysk rozdartego nagłówka
+    "phase_not_saved", "header_moved_before_write", "anchor_mismatch", "journal_not_saved",
+    "inplace_cut", "inplace_unfinished", "inplace_verify_failed", "inplace_verify_mismatch",
+    "handle_close_failed", "fb_replaced_since_commit", "undo_already_region", "undo_region_changed",
+    "inplace_other_file", "not_torn_readable", "not_torn_manual",
+    # orkiestracja: kontrola danych, dokończenie, rekoncyliacja backupu, wynik lokacji
+    "data_identity_changed", "check_header_other", "check_no_anchor", "check_outside_changed",
+    "inplace_after_read", "no_operation", "finish_not_waiting", "finish_newer_op",
+    "finish_region_changed", "synced_not_saved", "resync_failed_retry", "check_failed_way_back",
+    "backup_reconcile_failed", "backup_still_pending", "backup_confirm_blocked",
+    "commit_cut_unproven", "commit_cut_other_returned", "commit_cut_copy_left",
+    "commit_cut_return_cut", "commit_cut_return_failed", "backup_changed_during",
+    "returned_not_read", "compressed_master", "no_fallback", "replace_unconfirmed",
+    "backup_saved_in", "backup_saved_in_isolated", "finish_failed_isolated",
+    "finish_failed_isolated_release", "resync_failed",
+    # renam: staging, rekoncyliacja zamiarów, cofnięcie
+    "rename_undone", "rename_undone_because", "reconcile_failed", "no_location_row",
+    "intent_closed_no_location", "disk_silent", "intent_both_names", "intent_no_name",
+    "intent_mtime_differs", "intent_sha1_differs", "intent_changed", "intent_target_taken",
+    "reconciled_relocated", "reconciled_in_sync", "rename_changed_since_preview",
+    "not_on_commit_name", "intent_settled_elsewhere", "intent_file_moved",
+    # cofnięcie commitu, odzysk, droga powrotu, zwolnienie izolacji
+    "undo_resync_failed", "isolated_suffix", "undo_finish_failed", "undo_not_replaced",
+    "undo_open_op", "undo_sync_finished", "undo_already_op", "undo_commit_unfinished",
+    "backup_envelope_broken", "undo_partial_isolated", "undo_already", "undo_not_synced",
+    "recover_not_open", "recover_closed_meanwhile", "recover_newer_op", "recover_resync_failed",
+    "recover_phase_not_saved", "return_not_written", "return_newer_op", "return_region_foreign",
+    "return_read_failed", "return_check_passes", "return_resumed", "reverted_rescan",
+    "revert_phase_not_saved", "release_file_busy", "release_not_isolating",
+    "released_without_lock", "release_refused_db", "release_phase_changed",
+    # klinga (`repo`): potwierdzenia wpisów stagingu, dopiski zamknięcia wstrzymania
+    "confirmed_by_scan", "confirmed_from_disk_cut", "withheld_undone", "withheld_other_frame",
+    "withheld_newer_header",
+    # plan zapisu FITS w miejscu: spadek na drogę atomową (`Fallback`), odmowa sumy kontrolnej,
+    # przepowiednia drogi w podglądzie (`inplace_route`)
+    "fb_card_too_long", "fb_compressed", "checksum_present", "fb_op_kind", "fb_not_text_card",
+    "fb_card_present", "fb_card_count", "fb_value_not_text", "fb_card_records", "fb_continue",
+    "fb_no_room", "free_records", "route_depends",
 })
 
 # Rodzaj wartości każdego parametru powodu (kontrakt kodeka i zdania okna; test AST pilnuje, że
 # rdzeń nie podaje parametru spoza tej listy): `text` = tekst (także powód zagnieżdżony, fragment
-# zdania) albo None, `int` = liczba całkowita. Parametr spoza listy albo wartość innego rodzaju
-# (zapis spoza kodeka) - okno mówi zachowaną prozą (`gui.wb_worker.tekst_powodu`). `notes` osobno:
-# krotka powodów.
+# zdania) albo None, `int` = liczba całkowita, `list` = lista (krotka) tekstów albo powodów -
+# okno składa ją po `, `, jak rdzeń (cechy rozjazdu pliku, ścieżki zostawione do oka). Parametr
+# spoza listy albo wartość innego rodzaju (zapis spoza kodeka) - okno mówi zachowaną prozą
+# (`gui.wb_worker.tekst_powodu`). `notes` osobno: krotka powodów.
 PARAM_KINDS = {
     **dict.fromkeys(("detail", "inner", "outer", "path", "dir", "src", "dst", "db_path", "in_flight",
                      "intent_detail", "alias", "canon", "target", "text", "status", "commits",
-                     "op_kind", "phase", "volume", "copies", "lead"), "text"),
+                     "op_kind", "phase", "volume", "copies", "lead",
+                     # warstwa pisarza karty i renamu (AR-148)
+                     "keyword", "copy", "tmp", "change", "way", "error", "prop", "value", "current",
+                     "card", "derived", "op", "value_type", "sha1", "mtime", "db_mtime",
+                     "expected", "needed"), "text"),
     **dict.fromkeys(("n", "tries", "winerror", "op_id", "location", "object_id", "rename_id",
-                     "commit_id"), "int"),
+                     "commit_id", "before", "after", "free"), "int"),
+    **dict.fromkeys(("features", "paths", "sums"), "list"),
 }
 
 
@@ -72,6 +136,8 @@ def param_ok(nazwa, wartosc):
         return wartosc is None or isinstance(wartosc, str)
     if rodzaj == "int":
         return isinstance(wartosc, int) and not isinstance(wartosc, bool)
+    if rodzaj == "list":
+        return isinstance(wartosc, (list, tuple)) and all(isinstance(v, str) for v in wartosc)
     return False
 
 
@@ -138,6 +204,15 @@ def dopisz(powod, nota):
     return PowodPozycji(f"{powod}; {nota}", powod.code, **params)
 
 
+def dopisz_z_koperta(powod, nota):
+    """`dopisz` dla wołającego, który dokleja do powodu dowolnej warstwy: nota Z KODEM za prozą bez
+    kodu (tekst systemu, wiersz bazy sprzed kodów) - proza w kopercie `prose`, kod noty zostaje.
+    Jedna reguła dla sterownika zapisu (`writeback._dopisz`) i klingi (`repo`, dopiski wstrzymań)."""
+    if powod and isinstance(nota, PowodPozycji) and not isinstance(powod, PowodPozycji):
+        powod = PowodPozycji(powod, "prose", text=powod)
+    return dopisz(powod, nota)
+
+
 def _do_slownika(wartosc):
     if isinstance(wartosc, PowodPozycji):
         return {_ZDANIE: str(wartosc), _KOD: wartosc.code,
@@ -171,7 +246,11 @@ def _ze_slownika(wartosc):
 
 def _odbuduj(zdanie, kod, args):
     """Powód z części albo `_Nieodtwarzalny`. Kod, którego ten program nie zna (baza po zmianie
-    zbioru kodów), zostaje prozą - zdanie PL jest zawsze."""
+    zbioru kodów), zostaje prozą - zdanie PL jest zawsze. Kod nie-tekst (lista, obiekt JSON, liczba
+    z kolumny bez typu) to kształt spoza kodeka - sprawdzany PRZED członkostwem w zbiorze, bo obiekt
+    niehaszowalny wywróciłby odczyt `TypeError`."""
+    if not isinstance(kod, str):
+        raise _Nieodtwarzalny
     if kod not in ITEM_REASON_CODES:
         return zdanie
     if not isinstance(args, dict):

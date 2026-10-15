@@ -190,9 +190,9 @@ def test_dziennik_powstaje_przed_zapisem_a_jego_porazka_nie_rusza_pliku(tmp_path
      lambda tp: _fits(tp / "d.fits", extra=[("OBJECT", "NGC6992")]), _op(), "występuje 2 razy"),
     ("komentarz nie zmieści się przy nowej wartości",
      lambda tp: _fits(tp / "e.fits", obj="M31", comment="k" * 47), _op("V" * 20), "nie mieści"),
-    ("dopisanie karty",
-     lambda tp: _fits(tp / "f.fits"),
-     [writeback.WriteOp("OBSERVER", "add", "Zdzin", "str")], "add"),
+    ("dopisanie karty bez miejsca (END na ostatnim rekordzie bloku)",
+     lambda tp: _fits(tp / "f.fits", extra=[(f"PAD{i}", i) for i in range(27)]),
+     [writeback.WriteOp("OBSERVER", "add", "Zdzin", "str")], "potrzebuje 1 wolnego rekordu"),
     ("wartość liczbowa",
      lambda tp: _fits(tp / "g.fits", extra=[("FOCALLEN", 800)]),
      [writeback.WriteOp("FOCALLEN", "set", "789", "int")], "int"),
@@ -1665,8 +1665,11 @@ def test_commit_atomowy_przeplatany_z_zapisem_w_miejscu(tmp_path, monkeypatch, f
 
 
 @pytest.mark.parametrize("powod, recznie", [
-    ("operacja 1 jest w fazie synced, nie czeka na dokończenie", True),
-    (f"inny plik niż w chwili zapisu (rozmiar/st_ino); {writeback._RECZNA}", False),
+    # Powody, które `_dokoncz` naprawdę oddaje - z kodem (AR-148: droga wyjścia rozpoznana po
+    # kodzie fragmentu `way_*`, nie po prozie).
+    (writeback.PowodPozycji("operacja 1 jest w fazie synced, nie czeka na dokończenie",
+                            "finish_not_waiting", op_id=1, phase="synced"), True),
+    (writeback._INNY_PLIK, False),
 ], ids=["faza", "recepta_reczna"])
 def test_dokonczenie_zablokowane_wskazuje_gest_zwolnienia(tmp_path, monkeypatch, powod, recznie):
     """Dokończenie zapisu w miejscu odmówiło ('blocked') - powód commitu wskazuje drogę zwolnienia,

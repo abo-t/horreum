@@ -911,9 +911,20 @@ def test_en_render_z_katalogu(qapp, tmp_path):
 NOW_PD = "2026-08-01T00:00:00Z"
 
 
-def _nameless_tree(root, names=("NGC7635_20230103_a.fits", "NGC7635_20230103_b.fits"), seed=0):
+def _bez_zapasu(hdr):
+    """Dopełnij nagłówek kartami tak, żeby `END` stanął na ostatnim rekordzie bloku 2880 B (bez
+    pustych kart): dopisanie karty nie ma miejsca i rdzeń spada na drogę atomową (AR-118)."""
+    i = 0
+    while (len(hdr) + 1) % 36:
+        hdr[f"PAD{i}"] = i
+        i += 1
+
+
+def _nameless_tree(root, names=("NGC7635_20230103_a.fits", "NGC7635_20230103_b.fits"), seed=0,
+                   bez_zapasu=()):
     """Drzewo `…/LIGHTS/NGC7635/RC8_2600MC/L-eXtreme/NGC7635_*.fits` — lighty BEZ karty OBJECT.
-    Kotwicą propozycji jest segment PO `LIGHTS`, więc struktura katalogu jest częścią testu."""
+    Kotwicą propozycji jest segment PO `LIGHTS`, więc struktura katalogu jest częścią testu.
+    Pliki z `bez_zapasu` nie mają w nagłówku miejsca na dopisaną kartę (`_bez_zapasu`)."""
     import numpy as np
     from astropy.io import fits
     d = root / "LIGHTS" / "NGC7635" / "RC8_2600MC" / "L-eXtreme"
@@ -924,6 +935,8 @@ def _nameless_tree(root, names=("NGC7635_20230103_a.fits", "NGC7635_20230103_b.f
         hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + seed + i)  # różne DANE = różne klatki
         hdu.header["TELESCOP"] = "RC8"
         hdu.header["IMAGETYP"] = "Light"
+        if name in bez_zapasu:
+            _bez_zapasu(hdu.header)
         hdu.writeto(str(p), overwrite=True)
         made.append(p)
     return made
@@ -2838,9 +2851,10 @@ NOW_O3 = "2026-09-26T14:00:00Z"
 LATER_O3 = "2026-09-26T15:00:00Z"
 
 
-def _stos_fits(root, obj, nazwa, *, seed, object_card=None):
+def _stos_fits(root, obj, nazwa, *, seed, object_card=None, bez_zapasu=False):
     """Gotowy stos FITS pod `STACKS\\<obj>\\RC8_2600MC\\Ha` BEZ zeznania o obiekcie
-    (`object_card=''` = karta JEST, ale pusta - nagłówek dalej milczy)."""
+    (`object_card=''` = karta JEST, ale pusta - nagłówek dalej milczy; `bez_zapasu` - nagłówek
+    bez miejsca na dopisaną kartę, `_bez_zapasu`)."""
     import numpy as np
     from astropy.io import fits
     d = root / "STACKS" / obj / "RC8_2600MC" / "Ha"
@@ -2851,6 +2865,8 @@ def _stos_fits(root, obj, nazwa, *, seed, object_card=None):
     hdu.header["TELESCOP"] = "RC8"
     if object_card is not None:
         hdu.header["OBJECT"] = object_card
+    if bez_zapasu:
+        _bez_zapasu(hdu.header)
     hdu.writeto(str(p), overwrite=True)
     return p
 
@@ -3196,30 +3212,72 @@ def test_oba_gesty_licza_forme_TA_SAMA_funkcja(sciezka_karty, monkeypatch):
     assert app_mod._validate_object_value(con, "NGC 7635")[0] == "NGC 7000"
 
 
+def _okno_karty_z_mieszanka(tmp_path, ktore):
+    """Okno karty nad DWOMA plikami FITS bez karty `OBJECT`: pierwszy z zapasem nagłówka (dopisanie
+    w miejscu), drugi bez zapasu (`_bez_zapasu` - spadek na drogę atomową). → `(dlg, klik, pliki,
+    con)`."""
+    from horreum import scan
+    from horreum.gui.app import RepairHeaderDialog
+    if ktore == "sciezka":
+        pliki = [_stos_fits(tmp_path, "NGC7635", "NGC7635_Ha_a.fits", seed=1),
+                 _stos_fits(tmp_path, "NGC7635", "NGC7635_Ha_b.fits", seed=2, bez_zapasu=True)]
+        teraz = NOW_O3
+    else:
+        pliki = _nameless_tree(tmp_path, bez_zapasu=("NGC7635_20230103_b.fits",))
+        teraz = NOW_PD
+    con = db.open_db(str(tmp_path / "mieszanka.db"))
+    for p in pliki:
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=teraz,
+                           summary=scan.ScanSummary())
+    if ktore == "sciezka":
+        # RAW pod `LIGHTS` jak w `sciezka_karty`: korzeń archiwum (kotwica `STACKS`) z bazy.
+        raw, _ = repo.upsert_frame(con, sha1_data="sha-mieszanka-raw", kind="light",
+                                   filetype="raw", camera_id=None, now=teraz)
+        repo.record_header(con, frame_id=raw, raw_json="{}", object_raw=None, now=teraz)
+        repo.add_location(con, frame_id=raw, volume="V", header_hash="h-raw", now=teraz,
+                          path=str(tmp_path / "LIGHTS" / "NGC7635" / "A7R3" / "_7R38821.ARW"))
+        dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                       now_fn=lambda: teraz, db_path=queries.db_path_of(con))
+        klik = dlg._on_confirm
+    else:
+        dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                                 db_path=queries.db_path_of(con), now_fn=lambda: teraz)
+        klik = dlg._on_save
+    dlg._runner.async_ok = False
+    return dlg, klik, pliki, con
+
+
+@pytest.mark.parametrize("zapas", ["z_zapasem", "bez_zapasu"])
 @pytest.mark.parametrize("ktore", ["sciezka", "naprawa"])
-def test_okna_kart_startuja_zapis_w_miejscu_a_FITS_bez_karty_SPADA_i_MOWI_to(
-        ktore, request, monkeypatch):
-    """AR-117: „Zatwierdź ze ścieżki…" i „Napraw nagłówek…" startują `commit_inplace` - droga
-    atomowa przepisywała cały plik po SMB i zrywała dowiązania `_WBPP`.
+def test_okna_kart_pisza_W_MIEJSCU_a_FITS_bez_zapasu_SPADA_i_MOWI_to(
+        ktore, zapas, request, monkeypatch, qapp, tmp_path):
+    """AR-117 + AR-118: „Zatwierdź ze ścieżki…" i „Napraw nagłówek…" startują `commit_inplace` -
+    droga atomowa przepisywała cały plik po SMB i zrywała dowiązania `_WBPP`.
 
-    Oba okna DOPISUJĄ kartę (`add`), a zapis w miejscu FITS umie dziś wyłącznie `set` istniejącej
-    karty (`writeback.write_changes_inplace` → `Fallback`; dopisanie w miejscu to AR-118), więc plik
-    FITS spada na drogę atomową z powodem rdzenia - i okno MÓWI to zdaniem wyniku (ekran nie kłamie
-    o drodze zapisu). Spadek niesie KOD (`writeback.CODE_INPLACE_FALLBACK`), po którym okno go
-    rozpoznaje - test pinuje go na PRAWDZIWYM pisarzu.
+    Oba okna DOPISUJĄ kartę (`add`). FITS z zapasem nagłówka (pusta karta na końcu albo wolny
+    rekord za `END`) dostaje ją W MIEJSCU - plik zostaje tym samym plikiem (`st_ino`), a zdanie
+    wyniku milczy o drodze zapisu. FITS bez zapasu spada na drogę atomową z powodem rdzenia i okno
+    MÓWI to zdaniem wyniku (ekran nie kłamie o drodze zapisu). Spadek niesie KOD
+    (`writeback.CODE_INPLACE_FALLBACK`), po którym okno go rozpoznaje - test pinuje go na
+    PRAWDZIWYM pisarzu.
 
-    Falsyfikator: wróć do `start("commit", …)` w którymkolwiek oknie → pierwsza asercja."""
+    Falsyfikator: wróć do `start("commit", …)` w którymkolwiek oknie → pierwsza asercja; zdejmij
+    dopisanie w miejscu (`add` → `Fallback`) → `z_zapasem` pada na `in_place`."""
     from horreum import writeback
     from horreum.gui.wb_worker import bez_prefiksu_spadku
     from astropy.io import fits
-    if ktore == "sciezka":
-        v, con, pliki, fid = request.getfixturevalue("sciezka_karty")
-        dlg = _okno_sciezki(v, con)
-        klik, plik = dlg._on_confirm, pliki["zapis"]
+    con = None
+    if zapas == "bez_zapasu":
+        dlg, klik, pliki, con = _okno_karty_z_mieszanka(tmp_path, ktore)
+    elif ktore == "sciezka":
+        v, _con, p, fid = request.getfixturevalue("sciezka_karty")
+        dlg = _okno_sciezki(v, _con)
+        klik, pliki = dlg._on_confirm, [p["zapis"]]
     else:
-        v, con, files, _open = request.getfixturevalue("repair")
+        v, _con, files, _open = request.getfixturevalue("repair")
         dlg = _open()
-        klik, plik = dlg._on_save, files[0]
+        klik, pliki = dlg._on_save, list(files)
+    ino = [os.stat(p).st_ino for p in pliki]
     ops, wyniki = [], []
     prawdziwy_start, prawdziwy_koniec = dlg._runner.start, dlg._after_commit
     monkeypatch.setattr(dlg._runner, "start", lambda op, *a, **k: ops.append(op)
@@ -3228,18 +3286,27 @@ def test_okna_kart_startuja_zapis_w_miejscu_a_FITS_bez_karty_SPADA_i_MOWI_to(
                         or prawdziwy_koniec(op, res))
     klik()
     assert ops == ["commit_inplace"]
-    assert fits.getheader(str(plik))["OBJECT"] == "NGC 7635"
+    assert [fits.getheader(str(p))["OBJECT"] for p in pliki] == ["NGC 7635"] * len(pliki)
     w_miejscu = {fr.location_id for fr in wyniki[0].in_place}
     spadek = [fr for fr in wyniki[0].applied if fr.location_id not in w_miejscu]
-    assert spadek and all(fr.code == writeback.CODE_INPLACE_FALLBACK
-                          and fr.reason.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ)
-                          for fr in spadek)
-    # Zdanie mówi o spadku językiem człowieka, szczegół rdzenia jest w podpowiedzi zdania.
-    szczegol = bez_prefiksu_spadku(spadek[0].reason).partition("; ")[0]
-    assert i18n.t("wb.inplace_fallback", n=len(spadek)) in dlg.status.text()
-    assert szczegol not in dlg.status.text()
-    assert dlg.status.toolTip() == i18n.t("objchg.st.detail_tip", detail=szczegol)
+    if zapas == "z_zapasem":
+        assert wyniki[0].in_place and not spadek, wyniki[0]
+        assert [os.stat(p).st_ino for p in pliki] == ino           # ten sam plik, nie podmiana
+        assert i18n.t("wb.inplace_fallback", n=1) not in dlg.status.text()
+    else:
+        assert len(w_miejscu) == 1 and len(spadek) == 1, wyniki[0]
+        assert [os.stat(p).st_ino == i for p, i in zip(pliki, ino)] == [True, False]
+        assert all(fr.code == writeback.CODE_INPLACE_FALLBACK
+                   and fr.reason.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ) for fr in spadek)
+        # Zdanie mówi o spadku językiem człowieka, szczegół rdzenia jest w podpowiedzi zdania.
+        szczegol = bez_prefiksu_spadku(spadek[0].reason).partition("; ")[0]
+        assert "potrzebuje 1 wolnego rekordu" in szczegol
+        assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()
+        assert szczegol not in dlg.status.text()
+        assert dlg.status.toolTip() == i18n.t("objchg.st.detail_tip", detail=szczegol)
     dlg.reject()
+    if con is not None:
+        con.close()
 
 
 def _xisf_bez_object(path, *, pad=512, payload=b"\x07" * 32):

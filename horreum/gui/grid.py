@@ -59,6 +59,7 @@ from horreum.gui.object_change_dialog import ObjectChangeDialog
 from horreum.gui.projection_dialog import ObjectPickDialog, ProjectionDialog
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_undo_kart, zdanie_wyniku_zapisu
+from horreum.gui.wb_worker import tekst_powodu   # powód rdzenia w języku UI (AR-148)
 
 # FASADA: `grid` re-eksportuje nazwy modułów `grid_*`, po które sięga reszta pakietu i testy
 # (`tests/test_gui_grid_fasada.py` pilnuje, że każda czytana z zewnątrz nazwa tu jest).
@@ -2358,9 +2359,10 @@ class FramesView(QWidget):
         # Fakt „gest ma tu jeszcze co zrobić" jest JEDEN dla panelu, kolumny i perspektywy
         # (`queries.lineage_awaits_hand`): stos z odrzuconym ostatnim kandydatem nie wraca do trybu
         # propozycji z pustymi nocami, tylko pokazuje własne werdykty do ewentualnego cofnięcia.
-        kandydaci, raw_bez_zegara = (), 0
+        kandydaci, raw_bez_zegara, po_zintegrowaniu = (), 0, 0
         if queries.lineage_awaits_hand(self.con, fid):
-            kandydaci, raw_bez_zegara = stacks.propose_lineage_candidates(self.con, fid)
+            kandydaci, raw_bez_zegara, po_zintegrowaniu = stacks.propose_lineage_candidates(
+                self.con, fid)
         # TRZECI ŚWIADEK ZEGARA (G2-1d): uwaga przebiegu o RAW-ach bez zegara przy obrazie, którego
         # werdykt mówi co innego - także przy GOTOWYM rodowodzie z puli mieszanej, gdzie propozycji
         # nie liczymy wcale. Bez tego członu flaga mówiłaby „nie umiem umieścić N klatek", a gest,
@@ -2383,7 +2385,7 @@ class FramesView(QWidget):
                    if kandydaci else {})
         self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid),
                                      candidates=kandydaci, raw_unreferenced=raw_bez_zegara,
-                                     candidate_paths=sciezki)
+                                     after_integration=po_zintegrowaniu, candidate_paths=sciezki)
         self._lineage_frame_id = fid
         if select_frame_ids:
             self.lineage_bar.select_frame_ids(select_frame_ids)
@@ -4793,7 +4795,7 @@ class FramesView(QWidget):
         detail = next((fr for fr in res.failed + res.blocked if fr.reason), None)
         if detail is not None:
             msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
-                          detail=detail.reason)
+                          detail=tekst_powodu(detail.reason))
         self.drawer.end_progress()
         if res.failed:                                   # commit zostaje - „Cofnij" ponowi resztę
             msg += i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo"))
@@ -4994,7 +4996,7 @@ class FramesView(QWidget):
         detail = next((fr for fr in res.failed + res.blocked if fr.reason), None)
         if detail is not None:
             msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
-                          detail=detail.reason)
+                          detail=tekst_powodu(detail.reason))
         self.drawer.end_progress()
         if res.failed:                                   # przebieg zostaje - „Cofnij" ponowi resztę
             msg += i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo"))

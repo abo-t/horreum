@@ -948,6 +948,47 @@ def test_AR30_1_powod_rdzenia_mowi_gestem_okna_i_wywolaniem(tmp_path, monkeypatc
     con.close()
 
 
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_AR148_drogi_wyjscia_mowia_etykieta_gestu_w_jezyku_UI(lang):
+    """AR-148: fragmenty dróg wyjścia z izolacji (`way_finish`, `way_restore`, `way_manual`) mówią
+    w oknie nazwą gestu z katalogu `grid.inplace.*` w JĘZYKU UI - w cudzysłowie drukarskim języka -
+    a wywołanie rdzenia zostaje. Zmiana etykiety gestu bez zdania drogi (albo odwrotnie) = czerwień.
+
+    Falsyfikator: literówka w EN `objchg.item.way_restore` → asercja o etykiecie pada."""
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import tekst_powodu
+    i18n.set_lang(lang)
+    try:
+        cudzyslow = ("„", "”") if lang == "pl" else ("“", "”")
+        for powod, klucz, wywolanie in (
+                (writeback._droga_dokoncz(5), "grid.inplace.finish", "`finish_inplace(5)`"),
+                (writeback._droga_przywroc(5), "grid.inplace.restore", "`recover_torn(5)`"),
+                (writeback._RECZNA, "grid.inplace.release", "`writeback.release_isolation`")):
+            zdanie = tekst_powodu(powod)
+            etykieta = f"{cudzyslow[0]}{CATALOG[klucz][lang]}{cudzyslow[1]}"
+            assert etykieta in zdanie and wywolanie in zdanie, (klucz, zdanie)
+        # KAŻDY wpis powodu, którego PL niesie etykietę gestu `_GEST_*` (także kopie literalne
+        # spoza fragmentów `way_*`: `isolated_*`, `finish_failed_isolated_release`), mówi nią
+        # w języku UI - zmiana etykiety gestu bez zdania = czerwień.
+        gesty = {writeback._GEST_DOKONCZ: "grid.inplace.finish",
+                 writeback._GEST_PRZYWROC: "grid.inplace.restore",
+                 writeback._GEST_ZWOLNIJ: "grid.inplace.release"}
+        z_gestem = set()
+        for klucz_wpisu, wpis in CATALOG.items():
+            if not klucz_wpisu.startswith("objchg.item."):
+                continue
+            pl, tekst = wpis["pl"], wpis[lang]
+            for gest, klucz in gesty.items():
+                if f"„{gest}”" in pl:
+                    z_gestem.add(klucz_wpisu.split(".", 2)[2])
+                    etykieta = f"{cudzyslow[0]}{CATALOG[klucz][lang]}{cudzyslow[1]}"
+                    assert etykieta in tekst, (klucz_wpisu, klucz, tekst)
+        assert {"way_finish", "way_restore", "way_manual", "isolated_recover", "isolated_finish",
+                "finish_failed_isolated_release"} <= z_gestem, z_gestem
+    finally:
+        i18n.set_lang("pl")
+
+
 def test_AR30_2_podpowiedzi_dokonczenia_mowia_o_powrocie_i_zwolnieniu(qapp, tmp_path, monkeypatch):
     """AR-30 (2): podpowiedź „Dokończ zapis” (menu) i wiersza „Zapis czeka na dokończenie”
     (Porządki) mówiły tylko „Dokończ”, choć przy nieudanej kontroli danych drogą jest powrót,

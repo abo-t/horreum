@@ -813,8 +813,9 @@ def _zdanie_gestu_zapisu(op, res):
     """Zdanie wyniku gestu plikowego izolacji: „Dokończono N zapisów · zablokowane M · błędy K -
     plik: powód" (+ przerwanie). Czysta funkcja.
 
-    POWÓD RDZENIA JEDZIE DOSŁOWNIE - jest po polsku i niesie drogę dalej (np. „kontrola danych
-    operacji 7 przechodzi - zapis jest poprawny, powrót go nie cofa; dokończ…"); zdanie bez niego
+    POWÓD RDZENIA JEDZIE CAŁY, W JĘZYKU UI (`tekst_powodu` składa zdanie z kodu, AR-148) - niesie
+    drogę dalej (np. „kontrola danych operacji 7 przechodzi - zapis jest poprawny, powrót go nie
+    cofa; dokończ…"); zdanie bez niego
     zostawiałoby człowieka przy „zablokowane 1" bez odpowiedzi „czemu". Pokazujemy PIERWSZY powód
     z nazwą pliku - reszta ma tę samą drogę albo własny wiersz w Porządkach, a pasek jest jeden.
 
@@ -839,11 +840,12 @@ def _zdanie_gestu_zapisu(op, res):
         msg += i18n.t_plural("grid.inplace.failed", len(bledy))
     if res.cancelled:
         msg += i18n.t("grid.inplace.cancelled")
+    from horreum.gui.wb_worker import tekst_powodu   # powód rdzenia w języku UI (AR-148)
     for powod in (next((w for w in zablokowane + bledy + wstrzymane if w.reason), None),
                   next((w for w in wyniki if w.status == sukces and w.reason), None)):
         if powod is not None:
             msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path),
-                          detail=powod.reason)
+                          detail=tekst_powodu(powod.reason))
     return msg
 
 

@@ -6,6 +6,58 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.13.0] - 2026-10-15
+
+Wydanie o **gestach, które cofasz bez śladu, i planerze, który zna nazwy katalogowe**. Cofnięcie
+„Zmień obiekt…” zdejmuje także obiekt, który ten gest założył, a teleskop dopisany przez „Dopisz
+nowy…” cofniesz jednym przyciskiem, również po ponownym uruchomieniu programu. Planer i Porządki znają
+pełną tabelę Messiera, katalog Arp i mgławice planetarne z oznaczeniem pewności, a szukanie celu stawia
+trafienie dokładne na górze listy. Schemat bazy rośnie z wersji 39 do 41.
+
+Bazy otwartej w tej wersji nie otworzysz już w 0.12.0 - tamto wydanie odmówi bazy z nowszego
+schematu. Przed pierwszym otwarciem zrób kopię bazy, jeśli chcesz zachować drogę powrotu.
+
+### Dodane
+
+- **Cofnij dopisanie** na Osi teleskopu: teleskop dopisany przez „Dopisz nowy…” cofniesz przyciskiem
+  przy nim albo receptą z paska stanu. Ślad gestu zostaje w bazie, więc przycisk przeżywa zmianę strony
+  i restart programu.
+- **Porządki: „Nazwa katalogowa wskazuje inny obiekt”** - klatki, których nazwa katalogowa (na przykład
+  numer Messiera) prowadzi do innego obiektu niż ten, do którego są przypisane; wiersz otwiera je
+  w Zbiorach. Raport Dostawy dopisuje człony „nazwa katalogowa przepięta” i „wskazuje inny obiekt”,
+  a przy zerze milczy.
+- **Katalogi:** pełna tabela Messier → NGC/IC (106 par, VizieR VII/118), nazwy z katalogu Arp (54)
+  i 131 mgławic planetarnych z oznaczeniem statusu: potwierdzona, kandydatka albo mimika (na przykład
+  „SNR (mimika PN)”). Katalog celów planera rośnie z 1559 do 1691 pozycji.
+- **Planer: przełącznik „Ukryj kandydatki i mimiki PN”** - domyślnie wyłączony; pasek mówi, ile celów
+  schował.
+- **Gotowe obrazy bez oryginału** (wiersz poleceń, `horreum stack-versions --standalone`): autocropy,
+  których oryginału nie ma w archiwum, trafiają do archiwum stosów pod obiekt, zestaw i filtr z karty
+  pliku; bliźniacze nazwy dostają przyrostek `_2`, a plik już obecny w archiwum zostaje rozpoznany.
+
+### Zmienione
+
+- **Szukanie celu w planerze** zna formy katalogowe i nazwy potoczne: „M 27”, „m27” i „Arp 244”
+  trafiają swój cel, a trafienie dokładne stoi przed trafieniami po fragmencie nazwy. Pusty wynik mówi
+  dlaczego: nazwa znana, ale spoza celów planera („M 13” → „= NGC6205, poza celami planera”), cel
+  z innej warstwy albo cel schowany przez bieżące filtry.
+- Powody pozycji w oknie przebiegu „Zmień obiekt…”, ostrzeżenia planu zmiany obiektu i szczegóły
+  pominięć mówią w języku interfejsu - wersja angielska nie pokazuje w tych oknach polskich zdań.
+  Szczegół z warstwy zapisu karty jest jeszcze po polsku.
+- Okno żniw przy niepodłączonym dysku karty mówi „Folder karty nie istnieje: …” zamiast „na kartach nie
+  ma jeszcze wydań”. Długa ścieżka w zdaniu okna nie poszerza go; pełną widać w podpowiedzi.
+- Zestawy pomijają klatki zastąpione i wycofane, więc log grupowania liczy to samo co Porządki.
+- Kontrola `horreum human-facts --baseline` pilnuje także aliasów nazw nadanych ręką.
+- Schemat bazy v41: wersja 40 dokłada nagrobki obiektów i teleskopów założonych gestem, który cofnięto
+  (listy i wiersz poleceń ich nie pokazują), oraz ślad gestu „Dopisz nowy…”; wersja 41 zapisuje powody
+  pozycji zmiany obiektu kodem. Migracje wjeżdżają same przy pierwszym otwarciu i nie ruszają klatek
+  ani kopii.
+
+### Naprawione
+
+- Cofnięcie „Zmień obiekt…” z nową nazwą zostawiało obiekt bez klatek na liście „Istniejący obiekt”
+  i w „ostatnio użytych”.
+
 ## [0.12.0] - 2026-10-14
 
 Wydanie o **teleskopie, który zna swoją optykę, i oknie, które nie stoi**. Ogniskową i f/ teleskopu
@@ -1305,7 +1357,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.12.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/abo-t/horreum/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/abo-t/horreum/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/abo-t/horreum/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/abo-t/horreum/compare/v0.9.1...v0.10.0

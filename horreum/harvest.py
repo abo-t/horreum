@@ -742,7 +742,8 @@ def plan(con, wbpp_dir, *, archive_root, manifest=None, read=read_master, should
             t = read(src)
         except Exception as exc:                          # czytnik nie umiera za cały plan
             items.append(HarvestItem(src, "unknown", "review", "unreadable",
-                                     detail=f"{type(exc).__name__}: {exc}", src_mtime_ns=src_mtime_ns))
+                                     detail=f"{scan.nazwa_typu_diagnozy(exc)}: {exc}",
+                                     src_mtime_ns=src_mtime_ns))
             continue
         item = HarvestItem(src, t.kind, "review", sha1_data=t.sha1_data, file_sha1=t.file_sha1,
                            src_mtime_ns=src_mtime_ns)

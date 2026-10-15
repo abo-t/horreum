@@ -126,7 +126,12 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
     liczniki listwy `listwa` i `baza_ma_klatki` (rozróżnienie pustego stanu, wiz F5 #8)."""
     # Stan rodowodu gotowych obrazów RAZ na skład: kolumna, liść facetu, widoczność grupy i liczniki
     # listwy czytają ten sam słownik (jedna migawka, zero powtórzeń read-modelu).
-    stany = queries.stack_lineage_states(con)
+    # ZBIÓR KUBEŁKA RODOWODU TEŻ RAZ (AR-154): liczy propozycję dla ~33 stosów (36 ms na kopii pf4),
+    # a perspektywa „Rodowód do potwierdzenia" bierze go dodatkowo jako trim - ten sam wynik idzie
+    # do stanów i do trimu, zamiast drugiego liczenia.
+    oczekujace = queries.lineage_pending_frame_ids(con)
+    stany = queries.stack_lineage_states(con, oczekujace=oczekujace)
+    gotowe_trimy = {"lineage_pending_frame_ids": oczekujace}
     leaf_fn, universe_fn = _memo_leaf_fns(con, stany)
     frame_ids = filter_engine.run(stan["drzewo"], leaf_fn=leaf_fn, universe_fn=universe_fn)
     # JEDNA derywacja trimu dla zbioru głównego I dla sibling-setów listwy (SPOT, F4R2#2) -
@@ -136,7 +141,8 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
     # z trimem liczniki facetów i godziny portfela liczyły się na zbiorze BEZ przycięcia.
     # Skład rodziny czyta migawka z `_TRIMY` (BP-4), więc dołożenie ósmej flagi jest wpisem
     # w tabelę, a nie ósmym miejscem do zapamiętania.
-    trims = [getattr(queries, nazwa)(con) for nazwa in stan["trimy"]]
+    trims = [gotowe_trimy[nazwa] if nazwa in gotowe_trimy else getattr(queries, nazwa)(con)
+             for nazwa in stan["trimy"]]
     # TEKST UWAG TNIE JAK TRIM - w tę samą listę, więc ten sam zbiór dostają i grid, i sibling-sety
     # listwy (liczniki facetów przy `uwagi:chmury` liczą klatki z tą uwagą, nie całe archiwum).
     # `.get`: migawka sprzed tego składnika (test, który ją składa ręcznie) znaczy „bez uwag".

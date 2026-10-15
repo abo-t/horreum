@@ -1,0 +1,12 @@
+-- 0043 - INDEKS `frame(object_id)` (AR-154): materiał okna stosu (`stacks._window_candidates`) pyta
+-- o lighty JEDNEGO obiektu, a tabela `frame` nie miała indeksu prowadzonego tą kolumną (są: kamera,
+-- config, stanowisko, profil kalibracji, `sha1_data`) - plan zapytania `SCAN f` po całej tabeli
+-- (16 998 wierszy na kopii żywej bazy) przy każdym wołaniu.
+--
+-- Wołań przybyło: kubełek „Rodowód do potwierdzenia” pyta propozycję rodowodu także dla stosów BEZ
+-- werdyktu, których powodem jest okno (zdegenerowane, puste, mylące) - stos, któremu propozycja nie
+-- ma nic do dania, z kubełka wypada (`queries._czeka_na_reke`). Zmierzone na kopii żywej bazy (AR-150,
+-- sonda `stack_lineage_states`): bez indeksu 248 ms na skład zbioru, z indeksem 40 ms.
+--
+-- PRZYROST (CREATE INDEX) - zero przebudowy, zero ruszonych wierszy, schemat tabel bez zmian.
+CREATE INDEX idx_frame_object ON frame(object_id);

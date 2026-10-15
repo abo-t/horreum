@@ -2462,7 +2462,10 @@ def test_obraz_ktorego_CALY_material_powstal_pozniej_nie_slyszy_ze_archiwum_jest
     view._toggle_panel("lineage")
     bar = view.lineage_bar
     nota = bar.note.full_text()
-    assert bar.combo_night.currentData() == "2023-04-21" and bar.items.count() == 0
+    # AR-154: propozycja nie ma czego dać, więc stos wypada z kubełka i trybu nocy nie otwiera -
+    # zdanie o klatkach nowszych niż obraz zostaje (licznik idzie do panelu poza trybem propozycji).
+    assert 10 not in queries.lineage_pending_frame_ids(gcon)
+    assert bar.night_row.isHidden() and bar.items.count() == 0
     assert "Pominięte 3 klatki nowsze niż obraz" in nota
     assert "nie ma ani jednej klatki" not in nota, f"klatki są, tylko powstały później: {nota!r}"
     naglowek = bar.head.text()
@@ -2530,7 +2533,7 @@ def test_perspektywa_rodowodu_zaweza_grid_do_czekajacych(view, gcon):
     — żeby trafić na 35 obrazów czekających na słowo, trzeba było przeklikać 128 stosów. Wiersz
     Porządków celuje w tę perspektywę, więc jej trim jest jedyną drogą od liczby do listy."""
     from horreum.gui.grid import PRESET_LINEAGE
-    _seed_stos(gcon, reason="degenerate_window")
+    _seed_stos_z_kandydatami(gcon)          # okno zdegenerowane Z materiałem - gest ma co zrobić
     view.apply_perspective(PRESET_LINEAGE)
     assert view._only_lineage is True
     assert set(view._frame_ids) == queries.lineage_pending_frame_ids(gcon) == {10}
@@ -6351,3 +6354,111 @@ def test_kolumna_exptime_jedna_precyzja_na_kolumne(qapp):
     assert miejsca_ekspozycji([0.00625, 0.008, 0.01, 0.0125]) == 3
     assert len({f"{v:.3f}" for v in (0.00625, 0.008, 0.01, 0.0125)}) == 4
     assert miejsca_ekspozycji([300.0, 0.5]) == 1 and miejsca_ekspozycji([]) == 0
+
+
+# ---------- szuflada: ogon cofnięcia kart wspólny z oknami kart (AR-160) ----------
+
+def _commit_makra(view):
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    view._on_commit()
+    return view._undo_commit_id
+
+
+def test_cofniecie_makra_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(wb_view, monkeypatch):
+    """AR-160 (cancelled): dawniej szuflada przy samym `cancelled` chowała „Cofnij”, choć pętla
+    rdzenia staje PRZED resztą backupów - commit nie jest cofnięty. Teraz reguła jest wspólna
+    z oknami kart (`wb_worker.ogon_cofniecia`): przerwanie przed pierwszym plikiem i po części
+    plików (`restored` + `cancelled`) zostawia „Cofnij” przy tym samym commicie, zdanie mówi
+    o przerwaniu; ponowienie kończy i chowa przycisk.
+    Falsyfikator: reguła „Cofnij zostaje” tylko przy `failed` → druga asercja."""
+    from astropy.io import fits
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import WritebackWorker
+    view, con, p = wb_view
+    commit_id = _commit_makra(view)
+    assert commit_id is not None and fits.getheader(str(p))["TELESCOP"] == "EQ6"
+    przerwane = i18n.t("wb.undo_cancelled", undo=i18n.t("grid.action.undo"))
+    with monkeypatch.context() as m:
+        m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
+            c, t, now=now, progress=pr, should_cancel=lambda: True))
+        view._dispatch_undo()
+    assert przerwane in view.drawer.result.text(), view.drawer.result.text()
+    assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
+    assert view._undo_commit_id == commit_id and fits.getheader(str(p))["TELESCOP"] == "EQ6"
+    wrocil = writeback.FileResult(1, str(p), "restored", None)
+    view._after_undo("undo", writeback.UndoResult(commit_id, [wrocil], [], [], cancelled=True))
+    assert przerwane in view.drawer.result.text()
+    assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
+    view._dispatch_undo()                                # ponowienie kończy cofnięcie
+    assert fits.getheader(str(p))["TELESCOP"] == "RC8"
+    assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None
+
+
+def test_cofniecie_makra_z_bledem_mowi_powod_po_angielsku_w_UI_EN(wb_view, monkeypatch):
+    """AR-160: szuflada (wzór dla okien kart) - powód błędu cofnięcia w języku UI, recepta
+    z nazwą przycisku, „Cofnij” zostaje; w EN bez polskiego zdania."""
+    from horreum.gui import i18n
+    view, con, p = wb_view
+    commit_id = _commit_makra(view)
+    i18n.set_lang("en")
+    with monkeypatch.context() as m:
+        m.setattr(writeback.scan, "scan_file",
+                  lambda path, **kw: (_ for _ in ()).throw(OSError(64, "broken share")))
+        view._dispatch_undo()
+    tekst = view.drawer.result.text()
+    assert "broken share" in tekst and "1 error" in tekst, tekst
+    assert i18n.t("grid.wb.undo_retry", undo="Undo") in tekst, tekst
+    assert not set(tekst) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), tekst
+    assert view._undo_btn.isVisibleTo(view) and view._undo_commit_id == commit_id
+
+
+def test_cofniecie_makra_ZABLOKOWANE_bez_juz_cofnietego_zostawia_Cofnij(wb_view):
+    """AR-160 (domknięcie z rdzenia): plik zmieniony od commitu - cofnięcie go blokuje, plik NIE
+    wrócił, więc „Cofnij” zostaje (dawniej samo `blocked` chowało jedyny uchwyt). Blokada „już
+    cofnięte” (`UndoResult.already`) domyka cofnięcie - przycisk znika.
+    Falsyfikator: `ogon_cofniecia` z regułą `failed or cancelled` → pierwsza asercja widoczności."""
+    from astropy.io import fits
+    from horreum.gui import i18n
+    view, con, p = wb_view
+    commit_id = _commit_makra(view)
+    fits.setval(str(p), "IMAGETYP", value="Flat")                # cudza zmiana po commicie
+    view._dispatch_undo()
+    assert view._undo_btn.isVisibleTo(view) and view._undo_commit_id == commit_id
+    assert i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo")) in view.drawer.result.text()
+    juz = writeback.FileResult(1, str(p), "blocked", "już cofnięte")
+    view._after_undo("undo", writeback.UndoResult(commit_id, [], [juz], [], already=[juz]))
+    assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None
+
+
+def test_cofniecie_renamu_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(rn_view, monkeypatch):
+    """AR-160 dla Nazw: `undo_renames` przerywa przed resztą wierszy, a ogon chował „Cofnij” przy
+    samym `cancelled` - przebieg zostawał w połowie bez uchwytu. Wspólny ogon zostawia przycisk,
+    zdanie mówi o przerwaniu; ponowienie cofa resztę.
+    Falsyfikator: `_after_undo_rename` z warunkiem `if res.failed` → asercja widoczności."""
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import WritebackWorker
+    view, con, files = rn_view
+    view._on_rename_stage(_POL)
+    run = view._rename_run_id
+    view._on_commit()
+    pytania = []
+
+    def _po_pierwszym():
+        pytania.append(1)
+        return len(pytania) > 1
+
+    with monkeypatch.context() as m:
+        m.setitem(WritebackWorker._OPS, "undo_rename", lambda c, t, now, pr, sc:
+                  writeback.undo_renames(c, t, now=now, progress=pr, should_cancel=_po_pierwszym))
+        view._dispatch_undo()
+    tekst = view.drawer.result.text()
+    assert i18n.t("wb.undo_cancelled", undo=i18n.t("grid.action.undo")) in tekst, tekst
+    assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "rename"
+    assert view._undo_rename_run_id == run
+    assert sum(f.exists() for f in files) == 1, "jeden plik wrócił, drugi czeka na ponowienie"
+    view._dispatch_undo()
+    assert all(f.exists() for f in files)
+    assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None

@@ -12,24 +12,41 @@ sama z kopii i planu. Z `writeback` bierze wyłącznie blokadę (`_exclusive`) d
 Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
 
   przed KATALOG_KOPII PLAN.json
-      PLAN.json = lista `{"plik": ścieżka, "object": oczekiwana forma karty OBJECT}`, opcjonalnie
-      z `"po": ścieżka` - PARA ŚCIEŻEK gestu „Zmień obiekt…” (AR-17 krok 3): `plik` = ścieżka przed
-      przeniesieniem, `po` = ścieżka po nim (jeden `os.rename` zmienia folder i nazwę). `"object":
-      null` = karta bez zmiany (RAW albo karta już w formie): po zapisie CAŁY plik bajt w bajt jak
-      kopia. Klucz `object` jest obowiązkowy - jego brak to literówka planu, nie „bez karty”. Pełna kopia
+      PLAN.json = lista pozycji `{"plik", "po"?, "keyword", "value", "comment", "op"}` (AR-156):
+      `op` = `set` (podmiana istniejącej karty `keyword`), `add` (dopisanie karty, której kopia NIE
+      MA) albo `none` (plik bez zmiany treści: po zapisie CAŁY plik bajt w bajt jak kopia - RAW
+      albo karta już w formie); `comment` null = bez komentarza, a przy `set` - komentarz zastany.
+      Skrót sprzed AR-156: `{"plik", "object": X}` ≡ `OBJECT` `set` X bez komentarza, `"object":
+      null` ≡ `none`; pozycja z oboma kształtami naraz to odmowa. Klucze kształtu są obowiązkowe -
+      brak to literówka planu, nie „bez karty”. Keyword: FITS - dowolna karta tekstowa (`OBJECT`
+      gestu „Zmień obiekt…”, `FILTER` naprawy `header-fix`); XISF - wyłącznie `OBJECT` `set` bez
+      komentarza (model regionu XML niżej). `add` przy kopii, która kartę już ma, i `set` przy kopii
+      bez karty → odmowa, zanim powstanie jakakolwiek kopia. Opcjonalne `"po": ścieżka` - PARA
+      ŚCIEŻEK gestu „Zmień obiekt…” (AR-17 krok 3): `plik` = ścieżka przed przeniesieniem, `po` =
+      ścieżka po nim (jeden `os.rename` zmienia folder i nazwę). Pełna kopia
       każdego pliku do KATALOG_KOPII (lokalny dysk, NIE udział z oryginałami), tworzona wyłącznie
       jako NOWY plik; sha1 oryginału i kopii (muszą być równe), rozmiar, `st_ino`, granice
-      nagłówka, karty → manifest.json, zapisany atomowo dopiero po skopiowaniu i sprawdzeniu
-      wszystkich plików. Katalog z manifestem albo z plikiem kopii (`NNNN.*`) → odmowa: kopie
-      sprzed zapisu są jedynym materiałem porównania i nie wolno ich nadpisać.
+      nagłówka, karty i pełny kształt pozycji → manifest.json, zapisany atomowo dopiero po
+      skopiowaniu i sprawdzeniu wszystkich plików. Katalog z manifestem albo z plikiem kopii
+      (`NNNN.*`) → odmowa: kopie sprzed zapisu są jedynym materiałem porównania i nie wolno ich
+      nadpisać.
   po KATALOG_KOPII
       dla każdego pliku (przy parze: pod ścieżką `po`, a pod starą nie ma już nic - rename zachowuje
-      `st_ino`, zmierzone na `R:`): kopia nietknięta (sha1), rozmiar i `st_ino` bez zmian, a CAŁY plik
-      równy plikowi oczekiwanemu, wyznaczonemu z kopii i planu:
-        FITS - wszystkie bajty identyczne z kopią poza jednym 80-bajtowym rekordem karty
-          `OBJECT[0]` w jej położeniu z kopii (pierwszy rekord `OBJECT` w regionie
-          `[hdrLoc, datLoc)` wybranego HDU); ten rekord to karta `OBJECT` o wartości = forma
-          z planu i komentarzu = komentarz z kopii.
+      `st_ino`, zmierzone na `R:`): kopia nietknięta (sha1), rozmiar i `st_ino` bez zmian (inny
+      `st_ino` przy `add` = plik przepisany w całości drogą atomową, nie dopisany w miejscu), a CAŁY
+      plik równy plikowi oczekiwanemu, wyznaczonemu z kopii i planu:
+        FITS `set` - wszystkie bajty identyczne z kopią poza jednym 80-bajtowym rekordem karty
+          `keyword[0]` w jej położeniu z kopii (pierwszy rekord tej karty w regionie
+          `[hdrLoc, datLoc)` wybranego HDU); ten rekord to karta `keyword` o wartości z planu
+          i komentarzu z planu (null = komentarz z kopii).
+        FITS `add` - bajty poza regionem identyczne z kopią, a region = region kopii po dopisaniu
+          wg reguły pisarza, wyznaczony WŁASNYM modelem na rekordach kopii (bez `Header` astropy):
+          karty kopii do ostatniej karty zwykłej bez zmian, potem rekord nowej karty (wartość
+          i komentarz z planu, null = bez komentarza), potem końcowy blok kart komentarzowych
+          (COMMENT/HISTORY/nazwa pusta) kopii przesunięty o rekord; pusta karta z końca zużyta
+          (`END` na miejscu), a gdy jej nie ma - `END` o rekord niżej, w wolny rekord za `END`
+          kopii; reszta regionu jak w kopii. Kopia bez obu zapasów → NIE (pisarz nie dopisze
+          w miejscu).
         XISF - bajty od `first_attachment` do końca identyczne z kopią; w regionie
           `[0, first_attachment)`: sygnatura i `reserved` z kopii, pole długości wskazuje XML
           mieszczący się w regionie, XML równy XML-owi kopii poza DWIEMA wartościami, które
@@ -44,8 +61,9 @@ Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
           `<Property id="Observation:Object:Name">` (atrybut `value` albo tekst elementu) -
           pisarz ją łata razem z kartą, gdy plik ją ma, żeby plik nie przeczył sam sobie; gdy
           kopia ją ma, po zapisie MUSI być równa formie. Komentarz karty zmienić się nie może.
-      Niezależnie od różnic: czytnik skanu widzi po zapisie `OBJECT[0]` = forma z planu,
-      z komentarzem sprzed - brak wykonania zmiany to NIE, nie „zero różnic".
+      Niezależnie od różnic: czytnik skanu widzi po zapisie `keyword[0]` = wartość z planu,
+      z komentarzem z planu (przy `set` z komentarzem null - sprzed), a przy `add` karty przed
+      zapisem nie było - brak wykonania zmiany to NIE, nie „zero różnic".
       Kod wyjścia 1 przy którymkolwiek NIE.
   po-undo KATALOG_KOPII
       po cofnięciu pilotażu: sha1 CAŁEGO pliku == sha1 sprzed pilotażu, ten sam rozmiar i ten sam
@@ -82,6 +100,10 @@ _KOPIA = re.compile(r"^\d{4}\.")                     # nazwa pliku kopii: numer 
 
 _FITS_REKORD = 80
 _FITS_END = b"END" + b" " * 77
+_FITS_PUSTY = b" " * _FITS_REKORD                     # pusta karta albo wolny rekord za END
+# Karty komentarzowe (nazwa COMMENT, HISTORY albo pusta): za nimi dopisywana karta NIE staje.
+_FITS_KOMENTARZOWE = (b"COMMENT ", b"HISTORY ", b" " * 8)
+_FITS_NAZWA = re.compile(r"[A-Z0-9_-]{1,8}")
 _XISF_SYGNATURA = b"XISF0100"
 _XISF_XML = 16                                       # sygnatura 8 B + długość 4 B + reserved 4 B
 _WLASNOSC_OBIEKTU = "Observation:Object:Name"
@@ -128,6 +150,122 @@ def _karty(path):
     return {f"{c.keyword}[{c.idx}]": [c.value_raw, c.comment] for c in (rec.cards or [])}, rec.error
 
 
+# ============================================================ kształt pozycji (AR-156)
+
+
+_OPERACJE = ("set", "add", "none")
+_KSZTALT = ("keyword", "value", "comment", "op")
+
+
+def _pozycja(p):
+    """Pozycja planu albo wpis manifestu w pełnym kształcie `{keyword, value, comment, op}`.
+
+    Skrót sprzed AR-156: `"object": X` ≡ `OBJECT` `set` X bez komentarza, `"object": null` ≡
+    `none` (stare manifesty czyta tą samą drogą). `ValueError` z powodem: oba kształty naraz,
+    brak klucza kształtu, nieznana operacja, typ spoza kontraktu - literówka planu nie przechodzi
+    jako „bez karty”."""
+    stary, nowe = "object" in p, [k for k in _KSZTALT if k in p]
+    if stary and nowe:
+        raise ValueError(f"pozycja ma naraz 'object' i pelny ksztalt ({', '.join(nowe)})")
+    if stary:
+        forma = p["object"]
+        if forma is None:
+            return {"keyword": None, "value": None, "comment": None, "op": "none"}
+        if not isinstance(forma, str):
+            raise ValueError("'object' nie jest tekstem ani null")
+        return {"keyword": "OBJECT", "value": forma, "comment": None, "op": "set"}
+    if len(nowe) != len(_KSZTALT):
+        brak = sorted(set(_KSZTALT) - set(nowe))
+        raise ValueError(f"brak kluczy {', '.join(brak)} (ani skrotu 'object')")
+    if p["op"] not in _OPERACJE:
+        raise ValueError(f"op {p['op']!r} spoza {'/'.join(_OPERACJE)}")
+    if p["op"] == "none":
+        return {"keyword": None, "value": None, "comment": None, "op": "none"}
+    kw, wartosc, komentarz = p["keyword"], p["value"], p["comment"]
+    if not (isinstance(kw, str) and kw.strip() and isinstance(wartosc, str)
+            and (komentarz is None or isinstance(komentarz, str))):
+        raise ValueError("keyword i value musza byc tekstem, comment tekstem albo null")
+    return {"keyword": kw.strip().upper(), "value": wartosc, "comment": komentarz, "op": p["op"]}
+
+
+_KLUCZE_STARE = frozenset({"plik", "object"})          # skrót sprzed AR-156
+_KLUCZE_NOWE = frozenset({"plik", *_KSZTALT})
+_KLUCZ_PARY = "po"                                     # opcjonalny w obu kształtach
+
+
+def _pozycja_planu(p):
+    """`(plik, po, kształt)` pozycji planu - schemat ZAMKNIĘTY: obiekt JSON z kluczami dokładnie
+    jednego kształtu (+ opcjonalne `po`), `plik` niepustym tekstem, `po` tekstem albo null. Obcy
+    klucz (literówka `coment`, `poo`) → `ValueError` z jego nazwą, nie cicha wartość domyślna."""
+    if not isinstance(p, dict):
+        raise ValueError(f"pozycja nie jest obiektem JSON ({type(p).__name__})")
+    obce = sorted(set(p) - _KLUCZE_STARE - _KLUCZE_NOWE - {_KLUCZ_PARY})
+    if obce:
+        raise ValueError(f"obce klucze {', '.join(map(repr, obce))}")
+    if not isinstance(p.get("plik"), str) or not p["plik"]:
+        raise ValueError("'plik' nie jest niepustym tekstem")
+    po = p.get(_KLUCZ_PARY)
+    if po is not None and (not isinstance(po, str) or not po):
+        raise ValueError("'po' nie jest niepustym tekstem ani null")
+    return os.path.abspath(p["plik"]), os.path.abspath(po) if po else None, _pozycja(p)
+
+
+# Bramka kwalifikacji zapisu w miejscu - WŁASNY kod kontroli, nie import z pisarza (niezależność):
+# karta, której pisarz w miejscu nie zapisze, nie może dostać od kontroli TAK. Karty specjalne
+# (bez wartości albo z układem innym niż `keyword = 'tekst' / komentarz`), układu danych (zmiana
+# zmieniłaby znaczenie bajtów danych) i sumy kontrolne (zmiana nagłówka unieważnia `CHECKSUM`).
+_FITS_SPECJALNE = frozenset({"", "COMMENT", "HISTORY", "CONTINUE", "END"})
+_FITS_UKLAD = frozenset({"SIMPLE", "XTENSION", "BITPIX", "NAXIS", "EXTEND", "PCOUNT", "GCOUNT",
+                         "GROUPS", "BZERO", "BSCALE", "BLANK"})
+_FITS_NAXIS_N = re.compile(r"NAXIS\d+")
+_FITS_SUMY = ("CHECKSUM", "DATASUM")
+
+
+def _karty_naglowka(path):
+    """`[(keyword, wartość)]` nagłówka (wybrane HDU FITS / karty XISF) - sam odczyt nagłówka, bez
+    haszy całego pliku (bramka planu przed kopiowaniem)."""
+    if _jest_xisf(path):
+        return [(c.keyword, c.value_raw) for c in scan.read_xisf_meta_full(path).cards]
+    with fits.open(path, mode="readonly", memmap=False) as hdul:
+        _, hdu = scan._select_hdu(hdul)
+        return [(c.keyword, c.value) for c in hdu.header.cards]
+
+
+def _odmowa_pozycji(path, poz):
+    """Powód, dla którego kontrola nie umie sprawdzić tej pozycji na tym pliku, albo `None`."""
+    if poz["op"] == "none":
+        return None
+    kw = poz["keyword"]
+    xisf = _jest_xisf(path)
+    if xisf:
+        # Pisarz XISF dopisuje kartę w miejscu (`_xisf_add_patch`), ale model regionu XML tej
+        # kontroli zna wyłącznie podmianę wartości karty OBJECT (i jej własności).
+        if (kw, poz["op"], poz["comment"]) != ("OBJECT", "set", None):
+            return (f"XISF: kontrola zna wylacznie 'set' karty OBJECT bez komentarza, plan chce "
+                    f"'{poz['op']}' karty {kw}")
+    elif not _FITS_NAZWA.fullmatch(kw):
+        return f"nazwa karty FITS {kw!r} spoza 8 znakow A-Z 0-9 _ -"
+    elif kw in _FITS_SPECJALNE or kw in _FITS_UKLAD or _FITS_NAXIS_N.fullmatch(kw):
+        return f"karta {kw} specjalna albo ukladu danych - pisarz nie zapisze jej w miejscu"
+    karty = _karty_naglowka(path)
+    if not xisf:
+        sumy = [s for s in _FITS_SUMY if any(k == s for k, _ in karty)]
+        if sumy:
+            return (f"FITS z suma kontrolna ({', '.join(sumy)}) - zmiana naglowka ja uniewazni, "
+                    f"pisarz odmawia")
+    wartosci = [v for k, v in karty if k == kw]
+    if poz["op"] == "add" and wartosci:
+        return f"op 'add', a kopia ma juz karte {kw} - zmiana wartosci idzie przez 'set'"
+    if poz["op"] == "set" and not wartosci:
+        return f"op 'set', a kopia nie ma karty {kw} - dopisanie idzie przez 'add'"
+    if poz["op"] == "set" and not xisf:
+        if len(wartosci) != 1:
+            return f"op 'set', a karta {kw} wystepuje {len(wartosci)} razy - pisarz wymaga jednej"
+        if not isinstance(wartosci[0], str):
+            return f"op 'set', a zastana wartosc {kw} nie jest tekstem ({_a(repr(wartosci[0]))})"
+    return None
+
+
 # ============================================================ przed
 
 
@@ -157,13 +295,31 @@ def przed(katalog, plan_json):
     if zajety is not None:
         raise SystemExit(f"odmowa: {_a(katalog)} zawiera juz {_a(zajety)} - kopie sprzed zapisu "
                          f"nie moga byc nadpisane; podaj nowy katalog")
-    plan = json.loads(Path(plan_json).read_text(encoding="utf-8"))
-    sciezki = [os.path.abspath(p["plik"]) for p in plan]
-    pary = [os.path.abspath(p["po"]) if p.get("po") else None for p in plan]
-    if not plan or len(set(sciezki)) != len(sciezki) or any(
-            "object" not in p or not (p["object"] is None or isinstance(p["object"], str))
-            for p in plan):
-        raise SystemExit("odmowa: plan pusty, z powtorzonym plikiem albo bez formy 'object'")
+    try:
+        plan = json.loads(Path(plan_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"odmowa: plan nieczytelny: {_a(exc)}") from exc
+    if not isinstance(plan, list) or not plan:
+        raise SystemExit("odmowa: plan nie jest niepusta lista pozycji")
+    sciezki, pary, pozycje = [], [], []
+    for i, pozycja in enumerate(plan):
+        p = None
+        try:
+            p, po, poz = _pozycja_planu(pozycja)
+            powod = _odmowa_pozycji(p, poz)
+            if powod is None and os.stat(p).st_ino == 0:
+                # Zapis atomowy rozpoznajemy po zmianie `st_ino` - zero to brak tożsamości pliku.
+                powod = "st_ino == 0 - brak tozsamosci pliku, zapisu w miejscu nie da sie odroznic"
+        except Exception as exc:  # noqa: BLE001 - każda porażka bramki planu to odmowa, nie wyjątek
+            powod = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ValueError) else str(exc)
+        if powod is not None:
+            gdzie = f" ({_a(p)})" if p is not None else ""
+            raise SystemExit(f"odmowa: pozycja {i}{gdzie}: {_a(powod)}")
+        sciezki.append(p)
+        pary.append(po)
+        pozycje.append(poz)
+    if len(set(map(os.path.normcase, sciezki))) != len(sciezki):
+        raise SystemExit("odmowa: plan z powtorzonym plikiem")
     cele = [po for po in pary if po is not None]
     if len(set(map(os.path.normcase, cele))) != len(cele):
         raise SystemExit("odmowa: dwa pliki planu z ta sama sciezka 'po'")
@@ -172,17 +328,17 @@ def przed(katalog, plan_json):
             raise SystemExit(f"odmowa: sciezka 'po' juz istnieje przed zapisem: {_a(po)}")
     katalog.mkdir(parents=True, exist_ok=True)
     manifest = []
-    for i, (p, pozycja, po) in enumerate(zip(sciezki, plan, pary)):
+    for i, (p, poz, po) in enumerate(zip(sciezki, pozycje, pary)):
         kopia = katalog / f"{i:04d}{os.path.splitext(p)[1]}"
         st = os.stat(p)
         _kopiuj(p, kopia)
         karty, _ = _karty(p)
-        # Karta bez zmiany (RAW, karta już w formie) nie potrzebuje granic nagłówka - porównanie
-        # obejmuje cały plik, a RAW nie otworzy się czytnikiem FITS.
-        granice = [0, 0] if pozycja["object"] is None else list(_granice(p))
+        # Plik bez zmiany treści (RAW, karta już w formie) nie potrzebuje granic nagłówka -
+        # porównanie obejmuje cały plik, a RAW nie otworzy się czytnikiem FITS.
+        granice = [0, 0] if poz["op"] == "none" else list(_granice(p))
         wpis = {"plik": p, "po": po, "kopia": str(kopia), "sha1": _sha1(p),
                 "sha1_kopii": _sha1(kopia), "rozmiar": st.st_size, "ino": st.st_ino,
-                "granice": granice, "object": pozycja["object"], "karty": karty}
+                "granice": granice, **poz, "karty": karty}
         st_po = os.stat(p)
         if wpis["sha1"] != wpis["sha1_kopii"] or os.path.getsize(kopia) != st.st_size:
             raise SystemExit(f"KOPIA NIEZGODNA: {_a(p)}")
@@ -239,34 +395,112 @@ def _karta_fits(rekord):
         return None
 
 
-def _fits_problemy(plik, kopia, a, b, forma):
-    """Plik oczekiwany = kopia z podmienionym WYŁĄCZNIE rekordem `OBJECT[0]` (położenie z kopii)."""
+def _karta_wg_planu(karta, poz, komentarz):
+    """Problemy karty `(keyword, value, comment)` przeczytanej z pliku wobec planu i komentarza
+    oczekiwanego (`komentarz`)."""
+    kw = poz["keyword"]
+    problemy = []
+    if karta[0] != kw:
+        problemy.append(f"rekord {kw}[0] ma po zapisie keyword {_a(repr(karta[0]))}")
+    if not isinstance(karta[1], str) or karta[1] != poz["value"].rstrip():
+        problemy.append(f"{kw}[0] po zapisie = {_a(repr(karta[1]))}, plan = "
+                        f"{_a(repr(poz['value']))}")
+    if karta[2] != komentarz:
+        problemy.append(f"komentarz {kw}[0] = {_a(repr(karta[2]))}, oczekiwany "
+                        f"{_a(repr(komentarz))}")
+    return problemy
+
+
+def _fits_set_problemy(plik, kopia, a, b, poz):
+    """Plik oczekiwany = kopia z podmienionym WYŁĄCZNIE rekordem `keyword[0]` (położenie z kopii);
+    komentarz z planu, a przy `comment` null - komentarz kopii."""
+    kw = poz["keyword"]
+    nazwa = kw.ljust(8).encode("ascii")
     region = _czytaj(kopia, a, b)
     pozycja = None
     for i in range(0, len(region), _FITS_REKORD):
         rekord = region[i:i + _FITS_REKORD]
         if rekord == _FITS_END:
             break
-        if rekord[:8] == b"OBJECT  ":
+        if rekord[:8] == nazwa:
             pozycja = a + i
             break
     if pozycja is None:
-        return ["kopia bez karty OBJECT w regionie naglowka"]
+        return [f"kopia bez karty {kw} w regionie naglowka"]
     problemy = []
     if not _porownaj_poza(plik, kopia, pozycja, pozycja + _FITS_REKORD):
-        problemy.append("bajty poza rekordem OBJECT[0] rozne od kopii")
+        problemy.append(f"bajty poza rekordem {kw}[0] rozne od kopii")
     stara = _karta_fits(region[pozycja - a:pozycja - a + _FITS_REKORD])
     nowa = _karta_fits(_czytaj(plik, pozycja, pozycja + _FITS_REKORD))
     if stara is None or nowa is None:
-        return problemy + ["rekord OBJECT[0] nieparsowalny (kopia albo plik)"]
-    if nowa[0] != "OBJECT":
-        problemy.append(f"rekord OBJECT[0] ma po zapisie keyword {_a(repr(nowa[0]))}")
-    if not isinstance(nowa[1], str) or nowa[1] != forma.rstrip():
-        problemy.append(f"OBJECT[0] po zapisie = {_a(repr(nowa[1]))}, plan = {_a(repr(forma))}")
-    if nowa[2] != stara[2]:
-        problemy.append(f"komentarz OBJECT[0] zmieniony: {_a(repr(stara[2]))} -> "
-                        f"{_a(repr(nowa[2]))}")
-    return problemy
+        return problemy + [f"rekord {kw}[0] nieparsowalny (kopia albo plik)"]
+    return problemy + _karta_wg_planu(
+        nowa, poz, stara[2] if poz["comment"] is None else poz["comment"])
+
+
+def _fits_po_dopisaniu(region, poz):
+    """Region nagłówka FITS po dopisaniu karty W MIEJSCU - WŁASNY model reguły pisarza na rekordach
+    kopii (pisarz układa kolejność astropy `Header.append`: za ostatnią kartą zwykłą, przed końcowym
+    blokiem kart komentarzowych i pustych, z zużyciem pustej karty z końca). Bez `Header` astropy
+    i bez funkcji pisarza; `fits.Card` składa wyłącznie obraz nowej karty.
+
+    Zwraca `(region oczekiwany, indeks rekordu nowej karty, indeks rekordu END)` albo `(None,
+    powód)`, gdy kopia nie ma zapasu na dopisanie w miejscu."""
+    rekordy = [region[i:i + _FITS_REKORD] for i in range(0, len(region), _FITS_REKORD)]
+    if _FITS_END not in rekordy:
+        return None, "kopia bez rekordu END w regionie naglowka"
+    koniec = rekordy.index(_FITS_END)
+    karty = []                                       # karta = jej rekordy (z kontynuacjami)
+    for i, rekord in enumerate(rekordy[:koniec]):
+        if i and rekord[:8] == b"CONTINUE":
+            karty[-1].append(rekord)
+        else:
+            karty.append([rekord])
+    miejsce = len(karty)
+    while miejsce and karty[miejsce - 1] == [_FITS_PUSTY]:
+        miejsce -= 1
+    while miejsce and karty[miejsce - 1][0][:8] in _FITS_KOMENTARZOWE:
+        miejsce -= 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        nowa = fits.Card(poz["keyword"], poz["value"], poz["comment"] or "").image
+    if len(nowa) != _FITS_REKORD:
+        return None, f"karta {poz['keyword']} z planu nie miesci sie w jednym rekordzie"
+    po = karty[:miejsce] + [[nowa.encode("ascii")]] + karty[miejsce:]
+    if po[-1] == [_FITS_PUSTY]:
+        po.pop()                                     # pusta karta z końca zużyta - END na miejscu
+    nowe = b"".join(r for karta in po for r in karta)
+    przyrost = len(nowe) // _FITS_REKORD - koniec
+    if przyrost and rekordy[koniec + 1:koniec + 2] != [_FITS_PUSTY]:
+        return None, ("kopia bez pustej karty na koncu i bez wolnego rekordu za END - dopisanie "
+                      "w miejscu niemozliwe")
+    oczekiwany = nowe + _FITS_END + region[(koniec + 1 + przyrost) * _FITS_REKORD:]
+    return oczekiwany, sum(len(k) for k in karty[:miejsce]), koniec + przyrost
+
+
+def _fits_add_problemy(plik, kopia, a, b, poz):
+    """Plik oczekiwany = kopia z regionem nagłówka po dopisaniu (`_fits_po_dopisaniu`)."""
+    kw = poz["keyword"]
+    model = _fits_po_dopisaniu(_czytaj(kopia, a, b), poz)
+    if model[0] is None:
+        return [model[1]]
+    oczekiwany, i_karty, i_end = model
+    problemy = []
+    if not _porownaj_poza(plik, kopia, a, b):
+        problemy.append("bajty poza regionem naglowka rozne od kopii")
+    region = _czytaj(plik, a, b)
+    rozne = [i for i in range(0, len(oczekiwany), _FITS_REKORD)
+             if region[i:i + _FITS_REKORD] != oczekiwany[i:i + _FITS_REKORD]]
+    if rozne:
+        i = rozne[0] // _FITS_REKORD
+        rodzaj = ("nowa karta " + kw if i == i_karty else "END" if i == i_end
+                  else "karta kopii" if i < i_end else "wypelnienie za END")
+        problemy.append(f"region naglowka rozny od oczekiwanego w {len(rozne)} rekordach, "
+                        f"pierwszy: rekord {i} (oczekiwany: {_a(rodzaj)})")
+    karta = _karta_fits(region[i_karty * _FITS_REKORD:(i_karty + 1) * _FITS_REKORD])
+    if karta is None:
+        return problemy + [f"rekord nowej karty {kw} (rekord {i_karty}) nieparsowalny"]
+    return problemy + _karta_wg_planu(karta, poz, poz["comment"] or "")
 
 
 # ============================================================ po - XISF
@@ -425,6 +659,7 @@ def _problemy_pliku(w):
     problemy = []
     if _sha1(w["kopia"]) != w["sha1"]:
         return ["kopia sprzed zapisu zmieniona - brak materialu porownania"]
+    poz = _pozycja(w)                                    # manifest sprzed AR-156: skrót `object`
     po = _przeniesiony(w)
     plik = po or w["plik"]
     if po is not None and os.path.exists(w["plik"]):
@@ -433,35 +668,97 @@ def _problemy_pliku(w):
     if st.st_size != w["rozmiar"]:
         problemy.append("rozmiar pliku zmieniony")
     if st.st_ino != w["ino"]:
-        problemy.append("st_ino zmieniony - plik podmieniony, nie zapisany w miejscu ani przeniesiony")
-    if w["object"] is None:
+        problemy.append("st_ino zmieniony - przepisany w calosci, nie w miejscu"
+                        if poz["op"] == "add" else
+                        "st_ino zmieniony - plik podmieniony, nie zapisany w miejscu ani przeniesiony")
+    if poz["op"] == "none":
         if not _porownaj_poza(plik, w["kopia"], 0, 0):
             problemy.append("karta bez zmiany w planie, a bajty pliku rozne od kopii")
         return problemy
     a, b = w["granice"]
     if _jest_xisf(plik):
-        problemy += _xisf_problemy(plik, w["kopia"], b, w["object"])
+        problemy += _xisf_problemy(plik, w["kopia"], b, poz["value"])
+    elif poz["op"] == "add":
+        problemy += _fits_add_problemy(plik, w["kopia"], a, b, poz)
     else:
-        problemy += _fits_problemy(plik, w["kopia"], a, b, w["object"])
-    # Czytnik skanu - druga derywacja: OBJECT[0] = forma z planu, komentarz sprzed.
+        problemy += _fits_set_problemy(plik, w["kopia"], a, b, poz)
+    # Czytnik skanu - druga derywacja: `keyword[0]` = wartość z planu, komentarz z planu (`set`
+    # z komentarzem null - sprzed); przy `add` karty przed zapisem nie było.
+    kw = poz["keyword"]
     karty_po, blad = _karty(plik)
     if blad is not None:
         problemy.append(f"naglowek nieczytelny dla skanu: {_a(blad)}")
-    przed_obj, po_obj = w["karty"].get("OBJECT[0]"), karty_po.get("OBJECT[0]")
-    if przed_obj is None or po_obj is None:
-        problemy.append("skan: brak karty OBJECT[0] przed albo po zapisie")
+    przed_k, po_k = w["karty"].get(f"{kw}[0]"), karty_po.get(f"{kw}[0]")
+    if poz["op"] == "add":
+        if przed_k is not None:
+            problemy.append(f"skan: karta {kw}[0] byla juz przed zapisem")
+        komentarz = poz["comment"] or None
+    elif przed_k is None:
+        return problemy + [f"skan: brak karty {kw}[0] przed zapisem"]
     else:
-        if po_obj[0] != w["object"].rstrip():
-            problemy.append(f"skan: OBJECT[0] = {_a(repr(po_obj[0]))}, plan = "
-                            f"{_a(repr(w['object']))}")
-        if po_obj[1] != przed_obj[1]:
-            problemy.append("skan: komentarz OBJECT[0] zmieniony")
+        komentarz = przed_k[1] if poz["comment"] is None else (poz["comment"] or None)
+    if po_k is None:
+        problemy.append(f"skan: brak karty {kw}[0] po zapisie")
+    else:
+        if po_k[0] != poz["value"].rstrip():
+            problemy.append(f"skan: {kw}[0] = {_a(repr(po_k[0]))}, plan = "
+                            f"{_a(repr(poz['value']))}")
+        if po_k[1] != komentarz:
+            problemy.append(f"skan: komentarz {kw}[0] = {_a(repr(po_k[1]))}, oczekiwany "
+                            f"{_a(repr(komentarz))}")
     return problemy
+
+
+_KLUCZE_MANIFESTU = frozenset({"plik", "kopia", "sha1", "sha1_kopii", "rozmiar", "ino", "granice",
+                               "karty"})
+
+
+def _manifest(katalog):
+    """`(manifest, None)` albo `(None, problem)` - manifest pusty, niepełny albo rozjechany z kopiami
+    to NIE, nie „zero pozycji = zero problemów”. Wymagane: niepusta lista wpisów z pełnym schematem
+    (`po` opcjonalne - manifest sprzed pary ścieżek; kształt pozycji pełny albo skrót `object`, bez
+    obcych kluczy), kopia każdego wpisu w TYM katalogu pod numerem `NNNN` = jego pozycji (ciągła
+    numeracja od 0), a zbiór plików kopii katalogu == zbiór kopii manifestu (osierocona kopia albo
+    pozycja → NIE)."""
+    try:
+        manifest = json.loads((katalog / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"manifest nieczytelny: {type(exc).__name__}: {exc}"
+    if not isinstance(manifest, list) or not manifest:
+        return None, "manifest pusty albo nie jest lista wpisow"
+    nazwy = []
+    for i, w in enumerate(manifest):
+        if not isinstance(w, dict):
+            return None, f"wpis {i} nie jest obiektem"
+        brak = sorted(_KLUCZE_MANIFESTU - set(w))
+        obce = sorted(set(w) - _KLUCZE_MANIFESTU - {_KLUCZ_PARY, "object", *_KSZTALT})
+        if brak or obce:
+            return None, f"wpis {i}: brak kluczy {brak}, obce klucze {obce}"
+        try:
+            _pozycja(w)
+        except ValueError as exc:
+            return None, f"wpis {i}: {exc}"
+        kopia = Path(w["kopia"])
+        if (not re.fullmatch(rf"{i:04d}\.[^.]*", kopia.name)
+                or os.path.normcase(kopia.resolve().parent) != os.path.normcase(katalog.resolve())):
+            return None, f"wpis {i}: kopia {kopia.name} poza numeracja albo poza katalogiem kopii"
+        nazwy.append(kopia.name)
+    kopie = sorted(x.name for x in katalog.iterdir() if _KOPIA.match(x.name))
+    if kopie != sorted(nazwy):
+        return None, (f"kopie w katalogu ({', '.join(kopie)}) inne niz pozycje manifestu "
+                      f"({', '.join(nazwy)})")
+    return manifest, None
 
 
 def po(katalog):
     katalog = Path(katalog)
-    manifest = json.loads((katalog / MANIFEST).read_text(encoding="utf-8"))
+    manifest, problem = _manifest(katalog)
+    if problem is not None:
+        print(f"po NIE manifest | {_a(problem)}")
+        (katalog / "raport_po.json").write_text(json.dumps(
+            [{"plik": None, "ok": False, "problemy": [problem]}], indent=1, ensure_ascii=False),
+            encoding="utf-8")
+        return 1
     raport, zle = [], 0
     for w in manifest:
         try:
@@ -479,7 +776,10 @@ def po(katalog):
 
 
 def po_undo(katalog):
-    manifest = json.loads((Path(katalog) / MANIFEST).read_text(encoding="utf-8"))
+    manifest, problem = _manifest(Path(katalog))
+    if problem is not None:
+        print(f"po-undo NIE manifest | {_a(problem)}")
+        return 1
     zle = 0
     for w in manifest:
         po = _przeniesiony(w)

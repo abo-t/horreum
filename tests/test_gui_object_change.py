@@ -521,9 +521,11 @@ def test_CYKL_na_PRAWDZIWYM_sterowniku_lista_wynik_Cofnij_bajty_jak_przed(qapp, 
     dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb, fc])
     karty = [dlg.items_tree.topLevelItem(i).text(2) for i in range(3)]
     assert karty[0] == "'NGC 3034' → 'NGC 2632'"
-    assert karty[1].endswith(i18n.t("objchg.card_add_fits_short"))
-    assert karty[2].endswith(i18n.t("objchg.card_add_fits_short"))
-    assert dlg.card_note.text() == i18n.t("objchg.card_add_fits") and not dlg.card_note.isHidden()
+    # Drogę dopisania podgląd przewiduje PER POZYCJA z lustra kart (AR-155): zapas - w miejscu,
+    # pełny blok bez pustej karty - cały plik; zdania ogólnego „zależy od pliku” nie ma po co mówić.
+    assert karty[1].endswith(i18n.t("objchg.card_add_fits_inplace_short"))
+    assert karty[2].endswith(i18n.t("objchg.card_add_fits_rewrite_short"))
+    assert dlg.card_note.isHidden()
     dlg.action_btn.click()
     nowe = [a.root / r"LIGHTS\NGC2632\RC6\OSC\NGC2632_a_FLATGRP_NOFLAT_OSC.fits",   # człon obiektu
             a.root / r"LIGHTS\NGC2632\RC6\OSC\b.fits",                       # nazwa bez obiektu
@@ -2242,11 +2244,18 @@ def test_KAZDY_powod_bramki_karty_ma_zdanie_PL_i_EN_a_PL_to_zdanie_bramki():
     import inspect
     import string
     kody = {}
-    for w in ast.walk(ast.parse(inspect.getsource(queries.object_card_gate))):
-        if (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
-                and w.func.id == "ZdanieRdzenia"):
-            zdanie, kod = w.args
-            kody[kod.value] = (zdanie, {k.arg for k in w.keywords})
+    # Bramka sumy kontrolnej ma własną funkcję (AR-163, wspólna z oknem naprawy) - `object_card_gate`
+    # ją woła, więc jej powód jest powodem bramki karty. Osiągalność: `object_card_gate` ZWRACA jej
+    # wynik (bez tego zbiór kodów byłby pełny, a bramka martwa).
+    assert any(isinstance(w, ast.Return) and isinstance(w.value, ast.Call)
+               and isinstance(w.value.func, ast.Name) and w.value.func.id == "fits_checksum_gate"
+               for w in ast.walk(ast.parse(inspect.getsource(queries.object_card_gate))))
+    for funkcja in (queries.object_card_gate, queries.fits_checksum_gate):
+        for w in ast.walk(ast.parse(inspect.getsource(funkcja))):
+            if (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
+                    and w.func.id == "ZdanieRdzenia"):
+                zdanie, kod = w.args
+                kody[kod.value] = (zdanie, {k.arg for k in w.keywords})
     assert len(kody) == 13
     for kod, (zdanie, parametry) in kody.items():
         wpis = CATALOG[f"objchg.gate.{kod}"]
@@ -2294,12 +2303,15 @@ def _zdanie_pl_z_fstringa(w, modul):
 
 
 def _powody_pozycji():
-    """`kod → [(wzór PL, nazwy parametrów)]` z KAŻDEGO `PowodPozycji(...)` w `writeback` i `repo`."""
+    """`kod → [(wzór PL, nazwy parametrów)]` z KAŻDEGO `PowodPozycji(...)` w `writeback` i `repo`
+    oraz w modułach, w których zdanie odmowy rodzi się z kodem (AR-158): czytnik XISF `scan`
+    i reguły karty `card_rules`."""
     import ast
     import inspect
+    from horreum import card_rules, scan
     from horreum import repo as repo_mod
     out = {}
-    for modul in (writeback, repo_mod):
+    for modul in (writeback, repo_mod, scan, card_rules):
         for w in ast.walk(ast.parse(inspect.getsource(modul))):
             if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
                     and w.func.id == "PowodPozycji"):
@@ -2394,7 +2406,7 @@ def test_ZLOTE_powody_dynamiczne_PL_okna_to_proza_rdzenia_a_EN_bez_polskiego(tmp
             zdanie = tekst_powodu(p)
             if lang == "pl":
                 assert zdanie == czytelny_powod(str(p)), (zdanie, str(p))
-            elif p.code != "file_not_back":              # odmowa karty niesie prozę pisarza
+            elif p.code != "file_not_back":              # odmowa karty cytuje znak 'ł' wartości
                 assert not set(zdanie) & set("„ąćęłńóśźż"), zdanie
     i18n.set_lang("en")
     assert "1 present copy" in tekst_powodu(powody[-2]) and "2 present copies" in tekst_powodu(
@@ -2754,7 +2766,16 @@ def test_Napraw_naglowek_rozmiar_OD_TRESCI_a_zapis_nie_rozpycha_okna(qapp, tmp_p
     suwaka, wysokość wszystkie grupy, a zapis nie rozpycha okna (przyciski „Cofnij”/„Rozwiąż teraz”
     policzone z góry); sufit - część ekranu. Zdanie o spadku na drogę atomową i szczegół rdzenia
     w podpowiedzi - osobny test bez geometrii
-    (`test_Napraw_naglowek_szczegol_spadku_w_podpowiedzi_w_jezyku_UI`)."""
+    (`test_Napraw_naglowek_szczegol_spadku_w_podpowiedzi_w_jezyku_UI`).
+
+    AR-159: ten plik nie stawia `QT_QPA_PLATFORM=offscreen`, więc puszczony sam biegł na platformie
+    natywnej (Windows: styl `windows11`, dwa ekrany, DPR 1,5), a w baterii - offscreen (`fusion`,
+    ekran 800×800), bo platformę stawia moduł testów zebrany wcześniej. Asercja `isHidden()` suwaka
+    poziomego zależała od stylu: `windows11` trzyma suwak niechowany przy zakresie 0 (zmierzone:
+    zakres 0, viewport 788 px ≥ treść 776 px, a `isHidden()` False). Reguła „wiersze się mieszczą”
+    to ZAKRES suwaka 0 - nic do przewinięcia w poziomie - niezależnie od stylu. Sufit liczony
+    z ekranu, z którego okno liczyło rozmiar (przed `show`): menedżer okien kładzie okno na
+    innym ekranie."""
     from horreum.gui.app import RepairHeaderDialog
     from horreum.gui.config_dialog import _SCREEN_FRAC
     i18n.set_lang(lang)
@@ -2765,13 +2786,13 @@ def test_Napraw_naglowek_rozmiar_OD_TRESCI_a_zapis_nie_rozpycha_okna(qapp, tmp_p
     dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
                              db_path=queries.db_path_of(con), now_fn=lambda: NOW)
     dlg._runner.async_ok = False
-    dlg.show()
-    QCoreApplication.processEvents()
     ekran = dlg.screen().availableGeometry()
     sufit_w, sufit_h = int(ekran.width() * _SCREEN_FRAC), int(ekran.height() * _SCREEN_FRAC)
+    dlg.show()
+    QCoreApplication.processEvents()
     tresc = dlg._area.widget().sizeHint()
     if dlg.width() < sufit_w:
-        assert dlg._area.horizontalScrollBar().isHidden()
+        assert dlg._area.horizontalScrollBar().maximum() == 0      # wiersze grup się mieszczą
         assert dlg._area.viewport().width() >= tresc.width()
     else:
         assert dlg.width() == sufit_w
@@ -2813,3 +2834,449 @@ def test_Napraw_naglowek_szczegol_spadku_w_podpowiedzi_w_jezyku_UI(qapp, tmp_pat
     assert dlg.status.toolTip() == ""
     dlg.reject()
     con.close()
+
+
+# ═══════════════════════════════════════════════ „Napraw nagłówek…”: ogon cofnięcia (AR-160), sumy
+# kontrolne w podglądzie (AR-163), zdanie wyniku przy różnych powodach (AR-162)
+
+_ZNAKI_PL = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+def _lighty(root, con, folder, n, *, baza, suma=False):
+    """`n` FITS-ów lightów bez karty OBJECT w folderze obiektu (jak `_bezimienne`), z kartami
+    `CHECKSUM`/`DATASUM`, gdy `suma` (astropy `checksum=True` - pisarz ich odmówi). `baza` rozdziela
+    dane pliku (tożsamość klatki), nazwa niesie folder - propozycja ze ścieżki."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    pliki = []
+    for k in range(n):
+        p = (root / "LIGHTS" / folder / "RC8_2600MC" / "OSC"
+             / f"{folder}_20230104_21{baza:02d}{k:02d}_LIGHT_OSC_300s_FLATGRP_NOFLAT_.fits")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + 100 * baza + k)
+        hdu.header["IMAGETYP"] = "Light"
+        hdu.header["DATE-OBS"] = f"2023-01-04T21:{baza:02d}:{k:02d}"
+        hdu.writeto(str(p), checksum=suma)
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                           summary=scan.ScanSummary())
+        pliki.append(p)
+    return pliki
+
+
+def _okno_naprawy(con):
+    from horreum.gui.app import RepairHeaderDialog
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    dlg._runner.async_ok = False
+    return dlg
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_FITS_z_suma_kontrolna_POMINIETY_przed_zapisem_z_folderem(qapp, tmp_path,
+                                                                                lang):
+    """AR-163: folder mieszany (4 bez sumy, 2 z `CHECKSUM`/`DATASUM`) - podgląd liczy 4 do zapisu,
+    przycisk „Zapisz karty (4)”, a 2 stoją na liście pominiętych z folderem i powodem w języku UI;
+    folder z samymi takimi plikami mówi „cały folder”. Zapis nie dotyka plików z sumą i nie kończy
+    się „2 zablokowane”. Falsyfikator: zdejmij `fits_checksum_gate` z `_split_rows` → (6)."""
+    from horreum.gui.wb_worker import _liczba
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "s.db"))
+    root = tmp_path / "ASTRO_"
+    _lighty(root, con, "NGC7635", 4, baza=1)
+    sumy = _lighty(root, con, "NGC7635", 2, baza=2, suma=True)
+    sumy += _lighty(root, con, "IC405", 2, baza=3, suma=True)
+    przed = {p: p.read_bytes() for p in sumy}
+    dlg = _okno_naprawy(con)
+    assert [len(g["rows"]) for g in dlg._groups] == [4]
+    assert dlg.save_btn.text() == i18n.t("repair.save_btn_n", n=4) and dlg.save_btn.isEnabled()
+    powod = i18n.t("objchg.gate.fits_checksum")
+    pozycje = sorted(dlg.skipped_list.item(i).text() for i in range(dlg.skipped_list.count()))
+    assert pozycje == sorted([
+        i18n.t_plural("repair.skip.checksum", 2, folder="NGC7635\\RC8_2600MC\\OSC", reason=powod),
+        i18n.t_plural("repair.skip.checksum_all", 2, folder="IC405\\RC8_2600MC\\OSC",
+                      reason=powod)]), pozycje
+    dlg._on_save()
+    assert dlg.status.text().startswith(_liczba("grid.wb.applied", 4)), dlg.status.text()
+    assert _liczba("grid.wb.blocked", 2) not in dlg.status.text(), dlg.status.text()
+    assert all(p.read_bytes() == b for p, b in przed.items())
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_folder_TYLKO_z_suma_mowi_wprost_i_nie_ma_czego_zapisac(qapp, tmp_path,
+                                                                              lang):
+    """AR-163: okno nad samymi plikami z sumą - zero grup, przycisk bez liczby i wygaszony, lista
+    pominiętych mówi „cały folder pominięty” z odmienioną liczbą (1, 2-4, 5)."""
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "t.db"))
+    _lighty(tmp_path / "ASTRO_", con, "IC405", 5, baza=4, suma=True)
+    dlg = _okno_naprawy(con)
+    assert dlg._groups == []
+    assert dlg.save_btn.text() == i18n.t("repair.save_btn") and not dlg.save_btn.isEnabled()
+    assert [dlg.skipped_list.item(i).text() for i in range(dlg.skipped_list.count())] == [
+        i18n.t_plural("repair.skip.checksum_all", 5, folder="IC405\\RC8_2600MC\\OSC",
+                      reason=i18n.t("objchg.gate.fits_checksum"))]
+    dlg.reject()
+    con.close()
+    caly = {"pl": "X: cały folder pominięty ({}) - r", "en": "X: whole folder skipped ({}) - r"}
+    oczek = {"pl": ["1 plik", "2 pliki", "5 plików", "12 plików", "22 pliki"],
+             "en": ["1 file", "2 files", "5 files", "12 files", "22 files"]}[lang]
+    assert [i18n.t_plural("repair.skip.checksum_all", n, folder="X", reason="r")
+            for n in (1, 2, 5, 12, 22)] == [caly[lang].format(o) for o in oczek]
+    assert [i18n.t_plural("repair.skip.checksum", n, folder="X", reason="r")
+            for n in (1, 2, 5, 12, 22)] == {
+        "pl": ["X: 1 plik pominięty - r", "X: 2 pliki pominięte - r", "X: 5 plików pominiętych - r",
+               "X: 12 plików pominiętych - r", "X: 22 pliki pominięte - r"],
+        "en": ["X: 1 file skipped - r", "X: 2 files skipped - r", "X: 5 files skipped - r",
+               "X: 12 files skipped - r", "X: 22 files skipped - r"]}[lang]
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_cofniecie_z_BLEDEM_mowi_powod_w_jezyku_UI_i_zostawia_Cofnij(
+        qapp, tmp_path, monkeypatch, lang):
+    """AR-160: cofnięcie, którego re-sync pada (czkawka udziału), kończy się `failed` z receptą
+    rdzenia „ponowne undo dokończy”. Dawniej okno mówiło same liczniki i chowało „Cofnij” - z nim
+    jedyny uchwyt ponowienia. Teraz zdanie niesie powód w języku UI i receptę, „Cofnij” zostaje
+    przy tym samym commicie, zapis milczy, a drugi klik kończy cofnięcie i dopiero on chowa
+    przycisk. Falsyfikator: bezwarunkowe `undo_btn.setVisible(False)` w `_after_undo`."""
+    from astropy.io import fits
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "c.db"))
+    pliki = _lighty(tmp_path / "ASTRO_", con, "NGC7635", 2, baza=5)
+    dlg = _okno_naprawy(con)
+    dlg._on_save()
+    commit_id = dlg._commit_id
+    assert commit_id is not None and dlg.undo_btn.isVisibleTo(dlg)
+    with monkeypatch.context() as m:
+        m.setattr(writeback.scan, "scan_file",
+                  lambda path, **kw: (_ for _ in ()).throw(OSError(64, "broken share")))
+        dlg._on_undo()
+    tekst = dlg.status.text()
+    assert "broken share" in tekst, tekst
+    assert i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo")) in tekst, tekst
+    if lang == "en":
+        assert not set(tekst) & _ZNAKI_PL, tekst
+    assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
+    assert not dlg.save_btn.isEnabled()
+    dlg._on_undo()                                       # ponowienie kończy cofnięcie
+    assert not dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id is None
+    assert dlg.save_btn.isEnabled()
+    assert all(fits.getheader(str(p)).get("OBJECT") is None for p in pliki)
+    dlg.reject()
+    con.close()
+
+
+def test_Napraw_naglowek_cofniecie_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(
+        qapp, tmp_path, monkeypatch):
+    """AR-160 (cancelled): anulowanie przerywa pętlę rdzenia PRZED kolejnymi backupami - jeden plik
+    wrócił, drugi nie (`restored` + `cancelled`), więc commit nie jest cofnięty. „Cofnij” zostaje,
+    zdanie mówi o przerwaniu i o tym, że ponowienie dokończy resztę; ponowienie kończy i chowa
+    przycisk. Falsyfikator: reguła „Cofnij zostaje” tylko przy `failed`."""
+    from astropy.io import fits
+    from horreum.gui.wb_worker import WritebackWorker, _liczba
+    con = db.open_db(str(tmp_path / "p.db"))
+    pliki = _lighty(tmp_path / "ASTRO_", con, "NGC7635", 2, baza=6)
+    dlg = _okno_naprawy(con)
+    dlg._on_save()
+    commit_id = dlg._commit_id
+    pytania = []
+
+    def _po_pierwszym():
+        pytania.append(1)
+        return len(pytania) > 1
+
+    with monkeypatch.context() as m:
+        m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
+            c, t, now=now, progress=pr, should_cancel=_po_pierwszym))
+        dlg._on_undo()
+    tekst = dlg.status.text()
+    assert _liczba("grid.wb.restored", 1) in tekst, tekst
+    assert i18n.t("wb.undo_cancelled", undo=i18n.t("grid.action.undo")) in tekst, tekst
+    assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
+    assert not dlg.save_btn.isEnabled()
+    assert sorted(fits.getheader(str(p)).get("OBJECT") is None for p in pliki) == [False, True]
+    dlg._on_undo()
+    assert not dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id is None
+    assert all(fits.getheader(str(p)).get("OBJECT") is None for p in pliki)
+    dlg.reject()
+    con.close()
+
+
+def test_Napraw_naglowek_cofniecie_ZABLOKOWANE_bez_juz_cofnietego_zostawia_Cofnij_i_zapis_milczy(
+        qapp, tmp_path):
+    """AR-160 (domknięcie z rdzenia): plik zmieniony od commitu - blokada cofnięcia, karta zostaje.
+    Dawniej okno chowało „Cofnij”, zerowało commit i oddawało „Zapisz karty” nad plikiem z kartą.
+    Teraz uchwyt zostaje, zapis milczy; ponowienie, w którym drugi plik jest już „już cofnięty”
+    (`UndoResult.already`), a pierwszy dalej zablokowany - nadal niedomknięte.
+    Falsyfikator: reguła ogona `failed or cancelled` → asercja widoczności."""
+    from astropy.io import fits
+    con = db.open_db(str(tmp_path / "b.db"))
+    pliki = _lighty(tmp_path / "ASTRO_", con, "NGC7635", 2, baza=7)
+    dlg = _okno_naprawy(con)
+    dlg._on_save()
+    commit_id = dlg._commit_id
+    fits.setval(str(pliki[0]), "TELESCOP", value="Inny")           # cudza zmiana po commicie
+    dlg._on_undo()
+    assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
+    assert not dlg.save_btn.isEnabled()
+    assert i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo")) in dlg.status.text()
+    assert fits.getheader(str(pliki[0])).get("OBJECT") is not None
+    assert fits.getheader(str(pliki[1])).get("OBJECT") is None
+    dlg._on_undo()                                       # drugi plik „już cofnięty”, pierwszy nie
+    assert dlg.undo_btn.isVisibleTo(dlg) and not dlg.save_btn.isEnabled()
+    dlg.reject()
+    con.close()
+
+
+def _czekaj_na_uchwyt(dlg, limit_s=20.0):
+    """Bieg w PRAWDZIWYM wątku: pętla zdarzeń, aż uchwyt zgłosi koniec (`busy_changed(False)`)."""
+    koniec = time.monotonic() + limit_s
+    while dlg._runner.is_busy:
+        assert time.monotonic() < koniec, "uchwyt nie skończył biegu"
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
+    QCoreApplication.processEvents()
+
+
+def test_Napraw_naglowek_po_udanym_cofnieciu_W_WATKU_zapis_aktywny_bez_klikniec(qapp, tmp_path):
+    """Wizytacja W1 (P1): po udanym cofnięciu „Zapisz karty (N)” zostawał wygaszony - ogon cofnięcia
+    przychodzi, gdy uchwyt jest jeszcze zajęty (wątek sprząta się po `done`), a końca biegu nikt
+    nie przeliczał. Prawdziwy `QThread` (bez `async_ok=False`): zapis, cofnięcie, koniec biegu -
+    przycisk aktywny z liczbą. Falsyfikator: zdejmij przeliczenie po `busy_changed(False)`."""
+    con = db.open_db(str(tmp_path / "w1.db"))
+    _lighty(tmp_path / "ASTRO_", con, "NGC7635", 2, baza=8)
+    from horreum.gui.app import RepairHeaderDialog
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    assert dlg._runner.async_ok
+    dlg._on_save()
+    _czekaj_na_uchwyt(dlg)
+    assert dlg._commit_id is not None and not dlg.save_btn.isEnabled()
+    dlg._on_undo()
+    _czekaj_na_uchwyt(dlg)
+    assert dlg._commit_id is None
+    assert dlg.save_btn.isEnabled() and dlg.save_btn.text() == i18n.t("repair.save_btn_n", n=2)
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_rozne_powody_stoja_w_podpowiedzi_a_zdanie_do_niej_odsyla(qapp, tmp_path,
+                                                                                lang):
+    """Wizytacja W3: okno bez listy pozycji mówiło „pierwszy z 2 różnych powodów: …”, a drugiego
+    powodu nie było nigdzie. Teraz zdanie odsyła do podpowiedzi, a ta niesie każdy różny powód
+    w języku UI z plikiem, który go dostał. Jeden powód - bez odsyłacza i bez listy.
+    Falsyfikator: `podpowiedz_kart` bez `podpowiedz_powodow` → drugi powód nigdzie."""
+    from horreum.gui.wb_worker import tekst_powodu
+    from horreum.item_reasons import PowodPozycji
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "w3.db"))
+    _lighty(tmp_path / "ASTRO_", con, "NGC7635", 2, baza=9)
+    dlg = _okno_naprawy(con)
+    zmieniony = PowodPozycji("header_hash mismatch", "header_hash_mismatch")
+    juz = PowodPozycji("już cofnięte - nagłówek i baza opisują stan sprzed commitu",
+                       "undo_already")
+    b1 = writeback.FileResult(1, "X:/L/a.fits", "blocked", zmieniony)
+    b2 = writeback.FileResult(2, "X:/L/b.fits", "blocked", juz)
+    dlg._after_commit("commit_inplace", writeback.CommitResult("r", None, [], [b1, b2], [], []))
+    assert dlg.status.text().endswith(i18n.t("wb.reasons_tip")), dlg.status.text()
+    assert dlg.status.toolTip().splitlines() == [
+        i18n.t("wb.reason_line", file="a.fits", reason=tekst_powodu(zmieniony)),
+        i18n.t("wb.reason_line", file="b.fits", reason=tekst_powodu(juz))]
+    dlg._after_commit("commit_inplace", writeback.CommitResult("r", None, [], [b1], [], []))
+    assert i18n.t("wb.reasons_tip") not in dlg.status.text() and dlg.status.toolTip() == ""
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdanie_cofniecia_liczy_JUZ_COFNIETE_osobno_a_nie_jako_blokady(lang):
+    """Wizytacja W4: dokończone ponowienie brzmiało jak porażka („1 przywrócony · 33 zablokowane -
+    już cofnięte”). Pliki z `UndoResult.already` mają własny człon (odmiana 1, 2-4, 5, 12-14, 22),
+    a powód ogona pomija „już cofnięte” (człon mówi to samo); blokada spoza `already` zostaje
+    blokadą z powodem. Bez `already` zdanie znak w znak jak dotąd.
+    Falsyfikator: `zdanie_undo_kart` liczy `blocked` w całości → „zablokowane” w pierwszej asercji."""
+    from horreum.gui.wb_worker import _liczba, ogon_cofniecia, zdanie_undo_kart
+    i18n.set_lang(lang)
+    wrocil = writeback.FileResult(1, "X:/L/a.fits", "restored")
+    juz = [writeback.FileResult(10 + i, f"X:/L/j{i}.fits", "blocked", "już cofnięte")
+           for i in range(33)]
+    zmieniony = writeback.FileResult(9, "X:/L/z.fits", "blocked", "header_hash mismatch")
+    dokonczone = writeback.UndoResult(1, [wrocil], juz, [], already=juz)
+    msg, ponow = ogon_cofniecia(dokonczone, "Cofnij")
+    assert msg == _liczba("grid.wb.restored", 1) + " · " + _liczba("wb.undo_already", 33), msg
+    assert not ponow
+    mieszane = writeback.UndoResult(1, [wrocil], juz + [zmieniony], [], already=juz)
+    msg, ponow = ogon_cofniecia(mieszane, "Cofnij")
+    assert (_liczba("wb.undo_already", 33) + " · " + _liczba("grid.wb.blocked", 1)) in msg, msg
+    assert "z.fits" in msg and ponow
+    bez = writeback.UndoResult(1, [wrocil], [zmieniony], [])
+    assert zdanie_undo_kart(bez) == _liczba("grid.wb.restored", 1) + " · " + _liczba(
+        "grid.wb.blocked", 1)
+    oczek = {"pl": ["1 już cofnięty", "2 już cofnięte", "5 już cofniętych", "12 już cofniętych",
+                    "22 już cofnięte"],
+             "en": ["1 already undone", "2 already undone", "5 already undone",
+                    "12 already undone", "22 already undone"]}[lang]
+    assert [_liczba("wb.undo_already", n) for n in (1, 2, 5, 12, 22)] == oczek
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdanie_wyniku_przy_ROZNYCH_powodach_mowi_pierwszy_z_N_a_przy_jednym_bez_zmian(lang):
+    """AR-162: „2 zablokowane - plik zmieniony od skanu” przy dwóch RÓŻNYCH powodach brzmiało jak
+    powód wspólny. Różne kody (albo teksty bez kodu) → „pierwszy z N różnych powodów: …”; ten sam
+    kod z innymi parametrami albo ten sam tekst → zdanie znak w znak jak dotąd. To samo zdanie mówi
+    „Zmień obiekt…” (`zdanie_wyniku_zmiany` woła wspólną funkcję).
+    Falsyfikator: `rozne` liczone zawsze jako 1 → pierwsza asercja."""
+    from horreum.gui.object_change_dialog import zdanie_wyniku_zmiany
+    from horreum.gui.wb_worker import _liczba, tekst_powodu, zdanie_wyniku_zapisu
+    from horreum.item_reasons import PowodPozycji
+    i18n.set_lang(lang)
+
+    def _zdanie(*powody):
+        zablokowane = [writeback.FileResult(i, f"X:/L/{i}.fits", "blocked", p)
+                       for i, p in enumerate(powody)]
+        return zdanie_wyniku_zapisu(writeback.CommitResult("r", None, [], zablokowane, [], []),
+                                    "grid.wb.applied")
+
+    def _oczek(n, detail):
+        return (_liczba("grid.wb.applied", 0) + " · " + _liczba("grid.wb.blocked", n)
+                + i18n.t("grid.wb.detail_sep", detail=detail))
+
+    zmieniony = PowodPozycji("header_hash mismatch", "header_hash_mismatch")
+    juz = PowodPozycji("już cofnięte - nagłówek i baza opisują stan sprzed commitu",
+                       "undo_already")
+    suma1 = PowodPozycji("FITS z sumą kontrolną (CHECKSUM) - zapis nagłówka unieważniłby ją, a "
+                         "pisarz jej nie przelicza", "checksum_present", sums=["CHECKSUM"])
+    suma2 = PowodPozycji("FITS z sumą kontrolną (CHECKSUM, DATASUM) - zapis nagłówka unieważniłby "
+                         "ją, a pisarz jej nie przelicza", "checksum_present",
+                         sums=["CHECKSUM", "DATASUM"])
+    rozne = i18n.t("wb.reasons_first", n=2, detail=tekst_powodu(zmieniony))
+    assert _zdanie(zmieniony, juz) == _oczek(2, rozne)
+    assert _zdanie(zmieniony, juz, zmieniony) == _oczek(3, rozne)       # liczy RÓŻNE, nie pozycje
+    assert _zdanie(suma1, suma2) == _oczek(2, tekst_powodu(suma1))      # ten sam kod - bez zmian
+    assert _zdanie(zmieniony) == _oczek(1, tekst_powodu(zmieniony))
+    assert _zdanie("cel zajęty", "plik zmieniony") == _oczek(
+        2, i18n.t("wb.reasons_first", n=2, detail=tekst_powodu("cel zajęty")))
+    assert _zdanie("cel zajęty", "cel zajęty") == _oczek(2, tekst_powodu("cel zajęty"))
+    zmiana = zdanie_wyniku_zmiany(_Wynik("r", applied=[], blocked=[
+        _fr(1, "blocked", zmieniony), _fr(2, "blocked", juz)], failed=[], skipped=[]))
+    assert rozne in zmiana, zmiana
+
+
+# ═══════════════════════════════════════════════ AR-155: droga dopisania karty FITS per pozycja
+
+
+def _lid(con, fid):
+    return con.execute("SELECT id FROM location WHERE frame_id = ? AND present = 1",
+                       (fid,)).fetchone()[0]
+
+
+def test_podglad_mowi_droge_dopisania_FITS_PER_POZYCJA_a_pisarz_ja_potwierdza(qapp, archiwum):
+    """AR-155: podgląd mówił ogólnie „karta dopisana w miejscu, gdy plik na to pozwala; inaczej
+    cały plik przepisany albo odmowa” przy KAŻDYM dopisaniu do FITS. Teraz z lustra kart obecnej
+    kopii per pozycja: zapas za `END` - „w miejscu”, pełny ostatni blok bez pustej karty - „cały
+    plik przepisany” z powodem pisarza w podpowiedzi; zdanie ogólne pod listą znika, bo żadna
+    pozycja nie „zależy od pliku”. Zapis na PRAWDZIWYM sterowniku potwierdza obie prognozy: plik
+    z zapasem zostaje tym samym plikiem (`st_ino`), plik bez zapasu nie.
+    Falsyfikator: prognoza zawsze „zależy od pliku” (dawne zachowanie) → asercje znaczników."""
+    from horreum.gui.wb_worker import tekst_powodu
+    a = archiwum
+    fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", seed=2)
+    fc, pc = a.fits(r"LIGHTS\NGC3034\RC6\OSC\c.fits", date="2022-03-26T21:32:00", seed=3,
+                    bez_zapasu=True)
+    ino = {pb: os.stat(pb).st_ino, pc: os.stat(pc).st_ino}
+    dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fb, fc])
+    w = [dlg.items_tree.topLevelItem(i) for i in range(2)]
+    zmiana = i18n.t("objchg.card_change", old=i18n.t("objchg.card_absent"), new="'NGC 2632'")
+    assert w[0].text(2) == zmiana + i18n.t("objchg.card_add_fits_inplace_short")
+    assert w[1].text(2) == zmiana + i18n.t("objchg.card_add_fits_rewrite_short")
+    assert dlg._drogi[_lid(a.con, fb)] is None
+    powod = dlg._drogi[_lid(a.con, fc)]
+    assert (powod.code, dict(powod.params)["free"]) == ("fb_no_room", 0)
+    assert w[0].toolTip(2) == f"{w[0].text(2)}\n{i18n.t('objchg.card_add_fits_inplace')}"
+    assert w[1].toolTip(2) == (f"{w[1].text(2)}\n"
+                               f"{i18n.t('objchg.card_add_fits_rewrite', reason=tekst_powodu(powod))}")
+    assert dlg.card_note.isHidden()
+    dlg.action_btn.click()
+    nowe = a.root / r"LIGHTS\NGC2632\RC6\OSC"
+    assert [os.stat(nowe / n).st_ino == ino[s] for n, s in (("b.fits", pb), ("c.fits", pc))] \
+        == [True, False]
+    assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()     # spadek tylko pliku c
+    dlg.reject()
+
+
+def test_podglad_BEZ_lustra_kopii_mowi_zalezy_od_pliku_zdaniem_pod_lista(qapp, archiwum):
+    """Pozycja, której lustro kart nie opisuje obecnej kopii (tu: klatka bez wierszy `cards`),
+    dostaje dzisiejszy znacznik ogólny i zdanie „zależy od pliku” pod listą i w podpowiedzi;
+    sąsiednia pozycja z lustrem mówi swoją drogę. Zdanie ogólne stoi tylko dla takich pozycji."""
+    a = archiwum
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", seed=2)
+    fd, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\d.fits", date="2022-03-26T21:33:00", seed=4)
+    a.con.execute("DELETE FROM cards WHERE frame_id = ?", (fd,))
+    a.con.commit()
+    dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fb, fd])
+    w = [dlg.items_tree.topLevelItem(i) for i in range(2)]
+    assert w[0].text(2).endswith(i18n.t("objchg.card_add_fits_inplace_short"))
+    assert w[1].text(2).endswith(i18n.t("objchg.card_add_fits_short"))
+    assert dlg._drogi[_lid(a.con, fd)].code == "route_depends"
+    assert [i18n.t("objchg.card_add_fits") in x.toolTip(2) for x in w] == [False, True]
+    assert dlg.card_note.text() == i18n.t("objchg.card_add_fits") and not dlg.card_note.isHidden()
+    dlg.reject()
+
+
+def test_przerwany_przebieg_z_bazy_mowi_stan_HISTORYCZNY_nie_prognoze(qapp, archiwum, monkeypatch):
+    """AR-155: okno otwarte na przebiegu z Porządków (`run_id`) renderuje pozycje z
+    `queries.object_change_run_view` - bez faktów prognozy. Tam stoi dzisiejsze zdanie ogólne
+    (znacznik „dopisanie karty”, podpowiedź „zależy od pliku”), choć plik ma zapas i świeży podgląd
+    powiedziałby „w miejscu”; prognozy ta ścieżka nie liczy wcale."""
+    from horreum.gui import object_change_dialog as ocd
+    a = archiwum
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", seed=2)
+    plan, _ = ocd.policz_plan(a.con, [fb], target=queries.object_target(a.con, "M 44"))
+    assert ocd.drogi_dopisania(a.con, plan) == {_lid(a.con, fb): None}     # świeża prognoza
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+
+    def _nie_wolno(*_a, **_k):
+        raise AssertionError("ścieżka przebiegu z bazy nie liczy prognozy drogi")
+    monkeypatch.setattr(ocd, "drogi_dopisania", _nie_wolno)
+    dlg = ocd.ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+    w = dlg.items_tree.topLevelItem(0)
+    assert w.text(2) == (i18n.t("objchg.card_change", old=i18n.t("objchg.card_absent"),
+                                new="'NGC 2632'") + i18n.t("objchg.card_add_fits_short"))
+    assert w.toolTip(2) == f"{w.text(2)}\n{i18n.t('objchg.card_add_fits')}"
+    dlg.reject()
+
+
+def test_lustro_kart_obecnej_kopii_tylko_gdy_opisuje_JEJ_naglowek(archiwum):
+    """`queries.present_copy_card_mirror`: `cards` należą do klatki, nie do kopii. Lustro wraca,
+    gdy każda kopia klatki ma jeden `header_hash` i nie czeka zapis z zeznaniem wstrzymanym; inna
+    kopia z innym nagłówkiem (także nieobecna), kopia bez `header_hash` i otwarty `withheld_write`
+    dają `None` (podgląd: „zależy od pliku”). Klatka nieznana też `None`."""
+    import collections
+    from astropy.io import fits
+    from horreum import scan
+    a = archiwum
+    fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", seed=2)
+    with fits.open(str(pb)) as h:
+        oczekiwane = [(c.keyword, c.value_raw, c.value_type, c.comment)
+                      for c in scan._parse_cards(h[0].header)]
+    lustro = queries.present_copy_card_mirror(a.con, [fb, 999])
+    assert collections.Counter(lustro[fb]) == collections.Counter(oczekiwane)
+    assert lustro[999] is None
+    hh = a.con.execute("SELECT header_hash FROM location WHERE frame_id = ?", (fb,)).fetchone()[0]
+    for naglowek, oczekiwany in (("inny", None), (None, None), (hh, "lustro")):
+        a.con.execute("DELETE FROM location WHERE frame_id = ? AND present = 0", (fb,))
+        a.con.execute("INSERT INTO location(frame_id, volume, path, present, header_hash) "
+                      "VALUES (?, 'VOL', 'X:\\L\\stara.fits', 0, ?)", (fb, naglowek))
+        wynik = queries.present_copy_card_mirror(a.con, [fb])[fb]
+        assert (wynik is None) == (oczekiwany is None), naglowek
+    a.con.execute("INSERT INTO commits(id, run_id) VALUES (77, 'r-wstrzymany')")
+    a.con.execute("INSERT INTO withheld_write(kind, location_id, frame_id, commit_id, header_hash, "
+                  "object_written, reason, actor, opened_at) "
+                  "VALUES ('commit', ?, ?, 77, ?, 0, 'test', 'user:local', ?)",
+                  (_lid(a.con, fb), fb, hh, NOW))
+    assert queries.present_copy_card_mirror(a.con, [fb])[fb] is None
+    a.con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = 'completed'", (NOW,))
+    assert queries.present_copy_card_mirror(a.con, [fb])[fb] is not None

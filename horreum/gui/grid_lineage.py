@@ -236,10 +236,12 @@ class LineageBar(QWidget):
             # nowszych niż obraz" jest prawdą o oknie, ale czyta się jak sprzeczność - bliźniak
             # zdania, które nota wypiera w `_fill_night`. Liczba zostaje w nocie. RAW bez zegara
             # wyklucza ten wariant: o nim nie wiadomo, kiedy powstał.
+            # Wariant „wszystkie powstały po obrazie" tylko bez własnych werdyktów na liście:
+            # odrzucona klatka sprzed obrazu przeczyłaby słowu „wszystkie".
             if head["unresolved_reason"] == REASON_NO_CANDIDATES_TOKEN and not _lineage_stale(head):
                 if any(n.frames for n in candidates):
                     powod = i18n.t("grid.lin.reason.no_candidates_window")
-                elif after_integration and not raw_unreferenced:
+                elif after_integration and not raw_unreferenced and not inputs:
                     powod = i18n.t("grid.lin.reason.no_candidates_after_integration")
             self.head.setText(powod)
             self.note.set_full_text(info)
@@ -248,6 +250,13 @@ class LineageBar(QWidget):
                 self._sciezki_kandydatow = dict(candidate_paths or {})
                 self._set_candidates(candidates)
                 return
+            # POZA TRYBEM PROPOZYCJI LICZNIK ZOSTAJE (AR-154): stos, któremu propozycja nie ma nic
+            # do dania poza klatkami nowszymi niż obraz, z kubełka wypada i nocy nie otwiera - ale
+            # zdanie, DLACZEGO lista jest pusta, nie znika razem z trybem (to samo zdanie, co nota
+            # nocy w `_fill_night`).
+            if after_integration:
+                self.note.set_full_text(" · ".join(x for x in (info, i18n.t_plural(
+                    "grid.lin.cand.after_integration", after_integration)) if x))
         elif head["used_rows"] is not None:
             # WERDYKT „N Z M" (podzbiór okna): nagłówek nie ma prawa mówić „weszły M" - weszło N,
             # tylko nie wiadomo które. Godziny skalowane do N (≈), bo wiersze listy to kandydaci okna.

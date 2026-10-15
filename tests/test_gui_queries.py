@@ -285,7 +285,9 @@ def _seed_stosy_z_powodami(con):
         con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at, object_id) "
                     "VALUES (?, ?, 'master_light', 'xisf', ?, ?)",
                     (fid, f"m{fid}", NOW, oid if fid == 902 else None))
-    wiersze = [(901, "degenerate_window", None),   # czeka na gest człowieka
+    # 901 czeka na gest powodem z WŁASNĄ receptą (karta teleskopu) - powód okna bez obiektu
+    # i materiału to pusta propozycja, która z kubełka wypada (AR-154)
+    wiersze = [(901, "telescope_mismatch", None),  # czeka na gest człowieka
                (902, "no_object", None),           # ZWIETRZAŁ — obiekt nadany po przebiegu
                (903, "offset_unknown", 60),        # ZWIETRZAŁ — odniesienie wskazane po przebiegu
                (904, "offset_unknown", None),      # czeka: odniesienia nikt nie wskazał

@@ -72,8 +72,9 @@ _START_W, _START_H = 1100, 640
 _STATUS_POZYCJI = {"pending": "objchg.st.pending", "applied": "objchg.st.done",
                    "blocked": "objchg.st.blocked", "failed": "objchg.st.failed",
                    "skipped": "objchg.st.skipped", "undone": "objchg.st.undone"}
-# Rozszerzenie XISF: zapis karty w miejscu umie tam także DOPISAĆ kartę; FITS w miejscu wyłącznie
-# podmienia istniejącą (`writeback._fits_inplace_plan`), więc dopisanie przepisuje cały plik.
+# Rozszerzenie XISF: zapis karty w miejscu umie tam DOPISAĆ kartę w rezerwie nagłówka; FITS dopisuje
+# w miejscu wyłącznie w zapasie nagłówka (`writeback._fits_inplace_plan`, AR-118), inaczej
+# przepisuje cały plik - tę drogę okno przewiduje per pozycja (`drogi_dopisania`, AR-155).
 _XISF = ".xisf"
 # Rola komórki ścieżki: długość GŁOWY pokazanego tekstu (kategoria i folder obiektu pod korzeniem
 # archiwum, `glowa_sciezki`) - delegat elizji (`_ElizjaSciezki`) trzyma ją w kadrze. Komórka bez
@@ -84,6 +85,9 @@ _MIN_ZNAKOW_NAZWY = 12
 _WIELOKROPEK = "…"
 # Ile obiektów „Uzgodnij” nagłówek wymienia z nazwy, reszta liczbą.
 _OBIEKTOW_W_NAGLOWKU = 3
+# Droga dopisania karty FITS BEZ prognozy (AR-155): pozycja spoza `drogi_dopisania` albo lista
+# przebiegu z bazy - mówi się ogólnym „zależy od pliku”. Osobny znak, bo `None` znaczy „w miejscu”.
+_DROGA_NIEZNANA = object()
 def tekst_pominiecia(kod, params, powod):
     """Zdanie pominięcia planera w języku UI: kod (`object_change.SKIP_CODES`) → `objchg.skip.<kod>`
     z parametrami pominięcia; kod bez zdania w katalogu (i pominięcie bez kodu) zostaje przy zdaniu
@@ -146,12 +150,30 @@ def policz_plan(con, frame_ids, *, target):
     return plan, korzen
 
 
+def drogi_dopisania(con, plan):
+    """Przewidywana droga KAŻDEGO dopisania karty do FITS w planie (AR-155) → `{location_id:
+    powód | None}`: `None` = w miejscu, `fb_no_room` = cały plik przepisany, `route_depends` =
+    zależy od pliku. Reguła drogi jest jedna - `writeback.inplace_route` z lustrem kart obecnej
+    kopii (`queries.present_copy_card_mirror`); lustro, które nie opisuje tej kopii, daje „zależy
+    od pliku”. Pozycje bez dopisania do FITS (podmiana karty, XISF, bez karty) nie wchodzą - ich
+    drogi okno nie przewiduje. ZERO ZAPISU, zero dysku - liczone obok planu, na jego wątku."""
+    from horreum import writeback          # lazy: astropy, jak w `zdanie_wyniku_zmiany`
+    dopisania = [it for it in plan.items
+                 if ObjectChangeDialog._dopisanie_fits(it.card_op, it.old_path)]
+    if not dopisania:
+        return {}
+    lustra = queries.present_copy_card_mirror(con, [it.frame_id for it in dopisania])
+    return {it.location_id: writeback.inplace_route("fits", "OBJECT", it.card_new, "str", None,
+                                                    op="add", cards=lustra.get(it.frame_id))
+            for it in dopisania}
+
+
 class PlanWorker(QObject):
     """Plan gestu poza wątkiem okna (wzorzec `DryWorker`/`TeczkiWorker`). Otwiera WŁASNE połączenie
     po `db_path`; tryb inline (`db_path` pusty) dostaje żywe `con` wołającego i biegnie
     synchronicznie. Wynik niesie generację startu - okno odrzuca stale (plan sprzed cofnięcia)."""
 
-    done = Signal(int, object)          # (generacja, (plan, korzeń))
+    done = Signal(int, object)          # (generacja, (plan, korzeń, drogi dopisania))
     failed = Signal(int, str)           # (generacja, komunikat)
     finished = Signal()
 
@@ -176,7 +198,8 @@ class PlanWorker(QObject):
         own = bool(self._db_path)
         con = db.connect(self._db_path) if own else self._con
         try:
-            return policz_plan(con, self._frame_ids, target=self._target)
+            plan, korzen = policz_plan(con, self._frame_ids, target=self._target)
+            return plan, korzen, drogi_dopisania(con, plan)
         finally:
             if own:
                 con.close()
@@ -452,6 +475,7 @@ class ObjectChangeDialog(QDialog):
         self._off_thread = off_thread
         self._plan = None
         self._korzen = None
+        self._drogi = {}             # location_id → przewidywana droga dopisania karty FITS
         self._gen = 0
         self._plan_worker = None
         self._plan_thread = None
@@ -707,7 +731,7 @@ class ObjectChangeDialog(QDialog):
     def _on_plan_done(self, gen, payload):
         if gen != self._gen:
             return                              # plan sprzed nowszego zamówienia
-        self._plan, self._korzen = payload
+        self._plan, self._korzen, self._drogi = payload
         self._wypelnij()
         self._sync_akcji()
 
@@ -737,8 +761,9 @@ class ObjectChangeDialog(QDialog):
         self._status_wiersza = {}       # nowy plan: wiersze bez historii biegu
         self._jest = {it.location_id: it.old_path for it in plan.items}
         for it in plan.items:
+            droga = self._drogi.get(it.location_id, _DROGA_NIEZNANA)
             w = QTreeWidgetItem(["", "", self._tekst_karty(it.card_op, it.card_old, it.card_new,
-                                                           it.old_path)])
+                                                           it.old_path, droga)])
             ustaw_sciezke(w, _COL_STARA, it.old_path, self._korzen)
             if it.new_path:
                 ustaw_sciezke(w, _COL_NOWA, it.new_path, self._korzen)
@@ -748,14 +773,18 @@ class ObjectChangeDialog(QDialog):
             if it.mkdirs:
                 w.setToolTip(_COL_NOWA, (it.new_path or "") + "\n"
                              + i18n.t("objchg.mkdirs_tip", dirs="\n".join(it.mkdirs)))
-            self._podpowiedz_karty(w, it.card_op, it.old_path)
+            self._podpowiedz_karty(w, it.card_op, it.old_path, droga)
             w.setData(_COL_STARA, Qt.UserRole, it.frame_id)
             self.items_tree.addTopLevelItem(w)
             self._wiersze[it.location_id] = w
         self._dopasuj_karte()
+        # Zdanie ogólne pod listą - wyłącznie dla dopisań, których drogi lustro nie przewidziało;
+        # przewidziana droga stoi przy swojej pozycji (AR-155).
         self.card_note.setText(i18n.t("objchg.card_add_fits"))
-        self.card_note.setVisible(any(self._dopisanie_fits(it.card_op, it.old_path)
-                                      for it in plan.items))
+        self.card_note.setVisible(any(
+            self._dopisanie_fits(it.card_op, it.old_path)
+            and self._rodzaj_drogi(self._drogi.get(it.location_id, _DROGA_NIEZNANA)) is None
+            for it in plan.items))
 
         ostrzezenia = [tekst_ostrzezenia(o.code, o.params, o.text) for o in plan.warnings]
         self.warnings.setText("\n".join(ostrzezenia))
@@ -907,36 +936,60 @@ class ObjectChangeDialog(QDialog):
 
     @staticmethod
     def _dopisanie_fits(card_op, path):
-        """Pozycja DOPISUJE kartę do FITS - jej droga zapisu zależy od pliku (`_tekst_karty`)."""
+        """Pozycja DOPISUJE kartę do FITS - jej droga zapisu zależy od zapasu nagłówka
+        (`drogi_dopisania`, `_tekst_karty`)."""
         return card_op == "add" and not path.lower().endswith(_XISF)
 
-    def _podpowiedz_karty(self, w, card_op, path):
+    @staticmethod
+    def _rodzaj_drogi(droga):
+        """Przewidziana droga dopisania (`drogi_dopisania`) → `"inplace"` (w miejscu), `"rewrite"`
+        (cały plik przepisany) albo None - zależy od pliku: lustro nie rozstrzyga albo prognozy nie
+        ma (przebieg z bazy mówi stan historyczny, nie prognozę)."""
+        if droga is None:
+            return "inplace"
+        if droga is _DROGA_NIEZNANA:
+            return None
+        return "rewrite" if getattr(droga, "code", None) == "fb_no_room" else None
+
+    def _podpowiedz_karty(self, w, card_op, path, droga=_DROGA_NIEZNANA):
         """Podpowiedź komórki karty: jej pełna treść, a przy dopisaniu do FITS także pełne zdanie
-        o drodze zapisu (w komórce stoi krótki znacznik)."""
+        o drodze zapisu (w komórce stoi krótki znacznik) - przewidzianej dla tej pozycji albo
+        ogólne „zależy od pliku”. `droga` jak w `_tekst_karty`."""
         tekst = w.text(_COL_KARTA)
         if self._dopisanie_fits(card_op, path):
-            tekst = f"{tekst}\n{i18n.t('objchg.card_add_fits')}"
+            rodzaj = self._rodzaj_drogi(droga)
+            if rodzaj == "inplace":
+                zdanie = i18n.t("objchg.card_add_fits_inplace")
+            elif rodzaj == "rewrite":
+                zdanie = i18n.t("objchg.card_add_fits_rewrite", reason=tekst_powodu(droga))
+            else:
+                zdanie = i18n.t("objchg.card_add_fits")
+            tekst = f"{tekst}\n{zdanie}"
         w.setToolTip(_COL_KARTA, tekst)
 
     @staticmethod
-    def _tekst_karty(card_op, card_old, card_new, path):
+    def _tekst_karty(card_op, card_old, card_new, path, droga=_DROGA_NIEZNANA):
         """Karta `OBJECT` pozycji: stara → nowa, albo stan bez zmiany (karta już w formie albo
-        format bez karty - RAW). DOPISANIE karty do FITS jest oznaczone KRÓTKIM znacznikiem
-        (`objchg.card_add_fits_short`): rdzeń dopisuje ją w miejscu tylko wtedy, gdy plik na to
-        pozwala - zapas nagłówka (pusta karta na końcu albo wolny rekord za `END`, AR-118) i pozostałe
-        bramki zapisu w miejscu. Inaczej przepisuje cały plik (droga atomowa, np. bez zapasu albo
-        skompresowany HDU) albo odmawia z powodem przy pozycji (np. `CHECKSUM`/`DATASUM`). Tego baza
-        nie zna, więc pełne zdanie o wszystkich wynikach (`objchg.card_add_fits`) stoi raz pod listą
-        i w podpowiedzi komórki - człowiek ma to wiedzieć przed kliknięciem, a drogę konkretnego
-        pliku podaje zdanie wyniku. Pełne zdanie w każdym wierszu zabierało kolumnie ścieżek
-        szerokość (zmierzone natywnie przy 1100 px okna)."""
+        format bez karty - RAW). DOPISANIE karty do FITS niesie KRÓTKI znacznik drogi zapisu
+        (AR-155) z prognozy pozycji `droga` (`drogi_dopisania`): „w miejscu” (`None` - nagłówek
+        ma wolny rekord za `END`), „cały plik przepisany” (`fb_no_room` - pełny ostatni blok bez
+        pustej karty) albo ogólne „dopisanie karty” (`objchg.card_add_fits_short`), gdy lustro kart
+        nie rozstrzyga albo prognozy nie ma (`_DROGA_NIEZNANA` - domyślnie; przebieg z bazy pokazuje
+        stan historyczny, nie prognozę). Pełne zdanie stoi w podpowiedzi komórki, a ogólne
+        (`objchg.card_add_fits`) raz pod listą - tylko dla pozycji „zależy od pliku”. Ostatnie
+        słowo ma pisarz na pliku (plik zmieniony od skanu, odmowa reguły karty) - drogę, którą
+        plik naprawdę poszedł, podaje zdanie wyniku. Pełne zdanie w każdym wierszu zabierało
+        kolumnie ścieżek szerokość (zmierzone natywnie przy 1100 px okna)."""
         if card_op is None:
             return (i18n.t("objchg.card_kept", value=repr(card_old)) if card_old
                     else i18n.t("objchg.card_none"))
         stara = repr(card_old) if card_old is not None else i18n.t("objchg.card_absent")
         tekst = i18n.t("objchg.card_change", old=stara, new=repr(card_new))
         if ObjectChangeDialog._dopisanie_fits(card_op, path):
-            tekst += i18n.t("objchg.card_add_fits_short")
+            rodzaj = ObjectChangeDialog._rodzaj_drogi(droga)
+            tekst += i18n.t({"inplace": "objchg.card_add_fits_inplace_short",
+                             "rewrite": "objchg.card_add_fits_rewrite_short"}.get(
+                                 rodzaj, "objchg.card_add_fits_short"))
         return tekst
 
     # ---------------------------------------------------------------- stan akcji

@@ -1888,3 +1888,51 @@ def test_forma_karty_ta_sama_co_gesty_gui():
     pytest.importorskip("PySide6")
     from horreum.gui import app as app_mod
     assert app_mod.forma_karty_object is resolver.forma_karty_object
+
+
+# ---- AR-160: rdzeń mówi, czy cofnięcie jest DOMKNIĘTE (`UndoResult.already` / `complete`) ----
+
+@pytest.mark.parametrize("inplace", [False, True], ids=["atomowo", "w_miejscu"])
+def test_cofniecie_domkniete_liczy_rdzen_juz_cofniete_to_nie_blokada_do_ponowienia(tmp_path,
+                                                                                  inplace):
+    """„Już cofnięte” (`_CofniecieLokacji.juz`) i blokada, po której plik NIE wrócił, to dla
+    powierzchni dwa różne stany: pierwsza domyka cofnięcie (uchwyt znika), druga - nie (uchwyt
+    zostaje). Rdzeń niesie je jawnie: `already` ⊆ `blocked`, `complete`.
+    Falsyfikator: `undo` bez `already.append` → drugie cofnięcie niedomknięte (druga asercja)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    a = _fits(tmp_path / "a.fits", seed=1)
+    b = _fits(tmp_path / "b.fits", seed=2)
+    for p in (a, b):
+        _scan_in(con, p)
+        _stage(con, "R", _loc(con, p)["id"], "NGC 6992", _loc(con, p)["header_hash"])
+    res = writeback.commit(con, "R", now=NOW, inplace=inplace)
+    assert len(res.applied) == 2 and res.commit_id is not None, res
+    fits.setval(str(b), "TELESCOP", value="Inny")                  # cudza zmiana po commicie
+    pierwsze = writeback.undo(con, res.commit_id, now=NOW)
+    assert len(pierwsze.restored) == 1 and len(pierwsze.blocked) == 1, pierwsze
+    assert pierwsze.already == [] and not pierwsze.complete       # b NIE wrócił - do ponowienia
+    drugie = writeback.undo(con, res.commit_id, now=NOW)
+    juz = [fr for fr in drugie.blocked if fr.path == str(a)]
+    assert juz and juz[0].reason.code in ("undo_already", "undo_already_op"), drugie
+    assert juz == [fr for fr in drugie.already if fr.path == str(a)]
+    assert not drugie.complete                                     # b dalej zablokowany
+    con.close()
+
+
+def test_cofniecie_domkniete_tylko_bez_przerwania_bledu_i_blokady_do_ponowienia(tmp_path):
+    """`complete`: samo „już cofnięte” + przywrócone - domknięte; przerwanie przed backupami albo
+    błąd - nie (fakt liczony z wyniku, nie ze statusu w oknie)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    a = _fits(tmp_path / "a.fits", seed=3)
+    _scan_in(con, a)
+    _stage(con, "R", _loc(con, a)["id"], "NGC 6992", _loc(con, a)["header_hash"])
+    res = writeback.commit(con, "R", now=NOW)
+    przerwane = writeback.undo(con, res.commit_id, now=NOW, should_cancel=lambda: True)
+    assert przerwane.cancelled and not przerwane.restored and not przerwane.complete
+    cofniete = writeback.undo(con, res.commit_id, now=NOW)
+    assert len(cofniete.restored) == 1 and cofniete.complete
+    ponowione = writeback.undo(con, res.commit_id, now=NOW)
+    assert ponowione.blocked == ponowione.already != [] and ponowione.complete
+    fr = writeback.FileResult(1, "X:/L/a.fits", "failed", "x")
+    assert not writeback.UndoResult(1, [], [], [fr]).complete
+    con.close()

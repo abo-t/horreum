@@ -62,6 +62,7 @@ from astropy.io import fits
 
 from . import exif, repo
 from .hashing import sha1_of, sha1_of_span
+from .item_reasons import OdmowaZPowodem, PowodPozycji   # odmowy XISF z kodem (AR-158) - liść
 from .resolve.cameras import camera_identity
 from .resolve.frames import (HISTORY_MASTER_KINDS, kind_from_path, kind_from_testimony,
                              normalize_kind)
@@ -687,6 +688,16 @@ def _unescape_xml(text):
     return text.replace("&amp;", "&")
 
 
+class XisfFormatError(OdmowaZPowodem):
+    """Odmowa czytnika albo składacza nagłówka XISF Z KODEM (AR-158; wzorzec
+    `resolve.catalog.FolderFormError`, AR-141). To `ValueError` - każdy wołający łapie ją jak dotąd,
+    a `str(exc)` jest dotychczasowym zdaniem PL (logi, CLI, testy). `powod` = to samo zdanie jako
+    `item_reasons.PowodPozycji` z kodem i parametrami: pisarz przenosi go do okna
+    (`writeback._XisfRefusal`), a okno mówi zdaniem `objchg.item.<kod>` w języku UI. Zdanie i kod
+    rodzą się tu, w miejscu zdania (kod literałem - test AST katalogu powodów). `ValueError` bez
+    kodu (guard zgodności z parserem, błąd argumentu) zostaje prozą - granica jawna."""
+
+
 _XISF_TAG_NAME = re.compile(rb"<\s*/?\s*([A-Za-z_:][\w:.\-]*)")
 _XISF_ATTR = re.compile(rb"""([A-Za-z_:][\w:.\-]*)\s*=\s*("[^"]*"|'[^']*')""")
 
@@ -705,7 +716,9 @@ def _iter_xml_tags(xml_bytes):
             if xml_bytes.startswith(opener, i):
                 end = xml_bytes.find(closer, i + len(opener))
                 if end < 0:
-                    raise ValueError(f"XISF: niedomknięte {opener.decode()} w nagłówku")
+                    raise XisfFormatError(PowodPozycji(
+                        f"XISF: niedomknięte {opener.decode()} w nagłówku", "xisf_unclosed",
+                        text=opener.decode()))
                 i = end + len(closer)
                 break
         else:
@@ -721,7 +734,8 @@ def _iter_xml_tags(xml_bytes):
                     break
                 j += 1
             if j >= n:
-                raise ValueError("XISF: znacznik bez domknięcia '>'")
+                raise XisfFormatError(PowodPozycji("XISF: znacznik bez domknięcia '>'",
+                                                   "xisf_tag_unclosed"))
             yield i, j + 1
             i = j + 1
 
@@ -736,17 +750,19 @@ def _tag_attrs(tag_bytes):
     return out
 
 
-class XisfTargetMissing(ValueError):
+class XisfTargetMissing(XisfFormatError):
     """Adresu NIE MA w nagłówku (karta / atrybut / własność). Osobny typ, bo wołający reaguje na to
     RÓŻNIE zależnie od adresu: brak KARTY do zapisu = odmowa (dokładanie kart to D-X-12), brak
     zmapowanej WŁASNOŚCI = świadome pominięcie (D-X-10 — plik, który jej nigdy nie miał, nie jest
-    sam ze sobą sprzeczny). Rozróżnianie po treści komunikatu byłoby kruche."""
+    sam ze sobą sprzeczny). Rozróżnianie po treści komunikatu byłoby kruche. Kod powodu z klasy
+    kodowanej (AR-158) - typ zostaje, bo pisarz steruje nim przepływem."""
 
 
-class XisfValueUnreachable(ValueError):
+class XisfValueUnreachable(XisfFormatError):
     """Adres ISTNIEJE, ale jego wartość nie leży w nagłówku do przepisania: `location=`
     (inline/attachment) albo element pusty. Wołający mapuje na `blocked` — cel jest realny, więc
-    ciche pominięcie zostawiłoby plik SPRZECZNY, a łata nagłówka nie ma tu czego chwycić."""
+    ciche pominięcie zostawiłoby plik SPRZECZNY, a łata nagłówka nie ma tu czego chwycić. Kod
+    powodu z klasy kodowanej (AR-158), typ zostaje."""
 
 
 def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None, attr="value"):
@@ -792,7 +808,9 @@ def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None, attr=
                 seen += 1
                 continue
             if want_attr not in attrs:
-                raise XisfTargetMissing(f"XISF: karta {want}[{idx}] bez atrybutu {attr}=")
+                raise XisfTargetMissing(PowodPozycji(
+                    f"XISF: karta {want}[{idx}] bez atrybutu {attr}=", "xisf_card_attr_missing",
+                    keyword=want, n=idx, attr=attr))
             vs, ve = attrs[want_attr]
             span = (start + vs, start + ve)
             break
@@ -803,23 +821,28 @@ def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None, attr=
         if _unescape_xml(tag[ids:ide].decode("utf-8")) != property_id:
             continue
         if b"location" in attrs:
-            raise XisfValueUnreachable(
-                f"XISF: własność {property_id} trzyma wartość w location= — poza nagłówkiem")
+            raise XisfValueUnreachable(PowodPozycji(
+                f"XISF: własność {property_id} trzyma wartość w location= - poza nagłówkiem",
+                "xisf_prop_location", prop=property_id))
         if b"value" in attrs:
             vs, ve = attrs[b"value"]
             span = (start + vs, start + ve)
             break
         if tag.rstrip().endswith(b"/>"):
-            raise XisfValueUnreachable(
-                f"XISF: własność {property_id} pusta (element samozamykający)")
+            raise XisfValueUnreachable(PowodPozycji(
+                f"XISF: własność {property_id} pusta (element samozamykający)", "xisf_prop_empty",
+                prop=property_id))
         text_end = xml_bytes.find(b"<", end)
         if text_end < 0:
             raise ValueError(f"XISF: własność {property_id} bez domknięcia elementu")
         span = (end, text_end)
         break
     else:
-        cel = f"karta {want}[{idx}]" if want is not None else f"własność {property_id}"
-        raise XisfTargetMissing(f"XISF: {cel} nieobecna w nagłówku")
+        if want is not None:
+            raise XisfTargetMissing(PowodPozycji(f"XISF: karta {want}[{idx}] nieobecna w nagłówku",
+                                                 "xisf_card_missing", keyword=want, n=idx))
+        raise XisfTargetMissing(PowodPozycji(f"XISF: własność {property_id} nieobecna w nagłówku",
+                                             "xisf_prop_missing", prop=property_id))
 
     _assert_span_zgodny_z_parserem(xml_bytes, span, keyword=want, idx=idx,
                                    property_id=property_id, attr=attr)
@@ -872,20 +895,23 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
             continue
         if tag.startswith(b"</"):
             if otwarta is None:
-                raise ValueError("XISF: </FITSKeyword> bez otwarcia - struktury kart nie rozumiem, "
-                                 "nowej karty nie wstawiam")
+                raise XisfFormatError(PowodPozycji(
+                    "XISF: </FITSKeyword> bez otwarcia - struktury kart nie rozumiem, nowej karty "
+                    "nie wstawiam", "xisf_kw_close_without_open"))
             s, koniec_otw, tekstowa = otwarta
             if xml_bytes[koniec_otw:start].strip():
-                raise ValueError("XISF: karta ma treść elementu między otwarciem a zamknięciem - "
-                                 "takiej postaci nie rozumiem, nowej karty nie wstawiam")
+                raise XisfFormatError(PowodPozycji(
+                    "XISF: karta ma treść elementu między otwarciem a zamknięciem - takiej postaci "
+                    "nie rozumiem, nowej karty nie wstawiam", "xisf_kw_content"))
             ostatnia = (s, end)
             if tekstowa:
                 wzorzec = (s, end, koniec_otw)
             otwarta = None
             continue
         if otwarta is not None:
-            raise ValueError("XISF: <FITSKeyword> zagnieżdżona w innej karcie - struktury kart nie "
-                             "rozumiem, nowej karty nie wstawiam")
+            raise XisfFormatError(PowodPozycji(
+                "XISF: <FITSKeyword> zagnieżdżona w innej karcie - struktury kart nie rozumiem, "
+                "nowej karty nie wstawiam", "xisf_kw_nested"))
         attrs = _tag_attrs(tag)
         tekstowa = False
         if b"value" in attrs:
@@ -899,25 +925,29 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
         else:
             otwarta = (start, end, tekstowa)
     if otwarta is not None:
-        raise ValueError("XISF: <FITSKeyword> bez zamknięcia - nowej karty nie wstawiam")
+        raise XisfFormatError(PowodPozycji(
+            "XISF: <FITSKeyword> bez zamknięcia - nowej karty nie wstawiam", "xisf_kw_unclosed"))
     if ostatnia is None:
-        raise XisfTargetMissing(
-            "XISF: nagłówek nie ma ani jednej karty <FITSKeyword> — nie ma z czego przejąć "
-            "konwencji zapisu nowej")
+        raise XisfTargetMissing(PowodPozycji(
+            "XISF: nagłówek nie ma ani jednej karty <FITSKeyword> - nie ma z czego przejąć "
+            "konwencji zapisu nowej", "xisf_no_cards"))
     if wzorzec is None:
-        raise ValueError(
-            "XISF: żadna karta tego pliku nie trzyma wartości w apostrofach FITS — konwencji "
-            "wartości tekstowej NIE ZNAM, więc nowej karty nie składam")
+        raise XisfFormatError(PowodPozycji(
+            "XISF: żadna karta tego pliku nie trzyma wartości w apostrofach FITS - konwencji "
+            "wartości tekstowej NIE ZNAM, więc nowej karty nie składam", "xisf_no_text_template"))
 
     tmpl = xml_bytes[wzorzec[0]:wzorzec[1]]                 # CAŁY element - z zamknięciem, jeśli ma
     attrs = _tag_attrs(xml_bytes[wzorzec[0]:wzorzec[2]])    # atrybuty tylko ze znacznika otwierającego
     obce = set(attrs) - _KEYWORD_ATTRS_ZNANE
     if obce:
         nazwy = ", ".join(sorted(a.decode("ascii", "replace") for a in obce))
-        raise ValueError(f"XISF: wzorzec karty ma nieznane atrybuty ({nazwy}) — kopiowanie "
-                         "przeniosłoby do nowej karty wartość, której nie rozumiem")
+        raise XisfFormatError(PowodPozycji(
+            f"XISF: wzorzec karty ma nieznane atrybuty ({nazwy}) - kopiowanie przeniosłoby do "
+            f"nowej karty wartość, której nie rozumiem", "xisf_template_attrs", attrs=nazwy))
     if b"name" not in attrs or b"value" not in attrs:
-        raise ValueError("XISF: wzorzec karty bez atrybutu name= albo value= — nie ma czego podmienić")
+        raise XisfFormatError(PowodPozycji(
+            "XISF: wzorzec karty bez atrybutu name= albo value= - nie ma czego podmienić",
+            "xisf_template_no_name_value"))
 
     podmiany = [(attrs[b"name"], _escape_xml(str(keyword).strip().upper(),
                                              attribute=True).encode("utf-8")),
@@ -926,8 +956,9 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
         podmiany.append((attrs[b"comment"],
                          _escape_xml(str(comment or ""), attribute=True).encode("utf-8")))
     elif comment:
-        raise ValueError("XISF: wzorzec karty nie ma atrybutu comment= — dopisanie atrybutu "
-                         "jest poza P6d")
+        raise XisfFormatError(PowodPozycji(
+            "XISF: wzorzec karty nie ma atrybutu comment= - dopisanie atrybutu jest poza P6d",
+            "xisf_template_no_comment"))
 
     out, last = [], 0
     for (s, e), blob in sorted(podmiany):
@@ -1083,17 +1114,22 @@ def read_xisf_meta_full(path):
     with open(path, "rb") as fh:
         signature = fh.read(len(_XISF_SIGNATURE))
         if signature != _XISF_SIGNATURE:
-            raise ValueError(f"nie XISF monolithic (sygnatura {signature!r})")
+            raise XisfFormatError(PowodPozycji(
+                f"nie XISF monolithic (sygnatura {repr(signature)})", "xisf_signature",
+                value=repr(signature)))
         length_bytes = fh.read(_XISF_LENGTH_LEN)
         if len(length_bytes) < _XISF_LENGTH_LEN:
-            raise ValueError("XISF: brak pola długości nagłówka")
+            raise XisfFormatError(PowodPozycji("XISF: brak pola długości nagłówka",
+                                               "xisf_no_length"))
         (header_len,) = struct.unpack("<I", length_bytes)
         reserved = fh.read(_XISF_RESERVED_LEN)
         if len(reserved) < _XISF_RESERVED_LEN:
-            raise ValueError("XISF: brak pola reserved")
+            raise XisfFormatError(PowodPozycji("XISF: brak pola reserved", "xisf_no_reserved"))
         xml_bytes = fh.read(header_len)
         if len(xml_bytes) < header_len:
-            raise ValueError(f"XISF: nagłówek XML ucięty ({len(xml_bytes)}/{header_len} B)")
+            raise XisfFormatError(PowodPozycji(
+                f"XISF: nagłówek XML ucięty ({len(xml_bytes)}/{header_len} B)", "xisf_xml_cut",
+                n=len(xml_bytes), length=header_len))
 
         # Neutralizacja znaków nielegalnych w XML 1.0 (`xml_parsable`) — `xml_bytes` ZOSTAJĄ surowe,
         # bo z nich liczy się `header_hash` i z nich pisze pisarz. ParseError na tym, czego nawet to
@@ -1212,14 +1248,18 @@ def build_xisf_header_region(meta, new_xml):
     nagłówek), plik przeczy sam sobie (`padding_complete`), nagłówek nie mieści się w rezerwie
     (D-X-2). Trzeciej drogi nie ma — dane nie ustępują nagłówkowi."""
     if meta.first_attachment is None:
-        raise ValueError("XISF: brak bloku attachment — nie wiadomo, gdzie kończy się nagłówek")
+        raise XisfFormatError(PowodPozycji(
+            "XISF: brak bloku attachment - nie wiadomo, gdzie kończy się nagłówek",
+            "xisf_no_attachment"))
     if not meta.padding_complete:
-        raise ValueError("XISF: wypełnienie nagłówka niekompletne — plik przeczy sam sobie")
+        raise XisfFormatError(PowodPozycji(
+            "XISF: wypełnienie nagłówka niekompletne - plik przeczy sam sobie",
+            "xisf_padding_broken"))
     room = meta.first_attachment - XISF_XML_OFFSET
     if len(new_xml) > room:
-        raise ValueError(
-            f"XISF: nagłówek nie mieści się w rezerwie ({len(new_xml)} B > {room} B) — "
-            f"attachmenty się nie ruszają")
+        raise XisfFormatError(PowodPozycji(
+            f"XISF: nagłówek nie mieści się w rezerwie ({len(new_xml)} B > {room} B) - "
+            f"attachmenty się nie ruszają", "xisf_no_room", length=len(new_xml), limit=room))
     delta = len(new_xml) - len(meta.xml_bytes)
     padding = meta.padding[delta:] if delta > 0 else b"\x00" * -delta + meta.padding
     return _XISF_SIGNATURE + struct.pack("<I", len(new_xml)) + meta.reserved + new_xml + padding
@@ -1342,7 +1382,16 @@ def unreadable_reason_of(exc):
         return f"{type(exc).__name__}: [WinError {exc.winerror}] {exc.strerror}"
     if isinstance(exc, OSError) and exc.errno is not None:
         return f"{type(exc).__name__}: [Errno {exc.errno}] {exc.strerror}"
-    return f"{type(exc).__name__}: {exc}"
+    return f"{nazwa_typu_diagnozy(exc)}: {exc}"
+
+
+def nazwa_typu_diagnozy(exc):
+    """Nazwa typu w diagnozie „Typ: opis" - jedna reguła dla `unreadable_reason_of` i pozycji
+    `unreadable` żniw (`harvest.plan`). Odmowa z kodem (`item_reasons.OdmowaZPowodem`, w tym
+    `XisfFormatError`, AR-158) mówi `ValueError`, jak przed kodem: diagnoza w bazie zostaje spójna
+    z wierszami sprzed AR-158 i ze zdaniem okna `xisf_unreadable_reader` (`... - ValueError: ...`).
+    Kod niesie obiekt wyjątku, nie tekst diagnozy."""
+    return "ValueError" if isinstance(exc, OdmowaZPowodem) else type(exc).__name__
 
 
 def scan_file(path, *, substitute=None):

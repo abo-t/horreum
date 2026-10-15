@@ -809,8 +809,8 @@ def _args(powod):
 def test_powod_pozycji_w_bazie_ma_kod_a_proza_to_proza_wyniku(tmp_path, scena):
     """AR-141: odmowy sterownika zapisują w pozycji KOD z parametrami obok prozy (0041). Proza
     w bazie = proza wyniku biegu (CLI, log), a powód z bazy wraca z tym samym kodem i tymi samymi
-    parametrami - także powodem niższej warstwy w `inner` (odmowa klingi z kodem; proza pisarza
-    karty bez kodu). Falsyfikator: `settle_object_change_item` bez trójki - kod NULL."""
+    parametrami - także powodem niższej warstwy w `inner` (odmowa klingi z kodem; reguła karty
+    z kodem - AR-158). Falsyfikator: `settle_object_change_item` bez trójki - kod NULL."""
     s = _Scena(tmp_path)
     con = s.con
     pozycja = s.pozycja(0)
@@ -842,8 +842,10 @@ def test_powod_pozycji_w_bazie_ma_kod_a_proza_to_proza_wyniku(tmp_path, scena):
         inner = _args(z_bazy)["inner"]
         assert (inner.code, _args(inner)) == ("alias_conflict",
                                               {"alias": "flamingstar", "object_id": m42})
-    if scena == "karta":                       # pisarz karty bez kodu - proza w `inner` (granica)
-        assert type(_args(z_bazy)["inner"]) is str
+    if scena == "karta":                       # reguła karty z kodem w `inner` (AR-158)
+        inner = _args(z_bazy)["inner"]
+        assert (inner.code, _args(inner)) == ("card_value_chars",
+                                              {"keyword": "OBJECT", "char": repr("ł")})
         cof = writeback.undo_object_change(con, run, now=NOW)
         assert [r.reason.code for r in cof.skipped] == ["undo_refused_earlier"]
 

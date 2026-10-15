@@ -47,6 +47,8 @@ def _probki():
         "n": 2, "tries": 3, "winerror": 32, "op_id": 7, "location": 5, "object_id": 9,
         "rename_id": 4, "commit_id": 11, "before": 60, "after": 40,
         "needed": writeback._wolne_rekordy(2), "free": 1,
+        "attr": "comment", "attrs": "foo, id", "char": "'\\x07'", "name": "'OBJECTNAM'",
+        "length": 70, "limit": 68,
         "features": [writeback._CECHA_ROZMIAR, writeback._CECHA_NAGLOWEK],
         "paths": ["X:/L/a", "X:/L/b"], "sums": ["CHECKSUM", "DATASUM"],
     }
@@ -445,3 +447,199 @@ def test_ostrzezenie_rekoncyliacji_renamu_niesie_powod_z_kodem_z_prawdziwej_drog
     assert detail.code == "intent_both_names", detail
     assert str(ostrzezenie) == f"{dict(ostrzezenie.params)['path']}: {detail}"
     con.close()
+
+
+# ============================================================ odmowy czytnika XISF i reguł karty (AR-158)
+# Zdanie odmowy rodzi się z kodem w `scan` (`XisfFormatError`) i w `card_rules` (`CardViolation`),
+# pisarz przenosi gotowy powód do wyniku - okno EN mówi po angielsku, PL znak w znak jak rdzeń.
+
+
+def _okno(powod):
+    """Zdanie okna w obu językach: `(pl, en)`; PL == `czytelny_powod(proza rdzenia)`."""
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import czytelny_powod, tekst_powodu
+    try:
+        i18n.set_lang("pl")
+        pl = tekst_powodu(powod)
+        i18n.set_lang("en")
+        en = tekst_powodu(powod)
+    finally:
+        i18n.set_lang("pl")
+    assert pl == czytelny_powod(str(powod)), (pl, str(powod))
+    assert not set(en) & _POLSKIE and en != pl, en
+    return pl, en
+
+
+def _zla_sygnatura(tmp_path):
+    from test_writeback import _xisf
+    p = _xisf(tmp_path, "sygn.xisf")
+    with open(p, "r+b") as fh:
+        fh.write(b"XISF0200")
+    return p, [writeback.WriteOp("TELESCOP", "set", "ED120R", "str")]
+
+
+def _bez_wzorca(tmp_path):
+    from test_writeback import _xisf
+    return (_xisf(tmp_path, "gole.xisf", keywords=[("FOCALLEN", "796"), ("XBINNING", "1")],
+                  props=""), [writeback.WriteOp("OBJECT", "add", "NGC 7000", "str")])
+
+
+def _ciasno(tmp_path):
+    from test_writeback import _xisf
+    return _xisf(tmp_path, "ciasno.xisf", pad=8), [writeback.WriteOp("OBJECT", "add", "NGC 7000",
+                                                                     "str")]
+
+
+@pytest.mark.parametrize("buduj, kod, pl, en", [
+    (_zla_sygnatura, "xisf_unreadable_reader",
+     "nagłówek XISF nieczytelny - ValueError: nie XISF monolithic (sygnatura b'XISF0200')",
+     "XISF header unreadable - not a monolithic XISF file (signature b'XISF0200')"),
+    (_bez_wzorca, "xisf_no_text_template",
+     "XISF: żadna karta tego pliku nie trzyma wartości w apostrofach FITS - konwencji wartości "
+     "tekstowej NIE ZNAM, więc nowej karty nie składam",
+     "XISF: no card in this file keeps its value in FITS quotes - I do NOT KNOW the convention "
+     "for text values, so I do not build a new card"),
+    (_ciasno, "xisf_no_room",
+     "XISF: nagłówek nie mieści się w rezerwie (628 B > 578 B) - attachmenty się nie ruszają",
+     "XISF: the header does not fit in the reserve (628 B > 578 B) - the attachments do not move"),
+], ids=["read_xisf_or_refuse", "build_fits_keyword_element", "build_xisf_header_region"])
+def test_odmowa_czytnika_XISF_mowi_w_oknie_kodem_na_kazdej_drodze(tmp_path, buduj, kod, pl, en):
+    """Trzy drogi odmowy czytnika do okna: odczyt nagłówka (`_read_xisf_or_refuse` - kod czytnika
+    zagnieżdżony w zdaniu „nieczytelny”, PL jak dawne `ValueError: …`), wstawka karty
+    (`build_fits_keyword_element`) i bramka mieszczenia się (`build_xisf_header_region`). Wynik
+    'blocked' z kodem, plik nietknięty; PL okna = zdanie rdzenia, EN po angielsku."""
+    pytest.importorskip("PySide6")
+    p, ops = buduj(tmp_path)
+    przed = p.read_bytes()
+    res = writeback.write_xisf_changes(str(p), ops, None)
+    assert res.status == "blocked" and res.reason.code == kod, res
+    assert p.read_bytes() == przed
+    zdanie_pl, zdanie_en = _okno(res.reason)
+    assert str(res.reason) == zdanie_pl == pl
+    assert zdanie_en == en, zdanie_en
+    if kod == "xisf_unreadable_reader":
+        assert dict(res.reason.params)["inner"].code == "xisf_signature"
+    if kod == "xisf_no_room":
+        assert {k for k, _ in res.reason.params} == {"length", "limit"}
+
+
+def test_odmowa_czytnika_z_kodem_zostaje_ValueError_z_dawnym_zdaniem(tmp_path):
+    """Wołający czytnika łapią `ValueError` jak dotąd (`XisfFormatError` to jego podklasa), a tekst
+    wyjątku to dotychczasowe zdanie PL. Diagnoza „Typ: opis” (miękkie lądowanie skanu →
+    `location.unreadable_reason`, pozycja `unreadable` żniw) mówi `ValueError`, jak wiersze sprzed
+    AR-158 i zdanie okna `xisf_unreadable_reader` - nie nazwą podklasy."""
+    from horreum import harvest, scan
+    p, _ = _zla_sygnatura(tmp_path)
+    with pytest.raises(ValueError) as odmowa:
+        scan.read_xisf_meta_full(str(p))
+    assert str(odmowa.value) == "nie XISF monolithic (sygnatura b'XISF0200')"
+    assert odmowa.value.powod.code == "xisf_signature"
+    rec = scan.scan_file(str(p))
+    assert rec.header is None
+    assert rec.error == "ValueError: nie XISF monolithic (sygnatura b'XISF0200')"
+    assert scan.unreadable_reason_of(scan.XisfTargetMissing(PowodPozycji(
+        "brak location w bazie", "no_location"))) == "ValueError: brak location w bazie"
+    assert scan.unreadable_reason_of(KeyError("k")) == "KeyError: 'k'"
+    wbpp = tmp_path / "wbpp"
+    (wbpp / "master").mkdir(parents=True)
+    (wbpp / "master" / "masterFlat_X.xisf").write_bytes(p.read_bytes())
+    con = db.open_db(str(tmp_path / "h.db"))
+    (it,) = harvest.plan(con, str(wbpp), archive_root="A",
+                         read=lambda src: scan.read_xisf_meta_full(src)).items
+    assert (it.reason, it.detail) == ("unreadable",
+                                      "ValueError: nie XISF monolithic (sygnatura b'XISF0200')")
+    con.close()
+
+
+def test_plan_karty_ze_sciezki_mowi_regule_karty_w_jezyku_UI(tmp_path):
+    """Gest „Zatwierdź ze ścieżki…” (`app.plan_kart_sciezki`) pomija klatki, gdy forma karty łamie
+    reguły FITS - powód reguły w zdaniu okna idzie przez `tekst_powodu`: EN po angielsku, PL znak
+    w znak jak dawne zdanie reguły."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import app as app_mod
+    from horreum.gui import i18n
+    con = db.open_db(str(tmp_path / "h.db"))
+    try:
+        zdania = {}
+        for lang in ("pl", "en"):
+            i18n.set_lang(lang)
+            value, touched, skipped = app_mod.plan_kart_sciezki(con, "Café", [1])
+            assert value == "Café" and touched == [] and len(skipped) == 1
+            zdania[lang] = skipped[0][2]
+    finally:
+        i18n.set_lang("pl")
+    assert ("wartość karty OBJECT ma znak 'é' spoza drukowalnego ASCII - karta FITS go nie "
+            "przyjmie, a w nagłówku XISF łamie XML 1.0") in zdania["pl"]
+    assert "the value of card OBJECT has the character 'é' outside printable ASCII" in zdania["en"]
+    assert not set(zdania["en"]) & _POLSKIE, zdania["en"]
+    con.close()
+
+
+def test_brak_celu_dalej_pomija_a_cel_nieosiagalny_dalej_blokuje(tmp_path):
+    """Typy `XisfTargetMissing`/`XisfValueUnreachable` (pisarz steruje nimi przepływem) dostały kod
+    przez dziedziczenie: własność NIEOBECNA dalej = pominięcie ('applied' bez niej), własność
+    w `location=` dalej = blokada - teraz z kodem; `set` karty nieobecnej niesie kod czytnika
+    w `detail`, okno EN mówi całość po angielsku."""
+    pytest.importorskip("PySide6")
+    from horreum import scan
+    from test_writeback import _xisf
+    assert issubclass(scan.XisfTargetMissing, scan.XisfFormatError)
+    assert issubclass(scan.XisfValueUnreachable, scan.XisfFormatError)
+    bez = _xisf(tmp_path, "bez.xisf", keywords=[("TELESCOP", "'ED'")], props="")
+    res = writeback.write_xisf_changes(str(bez), [writeback.WriteOp("TELESCOP", "set", "ED120R",
+                                                                     "str")], None)
+    assert res.status == "applied", res
+    loc = _xisf(tmp_path, "loc.xisf", keywords=[("TELESCOP", "'ED'")],
+                props='<Property id="Instrument:Telescope:Name" type="String" '
+                      'location="attachment:900:4"/>')
+    res = writeback.write_xisf_changes(str(loc), [writeback.WriteOp("TELESCOP", "set", "ED120R",
+                                                                     "str")], None)
+    assert res.status == "blocked" and res.reason.code == "xisf_prop_location", res
+    assert str(res.reason) == ("XISF: własność Instrument:Telescope:Name trzyma wartość "
+                               "w location= - poza nagłówkiem")
+    _okno(res.reason)
+    res = writeback.write_xisf_changes(str(bez), [writeback.WriteOp("FILTER", "set", "Ha", "str")],
+                                       None)
+    assert res.status == "blocked" and res.reason.code == "xisf_set_missing", res
+    assert dict(res.reason.params)["detail"].code == "xisf_card_missing"
+    assert str(res.reason) == ("XISF: karta FILTER[0] nieobecna w nagłówku - 'set' nie zakłada "
+                               "karty; dopisanie idzie przez 'add' (P6d)")
+    _, en = _okno(res.reason)
+    assert en.startswith("XISF: card FILTER[0] is not in the header - 'set' does not create"), en
+
+
+@pytest.mark.parametrize("fmt, op, pl, kod, pole", [
+    ("fits", writeback.WriteOp("TELESCOP", "set", "Café", "str"),
+     "wartość karty TELESCOP ma znak 'é' spoza drukowalnego ASCII - karta FITS go nie przyjmie, "
+     "a w nagłówku XISF łamie XML 1.0", "card_value_chars", "value"),
+    ("xisf", writeback.WriteOp("TELESCOP", "set", "ED", "str", comment="opisé"),
+     "komentarz karty TELESCOP ma znak 'é' spoza drukowalnego ASCII - karta FITS go nie "
+     "przyjmie, a w nagłówku XISF łamie XML 1.0", "card_comment_chars", "comment"),
+    ("xisf", writeback.WriteOp("TELESCOP", "set", "ED", "str", comment="c" * 60),
+     "komentarz karty TELESCOP ma 60 znaków, a przy tej wartości rekord FITS mieści 47",
+     "card_comment_long", "comment"),
+    ("fits", writeback.WriteOp("OBJECTNAM", "add", "x", "str"),
+     "nazwa karty 'OBJECTNAM' łamie reguły FITS 4.0 - do 8 znaków spośród A-Z, 0-9, '_' i '-'",
+     "card_name", "name"),
+    ("xisf", writeback.WriteOp("TELESCOP", "set", "X" * 69, "str"),
+     "wartość karty TELESCOP ma 69 znaków, a jeden rekord FITS mieści 68", "card_value_long",
+     "value"),
+], ids=["fits_znak_wartosci", "xisf_znak_komentarza", "xisf_dlugi_komentarz", "fits_nazwa",
+        "xisf_dluga_wartosc"])
+def test_naruszenie_reguly_karty_mowi_w_oknie_kodem(tmp_path, fmt, op, pl, kod, pole):
+    """`_ops_violation` niesie `CardViolation.reason` - `PowodPozycji` z kodem `card_*` (oba
+    formaty): PL znak w znak jak dawne zdanie reguły, EN po angielsku; pola naruszenia (`field`,
+    `char`, `length`/`limit`) dla powierzchni mówiących własnym językiem."""
+    pytest.importorskip("PySide6")
+    from horreum import card_rules
+    from test_writeback import _plik
+    p = _plik(tmp_path, fmt)
+    res = writeback.write_changes(str(p), [op], None)
+    assert res.status == "blocked" and res.reason.code == kod, res
+    assert str(res.reason) == pl
+    _okno(res.reason)
+    naruszenie = card_rules.card_violation(op.keyword, op.value, op.comment,
+                                           new_card=op.op == "add")
+    assert naruszenie.reason == res.reason and naruszenie.field == pole
+    if kod in ("card_value_chars", "card_comment_chars"):
+        assert naruszenie.char == "é" and naruszenie.kind == "chars"

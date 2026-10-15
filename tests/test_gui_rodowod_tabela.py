@@ -210,7 +210,9 @@ def _seed_stany(con):
         con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
                     (fid, f"/a/S/stos{fid}.xisf"))
     for fid in (20, 21, 22, 23, 24, 25, 26):
-        powod = "degenerate_window" if fid == 24 else None
+        # 24 czeka na gest bez propozycji: powód z WŁASNĄ receptą (karta teleskopu). Powód okna
+        # (`degenerate_window`) przy stosie bez obiektu i materiału z kubełka wypada (AR-154).
+        powod = "telescope_mismatch" if fid == 24 else None
         con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
                     "telescope_mismatch, unresolved_reason) VALUES (?, ?, ?, 0, 0, 0, ?)",
                     (fid, fid, NOW, powod))
@@ -639,7 +641,7 @@ def test_zastapiony_stos_nie_czeka_na_reke(con):
     con.commit()
     assert 40 not in queries.lineage_pending_frame_ids(con)
     assert queries.stack_lineage_states(con)[40] == "none"
-    assert not queries.lineage_awaits_hand(con, 40)
+    assert queries.lineage_hand_state(con, 40) == (False, None)
 
 
 def test_chip_wraca_do_zapytania_Znajdz_z_jego_tekstem(strona, con):
@@ -677,10 +679,30 @@ def test_sklad_liczy_stan_rodowodu_raz(strona, con, monkeypatch):
     wolania = []
     prawdziwa = queries.stack_lineage_states
     monkeypatch.setattr(queries, "stack_lineage_states",
-                        lambda c: wolania.append(1) or prawdziwa(c))
+                        lambda c, **kw: wolania.append(1) or prawdziwa(c, **kw))
     v.refresh()
     assert sorted(v._frame_ids) == [10, 20, 24]
     assert len(wolania) == 1
+
+
+def test_sklad_perspektywy_rodowodu_liczy_zbior_kubelka_raz(strona, con, monkeypatch):
+    """AR-154: zbiór kubełka liczy propozycję rodowodu, a perspektywa „Rodowód do potwierdzenia"
+    potrzebuje go dwa razy - w stanach (kolumna, facet) i jako trim. Jeden skład = jedno liczenie;
+    stany i trim mówią o tym samym zbiorze.
+
+    Falsyfikator: `stack_lineage_states(con)` bez `oczekujace=` w `_sklad_zbioru` → dwa liczenia."""
+    _seed_stany(con)
+    v = strona.frames_view
+    wolania = []
+    prawdziwa = queries.lineage_pending_frame_ids
+    monkeypatch.setattr(queries, "lineage_pending_frame_ids",
+                        lambda c: wolania.append(1) or prawdziwa(c))
+    v.apply_perspective(grid_mod.PRESET_LINEAGE)
+    assert v._frame_ids == [24]
+    assert _tekst_komorki(v, 24, "_rodowod") == i18n.t("grid.lineage.state.pending")
+    wolania.clear()
+    v.refresh()
+    assert v._frame_ids == [24] and len(wolania) == 1
 
 
 # ---------- tura po wizytacji natywnej ----------
@@ -791,3 +813,95 @@ def test_kandydat_ma_nazwe_pliku_a_odrzucone_stoja_wygaszone(strona, con):
     _klik_wiersza(bar.items, 42)
     _klik(bar.btn_confirm)
     assert _stan_wejscia(con, 42, integration_id=41) == ("user", 0)
+
+
+# ---------- AR-154: stos bez werdyktu, któremu propozycja nie ma nic do dania ----------
+
+def _seed_stos_okna(con, powod, *, lighty=(), creation_time=None, z_obiektem=True):
+    """Stos 50 (M51, Ha, 300 s) z oknem nagłówka 2023-04-21 20:00-22:00 i zapisanym powodem bez
+    werdyktu; `lighty` = [(frame_id, date_obs)] - materiał propozycji (M51, Ha, 300 s)."""
+    import json
+    con.execute("INSERT OR IGNORE INTO object (id, canon, catalog, kind) "
+                "VALUES (7, 'M51', 'catalog', 'deep_sky')")
+    raw = {"IMAGETYP": "Master Light", "EXPTIME": 300.0,
+           "DATE-OBS": "2023-04-21T20:00:00", "DATE-END": "2023-04-21T22:00:00"}
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                "first_seen_at) VALUES (50, 'm50', 'master_light', 'xisf', ?, 'Ha', ?)",
+                (7 if z_obiektem else None, NOW))
+    con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                "VALUES (50, ?, '2023-04-21T20:00:00', 300.0)", (json.dumps(raw),))
+    con.execute("INSERT INTO location (frame_id, volume, path, present) "
+                "VALUES (50, 'V', '/a/S/stosM51.xisf', 1)")
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch, unresolved_reason, creation_time) "
+                "VALUES (51, 50, ?, 0, 0, 0, ?, ?)", (NOW, powod, creation_time))
+    for fid, czas in lighty:
+        con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                    "first_seen_at) VALUES (?, ?, 'light', 'fits', 7, 'Ha', ?)", (fid, f"k{fid}", NOW))
+        con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                    "VALUES (?, '{}', ?, 300.0)", (fid, czas))
+        con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                    (fid, f"/a/M/l{fid}.fits"))
+    con.commit()
+
+
+# Każdy z SIEDMIU powodów rdzenia (`stacks.REASON_*`) - bez werdyktu, pusta propozycja. Trzy powody,
+# których jedyną receptą jest propozycja, wypadają z kubełka; cztery z własną receptą zostają.
+_POWODY_PUSTA_PROPOZYCJA = [
+    ("degenerate_window", False), ("no_candidates", False), ("history_mismatch", False),
+    ("no_object", True), ("no_window", True), ("telescope_mismatch", True),
+    ("offset_unknown", True)]
+
+
+def test_tabela_powodow_obejmuje_caly_slownik_rdzenia():
+    """Nowy powód w rdzeniu ma przewrócić ten test imiennie - inaczej trafiłby do kubełka bez
+    decyzji, czy jego receptą jest propozycja, czy własny gest."""
+    from horreum import stacks
+    rdzen = {v for k, v in vars(stacks).items() if k.startswith("REASON_")}
+    assert {p for p, _ in _POWODY_PUSTA_PROPOZYCJA} == rdzen and len(rdzen) == 7
+    assert queries._POWODY_RECEPTA_PROPOZYCJA == {
+        p for p, w_kubelku in _POWODY_PUSTA_PROPOZYCJA if not w_kubelku}
+
+
+@pytest.mark.parametrize("powod, w_kubelku", _POWODY_PUSTA_PROPOZYCJA)
+def test_stos_bez_werdyktu_z_pusta_propozycja_wg_powodu(con, powod, w_kubelku):
+    """Decyzja stoi na ZAMKNIĘTYM zbiorze powodów z receptą „propozycja", nie na samym pustym
+    wyniku: `telescope_mismatch` (napraw kartę) i `no_window` (propozycja pusta z definicji)
+    zostają w kubełku także nad pustą listą. Stan kolumny poza kubełkiem: „brak"."""
+    _seed_stos_okna(con, powod, z_obiektem=(powod != "no_object"))   # no_object z obiektem = zwietrzały
+    assert (50 in queries.lineage_pending_frame_ids(con)) is w_kubelku
+    assert queries.stack_lineage_states(con)[50] == ("pending" if w_kubelku else "none")
+    czeka, _ = queries.lineage_hand_state(con, 50)
+    assert czeka is w_kubelku
+
+
+def test_stos_z_kandydatem_zostaje_w_kubelku(con):
+    """Okno zdegenerowane, ale w nocy obrazu leży nieosądzony kandydat - gest ma co zrobić."""
+    _seed_stos_okna(con, "degenerate_window", lighty=[(52, "2023-04-21T20:30:00")],
+                    creation_time="2023-04-22T10:00:00Z")
+    assert 50 in queries.lineage_pending_frame_ids(con)
+    czeka, (noce, raw, po) = queries.lineage_hand_state(con, 50)
+    assert czeka and [f["frame_id"] for n in noce for f in n.frames] == [52] and po == 0
+
+
+def test_stos_z_samymi_klatkami_nowszymi_niz_obraz_wypada_a_panel_mowi_licznik(strona, con):
+    """AR-154 (powód okna innego niż `no_candidates`): cały materiał powstał po zintegrowaniu
+    obrazu - stos wypada z kubełka, panel nie otwiera trybu nocy, a zdanie „Pominięte N klatek
+    nowszych niż obraz" zostaje w nocie (bez niego pusta lista nie mówiłaby, dlaczego jest pusta).
+
+    Falsyfikator: zgub człon `elif propozycja is not None` w `_refresh_lineage` (`grid.py`) albo
+    dopisek noty poza trybem propozycji w `set_lineage` → zdanie znika."""
+    _seed_stos_okna(con, "degenerate_window", creation_time="2023-04-21T22:30:00Z",
+                    lighty=[(52, "2023-04-22T20:00:00"), (53, "2023-04-22T21:00:00")])
+    assert 50 not in queries.lineage_pending_frame_ids(con)
+    assert queries.stack_lineage_states(con)[50] == "none"
+    v = strona.frames_view
+    v.refresh()
+    _zaznacz(v, [50])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    assert bar.night_row.isHidden() and bar.items.count() == 0
+    assert bar.head.text() == i18n.t("grid.lin.reason.degenerate_window")
+    assert i18n.t_plural("grid.lin.cand.after_integration", 2) in bar.note.full_text()
+    assert not bar.note.isHidden()
+    assert _tekst_komorki(v, 50, "_rodowod") == i18n.t("grid.lineage.state.none")

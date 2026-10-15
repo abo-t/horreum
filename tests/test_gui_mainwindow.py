@@ -850,8 +850,10 @@ def test_zadanie_rodowodu_otwiera_perspektywe(qapp, tmp_path):
     con = db.open_db(path)
     try:
         fid = con.execute("SELECT id FROM frame ORDER BY id LIMIT 1").fetchone()[0]
+        # Powód z WŁASNĄ receptą (karta teleskopu) - czeka na gest bez materiału; powód okna bez
+        # materiału w propozycji z kubełka wypada (AR-154).
         con.execute("INSERT INTO integration (master_frame_id, created_at, unresolved_reason) "
-                    "VALUES (?, '2026-08-08T20:00:00', 'degenerate_window')", (fid,))
+                    "VALUES (?, '2026-08-08T20:00:00', 'telescope_mismatch')", (fid,))
         con.commit()
     finally:
         con.close()

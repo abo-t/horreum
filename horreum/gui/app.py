@@ -33,7 +33,8 @@ from horreum import db, macro as macro_mod, projection, repo, resolver, stacks
 from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-wolny)
 from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
-from horreum.gui.wb_worker import zdanie_commitu_kart, zdanie_undo_kart
+from horreum.gui.wb_worker import (ogon_cofniecia, podpowiedz_kart, tekst_powodu,
+                                   zdanie_commitu_kart)
 from horreum.gui.config_dialog import AssignConfigDialog
 # Kontener strony zbiorów: stałe prezentacji są wartościami jego sygnału, a `_TRASY` (poziom modułu)
 # ich potrzebuje; import ciągnie grid (~30 ms przy imporcie okna, zmierzone 2026-10-09).
@@ -898,18 +899,30 @@ def plan_kart_sciezki(con, canon, frame_ids):
     naruszenie = writeback.card_violation("OBJECT", value, new_card=True)
     powod = None
     if naruszenie is not None:
-        powod = i18n.t("path.card_skip.invalid", value=value, reason=naruszenie.reason)
+        powod = i18n.t("path.card_skip.invalid", value=value, reason=tekst_powodu(naruszenie.reason))
     elif forma is None:
         powod = i18n.t("path.card_skip.no_roundtrip", value=value, canon=canon)
     if powod is not None:
         return value, [], [(fid, "", powod) for fid in frame_ids]
+    # FITS Z SUMĄ KONTROLNĄ (AR-163) odpada PRZED silnikiem - bramka celu makra o sumie nie wie,
+    # a pisarz go odmówi; ta sama bramka co w „Napraw nagłówek…” (`queries.fits_checksum_gate`) i ta
+    # sama kolejność: najpierw bramki celu (`resolve_target`), potem suma.
+    cele = {}
+    for t in queries.writeback_frame_targets(con, list(frame_ids)):
+        cele.setdefault(int(t["frame_id"]), []).append(t)
+    z_suma = []
+    for fid, wiersze in cele.items():
+        cel, _ = macro_mod.resolve_target(wiersze)
+        if cel is not None and queries.fits_checksum_gate(cel) is not None:
+            z_suma.append((fid, cel["path"], i18n.t("objchg.gate.fits_checksum")))
+    ids_z_suma = {fid for fid, _, _ in z_suma}
     md = macro_mod.MacroDef(assign=macro_mod.Assign(
         keyword="OBJECT", op="add", expr=repr(value), value_type="str"))
     run = macro_mod.run_macro(
-        md, list(frame_ids),
+        md, [fid for fid in frame_ids if int(fid) not in ids_z_suma],
         targets_fn=lambda ids: queries.writeback_frame_targets(con, ids),
         cards_fn=lambda fid: queries.frame_cards(con, fid))
-    return value, list(run.touched), [(s.frame_id, s.path, s.reason) for s in run.skipped]
+    return value, list(run.touched), [(s.frame_id, s.path, s.reason) for s in run.skipped] + z_suma
 
 
 class ConfirmPathObjectsDialog(QDialog):
@@ -965,6 +978,10 @@ class ConfirmPathObjectsDialog(QDialog):
         self._runner = WritebackRunner(db_path if db_path is not None else queries.db_path_of(con),
                                        now_fn=now_fn, parent=self)
         self._runner.busy_changed.connect(self.busy_changed)
+        # Koniec biegu przelicza „Zatwierdź”: ogon zapisu/cofnięcia przychodzi, gdy
+        # uchwyt jest jeszcze zajęty (wątek sprząta się po `done`), więc przycisk liczony w ogonie
+        # zostawał wygaszony po udanym cofnięciu, choć zdanie mówi „„Zatwierdź” dopisze karty”.
+        self._runner.busy_changed.connect(lambda zajety: zajety or self._sync_confirm())
         self.setWindowTitle(i18n.t("path.title"))
         self._build_ui(proposals)
         self._sync_action()
@@ -1210,11 +1227,11 @@ class ConfirmPathObjectsDialog(QDialog):
         (ta sama umowa co w „Napraw nagłówek…"). Commit, który NIE podmienił żadnego pliku (same
         `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty.
         Zapis w miejscu (`commit_inplace`) mówi o drodze zapisu tylko przy spadku na atomową."""
-        from horreum.gui.wb_worker import podpowiedz_spadku     # dom zdań wspólnych okien zapisu
         summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied",
                                               w_miejscu=op == "commit_inplace")
-        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem.
-        self.status.setToolTip(podpowiedz_spadku(res))
+        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
+        # razem z pozostałymi powodami (okno nie ma listy pozycji).
+        self.status.setToolTip(podpowiedz_kart(res))
         if cofnij is not None:
             self._commit_id = cofnij
             self.undo_btn.setVisible(True)
@@ -1225,6 +1242,7 @@ class ConfirmPathObjectsDialog(QDialog):
         self._run_id = None                      # run domknięty commitem (R#5) - nie kasuj przy zamknięciu
         self.status.setText(self.status.text() + "\n" + summary)
         self._end_progress()
+        self._dopasuj_wysokosc()                 # zdanie bazy + zdanie plików
         self.changed.emit()
 
     def _on_failed(self, op, msg):
@@ -1254,13 +1272,41 @@ class ConfirmPathObjectsDialog(QDialog):
                            on_done=self._after_undo, on_failed=self._on_failed)
 
     def _after_undo(self, op, res):
-        self.status.setText(self.status.text() + "\n" + zdanie_undo_kart(res)
-                            + i18n.t("path.cards_restored_note"))
-        self.undo_btn.setVisible(False)
-        self.resolve_btn.setVisible(False)
-        self._commit_id = None
-        self._domkniety = False
+        """Ogon cofnięcia kart: zdanie i regułę „czy Cofnij zostaje” daje `ogon_cofniecia` - wspólny
+        z „Napraw nagłówek…” i szufladą Zbiorów (AR-160). Cofnięcie z błędem albo przerwane zostawia
+        „Cofnij karty” przy TYM SAMYM commicie (ponowienie dokończy resztę), a „Zatwierdź” milczy -
+        część kart stoi w plikach. Nota „pliki są bez karty” mówi tylko o cofnięciu domkniętym.
+
+        STATUS = WYNIK BIEŻĄCEGO GESTU, jak w „Napraw nagłówek…”: doklejanie każdego
+        wyniku do poprzednich rosło do pięciu wierszy w oknie, które nie rośnie, i ucinało najnowszy
+        wiersz z receptą przy rzędzie przycisków. Podpowiedź zapisu (spadek, powody) mówiła
+        o zapisie, nie o cofnięciu - schodzi."""
+        msg, ponow = ogon_cofniecia(res, i18n.t("path.undo_cards_btn"))
+        if not ponow:
+            msg += i18n.t("path.cards_restored_note")
+            self.undo_btn.setVisible(False)
+            self.resolve_btn.setVisible(False)
+            self._commit_id = None
+            self._domkniety = False
+        self.status.setText(msg)
+        self.status.setToolTip("")
         self._end_progress()
+        self._dopasuj_wysokosc()
+
+    def _dopasuj_wysokosc(self):
+        """Okno ROŚNIE (tylko w górę) do wysokości, której treść potrzebuje przy bieżącej szerokości
+        (AR-160): status zawija zdanie wyniku z receptą, więc jego wysokość zależy od
+        szerokości (`heightForWidth`), a okno z rozmiaru otwarcia ucinało ostatni wiersz przy
+        rzędzie przycisków. Wzór `assign_dialog.AssignObjectDialog._dopasuj_wysokosc`; okno
+        niepokazane nie ma jeszcze szerokości."""
+        if not self.isVisible():
+            return
+        lay = self.layout()
+        lay.activate()
+        potrzeba = (lay.totalHeightForWidth(self.width()) if lay.hasHeightForWidth()
+                    else lay.totalSizeHint().height())
+        if potrzeba > self.height():
+            self.resize(self.width(), potrzeba)
         self.changed.emit()
 
     def _on_resolve(self):
@@ -1396,8 +1442,15 @@ class RepairHeaderDialog(QDialog):
         self._committed = False   # karty są w plikach → zapis milczy do cofnięcia
         self._runner = WritebackRunner(db_path, now_fn=now_fn, parent=self)
         self._runner.busy_changed.connect(self.busy_changed)   # uchwyt zna OBA końce operacji
+        # Koniec biegu przelicza „Zapisz karty”: ogon cofnięcia przychodzi, gdy uchwyt
+        # jest jeszcze zajęty (wątek sprząta się po `done`), więc przycisk zostawał wygaszony po
+        # udanym cofnięciu. Błąd biegu (`_on_failed`) zostaje w polu błędu.
+        self._runner.busy_changed.connect(
+            lambda zajety: zajety or self._sync_preview(zachowaj_blad=True))
         self._groups = []       # [{folder, rows, check, edit, preview}]
         self._skipped = []      # [(path, powód)] — jawnie widoczne, nigdy ciche
+        self._sumy = []         # [{label, n, reason, all}] - foldery z plikami z sumą (AR-163)
+        self.skipped_list = None   # lista pominiętych (None, gdy nic nie odpadło)
         self.setWindowTitle(i18n.t("repair.title"))
         self._split_rows(rows)
         self._build_ui()
@@ -1462,12 +1515,20 @@ class RepairHeaderDialog(QDialog):
         ile ma filtrów. Folder obiektu daje `resolve.paths.object_folder(…, kind=STACK_KIND)`;
         poza drzewem `STACKS` (układ WBPP) i dla każdego lighta zostaje rodzic, znak w znak jak
         przedtem. Rodzaj wiersza wybiera też drzewo świadka propozycji (`path_proposal(…, kind=…)`),
-        a reguła dwóch zgodnych świadków jest dla obu drzew ta sama."""
+        a reguła dwóch zgodnych świadków jest dla obu drzew ta sama.
+
+        FITS Z SUMĄ KONTROLNĄ (AR-163) odpada TU, przed podglądem: pisarz go odmówi (`CHECKSUM`/
+        `DATASUM`), a bramka celu makra (`macro.resolve_target`) o sumie nie wie - podgląd liczył
+        taki plik do „Zapisz karty (N)”, a wynik mówił „2 zablokowane” bez folderu. Warunek ma
+        jednego właściciela (`queries.fits_checksum_gate`, ten sam co bramka karty „Zmień obiekt…”),
+        fakt `n_sum` niesie cel z `writeback_frame_targets`. Pominięcie liczy się PER FOLDER grupy
+        (`self._sumy`): folder bez pliku do zapisu mówi „cały folder”, mieszany - ile odpadło."""
         ids = [r["frame_id"] for r in rows]
         targets = {}
         for t in queries.writeback_frame_targets(self.con, ids):
             targets.setdefault(int(t["frame_id"]), []).append(t)
         groups = {}
+        sumy = {}               # folder -> {label, n, reason}: pliki z sumą kontrolną (AR-163)
         rodzaj = {}             # frame_id -> kind (drzewo świadka), poza słownikiem wiersza grupy
         korzen = resolver.library_root_from_db(self.con)   # kotwica drzewa stosów (E5-3)
         for r in rows:
@@ -1479,13 +1540,21 @@ class RepairHeaderDialog(QDialog):
             if target is None:
                 self._skipped.append((r["path"] or "", reason or ""))
                 continue
-            rodzaj[r["frame_id"]] = r["kind"]
             folder = os.path.dirname(target["path"])
             if r["kind"] == STACK_KIND:
                 folder = object_folder(target["path"], kind=STACK_KIND,
                                        library_root=korzen) or folder
+            suma = queries.fits_checksum_gate(target)
+            if suma is not None:
+                wpis = sumy.setdefault(folder, {
+                    "label": self._etykieta_grupy(folder, target["path"], r["kind"], korzen),
+                    "n": 0, "reason": i18n.t(f"objchg.gate.{suma.code}", **dict(suma.params))})
+                wpis["n"] += 1
+                continue
+            rodzaj[r["frame_id"]] = r["kind"]
             groups.setdefault(folder, []).append(
                 dict(frame_id=r["frame_id"], path=target["path"]))
+        self._sumy = [dict(w, all=folder not in groups) for folder, w in sumy.items()]
         for folder, items in groups.items():
             proposals = {resolver.path_proposal(self.con, it["path"], kind=rodzaj[it["frame_id"]])
                          for it in items}
@@ -1542,9 +1611,18 @@ class RepairHeaderDialog(QDialog):
         area.setWidget(inner)
         lay.addWidget(area, 1)
 
-        if self._skipped:
-            lay.addWidget(QLabel(i18n.t("repair.skipped_head", n=len(self._skipped))))
+        n_pominiete = len(self._skipped) + sum(s["n"] for s in self._sumy)
+        if n_pominiete:
+            lay.addWidget(QLabel(i18n.t("repair.skipped_head", n=n_pominiete)))
             lst = QListWidget()
+            self.skipped_list = lst
+            for s in self._sumy:                # sumy kontrolne per folder grupy (AR-163)
+                if s["all"]:
+                    lst.addItem(i18n.t_plural("repair.skip.checksum_all", s["n"],
+                                              folder=s["label"], reason=s["reason"]))
+                else:
+                    lst.addItem(i18n.t_plural("repair.skip.checksum", s["n"],
+                                              folder=s["label"], reason=s["reason"]))
             for path, reason in self._skipped:
                 lst.addItem(f"{os.path.basename(path) or i18n.t('object.no_location')} — {reason}")
             lst.setMaximumHeight(90)
@@ -1590,10 +1668,11 @@ class RepairHeaderDialog(QDialog):
         close_btn.setDefault(True)
 
     # ---------------------------------------------------------------- podgląd „co wpiszemy"
-    def _sync_preview(self):
+    def _sync_preview(self, *, zachowaj_blad=False):
         """Podgląd DOKŁADNIE tego, co pójdzie do pliku (`OBJECT = 'NGC7635'`), plus szczery stan
         akcji. Grupa zaznaczona z niepoprawną wartością pokazuje powód przy sobie — user nie musi
-        klikać, żeby dowiedzieć się, czemu zapis nie ruszy."""
+        klikać, żeby dowiedzieć się, czemu zapis nie ruszy. `zachowaj_blad` - przeliczenie po końcu
+        biegu (wejście się nie zmieniło): błąd biegu zostaje, chyba że podgląd ma własny."""
         ready, first_err = 0, None
         for g in self._groups:
             if not g["check"].isChecked():
@@ -1606,7 +1685,8 @@ class RepairHeaderDialog(QDialog):
             else:
                 g["preview"].setText(i18n.t("repair.preview", value=repr(value)))
                 ready += len(g["rows"])
-        self.error.setText(first_err or "")     # wejście się zmieniło → stary błąd nieaktualny
+        if first_err is not None or not zachowaj_blad:
+            self.error.setText(first_err or "")  # wejście się zmieniło → stary błąd nieaktualny
         # Po udanym commicie zapis MILCZY do czasu cofnięcia: karty są już w plikach, więc drugie
         # kliknięcie dałoby tylko listę „karta już istnieje" — szczery disabled zamiast pustego biegu.
         self.save_btn.setEnabled(ready > 0 and first_err is None and not self._committed
@@ -1693,12 +1773,12 @@ class RepairHeaderDialog(QDialog):
         teraz"; `commit_id` WIDOCZNY, bo po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki.
         Zdanie i regułę „kiedy wolno cofnąć" daje `zdanie_commitu_kart` - wspólne z oknem
         „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij")."""
-        from horreum.gui.wb_worker import podpowiedz_spadku     # dom zdań wspólnych okien zapisu
         self.bar.setVisible(False)
         summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied",
                                               w_miejscu=op == "commit_inplace")
-        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem.
-        self.status.setToolTip(podpowiedz_spadku(res))
+        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
+        # razem z pozostałymi powodami (okno nie ma listy pozycji).
+        self.status.setToolTip(podpowiedz_kart(res))
         if cofnij is not None:
             self._commit_id = cofnij
             self._committed = True
@@ -1739,14 +1819,18 @@ class RepairHeaderDialog(QDialog):
                            on_done=self._after_undo, on_failed=self._on_failed)
 
     def _after_undo(self, op, res):
+        """Ogon cofnięcia: zdanie z powodem i reguła „czy Cofnij zostaje” z `ogon_cofniecia` (AR-160,
+        wspólne z „Zatwierdź ze ścieżki…” i szufladą Zbiorów). Błąd albo przerwanie zostawia
+        „Cofnij” przy tym samym commicie, a zapis milczy - karty części plików wciąż stoją."""
         self.bar.setVisible(False)
-        msg = zdanie_undo_kart(res)
-        self.undo_btn.setVisible(False)          # commit ZUŻYTY - drugi undo nie ma czego cofać
-        self.resolve_btn.setVisible(False)
+        msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
+        if not ponow:
+            self.undo_btn.setVisible(False)      # commit ZUŻYTY - drugi undo nie ma czego cofać
+            self.resolve_btn.setVisible(False)
+            self._commit_id = None
+            self._committed = False              # karty zdjęte → zapis znów ma sens
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
-        self._commit_id = None
-        self._committed = False                  # karty zdjęte → zapis znów ma sens
         self._sync_preview()
         self.status.setText(msg)
         self.status.setToolTip("")               # szczegół spadku mówił o zapisie, nie o cofnięciu

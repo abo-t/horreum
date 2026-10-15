@@ -563,6 +563,24 @@ CATALOG = {
         "en": "Writing to files is in progress - stopping after the current file. You can close "
               "the window once the write stops and shows its result."},
     "wb.cancelled_note": {"pl": " - przerwano na żądanie", "en": " - stopped on request"},
+    # Ogon cofnięcia przerwanego na żądanie (AR-160): część plików nie doszła do pętli, a „Cofnij”
+    # zostaje, bo ponowienie dokończy resztę (`wb_worker.ogon_cofniecia`).
+    "wb.undo_cancelled": {
+        "pl": " · cofnięcie przerwano na żądanie - „{undo}” dokończy resztę plików",
+        "en": " · undo stopped on request - “{undo}” finishes the remaining files"},
+    # Zdanie wyniku przy pozycjach z RÓŻNYMI powodami (AR-162): pierwszy powód nie udaje wspólnego.
+    # `n` >= 2 zawsze, więc bez odmiany („z 2 / 5 / 22 różnych powodów”).
+    "wb.reasons_first": {"pl": "pierwszy z {n} różnych powodów: {detail}",
+                         "en": "first of {n} different reasons: {detail}"},
+    # Okna kart bez listy pozycji: pozostałe powody stoją w podpowiedzi zdania,
+    # wiersz na powód z plikiem, który go dostał (`wb_worker.podpowiedz_powodow`).
+    "wb.reasons_tip": {"pl": " (pozostałe powody: najedź na zdanie)",
+                       "en": " (other reasons: hover over this sentence)"},
+    "wb.reason_line": {"pl": "{file}: {reason}", "en": "{file}: {reason}"},
+    # Plik „już cofnięty” w wyniku cofnięcia - stan docelowy, nie blokada (AR-160).
+    "wb.undo_already": {
+        "pl": {"one": "{n} już cofnięty", "few": "{n} już cofnięte", "many": "{n} już cofniętych"},
+        "en": {"one": "{n} already undone", "other": "{n} already undone"}},
     "path.item": {"pl": "{canon}  ·  {frames}", "en": "{canon}  ·  {frames}"},
     "path.new_badge": {"pl": "NOWA w bazie", "en": "NEW in the database"},
     "path.known_badge": {"pl": "kanon znany", "en": "canon known"},
@@ -905,6 +923,20 @@ CATALOG = {
         "pl": "klatka zniknęła z bazy między odczytem a otwarciem okna",
         "en": "frame disappeared from the database between the read and opening the window",
     },
+    # Pliki FITS z sumą kontrolną, które pisarz odmówi (AR-163) - per FOLDER grupy, nie per plik:
+    # folder bez pliku do zapisu mówi „cały folder”, folder mieszany - ile z niego odpadło.
+    "repair.skip.checksum": {
+        "pl": {"one": "{folder}: {n} plik pominięty - {reason}",
+               "few": "{folder}: {n} pliki pominięte - {reason}",
+               "many": "{folder}: {n} plików pominiętych - {reason}"},
+        "en": {"one": "{folder}: {n} file skipped - {reason}",
+               "other": "{folder}: {n} files skipped - {reason}"}},
+    "repair.skip.checksum_all": {
+        "pl": {"one": "{folder}: cały folder pominięty ({n} plik) - {reason}",
+               "few": "{folder}: cały folder pominięty ({n} pliki) - {reason}",
+               "many": "{folder}: cały folder pominięty ({n} plików) - {reason}"},
+        "en": {"one": "{folder}: whole folder skipped ({n} file) - {reason}",
+               "other": "{folder}: whole folder skipped ({n} files) - {reason}"}},
     "repair.err.empty": {"pl": "pusto — wpisz oznaczenie", "en": "empty — type a designation"},
     "repair.err.ascii": {
         "pl": "„{text}” ma znaki spoza drukowalnego ASCII - nagłówek FITS ich nie przyjmie",
@@ -6196,7 +6228,8 @@ CATALOG = {
               "przed commitem",
         "en": "restored semantically - header rebuilt from the backup's content, the file's bytes "
               "differ from before the commit"},
-    # Pisarz XISF (`_XisfRefusal`); `{detail}` z czytnika `scan` zostaje prozą (granica).
+    # Pisarz XISF (`_XisfRefusal`); `{detail}` z wyjątku czytnika BEZ kodu zostaje prozą (granica),
+    # odmowa czytnika z kodem (`scan.XisfFormatError`, AR-158) idzie zdaniem `objchg.item.<kod>`.
     "objchg.item.xisf_unreadable": {
         "pl": "nagłówek XISF nieczytelny - {detail}",
         "en": "XISF header unreadable - {detail}"},
@@ -6243,6 +6276,120 @@ CATALOG = {
               "nieodwracalny",
         "en": "the header does not survive the bytes→text→bytes round trip - a backup for undo "
               "would be irreversible"},
+    "objchg.item.xisf_unreadable_reader": {
+        "pl": "nagłówek XISF nieczytelny - ValueError: {inner}",
+        "en": "XISF header unreadable - {inner}"},
+    # Odmowy czytnika i składacza nagłówka XISF (`scan.XisfFormatError`, AR-158) - PL znak w znak
+    # jak zdanie `scan`.
+    "objchg.item.xisf_signature": {
+        "pl": "nie XISF monolithic (sygnatura {value})",
+        "en": "not a monolithic XISF file (signature {value})"},
+    "objchg.item.xisf_no_length": {
+        "pl": "XISF: brak pola długości nagłówka",
+        "en": "XISF: the header length field is missing"},
+    "objchg.item.xisf_no_reserved": {
+        "pl": "XISF: brak pola reserved",
+        "en": "XISF: the reserved field is missing"},
+    "objchg.item.xisf_xml_cut": {
+        "pl": "XISF: nagłówek XML ucięty ({n}/{length} B)",
+        "en": "XISF: the XML header is truncated ({n}/{length} B)"},
+    "objchg.item.xisf_unclosed": {
+        "pl": "XISF: niedomknięte {text} w nagłówku",
+        "en": "XISF: unclosed {text} in the header"},
+    "objchg.item.xisf_tag_unclosed": {
+        "pl": "XISF: znacznik bez domknięcia '>'",
+        "en": "XISF: a tag without its closing '>'"},
+    "objchg.item.xisf_card_attr_missing": {
+        "pl": "XISF: karta {keyword}[{n}] bez atrybutu {attr}=",
+        "en": "XISF: card {keyword}[{n}] has no {attr}= attribute"},
+    "objchg.item.xisf_card_missing": {
+        "pl": "XISF: karta {keyword}[{n}] nieobecna w nagłówku",
+        "en": "XISF: card {keyword}[{n}] is not in the header"},
+    "objchg.item.xisf_prop_missing": {
+        "pl": "XISF: własność {prop} nieobecna w nagłówku",
+        "en": "XISF: property {prop} is not in the header"},
+    "objchg.item.xisf_prop_location": {
+        "pl": "XISF: własność {prop} trzyma wartość w location= - poza nagłówkiem",
+        "en": "XISF: property {prop} keeps its value in location= - outside the header"},
+    "objchg.item.xisf_prop_empty": {
+        "pl": "XISF: własność {prop} pusta (element samozamykający)",
+        "en": "XISF: property {prop} is empty (self-closing element)"},
+    "objchg.item.xisf_kw_close_without_open": {
+        "pl": "XISF: </FITSKeyword> bez otwarcia - struktury kart nie rozumiem, nowej karty nie "
+              "wstawiam",
+        "en": "XISF: </FITSKeyword> without an opening tag - I do not understand the card "
+              "structure, so I do not insert a new card"},
+    "objchg.item.xisf_kw_content": {
+        "pl": "XISF: karta ma treść elementu między otwarciem a zamknięciem - takiej postaci nie "
+              "rozumiem, nowej karty nie wstawiam",
+        "en": "XISF: a card has element content between its opening and closing tags - I do not "
+              "understand that form, so I do not insert a new card"},
+    "objchg.item.xisf_kw_nested": {
+        "pl": "XISF: <FITSKeyword> zagnieżdżona w innej karcie - struktury kart nie rozumiem, "
+              "nowej karty nie wstawiam",
+        "en": "XISF: <FITSKeyword> nested in another card - I do not understand the card "
+              "structure, so I do not insert a new card"},
+    "objchg.item.xisf_kw_unclosed": {
+        "pl": "XISF: <FITSKeyword> bez zamknięcia - nowej karty nie wstawiam",
+        "en": "XISF: <FITSKeyword> without a closing tag - I do not insert a new card"},
+    "objchg.item.xisf_no_cards": {
+        "pl": "XISF: nagłówek nie ma ani jednej karty <FITSKeyword> - nie ma z czego przejąć "
+              "konwencji zapisu nowej",
+        "en": "XISF: the header has no <FITSKeyword> card at all - there is nothing to take the "
+              "convention for writing a new one from"},
+    "objchg.item.xisf_no_text_template": {
+        "pl": "XISF: żadna karta tego pliku nie trzyma wartości w apostrofach FITS - konwencji "
+              "wartości tekstowej NIE ZNAM, więc nowej karty nie składam",
+        "en": "XISF: no card in this file keeps its value in FITS quotes - I do NOT KNOW the "
+              "convention for text values, so I do not build a new card"},
+    "objchg.item.xisf_template_attrs": {
+        "pl": "XISF: wzorzec karty ma nieznane atrybuty ({attrs}) - kopiowanie przeniosłoby do "
+              "nowej karty wartość, której nie rozumiem",
+        "en": "XISF: the template card has unknown attributes ({attrs}) - copying it would carry "
+              "a value I do not understand into the new card"},
+    "objchg.item.xisf_template_no_name_value": {
+        "pl": "XISF: wzorzec karty bez atrybutu name= albo value= - nie ma czego podmienić",
+        "en": "XISF: the template card has no name= or value= attribute - there is nothing to "
+              "replace"},
+    "objchg.item.xisf_template_no_comment": {
+        "pl": "XISF: wzorzec karty nie ma atrybutu comment= - dopisanie atrybutu jest poza P6d",
+        "en": "XISF: the template card has no comment= attribute - adding an attribute is "
+              "outside P6d"},
+    "objchg.item.xisf_no_attachment": {
+        "pl": "XISF: brak bloku attachment - nie wiadomo, gdzie kończy się nagłówek",
+        "en": "XISF: no attachment block - it is unknown where the header ends"},
+    "objchg.item.xisf_padding_broken": {
+        "pl": "XISF: wypełnienie nagłówka niekompletne - plik przeczy sam sobie",
+        "en": "XISF: the header padding is incomplete - the file contradicts itself"},
+    "objchg.item.xisf_no_room": {
+        "pl": "XISF: nagłówek nie mieści się w rezerwie ({length} B > {limit} B) - attachmenty "
+              "się nie ruszają",
+        "en": "XISF: the header does not fit in the reserve ({length} B > {limit} B) - the "
+              "attachments do not move"},
+    # Reguły karty FITS 4.0 (`card_rules.CardViolation.reason`, AR-158).
+    "objchg.item.card_name": {
+        "pl": "nazwa karty {name} łamie reguły FITS 4.0 - do 8 znaków spośród A-Z, 0-9, '_' i '-'",
+        "en": "card name {name} breaks the FITS 4.0 rules - up to 8 characters from A-Z, 0-9, "
+              "'_' and '-'"},
+    "objchg.item.card_value_chars": {
+        "pl": "wartość karty {keyword} ma znak {char} spoza drukowalnego ASCII - karta FITS go "
+              "nie przyjmie, a w nagłówku XISF łamie XML 1.0",
+        "en": "the value of card {keyword} has the character {char} outside printable ASCII - a "
+              "FITS card will not accept it, and in an XISF header it breaks XML 1.0"},
+    "objchg.item.card_comment_chars": {
+        "pl": "komentarz karty {keyword} ma znak {char} spoza drukowalnego ASCII - karta FITS go "
+              "nie przyjmie, a w nagłówku XISF łamie XML 1.0",
+        "en": "the comment of card {keyword} has the character {char} outside printable ASCII - "
+              "a FITS card will not accept it, and in an XISF header it breaks XML 1.0"},
+    "objchg.item.card_value_long": {
+        "pl": "wartość karty {keyword} ma {length} znaków, a jeden rekord FITS mieści {limit}",
+        "en": "the value of card {keyword} has {length} characters, and one FITS record holds "
+              "{limit}"},
+    "objchg.item.card_comment_long": {
+        "pl": "komentarz karty {keyword} ma {length} znaków, a przy tej wartości rekord FITS "
+              "mieści {limit}",
+        "en": "the comment of card {keyword} has {length} characters, and with this value a FITS "
+              "record holds {limit}"},
     # Zapis w miejscu i odzysk rozdartego nagłówka.
     "objchg.item.phase_not_saved": {
         "pl": "faza '{phase}' NIE zapisana w dzienniku ({detail}) - lokacja zostaje izolowana",
@@ -6884,6 +7031,19 @@ CATALOG = {
                                    "write is refused with a reason on the item."},
     "objchg.card_add_fits_short": {"pl": " · FITS: dopisanie karty",
                                    "en": " · FITS: card added"},
+    # Droga dopisania karty FITS przewidziana per pozycja z lustra kart (AR-155): znacznik w komórce,
+    # pełne zdanie w jej podpowiedzi; `{reason}` = powód pisarza `objchg.item.fb_no_room`.
+    "objchg.card_add_fits_inplace_short": {"pl": " · FITS: dopisanie w miejscu",
+                                           "en": " · FITS: card added in place"},
+    "objchg.card_add_fits_inplace": {
+        "pl": "FITS: nagłówek ma wolny rekord za END - karta dopisana w miejscu, bez przepisywania "
+              "pliku.",
+        "en": "FITS: the header has a free record after END - the card is added in place, "
+              "without rewriting the file."},
+    "objchg.card_add_fits_rewrite_short": {"pl": " · FITS: cały plik przepisany",
+                                           "en": " · FITS: whole file rewritten"},
+    "objchg.card_add_fits_rewrite": {"pl": "FITS: cały plik przepisany - {reason}.",
+                                     "en": "FITS: the whole file is rewritten - {reason}."},
     "objchg.err.stage": {"pl": "Zapis planu do bazy odmówiony: {msg}",
                          "en": "Saving the plan to the database was refused: {msg}"},
     "objchg.res.notes": {"pl": " · z uwagą: {n} - {note}", "en": " · with a note: {n} - {note}"},

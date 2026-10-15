@@ -3430,3 +3430,175 @@ def test_okno_wyboru_obiektu_rosnie_gdy_zdania_sie_zawijaja(qapp, tmp_path, lang
     finally:
         dlg.close()
         con.close()
+
+
+# ---- „Zatwierdź ze ścieżki…”: ogon cofnięcia kart (AR-160) ----
+
+_ZNAKI_PL = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_cofniecie_kart_z_BLEDEM_mowi_powod_w_jezyku_UI_i_zostawia_Cofnij_karty(
+        sciezka_karty, monkeypatch, lang):
+    """AR-160: cofnięcie kart, którego re-sync pada, kończy się `failed` („ponowne undo dokończy”).
+    Dawniej okno dopisywało same liczniki i notę „pliki są bez karty”, a „Cofnij karty” znikało.
+    Teraz zdanie niesie powód w języku UI i receptę z nazwą przycisku, nota o plikach bez karty
+    czeka na cofnięcie domknięte, „Cofnij karty” zostaje przy tym samym commicie, a „Zatwierdź”
+    milczy. Ponowienie kończy cofnięcie. Falsyfikator: bezwarunkowe chowanie „Cofnij karty”."""
+    from horreum import writeback
+    v, con, pliki, fid = sciezka_karty
+    i18n.set_lang(lang)
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    commit_id = dlg._commit_id
+    assert commit_id is not None and _karta_object(pliki["zapis"]) == "NGC 7635"
+    with monkeypatch.context() as m:
+        m.setattr(writeback.scan, "scan_file",
+                  lambda path, **kw: (_ for _ in ()).throw(OSError(64, "broken share")))
+        dlg._on_undo()
+    ogon = dlg.status.text().splitlines()[-1]
+    assert "broken share" in ogon, ogon
+    assert i18n.t("grid.wb.undo_retry", undo=i18n.t("path.undo_cards_btn")) in ogon, ogon
+    assert i18n.t("path.cards_restored_note") not in ogon
+    if lang == "en":
+        assert not set(ogon) & _ZNAKI_PL, ogon
+    assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
+    assert not dlg.confirm_btn.isEnabled()
+    dlg._on_undo()                                       # ponowienie kończy cofnięcie
+    assert not dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id is None
+    assert dlg.status.text().endswith(i18n.t("path.cards_restored_note"))
+    assert dlg.confirm_btn.isEnabled() and _karta_object(pliki["zapis"]) is None
+    dlg.reject()
+
+
+def test_cofniecie_kart_PRZERWANE_zostawia_Cofnij_karty_takze_po_czesci_plikow(
+        sciezka_karty, monkeypatch):
+    """AR-160 (cancelled): anulowanie przed pierwszym backupem i przerwanie po części plików
+    (`restored` + `cancelled`, wynik rdzenia przy dwóch backupach) - commit nie jest w pełni
+    cofnięty, więc „Cofnij karty” zostaje, a zdanie mówi o przerwaniu. Ponowienie kończy."""
+    from horreum import writeback
+    from horreum.gui.wb_worker import WritebackWorker
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    commit_id = dlg._commit_id
+    przerwane = i18n.t("wb.undo_cancelled", undo=i18n.t("path.undo_cards_btn"))
+    with monkeypatch.context() as m:
+        m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
+            c, t, now=now, progress=pr, should_cancel=lambda: True))
+        dlg._on_undo()
+    assert przerwane in dlg.status.text().splitlines()[-1], dlg.status.text()
+    assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
+    assert _karta_object(pliki["zapis"]) == "NGC 7635" and not dlg.confirm_btn.isEnabled()
+    wrocil = writeback.FileResult(1, str(pliki["zapis"]), "restored", None)
+    dlg._after_undo("undo", writeback.UndoResult(commit_id, [wrocil], [], [], cancelled=True))
+    assert przerwane in dlg.status.text().splitlines()[-1]
+    assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
+    dlg._on_undo()
+    assert not dlg.undo_btn.isVisibleTo(dlg) and _karta_object(pliki["zapis"]) is None
+    dlg.reject()
+
+
+def test_cofniecie_kart_ZABLOKOWANE_nie_oglasza_plikow_bez_karty_i_zostawia_Cofnij(sciezka_karty):
+    """AR-160 (domknięcie z rdzenia): plik zmieniony od commitu - cofnięcie zablokowane, karta
+    zostaje w pliku. Dawniej okno dopisywało „pliki są bez karty”, kasowało commit i oddawało
+    „Zatwierdź”. Teraz nota, reset commitu i „Zatwierdź” tylko przy cofnięciu domkniętym
+    (`UndoResult.complete`; „już cofnięte” - `already` - domyka).
+    Falsyfikator: reguła ogona `failed or cancelled` → asercja o nocie i widoczności."""
+    from astropy.io import fits
+    from horreum import writeback
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    commit_id = dlg._commit_id
+    fits.setval(str(pliki["zapis"]), "TELESCOP", value="Inny")    # cudza zmiana po commicie
+    dlg._on_undo()
+    ogon = dlg.status.text().splitlines()[-1]
+    assert i18n.t("path.cards_restored_note") not in ogon, ogon
+    assert i18n.t("grid.wb.undo_retry", undo=i18n.t("path.undo_cards_btn")) in ogon, ogon
+    assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
+    assert not dlg.confirm_btn.isEnabled() and _karta_object(pliki["zapis"]) == "NGC 7635"
+    juz = writeback.FileResult(1, str(pliki["zapis"]), "blocked", "już cofnięte")
+    dlg._after_undo("undo", writeback.UndoResult(commit_id, [], [juz], [], already=[juz]))
+    assert not dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id is None
+    assert dlg.status.text().endswith(i18n.t("path.cards_restored_note"))
+    dlg.reject()
+
+
+def test_plan_kart_sciezki_pomija_FITS_z_suma_kontrolna_z_powodem(sciezka_karty, tmp_path):
+    """AR-163 w „Zatwierdź ze ścieżki…”: plik z `CHECKSUM`/`DATASUM` nie wchodzi do kart do zapisu
+    (pisarz go odmówi) - stoi w pominiętych z powodem okna (`objchg.gate.fits_checksum`), przed
+    kliknięciem. Falsyfikator: `plan_kart_sciezki` bez `fits_checksum_gate` → plik w `touched`."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    from horreum.gui.app import plan_kart_sciezki
+    v, con, pliki, fid = sciezka_karty
+    p = pliki["zapis"].parent / "NGC7635_Ha_s.fits"
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + 77)
+    hdu.header["IMAGETYP"] = "Master Light"
+    hdu.writeto(str(p), checksum=True)
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_O3,
+                       summary=scan.ScanSummary())
+    suma = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
+    _value, touched, skipped = plan_kart_sciezki(con, "NGC7635", [fid["zapis"], suma])
+    assert [t.path for t in touched] == [str(pliki["zapis"])]
+    assert (suma, str(p), i18n.t("objchg.gate.fits_checksum")) in skipped, skipped
+
+
+def _czekaj_na_uchwyt(dlg, limit_s=20.0):
+    """Bieg w PRAWDZIWYM wątku: pętla zdarzeń, aż uchwyt zgłosi koniec (`busy_changed(False)`)."""
+    import time
+    from PySide6.QtCore import QCoreApplication
+    koniec = time.monotonic() + limit_s
+    while dlg._runner.is_busy:
+        assert time.monotonic() < koniec, "uchwyt nie skończył biegu"
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
+    QCoreApplication.processEvents()
+
+
+def test_po_udanym_cofnieciu_kart_W_WATKU_Zatwierdz_aktywny_bez_klikniec(sciezka_karty):
+    """Wizytacja W1 (P1): zdanie mówiło „„Zatwierdź” dopisze karty ponownie”, a przycisk stał
+    wygaszony - ogon cofnięcia przychodzi, gdy uchwyt jest jeszcze zajęty, a końca biegu nikt nie
+    przeliczał (odblokowywały dopiero 2 kliknięcia w pozycję). Prawdziwy `QThread`: zatwierdzenie,
+    cofnięcie, koniec biegu - „Zatwierdź” aktywny. Falsyfikator: zdejmij przeliczenie po
+    `busy_changed(False)`."""
+    v, con, pliki, fid = sciezka_karty
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_O3, db_path=queries.db_path_of(con), parent=v)
+    assert dlg._runner.async_ok
+    dlg._on_confirm()
+    _czekaj_na_uchwyt(dlg)
+    assert dlg._commit_id is not None and not dlg.confirm_btn.isEnabled()
+    dlg._on_undo()
+    _czekaj_na_uchwyt(dlg)
+    assert dlg._commit_id is None and _karta_object(pliki["zapis"]) is None
+    assert dlg.confirm_btn.isEnabled()
+    dlg.reject()
+
+
+def test_status_okna_sciezki_to_BIEZACY_wynik_a_recepta_miesci_sie_w_etykiecie(sciezka_karty,
+                                                                              monkeypatch):
+    """Wizytacja W5: okno doklejało każdy wynik do poprzednich - po serii pięć wierszy w oknie, które
+    nie rośnie, a najnowszy wiersz z receptą ucięty przy rzędzie przycisków. Teraz status cofnięcia
+    to wynik tego gestu (jak w „Napraw nagłówek…”), a etykieta ma wysokość, której jej tekst
+    potrzebuje przy jej szerokości (reguła, nie piksele). Falsyfikator: doklejanie do statusu."""
+    from horreum import writeback
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    dlg.show()
+    dlg._on_confirm()
+    with monkeypatch.context() as m:
+        m.setattr(writeback.scan, "scan_file",
+                  lambda path, **kw: (_ for _ in ()).throw(OSError(64, "broken share")))
+        dlg._on_undo()
+        dlg._on_undo()
+    qapp = QApplication.instance()
+    qapp.processEvents()
+    tekst = dlg.status.text()
+    assert "\n" not in tekst, tekst                                   # jeden gest - jedno zdanie
+    assert tekst.endswith(i18n.t("grid.wb.undo_retry", undo=i18n.t("path.undo_cards_btn"))), tekst
+    assert dlg.status.height() >= dlg.status.heightForWidth(dlg.status.width()), (
+        dlg.status.height(), dlg.status.heightForWidth(dlg.status.width()))
+    dlg.reject()

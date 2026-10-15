@@ -54,7 +54,7 @@ from . import sky
 from .gui.queries import (all_frame_ids, integrated_exposure, object_exposure,
                           stack_locations)
 from .resolve._coerce import _to_float, _to_text
-from .resolve._text import norm_alnum
+from .resolve._text import norm, norm_alnum
 from .resolve.catalog import catalog_canon, xref, xref_aliases
 from .resolve.objects import resolve_object
 
@@ -184,13 +184,30 @@ class Target:
         `catalog` - kanon i aliasy katalogowe PO `xref` (ta sama forma co `catalog_aliases`),
         `alnum` - kanon i wszystkie aliasy przez `norm_alnum`, `hay_fold`/`hay_alnum` - te same
         nazwy sklejone znakiem `\\x00`, którego wpisany tekst nie niesie, więc podciąg nie przejdzie
-        przez granicę dwóch nazw, a jedno `in` zastępuje pętlę po aliasach."""
+        przez granicę dwóch nazw, a jedno `in` zastępuje pętlę po aliasach. `word_starts` (AR-151) -
+        pozycje w `hay_alnum`, od których zaczyna się SŁOWO nazwy (znak alfanumeryczny po znaku
+        spoza `[A-Z0-9]` albo na początku nazwy): `norm_alnum` skleja słowa, więc bez nich podciąg
+        `FE` w „Sculptor DwarF Elliptical” wyglądałby jak podciąg na granicy."""
         names = (self.canon,) + self.aliases
         alnum = tuple(norm_alnum(n) for n in names)
+        starts, pos = set(), 0
+        for n in names:
+            poprzedni = False                   # czy znak przed tym jest alfanumeryczny
+            for ch in norm(n):
+                jest = "A" <= ch <= "Z" or "0" <= ch <= "9"
+                if jest:
+                    if not poprzedni:
+                        starts.add(pos)
+                    pos += 1
+                poprzedni = jest
+            pos += 1                            # separator `\x00` w `hay_alnum`
+        hay_alnum = "\x00".join(alnum)
+        if pos != len(hay_alnum) + 1:           # EXPECT także pod `python -O` (assert by zniknął)
+            raise ValueError(f"{self.canon}: granice słów rozjechane z norm_alnum")
         return _FindKeys(catalog=frozenset((self.canon,) + self.catalog_aliases),
                          alnum=frozenset(a for a in alnum if a),
                          hay_fold="\x00".join(names).casefold(),
-                         hay_alnum="\x00".join(alnum))
+                         hay_alnum=hay_alnum, word_starts=frozenset(starts))
 
 
 @dataclass(frozen=True)
@@ -199,6 +216,7 @@ class _FindKeys:
     alnum: frozenset
     hay_fold: str
     hay_alnum: str
+    word_starts: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -473,6 +491,14 @@ def find_matches(pool, needle):
     oznaczenie w trakcie pisania (`sh2 13` → `Sh2-131`) i zapis bez spacji trafiają jak ze spacją.
     Pusty klucz `norm_alnum` (sam znak spoza ASCII) nie trafia wszystkiego - druga droga milczy.
 
+    KOLEJNOŚĆ PODCIĄGU = PEWNOŚĆ (AR-151), w obrębie szczebla porządek puli (sort stabilny):
+    (a) prefiks kanonu, (b) prefiks aliasu, (c) podciąg od początku SŁOWA nazwy, (d) podciąg
+    w środku słowa (`_szczebel_podciagu`). `norm_alnum` skleja słowa, więc `Fe` trafia
+    „Sculptor DwarF Elliptical” - ten szum schodzi na koniec listy, zamiast wypychać kandydata,
+    którego nazwa zaczyna się wpisanym tekstem. Planer sortuje wiersze własnym kluczem (z kanonem
+    na końcu), więc ta kolejność rządzi najbliższymi oznaczenia (`resolve_plan_canon`), nie listą
+    ekranu.
+
     Wpisany tekst przechodzi resolver RAZ na wołanie, nazwy rekordów RAZ na rekord
     (`Target.find_keys`)."""
     fold = str(needle or "").casefold()
@@ -492,8 +518,33 @@ def find_matches(pool, needle):
         elif fold in k.hay_fold or (alnum and alnum in k.hay_alnum):
             tagged.append((t, 2))
     best = min((s for _t, s in tagged if s < 2), default=None)
-    return (tuple(t for t, s in tagged if s == best),
-            tuple(t for t, s in tagged if s != best))
+    rest = [t for t, s in tagged if s != best]
+    rest.sort(key=lambda t: _szczebel_podciagu(t.find_keys, fold, alnum))
+    return tuple(t for t, s in tagged if s == best), tuple(rest)
+
+
+def _szczebel_podciagu(k, fold, alnum):
+    """Pewność trafienia spoza dokładnych (`find_matches`, AR-151): 0 prefiks kanonu, 1 prefiks
+    aliasu, 2 podciąg od początku słowa nazwy, 3 podciąg w środku słowa. Najlepsza z dwóch dróg
+    podciągu: surowy tekst bez wielkości liter (`hay_fold`; granica słowa = znak przed trafieniem
+    nie jest alfanumeryczny) i klucz `norm_alnum` (`hay_alnum`; granica = `word_starts`). Nazwy
+    w stogu dzieli `\\x00`, więc „po `\\x00`” znaczy „od początku aliasu”."""
+    if k.hay_fold.startswith(fold) or (alnum and k.hay_alnum.startswith(alnum)):
+        return 0
+    if "\x00" + fold in k.hay_fold or (alnum and "\x00" + alnum in k.hay_alnum):
+        return 1
+    i = k.hay_fold.find(fold)
+    while i > 0:
+        if not k.hay_fold[i - 1].isalnum():
+            return 2
+        i = k.hay_fold.find(fold, i + 1)
+    if alnum:
+        i = k.hay_alnum.find(alnum)
+        while i >= 0:
+            if i in k.word_starts:
+                return 2
+            i = k.hay_alnum.find(alnum, i + 1)
+    return 3
 
 
 @dataclass(frozen=True)
@@ -545,7 +596,9 @@ def resolve_plan_canon(needle, layers=ALL_LAYERS):
     potoczna bywa DWUZNACZNA (zmierzone w T3: „Eastern Veil" wskazuje NGC6992 **i** NGC6995),
     a zapis kuratelii na losowym z dwóch rekordów byłby cichym wyborem za użytkownika. Nic
     dokładnego → `(None, najbliżsi po podciągu)` do 5, żeby literówka dostała odpowiedź, a nie
-    ciszę.
+    ciszę - w kolejności PEWNOŚCI z `find_matches` (AR-151: prefiks kanonu, prefiks aliasu,
+    początek słowa, środek słowa), kanon raz, na miejscu pierwszego trafienia (deduplikacja
+    stabilna; alfabet wypychał lepszego kandydata szumem sklejonych słów).
 
     Szukamy we WSZYSTKICH warstwach: cel z cirrusu wolno oznaczyć, mając wczytany rdzeń."""
     # Oznaczenie przycina wpis PRZED regułą (jak stara kopia): szukajka trzyma surowy tekst bit w bit,
@@ -556,7 +609,7 @@ def resolve_plan_canon(needle, layers=ALL_LAYERS):
         return canons[0], ()
     if canons:
         return None, tuple(canons)
-    return None, tuple(sorted({t.canon for t in rest})[:5])
+    return None, tuple(dict.fromkeys(t.canon for t in rest))[:5]
 
 
 def plan_marks(con):

@@ -164,10 +164,11 @@ def _brak_operacji(op_id) -> PowodPozycji:
 # `gui/app.py` (dialog naprawy nagłówka) i testy pisarza.
 
 
-def _ops_violation(ops, is_new: Callable[[WriteOp], bool]) -> str | None:
-    """Powód pierwszego naruszenia reguł karty w komplecie operacji albo `None`. Czy operacja
-    ZAKŁADA kartę (`is_new`), wie tylko pisarz danego formatu: FITS `set` na nieobecnej karcie
-    dopisuje ją po cichu (astropy), XISF odmawia."""
+def _ops_violation(ops, is_new: Callable[[WriteOp], bool]) -> PowodPozycji | None:
+    """Powód pierwszego naruszenia reguł karty w komplecie operacji albo `None` - `PowodPozycji`
+    z kodem `card_*` prosto od właściciela reguł (`CardViolation.reason`, AR-158), więc okno mówi
+    go w języku UI. Czy operacja ZAKŁADA kartę (`is_new`), wie tylko pisarz danego formatu: FITS
+    `set` na nieobecnej karcie dopisuje ją po cichu (astropy), XISF odmawia."""
     for op in ops:
         naruszenie = card_violation(op.keyword, op.value, op.comment, new_card=is_new(op))
         if naruszenie is not None:
@@ -1140,7 +1141,7 @@ def _xisf_semantyczny(path: str, fh, xml_text: str, expected_hash: str | None):
     try:
         region = scan.build_xisf_header_region(meta, xml)
     except ValueError as exc:
-        raise _XisfRefusal(str(exc)) from exc
+        raise _XisfRefusal(powod_wyjatku(exc)) from exc
     _xisf_region_from_handle(fh, meta, scan.build_xisf_header_region(meta, meta.xml_bytes))
     odcisk = _odcisk(fh, 0, meta.first_attachment)
     tmp, _, _ = _zloz_plik_tymczasowy(path, fh, [region, (meta.first_attachment, None)])
@@ -1182,7 +1183,10 @@ _XISF_PROPERTY_TARGETS = {
 class _XisfRefusal(Exception):
     """Wewnętrzna ODMOWA pisarza XISF → `WriteResult('blocked', reason)`. Odmowa to nie awaria:
     plik zostaje bajtowo nietknięty, a powód trafia do usera. Osobny typ (nie `ValueError`), żeby
-    „nie ruszam, bo nie rozumiem" nigdy nie zlało się z „coś się zepsuło" (to drugie = 'failed')."""
+    „nie ruszam, bo nie rozumiem" nigdy nie zlało się z „coś się zepsuło" (to drugie = 'failed').
+    Odmowa czytnika `scan` owinięta tym typem niesie GOTOWY powód z kodem (`powod_wyjatku`:
+    `scan.XisfFormatError.powod`, AR-158) - pisarz nie składa nowego; `ValueError` bez kodu -
+    prozą jak dotąd (granica)."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -1198,6 +1202,12 @@ def _read_xisf_or_refuse(path):
         return scan.read_xisf_meta_full(path)
     except OSError:
         raise
+    except scan.XisfFormatError as exc:
+        # Odmowa czytnika z kodem (AR-158): kod i parametry jadą do okna, a zdanie PL zostaje
+        # dotychczasowym „nieczytelny - Typ: opis" - typem tych odmów przed kodem był `ValueError`.
+        powod = powod_wyjatku(exc)
+        raise _XisfRefusal(PowodPozycji(f"nagłówek XISF nieczytelny - ValueError: {powod}",
+                                        "xisf_unreadable_reader", inner=powod)) from exc
     except Exception as exc:  # noqa: BLE001 — czytnik zgłasza format wieloma typami (w tym ParseError)
         blad = f"{type(exc).__name__}: {exc}"
         raise _XisfRefusal(PowodPozycji(f"nagłówek XISF nieczytelny - {blad}", "xisf_unreadable",
@@ -1242,7 +1252,7 @@ def _xisf_property_patch(meta, keyword, idx, new_text):
     except scan.XisfTargetMissing:
         return None                                   # własność nieobecna → NIE tworzymy (D-X-10)
     except scan.XisfValueUnreachable as exc:
-        raise _XisfRefusal(str(exc)) from exc
+        raise _XisfRefusal(powod_wyjatku(exc)) from exc
     obecna = xml[span[0]:span[1]]
     stara_karta = next((c.value_raw for c in meta.cards
                         if c.keyword == keyword and c.idx == idx), None)
@@ -1302,7 +1312,7 @@ def _xisf_add_patch(meta, keyword: str, new_text: str, comment) -> tuple[int, in
         except scan.XisfTargetMissing:
             pass
         except scan.XisfValueUnreachable as exc:
-            raise _XisfRefusal(str(exc)) from exc
+            raise _XisfRefusal(powod_wyjatku(exc)) from exc
         else:
             raise _XisfRefusal(PowodPozycji(
                 f"plik nie ma karty {keyword}, ale ma własność {target[0]} - dopisanie karty "
@@ -1312,7 +1322,7 @@ def _xisf_add_patch(meta, keyword: str, new_text: str, comment) -> tuple[int, in
         offset, blob = scan.build_fits_keyword_element(
             xml, keyword=keyword, value=new_text, comment=comment)
     except ValueError as exc:                 # w tym XisfTargetMissing/Unreachable (podklasy)
-        raise _XisfRefusal(str(exc)) from exc
+        raise _XisfRefusal(powod_wyjatku(exc)) from exc
     return offset, offset, blob
 
 
@@ -1346,7 +1356,7 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
         try:
             span = scan.locate_value_span(xml, keyword=keyword, idx=idx)
         except scan.XisfTargetMissing as exc:
-            brak = str(exc)                    # zdanie czytnika `scan` - granica bez kodu
+            brak = powod_wyjatku(exc)          # zdanie czytnika `scan` z kodem (AR-158)
             raise _XisfRefusal(PowodPozycji(
                 f"{brak} - 'set' nie zakłada karty; dopisanie idzie przez 'add' (P6d)",
                 "xisf_set_missing", detail=brak)) from exc
@@ -1355,7 +1365,7 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
             try:
                 cspan = scan.locate_value_span(xml, keyword=keyword, idx=idx, attr="comment")
             except scan.XisfTargetMissing as exc:
-                brak = str(exc)                # zdanie czytnika `scan` - granica bez kodu
+                brak = powod_wyjatku(exc)      # zdanie czytnika `scan` z kodem (AR-158)
                 raise _XisfRefusal(PowodPozycji(f"{brak} - dodanie atrybutu poza P6 (D-X-12)",
                                                 "xisf_attr_missing", detail=brak)) from exc
             patches.append((*cspan, scan.encode_xisf_value(op.comment, xml, cspan)))
@@ -1494,7 +1504,7 @@ def _xisf_prepare(path: str, ops: list[WriteOp], expected_hash: str | None):
     try:
         region = scan.build_xisf_header_region(meta, new_xml)      # D-X-1/2
     except ValueError as exc:                      # nie mieści się / plik przeczy sam sobie
-        raise _XisfRefusal(str(exc)) from exc
+        raise _XisfRefusal(powod_wyjatku(exc)) from exc
     return meta, new_xml, backup_text, region
 
 
@@ -1928,6 +1938,16 @@ def _wolne_rekordy(n: int) -> PowodPozycji:
     return PowodPozycji(f"{n} wolnych rekordów", "free_records", n=n)
 
 
+def _brak_miejsca(przyrost: int, wolne: int) -> PowodPozycji:
+    """Powód `fb_no_room` - jedno zdanie dla pisarza (`_fits_zloz_region`) i prognozy drogi z lustra
+    kart (`inplace_route`): dopisanie potrzebuje `przyrost` wolnych rekordów za `END`, a jest `wolne`."""
+    potrzebne = _wolne_rekordy(przyrost)
+    return PowodPozycji(
+        f"brak miejsca w nagłówku FITS: dopisanie potrzebuje {potrzebne} za END w ostatnim "
+        f"bloku 2880 B, a jest {wolne} - nagłówek urósłby o blok i przesunął dane",
+        "fb_no_room", needed=potrzebne, free=wolne)
+
+
 def _fits_zloz_region(raw: bytes, ops: list[WriteOp], obrazy: dict[str, bytes]):
     """Region nagłówka FITS po łacie, złożony z rekordów → `(nowy region, karty oczekiwane)` albo
     `Fallback`. `raw` = region sprawdzony (`_fits_region_checked`), `obrazy` = obraz 80 B każdej
@@ -1974,11 +1994,7 @@ def _fits_zloz_region(raw: bytes, ops: list[WriteOp], obrazy: dict[str, bytes]):
     while koniec + 1 + wolne < len(rekordy) and rekordy[koniec + 1 + wolne] == _FITS_WOLNY_REKORD:
         wolne += 1
     if wolne < przyrost:
-        potrzebne = _wolne_rekordy(przyrost)
-        return Fallback(PowodPozycji(
-            f"brak miejsca w nagłówku FITS: dopisanie potrzebuje {potrzebne} za END w ostatnim "
-            f"bloku 2880 B, a jest {wolne} - nagłówek urósłby o blok i przesunął dane",
-            "fb_no_room", needed=potrzebne, free=wolne))
+        return Fallback(_brak_miejsca(przyrost, wolne))
     nowy = b"".join(nowe) + _FITS_END_RECORD + raw[(koniec + 1 + przyrost) * _FITS_RECORD:]
     return nowy, want
 
@@ -2271,16 +2287,22 @@ def _verify_inplace(plan: _InplacePlan, size: int, probka, backup_text) -> Write
 
 
 def inplace_route(filetype, keyword: str, value: str, value_type, comment, *,
-                  op: str = "set") -> str | None:
+                  op: str = "set", cards=None) -> PowodPozycji | None:
     """PRZEWIDYWANIE drogi zapisu jednej karty tekstowej z faktów bazy, bez otwierania pliku
-    (podgląd planu): `None` = w miejscu, tekst = powód drogi dotychczasowej. Reguła mieszczenia się
+    (podgląd planu): `None` = w miejscu, `PowodPozycji` = powód drogi dotychczasowej (kod czyta
+    okno - `fb_no_room`, `route_depends`). Reguła mieszczenia się
     karty FITS jest TA SAMA, której używa pisarz (`_fits_card_image`), więc podgląd i zapis nie mogą
     się rozjechać co do rekordu 80 znaków; resztę (liczba kart, CONTINUE, sumy kontrolne)
     rozstrzyga pisarz na pliku. XISF → `None`: brak rezerwy odmawia tak samo w obu drogach.
 
     `op="add"` (AR-118): FITS dopisuje kartę w miejscu wyłącznie w zapasie nagłówka (pusta karta na
-    końcu albo wolny rekord za `END` w ostatnim bloku 2880 B), a tego baza nie zna - mieszcząca się
-    karta dostaje więc powód „zależy od pliku”, nie `None`, który obiecałby zapis w miejscu."""
+    końcu albo wolny rekord za `END` w ostatnim bloku 2880 B). `cards` (AR-155) = lustro kart
+    nagłówka TEJ kopii (`(keyword, value_raw, value_type, comment)` z tabeli `cards`), z którego
+    zapas daje się policzyć (`_zapas_z_lustra`): wolny rekord za `END` → `None`, pełny ostatni blok
+    bez pustych kart → powód pisarza `fb_no_room` (cały plik przepisany). Bez lustra, z lustrem,
+    które nie dowodzi układu rekordów, albo z pełnym blokiem i pustą kartą (pisarz zużyje ją
+    wyłącznie wtedy, gdy stoi NA KOŃCU, a kolejności kart lustro nie trzyma) - powód „zależy od
+    pliku”, nie `None`, który obiecałby zapis w miejscu."""
     if filetype == "xisf":
         return None
     if value_type != "str":
@@ -2292,11 +2314,68 @@ def inplace_route(filetype, keyword: str, value: str, value_type, comment, *,
                             keyword=keyword)
     powod = _fits_card_image(keyword, value, comment or "")[1]
     if powod is None and op == "add":
+        zapas = _zapas_z_lustra(cards) if cards else None
+        if zapas == "free":
+            return None
+        if zapas == "full":
+            # To samo zdanie i te same fakty, które poda pisarz (`_fits_zloz_region`): karta łaty
+            # ma jeden rekord (`_fits_card_image` wyżej), a za `END` nie ma żadnego.
+            return _brak_miejsca(1, 0)
         return PowodPozycji(
             f"zależy od pliku: dopisanie karty {keyword} do FITS idzie w miejscu, gdy nagłówek ma "
             f"zapas (pusta karta na końcu albo wolny rekord za END w ostatnim bloku 2880 B), "
             f"inaczej przepisuje cały plik", "route_depends", keyword=keyword)
     return powod
+
+
+# Karty komentarzowe w lustrze: tekst stoi od kolumny 9 rekordu (bez `= `).
+_FITS_KOMENTARZOWE = frozenset({"", "COMMENT", "HISTORY"})
+_FITS_HIERARCH = "HIERARCH "
+
+
+def _rekord_lustra_pewny(keyword: str, value_raw, value_type, comment) -> bool:
+    """Czy karta lustra stała w pliku w JEDNYM rekordzie 80 B. Lustro buduje się po `hdr.cards`
+    (`scan._parse_cards`), a `Header.fromstring` dokleja każdy rekord CONTINUE do karty przed nim -
+    kartę z kontynuacjami lustro widzi jako jedną. Dowodem jednego rekordu jest dolna granica
+    długości: treść karty w zapisie NAJCIAŚNIEJSZYM (`KEYWORD= 'wartość'/komentarz`, apostrof
+    podwojony, HIERARCH z prefiksem) mieści się w 80 znakach. Dłuższa musiała przyjść
+    z kontynuacjami, a ich liczby lustro nie zna. Liczby, logiki i niezdefiniowane - zawsze jeden
+    rekord (astropy przy nich ucina komentarz, CONTINUE nie składa)."""
+    if keyword in _FITS_KOMENTARZOWE:
+        return 8 + len(value_raw or "") <= _FITS_RECORD
+    if value_type != "str":
+        return True
+    naglowek = 10 if len(keyword) <= 8 else len(_FITS_HIERARCH) + len(keyword) + 1
+    tekst = 2 + len((value_raw or "").replace("'", "''"))
+    uwaga = 1 + len(comment) if comment else 0
+    return naglowek + tekst + uwaga <= _FITS_RECORD
+
+
+def _zapas_z_lustra(cards) -> str | None:
+    """Zapas nagłówka FITS na jedną kartę jednorekordową z lustra kart (AR-155): `"free"` = za
+    `END` w ostatnim bloku 2880 B stoi wolny rekord (pisarz dopisze w miejscu bez względu na puste
+    karty), `"full"` = blok pełny, a pustej karty, którą astropy mógłby zużyć, nie ma (pisarz
+    spadnie na drogę atomową), `None` = lustro tego nie rozstrzyga: karta z kontynuacjami CONTINUE
+    (`_rekord_lustra_pewny`) albo pełny blok z pustą kartą, o której lustro nie wie, czy stoi na
+    końcu (`Header.append` zużywa wyłącznie puste karty KOŃCOWE - `_fits_zloz_region`).
+
+    Rekordów przed `END` jest tyle, ile kart w lustrze, gdy każda stoi w jednym rekordzie; `END`
+    zajmuje następny, a nagłówek kończy się na najbliższej granicy 2880 B (36 rekordów - granicę
+    z bajtów sprawdza pisarz, `_fits_region_checked`). Reguła zakłada nagłówek o MINIMALNEJ liczbie
+    bloków: plik z dodatkowymi blokami spacji za blokiem `END` lustro widzi tak samo, a pisarz
+    odmawia go jako `failed` (granice z uchwytu nie zgadzają się z kartą `END`) - na `R:` 0 na 323
+    zmierzonych, rejestr."""
+    rekordy = 0
+    puste = False
+    for keyword, value_raw, value_type, comment in cards:
+        if not _rekord_lustra_pewny(keyword, value_raw, value_type, comment):
+            return None
+        rekordy += 1
+        puste = puste or keyword == ""
+    na_blok = 2880 // _FITS_RECORD
+    if (rekordy + 1) % na_blok:
+        return "free"
+    return None if puste else "full"
 
 
 def comment_loss_route(filetype, keyword: str, value: str, comment) -> str | None:
@@ -2605,6 +2684,20 @@ class UndoResult:
     # Podzbiór `restored`, którego nagłówek wrócił, a zeznanie klatki NIE (AR-82) - głosem klatki
     # mówi inna kopia; `FileResult.code` = `CODE_ZEZNANIE_WSTRZYMANE`.
     withheld: list[FileResult] = dataclasses.field(default_factory=list)
+    # Podzbiór `blocked`, w którym stan sprzed commitu JUŻ leży na dysku i w bazie („już cofnięte”,
+    # commit, który pliku nie podmienił - `_CofniecieLokacji.juz`): nie ma czego cofać (AR-160).
+    already: list[FileResult] = dataclasses.field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        """Czy cofnięcie jest DOMKNIĘTE: pętla przeszła wszystkie backupy (bez `cancelled`), żaden
+        plik nie padł, a każda blokada to „już cofnięte” (`already`). Tylko wtedy powierzchnia
+        chowa uchwyt cofnięcia (AR-160); blokada do ponowienia (nieudana rekoncyliacja backupu,
+        izolacja cudzą operacją, plik zmieniony od commitu) i błąd - uchwyt zostaje, powód mówi
+        zdanie. Wynik bez `already` (np. `undo_renames`, który już cofnięte pomija) liczy każdą
+        blokadę jako niedomkniętą."""
+        return (not self.cancelled and not self.failed
+                and all(fr in self.already for fr in self.blocked))
 
 
 def _group_by_location(rows) -> list[tuple[int, list]]:
@@ -4225,6 +4318,7 @@ def undo(con, commit_id, *, now,
     failed: list[FileResult] = []
     semantic: list[FileResult] = []
     withheld: list[FileResult] = []
+    already: list[FileResult] = []
     kubly = {"restored": restored, "blocked": blocked, "failed": failed}
     cancelled = False
     done = 0
@@ -4245,10 +4339,12 @@ def undo(con, commit_id, *, now,
             semantic.append(cofniecie.wynik)
         if cofniecie.wstrzymane:
             withheld.append(cofniecie.wynik)
+        if cofniecie.juz:                       # „już cofnięte” - nie ma czego ponawiać (AR-160)
+            already.append(cofniecie.wynik)
         _report(cofniecie.wynik.path, cofniecie.wynik.status)
 
     return UndoResult(commit_id, restored, blocked, failed, cancelled, semantic=semantic,
-                      withheld=withheld)
+                      withheld=withheld, already=already)
 
 
 @dataclasses.dataclass(frozen=True)

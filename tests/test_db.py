@@ -44,7 +44,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0040 nagrobek object/telescope.retired_at + ślady gestów (cofnięcie zdejmuje, AR-133/AR-137)
     # + 0041 pending_object_change.reason_code + reason_args (kod powodu pozycji, AR-141)
     # + 0042 reason_code + reason_args w pending_changes/pending_renames/withheld_write (AR-148)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 42
+    # + 0043 indeks frame(object_id) - materiał okna stosu i propozycja rodowodu (AR-154)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 43
     con.close()
 
 

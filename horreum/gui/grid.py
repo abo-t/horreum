@@ -58,8 +58,7 @@ from horreum.gui.note_dialog import NoteDialog
 from horreum.gui.object_change_dialog import ObjectChangeDialog
 from horreum.gui.projection_dialog import ObjectPickDialog, ProjectionDialog
 from horreum.resolve.frames import LIGHT_KINDS
-from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_undo_kart, zdanie_wyniku_zapisu
-from horreum.gui.wb_worker import tekst_powodu   # powód rdzenia w języku UI (AR-148)
+from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_wyniku_zapisu
 
 # FASADA: `grid` re-eksportuje nazwy modułów `grid_*`, po które sięga reszta pakietu i testy
 # (`tests/test_gui_grid_fasada.py` pilnuje, że każda czytana z zewnątrz nazwa tu jest).
@@ -708,7 +707,61 @@ class FramesView(QWidget):
         self.filter_panel.set_keywords(self._all_keywords)
         self.macro_bar.set_keywords(self._all_keywords)
         if zmiana and self._zbudowany:
-            self.refresh(w_tle=True)       # model tabeli niesie kolumny - bez tego zostałyby stare
+            self._przeladuj_po_kolumnach()  # model tabeli niesie kolumny - bez tego zostałyby stare
+
+    def _przeladuj_po_kolumnach(self):
+        """Przeładowanie zbioru Z POWODU KOLUMN (wynik Pól) - zaznaczenie wraca po nim (AR-164).
+
+        RESET MODELU ZOSTAJE I TO JEST ROZSTRZYGNIĘCIE, NIE ZANIECHANIE: kolumna-keyword niesie
+        komórki z `cards_pivot` liczonego po CAŁYM zbiorze (skład w tle, AR-27) oraz własny kierunek
+        (liczbowa vs tekstowa), sort i belki grup - wstawienie kolumn bez resetu byłoby drugą drogą
+        składu w modelu. Reset zdejmuje jednak zaznaczenie: wizytacja natywna zmierzyła pierwszy
+        wynik Pól 2,5-3,3 s po wejściu w Zbiory, a zaznaczenie zrobione w tym oknie znikało razem
+        z panelem rodowodu („Zaznacz w tabeli…").
+
+        MIGAWKA JEDZIE OGONEM ZE ZNACZNIKIEM GENERACJI, nie zwykłym `potem`: ogony przechodzą na
+        nowsze zlecenia (`refresh`), a stara migawka nie ma prawa wrócić po zmianie filtra,
+        nawigacji czy geście - tamten zbiór ma własne zaznaczenie. Ogon sprawdza, że przyłożono
+        właśnie TO przeładowanie (`_po_kolumnach`). Gdy zbiór już jest w drodze (zlecenie z innej
+        przyczyny), migawki nie robimy: przyłożenie i tak zastąpi zbiór, a jego zaznaczenie
+        zdejmie reset z tamtego powodu."""
+        migawka = None if self._zbior_w_drodze() else self._migawka_zaznaczenia()
+        gen = self._zbior_gen + 1           # generacja TEGO przeładowania (`refresh` podbija ją pierwszą)
+        self.refresh(w_tle=True,
+                     potem=partial(self._po_kolumnach, gen, migawka) if migawka else None)
+
+    def _migawka_zaznaczenia(self):
+        """Zaznaczenie tabeli po TOŻSAMOŚCI, nie po numerach (reset przenumerowuje wiersze, a nowe
+        kolumny przesuwają numery kolumn): `(frame_id zaznaczonych, frame_id bieżącego wiersza,
+        znaczenie bieżącej kolumny, zaznaczone wiersze listy panelu rodowodu)` albo `None` bez
+        zaznaczenia. Bieżący wiersz i kolumnę trzymamy OSOBNO - nie musi to być pierwszy zaznaczony
+        wiersz ani kolumna 0 (kotwica Shift i komórka, na której stoi klawiatura)."""
+        wiersze = self._selected_data_rows()
+        if not wiersze:
+            return None
+        biezacy = kolumna = None
+        idx = self.table.currentIndex()
+        if idx.isValid() and 0 <= idx.row() < len(self.model._rows):
+            wiersz = self.model._rows[idx.row()]
+            if isinstance(wiersz, dict) and "_group" not in wiersz:
+                biezacy = wiersz.get("frame_id")
+            kolumna = self.model._sort_id_for(idx.column())
+        lista = self.lineage_bar.selected_frame_ids() if self._lineage_panel_open() else []
+        return [r["frame_id"] for r in wiersze], biezacy, kolumna, lista
+
+    def _po_kolumnach(self, gen, migawka):
+        """Ogon `_przeladuj_po_kolumnach`: zaznaczenie, bieżąca komórka i panel wracają - o ile
+        przyłożony zbiór jest zbiorem TEGO przeładowania. Nowsze zlecenie (dowolnej przyczyny)
+        podbiło generację: jego zbiór, jego zaznaczenie, migawka idzie do kosza."""
+        if gen != self._zbior_gen:
+            return
+        zaznaczone, biezacy, kolumna, lista = migawka
+        self._przywroc_zaznaczenie(zaznaczone, biezacy=biezacy, kolumna=kolumna)
+        # Przywrócenie ruszyło debounce panelu daty i rodowodu; panel przebudowany zaraz po resecie
+        # mówił „Zaznacz w tabeli…" - odświeżamy go od razu, z zaznaczeniem wierszy jego listy.
+        self._date_timer.stop()
+        self._refresh_date_echo()
+        self._refresh_lineage(select_frame_ids=lista or None)
 
     def _wypelnij_pola(self):
         """Lista Pól z OSTATNIEGO pokrycia i bieżących kolumn. Szum strukturalny na DÓŁ (stabilnie
@@ -1844,8 +1897,12 @@ class FramesView(QWidget):
         self.empty_btn.setText(gest)
         self.empty_btn.setVisible(bool(gest))
 
-    def _przywroc_zaznaczenie(self, frame_ids):
+    def _przywroc_zaznaczenie(self, frame_ids, *, biezacy=None, kolumna=None):
         """Odłóż zaznaczenie po `frame_id` na PRZEBUDOWANYM modelu (R-S2b-3, człon pierwszy).
+
+        `biezacy` (frame_id) i `kolumna` (znaczenie kolumny, `model._sort_id_for`) stawiają bieżącą
+        komórkę tam, gdzie stała przed przeładowaniem (AR-164) - domyślnie pierwszy odłożony wiersz
+        i kolumna 0. Wiersz albo kolumna, których po przeładowaniu nie ma, wracają do domyślnych.
 
         PO `frame_id`, NIE PO NUMERZE WIERSZA — i to nie jest ostrożność: gest osi zmienia klucz
         sortu tej kolumny (`_object` bierze się z kanonu), a filtr perspektywy potrafi klatkę ze
@@ -1891,7 +1948,11 @@ class FramesView(QWidget):
                 start = i
             prev = i
         sm.select(sel, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
-        pierwszy = self.model.index(numery[0], 0)
+        wiersz = next((i for i in numery if self.model._rows[i].get("frame_id") == biezacy),
+                      numery[0]) if biezacy is not None else numery[0]
+        kol = next((c for c in range(self.model.columnCount())
+                    if self.model._sort_id_for(c) == kolumna), 0) if kolumna is not None else 0
+        pierwszy = self.model.index(wiersz, kol)
         sm.setCurrentIndex(pierwszy, QItemSelectionModel.NoUpdate)
         self.table.scrollTo(pierwszy, QAbstractItemView.PositionAtCenter)
         # …I DRUGI RAZ PO USTALENIU UKŁADU (FH-11). Tabela pokazana w tym samym obrocie pętli
@@ -1901,7 +1962,7 @@ class FramesView(QWidget):
         # inną klatkę pod tym samym numerem wiersza.
         trwaly = QPersistentModelIndex(pierwszy)
         QTimer.singleShot(0, self, lambda: trwaly.isValid() and self.table.scrollTo(
-            self.model.index(trwaly.row(), 0), QAbstractItemView.PositionAtCenter))
+            self.model.index(trwaly.row(), trwaly.column()), QAbstractItemView.PositionAtCenter))
         return len(numery)
 
     def _on_object_name(self, *, preselect_canon=None):
@@ -2357,12 +2418,19 @@ class FramesView(QWidget):
         # stanami zapytanie chodziłoby po całym materiale obiektu przy każdym zaznaczeniu, nie
         # mając komu oddać wyniku.
         # Fakt „gest ma tu jeszcze co zrobić" jest JEDEN dla panelu, kolumny i perspektywy
-        # (`queries.lineage_awaits_hand`): stos z odrzuconym ostatnim kandydatem nie wraca do trybu
+        # (`queries.lineage_hand_state`): stos z odrzuconym ostatnim kandydatem nie wraca do trybu
         # propozycji z pustymi nocami, tylko pokazuje własne werdykty do ewentualnego cofnięcia.
         kandydaci, raw_bez_zegara, po_zintegrowaniu = (), 0, 0
-        if queries.lineage_awaits_hand(self.con, fid):
-            kandydaci, raw_bez_zegara, po_zintegrowaniu = stacks.propose_lineage_candidates(
-                self.con, fid)
+        czeka, propozycja = queries.lineage_hand_state(self.con, fid)
+        if czeka:
+            kandydaci, raw_bez_zegara, po_zintegrowaniu = (
+                propozycja if propozycja is not None
+                else stacks.propose_lineage_candidates(self.con, fid))
+        elif propozycja is not None:
+            # STOS, KTÓRY WYPADŁ Z KUBEŁKA, BO PROPOZYCJA NIE MA CZEGO DAĆ (AR-154): trybu propozycji
+            # nie otwieramy, ale licznik klatek nowszych niż obraz idzie do panelu - to on mówi,
+            # dlaczego lista jest pusta. Bez niego zdanie znikało razem z trybem.
+            po_zintegrowaniu = propozycja[2]
         # TRZECI ŚWIADEK ZEGARA (G2-1d): uwaga przebiegu o RAW-ach bez zegara przy obrazie, którego
         # werdykt mówi co innego - także przy GOTOWYM rodowodzie z puli mieszanej, gdzie propozycji
         # nie liczymy wcale. Bez tego członu flaga mówiłaby „nie umiem umieścić N klatek", a gest,
@@ -3199,9 +3267,11 @@ class FramesView(QWidget):
         # gestu były nie do wyłuskania. Recepta prowadziła w ślepy zaułek dokładnie tam, gdzie
         # miała pomóc. Cel odkłada się więc sam przy najbliższym przeładowaniu zbioru.
         # JEDNORAZOWO, wzorem `_reveal_facet`: stan konsumuje PIERWSZY refresh po geście, także
-        # gdy niczego nie odłożył. Bez wygaszania zaznaczenie wracałoby przy dowolnym późniejszym
-        # odświeżeniu (zmiana kolumn, sortu) - czyli tam, gdzie user o nie nie prosił, a granica
-        # „zaznaczenie przeżywa GEST, nie każdy refresh" jest w tym repo pinowana od R-S2b-3.
+        # gdy niczego nie odłożył. Bez wygaszania CEL GESTU wracałby przy dowolnym późniejszym
+        # odświeżeniu - czyli tam, gdzie user o niego nie prosił (granica „cel gestu przeżywa GEST,
+        # nie każdy refresh", pinowana od R-S2b-3). Zaznaczenie przeżywa też przeładowanie z powodu
+        # KOLUMN z wyniku Pól - ale własną migawką z generacją (`_przeladuj_po_kolumnach`, AR-164),
+        # nie tym celem; zmiana kolumn ręką (`_on_columns`) zaznaczenie dalej zdejmuje.
         # Konsumpcja TU, odłożenie niżej - PO pokazaniu tabeli (FH-11).
         cel, self._cel_gestu = self._cel_gestu, []
         n = len(base)
@@ -4790,15 +4860,14 @@ class FramesView(QWidget):
         Dawniej zdanie liczyło tylko przywrócone i zablokowane, a „Cofnij" gasło razem z jedynym
         uchwytem ponowienia (`commit_id`). Teraz zdanie niesie liczbę błędów i pierwszy powód
         (błędu przed blokadą), a przy błędzie „Cofnij" zostaje przy tym samym commicie z receptą.
-        Ponowienie jest bezpieczne: pliki już cofnięte rdzeń odda jako zablokowane „już cofnięte"."""
-        msg = zdanie_undo_kart(res)
-        detail = next((fr for fr in res.failed + res.blocked if fr.reason), None)
-        if detail is not None:
-            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
-                          detail=tekst_powodu(detail.reason))
+        Ponowienie jest bezpieczne: pliki już cofnięte rdzeń odda jako zablokowane „już cofnięte".
+        Zdanie i regułę „Cofnij zostaje” daje `wb_worker.ogon_cofniecia` - jedna dla trzech
+        powierzchni (AR-160); zostaje też przy cofnięciu PRZERWANYM (`cancelled`): pętla rdzenia
+        staje przed resztą backupów, więc commit nie jest w pełni cofnięty."""
+        from horreum.gui.wb_worker import ogon_cofniecia     # wspólny ogon cofnięcia (AR-160)
+        msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
         self.drawer.end_progress()
-        if res.failed:                                   # commit zostaje - „Cofnij" ponowi resztę
-            msg += i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo"))
+        if ponow:                                        # commit zostaje - „Cofnij" ponowi resztę
             self.drawer.set_commit_actions_visible(False)   # jedyną akcją dalej jest „Cofnij" (#5)
             self.drawer.set_result(msg)                  # etykieta „Zatwierdzono…" zostaje
         else:
@@ -4991,15 +5060,15 @@ class FramesView(QWidget):
         Dawniej zdanie mówiło samo „przywrócono: 0", a „Cofnij" gasło - rozjazd znikał z ekranu,
         a jedyna droga ponowienia (run_id) ginęła razem z przyciskiem. Teraz zdanie niesie liczbę
         błędów i pierwszy powód (błędu przed blokadą), a przy błędzie „Cofnij" zostaje przy tym
-        samym przebiegu z receptą ponowienia."""
-        msg = zdanie_undo_kart(res)
-        detail = next((fr for fr in res.failed + res.blocked if fr.reason), None)
-        if detail is not None:
-            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
-                          detail=tekst_powodu(detail.reason))
+        samym przebiegu z receptą ponowienia.
+        Zdanie i regułę daje wspólny ogon `wb_worker.ogon_cofniecia` (AR-160): „Cofnij” zostaje
+        przy każdym cofnięciu niedomkniętym (`UndoResult.complete`) - także PRZERWANYM
+        (`undo_renames` przerywa przed resztą wierszy) i zablokowanym (`undo_renames` pomija wiersze
+        już cofnięte, więc blokada znaczy plik, który NIE wrócił)."""
+        from horreum.gui.wb_worker import ogon_cofniecia     # wspólny ogon cofnięcia (AR-160)
+        msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
         self.drawer.end_progress()
-        if res.failed:                                   # przebieg zostaje - „Cofnij" ponowi resztę
-            msg += i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo"))
+        if ponow:                                        # przebieg zostaje - „Cofnij" ponowi resztę
             self.drawer.set_commit_actions_visible(False)   # jedyną akcją dalej jest „Cofnij" (#5)
             self.drawer.set_result(msg)                  # etykieta „Przemianowano…" zostaje
         else:

@@ -259,12 +259,17 @@ def zdanie_wyniku_zapisu(res, noun_key):
 
     Powód BŁĘDU ma pierwszeństwo przed powodem blokady: blokada zostawia plik nietknięty, a błąd
     bywa rozjazdem, który trzeba naprawić („plik PRZENIESIONY…, baza NIE przepięta - zamiar renamu
-    zapisany: ponowienie albo cofnięcie przebiegu dokończy przepięcie"). Przy odwrotnej kolejności jedna blokada w tym samym wsadzie chowała go za sobą."""
+    zapisany: ponowienie albo cofnięcie przebiegu dokończy przepięcie"). Przy odwrotnej kolejności jedna blokada w tym samym wsadzie chowała go za sobą.
+
+    RÓŻNE POWODY (AR-162): „2 zablokowane - plik zmieniony od ostatniego skanu” przy blokadach
+    z dwóch różnych powodów brzmiało jak powód wspólny. Gdy pozycje z powodem mają powody różne
+    (`_klucz_powodu`: po kodzie, bez kodu po tekście), zdanie mówi „pierwszy z N różnych powodów:
+    …” - bez słownika krótkich nazw per kod, którego katalog nie ma. Reszta powodów stoi tam, gdzie
+    powierzchnia je ma: przy pozycjach (kolumna Status „Zmień obiekt…”), a w oknach kart bez listy
+    pozycji - w podpowiedzi zdania (`podpowiedz_powodow`, zdanie odsyła do niej:
+    `zdanie_commitu_kart`). Jeden powód albo same jednakowe - zdanie znak w znak."""
     parts = [_liczba(noun_key, len(res.applied))]
-    # AR-82: plik ZAPISANY, a zeznanie klatki go nie przyjęło - osobny człon, nie „0 zapisanych”.
-    # Przy cofnięciu gestu `withheld` jest podzbiorem `applied` (karta wróciła) - tamto zdanie mówi
-    # o nim własnym członem (`zdanie_wyniku_zmiany`), tu liczą się tylko pliki spoza `applied`.
-    wstrzymane = [fr for fr in res.withheld if fr not in res.applied]
+    wstrzymane = _wstrzymane_poza_zapisanymi(res)
     if wstrzymane:
         parts.append(_liczba("grid.wb.withheld", len(wstrzymane)))
     if res.blocked:
@@ -274,10 +279,57 @@ def zdanie_wyniku_zapisu(res, noun_key):
     if res.skipped:
         parts.append(_liczba("grid.wb.skipped", len(res.skipped)))
     summary = " · ".join(parts)
-    detail = next((fr.reason for fr in (res.failed + wstrzymane + res.blocked) if fr.reason), None)
-    if detail:
-        summary += i18n.t("grid.wb.detail_sep", detail=tekst_powodu(detail))
+    rozne = _rozne_powody(res)
+    if rozne:
+        detail = tekst_powodu(rozne[0].reason)
+        if len(rozne) > 1:
+            detail = i18n.t("wb.reasons_first", n=len(rozne), detail=detail)
+        summary += i18n.t("grid.wb.detail_sep", detail=detail)
     return summary
+
+
+def _wstrzymane_poza_zapisanymi(res):
+    """AR-82: plik ZAPISANY, a zeznanie klatki go nie przyjęło - osobny człon, nie „0 zapisanych”.
+    Przy cofnięciu gestu `withheld` jest podzbiorem `applied` (karta wróciła) - tamto zdanie mówi
+    o nim własnym członem (`zdanie_wyniku_zmiany`), tu liczą się tylko pliki spoza `applied`."""
+    return [fr for fr in res.withheld if fr not in res.applied]
+
+
+def _rozne_powody(res):
+    """Pierwsza pozycja z KAŻDYM różnym powodem (`_klucz_powodu`), w kolejności zdania: błąd przed
+    wstrzymaniem przed blokadą. Pierwsza z listy to powód, który zdanie mówi wprost."""
+    widziane, wynik = set(), []
+    for fr in res.failed + _wstrzymane_poza_zapisanymi(res) + res.blocked:
+        if fr.reason and _klucz_powodu(fr.reason) not in widziane:
+            widziane.add(_klucz_powodu(fr.reason))
+            wynik.append(fr)
+    return wynik
+
+
+def podpowiedz_powodow(res):
+    """Podpowiedź zdania wyniku w oknie BEZ listy pozycji („Napraw nagłówek…”, „Zatwierdź ze
+    ścieżki…”): przy różnych powodach - każdy różny powód w języku UI z nazwą pierwszego
+    pliku, który go dostał, wiersz na powód; przy jednym powodzie `""` (zdanie mówi go całego)."""
+    from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
+    rozne = _rozne_powody(res)
+    if len(rozne) < 2:
+        return ""
+    return "\n".join(i18n.t("wb.reason_line", file=_ogon_sciezki(fr.path),
+                            reason=tekst_powodu(fr.reason)) for fr in rozne)
+
+
+def podpowiedz_kart(res):
+    """Podpowiedź zdania commitu okna kart: szczegół spadku na drogę atomową (`podpowiedz_spadku`)
+    i różne powody blokad/błędów (`podpowiedz_powodow`) - wiersze, które są; `""`, gdy żadnych."""
+    return "\n".join(p for p in (podpowiedz_spadku(res), podpowiedz_powodow(res)) if p)
+
+
+def _klucz_powodu(powod):
+    """Tożsamość powodu do pytania „czy powody są różne” (AR-162): kod (`PowodPozycji.code`,
+    `ZdanieRdzenia.code`), a bez kodu - tekst. Parametry kodu się nie liczą: „wiele obecnych kopii
+    (2)” i „(3)” to ten sam powód."""
+    kod = getattr(powod, "code", None)
+    return ("kod", kod) if kod else ("tekst", str(powod))
 
 
 def commit_do_cofniecia(res):
@@ -487,8 +539,13 @@ def zdanie_commitu_kart(res, applied_key, *, w_miejscu=False):
     wyniku + nota przerwania + `commit_id` (po zamknięciu okna to jedyny uchwyt do cofnięcia).
     `w_miejscu` = commit szedł zapisem w miejscu (`commit_inplace`) - zdanie dokłada wtedy człon
     o spadku na drogę atomową (`zdanie_drogi_zapisu`); przy zwykłym commicie drogą atomową jest
-    każdy plik i taki człon byłby fałszem."""
+    każdy plik i taki człon byłby fałszem.
+
+    Okna kart nie mają listy pozycji: przy różnych powodach pozostałe stoją w podpowiedzi zdania
+    (`podpowiedz_powodow`), a zdanie mówi, gdzie ich szukać (`wb.reasons_tip`)."""
     summary = zdanie_wyniku_zapisu(res, applied_key)
+    if len(_rozne_powody(res)) > 1:
+        summary += i18n.t("wb.reasons_tip")
     if w_miejscu:
         summary += zdanie_drogi_zapisu(res)
     if res.cancelled:
@@ -500,14 +557,55 @@ def zdanie_commitu_kart(res, applied_key, *, w_miejscu=False):
 
 
 def zdanie_undo_kart(res):
-    """Zdanie wyniku cofnięcia - wspólne dla okien piszących karty."""
+    """Zdanie wyniku cofnięcia - wspólne dla okien piszących karty. Plik „już cofnięty”
+    (`UndoResult.already`) to nie blokada, tylko stan docelowy: liczy się osobnym członem, inaczej
+    dokończone ponowienie brzmiało jak porażka („1 przywrócony · 33 zablokowane”)."""
     msg = _liczba("grid.wb.restored", len(res.restored))
     if res.semantic:
         msg += " · " + _liczba("grid.wb.semantic", len(res.semantic))
     if res.withheld:                                     # AR-82: nagłówek wrócił, zeznanie nie
         msg += " · " + _liczba("grid.wb.undo_withheld", len(res.withheld))
-    if res.blocked:
-        msg += " · " + _liczba("grid.wb.blocked", len(res.blocked))
+    if res.already:
+        msg += " · " + _liczba("wb.undo_already", len(res.already))
+    zablokowane = [fr for fr in res.blocked if fr not in res.already]
+    if zablokowane:
+        msg += " · " + _liczba("grid.wb.blocked", len(zablokowane))
     if res.failed:
         msg += " · " + _liczba("grid.wb.errors", len(res.failed))
     return msg
+
+
+def ogon_cofniecia(res, przycisk):
+    """Ogon cofnięcia commitu kart → `(zdanie, czy „Cofnij” zostaje)` - JEDNA reguła dla trzech
+    powierzchni (szuflada Zbiorów, „Napraw nagłówek…”, „Zatwierdź ze ścieżki…”, AR-160); `przycisk`
+    = etykieta przycisku cofnięcia tej powierzchni, którą zdanie nazywa.
+
+    Zdanie: liczniki (`zdanie_undo_kart`) + pierwszy powód z nazwą pliku - błędu przed blokadą,
+    jak w `zdanie_wyniku_zapisu` - w języku UI (`tekst_powodu`). Okna kart mówiły same liczniki,
+    więc kody powodów cofnięcia (AR-148) do nich nie docierały.
+
+    „COFNIJ” ZNIKA WYŁĄCZNIE PRZY COFNIĘCIU DOMKNIĘTYM - fakt liczy RDZEŃ (`UndoResult.complete`
+    z `_CofniecieLokacji.juz`), nie ten moduł ze statusów: każdy plik wrócił albo jest „już
+    cofnięty”, pętla nie przerwana, nic nie padło. Inaczej uchwyt zostaje przy tym samym commicie:
+      * `failed` - nagłówek przywrócony bez re-syncu („ponowne undo dokończy”), podmiana bez
+        weryfikacji, operacja w miejscu przerwana; także błąd, którego ponowienie nie naprawi
+        (uszkodzona koperta backupu) - uchwyt nie ginie, zdanie mówi powód;
+      * `cancelled` - pętla `writeback.undo` przerywa PRZED kolejnymi backupami (także
+        `restored` + `cancelled`); ponowienie dokończy resztę;
+      * `blocked` bez „już cofnięte” - nieudana rekoncyliacja backupu (`backup_reconcile_failed`
+        wprost każe ponowić), izolacja cudzą operacją, plik zmieniony od commitu: plik NIE wrócił,
+        więc „pliki są bez karty” byłoby fałszem, a zgaszony uchwyt - utratą jedynej drogi.
+    Ponowienie jest bezpieczne: plik już cofnięty rdzeń odda jako 'blocked' „już cofnięte”."""
+    from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
+    msg = zdanie_undo_kart(res)
+    # Powód „już cofnięte” nie mówi niczego, co człon „N już cofniętych” nie powiedział (AR-160).
+    detail = next((fr for fr in res.failed + res.blocked
+                   if fr.reason and fr not in res.already), None)
+    if detail is not None:
+        msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
+                      detail=tekst_powodu(detail.reason))
+    if res.cancelled:
+        msg += i18n.t("wb.undo_cancelled", undo=przycisk)
+    elif not res.complete:
+        msg += i18n.t("grid.wb.undo_retry", undo=przycisk)
+    return msg, not res.complete

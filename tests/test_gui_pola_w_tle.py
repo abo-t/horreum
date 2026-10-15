@@ -1286,3 +1286,144 @@ def test_zamkniecie_okna_w_trakcie_licznikow_zbiera_watek(qapp, tmp_path, monkey
     finally:
         zegar.cancel()
         brama.set()
+
+
+# ---------- AR-164: pierwszy wynik Pól zmienia kolumny i przeładowuje zbiór - zaznaczenie zostaje ----------
+
+def _baza_ze_stosem(tmp_path):
+    """`_baza` (lighty 1-3 z kartami) + gotowy obraz 10 z rodowodem z lightów 1 i 2."""
+    path = _baza(tmp_path)
+    con = db.connect(path)
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (10, 'm10', 'master_light', 'xisf', ?)", (NOW,))
+    con.execute("INSERT INTO location (frame_id, volume, path, present) "
+                "VALUES (10, 'V', '/a/S/stos.xisf', 1)")
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch) VALUES (5, 10, ?, 0, 0, 0)", (NOW,))
+    con.executemany("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by) "
+                    "VALUES (5, ?, 'window')", [(1,), (2,)])
+    con.commit()
+    con.close()
+    return path
+
+
+def _klik_komorki(view, frame_id, kolumna, modyfikator=Qt.NoModifier):
+    """Prawdziwy klik myszą w komórkę wiersza klatki `frame_id`, kolumna `kolumna`."""
+    from PySide6.QtTest import QTest
+    QApplication.processEvents()
+    wiersz = next(i for i, r in enumerate(view.model._rows) if r.get("frame_id") == frame_id)
+    idx = view.model.index(wiersz, kolumna)
+    view.table.scrollTo(idx)
+    rect = view.table.visualRect(idx)
+    assert rect.isValid() and view.table.viewport().rect().contains(rect.center()), "komórka poza kadrem"
+    QTest.mouseClick(view.table.viewport(), Qt.LeftButton, modyfikator, rect.center())
+    QApplication.processEvents()
+
+
+def _klik_listy_panelu(lista, frame_id):
+    from PySide6.QtTest import QTest
+    QApplication.processEvents()
+    it = next(lista.item(i) for i in range(lista.count()) if lista.item(i).data(Qt.UserRole) == frame_id)
+    QTest.mouseClick(lista.viewport(), Qt.LeftButton, Qt.NoModifier, lista.visualItemRect(it).center())
+    QApplication.processEvents()
+
+
+def _odczekaj_debounce():
+    """Debounce panelu daty i rodowodu (150 ms) - realny czas pętli, nie wywołanie slotu."""
+    koniec = time.monotonic() + 0.4
+    while time.monotonic() < koniec:
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.01)
+
+
+def _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch):
+    """Widok gospodarza (wątki tła), pierwszy wynik Pól TRZYMANY bramą, pierwszy skład zbioru
+    przyłożony (kolumny jeszcze puste). Zaznaczenie robione myszą: stos 10, potem Ctrl+klik light 3
+    w kolumnie 2 - bieżący wiersz NIE jest pierwszym zaznaczonym w kolejności modelu, bieżąca
+    kolumna nie jest 0. Panel rodowodu otwarty, w jego liście zaznaczone wejście 2."""
+    brama = threading.Event()
+    _szpieg(monkeypatch, brama=brama)
+    con = db.connect(_baza_ze_stosem(tmp_path))
+    view = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
+    _czekaj(lambda: view._zbior_thread is None and view._zbior_worker is None
+            and view._pola_worker is not None, "pierwszy skład zbioru nie dojechał")
+    assert view._columns == [] and view._pola is None, "pierwszy wynik Pól jeszcze w drodze"
+    view.resize(1400, 800)
+    view.show()
+    view._toggle_panel("lineage")
+    wiersze = {r.get("frame_id"): i for i, r in enumerate(view.model._rows)}
+    pierwszy, drugi = sorted((10, 3), key=wiersze.get)       # kolejność modelu
+    _klik_komorki(view, pierwszy, 1)
+    _klik_komorki(view, drugi, 2, Qt.ControlModifier)
+    _odczekaj_debounce()
+    _klik_listy_panelu(view.lineage_bar.items, 2)
+    return view, con, brama, drugi
+
+
+def _biezaca(view):
+    idx = view.table.currentIndex()
+    return view.model._rows[idx.row()].get("frame_id"), view.model._sort_id_for(idx.column())
+
+
+def test_wynik_pol_zmienia_kolumny_a_zaznaczenie_biezaca_komorka_i_panel_zostaja(qapp, tmp_path,
+                                                                                 monkeypatch):
+    """AR-164 (wizytacja natywna): pierwszy wynik Pól 2,5-3,3 s po wejściu w Zbiory zmienia kolumny
+    i przeładowuje zbiór - reset modelu zdejmował zaznaczenie, a panel rodowodu wracał do „Zaznacz
+    w tabeli…". Po przeładowaniu z powodu KOLUMN wracają: zaznaczenie wielu wierszy, bieżący wiersz
+    (nie pierwszy zaznaczony) i bieżąca kolumna po znaczeniu, panel rodowodu ze swoim zaznaczeniem.
+
+    Falsyfikator (= HEAD): `refresh(w_tle=True)` bez ogona w `_zastosuj_pola` → zaznaczenie puste."""
+    view, con, brama, drugi = _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch)
+    try:
+        assert _zaznaczone(view) == [3, 10]
+        przed_biezaca = _biezaca(view)
+        assert przed_biezaca[0] == drugi and przed_biezaca[1] == view.model._sort_id_for(2)
+        przed_panel = view.lineage_bar.head.text()
+        assert przed_panel == i18n.t_plural("grid.lin.head", 2, hours="0.0")
+        assert view.lineage_bar.selected_frame_ids() == [2]
+        kolumn_przed = view.model.columnCount()
+
+        brama.set()
+        _czekaj_na_pola(view)
+        assert view.model.columnCount() == kolumn_przed + 3, "wynik Pól dołożył kolumny"
+        assert _zaznaczone(view) == [3, 10], "zaznaczenie przeżyło przeładowanie z powodu kolumn"
+        assert _biezaca(view) == przed_biezaca, "bieżący wiersz i kolumna - te same, nie pierwsze"
+        _odczekaj_debounce()
+        assert view.lineage_bar.head.text() == przed_panel, "panel nie wrócił do pustego stanu"
+        assert view.lineage_bar.selected_frame_ids() == [2]
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_zmiana_filtra_po_wyniku_pol_nie_przywraca_starego_zaznaczenia(qapp, tmp_path, monkeypatch):
+    """Ogon przywrócenia jedzie ze znacznikiem generacji, nie zwykłym `potem`: wynik Pól zleca
+    przeładowanie (skład w drodze, brama), człowiek klika facet „light" - nowszy zbiór ma własne
+    zaznaczenie (puste po resecie), a migawka sprzed zmiany filtra NIE wraca, choć light 3 z niej
+    należy do nowego zbioru.
+
+    Falsyfikator: zdejmij porównanie generacji w `_po_kolumnach` → light 3 wraca zaznaczony."""
+    view, con, brama, _ = _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch)
+    sklad, wszedl = _brama_na_skladzie(monkeypatch)
+    try:
+        assert _zaznaczone(view) == [3, 10]
+        brama.set()                                   # wynik Pól → przeładowanie z powodu kolumn
+        _czekaj(wszedl.is_set, "przeładowanie z powodu kolumn nie ruszyło w tle")
+        _czekaj(lambda: view._pola_worker is None, "wynik Pól nie dojechał")
+        assert view._zbior_w_drodze()
+        lw = view.facet_rail._lists["kind"]
+        it = next(lw.item(i) for i in range(lw.count())
+                  if lw.item(i).data(Qt.UserRole) and lw.item(i).data(Qt.UserRole)[1] == "light")
+        from PySide6.QtTest import QTest
+        lw.scrollToItem(it)
+        QTest.mouseClick(lw.viewport(), Qt.LeftButton, Qt.NoModifier, lw.visualItemRect(it).center())
+        QApplication.processEvents()
+        sklad.set()
+        _czekaj_na_pola(view)
+        _czekaj(lambda: not view._zbior_w_drodze(), "skład po zmianie filtra nie dojechał")
+        assert sorted(view._frame_ids) == [1, 2, 3], "zbiór nowego filtra"
+        assert _zaznaczone(view) == [], "stara migawka nie wraca po zmianie filtra"
+    finally:
+        brama.set()
+        sklad.set()
+        _zamknij(view, con)

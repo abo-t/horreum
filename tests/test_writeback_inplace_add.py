@@ -498,3 +498,88 @@ def test_przewidywanie_drogi_add_mowi_zalezy_od_pliku(tmp_path):
     assert writeback.inplace_route("fits", "FOCALLEN", "800", "int", None,
                                    op="add").startswith("operacja add/int")
     assert writeback.inplace_route("xisf", "OBJECT", "NGC 7635", "str", None, op="add") is None
+
+
+# ============================================================ PROGNOZA DROGI Z LUSTRA KART (AR-155)
+
+
+def _lustro(path):
+    """Lustro kart tak, jak buduje je skan (`scan._parse_cards` po `hdr.cards`) - wiersze tabeli
+    `cards` w kształcie, który podaje `queries.present_copy_card_mirror`."""
+    with fits.open(str(path), mode="readonly", memmap=False) as h:
+        return tuple((c.keyword, c.value_raw, c.value_type, c.comment)
+                     for c in scan._parse_cards(h[0].header))
+
+
+def _pad(n):
+    return [f"PAD{i:<5d}= {i:20d}" for i in range(n)]
+
+
+# Układ nagłówka → (prognoza: None = w miejscu | kod powodu, droga pisarza na pliku | None = bez
+# przypięcia, bo prognoza i tak mówi „zależy od pliku”). Rekordów przed END w `_fits_z_bajtow`:
+# 5 obowiązkowych + linie; pełny blok = 35 przed END.
+_UKLADY = {
+    "wolny_rekord": (lambda p: _fits_bez(p, zapas=1), None, "inplace"),
+    "pelny_blok_bez_pustych": (lambda p: _fits_bez(p, zapas=0), "fb_no_room", "atomic"),
+    "pusta_na_koncu_pelny_blok": (lambda p: _fits_bez(p, puste=1, zapas=0), "route_depends",
+                                  "inplace"),
+    "pusta_w_srodku_pelny_blok": (lambda p: _fits_z_bajtow(p, ["IMAGETYP= 'Light'", ""] + _pad(28)),
+                                  "route_depends", "atomic"),
+    "pusta_w_srodku_wolny_rekord": (lambda p: _fits_z_bajtow(p, ["IMAGETYP= 'Light'", ""] + _pad(5)),
+                                    None, "inplace"),
+    "comment_history_wolny_rekord": (
+        lambda p: _fits_bez(p, karty=(("COMMENT", "a"), ("COMMENT", "b"), ("HISTORY", "c"),
+                                      ("HISTORY", "d"), ("IMAGETYP", "Light")), zapas=2),
+        None, "inplace"),
+    "comment_history_pelny_blok": (
+        lambda p: _fits_bez(p, karty=(("COMMENT", "a"), ("COMMENT", "b"), ("HISTORY", "c"),
+                                      ("IMAGETYP", "Light")), zapas=0),
+        "fb_no_room", "atomic"),
+    "continue_wolny_rekord": (lambda p: _fits_bez(p, karty=(("NOTE", "x" * 100),), zapas=3),
+                              "route_depends", None),
+    # 35 kart lustra (z END byłby pełny blok), ale karta z kontynuacją zajmuje 2 rekordy -
+    # reguła „liczba kart + END” skłamałaby „cały plik”.
+    "continue_35_kart": (lambda p: _fits_bez(p, karty=(("NOTE", "x" * 100),), zapas=0),
+                         "route_depends", "inplace"),
+    "comment_z_kontynuacja_w_lustrze": (
+        lambda p: _fits_z_bajtow(p, ["COMMENT " + "c" * 72, "CONTINUE  'x'"] + _pad(2)),
+        "route_depends", None),
+}
+
+
+@pytest.mark.parametrize("uklad", sorted(_UKLADY))
+def test_prognoza_drogi_dopisania_z_lustra_kart_zgodna_z_pisarzem(tmp_path, uklad):
+    """AR-155: podgląd „Zmień obiekt…” przewiduje drogę dopisania karty per pozycja z lustra kart.
+    Lustro buduje się po `hdr.cards`, nie po rekordach 80 B: precyzyjna prognoza („w miejscu”,
+    „cały plik” z powodem pisarza `fb_no_room`, to samo zdanie i parametry) wyłącznie tam, gdzie
+    lustro dowodzi układu rekordów; pusta karta przy pełnym bloku (pisarz zużyje ją tylko na
+    KOŃCU) i karta z kontynuacją CONTINUE - „zależy od pliku”. Prawda = pisarz na pliku
+    (`write_changes_inplace`)."""
+    budowa, prognoza, droga = _UKLADY[uklad]
+    p = budowa(tmp_path / f"{uklad}.fits")
+    powod = writeback.inplace_route("fits", "OBJECT", "NGC 7635", "str", None, op="add",
+                                    cards=_lustro(p))
+    assert (None if powod is None else powod.code) == prognoza
+    wynik = writeback.write_changes_inplace(str(p), [_add()], _hash(p))
+    zapis = ("atomic" if isinstance(wynik, writeback.Fallback)
+             else "inplace" if wynik.status == "applied" and wynik.in_place else wynik.status)
+    if droga is not None:
+        assert zapis == droga
+    if prognoza == "fb_no_room":                       # to samo zdanie i fakty, które poda pisarz
+        assert (str(wynik.reason), wynik.reason.code, wynik.reason.params) == (
+            str(powod), powod.code, powod.params)
+
+
+def test_prognoza_bez_lustra_mowi_zalezy_od_pliku():
+    """Brak lustra (kopia bez kart w bazie, lustro innej kopii - `None` z
+    `present_copy_card_mirror`) i lustro puste: dzisiejsze „zależy od pliku”, nie obietnica."""
+    for cards in (None, ()):
+        powod = writeback.inplace_route("fits", "OBJECT", "NGC 7635", "str", None, op="add",
+                                        cards=cards)
+        assert powod.code == "route_depends"
+    # Karta, która się nie mieści, i XISF - jak bez lustra (lustro nie zmienia innych reguł).
+    lustro = (("SIMPLE", "T", "bool", None),)
+    assert writeback.inplace_route("fits", "OBJECT", "V" * 20, "str", "k" * 60, op="add",
+                                   cards=lustro).code == "fb_card_too_long"
+    assert writeback.inplace_route("xisf", "OBJECT", "NGC 7635", "str", None, op="add",
+                                   cards=lustro) is None

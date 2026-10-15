@@ -29,6 +29,8 @@ from __future__ import annotations
 import dataclasses
 import re
 
+from .item_reasons import PowodPozycji     # powód z kodem (AR-158) - liść bez astropy
+
 _FITS_NAME = re.compile(r"[A-Z0-9_-]{1,8}")   # §4.1.2.1: do 8 znaków z tego zbioru
 FITS_STRING_MAX = 68      # tekst w apostrofach w JEDNYM rekordzie: 80 - nazwa 8 - "= " 2 - apostrofy 2
 FITS_RECORD = 80
@@ -40,12 +42,17 @@ _FITS_COMMENT_SEP = 3     # " / "
 @dataclasses.dataclass(frozen=True)
 class CardViolation:
     """Naruszenie reguł karty wniesione przez łatę. `reason` idzie do raportu pisarza i do powodu
-    pominięcia w podglądzie makra; `kind` ('name' | 'chars' | 'length') oraz `length`/`limit`
-    służą powierzchniom, które mówią własnym językiem (i18n dialogu naprawy nagłówka)."""
+    pominięcia w podglądzie makra - zdanie PL jak dotąd, a od AR-158 `PowodPozycji` z kodem
+    (`card_*`), więc okno zapisu mówi je w języku UI (`writeback._ops_violation`). Parametry
+    naruszenia jako pola - dla powierzchni, które mówią własnym językiem (i18n dialogu naprawy
+    nagłówka): `kind` ('name' | 'chars' | 'length'), `field` - które pole karty łamie regułę
+    ('name' | 'value' | 'comment'), `char` - pierwszy znak spoza zbioru, `length`/`limit`."""
     kind: str
     reason: str
     length: int | None = None
     limit: int | None = None
+    field: str | None = None
+    char: str | None = None
 
 
 def _first_illegal(text):
@@ -81,26 +88,39 @@ def card_violation(keyword, value, comment=None, *, new_card=False) -> CardViola
     comment = None if comment is None else str(comment)
     if new_card and not _FITS_NAME.fullmatch(name):
         return CardViolation(
-            "name", f"nazwa karty {name!r} łamie reguły FITS 4.0 - do 8 znaków spośród A-Z, 0-9, "
-                    f"'_' i '-'")
+            "name", PowodPozycji(f"nazwa karty {repr(name)} łamie reguły FITS 4.0 - do 8 znaków "
+                                 f"spośród A-Z, 0-9, '_' i '-'", "card_name", name=repr(name)),
+            field="name")
     text = str(value)
-    for pole, tresc in (("wartość", text), ("komentarz", comment)):
-        znak = _first_illegal(tresc) if tresc is not None else None
-        if znak is not None:
-            return CardViolation(
-                "chars", f"{pole} karty {name} ma znak {znak!r} spoza drukowalnego ASCII - karta "
-                         f"FITS go nie przyjmie, a w nagłówku XISF łamie XML 1.0")
+    znak = _first_illegal(text)
+    if znak is not None:
+        return CardViolation(
+            "chars", PowodPozycji(f"wartość karty {name} ma znak {repr(znak)} spoza drukowalnego "
+                                  f"ASCII - karta FITS go nie przyjmie, a w nagłówku XISF łamie "
+                                  f"XML 1.0", "card_value_chars", keyword=name, char=repr(znak)),
+            field="value", char=znak)
+    znak = _first_illegal(comment) if comment is not None else None
+    if znak is not None:
+        return CardViolation(
+            "chars", PowodPozycji(f"komentarz karty {name} ma znak {repr(znak)} spoza drukowalnego "
+                                  f"ASCII - karta FITS go nie przyjmie, a w nagłówku XISF łamie "
+                                  f"XML 1.0", "card_comment_chars", keyword=name, char=repr(znak)),
+            field="comment", char=znak)
     pole_wartosci = len(text.replace("'", "''"))
     if pole_wartosci > FITS_STRING_MAX:
         return CardViolation(
-            "length", f"wartość karty {name} ma {pole_wartosci} znaków, a jeden rekord FITS mieści "
-                      f"{FITS_STRING_MAX}", length=pole_wartosci, limit=FITS_STRING_MAX)
+            "length", PowodPozycji(f"wartość karty {name} ma {pole_wartosci} znaków, a jeden rekord "
+                                   f"FITS mieści {FITS_STRING_MAX}", "card_value_long",
+                                   keyword=name, length=pole_wartosci, limit=FITS_STRING_MAX),
+            length=pole_wartosci, limit=FITS_STRING_MAX, field="value")
     if comment:
         limit = (FITS_RECORD - _FITS_VALUE_START - _FITS_COMMENT_SEP
                  - max(pole_wartosci + 2, _FITS_FIXED_FIELD))
         if len(comment) > limit:
             return CardViolation(
-                "length", f"komentarz karty {name} ma {len(comment)} znaków, a przy tej wartości "
-                          f"rekord FITS mieści {max(limit, 0)}", length=len(comment),
-                limit=max(limit, 0))
+                "length", PowodPozycji(f"komentarz karty {name} ma {len(comment)} znaków, a przy tej "
+                                       f"wartości rekord FITS mieści {max(limit, 0)}",
+                                       "card_comment_long", keyword=name, length=len(comment),
+                                       limit=max(limit, 0)),
+                length=len(comment), limit=max(limit, 0), field="comment")
     return None

@@ -7,8 +7,10 @@ Pozycja przebiegu (`pending_object_change`), wpis stagingu karty i renamu (`pend
 zapisu i rdzeń czytają go z bazy - samo i18n okna nie miało z czego złożyć zdania w języku UI. Teraz
 każdy powód to `PowodPozycji`: zdanie PL (`str` - CLI, log, testy i sklejenia biorą je jak tekst,
 znak w znak jak dotąd) + `code` + `params`. Okno składa z nich zdanie `objchg.item.<kod>`
-(`gui.wb_worker.tekst_powodu`); proza bez kodu (wiersz sprzed 0041/0042, tekst systemu, odmowa czytnika
-`scan` i reguły karty `card_rules`) zostaje zdaniem PL.
+(`gui.wb_worker.tekst_powodu`); proza bez kodu (wiersz sprzed 0041/0042, tekst systemu, wyjątek
+czytnika `scan` spoza `XisfFormatError`) zostaje zdaniem PL. Odmowy czytnika i składacza XISF
+(`scan.XisfFormatError.powod`) i reguły karty (`card_rules.CardViolation.reason`) rodzą się z kodem
+tam, gdzie rodzi się ich zdanie (AR-158).
 
 DLACZEGO LIŚĆ: powody piszą sterownik zapisu (`writeback`) i klinga (`repo`: wstrzymanie zapisu,
 dokończenie, doklejka CAS ręki), a czyta GUI. Repo nie importuje planera (`object_change`), więc
@@ -19,7 +21,7 @@ nośnik nie mieszka obok `ZdanieRdzenia` - tu, bez importów projektu i bez SQL.
 
 ZAGNIEŻDŻENIE: powód niższej warstwy jedzie PARAMETREM (`inner`, `detail`, `way`, w `file_not_back`
 też `outer`) - `PowodPozycji` (warstwy z kodem) albo zwykły `str` (tekst `OSError` w języku systemu,
-odmowa czytnika `scan`): jawna granica, zdanie UI wstawia taki tekst znak w znak. Uwagi doklejane za
+wyjątek czytnika bez kodu): jawna granica, zdanie UI wstawia taki tekst znak w znak. Uwagi doklejane za
 powodem (`; `, `dopisz`) to lista `notes` - lista powodów, nie sklejona proza. Lista cech
 (`features`, `paths`) to parametr rodzaju `list` - okno składa ją po `, `, jak rdzeń.
 """
@@ -68,7 +70,17 @@ ITEM_REASON_CODES = frozenset({
     # pisarz XISF (`_XisfRefusal`)
     "xisf_unreadable", "xisf_many_images", "xisf_no_identity", "xisf_prop_rule", "xisf_prop_mismatch",
     "xisf_card_exists", "xisf_prop_without_card", "xisf_bad_op", "xisf_set_missing",
-    "xisf_attr_missing", "xisf_not_utf8", "xisf_no_roundtrip",
+    "xisf_attr_missing", "xisf_not_utf8", "xisf_no_roundtrip", "xisf_unreadable_reader",
+    # odmowy czytnika i składacza nagłówka XISF (`scan.XisfFormatError`, AR-158) - zdanie rodzi się
+    # w `scan`, pisarz przenosi je do okna przez `_XisfRefusal`
+    "xisf_signature", "xisf_no_length", "xisf_no_reserved", "xisf_xml_cut", "xisf_unclosed",
+    "xisf_tag_unclosed", "xisf_card_attr_missing", "xisf_card_missing", "xisf_prop_missing",
+    "xisf_prop_location", "xisf_prop_empty", "xisf_kw_close_without_open", "xisf_kw_content",
+    "xisf_kw_nested", "xisf_kw_unclosed", "xisf_no_cards", "xisf_no_text_template",
+    "xisf_template_attrs", "xisf_template_no_name_value", "xisf_template_no_comment",
+    "xisf_no_attachment", "xisf_padding_broken", "xisf_no_room",
+    # reguły karty FITS 4.0 (`card_rules.CardViolation.reason`, AR-158)
+    "card_name", "card_value_chars", "card_comment_chars", "card_value_long", "card_comment_long",
     # zapis w miejscu i odzysk rozdartego nagłówka
     "phase_not_saved", "header_moved_before_write", "anchor_mismatch", "journal_not_saved",
     "inplace_cut", "inplace_unfinished", "inplace_verify_failed", "inplace_verify_mismatch",
@@ -122,9 +134,11 @@ PARAM_KINDS = {
                      # warstwa pisarza karty i renamu (AR-148)
                      "keyword", "copy", "tmp", "change", "way", "error", "prop", "value", "current",
                      "card", "derived", "op", "value_type", "sha1", "mtime", "db_mtime",
-                     "expected", "needed"), "text"),
+                     "expected", "needed",
+                     # czytnik XISF i reguły karty (AR-158)
+                     "attr", "attrs", "char", "name"), "text"),
     **dict.fromkeys(("n", "tries", "winerror", "op_id", "location", "object_id", "rename_id",
-                     "commit_id", "before", "after", "free"), "int"),
+                     "commit_id", "before", "after", "free", "length", "limit"), "int"),
     **dict.fromkeys(("features", "paths", "sums"), "list"),
 }
 

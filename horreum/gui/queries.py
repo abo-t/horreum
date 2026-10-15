@@ -43,7 +43,8 @@ from horreum.resolve.stack import read_testimony, signature_timestamp
 from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_lookup, alias_snapshot,
                               forma_karty_object, library_root_from_db,
                               optics_mismatch_frame_ids, path_proposals, resolve_name, review_state)
-from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, propose_lineage_candidates
+from horreum.stacks import (REASON_DEGENERATE, REASON_MISMATCH, REASON_NO_CANDIDATES,
+                            REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, propose_lineage_candidates)
 
 
 PATH_TAIL_DIRS = 2
@@ -2391,6 +2392,16 @@ def object_card_gate(r, *, card, form, canon, lookup):
     if card is not None and r["vtype"] != "str":
         return ZdanieRdzenia(f"karta OBJECT nietekstowa ({r['vtype']})", "card_not_text",
                              vtype=r["vtype"])
+    return fits_checksum_gate(r)
+
+
+def fits_checksum_gate(r):
+    """BRAMKA SUMY KONTROLNEJ FITS - powód (`ZdanieRdzenia` z kodem `fits_checksum`, zdanie okna
+    `objchg.gate.fits_checksum`) albo None. Pisarz odmawia FITS z kartą `CHECKSUM`/`DATASUM`
+    (`writeback._fits_inplace_plan`, kod `checksum_present`): zapis nagłówka unieważniłby sumę.
+    JEDEN właściciel warunku dla powierzchni, które mówią to PRZED zapisem: bramki karty `OBJECT`
+    (`object_card_gate`) i podglądu „Napraw nagłówek…” (`RepairHeaderDialog`, AR-163 - cel
+    z `writeback_frame_targets`). `r` = wiersz z `filetype` i `n_sum` (liczba kart sumy klatki)."""
     if r["filetype"] == "fits" and r["n_sum"]:
         return ZdanieRdzenia("FITS z sumą kontrolną (CHECKSUM/DATASUM)", "fits_checksum")
     return None
@@ -3020,35 +3031,67 @@ def _lineage_reason_rows(con):
     ).fetchall()
 
 
-def _czeka_na_reke(con, r):
-    """JEDEN FAKT „gest w panelu ma tu jeszcze co zrobić" dla wiersza `_lineage_reason_rows` -
-    zasila perspektywę „Rodowód do potwierdzenia", stan kolumny („do potwierdzenia" vs „wszystkie
-    odrzucone") i tryb propozycji panelu (`lineage_awaits_hand`).
+_POWODY_RECEPTA_PROPOZYCJA = frozenset({REASON_DEGENERATE, REASON_NO_CANDIDATES, REASON_MISMATCH})
+"""Powody braku rodowodu, których JEDYNĄ receptą ręki jest propozycja materiału (lista nocy):
+okno zdegenerowane (po to propozycja istnieje), okno puste i okno, które myli się wobec zeznania
+pliku (`stacks._plan`, gałąź (d)).
 
-    Powód zwietrzały - nie (czeka na przeliczenie, nie na rękę). Bez żadnego werdyktu - tak: powód
-    sam jest receptą (propozycje, odniesienie czasu, nazwa obiektu). Po werdyktach - tylko wtedy,
-    gdy zostało coś NIEOSĄDZONEGO: kandydat w propozycji (osądzonych propozycja nie zwraca),
-    klatki czekające na zegar albo brak obiektu (receptą jest nadanie nazwy, nie lista). Bez tego
-    stos, z którego człowiek odrzucił ostatniego kandydata, zostawał w kolejce z zadaniem, którego
-    nie da się wykonać. Propozycję liczymy WYŁĄCZNIE dla stosów z werdyktem bez wejść - garstka."""
+ZBIÓR ROZSTRZYGA WYŁĄCZNIE O STOSACH BEZ WERDYKTU. Po werdyktach ręki każdy powód poza
+`no_object` przechodzi przez propozycję (`_reka_i_propozycja`) - także `telescope_mismatch`
+z pustą listą z kubełka wtedy wypada.
+
+ZBIÓR ZAMKNIĘTY, nie „każdy powód z pustą listą": bez werdyktu poza nim zostają powody z WŁASNĄ
+receptą - nazwa obiektu (`no_object`), odniesienie czasu (`offset_unknown`), karta teleskopu
+(`telescope_mismatch`: kandydaci byli, odrzuciła ich oś, więc „napraw kartę" stoi także nad pustą
+listą - kolejność powodów w `_plan`) i nagłówek bez okna (`no_window`: `_plan` daje go przy braku
+POCZĄTKU albo KOŃCA okna, `stacks.py` gałąź `not okno_jest`; bez `DATE-OBS` propozycja jest pusta
+z definicji, więc decyzja na samym pustym wyniku chowałaby takie stosy na zawsze - powód zostaje
+w kubełku w całości, także gdy brakuje samego końca)."""
+
+
+def _reka_i_propozycja(con, r):
+    """JEDEN FAKT „gest w panelu ma tu jeszcze co zrobić" dla wiersza `_lineage_reason_rows` →
+    `(czeka, propozycja)`. Fakt zasila perspektywę „Rodowód do potwierdzenia", stan kolumny („do
+    potwierdzenia" vs „wszystkie odrzucone" / „brak") i tryb propozycji panelu
+    (`lineage_hand_state`); `propozycja` = wynik `stacks.propose_lineage_candidates`, gdy decyzja
+    go liczyła, inaczej `None` - panel bierze z niego licznik klatek nowszych niż obraz także wtedy,
+    gdy stos z kubełka wypadł (zdanie „dlaczego lista jest pusta" nie może zniknąć z trybem).
+
+    Powód zwietrzały - nie (czeka na przeliczenie, nie na rękę). Brak obiektu - tak (receptą jest
+    nadanie nazwy, nie lista). Bez żadnego werdyktu i z powodem, który ma WŁASNĄ receptę (odniesienie
+    czasu, karta teleskopu, nagłówek bez czasu) - tak: powód sam jest receptą. Bez werdyktu z powodem,
+    którego receptą jest PROPOZYCJA (`_POWODY_RECEPTA_PROPOZYCJA`), i po werdyktach - tylko wtedy,
+    gdy propozycja ma co dać: NIEOSĄDZONEGO kandydata (osądzonych propozycja nie zwraca) albo klatki
+    czekające na zegar. Bez tego stos, z którego człowiek odrzucił ostatniego kandydata, zostawał
+    w kolejce z zadaniem, którego nie da się wykonać - a od AR-150 ten sam stan ma stos BEZ werdyktu,
+    któremu propozycja pominęła cały materiał jako zrobiony po zintegrowaniu obrazu (AR-154: 2 stosy
+    NGC7635 na kopii żywej bazy, 66 i 20 takich klatek, stały w kubełku z pustą listą).
+    KOSZT: propozycję liczymy dla stosów z werdyktem bez wejść i dla stosów bez werdyktu z powodem
+    z `_POWODY_RECEPTA_PROPOZYCJA`; materiał okna idzie indeksem `frame(object_id)` (0043)."""
     if lineage_reason_stale(r):
-        return False
-    if not r["excluded"]:
-        return True
+        return False, None
     if r["unresolved_reason"] == REASON_NO_OBJECT:
-        return True
+        return True, None
+    if not r["excluded"] and r["unresolved_reason"] not in _POWODY_RECEPTA_PROPOZYCJA:
+        return True, None
     # Klatki po zintegrowaniu obrazu (trzecia wartość, AR-150) nie są robotą dla ręki - nie ma czego
-    # w nich potwierdzić, więc stos PO WERDYKTACH, któremu zostały tylko one, z kubełka wypada. Stos
-    # bez werdyktu czeka dalej (wyżej) - panel mówi wtedy, ile klatek pominął jako nowsze niż obraz.
-    noce, raw_bez_zegara, _ = propose_lineage_candidates(con, r["master_frame_id"])
-    return raw_bez_zegara > 0 or any(n.frames for n in noce)
+    # w nich potwierdzić, więc stos, któremu zostały tylko one, z kubełka wypada.
+    propozycja = propose_lineage_candidates(con, r["master_frame_id"])
+    noce, raw_bez_zegara, _ = propozycja
+    return raw_bez_zegara > 0 or any(n.frames for n in noce), propozycja
 
 
-def lineage_awaits_hand(con, frame_id):
-    """`_czeka_na_reke` dla JEDNEGO stosu (panel przy zaznaczeniu) - ten sam fakt, co perspektywa.
-    Stos bez zapisanego powodu albo spoza populacji akcyjnej - nie."""
+def _czeka_na_reke(con, r):
+    """Sama decyzja `_reka_i_propozycja` (bool) - dla zbioru perspektywy."""
+    return _reka_i_propozycja(con, r)[0]
+
+
+def lineage_hand_state(con, frame_id):
+    """`_reka_i_propozycja` dla JEDNEGO stosu (panel przy zaznaczeniu) - ten sam fakt, co
+    perspektywa → `(czeka, propozycja)`; propozycja policzona przy decyzji wraca, żeby panel nie
+    liczył jej drugi raz. Stos bez zapisanego powodu albo spoza populacji akcyjnej - `(False, None)`."""
     r = next((r for r in _lineage_reason_rows(con) if r["master_frame_id"] == frame_id), None)
-    return r is not None and _czeka_na_reke(con, r)
+    return (False, None) if r is None else _reka_i_propozycja(con, r)
 
 
 def lineage_pending_frame_ids(con):
@@ -3767,8 +3810,9 @@ LINEAGE_STATES = ("pending", "exact", "history", "mixed", "window", "rejected", 
 * `pending` - bez wejść, z aktualnym powodem: czeka na gest w panelu (ten sam zbiór, co perspektywa
   „Rodowód do potwierdzenia" - `lineage_pending_frame_ids`);
 * `rejected` - człowiek odrzucił wszystkie kandydatury i powodu do gestu nie ma;
-* `none` - policzony, bez wejść i bez sprawy do gestu (powód zwietrzały - czeka na przeliczenie -
-  albo przebieg nie zostawił powodu);
+* `none` - policzony, bez wejść i bez sprawy do gestu (powód zwietrzały - czeka na przeliczenie -,
+  przebieg nie zostawił powodu albo propozycja nie ma czego dać: cały materiał powstał po
+  zintegrowaniu obrazu - panel mówi licznik pominiętych, AR-154);
 * `uncounted` - rodowodu tego obrazu nigdy nie liczono (brak wiersza `integration`).
 
 Klatka, która nie jest gotowym obrazem, stanu nie ma (n.d.) - kolumna jest pusta, facet jej nie liczy.
@@ -3811,13 +3855,17 @@ def _stan_rodowodu(r, oczekuje):
     return "history" if r["n_history"] else "exact"
 
 
-def stack_lineage_states(con):
+def stack_lineage_states(con, oczekujace=None):
     """Stan rodowodu KAŻDEGO gotowego obrazu (`kind = 'master_light'`) → dict `frame_id → token`
     z `LINEAGE_STATES`. Klatki innych rodzajów w słowniku nie ma (n.d.).
 
     Koszt: jedno zapytanie po stosach archiwum (193 wiersze na kopii `pf4`) + zbiór perspektywy
-    „Rodowód do potwierdzenia" - liczone przy składzie zbioru, nie per wiersz."""
-    oczekujace = lineage_pending_frame_ids(con)
+    „Rodowód do potwierdzenia" - liczone przy składzie zbioru, nie per wiersz. Zbiór kubełka liczy
+    propozycję rodowodu (AR-154), więc skład podaje go gotowym (`oczekujace` = wynik
+    `lineage_pending_frame_ids` TEJ SAMEJ migawki) - perspektywa kubełka bierze go też jako trim
+    i bez tego liczyłaby go dwa razy. `None` = policz tu."""
+    if oczekujace is None:
+        oczekujace = lineage_pending_frame_ids(con)
     return {int(r["frame_id"]): _stan_rodowodu(r, int(r["frame_id"]) in oczekujace)
             for r in _stany_rodowodu_wiersze(con)}
 
@@ -4007,10 +4055,18 @@ def writeback_frame_targets(con, frame_ids):
     wiersze per frame). frame_ids jako TABLICA JSON (`json_each`, jeden param). Wybór celu (D-W1:
     dokładnie 1 present; T6: nie skompresowany; D-X-13: nie degenerat tożsamości) robi makro, nie ten
     czytnik. ORDER BY frame_id, location_id. Zwraca: frame_id, filetype, sha1_data_uncomputable,
-    location_id, path, header_hash, hdu_index, compressed."""
+    location_id, path, header_hash, hdu_index, compressed, n_sum.
+
+    `n_sum` = 1, gdy klatka ma kartę `CHECKSUM`/`DATASUM`, inaczej 0 - fakt bramki sumy kontrolnej
+    (`fits_checksum_gate`, AR-163; read-modele bramki karty `OBJECT` niosą tu liczbę kart, bramka
+    czyta tylko prawdziwość). Podzapytanie NIESKORELOWANE: jeden przebieg po indeksie `keyword`,
+    nie dwa wyszukiwania na klatkę - zmierzone na kopii pf4 (17 tys. klatek, cały zbiór): +4 ms
+    przy 60 ms bez faktu, wariant skorelowany `count(*)` dawał +62 ms."""
     return con.execute(
         "SELECT f.id AS frame_id, f.filetype, f.sha1_data_uncomputable, "
-        "       l.id AS location_id, l.path, l.header_hash, l.hdu_index, l.compressed "
+        "       l.id AS location_id, l.path, l.header_hash, l.hdu_index, l.compressed, "
+        "       f.id IN (SELECT c3.frame_id FROM cards c3 "
+        "                WHERE c3.keyword IN ('CHECKSUM', 'DATASUM')) AS n_sum "
         "FROM frame f "
         "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
@@ -5026,6 +5082,40 @@ def location_paths_in_dir(con, directory):
     return [r["path"] for r in con.execute(
         "SELECT path FROM location WHERE path LIKE ? ESCAPE '!' ORDER BY id", (wzor,))
         if os.path.normcase(os.path.dirname(os.path.normpath(r["path"]))) == katalog]
+
+
+def present_copy_card_mirror(con, frame_ids):
+    """LUSTRO KART OBECNEJ KOPII (AR-155) - `{frame_id: krotka (keyword, value_raw, value_type,
+    comment) | None}` dla każdej podanej klatki; z niego podgląd „Zmień obiekt…” przewiduje drogę
+    dopisania karty FITS (`writeback.inplace_route(cards=…)`).
+
+    `cards` należą do KLATKI, nie do kopii: niesie je kopia, która ostatnio zmieniła zeznanie
+    (`repo.refresh_location`, reguła kopii wiodącej AR-4). Lustro opisuje nagłówek obecnej kopii
+    wyłącznie wtedy, gdy WSZYSTKIE kopie klatki (obecne i nieobecne) mają jeden `header_hash` -
+    ten sam tekst nagłówka, więc ten sam układ rekordów, bez względu na to, która kopia mówi - i gdy
+    nie czeka zapis z zeznaniem wstrzymanym (`withheld_write`, AR-82: plik zapisany, `cards`
+    jeszcze sprzed zapisu). Inaczej `None` - „lustro nie wie”, a podgląd mówi „zależy od pliku”.
+    Kopia bez `header_hash` też daje `None`. Kolejność kart nie gra: zapas liczy się z ich
+    liczby i rodzaju. frame_ids jako tablica JSON (`json_each`)."""
+    ids = json.dumps(sorted({int(f) for f in frame_ids}))
+    znane = {int(r["fid"]) for r in con.execute(
+        "SELECT f.id AS fid FROM frame f "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id "
+        "                    AND l.header_hash IS NULL) "
+        "  AND (SELECT count(DISTINCT l.header_hash) FROM location l "
+        "        WHERE l.frame_id = f.id) = 1 "
+        "  AND NOT EXISTS (SELECT 1 FROM withheld_write w WHERE w.frame_id = f.id "
+        "                    AND w.settled_at IS NULL)", (ids,))}
+    karty: dict[int, list] = {}
+    for r in con.execute(
+            "SELECT frame_id, keyword, value_raw, value_type, comment FROM cards "
+            "WHERE frame_id IN (SELECT value FROM json_each(?)) ORDER BY frame_id, keyword, idx",
+            (json.dumps(sorted(znane)),)):
+        karty.setdefault(int(r["frame_id"]), []).append(
+            (r["keyword"], r["value_raw"], r["value_type"], r["comment"]))
+    return {int(f): (tuple(karty[int(f)]) if int(f) in karty else None)
+            for f in json.loads(ids)}
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po

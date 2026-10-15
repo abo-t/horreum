@@ -382,7 +382,8 @@ def test_szukajka_i_oznaczenie_celu_mowia_jednym_glosem(wpis, dokladne, oznaczen
     elif trafione:
         assert wynik == (None, tuple(sorted(trafione)))
     else:
-        assert wynik == (None, tuple(sorted({t.canon for t in rest})[:5]))
+        # Najbliżsi w kolejności pewności `find_matches`, kanon raz (AR-151) - nie alfabetem.
+        assert wynik == (None, tuple(dict.fromkeys(t.canon for t in rest))[:5])
         assert oznaczenie is not None or wynik[1], "literówka bez kandydatów - fikstura bez sensu"
 
 
@@ -407,6 +408,97 @@ def test_szczebel_katalogowy_bije_nazwe_a_rekord_nazwy_zostaje_na_liscie():
         assert [t.canon for t in exact] == [wpis]
         assert lustro in {t.canon for t in rest}
         assert targets.resolve_plan_canon(wpis) == (wpis, ())
+
+
+# ─────────────────────────────────────────────────────────────── najbliżsi po pewności (AR-151)
+
+def _cel(canon, *aliasy, layer="core"):
+    return targets.Target(canon=canon, type="EN", ra_deg=90.0, dec_deg=45.0, major_arcmin=10.0,
+                          minor_arcmin=None, mag=None, mag_from_b=False, aliases=tuple(aliasy),
+                          layer=layer, why=None, size_source=None)
+
+
+# Pula w porządku ASSETU - alfabet celowo inny niż pewność: szum (podciąg w środku słowa) stoi
+# na początku alfabetu i na początku puli.
+_PULA_AR151 = (
+    _cel("AAA 1", "Supernebula"),                     # „neb” w środku słowa
+    _cel("ESO351-030", "Sculptor Dwarf Elliptical"),  # „Fe” w środku słowa (dwarF Elliptical)
+    _cel("ABB 2", "Xfe Cloud"),                       # „Fe” w środku słowa
+    _cel("ZZZ 9", "Cave Nebula"),                     # „neb” od początku słowa aliasu
+    _cel("C9", "Nebula Cave"),                        # „neb” prefiks aliasu
+    _cel("Fe 7"),                                     # „Fe” prefiks kanonu (pula: 7 przed 6)
+    _cel("Fe 6"),
+    _cel("BBB 3", "Big Nebula"),                      # „neb” od początku słowa, za ZZZ 9 w puli
+    _cel("NGC7007"),
+    _cel("NGC7000", "North America Nebula"),
+    _cel("ACC 4", "Ringfe"),                          # „Fe” w środku słowa
+    _cel("ADD 5", "Fe Arc"),                          # „Fe” prefiks aliasu
+    _cel("AEE 6", "Old Fe"),                          # „Fe” od początku słowa aliasu
+    _cel("AFF 7", "Hafe"),                            # „Fe” w środku słowa
+    _cel("Fe 7", layer="cirrus"),                     # ten sam kanon drugi raz (inna warstwa)
+)
+
+# Wpis → dokładna kolejność najbliższych (pierwsza piątka, kanon raz).
+_NAJBLIZSI = [
+    # Debet AR-151: szum sklejonych słów był pierwszy alfabetem i wypychał „Fe 6”/„Fe 7” poza
+    # piątkę; teraz: prefiks kanonu (porządek puli), prefiks aliasu, początek słowa, środek słowa.
+    ("Fe", ("Fe 7", "Fe 6", "ADD 5", "AEE 6", "ESO351-030")),
+    # Literówka - prefiks kanonu, porządek puli (7007 przed 7000), bez alfabetu.
+    ("NGC 700", ("NGC7007", "NGC7000")),
+    ("ngc700", ("NGC7007", "NGC7000")),
+    # Cztery szczeble naraz: prefiks aliasu, początek słowa (porządek puli: ZZZ 9, BBB 3, NGC7000),
+    # środek słowa na końcu.
+    ("neb", ("C9", "ZZZ 9", "BBB 3", "NGC7000", "AAA 1")),
+    # Sam środek słowa - porządek puli (alfabet dałby AAA 1, BBB 3, C9, ESO351-030, NGC7000).
+    ("ul", ("AAA 1", "ESO351-030", "ZZZ 9", "C9", "BBB 3")),
+    ("dwarf", ("ESO351-030",)),
+]
+
+
+@pytest.mark.parametrize("wpis, szczebel", [
+    ("eso35", 0), ("ESO 351", 0),                     # prefiks kanonu (surowo i `norm_alnum`)
+    ("sculp", 1),                                     # prefiks aliasu
+    ("dwarf", 2), ("elliptical", 2),                  # od początku słowa (spacja w surowym tekście)
+    ("dwarfell", 2),                                  # od początku słowa w kluczu `norm_alnum`
+    ("fe", 3), ("warf", 3), ("ptor dw", 3),           # w środku słowa
+])
+def test_szczebel_podciagu_ESO351_030(wpis, szczebel):
+    """Szczebel pewności trafienia (`_szczebel_podciagu`) na rekordzie z debetu AR-151: „Fe”
+    trafia go w środku słowa (dwarF Elliptical), więc staje za kandydatami z prefiksem."""
+    k = _cel("ESO351-030", "Sculptor Dwarf Elliptical").find_keys
+    assert targets._szczebel_podciagu(k, wpis.casefold(), targets.norm_alnum(wpis)) == szczebel
+
+
+@pytest.mark.parametrize("wpis, najblizsi", _NAJBLIZSI)
+def test_najblizsi_oznaczenia_po_pewnosci_nie_alfabetem(monkeypatch, wpis, najblizsi):
+    """AR-151: `find_matches` skleja słowa nazwy (`norm_alnum`), więc `Fe` trafia „Sculptor
+    DwarF Elliptical”; od AR-149 ta reguła zasila najbliższych oznaczenia, a `resolve_plan_canon`
+    sortował je ALFABETEM i ucinał do pięciu - szum wypychał kandydata, którego nazwa zaczyna się
+    wpisanym tekstem. Teraz kolejność pewności z `find_matches`, w obrębie szczebla porządek puli,
+    kanon raz na miejscu pierwszego trafienia. Woła KOŃCOWE `resolve_plan_canon` (pula podstawiona -
+    kolejność przypięta niezależnie od assetu)."""
+    monkeypatch.setattr(targets, "load_targets", lambda layers=None: _PULA_AR151)
+    assert targets.resolve_plan_canon(wpis) == (None, najblizsi)
+
+
+def test_najblizsi_z_assetu_fe_i_literowka():
+    """Ten sam debet na prawdziwym assecie: `Fe` - dwa kanony z prefiksem przed `ESO351-030`
+    (dawniej pierwszy alfabetem), literówka `NGC 700` - kanony z prefiksem."""
+    assert targets.resolve_plan_canon("Fe") == (None, ("Fe 6", "Fe 7", "ESO351-030"))
+    assert targets.resolve_plan_canon("NGC 700") == (None, ("NGC7000", "NGC7007"))
+
+
+def test_kolejnosc_podciagu_nie_zmienia_skladu_ani_dokladnych():
+    """Sort pewności przestawia WYŁĄCZNIE listę podciągu `find_matches` - zbiór trafień i dokładne
+    zostają (AR-146: nic, co trafiało, nie przestaje), a wiersze planera mają własny klucz."""
+    pool = targets.load_targets(targets.ALL_LAYERS)
+    for wpis in ("Fe", "neb", "NGC70", "Sh2 13", "veil", "+00.9"):
+        exact, rest = targets.find_matches(pool, wpis)
+        szczeble = [targets._szczebel_podciagu(t.find_keys, wpis.casefold(),
+                                               targets.norm_alnum(wpis)) for t in rest]
+        assert szczeble == sorted(szczeble), wpis
+        przed = [t for t in pool if t in set(exact) | set(rest)]
+        assert sorted(map(id, exact + rest)) == sorted(map(id, przed)), wpis
 
 
 # ─────────────────────────────────────────────────────────────── CLI

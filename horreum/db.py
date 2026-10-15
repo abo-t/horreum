@@ -149,6 +149,9 @@ from importlib import resources
 # `pending_renames` i `withheld_write` - kod powodu warstwy pisarza karty i renamu (okna zapisu mówią
 # w języku UI także powodem przeczytanym z bazy). Wchodzą PUSTE, bez backfillu (na żywym archiwum
 # 1 + 63 + 1 wierszy z prozą).
+# 0043 to PRZYROST (CREATE INDEX, AR-154): `idx_frame_object` na `frame(object_id)` - materiał okna
+# stosu pyta o lighty jednego obiektu, a kubełek rodowodu woła propozycję także dla stosów bez
+# werdyktu z powodem okna. Zero ruszonych wierszy.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -191,6 +194,7 @@ MIGRATIONS = [
     (40, "0040_axis_retired.sql"),
     (41, "0041_object_change_reason_code.sql"),
     (42, "0042_writer_reason_code.sql"),
+    (43, "0043_frame_object_index.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

@@ -6,6 +6,43 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.15.0] - 2026-10-16
+
+Wydanie o **uzgadnianiu kart z folderem i rodowodzie bez klatek spoza czasu obrazu**. „Uzgodnij” z wiersza
+Porządków „Plik nie zgadza się z obiektem” dopisuje kartę `OBJECT` także klatkom obiektu rozpoznawanego po
+współrzędnych (np. Veil) i wariantom stosów (autocrop), które wcześniej wypadały z gestu. Wejścia rodowodu
+nagrane po zapisaniu obrazu dostają własny wiersz Porządków i przycisk „Odrzuć nowsze niż obraz”. Zaznaczenie
+w Zbiorach przeżywa przeładowania widoku, które nie zmieniają zbioru. Schemat bazy bez zmian (wersja 43) -
+bazę otwartą w tej wersji dalej otworzy 0.14.0.
+
+### Dodane
+
+- **Forma karty obiektu-regionu:** obiekt rozpoznawany po współrzędnych dostaje formę karty `OBJECT` zgodną
+  z plikami w jego folderze, więc „Uzgodnij” i „Zmień obiekt…” piszą kartę także klatkom, które region
+  sprowadza z powrotem do obiektu; klatka spoza regionu dostaje odmowę z powodem.
+- **Rodowód z klatkami nowszymi niż obraz:** wiersz Porządków i perspektywa w Zbiorach, przycisk „Odrzuć
+  nowsze niż obraz” w panelu Rodowód (z „Cofnij werdykt”) oraz stan „tylko klatki nowsze niż obraz” w kolumnie
+  i facecie Rodowód.
+- „Uzgodnij” podaje sumę dróg zapisu kart (w miejscu / cały plik / zależy od pliku), a klatki z kilkoma
+  kopiami pomija z receptą wspólną z wierszem „Duplikaty”.
+
+### Zmienione
+
+- „Uzgodnij” zapisuje kartę wariantom stosów (autocrop), gdy oryginał jest bez zmian - warianty nie są już
+  zdejmowane jako para; wiersz „Plik nie zgadza się z obiektem” sprawdza każdą obecną kopię.
+- Błędy systemu przy zapisie kart (odmowa dostępu, brak pliku, brak miejsca, zerwany udział sieciowy) mówią
+  krótkim zdaniem w języku interfejsu; surowy komunikat systemu jest w podpowiedzi.
+- Pliki FITS z sumą kontrolną (`CHECKSUM`, `DATASUM`): obie drogi zapisu odmawiają jedną regułą.
+- Cofnięcie zapisu w miejscu uznaje plik za „już cofnięty” wyłącznie z dowodem całego pliku; przerwane
+  cofnięcie mówi, ile plików wymaga sprawdzenia, bez obietnicy wyniku.
+- Zaznaczenie w Zbiorach przeżywa przeładowania, które nie zmieniają zbioru (wynik Pól, kolumny wybrane ręką,
+  Dostawa, grupowanie po wersji stosu, kolumna „Wersja”); panel Rodowód zachowuje noc, relację i wiersze.
+- Szuflada Zbiorów podaje pozostałe powody w podpowiedzi; status „Napraw nagłówek…” nie ucina zdania.
+
+### Naprawione
+
+- Cel gestu bez klatki w bieżącym zbiorze nie nadpisuje już zaznaczenia zrobionego ręką.
+
 ## [0.14.0] - 2026-10-16
 
 Wydanie o **karcie FITS dopisanej w miejscu i powodach zapisu w języku interfejsu**. „Zmień obiekt…”
@@ -1400,7 +1437,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.14.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/abo-t/horreum/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/abo-t/horreum/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/abo-t/horreum/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/abo-t/horreum/compare/v0.11.0...v0.12.0

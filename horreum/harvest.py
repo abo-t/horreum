@@ -62,6 +62,7 @@ from datetime import datetime
 
 from . import hashing, naming, projection, scan, stacks
 from .gui import queries
+from .item_reasons import blad_systemu, powod_systemu, proza_z_diagnoza   # błąd systemu klasą (AR-184)
 from .resolve._coerce import _to_float, _to_int, _to_text
 from .resolve.cameras import normalize_camera
 from .resolve.filters import normalize_filter
@@ -98,7 +99,9 @@ _TESTIMONY_DEPTH = 2                                    # ile poziomów pod wyj�
 REASONS = ("no_raw_darks", "unreadable", "no_history", "no_inputs", "inputs_unknown",
            "inputs_ambiguous", "mixed_profile", "no_profile", "no_night", "header_mismatch",
            "outside_release", "no_config", "name_taken", "no_release", "no_light_seat",
-           "color_unknown", "foreign_calibration")
+           "color_unknown", "foreign_calibration",
+           # siedziba w archiwum nieczytelna (zerwany udział, odmowa dostępu) - nie „siedziby nie ma”
+           "seat_unreadable")
 # Statusy pozycji - JEDYNY właściciel listy (dialog: literalna mapa na klucze i18n + test parytetu).
 # Trzy pierwsze daje plan, reszta to wynik kopii po `apply`.
 STATUSES = ("would-place", "exists", "review", "placed", "verify_bad", "conflict", "error", "cancelled")
@@ -108,6 +111,32 @@ class HarvestCancelled(Exception):
     """Sonda żniw przerwana na żądanie wołającego (`should_cancel` w `discover`/`plan`). Planu
     częściowego nie ma: pozycje policzone przed przerwaniem nie są obrazem wyjścia WBPP, więc wołający
     porzuca wynik, zamiast pokazać połowę katalogu jako całość."""
+
+
+class _SiedzibaNieczytelna(Exception):
+    """Odczyt katalogu siedziby w archiwum padł błędem innym niż „katalogu nie ma” - wewnętrzny sygnał
+    planu (pozycja `review` z powodem `seat_unreadable`), nie wychodzi poza moduł. `blad` = wyjątek
+    systemu (powód klasą: `item_reasons.blad_systemu`)."""
+
+    def __init__(self, blad):
+        super().__init__(blad)
+        self.blad = blad
+
+
+def _wpisy_siedziby(seat, *, brak=(FileNotFoundError,)):
+    """`os.listdir(seat)` posortowane albo None - siedziby jeszcze nie ma. „Nie ma” = podklasa
+    z `brak` i klasa `os_missing` albo kod spoza klas (`NotADirectoryError` stosu, kod Windows przed
+    podklasą wyjątku, AR-183): zerwany udział (53/67) CPython podaje jako `FileNotFoundError`, a siedziba
+    istnieje - wtedy i przy każdym innym błędzie systemu `_SiedzibaNieczytelna`, nie „do wciągnięcia”
+    na udział, którego nie widać. `brak` - podklasy, które wołający uznaje za brak siedziby."""
+    try:
+        return sorted(os.listdir(seat))
+    except brak as exc:
+        if getattr(powod_systemu(exc), "code", None) not in (None, "os_missing"):
+            raise _SiedzibaNieczytelna(exc) from exc
+        return None
+    except OSError as exc:
+        raise _SiedzibaNieczytelna(exc) from exc
 
 
 def discover(wbpp_dir, *, should_cancel=None):
@@ -201,7 +230,8 @@ class HarvestItem:
     `placed` · `verify_bad` · `conflict` · `error` · `cancelled`. `reason` = token z `REASONS`
     (wyłącznie `review`), `reason_n` = liczność powodu (ile wejść, ile profili, ile nocy),
     `detail` = treść dla człowieka (wyjątek czytnika, pierwsze nazwy wejść, co się nie zgadza, powód
-    klingi po `apply`). `release` = `(object_canon, zestaw)` z manifestu-świadka albo `None`;
+    klingi po `apply`; błąd systemu klasą jako `PowodPozycji` z kodem - okno mówi go w języku UI,
+    AR-184). `release` = `(object_canon, zestaw)` z manifestu-świadka albo `None`;
     `exists_path` = gdzie archiwum już ma te bajty (baza albo dysk siedziby; `None` przy klatce bez
     obecnej kopii). `zestaw` = segment zestawu Horreum (jak w wydaniu, `76EDPH_ASI2600MM`), nie folder
     siedziby - folder archiwum (`76EDPH_2600MM`) niesie `dst`. Stos (`kind='master_light'`) niesie
@@ -377,13 +407,12 @@ def _on_disk(seat, night8, filter_segment, src, file_sha1):
     """Te same bajty już leżą w siedzibie (idempotencja BEZ skanu: żniwa powtórzone przed Dostawą)?
     Kandydaci = pliki grupy tej nocy i filtru (`MASTERFLAT_FLATGRP_<noc>?_FILTER_<filtr>_.xisf`)
     o rozmiarze źródła; dopiero ich sha1 całego pliku porównujemy z `file_sha1`. Siedziby jeszcze
-    nie ma → `None`."""
+    nie ma → `None`; siedziba nieczytelna → `_SiedzibaNieczytelna` (`_wpisy_siedziby`)."""
     sufiksy = "|".join(re.escape(s) for s in scan.XISF_SUFFIXES)
     rx = re.compile(rf"MASTERFLAT_FLATGRP_{night8}[0-9]_FILTER_{re.escape(filter_segment)}_(?:{sufiksy})",
                     re.IGNORECASE)
-    try:
-        names = sorted(os.listdir(seat))
-    except FileNotFoundError:
+    names = _wpisy_siedziby(seat)
+    if names is None:
         return None
     size = os.path.getsize(src)
     for name in names:
@@ -486,10 +515,9 @@ def _stack_on_disk(seat, src, file_sha1):
     """Te same bajty już leżą w siedzibie stosu (idempotencja BEZ skanu: żniwa powtórzone przed
     Dostawą)? Kandydaci = `.xisf` siedziby o rozmiarze źródła; prefiks treści (`projection._same_content`)
     odsiewa inne stosy tej samej geometrii przed pełnym sha1 (stos to setki MB, często po SMB).
-    Siedziby jeszcze nie ma → `None`."""
-    try:
-        names = sorted(os.listdir(seat))
-    except (FileNotFoundError, NotADirectoryError):
+    Siedziby jeszcze nie ma → `None`; siedziba nieczytelna → `_SiedzibaNieczytelna`."""
+    names = _wpisy_siedziby(seat, brak=(FileNotFoundError, NotADirectoryError))
+    if names is None:
         return None
     ss = os.stat(src)
     for name in names:
@@ -643,7 +671,11 @@ def _plan_stack(con, item, t, ctx, reserved):
     item.filter_segment = filtr_dir
     seat = os.path.join(ctx.stacks_root, obiekt, zestaw_dir, filtr_dir)
 
-    na_dysku = _stack_on_disk(seat, item.src, t.file_sha1)
+    try:
+        na_dysku = _stack_on_disk(seat, item.src, t.file_sha1)
+    except _SiedzibaNieczytelna as e:                    # udział siedziby nie odpowiada - nie „do wciągnięcia”
+        _review(item, "seat_unreadable", detail=blad_systemu(e.blad))
+        return
     if na_dysku is not None:
         item.status, item.exists_path = "exists", na_dysku
         item.known_to_db = any(_path_key(p) == _path_key(na_dysku) for p in obecne)
@@ -741,8 +773,10 @@ def plan(con, wbpp_dir, *, archive_root, manifest=None, read=read_master, should
         try:
             t = read(src)
         except Exception as exc:                          # czytnik nie umiera za cały plan
+            # Błąd systemu klasą z kodem (AR-184); odmowa parsera mówi jak dotąd (`ValueError: …`).
             items.append(HarvestItem(src, "unknown", "review", "unreadable",
-                                     detail=f"{scan.nazwa_typu_diagnozy(exc)}: {exc}",
+                                     detail=(powod_systemu(exc)
+                                             or f"{scan.nazwa_typu_diagnozy(exc)}: {exc}"),
                                      src_mtime_ns=src_mtime_ns))
             continue
         item = HarvestItem(src, t.kind, "review", sha1_data=t.sha1_data, file_sha1=t.file_sha1,
@@ -858,7 +892,11 @@ def plan(con, wbpp_dir, *, archive_root, manifest=None, read=read_master, should
                 continue
             seat = os.path.join(root, *MASTERS_SUBDIR, item.zestaw, item.filter_segment)
 
-        na_dysku = _on_disk(seat, night8, item.filter_segment, src, t.file_sha1)
+        try:
+            na_dysku = _on_disk(seat, night8, item.filter_segment, src, t.file_sha1)
+        except _SiedzibaNieczytelna as e:                # udział siedziby nie odpowiada - nie „do wciągnięcia”
+            _review(item, "seat_unreadable", detail=blad_systemu(e.blad))
+            continue
         if na_dysku is not None:
             item.status, item.exists_path, item.known_to_db = "exists", na_dysku, False
             continue
@@ -886,7 +924,8 @@ class HarvestResult:
     """Wynik `apply`: wszystkie pozycje planu (kopiowane ze statusem po kopii, reszta bez zmian),
     `placed_dirs` = katalogi z co najmniej jednym `placed` (ich wspólny rodzic to korzeń skanu po
     żniwach), `cancelled` = przerwano przed końcem. `manifest_path` = zapisane zeznanie biegu;
-    `manifest_error` = treść błędu jego zapisu (`None` przy sukcesie) - kopie już leżą, więc wynik
+    `manifest_error` = powód błędu jego zapisu (błąd systemu klasą albo tekst systemu, `None` przy
+    sukcesie) - kopie już leżą, więc wynik
     wraca, zamiast zginąć w wyjątku."""
     items: list
     placed_dirs: list
@@ -896,7 +935,10 @@ class HarvestResult:
 
 
 def _manifest_payload(harvest_plan, items, cancelled, now):
-    """Treść zeznania biegu: cały przebieg, także pozycje, które nie weszły (z powodem)."""
+    """Treść zeznania biegu: cały przebieg, także pozycje, które nie weszły (z powodem). `detail`
+    z błędem systemu klasą zapisuje się z surowym tekstem systemu za zdaniem (`proza_z_diagnoza`) -
+    JSON podklasy `str` wziąłby samo zdanie i diagnoza zginęłaby z zeznania. Czytelnik zeznań
+    (`_harvest_testimonies`) `detail` nie czyta."""
     counts = Counter(it.status for it in items)
     return {
         "wbpp_dir": harvest_plan.wbpp_dir, "manifest_root": harvest_plan.manifest_root, "ts": now,
@@ -904,7 +946,7 @@ def _manifest_payload(harvest_plan, items, cancelled, now):
         "cancelled": cancelled, "counts": dict(sorted(counts.items())),
         "items": [{
             "src": it.src, "dst": it.dst, "kind": it.kind, "status": it.status, "reason": it.reason,
-            "reason_n": it.reason_n, "detail": it.detail, "sha1_data": it.sha1_data,
+            "reason_n": it.reason_n, "detail": proza_z_diagnoza(it.detail), "sha1_data": it.sha1_data,
             "file_sha1": it.file_sha1, "frame_ids": list(it.frame_ids), "nights": list(it.nights),
             "profile_id": it.profile_id, "release": list(it.release) if it.release else None,
             "exists_path": it.exists_path, "known_to_db": it.known_to_db,
@@ -948,7 +990,7 @@ def apply(harvest_plan, *, now,
                 status, why = copy(it.src, it.dst, expected_sha1=it.file_sha1,
                                    library_root=harvest_plan.archive_root)
             except Exception as exc:
-                status, why = "error", f"{type(exc).__name__}: {exc}"
+                status, why = "error", blad_systemu(exc)
             out.append(dataclasses.replace(it, status=status, detail=why))
             if status == "placed":
                 placed_dirs.add(os.path.dirname(it.dst))
@@ -962,7 +1004,7 @@ def apply(harvest_plan, *, now,
             manifest_path = projection.write_harvest_manifest(
                 harvest_plan.wbpp_dir, _manifest_payload(harvest_plan, items, cancelled, now), now=now)
         except OSError as exc:
-            manifest_error = f"{type(exc).__name__}: {exc}"
+            manifest_error = blad_systemu(exc)
     return HarvestResult(items=items, placed_dirs=sorted(placed_dirs), cancelled=cancelled,
                          manifest_path=manifest_path, manifest_error=manifest_error)
 

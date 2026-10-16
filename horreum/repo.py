@@ -6830,6 +6830,42 @@ def restore_integration_judgment(con, *, integration_id, change, now, uid="local
     return True
 
 
+def judge_stacks_inputs(con, *, inputs_by_master, excluded, now, uid="local"):
+    """Werdykt ręki na wejściach KILKU stosów jednym gestem (AR-178: „Odrzuć nowsze niż obraz we
+    wszystkich obrazach") - jedna transakcja (`atomic`) dla wszystkich: gest zapisuje się cały albo
+    wcale, więc jedno „Cofnij” ma komplet materiału. `inputs_by_master` = `{master_frame_id:
+    input_frame_ids}`; integrację stosu wskazuje jego klatka (UNIQUE z 0012). Każdy stos idzie
+    klingą jednego stosu (`judge_integration_inputs`) - zdarzenia, idempotencja i precedencja
+    zostają w jednym miejscu. Stos bez wiersza `integration` to błąd wołającego (EXPECT) i wycofuje
+    cały gest. Zwraca `[(master_frame_id, integration_id, (JudgedInput, …)), …]` stosów z realną
+    zmianą, w kolejności `inputs_by_master`."""
+    wynik = []
+    with atomic(con):
+        for master, ids in inputs_by_master.items():
+            row = con.execute("SELECT id FROM integration WHERE master_frame_id = ?",
+                              (master,)).fetchone()
+            if row is None:
+                raise ValueError(f"frame:{master} nie ma wiersza integration")
+            zmiany = judge_integration_inputs(con, integration_id=row["id"],
+                                              input_frame_ids=list(ids), excluded=excluded,
+                                              now=now, uid=uid)
+            if zmiany:
+                wynik.append((master, row["id"], tuple(zmiany)))
+    return wynik
+
+
+def restore_integration_judgments(con, *, changes, now, uid="local"):
+    """COFNIĘCIE gestu werdyktu w JEDNEJ transakcji (`atomic`) - jednego stosu albo zbiorczego
+    (AR-178). `changes` = `(integration_id, JudgedInput)` z klingi gestu. Każdy wiersz przechodzi
+    CAS `restore_integration_judgment`: wiersz zmieniony po geście (nowszy werdykt, przebieg)
+    zostaje, reszta wraca - a awaria w połowie nie zostawia gestu cofniętego częściowo (osobne
+    transakcje per wiersz zostawiały). Zwraca liczbę przywróconych wierszy."""
+    with atomic(con):
+        return sum(restore_integration_judgment(con, integration_id=iid, change=z, now=now,
+                                                uid=uid)
+                   for iid, z in changes)
+
+
 def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0, kept_frames=(),
                                kept_proven=0):
     """Stosy BEZ zapisanych wejść — JEDEN `event(integration.lineage_summary)` z licznością per

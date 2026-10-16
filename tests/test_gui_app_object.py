@@ -3058,7 +3058,7 @@ def test_wyjatek_workera_sprzata_staging_od_razu(ktore, request):
                        old_value=None, new_value="X", new_type="str", new_comment=None,
                        expected_header_hash="h")
     dlg._run_id = "r-fail"
-    dlg._on_failed("commit", "OSError: dysk zniknął")
+    dlg._on_failed("commit", "OSError: dysk zniknął", "")
     assert con.execute("SELECT count(*) FROM pending_changes").fetchone()[0] == 0
     assert "dysk zniknął" in dlg.error.text()
     dlg.reject()

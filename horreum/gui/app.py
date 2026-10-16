@@ -33,7 +33,7 @@ from horreum import db, macro as macro_mod, projection, repo, resolver, stacks
 from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-wolny)
 from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
-from horreum.gui.wb_worker import (ogon_cofniecia, podpowiedz_kart, tekst_powodu,
+from horreum.gui.wb_worker import (EtykietaBledu, ogon_cofniecia, podpowiedz_kart, tekst_powodu,
                                    zdanie_commitu_kart)
 from horreum.gui.config_dialog import AssignConfigDialog, dopasuj_wysokosc
 # Kontener strony zbiorów: stałe prezentacji są wartościami jego sygnału, a `_TRASY` (poziom modułu)
@@ -1053,7 +1053,9 @@ class ConfirmPathObjectsDialog(QDialog):
                                         n=sum(pominiete.values()))))
             self.cards_skipped = QListWidget()
             for powod, n in sorted(pominiete.items(), key=lambda kv: (-kv[1], kv[0])):
-                self.cards_skipped.addItem(i18n.t("path.cards_skipped_item", reason=powod, n=n))
+                # Powód bramki celu i makra z kodem (AR-181) w języku UI; zdania katalogu bez zmian.
+                self.cards_skipped.addItem(i18n.t("path.cards_skipped_item",
+                                                  reason=tekst_powodu(powod), n=n))
             self.cards_skipped.setMaximumHeight(90)
             lay.addWidget(self.cards_skipped)
 
@@ -1064,7 +1066,7 @@ class ConfirmPathObjectsDialog(QDialog):
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)   # `commit_id` do skopiowania
         lay.addWidget(self.status)
-        self.error = QLabel("")
+        self.error = EtykietaBledu("")      # szczegół systemu awarii znika z następnym zdaniem (AR-185)
         self.error.setProperty("role", "error")
         self.error.setWordWrap(True)
         lay.addWidget(self.error)
@@ -1249,14 +1251,16 @@ class ConfirmPathObjectsDialog(QDialog):
         dopasuj_wysokosc(self)                   # zdanie bazy + zdanie plików (`config_dialog`)
         self.changed.emit()
 
-    def _on_failed(self, op, msg):
+    def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera: staging tego runu jest sierotą (C1) - sprzątamy go od razu, nie przy
-        zamknięciu okna. „Zatwierdź" wraca, bo nie wiemy, czy karty stoją w plikach."""
+        zamknięciu okna. „Zatwierdź" wraca, bo nie wiemy, czy karty stoją w plikach. Szczegół
+        systemu (`podpowiedz`, AR-185) - pod kursorem pola błędu; następne zdanie go zdejmuje."""
         self._porzuc_staging()
         self._domkniety = self._commit_id is not None
         self._end_progress()
         from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
         self.error.setText(i18n.t("grid.wb.error", msg=czytelny_powod(msg)))
+        self.error.setToolTip(podpowiedz)
         self.changed.emit()
 
     def _porzuc_staging(self):
@@ -1372,7 +1376,12 @@ def _validate_object_value(con, text):
 
     Pytanie czwartej bramki zadaje `resolver.name_resolves` — CAŁA drabina nazwy (solar → katalog →
     alias), nie sam `resolve_object`; dlatego walidacja potrzebuje `con`. Bramka pytająca węższym
-    predykatem niż przebieg odmawiałaby nazw, które przebieg rozwiązuje (`Moon`, `WR134`)."""
+    predykatem niż przebieg odmawiałaby nazw, które przebieg rozwiązuje (`Moon`, `WR134`).
+
+    Sukces = wartość, którą drabina NAZWY rozpoznaje - dla każdej klatki tak samo. Nazwa
+    obiektu-regionu (`Veil`) tu odmawia: region sprowadza klatkę ze współrzędnych, więc odpowiedź
+    zależy od klatki i wyjątek regionu żyje wyłącznie w walidatorze grupy razem z bramką per klatka
+    (`plan_kart_naprawy`, AR-180)."""
     raw = (text or "").strip()
     if not raw:
         return None, i18n.t("repair.err.empty")
@@ -1385,19 +1394,112 @@ def _validate_object_value(con, text):
     except ValueError:
         ident = None
     value = (forma_karty_object(con, ident.canon) if ident is not None else None) or raw
+    odmowa = _odmowa_reguly_karty(value)
+    if odmowa is not None:
+        return None, odmowa
+    if not resolver.name_resolves(con, value):
+        return None, i18n.t("repair.err.unresolvable", text=raw)
+    return value, None
+
+
+def _odmowa_reguly_karty(value):
+    """Powód odmowy reguł karty FITS dla karty `OBJECT` = `value` w języku UI albo None - jeden
+    właściciel reguł (`writeback.card_violation`), dialog tylko mówi własnym językiem. Wspólne dla
+    walidacji nazwy (`_validate_object_value`) i formy obiektu-regionu (`plan_kart_naprawy`)."""
     # Lazy jak `wb_worker` w dialogu: `writeback` ciągnie astropy, a dialog, który tu pyta, i tak
     # już go załadował. Dialog zapisuje kartę przez `add` - stąd `new_card=True`.
     from horreum import writeback
     naruszenie = writeback.card_violation("OBJECT", value, new_card=True)
-    if naruszenie is not None:
-        if naruszenie.kind == "length":
-            return None, i18n.t("repair.err.too_long", n=naruszenie.length, max=naruszenie.limit)
-        if naruszenie.kind == "chars":
-            return None, i18n.t("repair.err.ascii", text=value)
-        return None, naruszenie.reason          # nazwa: nieosiągalne dla stałej `OBJECT`
-    if not resolver.name_resolves(con, value):
-        return None, i18n.t("repair.err.unresolvable", text=raw)
-    return value, None
+    if naruszenie is None:
+        return None
+    if naruszenie.kind == "length":
+        return i18n.t("repair.err.too_long", n=naruszenie.length, max=naruszenie.limit)
+    if naruszenie.kind == "chars":
+        return i18n.t("repair.err.ascii", text=value)
+    # Nazwa karty: nieosiągalne dla stałej `OBJECT`, ale reguła ma kod - w języku UI (AR-181).
+    return tekst_powodu(naruszenie.reason)
+
+
+def plan_kart_naprawy(con, grupy, fakty, *, lookup=None):
+    """Grupy okna „Napraw nagłówek…” → plan karty `OBJECT` per grupa, w kolejności `grupy` (AR-180):
+    `(wartość | None, powód | None, frame_ids do zapisu, kanon regionu | None)` - wartość do pliku
+    albo powód odmowy grupy, klatki, które kartę dostaną, i kanon obiektu-regionu (None - nazwa
+    wraca drabiną nazw, karta dla każdej klatki grupy). `grupy` = `[(tekst, frame_ids)]` ZAZNACZONYCH
+    grup, `fakty` = `resolver.fakty_karty_klatek` klatek okna. Zero zapisu.
+
+    NAZWA (`_validate_object_value` - walidator nazwy bez zmian): karta dla każdej klatki grupy.
+    OBIEKT-REGION: drabina nazw milczy, a tekst nazywa region (`resolver.kanon_regionu_karty`) -
+    forma karty regionu (`forma_karty_object`) i bramka PER KLATKA tą samą drabiną, którą pójdzie
+    przebieg (`resolver.karta_wraca`): kartę dostaje wyłącznie klatka, którą karta SAMA sprowadzi do
+    regionu; reszta grupy zostaje bez karty (podgląd mówi ile), grupa bez żadnej takiej - powód.
+    Węższa bramka kłamałaby o klatkach, które wrócą, szersza zapisałaby kartę, która klatki nie
+    rozwiąże.
+
+    KOLEJNOŚĆ PRZEBIEGU DLA WARIANTÓW STOSU (`run_resolver`: oryginał przed wariantem, wariant
+    bierze obiekt oryginału z tego samego przebiegu): najpierw klatki bez relacji wariantu, potem
+    warianty - wariant, którego oryginał dostaje kartę W TYM ZAPISIE, bierze obiekt, do którego ta
+    karta oryginał sprowadzi (wraca szczeblem bliźniaka, choć sam leży poza regionem); wariant
+    z oryginałem spoza zapisu - obiekt oryginału po przebiegu ze stanu bazy (`FaktyKarty.twin_canon`)."""
+    lookup = lookup or resolver.alias_snapshot(con).get
+    plany = []                                   # [wartość, powód, ids, region] per grupa
+    przyszly = {}                                # frame_id → kanon klatki po zapisie i przebiegu
+    for tekst, ids in grupy:
+        value, err = _validate_object_value(con, tekst)
+        if err is None:
+            try:
+                ident = resolver.resolve_name(lookup, value)[0]
+            except ValueError:
+                ident = None
+            for fid in ids:
+                if ident is not None:
+                    przyszly[fid] = ident.canon
+            plany.append([value, None, list(ids), None])
+            continue
+        raw = (tekst or "").strip()
+        try:
+            region = resolver.kanon_regionu_karty(con, raw, lookup=lookup) if con and raw else None
+        except ValueError:
+            region = None
+        if region is None:
+            plany.append([None, err, [], None])
+            continue
+        value = forma_karty_object(con, region) or header_form(region)
+        odmowa = _odmowa_reguly_karty(value)
+        plany.append([None, odmowa, [], None] if odmowa is not None else [value, None, [], region])
+
+    def _wraca(fid, value, region, twin):
+        f = fakty.get(fid)
+        if f is None:                            # klatka zniknęła z bazy - karta jej nie sprowadzi
+            return False
+        return resolver.karta_wraca(lookup, value, region, f.ra_deg, f.dec_deg, twin_canon=twin)
+
+    regionalne = [(plan, ids) for plan, (_t, ids) in zip(plany, grupy) if plan[3] is not None]
+    for plan, ids in regionalne:                 # przejście 1: klatki bez relacji wariantu
+        for fid in ids:
+            f = fakty.get(fid)
+            if (f is None or f.original_frame_id is None) and _wraca(fid, plan[0], plan[3], None):
+                plan[2].append(fid)
+                przyszly[fid] = plan[3]
+    for plan, ids in regionalne:                 # przejście 2: warianty po oryginałach
+        for fid in ids:
+            f = fakty.get(fid)
+            if f is None or f.original_frame_id is None:
+                continue
+            twin = przyszly.get(f.original_frame_id, f.twin_canon)
+            if _wraca(fid, plan[0], plan[3], twin):
+                plan[2].append(fid)
+                przyszly[fid] = plan[3]
+    wynik = []
+    for (value, reason, zapis, region), (_t, ids) in zip(plany, grupy):
+        if region is not None:
+            w_zapisie = set(zapis)
+            zapis = [fid for fid in ids if fid in w_zapisie]           # kolejność grupy
+            if not zapis:
+                reason = i18n.t_plural("repair.err.region_none", len(ids), value=repr(value),
+                                       canon=region)
+                value = None
+        wynik.append((value, reason, tuple(zapis), region))
+    return wynik
 
 
 class RepairHeaderDialog(QDialog):
@@ -1443,6 +1545,7 @@ class RepairHeaderDialog(QDialog):
         self._groups = []       # [{folder, rows, check, edit, preview}]
         self._skipped = []      # [(path, powód)] — jawnie widoczne, nigdy ciche
         self._sumy = []         # [{label, n, reason, all}] - foldery z plikami z sumą (AR-163)
+        self._fakty = {}        # frame_id → `resolver.FaktyKarty` - bramka karty regionu (AR-180)
         self.skipped_list = None   # lista pominiętych (None, gdy nic nie odpadło)
         self.setWindowTitle(i18n.t("repair.title"))
         self._split_rows(rows)
@@ -1557,6 +1660,20 @@ class RepairHeaderDialog(QDialog):
                                  "label": self._etykieta_grupy(folder, items[0]["path"],
                                                                rodzaj[items[0]["frame_id"]],
                                                                korzen)})
+        # Fakty bramki karty regionu (AR-180): współrzędne i oryginał wariantu - raz na okno, bo
+        # podgląd przelicza plan przy każdym klawiszu.
+        self._fakty = resolver.fakty_karty_klatek(
+            self.con, [it["frame_id"] for g in self._groups for it in g["rows"]])
+
+    def _plan_zapisu(self):
+        """Plan karty ZAZNACZONYCH grup → `{id(grupy): plan}` (`plan_kart_naprawy`) - JEDNA reguła
+        dla podglądu i zapisu: zbiór klatek do zapisu zależy od wszystkich grup naraz (wariant
+        stosu idzie za oryginałem z innej grupy okna)."""
+        zaznaczone = [g for g in self._groups if g["check"].isChecked()]
+        plany = plan_kart_naprawy(
+            self.con, [(g["edit"].text(), [it["frame_id"] for it in g["rows"]]) for g in zaznaczone],
+            self._fakty)
+        return {id(g): p for g, p in zip(zaznaczone, plany)}
 
     @staticmethod
     def _etykieta_grupy(folder, path, kind, korzen):
@@ -1618,7 +1735,10 @@ class RepairHeaderDialog(QDialog):
                     lst.addItem(i18n.t_plural("repair.skip.checksum", s["n"],
                                               folder=s["label"], reason=s["reason"]))
             for path, reason in self._skipped:
-                lst.addItem(f"{os.path.basename(path) or i18n.t('object.no_location')} — {reason}")
+                # Powód bramki celu z kodem (AR-181) w języku UI - kluczem katalogu, nie f-stringiem.
+                lst.addItem(i18n.t("repair.skip.item",
+                                   file=os.path.basename(path) or i18n.t("object.no_location"),
+                                   reason=tekst_powodu(reason)))
             lst.setMaximumHeight(90)
             lay.addWidget(lst)
 
@@ -1629,7 +1749,7 @@ class RepairHeaderDialog(QDialog):
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)   # `commit_id` do skopiowania
         lay.addWidget(self.status)
-        self.error = QLabel("")
+        self.error = EtykietaBledu("")      # szczegół systemu awarii znika z następnym zdaniem (AR-185)
         self.error.setProperty("role", "error")
         self.error.setWordWrap(True)
         lay.addWidget(self.error)
@@ -1664,21 +1784,33 @@ class RepairHeaderDialog(QDialog):
     # ---------------------------------------------------------------- podgląd „co wpiszemy"
     def _sync_preview(self, *, zachowaj_blad=False):
         """Podgląd DOKŁADNIE tego, co pójdzie do pliku (`OBJECT = 'NGC7635'`), plus szczery stan
-        akcji. Grupa zaznaczona z niepoprawną wartością pokazuje powód przy sobie — user nie musi
-        klikać, żeby dowiedzieć się, czemu zapis nie ruszy. `zachowaj_blad` - przeliczenie po końcu
-        biegu (wejście się nie zmieniło): błąd biegu zostaje, chyba że podgląd ma własny."""
+        akcji. Grupa zaznaczona z niepoprawną wartością pokazuje powód przy sobie - user nie musi
+        klikać, żeby dowiedzieć się, czemu zapis nie ruszy. Nazwa obiektu-regionu (AR-180) wraca
+        tylko części grupy: podgląd mówi „k z n klatek”, podpowiedź - ile zostaje bez karty i czemu;
+        przycisk liczy wyłącznie klatki, które kartę dostaną (`_plan_zapisu`, ta sama reguła co
+        zapis). `zachowaj_blad` - przeliczenie po końcu biegu (wejście się nie zmieniło): błąd biegu
+        zostaje, chyba że podgląd ma własny."""
         ready, first_err = 0, None
+        plany = self._plan_zapisu()
         for g in self._groups:
+            g["preview"].setToolTip("")
             if not g["check"].isChecked():
                 g["preview"].setText("")
                 continue
-            value, err = _validate_object_value(self.con, g["edit"].text())
+            value, err, ids, region = plany[id(g)]
             if err:
                 g["preview"].setText(i18n.t("repair.preview_none"))
                 first_err = first_err or i18n.t("repair.err.group", folder=g["label"], reason=err)
+                continue
+            n = len(g["rows"])
+            if len(ids) < n:
+                g["preview"].setText(i18n.t_plural("repair.preview_part", n, value=repr(value),
+                                                   k=len(ids)))
+                g["preview"].setToolTip(i18n.t_plural("repair.region_outside_tip", n - len(ids),
+                                                      value=repr(value), canon=region))
             else:
                 g["preview"].setText(i18n.t("repair.preview", value=repr(value)))
-                ready += len(g["rows"])
+            ready += len(ids)
         if first_err is not None or not zachowaj_blad:
             self.error.setText(first_err or "")  # wejście się zmieniło → stary błąd nieaktualny
         # Po udanym commicie zapis MILCZY do czasu cofnięcia: karty są już w plikach, więc drugie
@@ -1703,27 +1835,29 @@ class RepairHeaderDialog(QDialog):
             return
         self.error.clear()
         plan = []
+        plany = self._plan_zapisu()              # ta sama reguła co podgląd (AR-180)
         for g in self._groups:
             if not g["check"].isChecked():
                 continue
-            value, err = _validate_object_value(self.con, g["edit"].text())
+            value, err, ids, _region = plany[id(g)]
             if err:
                 return self._fail(i18n.t("repair.err.group", folder=g["label"], reason=err))
-            plan.append((g, value))
+            plan.append((g, value, list(ids)))
         if not plan:
             return self._fail(i18n.t("repair.err.nothing"))
 
         run_id = uuid.uuid4().hex
         staged, skipped = 0, []
-        for g, value in plan:
+        for g, value, do_zapisu in plan:
             # `repr(value)` — bo `expr` traktuje gołe `NGC7635` jak NAZWĘ ZMIENNEJ (przy kolizji
             # z keywordem wpisalibyśmy WARTOŚĆ TEJ KARTY), a sam cudzysłów nie wystarcza: kanon
             # z apostrofem wysadza kompilację i makro wpisałoby surową zawartość pola razem
             # z cudzysłowami. Python dobiera cudzysłów i escape sam.
             md = macro_mod.MacroDef(assign=macro_mod.Assign(
                 keyword="OBJECT", op="add", expr=repr(value), value_type="str"))
+            # Klatki z planu grupy: przy obiekcie-regionie tylko te, które karta sama sprowadzi.
             run = macro_mod.run_macro(
-                md, [it["frame_id"] for it in g["rows"]],
+                md, do_zapisu,
                 targets_fn=lambda ids: queries.writeback_frame_targets(self.con, ids),
                 cards_fn=lambda fid: queries.frame_cards(self.con, fid),
                 run_id=run_id)
@@ -1737,8 +1871,8 @@ class RepairHeaderDialog(QDialog):
             skipped += [(s.path, s.reason) for s in run.skipped]
         if staged == 0:
             repo.clear_pending_for_run(self.con, run_id)     # nic do zapisu → run nie zostaje otwarty
-            return self._fail(i18n.t("repair.err.all_skipped",
-                                     reason=(skipped[0][1] if skipped else "")))
+            return self._fail(i18n.t("repair.err.all_skipped",   # powód makra w języku UI
+                                     reason=tekst_powodu(skipped[0][1] if skipped else "")))
 
         self._run_id = run_id
         self._begin_progress(staged)
@@ -1792,8 +1926,10 @@ class RepairHeaderDialog(QDialog):
         dopasuj_wysokosc(self)
         self.changed.emit()
 
-    def _on_failed(self, op, msg):
-        """Wyjątek workera: staging runu jest sierotą (C1) - sprzątany od razu, nie przy zamknięciu."""
+    def _on_failed(self, op, msg, podpowiedz):
+        """Wyjątek workera: staging runu jest sierotą (C1) - sprzątany od razu, nie przy zamknięciu.
+        Szczegół systemu (`podpowiedz`, AR-185) - pod kursorem pola błędu, PO tekście (`_fail` go
+        zdejmuje razem ze starym zdaniem)."""
         self._porzuc_staging()
         self.bar.setVisible(False)
         self.undo_btn.setEnabled(True)
@@ -1801,6 +1937,7 @@ class RepairHeaderDialog(QDialog):
         self._sync_preview()                     # PRZED `_fail`: podgląd czyści pole błędu
         from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
         self._fail(i18n.t("grid.wb.error", msg=czytelny_powod(msg)))
+        self.error.setToolTip(podpowiedz)
         self.changed.emit()
 
     def _porzuc_staging(self):
@@ -2407,11 +2544,12 @@ class ObjectAxisView(QWidget):
     def _dopasuj_kolejke(self):
         """Zetnij wysokość kolejki przeglądu DO TREŚCI, z sufitem w wierszach (W-3).
 
-        Wzorzec `tasks._fit_task_list`, z jedną różnicą, która jest tu sednem: tam lista ma pięć
-        pozycji i sufit byłby zbędny, a kolejka przeglądu rośnie do ~45 — dopasowanie bez sufitu
-        zabrałoby cały pion tabeli „Biblioteka", czyli zamieniło jeden dług na drugi. Stąd
-        `setMaximumHeight` (nie `setFixedHeight`) i suma po `_KOLEJKA_SUFIT_WIERSZY` wierszach:
-        krótka kolejka nie zostawia pustki, długa dostaje pasek przewijania.
+        Bliźniak `tasks._fit_task_list`, ale z innym sednem: tam sufit = cała treść, a podłoga
+        w wierszach (`tasks._LISTA_ZADAN_MIN_WIERSZY`) chroni podłogę okna przed wzrostem z każdym
+        wierszem Porządków (AR-188); tu kolejka przeglądu rośnie do ~45 i pod nią stoi tabela
+        „Biblioteka" - dopasowanie bez sufitu zabrałoby jej cały pion, czyli zamieniło jeden dług
+        na drugi. Stąd `setMaximumHeight` (nie `setFixedHeight`) i suma po `_KOLEJKA_SUFIT_WIERSZY`
+        wierszach: krótka kolejka nie zostawia pustki, długa dostaje pasek przewijania.
 
         WYSOKOŚĆ SUMUJEMY PRZEZ DELEGATA, nie mnożymy jednej podpowiedzi — wiersze `TwoPartDelegate`
         nie muszą być równe, a `sizeHintForRow(0)` kłamało już raz w bliźniaczej liście (WIZ #14).

@@ -364,11 +364,54 @@ def test_wiersz_zeznania_z_nieobecnej_kopii_przy_kopiach_bez_zeznania(qapp, tmp_
 
 
 def test_zdanie_odmowy_mowi_ze_nic_nie_zapisano():
-    """Czysta funkcja zdania: odmowa niesie ścieżkę kopii (katalog i nazwa) i powód odczytu."""
+    """Czysta funkcja zdania: odmowa niesie ścieżkę kopii (katalog i nazwa) i powód odczytu; diagnoza
+    skanu bez kodu (proza) mówi znak w znak, bez podpowiedzi."""
     from horreum.lead_copy import LeadCopyResult
-    res = LeadCopyResult("failed", 1, r"R:\X\B_CLS\m.xisf", reason="OSError: [WinError 64] x")
-    zdanie = grid_mod._zdanie_kopii_wiodacej(res)
+    res = LeadCopyResult("failed", 1, r"X:\X\B_CLS\m.xisf", reason="OSError: [WinError 64] x")
+    zdanie, podpowiedz = grid_mod._zdanie_kopii_wiodacej(res)
     assert zdanie == ("Nie udało się przeczytać kopii B_CLS\\m.xisf: OSError: [WinError 64] x "
                       "- nic nie zapisano.")
-    bez_powrotu = grid_mod._zdanie_kopii_wiodacej(LeadCopyResult("adopted", 1, "/a/C/m.xisf"))
+    assert podpowiedz == ""
+    bez_powrotu, _ = grid_mod._zdanie_kopii_wiodacej(LeadCopyResult("adopted", 1, "/a/C/m.xisf"))
     assert bez_powrotu.endswith(i18n.t("grid.lead.no_back"))
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdanie_odmowy_z_bledem_systemu_klasa_w_jezyku_UI_a_szczegol_w_podpowiedzi(lang):
+    """AR-184: zerwany udział przy odczycie kopii mówi klasą w języku UI (w EN bez komunikatu
+    systemu po polsku), a surowy tekst systemu - bez `repr` ścieżki - stoi w podpowiedzi.
+    Falsyfikator: `_zdanie_kopii_wiodacej` z `reason=res.reason` → polskie zdanie klasy w EN."""
+    from horreum.item_reasons import blad_systemu
+    from horreum.lead_copy import LeadCopyResult
+    i18n.set_lang(lang)
+    try:
+        exc = OSError(None, "Nazwa sieciowa jest już niedostępna", r"X:\X\B_CLS\m.xisf", 64)
+        zdanie, podpowiedz = grid_mod._zdanie_kopii_wiodacej(
+            LeadCopyResult("failed", 1, r"X:\X\B_CLS\m.xisf", reason=blad_systemu(exc)))
+        assert i18n.t("objchg.item.os_share_lost", os_code="WinError 64") in zdanie, zdanie
+        assert "niedostępna" not in zdanie, zdanie
+        assert podpowiedz == i18n.t(
+            "wb.os_detail_tip",
+            detail=r"OSError: [WinError 64] Nazwa sieciowa jest już niedostępna: 'X:\X\B_CLS\m.xisf'")
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_gest_na_zerwanym_udziale_mowi_klasa_a_szuflada_niesie_szczegol(widok, monkeypatch):
+    """AR-184 na prawdziwym geście: klik, menu, wątek tła; odczyt kopii pada zerwanym udziałem.
+    Szuflada mówi klasą błędu, a pod kursorem ma surowy tekst systemu. Falsyfikator:
+    `_after_lead_copy` bez `_podpowiedz_wyniku` → podpowiedź równa samemu zdaniu."""
+    con, v, fid, a, b = widok
+    v.apply_perspective(grid_mod.PRESET_COPY_CONFLICT)
+
+    def zerwany(path, **_k):
+        raise OSError(None, "Nazwa sieciowa jest już niedostępna", str(path), 64)
+    monkeypatch.setattr(scan, "scan_file", zerwany)
+    _prawy_klik(v, _wiersz(v, fid))
+    _pozycje_kopii(v)[1].trigger()
+    v._menu_tabeli.hide()
+    assert _po_gescie(v)
+    tekst = v.drawer.result.text()
+    assert i18n.t("objchg.item.os_share_lost", os_code="WinError 64") in tekst, tekst
+    assert v.drawer.result.toolTip().startswith(tekst + "\n" + i18n.t("wb.os_detail_tip",
+                                                                      detail="OSError: [WinError 64]"))

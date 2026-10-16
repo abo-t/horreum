@@ -2130,10 +2130,12 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
     e = a.klatka(r"LIGHTS\E\cam\NGC224_z.fits", canon="NGC224")
     plany.append(a.plan([e], target=queries.object_target(a.con, "NGC4")))
     # rodzaj błędu katalogu to fakt (AR-138): odmowa dostępu i brak katalogu mają własne zdania,
-    # inny błąd systemu zostaje szczegółem zdania
+    # inny błąd systemu zostaje szczegółem zdania - także zajętość (WinError 32, `PermissionError`):
+    # klasa błędu systemu ją pomija, bo to nie odmowa dostępu (AR-183)
     bledy = {"NGC5": PermissionError(13, "Odmowa dostępu"),
              "NGC6": FileNotFoundError(2, "Nie można odnaleźć ścieżki"),
-             "NGC7": OSError(22, "Nieprawidłowy argument")}
+             "NGC7": OSError(22, "Nieprawidłowy argument"),
+             "NGC8": OSError(None, "Proces nie może uzyskać dostępu do pliku", None, 32)}
     for i, cel in enumerate(bledy):
         os.makedirs(a.sciezka(rf"LIGHTS\{cel}\cam"))
         f = a.klatka(rf"LIGHTS\F{i}\cam\NGC224_w.fits", canon="NGC224")
@@ -2141,9 +2143,12 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
         def listdir(katalog, cel=cel):
             if cel in katalog:
                 blad = bledy[cel]
-                raise type(blad)(blad.errno, blad.strerror, katalog)
+                kod_win = () if blad.winerror is None else (blad.winerror,)
+                raise type(blad)(blad.errno, blad.strerror, katalog, *kod_win)
             return os.listdir(katalog)
         plany.append(a.plan([f], target=queries.object_target(a.con, cel), listdir=listdir))
+    assert [p.skipped[0].code for p in plany[-len(bledy):]] == [
+        "dir_denied", "dir_missing", "dir_unreadable", "dir_unreadable"]
     # para stosu: wersja w innym katalogu → obie połowy
     o = _stos(a, r"STACKS\IC405\A140R\Ha\IC405_2025-08-23_A140R_Ha_60s_mono.xisf")
     v = _stos(a, r"STACKS\IC405\A140R\OIII\IC405_2025-08-23_A140R_Ha_60s_mono_autocrop.xisf")
@@ -2311,14 +2316,18 @@ def _zdanie_pl_z_fstringa(w, modul):
 def _powody_pozycji():
     """`kod → [(wzór PL, nazwy parametrów)]` z KAŻDEGO `PowodPozycji(...)` w `writeback` i `repo`
     oraz w modułach, w których zdanie odmowy rodzi się z kodem (AR-158): czytnik XISF `scan`
-    i reguły karty `card_rules`."""
+    i reguły karty `card_rules`, bramki makra i wyrażenia (`macro`, `expr`, AR-181) i właściciel
+    błędów systemu klasą (`item_reasons.powod_systemu`, AR-184 - z modułu tylko ta funkcja: reszta
+    kodeka składa powód z kodu odczytanego, nie z literału)."""
     import ast
     import inspect
-    from horreum import card_rules, scan
+    from horreum import card_rules, expr, item_reasons, macro, scan
     from horreum import repo as repo_mod
     out = {}
-    for modul in (writeback, repo_mod, scan, card_rules):
-        for w in ast.walk(ast.parse(inspect.getsource(modul))):
+    zrodla = [(m, inspect.getsource(m)) for m in (writeback, repo_mod, scan, card_rules, macro, expr)]
+    zrodla.append((item_reasons, inspect.getsource(item_reasons.powod_systemu)))
+    for modul, zrodlo in zrodla:
+        for w in ast.walk(ast.parse(zrodlo)):
             if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
                     and w.func.id == "PowodPozycji"):
                 continue

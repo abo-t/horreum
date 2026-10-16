@@ -943,6 +943,32 @@ CATALOG = {
         "pl": "klatka zniknęła z bazy między odczytem a otwarciem okna",
         "en": "frame disappeared from the database between the read and opening the window",
     },
+    # Pozycja listy pominiętych: plik i powód bramki celu w języku UI (AR-181).
+    "repair.skip.item": {"pl": "{file} - {reason}", "en": "{file} - {reason}"},
+    # Nazwa obiektu-regionu (AR-180): karta wraca wyłącznie klatkom, które region (albo oryginał
+    # wariantu) do obiektu sprowadzi - podgląd mówi, ilu z grupy, podpowiedź ilu i dlaczego nie,
+    # błąd grupy - gdy żadnej. Odmiana po liczbie z mianownika (`n`).
+    "repair.preview_part": {
+        "pl": {"one": "do pliku: OBJECT = {value} ({k} z {n} klatki)",
+               "few": "do pliku: OBJECT = {value} ({k} z {n} klatek)",
+               "many": "do pliku: OBJECT = {value} ({k} z {n} klatek)"},
+        "en": {"one": "into file: OBJECT = {value} ({k} of {n} frame)",
+               "other": "into file: OBJECT = {value} ({k} of {n} frames)"}},
+    "repair.region_outside_tip": {
+        "pl": {"one": "{n} klatka bez karty - sama karta {value} nie sprowadzi jej do {canon}",
+               "few": "{n} klatki bez karty - sama karta {value} nie sprowadzi ich do {canon}",
+               "many": "{n} klatek bez karty - sama karta {value} nie sprowadzi ich do {canon}"},
+        "en": {"one": "{n} frame without a card - the card {value} alone would not lead it to "
+                      "{canon}",
+               "other": "{n} frames without a card - the card {value} alone would not lead them "
+                        "to {canon}"}},
+    "repair.err.region_none": {
+        "pl": {"one": "sama karta {value} nie sprowadzi klatki grupy do {canon}",
+               "few": "sama karta {value} nie sprowadzi żadnej z {n} klatek grupy do {canon}",
+               "many": "sama karta {value} nie sprowadzi żadnej z {n} klatek grupy do {canon}"},
+        "en": {"one": "the card {value} alone would not lead the group's frame to {canon}",
+               "other": "the card {value} alone would lead none of the group's {n} frames to "
+                        "{canon}"}},
     # Pliki FITS z sumą kontrolną, które pisarz odmówi (AR-163) - per FOLDER grupy, nie per plik:
     # folder bez pliku do zapisu mówi „cały folder”, folder mieszany - ile z niego odpadło.
     "repair.skip.checksum": {
@@ -960,7 +986,7 @@ CATALOG = {
     "repair.err.empty": {"pl": "pusto — wpisz oznaczenie", "en": "empty — type a designation"},
     "repair.err.ascii": {
         "pl": "„{text}” ma znaki spoza drukowalnego ASCII - nagłówek FITS ich nie przyjmie",
-        "en": "„{text}” has characters outside printable ASCII - a FITS header will not take them",
+        "en": "“{text}” has characters outside printable ASCII - a FITS header will not take them",
     },
     "repair.err.too_long": {
         "pl": "za długie ({n} znaków, limit {max})", "en": "too long ({n} characters, limit {max})",
@@ -968,7 +994,7 @@ CATALOG = {
     "repair.err.unresolvable": {
         "pl": "„{text}” nie jest oznaczeniem katalogowym ani znaną nazwą — po zapisie klatka "
               "zostałaby bez obiektu",
-        "en": "„{text}” is neither a catalog designation nor a known name — after writing, the "
+        "en": "“{text}” is neither a catalog designation nor a known name - after writing, the "
               "frame would still have no object",
     },
     "repair.err.group": {"pl": "{folder}: {reason}", "en": "{folder}: {reason}"},
@@ -981,7 +1007,7 @@ CATALOG = {
     },
     "repair.err.no_host": {
         "pl": "Ten widok nie ma skąd uruchomić etapu — użyj „Rozwiąż” w Dostawie.",
-        "en": "This view cannot start the stage — use „Resolve” in Delivery.",
+        "en": "This view cannot start the stage - use “Resolve” in Delivery.",
     },
 
     # --- dialog „Przypisz obiekt" ---
@@ -2291,6 +2317,8 @@ CATALOG = {
     # AR-61: edycja JEDNEJ komórki keyworda - ta sama klinga i szuflada co makro. Pole komentarza
     # edytora bierze brzmienie z `grid.macro.comment_ph`/`comment_tip` (to samo znaczenie).
     "grid.cell.value_ph": {"pl": "wartość", "en": "value"},
+    # Podpowiedź pustej komórki keyworda: plik tej klatki nie ma karty (AR-181).
+    "grid.cell.no_card_tip": {"pl": "brak karty", "en": "no card"},
     # Podgląd stagingu: komentarz karty, który zapis wniesie (samodzielnie albo przy wartości).
     "grid.preview.comment_only": {"pl": "komentarz → {comment}", "en": "comment → {comment}"},
     "grid.preview.comment_tip": {"pl": " · komentarz → {comment!r}",
@@ -2682,6 +2710,81 @@ CATALOG = {
         "en": "Record that the frames confirmed by hand but shot after the image was integrated did "
               "NOT go into it - the other inputs stay. “{undo}” on the status bar restores the state "
               "before.",
+    },
+    # AR-178: cofnięcie werdyktu padło na błędzie bazy - transakcja wycofana w całości, recepta zostaje.
+    "grid.lin.undo_failed": {
+        "pl": "Cofnięcie werdyktu nie doszło do skutku (baza zajęta albo błąd zapisu) - nic nie "
+              "zmieniono; kliknij „{undo}” ponownie",
+        "en": "Undoing the verdict did not go through (database busy or write error) - nothing was "
+              "changed; click “{undo}” again",
+    },
+    # AR-178: gest zbiorczy perspektywy „Rodowód z klatkami nowszymi niż obraz" (menu prawego kliku) -
+    # werdykt przycisku `grid.lin.reject_newer` na każdym widocznym obrazie naraz.
+    "grid.lin.reject_newer_all": {"pl": "Odrzuć nowsze niż obraz we wszystkich obrazach",
+                                  "en": "Reject newer than the image in all images"},
+    # Obrazy w miejscowniku: „w 1 obrazie”, „w 2 obrazach”, „w 5 obrazach”.
+    "grid.lin.reject_newer_all_tip": {
+        "pl": {"one": "W {n} obrazie widoku zapisz, że klatki potwierdzone ręką, a zrobione po "
+                      "zintegrowaniu obrazu, NIE weszły w niego - pozostałe wejścia zostają. "
+                      "„{undo}” na pasku przywróci stan sprzed gestu.",
+               "few": "W {n} obrazach widoku zapisz, że klatki potwierdzone ręką, a zrobione po "
+                      "zintegrowaniu obrazu, NIE weszły w niego - pozostałe wejścia zostają. "
+                      "„{undo}” na pasku przywróci stan sprzed gestu.",
+               "many": "W {n} obrazach widoku zapisz, że klatki potwierdzone ręką, a zrobione po "
+                       "zintegrowaniu obrazu, NIE weszły w niego - pozostałe wejścia zostają. "
+                       "„{undo}” na pasku przywróci stan sprzed gestu."},
+        "en": {"one": "In {n} image in view, record that the frames confirmed by hand but shot after "
+                      "the image was integrated did NOT go into it - the other inputs stay. “{undo}” "
+                      "on the status bar restores the state before.",
+               "other": "In {n} images in view, record that the frames confirmed by hand but shot "
+                        "after the image was integrated did NOT go into it - the other inputs stay. "
+                        "“{undo}” on the status bar restores the state before."},
+    },
+    "grid.lin.reject_newer_all_none": {
+        "pl": "W widoku nie ma wejść nowszych niż obraz do odrzucenia",
+        "en": "No inputs newer than the image to reject in view",
+    },
+    # Człon zdania po „Odrzucono {n}” (`grid.lin.judged_excluded`) - obrazy gestu w miejscowniku.
+    "grid.lin.judged_in_images": {
+        "pl": {"one": " w {n} obrazie", "few": " w {n} obrazach", "many": " w {n} obrazach"},
+        "en": {"one": " in {n} image", "other": " in {n} images"},
+    },
+    # Człon zdania odrzucenia: obrazy, którym nie zostało ani jedno wejście (AR-178). Czasownik
+    # w zgodzie z liczebnikiem: 1 obraz został, 2 obrazy zostały, 5 obrazów zostało, 22 obrazy zostały.
+    "grid.lin.left_without_inputs": {
+        "pl": {"one": " · {n} obraz został bez wejść", "few": " · {n} obrazy zostały bez wejść",
+               "many": " · {n} obrazów zostało bez wejść"},
+        "en": {"one": " · {n} image was left without inputs",
+               "other": " · {n} images were left without inputs"},
+    },
+    # Recepta wejścia w perspektywę nowszych: gest jednego obrazu w panelu, gest na wszystkie w menu
+    # tabeli, którego nie widać, dopóki się go nie otworzy.
+    "grid.lin.newer_recipe": {
+        "pl": "zaznaczony obraz: „{reject}” w panelu „{panel}”; wszystkie naraz: prawy klik → „{all}”",
+        "en": "selected image: “{reject}” in the “{panel}” panel; all at once: right-click → “{all}”",
+    },
+    # AR-187: przebudowa tabeli bez zmiany zbioru (sort, grupowanie, prezentacja, przeładowanie po
+    # zapisie, wynik Pól, Dostawa) zdjęła zaznaczenie za duże do odtworzenia
+    # (`grid._PROG_ODTWORZENIA_KOMOREK`). Dopełniacz po „zaznaczenie”: 1 klatki, 2 klatek.
+    "grid.sel.restore_too_big": {
+        "pl": {"one": "Zaznaczenie {n} klatki zdjęte przy przebudowie tabeli - za duże, żeby je "
+                      "odtworzyć; zaznacz je ponownie",
+               "few": "Zaznaczenie {n} klatek zdjęte przy przebudowie tabeli - za duże, żeby je "
+                      "odtworzyć; zaznacz je ponownie",
+               "many": "Zaznaczenie {n} klatek zdjęte przy przebudowie tabeli - za duże, żeby je "
+                       "odtworzyć; zaznacz je ponownie"},
+        "en": {"one": "Selection of {n} frame cleared when the table was rebuilt - too large to "
+                      "restore; select it again",
+               "other": "Selection of {n} frames cleared when the table was rebuilt - too large to "
+                        "restore; select them again"},
+    },
+    # Ten sam fakt członem zdania gestu (zapis i cofnięcie szuflady), które przykrywa zdanie przyłożenia.
+    "grid.sel.restore_too_big_tail": {
+        "pl": {"one": " · zaznaczenie {n} klatki zdjęte - za duże, żeby je odtworzyć",
+               "few": " · zaznaczenie {n} klatek zdjęte - za duże, żeby je odtworzyć",
+               "many": " · zaznaczenie {n} klatek zdjęte - za duże, żeby je odtworzyć"},
+        "en": {"one": " · selection of {n} frame cleared - too large to restore",
+               "other": " · selection of {n} frames cleared - too large to restore"},
     },
     # Podpowiedź „Potwierdź zaznaczone", gdy zaznaczenie obejmuje klatkę nowszą niż obraz - przycisk
     # zostaje czynny (werdykt należy do człowieka), zdanie mówi, co zapisze.
@@ -3159,9 +3262,14 @@ CATALOG = {
 
     # --- StagingDrawer (poczekalnia zmian) ---
     "grid.drawer.empty": {"pl": "Poczekalnia zmian — pusta", "en": "Changes waiting room — empty"},
-    "grid.drawer.pending": {"pl": "{n} zmian oczekuje", "en": "{n} changes pending"},
+    # Wpis mnogi: „1 zmian oczekuje” stało w szufladzie przy każdym pojedynczym stagingu.
+    "grid.drawer.pending": {
+        "pl": {"one": "{n} zmiana oczekuje", "few": "{n} zmiany oczekują", "many": "{n} zmian oczekuje"},
+        "en": {"one": "{n} change pending", "other": "{n} changes pending"}},
     "grid.drawer.pending_rename": {
-        "pl": "{n} zmian nazw oczekuje", "en": "{n} name changes pending",
+        "pl": {"one": "{n} zmiana nazwy oczekuje", "few": "{n} zmiany nazw oczekują",
+               "many": "{n} zmian nazw oczekuje"},
+        "en": {"one": "{n} name change pending", "other": "{n} name changes pending"},
     },
     "grid.action.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "grid.action.commit": {"pl": "Zatwierdź", "en": "Commit"},
@@ -3300,7 +3408,7 @@ CATALOG = {
     "grid.wb.error": {"pl": "BŁĄD: {msg}", "en": "ERROR: {msg}"},
     "grid.wb.failed": {
         "pl": "Writeback „{op}” nie powiódł się: {msg}",
-        "en": "Writeback „{op}” failed: {msg}",
+        "en": "Writeback “{op}” failed: {msg}",
     },
     "grid.wb.cancelling": {"pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)"},
     "grid.wb.status": {"pl": "Writeback: {summary}", "en": "Writeback: {summary}"},
@@ -4773,6 +4881,12 @@ CATALOG = {
         "en": "group calibrated with a master from outside its rig (one WBPP session per release, or the "
               "TELESCOP keyword as Pre and Post)",
     },
+    # Siedziba w archiwum nieczytelna (zerwany udział, odmowa dostępu): `detail` = błąd systemu klasą,
+    # szczegół systemu w podpowiedzi komórki. Dawniej zerwany udział (53/67) brzmiał „siedziby nie ma”.
+    "harvest.reason.seat_unreadable": {
+        "pl": "nie da się odczytać folderu docelowego w archiwum",
+        "en": "the target folder in the archive cannot be read",
+    },
     "harvest.btn_apply": {
         "pl": {"one": "Wciągnij {n} plik", "few": "Wciągnij {n} pliki", "many": "Wciągnij {n} plików"},
         "en": {"one": "Take in {n} file", "other": "Take in {n} files"},
@@ -5004,14 +5118,16 @@ CATALOG = {
     # AR-153: nazwa perspektywy, którą wiersz otwiera (`perspective.lineage_newer`).
     "tasks.lineage_newer": {"pl": "Rodowód z klatkami nowszymi niż obraz",
                             "en": "Lineage with frames newer than the image"},
-    # Forma „etykieta: liczba" - bez odmiany liczebnika; nazwy gestu i recepty z katalogu
-    # (`grid.lin.reject_newer`, `grid.lin.undo`).
+    # Forma „etykieta: liczba" - bez odmiany liczebnika; nazwy gestów i recepty z katalogu
+    # (`grid.lin.reject_newer`, `grid.lin.reject_newer_all`, `grid.lin.undo`). Klik otwiera panel
+    # na pierwszym obrazie (AR-178), więc zdanie nie każe go szukać.
     "tasks.lineage_newer_tip": {
-        "pl": "Wejścia potwierdzone ręką, zrobione po zintegrowaniu obrazu: {n}. W Zbiorach zaznacz "
-              "obraz i w panelu „Rodowód” kliknij „{reject}” - „{undo}” na pasku przywróci stan "
-              "sprzed gestu.",
-        "en": "Inputs confirmed by hand but shot after the image was integrated: {n}. In Collections "
-              "select the image and click “{reject}” in the “Lineage” panel - “{undo}” on the status "
+        "pl": "Wejścia potwierdzone ręką, zrobione po zintegrowaniu obrazu: {n}. Klik otworzy Zbiory "
+              "z panelem „Rodowód” na pierwszym obrazie: „{reject}” odrzuca je w nim, prawy klik → "
+              "„{all}” - we wszystkich naraz; „{undo}” na pasku przywróci stan sprzed gestu.",
+        "en": "Inputs confirmed by hand but shot after the image was integrated: {n}. The click "
+              "opens Collections with the “Lineage” panel on the first image: “{reject}” rejects "
+              "them there, right-click → “{all}” - in all images at once; “{undo}” on the status "
               "bar restores the state before.",
     },
     "tasks.superseded_frames": {"pl": "Zastąpione (historia)", "en": "Superseded (history)"},
@@ -6972,7 +7088,7 @@ CATALOG = {
     "objchg.item.withheld_newer_header": {
         "pl": "zapis zastąpiony nowszym stanem pliku (inny nagłówek na dysku)",
         "en": "write superseded by a newer state of the file (a different header on disk)"},
-    # Błędy systemu klasą (AR-168, `writeback._blad_systemu`): fraza z numerem, surowy tekst systemu
+    # Błędy systemu klasą (AR-168, AR-184, `item_reasons.blad_systemu`): fraza z numerem, surowy tekst systemu
     # w podpowiedzi (`wb.os_detail_tip`); bramka sumy kontrolnej z faktów bazy (AR-167,
     # `card_rules.BRAMKA_SUMY`); region sprzed commitu bez dowodu całego pliku (AR-169).
     "objchg.item.os_denied": {"pl": "odmowa dostępu do pliku ({os_code})",
@@ -6991,6 +7107,52 @@ CATALOG = {
         "en": "the header region is already the state from before the commit, but the whole file "
               "cannot be confirmed ({inner}) - rescan the file; a change outside the header is for "
               "a person to decide"},
+    # Bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
+    # `evaluate_manual_change`) i powody wyrażenia (`expr.eval_for`, parametr `inner` powodów
+    # `macro_compute`/`macro_assign`). PL = zdanie rdzenia znak w znak (ASCII, `--` jak w makrze).
+    "objchg.item.macro_raw": {
+        "pl": "plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)",
+        "en": "RAW file (DSLR) - Horreum does NOT write it (read-only)"},
+    "objchg.item.macro_no_present_copy": {
+        "pl": "brak obecnej kopii do zapisu (wszystkie present=0)",
+        "en": "no present copy to write (all present=0)"},
+    "objchg.item.macro_many_copies": {
+        "pl": "wiele obecnych kopii ({n}) -- writeback poza v1 (D-W1)",
+        "en": "several present copies ({n}) - writeback outside v1 (D-W1)"},
+    "objchg.item.macro_compressed": {
+        "pl": "skompresowany master -- edycja poza krokiem 4 (T6)",
+        "en": "compressed master - editing is outside step 4 (T6)"},
+    "objchg.item.macro_degenerate": {
+        "pl": "tozsamosc nieobliczalna (degenerat) -- zapis rozdwoilby klatke (D-X-13)",
+        "en": "identity cannot be computed (degenerate) - a write would split the frame (D-X-13)"},
+    "objchg.item.macro_no_header_hash": {
+        "pl": "brak header_hash (plik nieczytelny) -- brak kontroli zapisu",
+        "en": "no header_hash (unreadable file) - no write control"},
+    "objchg.item.macro_frame_gone": {"pl": "frame nieobecny w bazie",
+                                     "en": "frame missing from the database"},
+    "objchg.item.macro_set_missing": {"pl": "brak karty '{keyword}' do modyfikacji (uzyj add)",
+                                      "en": "no card '{keyword}' to modify (use add)"},
+    "objchg.item.macro_idx_required": {
+        "pl": "keyword '{keyword}' ma wiele wystapien -- wymagany jawny idx",
+        "en": "keyword '{keyword}' occurs more than once - an explicit idx is required"},
+    "objchg.item.macro_add_exists": {"pl": "karta '{keyword}' juz istnieje (uzyj set)",
+                                     "en": "card '{keyword}' already exists (use set)"},
+    "objchg.item.macro_compute": {"pl": "compute {name}: {inner}", "en": "compute {name}: {inner}"},
+    "objchg.item.macro_assign": {"pl": "assign: {inner}", "en": "assign: {inner}"},
+    "objchg.item.macro_not_int": {
+        "pl": "wynik niecalkowity ({value}) dla keyworda '{keyword}' typu int",
+        "en": "non-integer result ({value}) for int keyword '{keyword}'"},
+    "objchg.item.macro_type_mismatch": {
+        "pl": "wartosc '{value}' nie pasuje do typu '{value_type}'",
+        "en": "value '{value}' does not match type '{value_type}'"},
+    "objchg.item.macro_manual_many": {
+        "pl": "keyword '{keyword}' ma wiele wystapien -- edycja reczna poza krokiem 4",
+        "en": "keyword '{keyword}' occurs more than once - manual editing is outside step 4"},
+    "objchg.item.macro_manual_not_int": {"pl": "wynik niecalkowity ({value}) dla keyworda typu int",
+                                         "en": "non-integer result ({value}) for an int keyword"},
+    "objchg.item.macro_missing_operand": {"pl": "brak operandu: {name}",
+                                          "en": "missing operand: {name}"},
+    "objchg.item.macro_zero_division": {"pl": "dzielenie przez zero", "en": "division by zero"},
     # Reguła formy folderu obiektu (`resolve.catalog.FOLDER_RULE_CODES`, AR-141) - szczegół
     # pominięcia `bad_target` w języku UI.
     "objchg.folder.empty": {"pl": "kanon pusty albo nie jest tekstem",
@@ -7114,6 +7276,15 @@ CATALOG = {
                                "en": "target folder unreadable - access denied: {dir}"},
     "objchg.skip.dir_missing": {"pl": "katalog celu nie istnieje na dysku: {dir}",
                                 "en": "the target folder does not exist on disk: {dir}"},
+    # Zerwany udział przy odczycie katalogu celu (AR-183): klasa po kodzie Windows, nie po podklasie
+    # wyjątku - 53/67 to `FileNotFoundError`, a katalog istnieje; szczegół systemu w podpowiedzi.
+    "objchg.skip.dir_share_lost": {
+        "pl": "udział sieciowy albo dysk nie odpowiada ({os_code}) - katalog celu: {dir}",
+        "en": "the network share or disk is not responding ({os_code}) - target folder: {dir}"},
+    # Brak miejsca przy odczycie katalogu celu - klasa błędu systemu, nie komunikat systemu w zdaniu.
+    "objchg.skip.dir_no_space": {
+        "pl": "brak miejsca na dysku ({os_code}) - katalog celu: {dir}",
+        "en": "not enough space on the disk ({os_code}) - target folder: {dir}"},
     "objchg.skip.file_in_dir_place": {"pl": "w miejscu katalogu celu stoi plik: {path}",
                                       "en": "a file stands where the target folder should be: "
                                             "{path}"},

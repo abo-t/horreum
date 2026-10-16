@@ -429,6 +429,100 @@ def karta_wraca(lookup, value, canon, ra_deg, dec_deg, *, twin_canon=None):
     return region is not None and region.canon == canon
 
 
+def kanon_regionu_karty(con, value, *, lookup=None):
+    """Kanon obiektu-regionu, który karta `OBJECT` = `value` NAZYWA, albo None (AR-180). Read-only.
+
+    None, gdy drabina nazw `value` rozpoznaje (szczebel nazwy stoi w przebiegu przed regionem, więc
+    karta należy wtedy do tamtego obiektu) albo gdy tekst nie nazywa żadnego regionu z `regions.json`.
+    Nazywa = kanon regionu bez wielkości liter i znaków spoza A-Z0-9 (`norm_alnum`: `Veil`, `veil`,
+    `VEIL`) albo forma karty regionu (`forma_karty_object` - głos bliźniaków folderu, AR-177), ta
+    sama reguła `norm_alnum` (`cygnus loop` nazywa region o formie `Cygnus Loop`).
+
+    ŚWIADOMIE WĘŻSZE OD SZCZEBLA REGIONU: region sprowadza klatkę ze współrzędnych przy KAŻDYM
+    tekście, którego drabina nazw nie zna (`xyzzy` w promieniu Veil też trafi do `Veil`), ale karta
+    z takim słowem byłaby w nagłówku nieprawdą o obiekcie. Czy karta wraca KONKRETNEJ klatce, pyta
+    wołający per klatka (`karta_wraca`). `ValueError` drabiny (uszkodzony słownik) przechodzi."""
+    if not value or not str(value).strip():
+        return None
+    lookup = lookup or alias_lookup(con)
+    if resolve_name(lookup, value)[0] is not None:
+        return None
+    regiony = sorted(kanony_regionow())
+    klucz = norm_alnum(value)
+    for canon in regiony:
+        if norm_alnum(canon) == klucz:
+            return canon
+    # Forma z głosu bliźniaków (`_forma_regionu` - zapytanie po klatkach obiektu): dopiero, gdy
+    # kanon nie pasuje, bo kosztuje ok. 20 ms na kopii pf4, a woła to podgląd przy każdym klawiszu.
+    # Ta sama reguła dopasowania co kanon (`norm_alnum`) - do pliku i tak idzie forma, nie tekst.
+    for canon in regiony:
+        forma = forma_karty_object(con, canon, lookup=lookup)
+        if forma is not None and norm_alnum(forma) == klucz:
+            return canon
+    return None
+
+
+@dataclass(frozen=True)
+class FaktyKarty:
+    """Fakty klatki, od których zależy, czy karta `OBJECT` sama ją sprowadzi (szczeble `karta_wraca`
+    zależne od KLATKI, nie od tekstu): współrzędne nagłówka, oryginał wariantu stosu
+    (`stack_variant`, None - klatka nie jest wariantem) i kanon, który przebieg da temu oryginałowi
+    przed wariantem (`twin_canon` - None, gdy oryginału nie ma albo zostanie bez obiektu)."""
+    ra_deg: object
+    dec_deg: object
+    original_frame_id: object
+    twin_canon: object
+
+
+def fakty_karty_klatek(con, frame_ids, *, lookup=None):
+    """`frame_id → FaktyKarty` dla `frame_ids` (AR-180). Read-only, jeden SELECT.
+
+    `twin_canon` = obiekt ORYGINAŁU wariantu po przebiegu w kolejności `run_resolver`: warianty idą
+    na koniec pętli, więc oryginał rozstrzyga się wcześniej i wariant bierze jego obiekt z TEGO
+    przebiegu (bliźniak, AR-54). Stan bazy nie wystarcza, gdy nagłówek oryginału zmieniono po
+    ostatnim `Rozwiąż` (zapis karty re-synchronizuje zeznanie, przebieg przychodzi osobnym taktem):
+    oryginał `Veil` ze źródłem `region` z kartą `NGC 6992` w nagłówku przebieg przepnie na `NGC 6992`,
+    a wariant pójdzie za nim. Stąd szczeble oryginału w kolejności przebiegu: ręka i nagrobek
+    (`STICKY_OBJECT_SOURCES`) zostają; nazwa z nagłówka bije resztę; bez nazwy klatka bez obiektu
+    albo ze źródłem `region` bierze region ze współrzędnych oryginału (brak regionu - zostaje); każde
+    inne źródło zostaje. Oryginał, który sam jest wariantem, idzie tu stanem bazy (szczebel bliźniaka
+    oryginału poza zakresem - w archiwum łańcuchów wariantów nie ma). Równoważność z prawdziwym
+    przebiegiem pinuje test na macierzy oryginałów.
+
+    Oryginał, który dostaje kartę W TYM SAMYM zapisie, rozstrzyga wołający (okno zna swój zbiór
+    zapisu) - te fakty mówią o oryginale takim, jaki jest w bazie."""
+    ids = sorted({int(f) for f in frame_ids})
+    if not ids:
+        return {}
+    lookup = lookup or alias_lookup(con)
+    rows = con.execute(
+        "SELECT f.id AS fid, h.ra_deg AS ra, h.dec_deg AS dec, "
+        "       sv.original_frame_id AS oryginal, fo.object_source AS osrc, o.canon AS canon, "
+        "       ho.object_raw AS obj, ho.ra_deg AS ora, ho.dec_deg AS odec "
+        "FROM frame f "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN stack_variant sv ON sv.variant_frame_id = f.id "
+        "LEFT JOIN frame fo ON fo.id = sv.original_frame_id "
+        "LEFT JOIN object o ON o.id = fo.object_id "
+        "LEFT JOIN header ho ON ho.frame_id = fo.id "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY f.id", (json.dumps(ids),)).fetchall()
+    wynik = {}
+    for r in rows:
+        twin = None
+        if r["oryginal"] is not None:
+            twin = r["canon"]
+            if r["osrc"] not in STICKY_OBJECT_SOURCES:
+                ident = resolve_name(lookup, r["obj"])[0]
+                if ident is not None:
+                    twin = ident.canon
+                elif r["canon"] is None or r["osrc"] == "region":
+                    region = resolve_region(r["ora"], r["odec"])
+                    twin = region.canon if region is not None else r["canon"]
+        wynik.setdefault(int(r["fid"]), FaktyKarty(r["ra"], r["dec"], r["oryginal"], twin))
+    return wynik
+
+
 def alias_snapshot(con):
     """Snapshot WSZYSTKICH równoważności raz na przebieg: `alias_norm → wiersz` (jak wyżej).
 

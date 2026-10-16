@@ -511,6 +511,10 @@ _FLAGA_ZGODNOSCI_PLIKU = "_only_file_object_mismatch"
 # Perspektywa „f/ niezgodna z teleskopem" dokłada do menu tabeli gest „Popraw f/ w plikach…"
 # (AR-129) - ta sama figura: jedna flaga, pod stałą.
 _FLAGA_OPTYKI = "_only_f_ratio_mismatch"
+# Perspektywa „Rodowód z klatkami nowszymi niż obraz" dokłada do menu tabeli gest zbiorczy
+# „Odrzuć nowsze niż obraz we wszystkich obrazach", a wejście w nią otwiera panel „Rodowód" na
+# pierwszym obrazie (AR-178) - ta sama figura: jedna flaga, pod stałą.
+_FLAGA_NOWSZYCH = "_only_lineage_newer"
 # Te same zasady dla dwóch perspektyw izolacji zapisu w miejscu: w nich menu tabeli pokazuje drogi
 # wyjścia z izolacji także nad pustym zaznaczeniem (wygaszone z powodem), a wejście w perspektywę
 # podaje receptę gestu (`_RECEPTY_ZAPISU`). Klucz = flaga z `_TRIMY`.
@@ -753,13 +757,18 @@ class _Odwrot(NamedTuple):
     cytowane z katalogu - recepta wskazująca napis, którego na ekranie nie ma, jest gorsza niż jej
     brak. `slot` to metoda widoku, którą wisi ta pozycja menu: wykonawca recepty woła ją, nie kopię.
     `zostalo` to metoda widoku, która mówi, ILE klatek celu da się dziś odwrócić - recepta żyje,
-    dopóki to jest prawdą (odwracalność jest faktem o STANIE, nie o czasie komunikatu)."""
+    dopóki to jest prawdą (odwracalność jest faktem o STANIE, nie o czasie komunikatu).
+
+    `bez_widoku` - odwrót bierze cel z migawki widoku, nie z zaznaczenia, więc jest wykonalny także
+    wtedy, gdy celu nie widać, a członu odsłonięcia recepta nie dostaje (AR-178: odsłonięcie
+    prowadziło z perspektywy roboczej do „Przeglądu", choć cofnięty cel wraca do niej sam)."""
     klucz: str
     klucz_potem: str
     menu: str
     akcja: str
     slot: str
     zostalo: str
+    bez_widoku: bool = False
 
 
 # Trzy drogi powrotu osi zaznaczenia, każda z WŁASNĄ parą kluczy zdania. Cofnięcie przypisania
@@ -792,10 +801,11 @@ _ODWROT_UWAG = _Odwrot("grid.notes.undo", "grid.notes.undo_after",
 # Droga powrotu WERDYKTU RĘKI w panelu rodowodu (D-1011-4): odwrotem nie jest werdykt przeciwny,
 # tylko stan SPRZED gestu (`repo.restore_integration_judgment`), znany wyłącznie migawce widoku
 # (`FramesView._migawka_werdyktu`) - recepta jest jedynym wejściem, jak przy uwagach. Cel recepty
-# to klatka STOSU (wiersz gridu), bo wejścia stosu w gridzie zwykle nie stoją.
+# to klatki STOSÓW gestu (wiersze gridu), bo wejścia stosu w gridzie zwykle nie stoją. Bez widoku
+# (AR-178): cofnięty stos wraca do zbioru i zaznaczenia sam (`FramesView._po_werdykcie`).
 _ODWROT_WERDYKTU = _Odwrot("grid.lin.undo", "grid.lin.undo_after",
                            "grid.sel.lineage", "grid.sel.lineage",
-                           "_cofnij_werdykt", "_ile_werdyktow_do_cofniecia")
+                           "_cofnij_werdykt", "_ile_werdyktow_do_cofniecia", bez_widoku=True)
 # Odmowa gestu uwag przy zajętości - zdania gestów izolacji obiecują, że gest „ruszy po
 # zakończeniu", a okno uwag samo nie ruszy.
 _UWAGI_ZAJETE = {"grid.inplace.busy_stage": "grid.notes.busy_stage",
@@ -878,17 +888,20 @@ _ZDANIA_KOPII_WIODACEJ = {
 
 
 def _zdanie_kopii_wiodacej(res):
-    """Zdanie po geście „Ta kopia prowadzi" - czysta funkcja. Przejęcie mówi DROGĘ POWROTU: kopię,
-    która mówiła przed gestem, wskazuje się tym samym gestem (`res.back`). Gdy żadna obecna kopia
-    nie mówiła (zeznanie z kopii, której już nie ma), powrotu gestem nie ma i zdanie to mówi -
-    poprzednie zeznanie zostaje wyłącznie w dzienniku. Odmowa mówi, że nic nie zapisano, i czemu."""
+    """`(zdanie, podpowiedź)` po geście „Ta kopia prowadzi" - czysta funkcja. Przejęcie mówi DROGĘ
+    POWROTU: kopię, która mówiła przed gestem, wskazuje się tym samym gestem (`res.back`). Gdy żadna
+    obecna kopia nie mówiła (zeznanie z kopii, której już nie ma), powrotu gestem nie ma i zdanie to
+    mówi - poprzednie zeznanie zostaje wyłącznie w dzienniku. Odmowa mówi, że nic nie zapisano,
+    i czemu - powodem w języku UI (`tekst_powodu`: błąd systemu klasą z kodem, AR-184), a surowy
+    tekst systemu schodzi do podpowiedzi (`wiersz_systemu`, `""` bez błędu systemu klasą)."""
+    from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu   # lazy: `wb_worker` woła ten moduł
     msg = i18n.t(_ZDANIA_KOPII_WIODACEJ[res.verdict], copy=_kopia_krotko(res.path),
-                 reason=res.reason or "")
+                 reason=tekst_powodu(res.reason or ""))
     if res.verdict in ("adopted", "confirmed"):
         msg += (i18n.t("grid.lead.back", lead=i18n.t("grid.lead.menu"),
                        copy=_kopia_krotko(res.back[0])) if res.back
                 else i18n.t("grid.lead.no_back"))
-    return msg
+    return msg, wiersz_systemu(res.reason)
 
 
 def _kopie_wielokrotne(ops):
@@ -1446,6 +1459,21 @@ class GridTableModel(QAbstractTableModel):
         # Kolumny bazowe BIEŻĄCEJ prezentacji: `BASE_COLS` (klasyczna) albo `FIND_COLS` (Znajdź).
         # Numery liczone od nich - keywordy, „Wersja" i podgląd idą za nimi w obu prezentacjach.
         self._base = BASE_COLS
+        self._nowe_wiersze = False   # reset w toku przykłada NOWY zbiór (`set_data`) - AR-187
+        self._reset_podgladu = False  # reset w toku stawia albo zdejmuje podgląd klingi - AR-187
+
+    def reset_tych_samych_wierszy(self):
+        """Czy TRWAJĄCY reset modelu przebudowuje te same wiersze - sort z nagłówka, grupowanie,
+        podgląd klingi, prezentacja (AR-187) - a nie przykłada nowego zbioru (`set_data`). Widok
+        trzyma przez taki reset zaznaczenie; nowy zbiór ma własną regułę (przeładowanie nawigacyjne
+        je zdejmuje, nie-nawigacyjne oddaje migawką z chwili przyłożenia - AR-172)."""
+        return not self._nowe_wiersze
+
+    def reset_podgladu(self):
+        """Czy TRWAJĄCY reset stawia albo zdejmuje podgląd klingi (`set_preview`). Podgląd wywołuje
+        gest, którego celem bywa zaznaczenie (nazwy, edycja komórki), więc widok odtwarza je przy
+        takim resecie bez progu kosztu - utrata zaznaczenia zmieniłaby cel następnego gestu."""
+        return self._reset_podgladu
 
     def set_base_columns(self, cols, *, version_col):
         """Przełącz zestaw kolumn bazowych (prezentacja) na TYCH SAMYCH wierszach - bez nowych
@@ -1471,10 +1499,14 @@ class GridTableModel(QAbstractTableModel):
         i szerokości się nie przesuwają. Podgląd stał ostatni także wizualnie (rename: indeks 14
         z 15, x=1300 przy viewporcie 1076 px; makro i edycja komórki: ~130 px na końcu), więc
         tego, co miał pokazać, nie było widać bez przewijania - ani obok starej wartości."""
-        self.beginResetModel()
-        self._preview = dict(preview or {})
-        self._preview_label = label if label is not None else i18n.t("grid.preview.macro")
-        self.endResetModel()
+        self._reset_podgladu = True
+        try:
+            self.beginResetModel()
+            self._preview = dict(preview or {})
+            self._preview_label = label if label is not None else i18n.t("grid.preview.macro")
+            self.endResetModel()
+        finally:
+            self._reset_podgladu = False
 
     def _preview_active(self):
         return bool(self._preview)
@@ -1526,7 +1558,11 @@ class GridTableModel(QAbstractTableModel):
         self._miejsca_czasu = miejsca_ekspozycji(
             float(d["exptime"]) for d in self._data_rows if d.get("exptime") is not None)
         self._group_by = group_by
-        self._rebuild()
+        self._nowe_wiersze = True
+        try:
+            self._rebuild()
+        finally:
+            self._nowe_wiersze = False
 
     # ---- kształt ----
     def rowCount(self, parent=QModelIndex()):
@@ -2021,7 +2057,7 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.TextAlignmentRole and kw in self._numeric_kw:
                 return int(Qt.AlignRight | Qt.AlignVCenter)   # „—" pod słupkiem liczb (wizytator P3-7)
             if role == Qt.ToolTipRole:
-                return "brak karty"
+                return i18n.t("grid.cell.no_card_tip")   # w języku UI (AR-181)
             return None
         if kw == _EXPTIME and cell.num is not None:
             # Jedna precyzja kolumny zamiast zapisu karty (AR-115, reguła przy `miejsca_ekspozycji`).

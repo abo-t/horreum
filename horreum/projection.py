@@ -50,6 +50,7 @@ from datetime import datetime
 
 from . import hashing, lineage, naming
 from .gui import queries
+from .item_reasons import blad_systemu   # błąd systemu klasą - jeden właściciel (AR-184)
 from .resolve.paths import STACKS_DIR
 from .scan import EXCLUDED_DIR_NAMES
 
@@ -483,7 +484,9 @@ def _link_to(src, dst, *, do_apply, copy):
     """Status src→KONKRETNY dst, ZERO nadpisania (§0). Zwraca `(status, reason|None)`:
     `would-link` (DRY, cel wolny) · `linked` (utworzony) · `exists` (ten sam i-węzeł, idempotentnie
     pomiń) · `conflict` (cel z INNYM i-węzłem - NIE clobber) · `verify_bad` (po `os.link` inny i-węzeł
-    = SMB kopia) · `error` (I/O, np. EXDEV cross-wolumen → rada `--copy`). Odczyty stanu celu
+    = SMB kopia) · `error` (I/O, np. EXDEV cross-wolumen → rada `--copy`; powód = błąd systemu klasą
+    bez ścieżki, surowy tekst w `detail`, albo tekst systemu - `item_reasons.blad_systemu`, AR-184:
+    `str(exc)` dawnego powodu niósł `'źródło' -> 'cel'`, a CLI dokleja nazwę trzeci raz). Odczyty stanu celu
     (`exists`/`stat`, w trybie kopii także prefiks treści) działają też w DRY (raport nad
     istniejącym drzewem).
 
@@ -523,7 +526,7 @@ def _link_to(src, dst, *, do_apply, copy):
                 return "verify_bad", "cel po os.link ma inny i-węzeł (SMB kopia?)"
         return "linked", None
     except OSError as exc:                         # EXDEV / brak uprawnień / znikłe źródło
-        return "error", f"{type(exc).__name__}: {exc}"
+        return "error", blad_systemu(exc)
 
 
 def _verify_content(src, dst, nbytes=_PROBE_BYTES):
@@ -827,7 +830,9 @@ def copy_master(src, dst, *, expected_sha1, library_root, sha1_fn=hashing.sha1_o
     półproduktu, który skan wziąłby za mastera. `sha1_fn` to szew testu wyścigu.
 
     Powód to DANE, nie zdanie (ekran EN pokazuje go dosłownie, a co się stało, mówi status): ścieżka
-    celu albo `.part`, `sha1 <kopia> != <plan>`, treść wyjątku."""
+    celu albo `.part`, `sha1 <kopia> != <plan>`. Przy `error` - błąd systemu klasą (`PowodPozycji`
+    `os_*`, okno mówi go w języku UI, surowy tekst w `detail`) albo tekst systemu spoza klas
+    (`item_reasons.blad_systemu`, AR-184)."""
     _assert_archive_library(dst, library_root)
     if os.path.lexists(dst):
         return "conflict", str(dst)
@@ -835,13 +840,13 @@ def copy_master(src, dst, *, expected_sha1, library_root, sha1_fn=hashing.sha1_o
     try:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
     except OSError as exc:                     # także `FileExistsError`: rodzic celu jest plikiem
-        return "error", f"{type(exc).__name__}: {exc}"
+        return "error", blad_systemu(exc)
     try:
         fh = open(part, "xb")
     except FileExistsError:
         return "conflict", str(part)
     except OSError as exc:
-        return "error", f"{type(exc).__name__}: {exc}"
+        return "error", blad_systemu(exc)
     try:
         with fh, open(src, "rb") as zrodlo:
             shutil.copyfileobj(zrodlo, fh, _COPY_BUF)
@@ -860,7 +865,7 @@ def copy_master(src, dst, *, expected_sha1, library_root, sha1_fn=hashing.sha1_o
             return "conflict", f"{dst} (rename: FileExistsError)"
     except OSError as exc:
         _drop_part(part)
-        return "error", f"{type(exc).__name__}: {exc}"
+        return "error", blad_systemu(exc)
     except BaseException:
         _drop_part(part)
         raise

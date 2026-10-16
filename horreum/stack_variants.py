@@ -59,6 +59,7 @@ import re
 
 from . import hashing, naming, projection, repo, scan
 from .gui import queries
+from .item_reasons import blad_systemu   # błąd systemu klasą - jeden właściciel (AR-184)
 from .resolve.cameras import camera_identity
 from .resolve.catalog import folder_form
 from .resolve.filters import normalize_filter
@@ -279,7 +280,7 @@ def _plan_item(con, src, size, klatki, okna, stacks_root, read_header):
     try:
         h = {str(k).upper(): v for k, v in read_header(src).items()}
     except Exception as exc:                       # plik nieczytelny: pozycja do ręki, nie wyjątek planu
-        return VariantItem("header_unreadable", side, detail=f"{type(exc).__name__}: {exc}")
+        return VariantItem("header_unreadable", side, detail=blad_systemu(exc))
     klucz = _window_key(h)
     okno = tuple(okna.get((klucz, _drizzle(src)), ())) if klucz is not None else ()
 
@@ -543,7 +544,7 @@ def apply(variant_plan, *, con, now, read=scan.scan_file, sha1_fn=hashing.sha1_o
                     _record(con, item.autocrop.dst, stare, now)
             out.append(ApplyRow(item, status, reason, zeznanie))
         except OSError as exc:
-            out.append(ApplyRow(item, "error", f"{type(exc).__name__}: {exc}"))
+            out.append(ApplyRow(item, "error", blad_systemu(exc)))
         if progress is not None:
             progress(n, len(variant_plan.items), item.autocrop.src)
     return out
@@ -762,7 +763,7 @@ def _standalone_item(con, src, root, stacks_root, db_root, lookup, read):
     try:
         rec = read(src)
     except OSError as exc:
-        return odmowa("unreadable", f"{type(exc).__name__}: {exc}")
+        return odmowa("unreadable", blad_systemu(exc))
     if rec.header is None or rec.sha1_data is None:
         return odmowa("unreadable", rec.error)
     znana = queries.frame_by_sha1_data(con, rec.sha1_data)
@@ -814,7 +815,8 @@ def _standalone_targets(con, items, sha1_fn):
     (po kopii, po Dostawie) daje te same cele. Potem, w tej kolejności: te same bajty pod celem →
     `standalone_exists` (cel na dysku wyprzedza bazę - po Dostawie kopia jest i „u celu”, i znana);
     dane znane bazie (`known_frame_id`, `_standalone_item`) → `standalone_known`; `.part` albo inne
-    bajty pod celem → `dst_taken`. Błąd I/O przy haszu celu → `unreadable` z celem i treścią błędu."""
+    bajty pod celem → `dst_taken`. Błąd I/O przy haszu celu → `unreadable` z powodem błędu (cel stoi
+    w `dst` pozycji - CLI drukuje `src -> dst`, więc w `detail` byłby drugi raz, P4-6)."""
     zajete, out = set(), []
     for it in items:
         if it.seat is None:
@@ -830,7 +832,7 @@ def _standalone_targets(con, items, sha1_fn):
             u_celu = os.path.isfile(dst) and sha1_fn(dst) == it.file_sha1
         except OSError as exc:
             out.append(dataclasses.replace(it, status="standalone_conflict", reason="unreadable",
-                                           detail=f"{dst}: {type(exc).__name__}: {exc}"))
+                                           detail=blad_systemu(exc)))
             continue
         if u_celu:
             it = dataclasses.replace(it, status="standalone_exists")
@@ -932,7 +934,7 @@ def apply_standalone(standalone_plan, *, con, sha1_fn=hashing.sha1_of, should_ca
                 library_root=standalone_plan.library_root, sha1_fn=sha1_fn)
             out.append(StandaloneRow(item, status, reason))
         except OSError as exc:
-            out.append(StandaloneRow(item, "error", f"{type(exc).__name__}: {exc}"))
+            out.append(StandaloneRow(item, "error", blad_systemu(exc)))
         if progress is not None:
             progress(n, len(standalone_plan.items), item.src)
     return out

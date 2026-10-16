@@ -831,52 +831,118 @@ def test_brak_miejsca_i_zerwany_udzial_na_prawdziwej_drodze(tmp_path, monkeypatc
     assert "Errno 28" in res.reason
 
 
-# Handlery łapiące WYŁĄCZNIE błąd nie-systemowy, które składają tekst z wyjątku - z uzasadnieniem.
-_GOLY_WYJATEK_POZA_SYSTEMEM = {
+# Drogi plików, których powód widzi człowiek (AR-168, AR-184): plik → handlery łapiące błąd
+# nie-systemowy (funkcja, typ handlera), które składają tekst z wyjątku - każdy z uzasadnieniem.
+_DROGI_PLIKOW = {
     # parser XML łaty XISF: `ET.ParseError` to werdykt o bajtach, nie błąd systemu; `ValueError`
     # z tym zdaniem trafia do wyniku przez `_blad_systemu` w `write_xisf_changes` (surowo)
-    ("_xisf_verify", "ET.ParseError"),
+    "writeback.py": {("_xisf_verify", "ET.ParseError")},
+    # właściciel: `powod_systemu`, `blad_systemu`; poza nim - powód odmowy KLINGI (`powod_wyjatku`:
+    # `OdmowaZPowodem.powod` albo tekst odmowy, nie system) i nazwa TYPU wartości w komunikacie
+    # EXPECT kodeka (`_do_slownika`, nie tekst wyjątku)
+    "item_reasons.py": {("powod_wyjatku", None), ("_do_slownika", None)},
+    # `e` to etykieta zestawu w składaniu nazwy folderu (`zestawy_configow`), nie wyjątek
+    "projection.py": {("zestawy_configow", None)},
+    # `naming.stack_name` (segment siedziby pusty) i diagnoza czytnika żniw poza klasą błędu
+    # systemu (odmowa parsera, `scan.nazwa_typu_diagnozy`) - handler czytnika pyta najpierw o klasę
+    "harvest.py": {("_plan_stack", "ValueError"), ("plan", "Exception")},
+    # odmowa klingi relacji wariantu i reguła formy folderu (`ValueError`) - nie system
+    "stack_variants.py": {("link_from_testimonies", "ValueError"), ("_standalone_item", "ValueError")},
+    "lead_copy.py": set(),
+    # reguła formy folderu kanonu (`FolderFormError` z kodem i `ValueError`) - nie system
+    "object_change.py": {("plan_object_change", "FolderFormError"), ("plan_object_change", "ValueError")},
+    # strażnik korzenia klingi (`ValueError`) i sonda hardlinka (`ProjectionAbort`) - proza rdzenia
+    "gui/projection_dialog.py": {("run", "ValueError"), ("run", "projection.ProjectionAbort")},
+    "gui/harvest_dialog.py": set(),
+    "gui/wb_worker.py": set(),                     # wykonawca zapisu: wyjątek całej operacji (AR-185)
+    # odmowa klingi i staging bazy (`ValueError`, `sqlite3.Error`) - nie błąd systemu plików
+    "gui/object_change_dialog.py": {("_on_action", "(ValueError, sqlite3.Error)")},
 }
+_WLASCICIEL = {"powod_systemu", "blad_systemu"}
+_SZEROKIE = {"Exception", "BaseException", "OSError"}
+# Podklasy `OSError` - klasyfikacja nimi kłamie (53/67 to `FileNotFoundError`, 21 `PermissionError`)
+_PODKLASY_OS = {"PermissionError", "FileNotFoundError", "FileExistsError", "IsADirectoryError",
+                "NotADirectoryError", "ConnectionError", "TimeoutError", "BrokenPipeError",
+                "InterruptedError", "BlockingIOError"}
+
+
+def _drzewo_drogi(plik):
+    from pathlib import Path
+    import horreum
+    return ast.parse((Path(horreum.__file__).parent / plik).read_text(encoding="utf-8"))
 
 
 def test_meta_tekst_wyjatku_tylko_przez_blad_systemu():
-    """AR-168 (bramka zamiast wyliczanki): w `writeback` tekst wyjątku
-    staje się powodem WYŁĄCZNIE w `_blad_systemu` - f-string z `type(X).__name__`, f-string z gołym
-    `{exc|exc2|err|e}` albo `str(exc|exc2|blad)` poza nim = czerwień. Wyjątki: handler, który łapie
-    wyłącznie błąd nie-systemowy, z uzasadnieniem (`_GOLY_WYJATEK_POZA_SYSTEMEM`). Falsyfikator:
-    przywróć `blad = f"{type(exc).__name__}: {exc}"` albo `f"… ({exc})"` w jednym miejscu."""
-    drzewo = ast.parse(inspect.getsource(writeback))
-    rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+    """AR-168, AR-184 (bramka zamiast wyliczanki): w drogach plików (`_DROGI_PLIKOW` - pisarz kart,
+    projekcja, żniwa, wersje stosów, kopia wiodąca, planer zmiany obiektu i ich okna) tekst wyjątku
+    staje się powodem WYŁĄCZNIE u właściciela (`item_reasons.powod_systemu`/`blad_systemu`) -
+    f-string z `type(X).__name__`, f-string z gołym `{exc|exc2|err|e}` albo nazwą z `except … as N`,
+    `str(exc|exc2|blad)` poza nim = czerwień. Wyjątki: handler błędu nie-systemowego z uzasadnieniem;
+    handler szeroki (`Exception`/`OSError`) z wyjątku MUSI zapytać właściciela o klasę. Klasyfikacja
+    podklasą `OSError` (`isinstance(x, FileNotFoundError)`) poza właścicielem = czerwień (AR-183).
+    Każda droga woła właściciela, pisarz ≥ 45 razy. Falsyfikator: `f"{type(exc).__name__}: {exc}"`
+    w `projection._link_to`, `isinstance(wynik, FileNotFoundError)` w `object_change`, handler
+    czytnika `harvest.plan` bez `powod_systemu`."""
+    poza, wolania = [], {}
+    for plik, wyjatki in _DROGI_PLIKOW.items():
+        drzewo = _drzewo_drogi(plik)
+        rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
 
-    def _otoczenie(w):
-        """(funkcja, typ handlera `except` albo None) węzła."""
-        handler = None
-        while w in rodzic:
-            w = rodzic[w]
-            if handler is None and isinstance(w, ast.ExceptHandler):
-                handler = ast.unparse(w.type) if w.type is not None else ""
-            if isinstance(w, ast.FunctionDef):
-                return w.name, handler
-        return None, handler
-    poza, wywolan = [], 0
-    for w in ast.walk(drzewo):
-        typ = isinstance(w, ast.JoinedStr) and any(
-            isinstance(v, ast.FormattedValue) and ast.unparse(v.value).startswith("type(")
-            and ast.unparse(v.value).endswith(").__name__") for v in w.values)
-        goly = isinstance(w, ast.JoinedStr) and any(
-            isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name)
-            and v.value.id in ("exc", "exc2", "err", "e") for v in w.values)
-        tekst = (isinstance(w, ast.Call) and getattr(w.func, "id", None) == "str"
-                 and len(w.args) == 1 and isinstance(w.args[0], ast.Name)
-                 and w.args[0].id in ("exc", "exc2", "blad"))
-        funkcja, handler = _otoczenie(w)
-        if (typ or goly or tekst) and funkcja != "_blad_systemu" \
-                and (funkcja, handler) not in _GOLY_WYJATEK_POZA_SYSTEMEM:
-            poza.append(f"{w.lineno}: {ast.unparse(w)[:80]}")
-        if isinstance(w, ast.Call) and getattr(w.func, "id", None) == "_blad_systemu":
-            wywolan += 1
+        def _otoczenie(w):
+            """(funkcja, typ najbliższego handlera `except` albo None, nazwy z `except … as N`)."""
+            handler, nazwy = None, set()
+            while w in rodzic:
+                w = rodzic[w]
+                if isinstance(w, ast.ExceptHandler):
+                    if handler is None:
+                        handler = ast.unparse(w.type) if w.type is not None else ""
+                    if w.name:
+                        nazwy.add(w.name)
+                if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return w.name, handler, nazwy
+            return None, handler, nazwy
+        for w in ast.walk(drzewo):
+            funkcja, handler, nazwy = _otoczenie(w)
+            u_wlasciciela = plik == "item_reasons.py" and funkcja in _WLASCICIEL
+            if isinstance(w, ast.Call):
+                nazwa = w.func.attr if isinstance(w.func, ast.Attribute) else getattr(w.func, "id", None)
+                if nazwa in _WLASCICIEL or nazwa == "_blad_systemu":
+                    wolania[plik] = wolania.get(plik, 0) + 1
+                if (nazwa == "isinstance" and len(w.args) == 2 and not u_wlasciciela
+                        and {getattr(n, "id", None) for n in ast.walk(w.args[1])} & _PODKLASY_OS):
+                    poza.append(f"{plik}:{w.lineno}: klasa podklasą - {ast.unparse(w)[:70]}")
+            typ = isinstance(w, ast.JoinedStr) and any(
+                isinstance(v, ast.FormattedValue) and ast.unparse(v.value).startswith("type(")
+                and ast.unparse(v.value).endswith(").__name__") for v in w.values)
+            goly = isinstance(w, ast.JoinedStr) and any(
+                isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name)
+                and v.value.id in ({"exc", "exc2", "err", "e"} | nazwy) for v in w.values)
+            tekst = (isinstance(w, ast.Call) and getattr(w.func, "id", None) == "str"
+                     and len(w.args) == 1 and isinstance(w.args[0], ast.Name)
+                     and w.args[0].id in ({"exc", "exc2", "blad"} | nazwy))
+            if (typ or goly or tekst) and not u_wlasciciela and (funkcja, handler) not in wyjatki:
+                poza.append(f"{plik}:{w.lineno}: {ast.unparse(w)[:80]}")
+        # Handler szeroki z listy wyjątków składa tekst z wyjątku dopiero PO pytaniu o klasę.
+        for w in ast.walk(drzewo):
+            if not (isinstance(w, ast.ExceptHandler) and w.type is not None
+                    and ast.unparse(w.type) in _SZEROKIE):
+                continue
+            funkcja = next((n.name for n in _przodkowie(rodzic, w)
+                            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
+            if (funkcja, ast.unparse(w.type)) in wyjatki and not any(
+                    isinstance(c, ast.Call) and getattr(c.func, "id", None) in _WLASCICIEL
+                    for c in ast.walk(w)):
+                poza.append(f"{plik}:{w.lineno}: handler szeroki bez właściciela klasy")
     assert not poza, "\n".join(poza)
-    assert wywolan >= 45, wywolan
+    assert wolania.get("writeback.py", 0) >= 45, wolania
+    bez = [p for p in _DROGI_PLIKOW if p not in ("item_reasons.py", "writeback.py") and not wolania.get(p)]
+    assert not bez, bez
+
+
+def _przodkowie(rodzic, w):
+    while w in rodzic:
+        w = rodzic[w]
+        yield w
 
 
 def test_przerwane_cofniecie_w_miejscu_zostawia_surowy_szczegol_w_bazie(tmp_path, monkeypatch):

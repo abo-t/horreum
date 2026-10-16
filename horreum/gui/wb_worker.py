@@ -7,9 +7,10 @@ deadlocku AB-BA (GIL × `~QThread`, 2026-07-20), która raz już kosztowała ses
 dlatego wędruje TU cały zestaw: worker, dyspozycja `_OPS`, fallback inline dla `:memory:`
 i cleanup z `wait()`.
 
-Warstwa widżetów (import Qt uprawniony), ale ŻADNEGO widżetu nie dotyka: postęp/koniec/błąd
-wracają sygnałami, a wołający sam gasi przyciski i rysuje pasek — dlatego w `grid.py` zostaje
-kilkulinijkowy launcher robiący WYŁĄCZNIE rzeczy widżetowe.
+Warstwa widżetów (import Qt uprawniony), ale worker ŻADNEGO widżetu nie dotyka: postęp/koniec/błąd
+wracają sygnałami, a wołający sam gasi przyciski i rysuje pasek - dlatego w `grid.py` zostaje
+kilkulinijkowy launcher robiący WYŁĄCZNIE rzeczy widżetowe. Jedyny widżet modułu to pole błędu okien
+zapisu (`EtykietaBledu`, AR-185): wspólne dla okien, które biorą stąd zdania wyniku.
 
 Uchwyt jest PER POWIERZCHNIA, nie singleton: wspólna instancja zlałaby `is_busy`, `cancel()`
 i callbacki dwóch niezależnych operacji. Wzajemne wykluczenie DWÓCH powierzchni jest więc
@@ -19,16 +20,18 @@ osobnym faktem i mieszka w gospodarzu (`MainWindow`) — patrz `app.py`.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import re
 import string
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtWidgets import QLabel
 
 from horreum import db, lead_copy, writeback
 from horreum.gui import i18n
 from horreum.item_reasons import (OS_REASON_CODES, PowodPozycji,   # powód z kodem (AR-141)
-                                  param_ok)
+                                  blad_systemu, param_ok, powod_systemu)
 from horreum.gui.i18n_catalog import CATALOG
 
 
@@ -67,7 +70,9 @@ class WritebackWorker(QObject):
 
     progress = Signal(int, int, str, str)   # done, total, path, status — MID-commit (Qt-wolny callback rdzenia)
     done = Signal(str, object)              # op, result (CommitResult|UndoResult|InplaceGestureResult|ObjectChangeResult) - niemutowany po zwrocie rdzenia
-    failed = Signal(str, str)               # op, msg — wyjątek → sygnał, NIE crash apki
+    # op, zdanie, podpowiedź - wyjątek → sygnał, NIE crash apki; podpowiedź = wiersz szczegółu
+    # systemu (`wiersz_systemu`, AR-185) albo "" przy wyjątku spoza klas błędu systemu
+    failed = Signal(str, str, str)
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
     # Pętle po plikach dzielą sygnaturę (con, target_id, now=, progress=, should_cancel=); gest
@@ -128,20 +133,24 @@ class WritebackWorker(QObject):
     def run(self):
         con = None
         result = None
-        error = None
+        error = podpowiedz = None
         try:
             con = db.connect(self._db_path)     # WŁASNE połączenie w TYM wątku (baza już zmigrowana)
             result = self._OPS[self._op](con, self._target_id, self._now(),
                                          self._emit_progress, self._cancel.is_set)
         except Exception as exc:                # błąd → sygnał, NIE crash
             # Błąd systemu klasą, zdaniem w języku UI (AR-168) - nie surowy `PermissionError: […]`
-            # z komunikatem w języku systemu; inny wyjątek zostaje tekstem `Typ: opis`.
-            error = tekst_powodu(writeback.blad_systemu(exc))
+            # z komunikatem w języku systemu; inny wyjątek zostaje tekstem `Typ: opis`. Surowy tekst
+            # systemu jedzie trzecim argumentem do podpowiedzi odbiorcy (AR-185). Odmowa klingi z kodem
+            # (`OdmowaZPowodem.powod`) mówi swoim kodem - ucieka np. z gestu kopii wiodącej przez
+            # pochodne (`derive.run_derived` → resolver → `repo.upsert_object`), bez handlera po drodze.
+            powod = powod_systemu(exc) or getattr(exc, "powod", None) or blad_systemu(exc)
+            error, podpowiedz = tekst_powodu(powod), wiersz_systemu(powod)
         finally:
             if con is not None:
                 con.close()                     # zamknij PRZED done — main czyta tylko przez self.con
         if error is not None:
-            self.failed.emit(self._op, error)
+            self.failed.emit(self._op, error, podpowiedz)
         else:
             self.done.emit(self._op, result)
         self.finished.emit()                    # zawsze: zwolnij wątek
@@ -184,7 +193,11 @@ class WritebackRunner(QObject):
     def start(self, op, target_id, *, on_progress, on_done, on_failed) -> bool:
         """Odpal `op` (klucz `WritebackWorker._OPS`) na `target_id`. Zwraca False, gdy
         operacja już trwa (wołający nie ma wtedy prawa liczyć na callbacki). Sloty dostaje wołający
-        — TEN moduł nie wie, co jest paskiem, a co przyciskiem."""
+        - TEN moduł nie wie, co jest paskiem, a co przyciskiem. `on_failed(op, zdanie, podpowiedź)`:
+        trzy parametry - PySide przycina argumenty sygnału po cichu, więc odbiorca z dwoma zgubiłby
+        szczegół systemu bez błędu (AR-185). Zła arność odbiorcy = `TypeError` od razu (EXPECT),
+        nie cisza dopiero przy pierwszej awarii."""
+        inspect.signature(on_failed).bind("op", "zdanie", "podpowiedź")
         if self._thread is not None:
             return False
         self._worker = WritebackWorker(self._db_path, op, target_id, now_fn=self._now)
@@ -334,28 +347,64 @@ def szczegol_systemu(powod):
     """Surowy tekst systemu (`Typ: [WinError N] opis`) pierwszego błędu systemu klasą
     (`item_reasons.OS_REASON_CODES`) w drzewie powodu - parametry-powody, listy, uwagi - albo
     None. Zdanie mówi klasę i numer w języku UI, komunikat systemu (w języku systemu) schodzi tu."""
+    surowy = _surowy_systemu(powod)
+    return None if surowy is None else _bez_repr_sciezek(surowy)
+
+
+def _surowy_systemu(powod):
+    """`detail` pierwszego błędu systemu klasą w drzewie powodu (tekst jak od systemu) albo None."""
     if not isinstance(powod, PowodPozycji):
         return None
     if powod.code in OS_REASON_CODES:
         detail = dict(powod.params).get("detail")
-        return _REPR_SCIEZKI.sub(lambda m: "'" + _bez_repr(m.group(1)) + "'", detail) \
-            if isinstance(detail, str) else None
+        return detail if isinstance(detail, str) else None
     for _nazwa, wartosc in powod.params:
         for w in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
-            znaleziony = szczegol_systemu(w)
+            znaleziony = _surowy_systemu(w)
             if znaleziony is not None:
                 return znaleziony
     return None
+
+
+def wiersz_szczegolu(surowy):
+    """Wiersz podpowiedzi „Szczegół systemu: …” z surowego tekstu systemu (ścieżki bez zapisu
+    `repr`) albo `""` - JEDNA reguła składania wiersza dla powodu z kodem (`wiersz_systemu`) i dla
+    parametru pominięcia planera (`object_change_dialog.podpowiedz_pominiecia`)."""
+    return i18n.t("wb.os_detail_tip", detail=_bez_repr_sciezek(surowy)) if surowy else ""
+
+
+def wiersz_systemu(powod):
+    """Wiersz podpowiedzi „Szczegół systemu: …” powodu z błędem systemu klasą (`szczegol_systemu`)
+    albo `""` - jeden dla wyniku zapisu, awarii całej operacji (AR-185), kopii wiodącej i okien
+    wydania, żniw i zmiany obiektu (AR-184). Powód bez klasy (tekst systemu, wyjątek spoza klas) nie
+    dostaje wymyślonego szczegółu."""
+    return wiersz_szczegolu(_surowy_systemu(powod))
 
 
 def podpowiedz_systemu(res):
     """Wiersz podpowiedzi „Szczegół systemu: …” dla pierwszej pozycji wyniku z błędem systemu
     (błąd przed wstrzymaniem przed blokadą, jak w zdaniu wyniku) albo `""`."""
     for fr in res.failed + list(getattr(res, "withheld", [])) + res.blocked:
-        szczegol = szczegol_systemu(fr.reason)
-        if szczegol is not None:
-            return i18n.t("wb.os_detail_tip", detail=szczegol)
+        wiersz = wiersz_systemu(fr.reason)
+        if wiersz:
+            return wiersz
     return ""
+
+
+class EtykietaBledu(QLabel):
+    """Pole błędu okna zapisu: podpowiedź (szczegół systemu awarii, AR-185) należy do BIEŻĄCEGO
+    zdania - każde nowe `setText` i `clear` ją zdejmuje, więc szczegół jednej awarii nie zostaje pod
+    zdaniem walidacji albo „brak gospodarza”. Zwykły `QLabel` podpowiedzi przy `clear()` nie rusza,
+    a C++ `clear` nie woła pythonowego `setText` (zmierzone, PySide6 6.9) - stąd nadpisane oba.
+    Wołający stawia podpowiedź PO tekście (`setToolTip`). Wzorzec `grid_selection._ZdanieWyniku`."""
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip("")
+
+    def clear(self):
+        super().clear()
+        self.setToolTip("")
 
 
 def _klucz_powodu(powod):
@@ -467,8 +516,8 @@ def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
     dokłada do podpowiedzi surowy tekst systemu (`szczegol_systemu`)."""
     if not powod:
         return stan, stan
-    systemu = szczegol_systemu(powod)
-    tip_systemu = "" if systemu is None else "\n" + i18n.t("wb.os_detail_tip", detail=systemu)
+    systemu = wiersz_systemu(powod)
+    tip_systemu = "\n" + systemu if systemu else ""
     szczegol = None
     if (kod == writeback.CODE_INPLACE_FALLBACK or _spadek_z_kodu(powod)
             or (z_bazy and not _spadek_z_kodu(powod)
@@ -499,13 +548,19 @@ def _bez_repr(sciezka):
     return sciezka.replace("\\\\", "\\")
 
 
+def _bez_repr_sciezek(tekst):
+    """Każda ścieżka z zapisu `repr` w tekście (`'R:\\\\ASTRO_\\\\…'`) bez podwojonych ukośników -
+    jedna reguła dla zdania (`czytelny_powod`) i wiersza szczegółu systemu (`wiersz_szczegolu`)."""
+    return _REPR_SCIEZKI.sub(lambda m: "'" + _bez_repr(m.group(1)) + "'", tekst)
+
+
 def czytelny_powod(tekst):
     """Powód rdzenia w zdaniu dla człowieka: plik zajęty przez inny program słowami okna
     (`objchg.reason.busy`, bliźniak powodu przeniesienia rdzenia po AR-125) zamiast surowego
     `PermissionError: [WinError 32] …` - ścieżka zajętego pliku zostaje w nawiasie - a ścieżka
     z zapisu `repr` bez podwojonych ukośników. Reszta zdania znak w znak: powód rdzenia jest
-    zdaniem dla człowieka, a przekład innych błędów systemu robi rdzeń (`writeback._blad_systemu`,
-    AR-168: odmowa dostępu, brak pliku, brak miejsca, udział - z kodem). Zajętość zostaje tutaj:
+    zdaniem dla człowieka, a przekład innych błędów systemu robi rdzeń (`item_reasons.blad_systemu`,
+    AR-168, AR-184: odmowa dostępu, brak pliku, brak miejsca, udział - z kodem). Zajętość zostaje tutaj:
     rdzeń jej nie koduje, a wiersze bazy sprzed kodów są surowe. Jedna funkcja dla okien zapisu
     (zdanie wyniku `zdanie_wyniku_zapisu`, statusy okna zmiany obiektu)."""
     if not tekst:
@@ -516,7 +571,7 @@ def czytelny_powod(tekst):
         return i18n.t("objchg.reason.busy") + (f" ({_bez_repr(sciezka)})" if sciezka else "")
 
     tekst = _OS_ZAJETY.sub(_zajety, tekst)
-    return _REPR_SCIEZKI.sub(lambda m: "'" + _bez_repr(m.group(1)) + "'", tekst)
+    return _bez_repr_sciezek(tekst)
 
 
 def tekst_powodu(powod):

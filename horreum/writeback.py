@@ -54,7 +54,6 @@ import base64
 import contextlib
 import ctypes
 import dataclasses
-import errno
 import hashlib
 import json
 import os
@@ -75,8 +74,11 @@ from . import exif, hashing, repo, scan
 from .card_rules import FITS_RECORD as _FITS_RECORD
 from .resolve.paths import path_key   # ścieżka FIZYCZNA (bez wielkości liter) - jak planer i straż
 from .object_change import ZdanieRdzenia   # ostrzeżenie gestu z kodem dla okna (AR-138)
-from .item_reasons import (ITEM_REASON_CODES, OS_REASON_CODES,   # powód z kodem (AR-141, AR-148)
+from .item_reasons import (ITEM_REASON_CODES,   # powód z kodem (AR-141, AR-148)
                            PowodPozycji, dopisz_z_koperta, powod_wyjatku, z_bazy)
+# Błędy systemu klasą - właściciel `item_reasons` (AR-168, AR-184); nazwy modułu zostają dla miejsc pisarza.
+from .item_reasons import (blad_systemu as _blad_systemu, proza_z_diagnoza as _proza_z_diagnoza,
+                           szczegoly_systemu as _szczegoly_systemu)
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
 # ============================================================ WRITER (port dawcy fits_io)
@@ -155,81 +157,10 @@ _HEADER_HASH_MISMATCH = PowodPozycji("nagłówek pliku zmienił się od stagingu
 _UNDO_HEADER_CHANGED = PowodPozycji("nagłówek pliku zmienił się od commitu (header_hash "
                                     "niezgodny)", "undo_header_changed")
 
-# BŁĘDY SYSTEMU KLASĄ (AR-168). Klasa po kodzie Windows (`winerror`), gdy go jest - podklasa
-# wyjątku i `errno` CPythona tu kłamią: 53/67 (ścieżka sieciowa) to `FileNotFoundError`, 21 i 32/33
-# to `PermissionError`, sieć to EINVAL (mapa zmierzona `OSError(None, 'x', None, kod)`, Python
-# 3.13; numery i nazwy: Microsoft Learn, „System Error Codes (0-499)” i „(1000-1299)”). Kod spoza
-# tabeli (32/33 zajętość - mówi ją `gui.wb_worker.czytelny_powod`, 1117, 1177…) zostaje tekstem
-# systemu. Bez `winerror` (funkcje CRT: `open()`, plik tymczasowy, zapis strumienia, astropy) - po
-# `errno`; samo EACCES nie odróżnia odmowy od zajętości (CRT mapuje 32 na 13), zdanie mówi słowa
-# systemu z numerem, a surowy tekst jedzie w `detail` (okno: podpowiedź, baza: `reason_args`).
-_OS_WINERROR = {
-    5: "denied", 19: "denied", 65: "denied",        # ACCESS_DENIED, WRITE_PROTECT, NETWORK_ACCESS_DENIED
-    2: "missing", 3: "missing",                     # FILE_NOT_FOUND, PATH_NOT_FOUND
-    112: "no_space", 39: "no_space",                # DISK_FULL, HANDLE_DISK_FULL
-    # NOT_READY, REM_NOT_LIST, BAD_NETPATH, NETWORK_BUSY, DEV_NOT_EXIST, UNEXP_NET_ERR,
-    # NETNAME_DELETED, BAD_NET_NAME, SEM_TIMEOUT, VC_DISCONNECTED, NO_NETWORK, NETWORK_UNREACHABLE,
-    # CONNECTION_ABORTED
-    **dict.fromkeys((21, 51, 53, 54, 55, 59, 64, 67, 121, 240, 1222, 1231, 1236), "share_lost"),
-}
-_OS_ERRNO = {errno.EACCES: "denied", errno.EPERM: "denied", errno.ENOENT: "missing",
-             errno.ENOSPC: "no_space"}
-
-
-def _blad_systemu(exc, *, z_typem=True):
-    """Powód z wyjątku systemu → `PowodPozycji` klasy (`os_denied`, `os_missing`, `os_no_space`,
-    `os_share_lost`: krótka fraza z numerem `os_code`, surowy tekst w `detail`) albo - błąd spoza
-    klas, wyjątek nie-`OSError` - tekst wyjątku jak dotąd: `Typ: opis` (`z_typem=False`: `str(exc)`,
-    miejsca, które składały powód bez typu). JEDYNE miejsce modułu, w którym tekst wyjątku staje
-    się powodem (meta-test `tests/test_powody_pisarza.py`)."""
-    surowy = f"{type(exc).__name__}: {exc}"
-    if isinstance(exc, OSError):
-        kod_win = getattr(exc, "winerror", None)
-        if kod_win is not None:
-            klasa, os_code = _OS_WINERROR.get(kod_win), f"WinError {kod_win}"
-        else:
-            klasa, os_code = _OS_ERRNO.get(exc.errno), f"Errno {exc.errno}"
-        if klasa == "denied":
-            return PowodPozycji(f"odmowa dostępu do pliku ({os_code})", "os_denied",
-                                os_code=os_code, detail=surowy)
-        if klasa == "missing":
-            return PowodPozycji(f"plik albo folder nie istnieje ({os_code})", "os_missing",
-                                os_code=os_code, detail=surowy)
-        if klasa == "no_space":
-            return PowodPozycji(f"brak miejsca na dysku ({os_code})", "os_no_space",
-                                os_code=os_code, detail=surowy)
-        if klasa == "share_lost":
-            return PowodPozycji(f"udział sieciowy albo dysk nie odpowiada ({os_code})",
-                                "os_share_lost", os_code=os_code, detail=surowy)
-    return surowy if z_typem else str(exc)
-
-
-# Ta sama klasyfikacja dla wykonawcy GUI (`gui.wb_worker.WritebackWorker`: wyjątek całej operacji).
-blad_systemu = _blad_systemu
-
-
-def _szczegoly_systemu(powod) -> list[str]:
-    """Surowe teksty systemu (`detail`) błędów systemu klasą w drzewie powodu (parametry-powody,
-    listy, uwagi) - w kolejności zdania."""
-    if not isinstance(powod, PowodPozycji):
-        return []
-    if powod.code in OS_REASON_CODES:
-        return [dict(powod.params)["detail"]]
-    wynik = []
-    for _nazwa, wartosc in powod.params:
-        for w in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
-            wynik += _szczegoly_systemu(w)
-    return wynik
-
-
-def _proza_z_diagnoza(powod):
-    """Powód do KOLUMNY PROZOWEJ (bez `reason_args`: `inplace_op.reason`) - zdanie PL, a gdy w powodzie
-    jest błąd systemu klasą, za nim surowy tekst systemu (`zdanie - Typ: opis`), żeby diagnoza
-    z bazy nie zginęła razem z kodem (AR-168). `None` → `None`."""
-    if powod is None:
-        return None
-    szczegoly = _szczegoly_systemu(powod)
-    return " - ".join([str(powod), *szczegoly]) if szczegoly else str(powod)
+# BŁĘDY SYSTEMU KLASĄ (AR-168): `_blad_systemu`, `_szczegoly_systemu`, `_proza_z_diagnoza` to aliasy
+# importu z właściciela `item_reasons` (AR-184 - jedna klasyfikacja dla wszystkich dróg plików).
+# W tym module tekst wyjątku staje się powodem WYŁĄCZNIE przez `_blad_systemu` (meta-test
+# `tests/test_powody_pisarza.py`).
 _BRAK_LOCATION = PowodPozycji("brak location w bazie", "no_location")
 _KOPIA_ZNIKNELA = PowodPozycji("kopia zniknęła (present=0)", "copy_gone")
 

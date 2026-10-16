@@ -2185,7 +2185,16 @@ def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_pa
     więc o wyniku decydowało środowisko. Warianty `sciezka_szersza_od_okna` dokładają katalog
     liczony z metryki fontu - ścieżka ~1,3 szerokości okna przy każdym foncie, także ×1,6
     (`QApplication.setFont` przed otwarciem okna); sufit długości trzyma się MAX_PATH.
-    Falsyfikator: zdejmij `_szerokosc_od_okna` z `notice` → padają warianty `sciezka_szersza_od_okna`."""
+    Falsyfikator: zdejmij `_szerokosc_od_okna` z `notice` → padają warianty `sciezka_szersza_od_okna`.
+
+    AR-191 - zapas pod polem: przyrost zdania podglądu (+1-2 wiersze) bierze tabela pozycji, dopóki
+    stoi nad swoim minimum; potem układ zabiera wysokość liście wydań NAD polem. Przy foncie ×1,6
+    stałe 600 px okna było niższe od treści (694-760 px offscreen), tabela startowała na minimum albo
+    28 px nad nim, a wynik zależał od basetemp: szerokość okna z etykiety archiwum (ścieżka
+    `tmp_path`, ucinana na 64 znakach), łamanie ścieżki po `-` i po `C:`, sufit MAX_PATH.
+    Warunek wstępny przed listą: okno otwiera się w wysokości treści, najwyżej `_SCREEN_SHARE`
+    ekranu (`_fit_height`). Falsyfikator: zdejmij `_fit_height` z `showEvent` → warunek pada
+    w każdym wariancie i przy każdym basetemp."""
     import math
 
     from PySide6.QtGui import QFont, QFontMetrics
@@ -2211,6 +2220,9 @@ def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_pa
     assert entered.wait(10)
     QTest.qWait(30)
     assert dlg.rel_notice.text() == "Liczę wydania na kartach…" and not dlg.rel_table.isHidden()
+    sufit = int(dlg.screen().availableGeometry().height() * hd_mod._SCREEN_SHARE)
+    assert dlg.height() >= min(dlg.layout().totalHeightForWidth(dlg.width()), sufit), (
+        f"okno {dlg.height()} px niższe od treści - tabela pozycji bez zapasu pod przyrost zdania")
     przed = (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y(), dlg.width())
     gate.set()
     assert _wait_until(lambda: dlg._rel_thread is None and dlg._dry_thread is None and dlg.btn_apply.isEnabled())

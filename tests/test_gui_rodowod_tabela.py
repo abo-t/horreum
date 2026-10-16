@@ -436,7 +436,7 @@ def test_werdykt_na_dwoch_zaznaczonych_wierszach_to_jeden_gest_z_jednym_cofnieci
     assert sorted(v.lineage_bar.selected_frame_ids()) == [1, 2]
     _klik(v.lineage_bar.btn_reject)
     assert _stan_wejscia(con, 1) == _stan_wejscia(con, 2) == ("user", 1)
-    assert [z.input_frame_id for z in v._migawka_werdyktu[2]] == [1, 2]
+    assert [z.input_frame_id for z in v._migawka_werdyktu[0][2]] == [1, 2]
     v._wykonaj_odwrot((10,), grid_model._ODWROT_WERDYKTU)
     assert _stan_wejscia(con, 1) == _stan_wejscia(con, 2) == ("window", 0)
 
@@ -1187,6 +1187,7 @@ def test_wiersz_porzadkow_nowszych_liczy_obrazy_i_gasnie_po_gescie(qapp, con):
         assert it.data(rows.SECONDARY) == "1  ›" and it.data(rows.STRONG) is True
         assert it.toolTip() == i18n.t("tasks.lineage_newer_tip", n=2,
                                       reject=i18n.t("grid.lin.reject_newer"),
+                                      all=i18n.t("grid.lin.reject_newer_all"),
                                       undo=i18n.t("grid.lin.undo"))
         assert f"„{i18n.t('grid.lin.undo')}”" in it.toolTip()
         repo.judge_integration_inputs(con, integration_id=61, input_frame_ids=[63, 64],
@@ -1338,14 +1339,14 @@ def test_karta_teleskopu_po_werdyktach_zostaje_w_kubelku(strona, con):
     assert bar.items.isVisible() and _wiersz_listy(bar.items, 52)          # werdykt do cofnięcia
 
 
-def test_gest_w_perspektywie_nowszych_cofa_sie_oboma_czlonami_recepty(strona, con):
-    """Główna droga z wiersza Porządków: perspektywa „Rodowód z klatkami nowszymi niż obraz", klik
-    gestu - obraz wypada z perspektywy (stan, nie dziennik), więc recepta ma DWA człony: odsłonięcie
-    (wykonalne) i „potem cofniesz werdykt" (bez wykonawcy, póki obraz poza widokiem). Wykonanie obu
-    przywraca CAŁĄ tabelę `integration_input` sprzed gestu; dziennik niesie po jednym zdarzeniu
-    werdyktu i cofnięcia na każde wejście.
+def test_gest_w_perspektywie_nowszych_cofa_sie_jednym_czlonem_bez_odslaniania(strona, con):
+    """Główna droga z wiersza Porządków: perspektywa „Rodowód z klatkami nowszymi niż obraz" otwiera
+    panel na obrazie, klik gestu - obraz wypada z perspektywy (stan, nie dziennik), a recepta ma
+    JEDEN człon: „Cofnij werdykt", wykonalny od razu, bez odsłaniania (AR-178 - cofnięty obraz wraca
+    do perspektywy sam). Wykonanie przywraca CAŁĄ tabelę `integration_input` sprzed gestu i obraz
+    w zbiorze; dziennik niesie po jednym zdarzeniu werdyktu i cofnięcia na każde wejście.
 
-    Falsyfikator: recepta bez członu odsłonięcia (cofnięcie wisi na obrazie, którego nie widać)."""
+    Falsyfikator: `bez_widoku=False` w `_ODWROT_WERDYKTU` (dwa człony, cofnięcie bez wykonawcy)."""
     _seed_nowsze(con)
     v = strona.frames_view
     recepty = []
@@ -1360,22 +1361,16 @@ def test_gest_w_perspektywie_nowszych_cofa_sie_oboma_czlonami_recepty(strona, co
     przed = tabela()
     v.apply_perspective(grid_model.PRESET_LINEAGE_NEWER)
     assert v._frame_ids == [60]
-    _zaznacz(v, [60])
-    v._toggle_panel("lineage")
+    assert _zaznaczone(v) == [60] and v._lineage_panel_open()      # wejście stawia gest pod ręką
     assert v.lineage_bar.btn_reject_newer.isVisible()
     _klik(v.lineage_bar.btn_reject_newer)
     assert v._frame_ids == []
     recepta = recepty[-1]
-    assert len(recepta.czlony) == 2
-    assert recepta.czlony[0].wykonaj is not None and recepta.czlony[1].wykonaj is None
-    recepta.czlony[0].wykonaj()                                  # odsłoń obraz
+    assert str(recepta) == i18n.t("grid.lin.undo")
+    assert len(recepta.czlony) == 1 and recepta.czlony[0].wykonaj is not None
+    recepta.czlony[0].wykonaj()
     QApplication.processEvents()
-    assert 60 in v._frame_ids
-    assert str(recepty[-1]) == i18n.t("grid.lin.undo")          # został sam człon cofnięcia
-    cofnij = [c for c in recepty[-1].czlony if c.wykonaj is not None]
-    assert len(cofnij) == 1
-    cofnij[0].wykonaj()
-    QApplication.processEvents()
+    assert v._frame_ids == [60] and _zaznaczone(v) == [60]
     assert tabela() == przed
     assert zdarzenia("integration.judged") == 2
     assert zdarzenia("integration.judgment_restored") == 2

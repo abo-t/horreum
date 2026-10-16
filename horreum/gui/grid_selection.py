@@ -560,7 +560,7 @@ class StagingDrawer(QFrame):
             self.dot.setText("●"); _set_role(self.dot, "warn")   # U+25CF: jest w Segoe UI, paruje z „○" (wiz F3 #2)
             # `label` rozróżnia klingę też przy n>0: „N zmian nazw oczekuje" vs domyślne „N zmian
             # oczekuje" (mikro-zmiana §0; call-sites makra bez label → domyślny tekst, R1 #8).
-            self.label.setText(label or i18n.t("grid.drawer.pending", n=n))
+            self.label.setText(label or i18n.t_plural("grid.drawer.pending", n))
             if result is None:
                 self.result.setText("")      # nowy staging: skasuj STALE wynik commitu/odrzucenia (wiz #7)
         else:

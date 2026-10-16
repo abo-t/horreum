@@ -1225,6 +1225,47 @@ def test_audyt_kalibracji_bez_werdyktu_nie_jest_odmowa(tmp_path):
     assert harvest.audit_calibration(str(wlasne), ic) == {}
 
 
+def test_siedziba_na_zerwanym_udziale_to_przeglad_nie_do_wciagniecia(con, tmp_path, monkeypatch):
+    """Odczyt folderu siedziby pada zerwanym udziałem (WinError 53 - CPython daje `FileNotFoundError`,
+    a folder istnieje) albo odmową dostępu (5) → pozycja `review` z powodem `"seat_unreadable"`
+    i błędem systemu klasą w `detail`, nie „do wciągnięcia” na udział, którego nie widać. Folderu
+    naprawdę nie ma - dalej „do wciągnięcia”. Falsyfikator: `except FileNotFoundError: return None`."""
+    pid = _profile(con)
+    names, _ = _flaty(con, pid, n=2)
+    s = _out(tmp_path, "masterFlat_0.xisf", data=b"MASTER-0")
+    t = {s: _testimony(s, inputs=[_wbpp_input(nm) for nm in names])}
+    it = _one(_plan(con, tmp_path, t))
+    assert it.status == "would-place"                            # siedziby nie ma - do wciągnięcia
+    seat = os.path.dirname(it.dst)
+    oryg = os.listdir
+    for kod, klasa in ((53, "os_share_lost"), (5, "os_denied")):
+        def listdir(k, kod=kod):
+            if os.path.normcase(str(k)) == os.path.normcase(seat):
+                raise OSError(None, "Komunikat systemu", str(k), kod)
+            return oryg(k)
+        monkeypatch.setattr(harvest.os, "listdir", listdir)
+        it = _one(_plan(con, tmp_path, t))
+        assert (it.status, it.reason, it.dst) == ("review", "seat_unreadable", None), it
+        assert it.detail.code == klasa and dict(it.detail.params)["os_code"] == f"WinError {kod}"
+    monkeypatch.undo()
+    # stos z wydania: ta sama reguła siedziby pod `STACKS` (`_stack_on_disk`)
+    nazwy, ids = _lighty(con, 2)
+    src = _out(tmp_path, STOS_WBPP, data=b"STOS-HA")
+    stos = {src: _stos(src, [_wejscie(nm) for nm in nazwy])}
+    wydanie = _wydanie(tmp_path, {ZESTAW: (nazwy, ids)})
+    stos_it = next(i for i in _plan(con, tmp_path, {**t, **stos}, manifest=wydanie).items if i.src == src)
+    assert stos_it.status == "would-place"
+
+    def listdir_stosu(k):
+        if os.path.normcase(str(k)) == os.path.normcase(_seat(tmp_path)):
+            raise OSError(None, "Komunikat systemu", str(k), 67)
+        return oryg(k)
+    monkeypatch.setattr(harvest.os, "listdir", listdir_stosu)
+    stos_it = next(i for i in _plan(con, tmp_path, {**t, **stos}, manifest=wydanie).items if i.src == src)
+    assert (stos_it.status, stos_it.reason) == ("review", "seat_unreadable"), stos_it
+    assert stos_it.detail.code == "os_share_lost"
+
+
 def test_kazdy_powod_ma_test():
     """Lista powodów jest zamknięta; nowy token bez testu w tym pliku przewraca ten test."""
     zrodlo = open(__file__, encoding="utf-8").read()
@@ -1330,7 +1371,8 @@ def test_apply_blad_zapisu_zeznania_wraca_w_wyniku(con, tmp_path, monkeypatch):
     monkeypatch.setattr(projection, "write_harvest_manifest", pelny_dysk)
     r = harvest.apply(p, now=NOW)
     assert [it.status for it in r.items] == ["placed", "placed"] and len(r.placed_dirs) == 1
-    assert r.manifest_path is None and r.manifest_error == "OSError: [Errno 28] No space left on device"
+    assert r.manifest_path is None and r.manifest_error.code == "os_no_space"   # klasą (AR-184)
+    assert dict(r.manifest_error.params)["detail"] == "OSError: [Errno 28] No space left on device"
 
 
 def test_apply_przerwanie_zapisuje_zeznanie_wyniku_czesciowego(con, tmp_path):
@@ -1378,7 +1420,8 @@ def test_powody_stosow_doszly_na_koncu_listy():
     assert harvest.REASONS[:13] == ("no_raw_darks", "unreadable", "no_history", "no_inputs", "inputs_unknown",
                                     "inputs_ambiguous", "mixed_profile", "no_profile", "no_night",
                                     "header_mismatch", "outside_release", "no_config", "name_taken")
-    assert harvest.REASONS[13:] == ("no_release", "no_light_seat", "color_unknown", "foreign_calibration")
+    assert harvest.REASONS[13:] == ("no_release", "no_light_seat", "color_unknown", "foreign_calibration",
+                                    "seat_unreadable")              # siedziba nieczytelna (AR-183)
     assert len(set(harvest.REASONS)) == len(harvest.REASONS)
 
 

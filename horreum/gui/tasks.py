@@ -85,6 +85,15 @@ use_theme(theme.DEFAULT)
 # + najszerszy człon drugi („381  ›") = 35 px + `_GAP`/`_PAD` ≈ 230 px. 400 px daje oddech bez
 # rozjeżdżania; przy 520 px wzrok znów gubi drogę etykieta→liczba (wizytator P1 tura 2).
 _LIST_MAX_W = 400
+# PODŁOGA LISTY ZADAŃ W WIERSZACH (AR-188), nie w pikselach - wiersz maluje delegat, jego wysokość
+# zależy od fontu i DPI. Lista ponad tę liczbę przewija się, gdy okno jest niskie; przy wolnym pionie
+# pokazuje całą treść (sufit = treść). LICZBA Z POMIARU (natywnie, 100 %, wiersz 18 px): podłogę okna
+# wyznaczała dotąd ta lista (27 wierszy: strona 530 px, okno 608 px); przy podłodze do 21 wierszy
+# strona listy schodzi poniżej podstron osi Porządków (439 px) i Planera (440 px), a okno - do 518 px
+# niezależnie od liczby wierszy. 18 zostawia zapas 4 wierszy (72 px), żeby inny font albo skala nie
+# przywróciły zależności; przy oknie na podłodze lista i tak dostaje ~22 wiersze (stretch do treści).
+# Ta sama liczba co `app._KOLEJKA_SUFIT_WIERSZY`, ale inny fakt (tam sufit, tu podłoga).
+_LISTA_ZADAN_MIN_WIERSZY = 18
 # etykieta = KLUCZ i18n rozwiązywany w budowie/refresh (nie zamrażać PL przy imporcie).
 _TASKS = [
     ("unresolved_lights", "tasks.unresolved_lights", _PAGE_OBJECTS),
@@ -470,13 +479,17 @@ class TasksView(QWidget):
             else:
                 it.setData(Qt.UserRole, key)           # akcyjna — handler mapuje klucz → akcja
             self.tasks.addItem(it)
-        lv.addWidget(self.tasks)
         # Lista HUGGUJE treść, reszta pionu zostaje pusta BEZ ramki (wizytator P1 tura 2): przy oknie
-        # 1400×900 ramka miała 807 px na 60 px treści — ~750 px obramowanej pustki czyta się jako
-        # „coś tu miało być". Wysokość z `_fit_task_list` (pomiar, nie stała); stretch trzyma listę
-        # przy GÓRZE — centrowanie zerwałoby lewą oś czytania (sidebar + nagłówek na x≈185)
-        # i wyglądałoby jak strona www, nie okno Qt.
-        lv.addStretch(1)
+        # 1400×900 ramka miała 807 px na 60 px treści - ~750 px obramowanej pustki czyta się jako
+        # „coś tu miało być". Wysokość z `_fit_task_list` (pomiar, nie stała): sufit = treść,
+        # podłoga = `_LISTA_ZADAN_MIN_WIERSZY` wierszy (AR-188). Lista ma stretch, więc rośnie do
+        # treści, gdy pion jest; pion ponad treść bierze pusty stretch pod nią, który trzyma listę
+        # przy GÓRZE - centrowanie zerwałoby lewą oś czytania (sidebar + nagłówek na x≈185)
+        # i wyglądałoby jak strona www, nie okno Qt. Bez stretchu listy pion dzieliłby się z pustką
+        # i lista zostawałaby na podłodze z suwakiem przy wolnym miejscu (zmierzone natywnie: 274 px
+        # przy oknie 1040 px i treści 490 px).
+        lv.addWidget(self.tasks, 1)
+        lv.addStretch(0)
         self._fit_task_list()
         self.pages.addWidget(list_page)                # _PAGE_LIST
 
@@ -486,23 +499,33 @@ class TasksView(QWidget):
         self.pages.addWidget(self._wrap(i18n.t("tasks.object_review"), self.object_view))   # _PAGE_OBJECTS
 
     def _fit_task_list(self):
-        """Zetnij wysokość listy zadań do jej treści (suma wysokości wierszy przez delegata + ramka).
-        Wołane DWA razy: w budowie (żeby pierwszy paint nie mignął pełną ramką) i w `refresh_counts`
-        — dopiero po `show()` metryki fontu są prawdziwe (`sizeHintForRow` przed pokazaniem potrafi
-        oddać wartość zastępczą), a `refresh_counts` woła gospodarz właśnie na wejściu w Porządki.
-        Idempotentne: ten sam pomiar daje tę samą liczbę, więc powtórne wołanie nic nie rusza.
+        """Sufit wysokości listy zadań = jej treść (suma wysokości wierszy przez delegata + ramka),
+        podłoga = pierwsze `_LISTA_ZADAN_MIN_WIERSZY` wierszy (AR-188). Wołane DWA razy: w budowie
+        (żeby pierwszy paint nie mignął pełną ramką) i w `refresh_counts` - dopiero po `show()`
+        metryki fontu są prawdziwe (`sizeHintForRow` przed pokazaniem potrafi oddać wartość
+        zastępczą), a `refresh_counts` woła gospodarz właśnie na wejściu w Porządki. Idempotentne:
+        ten sam pomiar daje tę samą liczbę, więc powtórne wołanie nic nie rusza.
+
+        PODŁOGA NIE ZALEŻY OD LICZBY WIERSZY (AR-188): dawniej wysokość była stała na całą treść,
+        a minimum okna liczy się z najwyższej strony - każdy nowy wiersz podnosił podłogę okna
+        o wysokość wiersza (zmierzone natywnie: 18 px; 27 wierszy - okno 608 px, 37 - 788 px). Teraz
+        lista ponad podłogę przewija się, gdy pionu brak, a przy wolnym pionie pokazuje całą treść.
 
         WIZ #14: `sizeHintForRow(0) × n` KŁAMAŁO, bo wiersze maluje `TwoPartDelegate` i realna
         wysokość jest większa niż podpowiedź widoku (zmierzone: podpowiedź 13 px przy wierszu
-        wyraźnie wyższym) — lista dostawała pasek przewijania przy PIĘCIU pozycjach, mając pod sobą
+        wyraźnie wyższym) - lista dostawała pasek przewijania przy PIĘCIU pozycjach, mając pod sobą
         ~700 px wolnego pionu. Sumujemy więc wysokości WSZYSTKICH wierszy przez delegata
         (`sizeHintForIndex`), zamiast mnożyć jedną podpowiedź: wiersze nie muszą być równe."""
         n = self.tasks.count()
-        if not n:
-            return
+        # Lista NIGDY nie jest pusta: `_build_ui` wstawia wiersz na każdą pozycję `_TASKS`, a nic jej
+        # nie opróżnia (`_przyloz_liczniki` przepisuje tylko tekst i role). Pusta lista = złamany
+        # inwariant - podłoga 18 wierszy i sufit treści z poprzedniego stanu zostałyby zawieszone.
+        assert n, "lista Porządków bez wierszy - `_TASKS` nie wszedł do listy"
         model = self.tasks.model()
-        wys = sum(self.tasks.sizeHintForIndex(model.index(i, 0)).height() for i in range(n))
-        self.tasks.setFixedHeight(wys + 2 * self.tasks.frameWidth())
+        wiersze = [self.tasks.sizeHintForIndex(model.index(i, 0)).height() for i in range(n)]
+        ramka = 2 * self.tasks.frameWidth()
+        self.tasks.setMinimumHeight(sum(wiersze[:_LISTA_ZADAN_MIN_WIERSZY]) + ramka)
+        self.tasks.setMaximumHeight(sum(wiersze) + ramka)
 
     def _wrap(self, title, view):
         """Podstrona osi: pasek powrotu + tytuł + widok. Powrót odświeża listę (stan mógł się
@@ -672,9 +695,11 @@ class TasksView(QWidget):
                              pairs=", ".join(state["xref_reconcile_pairs"]),
                              change=i18n.t("grid.sel.object_change"))
             elif key == "lineage_newer" and n > 0:
-                # AR-153: ile wejść czeka i gdzie gest - przycisk panelu nazwany z katalogu.
+                # AR-153, AR-178: ile wejść czeka i gdzie oba gesty - przycisk panelu i pozycja menu
+                # tabeli nazwane z katalogu.
                 tip = i18n.t("tasks.lineage_newer_tip", n=state["lineage_newer_inputs"],
-                             reject=i18n.t("grid.lin.reject_newer"), undo=i18n.t("grid.lin.undo"))
+                             reject=i18n.t("grid.lin.reject_newer"),
+                             all=i18n.t("grid.lin.reject_newer_all"), undo=i18n.t("grid.lin.undo"))
             if robota != n:                             # część liczby z decyzją - nie robota
                 tip += _zdanie_podzbioru(key, n - robota)
             if czesciowe:

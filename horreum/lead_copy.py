@@ -27,6 +27,7 @@ import json
 from dataclasses import dataclass
 
 from . import derive, repo, scan
+from .item_reasons import powod_systemu   # błąd systemu klasą - jeden właściciel (AR-184)
 from .resolve.headers import FAKTY_BIEZACE, copy_facts_state, copy_testimony
 
 HAND_ACTOR = "user:local"
@@ -58,7 +59,8 @@ class LeadCopyResult:
         z `changed: {}` i `confirmed: True`, bez zmiany treści);
       * `'absent'` - kopii nie ma już na dysku według bazy (`present = 0`);
       * `'isolated'` - kopia izolowana po zapisie w miejscu (Porządki mają na to własne wiersze);
-      * `'failed'` - plik nieczytelny (`reason` = diagnoza odczytu);
+      * `'failed'` - plik nieczytelny (`reason` = błąd systemu klasą, `PowodPozycji` `os_*`, albo
+        diagnoza odczytu skanu);
       * `'identity'` - pod ścieżką leży inna treść niż ta klatka (robota skanu);
       * `'stale'` - nagłówek pliku zmienił się od skanu (robota skanu, który odświeży zeznanie);
       * `'raced'` - stan bazy zmienił się w trakcie odczytu (równoległy zapis, kopia przestawiona,
@@ -148,7 +150,11 @@ def adopt_lead_copy(con, *, location_id, now, actor=HAND_ACTOR, expected_frame_i
         try:
             rec = scan.scan_file(path)
         except Exception as exc:               # I/O - wynik z diagnozą, nie zapis
-            return LeadCopyResult("failed", frame_id, path, reason=scan.unreadable_reason_of(exc))
+            # Błąd systemu klasą z kodem - okno mówi go w języku UI, surowy tekst w podpowiedzi
+            # (AR-184); reszta (zajętość 32/33, kod spoza klas) to diagnoza skanu BEZ ścieżki - zdanie
+            # okna już nazywa kopię (P4-6).
+            return LeadCopyResult("failed", frame_id, path,
+                                  reason=powod_systemu(exc) or scan.unreadable_reason_of(exc))
         try:
             werdykt = _przejmij(con, frame_id, location_id, rec, now=now, actor=actor,
                                 inplace_gen=gen, expected_frame_id=expected_frame_id)

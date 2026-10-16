@@ -33,6 +33,7 @@ import re
 import uuid
 
 from . import card_rules, naming
+from .item_reasons import blad_systemu, powod_systemu   # błąd systemu klasą (AR-183, AR-184) - liść
 from .resolve.catalog import FolderFormError   # reguła formy folderu z kodem (AR-141)
 from .resolve.frames import LIGHT_KINDS
 from .resolve.paths import STACK_KIND, object_from_path, path_after_object_change, path_key
@@ -112,7 +113,7 @@ SKIP_CODES = frozenset({
     "kind_not_light", "retired", "superseded", "no_present_copy", "many_copies", "isolated",
     "no_mtime", "no_object", "bad_target", "off_position", "folder_twins", "card_skip",
     "card_rule", "card_too_long", "card_chars", "card_comment", "dir_unreadable", "dir_denied",
-    "dir_missing", "file_in_dir_place", "variant_dir", "variant_name", SKIP_UNCHANGED,
+    "dir_missing", "dir_share_lost", "dir_no_space", "file_in_dir_place", "variant_dir", "variant_name", SKIP_UNCHANGED,
     "target_on_disk", "batch_collision", "target_in_db", "pair"})
 # Kody ostrzeżeń planera - każdy ma zdanie `objchg.warn.<kod>` w katalogu okna (PL+EN, test AST).
 WARNING_CODES = frozenset({"stack_split"})
@@ -191,18 +192,34 @@ class _Dysk:
             else:
                 self._pamiec[klucz] = (set(nazwy), {n.casefold(): n for n in reversed(nazwy)})
         wynik = self._pamiec[klucz]
-        # Rodzaj błędu systemu to fakt (klasa wyjątku), nie proza: odmowa dostępu i brak katalogu
-        # mają własne zdania w języku UI; inny błąd niesie komunikat systemu jako szczegół.
-        if isinstance(wynik, PermissionError):
+        if not isinstance(wynik, OSError):
+            return wynik
+        # Rodzaj błędu systemu to fakt KLASY po kodzie Windows (`item_reasons.powod_systemu`, AR-183),
+        # nie po podklasie wyjątku: zerwany udział (53/67) CPython podaje jako `FileNotFoundError`,
+        # dysk niegotowy (21) jako `PermissionError`. Każda klasa (odmowa dostępu, brak katalogu, brak
+        # miejsca, zerwany udział) ma własne zdanie w języku UI, surowy tekst systemu jedzie w `detail`
+        # (podpowiedź okna). Reszta - kod spoza klas, także zajętość 32/33, którą klasa świadomie pomija
+        # (to nie odmowa dostępu) - niesie komunikat systemu w zdaniu (`dir_unreadable`).
+        powod = powod_systemu(wynik)
+        kod = getattr(powod, "code", None)
+        szczegol = dict(powod.params) if powod is not None else {}
+        if kod == "os_denied":
             raise _Odmowa("dir_denied", f"katalog celu nieczytelny - brak dostępu: {katalog}",
-                          dir=katalog)
-        if isinstance(wynik, FileNotFoundError):
+                          dir=katalog, detail=szczegol["detail"])
+        if kod == "os_missing":
             raise _Odmowa("dir_missing", f"katalog celu nie istnieje na dysku: {katalog}",
-                          dir=katalog)
-        if isinstance(wynik, OSError):
-            raise _Odmowa("dir_unreadable", f"katalog celu nieczytelny ({katalog}): {wynik}",
-                          dir=katalog, detail=str(wynik))
-        return wynik
+                          dir=katalog, detail=szczegol["detail"])
+        if kod == "os_share_lost":
+            raise _Odmowa("dir_share_lost", f"udział sieciowy albo dysk nie odpowiada "
+                          f"({szczegol['os_code']}) - katalog celu: {katalog}",
+                          dir=katalog, os_code=szczegol["os_code"], detail=szczegol["detail"])
+        if kod == "os_no_space":
+            raise _Odmowa("dir_no_space", f"brak miejsca na dysku ({szczegol['os_code']}) - katalog "
+                          f"celu: {katalog}",
+                          dir=katalog, os_code=szczegol["os_code"], detail=szczegol["detail"])
+        tekst = blad_systemu(wynik, z_typem=False)          # kod spoza klas: zawsze tekst systemu
+        raise _Odmowa("dir_unreadable", f"katalog celu nieczytelny ({katalog}): {tekst}",
+                      dir=katalog, detail=tekst)
 
     def katalog(self, cel, stary):
         """Katalog celu w pisowni Z DYSKU + katalogi do założenia, od najpłytszego.

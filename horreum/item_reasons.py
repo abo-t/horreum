@@ -24,8 +24,15 @@ też `outer`) - `PowodPozycji` (warstwy z kodem) albo zwykły `str` (tekst `OSEr
 wyjątek czytnika bez kodu): jawna granica, zdanie UI wstawia taki tekst znak w znak. Uwagi doklejane za
 powodem (`; `, `dopisz`) to lista `notes` - lista powodów, nie sklejona proza. Lista cech
 (`features`, `paths`) to parametr rodzaju `list` - okno składa ją po `, `, jak rdzeń.
+
+BŁĘDY SYSTEMU KLASĄ (AR-168, AR-184): jeden właściciel klasyfikacji `OSError` (`powod_systemu`,
+`blad_systemu`, sekcja na końcu modułu) dla KAŻDEJ drogi plików - pisarza kart (`writeback` woła go pod
+dawną nazwą `_blad_systemu`), projekcji i kopii mastera (`projection`), żniw (`harvest`), wersji stosów
+(`stack_variants`), kopii wiodącej (`lead_copy`), planera zmiany obiektu (`object_change`) i wykonawców
+GUI. Tu, bo te moduły nie importują pisarza (astropy, klinga plików), a powód z kodem i tak mieszka tutaj.
 """
 
+import errno
 import json
 
 # Kody powodów pozycji - każdy ma zdanie `objchg.item.<kod>` w katalogu okna (PL+EN, test AST), PL
@@ -119,10 +126,17 @@ ITEM_REASON_CODES = frozenset({
     "fb_card_too_long", "fb_compressed", "checksum_present", "fb_op_kind", "fb_not_text_card",
     "fb_card_present", "fb_card_count", "fb_value_not_text", "fb_card_records", "fb_continue",
     "fb_no_room", "free_records", "route_depends",
-    # --- błędy systemu klasą (AR-168, `writeback._blad_systemu`) i bramka sumy kontrolnej z faktów
+    # --- błędy systemu klasą (AR-168, `blad_systemu` niżej) i bramka sumy kontrolnej z faktów
     # bazy (AR-167, `card_rules.BRAMKA_SUMY`); region sprzed commitu bez dowodu całego pliku (AR-169)
     "os_denied", "os_missing", "os_no_space", "os_share_lost", "fits_checksum",
     "undo_region_unproven",
+    # --- bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
+    # `evaluate_manual_change`, `run_macro`/`plan_manual_change`) i powody wyrażenia (`expr.eval_for`)
+    "macro_raw", "macro_no_present_copy", "macro_many_copies", "macro_compressed",
+    "macro_degenerate", "macro_no_header_hash", "macro_frame_gone", "macro_set_missing",
+    "macro_idx_required", "macro_add_exists", "macro_compute", "macro_assign", "macro_not_int",
+    "macro_type_mismatch", "macro_manual_many", "macro_manual_not_int", "macro_missing_operand",
+    "macro_zero_division",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
@@ -319,3 +333,91 @@ def z_bazy(reason, reason_code, reason_args):
     except (TypeError, ValueError):
         return reason
     return z_czesci(reason, reason_code, args)
+
+
+# ============================================================ BŁĘDY SYSTEMU KLASĄ (AR-168, AR-184)
+# Klasa po kodzie Windows (`winerror`), gdy go jest - podklasa
+# wyjątku i `errno` CPythona tu kłamią: 53/67 (ścieżka sieciowa) to `FileNotFoundError`, 21 i 32/33
+# to `PermissionError`, sieć to EINVAL (mapa zmierzona `OSError(None, 'x', None, kod)`, Python
+# 3.13; numery i nazwy: Microsoft Learn, „System Error Codes (0-499)” i „(1000-1299)”). Kod spoza
+# tabeli (32/33 zajętość - mówi ją `gui.wb_worker.czytelny_powod`, 1117, 1177…) zostaje tekstem
+# systemu. Bez `winerror` (funkcje CRT: `open()`, plik tymczasowy, zapis strumienia, astropy) - po
+# `errno`; samo EACCES nie odróżnia odmowy od zajętości (CRT mapuje 32 na 13), zdanie mówi słowa
+# systemu z numerem, a surowy tekst jedzie w `detail` (okno: podpowiedź, baza: `reason_args`).
+# Do AR-184 sekcja mieszkała w `writeback`; reszta dróg plików sklejała `Typ: opis` sama.
+_OS_WINERROR = {
+    5: "denied", 19: "denied", 65: "denied",        # ACCESS_DENIED, WRITE_PROTECT, NETWORK_ACCESS_DENIED
+    2: "missing", 3: "missing",                     # FILE_NOT_FOUND, PATH_NOT_FOUND
+    112: "no_space", 39: "no_space",                # DISK_FULL, HANDLE_DISK_FULL
+    # NOT_READY, REM_NOT_LIST, BAD_NETPATH, NETWORK_BUSY, DEV_NOT_EXIST, UNEXP_NET_ERR,
+    # NETNAME_DELETED, BAD_NET_NAME, SEM_TIMEOUT, VC_DISCONNECTED, NO_NETWORK, NETWORK_UNREACHABLE,
+    # CONNECTION_ABORTED
+    **dict.fromkeys((21, 51, 53, 54, 55, 59, 64, 67, 121, 240, 1222, 1231, 1236), "share_lost"),
+}
+_OS_ERRNO = {errno.EACCES: "denied", errno.EPERM: "denied", errno.ENOENT: "missing",
+             errno.ENOSPC: "no_space"}
+
+
+def powod_systemu(exc):
+    """Błąd systemu KLASĄ → `PowodPozycji` (`os_denied`, `os_missing`, `os_no_space`,
+    `os_share_lost`: krótka fraza z numerem `os_code`, surowy tekst `Typ: opis` w `detail`) albo
+    None - błąd spoza klas, wyjątek nie-`OSError`. Wołający z WŁASNĄ diagnozą spoza klas (czytnik
+    żniw, kopia wiodąca) pyta tylko o klasę; reszta bierze `blad_systemu`. JEDYNE miejsce rdzenia,
+    w którym tekst wyjątku systemu staje się powodem (meta-test `tests/test_powody_pisarza.py`)."""
+    if not isinstance(exc, OSError):
+        return None
+    surowy = f"{type(exc).__name__}: {exc}"
+    kod_win = getattr(exc, "winerror", None)
+    if kod_win is not None:
+        klasa, os_code = _OS_WINERROR.get(kod_win), f"WinError {kod_win}"
+    else:
+        klasa, os_code = _OS_ERRNO.get(exc.errno), f"Errno {exc.errno}"
+    if klasa == "denied":
+        return PowodPozycji(f"odmowa dostępu do pliku ({os_code})", "os_denied",
+                            os_code=os_code, detail=surowy)
+    if klasa == "missing":
+        return PowodPozycji(f"plik albo folder nie istnieje ({os_code})", "os_missing",
+                            os_code=os_code, detail=surowy)
+    if klasa == "no_space":
+        return PowodPozycji(f"brak miejsca na dysku ({os_code})", "os_no_space",
+                            os_code=os_code, detail=surowy)
+    if klasa == "share_lost":
+        return PowodPozycji(f"udział sieciowy albo dysk nie odpowiada ({os_code})",
+                            "os_share_lost", os_code=os_code, detail=surowy)
+    return None
+
+
+def blad_systemu(exc, *, z_typem=True):
+    """Powód z wyjątku: błąd systemu klasą (`powod_systemu`) albo - błąd spoza klas, wyjątek
+    nie-`OSError` - tekst wyjątku jak dotąd: `Typ: opis` (`z_typem=False`: `str(exc)`, miejsca, które
+    składały powód bez typu). Ten sam tekst co w `detail` klasy, więc kod spoza tabeli mówi znak
+    w znak to, co system."""
+    powod = powod_systemu(exc)
+    if powod is not None:
+        return powod
+    return f"{type(exc).__name__}: {exc}" if z_typem else str(exc)
+
+
+def szczegoly_systemu(powod) -> list[str]:
+    """Surowe teksty systemu (`detail`) błędów systemu klasą w drzewie powodu (parametry-powody,
+    listy, uwagi) - w kolejności zdania."""
+    if not isinstance(powod, PowodPozycji):
+        return []
+    if powod.code in OS_REASON_CODES:
+        return [dict(powod.params)["detail"]]
+    wynik = []
+    for _nazwa, wartosc in powod.params:
+        for w in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
+            wynik += szczegoly_systemu(w)
+    return wynik
+
+
+def proza_z_diagnoza(powod):
+    """Powód do KOLUMNY PROZOWEJ (bez `reason_args`: `inplace_op.reason`) i do zeznania w pliku
+    (`harvest` - `_ZNIWA_*.json`) - zdanie PL, a gdy w powodzie jest błąd systemu klasą, za nim
+    surowy tekst systemu (`zdanie - Typ: opis`), żeby diagnoza nie zginęła razem z kodem (AR-168).
+    `None` → `None`."""
+    if powod is None:
+        return None
+    szczegoly = szczegoly_systemu(powod)
+    return " - ".join([str(powod), *szczegoly]) if szczegoly else str(powod)

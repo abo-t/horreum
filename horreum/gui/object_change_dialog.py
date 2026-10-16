@@ -53,8 +53,9 @@ from horreum.gui import i18n, queries
 from horreum.gui.i18n_catalog import CATALOG
 # Zdania wspólne okien zapisu mieszkają w `wb_worker` (jeden dom: czytelny powód rdzenia, status
 # wiersza ze spadkiem na drogę atomową, podział powodu spadku); `grid` importuje go i tak.
-from horreum.gui.wb_worker import (czytelny_powod, podziel_powod_spadku, status_pozycji,
-                                   tekst_powodu)
+from horreum.gui.wb_worker import (EtykietaBledu, czytelny_powod, podziel_powod_spadku,
+                                   status_pozycji, tekst_powodu, wiersz_systemu, wiersz_szczegolu)
+from horreum.item_reasons import blad_systemu   # wyjątek planu - błąd systemu klasą (AR-184)
 from horreum.resolve.paths import STACK_KIND, object_folder
 
 # Kolumny listy pozycji: plik dziś, plik po zmianie, karta `OBJECT` stara → nowa i - po biegu
@@ -110,6 +111,19 @@ def tekst_pominiecia(kod, params, powod):
     if regula and f"objchg.folder.{regula}" in CATALOG:   # reguła formy folderu (AR-141)
         p["detail"] = i18n.t(f"objchg.folder.{regula}", **dict(regula_params))
     return czytelny_powod(i18n.t(klucz, **p))
+
+
+# Pominięcia katalogu celu z błędem systemu klasą (AR-183): zdanie mówi klasę w języku UI, a komunikat
+# systemu (w języku systemu) - podpowiedź grupy. `dir_unreadable` niesie go w samym zdaniu.
+_SZCZEGOL_W_PODPOWIEDZI = frozenset({"dir_denied", "dir_missing", "dir_share_lost", "dir_no_space"})
+
+
+def podpowiedz_pominiecia(kod, params, zdanie):
+    """Podpowiedź grupy pominięć: zdanie grupy, a przy odmowie katalogu z błędem systemu klasą -
+    wiersz „Szczegół systemu: …” z surowym tekstem systemu (`wb_worker.wiersz_szczegolu` - ta sama
+    reguła zdejmowania `repr` ścieżki co przy powodzie z kodem)."""
+    wiersz = wiersz_szczegolu(dict(params).get("detail") if kod in _SZCZEGOL_W_PODPOWIEDZI else None)
+    return zdanie + "\n" + wiersz if wiersz else zdanie
 
 
 def tekst_ostrzezenia(kod, params, tekst):
@@ -237,7 +251,8 @@ class PlanWorker(QObject):
     synchronicznie. Wynik niesie generację startu - okno odrzuca stale (plan sprzed cofnięcia)."""
 
     done = Signal(int, object)          # (generacja, (plan, korzeń, drogi zapisu kart))
-    failed = Signal(int, str)           # (generacja, komunikat)
+    # (generacja, powód) - `object`, nie `str`: `Signal(str)` zgubiłby kod `PowodPozycji` (AR-184)
+    failed = Signal(int, object)
     finished = Signal()
 
     def __init__(self, db_path, gen, *, frame_ids, target, con=None):
@@ -253,7 +268,7 @@ class PlanWorker(QObject):
         try:
             self.done.emit(self._gen, self._compute())
         except Exception as exc:        # szczerze na ekran, nie cicha śmierć wątku
-            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+            self.failed.emit(self._gen, blad_systemu(exc))
         finally:
             self.finished.emit()
 
@@ -686,7 +701,7 @@ class ObjectChangeDialog(QDialog):
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lay.addWidget(self.status)
-        self.error = QLabel("")
+        self.error = EtykietaBledu("")      # szczegół systemu awarii znika z następnym zdaniem (AR-185)
         self.error.setProperty("role", "error")
         self.error.setWordWrap(True)
         lay.addWidget(self.error)
@@ -815,12 +830,15 @@ class ObjectChangeDialog(QDialog):
         self._wypelnij()
         self._sync_akcji()
 
-    @Slot(int, str)
-    def _on_plan_failed(self, gen, msg):
+    @Slot(int, object)
+    def _on_plan_failed(self, gen, powod):
+        """Wyjątek planu (`PlanWorker`): błąd systemu klasą w języku UI (`tekst_powodu`), surowy
+        tekst systemu pod kursorem (`wiersz_systemu`, AR-184); inny wyjątek - tekstem `Typ: opis`."""
         if gen != self._gen:
             return
         self.counts.setText("")
-        self.error.setText(i18n.t("objchg.err.plan", msg=czytelny_powod(msg)))
+        self.error.setText(i18n.t("objchg.err.plan", msg=tekst_powodu(powod)))
+        self.error.setToolTip(wiersz_systemu(powod))
         self._sync_akcji()
 
     def _kolumna_po_zmianie(self, sciezki):
@@ -880,7 +898,7 @@ class ObjectChangeDialog(QDialog):
         # Najliczniejszy powód na górze - 300 plików z jednym powodem to jeden wiersz, nie 300.
         for powod, lista in sorted(grupy.items(), key=lambda kv: (-len(kv[1]), kv[0])):
             g = QTreeWidgetItem([powod, str(len(lista))])
-            g.setToolTip(_COL_POWOD, powod)
+            g.setToolTip(_COL_POWOD, podpowiedz_pominiecia(lista[0].code, lista[0].params, powod))
             for s in lista:
                 d = QTreeWidgetItem(["", ""])
                 ustaw_sciezke(d, _COL_POWOD, s.path, self._korzen)
@@ -1219,12 +1237,13 @@ class ObjectChangeDialog(QDialog):
         self.changed.emit()
         self._sync_akcji()
 
-    def _on_failed(self, op, msg):
+    def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera. Przebieg jest w bazie, więc okno bierze stan stamtąd, nie z pamięci:
         po wyjątku ZAPISU „Cofnij” zostaje (cofnięcie przy niczym do zrobienia mówi „0”), a „Dokończ”
         stoi, dopóki przebieg jest `staged` (liczy pozycje, które w bazie wciąż czekają - także
         zero, gdy wyjątek padł po ostatniej pozycji); po wyjątku COFNIĘCIA dokańczać nie ma czego
-        (cofnięty przebieg zapisu nie wznawia), zostaje ponowienie „Cofnij”."""
+        (cofnięty przebieg zapisu nie wznawia), zostaje ponowienie „Cofnij”. Szczegół systemu
+        (`podpowiedz`, AR-185) - pod kursorem pola błędu; następne zdanie go zdejmuje."""
         self.bar.setVisible(False)
         if self._run_id is not None:
             self._do_cofniecia = True
@@ -1237,6 +1256,7 @@ class ObjectChangeDialog(QDialog):
                 self._stan_przebiegu = "undoing"
         self.error.setText(i18n.t("grid.wb.error", msg=czytelny_powod(msg))
                            + (i18n.t("objchg.res.run", run_id=self._run_id) if self._run_id else ""))
+        self.error.setToolTip(podpowiedz)
         self._sync_akcji()
         self.changed.emit()
 

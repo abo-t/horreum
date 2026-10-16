@@ -2259,23 +2259,29 @@ def _cmd_header_fix(args):
     sprzeczność = odmowa w całości, zero zapisu). Zapis: staging (`repo.stage_pending_many`) +
     `writeback.commit(..., inplace=True)` (droga ujednolicenia karty `OBJECT`, kotwica nagłówka każdej
     kopii, backup pod `--undo`). Po zapisie i po cofnięciu - łańcuch pochodnych (filtr, przepis,
-    rodowód). Kod wyjścia APPLY/UNDO: 1, gdy którykolwiek plik zablokowany, nieudany albo (APPLY)
-    zapisany z zeznaniem wstrzymanym (AR-82: głosem klatki mówi inna kopia)."""
+    rodowód). Kod wyjścia APPLY: 1, gdy którykolwiek plik zablokowany, nieudany albo zapisany
+    z zeznaniem wstrzymanym (AR-82: głosem klatki mówi inna kopia). Kod wyjścia UNDO: 1, gdy cofnięcie
+    nie jest domknięte (`UndoResult.complete` - ta sama reguła co uchwyt „Cofnij” okien, AR-160):
+    plik „już cofnięty” (`UndoResult.already`) ma własny wiersz i nie liczy się do zablokowanych."""
     from . import macro, repo, writeback
     now = datetime.now(timezone.utc).isoformat()
     con = db.open_db(args.db)
     try:
         if args.undo is not None:
             res = writeback.undo(con, args.undo, now=now)
+            zablokowane = [fr for fr in res.blocked if fr not in res.already]
             lines = [f"Horreum header-fix {args.db} (UNDO commit {args.undo}): przywrocone "
                      f"{len(res.restored)} (bez powrotu zeznania {len(res.withheld)}), "
-                     f"zablokowane {len(res.blocked)}, nieudane {len(res.failed)}"]
+                     f"zablokowane {len(zablokowane)}, nieudane {len(res.failed)}"]
+            if res.already:
+                lines.append(f"  juz cofniete {len(res.already)} - stan sprzed commitu jest juz na "
+                             f"dysku i w bazie, nie ma czego cofac")
             lines += [f"    {fr.status}: {fr.path} - {fr.reason}"
-                      for fr in (res.withheld + res.blocked + res.failed)[:args.limit]]
+                      for fr in (res.withheld + zablokowane + res.failed)[:args.limit]]
             if res.restored:
                 _pochodne(con, now, lines)
             print("\n".join(lines))
-            return 1 if (res.blocked or res.failed) else 0
+            return 0 if res.complete else 1
         if args.apply:
             try:
                 zapisany = _wczytaj_plan(args.plan, "header-fix", args.db)

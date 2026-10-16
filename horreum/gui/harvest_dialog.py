@@ -88,6 +88,8 @@ from horreum import db, harvest, projection
 from horreum.gui import i18n, queries
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.projection_dialog import _COLORS, _elide_path
+from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu   # błąd systemu w języku UI (AR-184)
+from horreum.item_reasons import blad_systemu
 
 # Ile poziomów nad wyjściem WBPP szukać manifestu wydania: WBPP pisze `master/` (i `calibrated/`)
 # wewnątrz katalogu roboczego, który wydanie obiektu kładzie pod `<karta>/OBJECTS/<obiekt>` -
@@ -115,6 +117,7 @@ _HARVEST_REASONS = {
     "no_light_seat": "harvest.reason.no_light_seat",
     "color_unknown": "harvest.reason.color_unknown",
     "foreign_calibration": "harvest.reason.foreign_calibration",
+    "seat_unreadable": "harvest.reason.seat_unreadable",
 }
 
 # Powód STOSU, którego zdanie różni się od zdania tego samego tokenu przy master flacie. Stos
@@ -177,7 +180,7 @@ _TROUBLE_KEYS = (("conflict", "harvest.sum_conflict"), ("error", "harvest.sum_er
 COL_FILE, COL_KIND, COL_STATUS, COL_REASON, COL_NAME, COL_DIR, COL_RELEASE = range(7)
 _HEADERS = ("harvest.col.file", "harvest.col.kind", "harvest.col.status", "harvest.col.reason",
             "harvest.col.name", "harvest.col.dir", "harvest.col.release")
-_SCREEN_SHARE = 0.9                      # okno rośnie pod treść tabeli najwyżej do tej części ekranu
+_SCREEN_SHARE = 0.9                      # okno rośnie pod treść najwyżej do tej części ekranu (szerokość i wysokość)
 
 # Lista wydań: kolumny i wysokość. Lista stoi NAD polem i nie może zjeść tabeli pozycji - widać
 # najwyżej tyle wierszy, dalej przewija się sama.
@@ -258,8 +261,12 @@ def reason_text(item):
     a `detail` niesie tekst klingi kopii (konflikt, błąd I/O). Pozycja `exists` bez obecnej kopii
     mówi to wprost - pusta kolumna katalogu wyglądałaby jak błąd. Token spoza mapy renderuje się
     sam, nie pustką. `header_mismatch` z `DATE-OBS` w `detail` mówi o dacie nazwy stosu
-    (`date_obs_text`), nie o niezgodności z wejściami."""
-    detail = (item.detail or "").strip()
+    (`date_obs_text`), nie o niezgodności z wejściami. `detail` z błędem systemu klasą
+    (`PowodPozycji` `os_*`: kopia, czytnik, AR-184) mówi w języku UI przez `tekst_powodu`, a surowy
+    tekst systemu stoi w podpowiedzi komórki (`_fill`). Dane bez kodu idą przez `czytelny_powod`:
+    ścieżka w zapisie `repr` traci podwojone ukośniki (`'X:\\\\a'` → `'X:\\a'`), plik zajęty
+    (WinError 32/33) mówi słowami okna z nazwą pliku; reszta przechodzi znak w znak."""
+    detail = (tekst_powodu(item.detail) or "").strip()
     if item.reason == "header_mismatch" and detail.startswith(_DATE_OBS_DETAIL):
         return date_obs_text(detail[len(_DATE_OBS_DETAIL):])
     if item.reason:
@@ -458,7 +465,8 @@ class HarvestDryWorker(QObject):
     domyślnej `plan` - testy podstawiają czytnik bez czytania XISF, a produkcja czyta pliki."""
 
     done = Signal(int, object)        # (generacja, payload)
-    failed = Signal(int, str)         # (generacja, komunikat)
+    # (generacja, powód) - `object`: `Signal(str)` zgubiłby kod błędu systemu klasą (AR-184)
+    failed = Signal(int, object)
     finished = Signal()
 
     def __init__(self, db_path, wbpp_dir, archive_root, gen, con=None):
@@ -480,7 +488,7 @@ class HarvestDryWorker(QObject):
         except harvest.HarvestCancelled:
             pass                                     # porzucona sonda - wynik nikomu niepotrzebny
         except Exception as exc:                     # sonda pada szczerze, nie cichą śmiercią wątku
-            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+            self.failed.emit(self._gen, blad_systemu(exc))
         else:
             self.done.emit(self._gen, payload)
         finally:
@@ -513,7 +521,7 @@ class HarvestApplyWorker(QObject):
 
     progress = Signal(int, int, str, str)   # done, total, dst, status
     done = Signal(object)                   # HarvestResult (może nieść cancelled=True)
-    failed = Signal(str)                    # wyjątek → sygnał, nie crash okna
+    failed = Signal(object)                 # powód wyjątku → sygnał, nie crash okna (kod: AR-184)
     finished = Signal()
 
     def __init__(self, plan, now):
@@ -531,7 +539,7 @@ class HarvestApplyWorker(QObject):
             res = harvest.apply(self._plan, now=self._now, progress=self._emit_progress,
                                 should_cancel=self._cancel.is_set)
         except Exception as exc:
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.failed.emit(blad_systemu(exc))
         else:
             self.done.emit(res)
         finally:
@@ -555,7 +563,7 @@ class HarvestReleasesWorker(QObject):
 
     done = Signal(int, object)        # (generacja, [ReleaseRow])
     missing = Signal(int, object)     # (generacja, karty bez folderu) - przed `done` tej generacji
-    failed = Signal(int, str)         # (generacja, komunikat)
+    failed = Signal(int, object)      # (generacja, powód) - `object` niesie kod (AR-184)
     finished = Signal()
 
     def __init__(self, roots, gen, *, archive_root=None, db_path=None, con=None):
@@ -578,7 +586,7 @@ class HarvestReleasesWorker(QObject):
                     con.close()
             brak = harvest.missing_roots(self._roots)
         except Exception as exc:                     # lista pada szczerze, nie cichą śmiercią wątku
-            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+            self.failed.emit(self._gen, blad_systemu(exc))
         else:
             self.missing.emit(self._gen, brak)
             self.done.emit(self._gen, rows)
@@ -602,11 +610,12 @@ def _szerokosc_od_okna(label):
     label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
 
-def _ustaw_zdanie(label, text):
+def _ustaw_zdanie(label, text, tip=""):
     """Tekst etykiety z `_szerokosc_od_okna` i ten sam tekst pod kursorem - ucięta ścieżka jest
-    czytelna w całości bez zaznaczania."""
+    czytelna w całości bez zaznaczania. `tip` - wiersz pod zdaniem w podpowiedzi (szczegół systemu,
+    AR-184); każde zdanie stawia podpowiedź od nowa, więc szczegół nie zostaje pod innym zdaniem."""
     label.setText(text)
-    label.setToolTip(text)
+    label.setToolTip("\n".join(p for p in (text, tip) if p))
 
 
 class HarvestDialog(QDialog):
@@ -664,7 +673,7 @@ class HarvestDialog(QDialog):
         self._close_after_apply = None   # kod zamknięcia zgłoszonego w biegu apply
         self._closing = False
         self._zwolnione = False          # `deleteLater` po zamknięciu już zlecone (`_zwolnij_gdy_wolne`)
-        self._notice_state = ("", None)  # ostatni komunikat stanu - wraca, gdy pole przestaje odbiegać
+        self._notice_state = ("", None, "")  # ostatni komunikat stanu (tekst, rola, podpowiedź) - wraca, gdy pole przestaje odbiegać
         self.summary = None              # zdanie na pasek stanu gospodarza (None = nic się nie stało)
         self.harvested_root = None       # korzeń do przyjęcia - ustawia go WYŁĄCZNIE „Zamknij i przyjmij”
         self.harvested_stacks = []       # [(sha1_data, frame_ids, kanon wydania)] - razem z `harvested_root`
@@ -910,12 +919,37 @@ class HarvestDialog(QDialog):
         wyjścia, jak kafel Przyjmij przy pierwszej dostawie - puste pole i zdanie „Wskaż…” to jedna
         interakcja więcej do tego samego miejsca. Z kartami wyborem jest lista wydań, więc okno
         wyboru nie wyskakuje nad nią. Raz na okno, po pokazaniu (kolejka zdarzeń), żeby wybór
-        stał nad oknem żniw, a nie przed nim; anulowanie zostawia okno z pustym polem."""
-        super().showEvent(event)
-        if not self._first_pick_checked:
+        stał nad oknem żniw, a nie przed nim; anulowanie zostawia okno z pustym polem.
+        Pierwsze pokazanie dopasowuje też wysokość (`_fit_height`) - przed `QDialog.showEvent`,
+        które ustawia pozycję okna pod jego rozmiar."""
+        first = not self._first_pick_checked
+        if first:
             self._first_pick_checked = True
-            if not self._rel_roots and not str(self._settings().value("harvest/last_output", "") or ""):
-                QTimer.singleShot(0, self._on_pick_output)
+            self._fit_height()
+        super().showEvent(event)
+        if first and not self._rel_roots and not str(self._settings().value("harvest/last_output", "") or ""):
+            QTimer.singleShot(0, self._on_pick_output)
+
+    def _fit_height(self):
+        """Wysokość okna pod treść (AR-191): `heightForWidth` układu przy szerokości, którą okno już
+        ma, najwyżej `_SCREEN_SHARE` wysokości ekranu; okno tylko rośnie ponad startowe 600 px. Stałe
+        600 px nie zna fontu: przy foncie ×1,6 treść chce 694-760 px (offscreen), okno startowało
+        ściśnięte z tabelą pozycji na minimum, a wiersz, który zdanie podglądu z tła dokłada pod
+        polem, schodził wtedy z listy wydań NAD nim - pole, „Wskaż…” i „Zmień…” podjeżdżały o
+        13-19 px. W wysokości treści tabela pozycji stoi na swoim sizeHint i to jej zapas bierze
+        przyrost zdania."""
+        want = self.layout().totalHeightForWidth(self.width())
+        screen = self._ekran()
+        if screen is not None:
+            want = min(want, int(screen.availableGeometry().height() * _SCREEN_SHARE))
+        if want > self.height():
+            self.resize(self.width(), want)
+
+    def _ekran(self):
+        """Ekran, na którym okno stanie: rodzica (`QDialog.showEvent` centruje okno na nim), a bez
+        rodzica - własny. `self.screen()` niepokazanego okna z rodzicem na drugim monitorze to ekran
+        główny, więc sufit wysokości i szerokości liczyłby się z innego ekranu."""
+        return (self.parentWidget() or self).screen()
 
     # ---- szerokości (powód w kadrze, ścieżki odróżnialne) ----
     def _fit_columns(self):
@@ -966,7 +1000,7 @@ class HarvestDialog(QDialog):
         m = self.layout().contentsMargins()
         overhead = (m.left() + m.right() + 2 * self.table.frameWidth()
                     + self.table.verticalScrollBar().sizeHint().width())
-        screen = self.screen()
+        screen = self._ekran()
         cap = int(screen.availableGeometry().width() * _SCREEN_SHARE) if screen is not None else total + overhead
         target = min(total + overhead, cap)
         if target > self.width():
@@ -1240,8 +1274,9 @@ class HarvestDialog(QDialog):
                               if plan.manifest_root else "")
         self._sync_stale()
 
-    @Slot(int, str)
+    @Slot(int, object)
     def _on_dry_failed(self, gen, msg):
+        """Sonda padła: błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem (AR-184)."""
         self._set_probing(False)
         if self._closing:
             return
@@ -1250,14 +1285,15 @@ class HarvestDialog(QDialog):
             return
         self._plan = None
         self._sync_buttons()
-        self._show_notice(i18n.t("harvest.dry_failed", msg=msg), "error")
+        self._show_notice(i18n.t("harvest.dry_failed", msg=tekst_powodu(msg)), "error",
+                          wiersz_systemu(msg))
 
-    def _show_notice(self, text, role=None, *, remember=True):
+    def _show_notice(self, text, role=None, tip="", *, remember=True):
         """Komunikat stanu. `remember=False` - zdanie chwilowe (pole odbiega od podglądu), po którym
-        wraca poprzedni komunikat."""
+        wraca poprzedni komunikat. `tip` - szczegół systemu w podpowiedzi (`_ustaw_zdanie`)."""
         if remember:
-            self._notice_state = (text, role)
-        _ustaw_zdanie(self.notice, text)
+            self._notice_state = (text, role, tip)
+        _ustaw_zdanie(self.notice, text, tip)
         self.notice.setProperty("role", role or "")
         self.notice.style().unpolish(self.notice)    # rola zmienia kolor z motywu dopiero po repolish
         self.notice.style().polish(self.notice)
@@ -1272,10 +1308,13 @@ class HarvestDialog(QDialog):
         for i, it in enumerate(items):
             folder = dir_of(it)
             reason = reason_text(it)
+            # Pełny powód pod kursorem, a przy błędzie systemu klasą - wiersz surowego tekstu systemu
+            # (AR-184): zdanie komórki mówi klasę w języku UI, ścieżka i komunikat systemu - tu.
+            podpowiedz = "\n".join(p for p in (reason, wiersz_systemu(it.detail)) if p)
             cells = {COL_FILE: (rel_text(it.src, self._shown_out), it.src),
                      COL_KIND: (kind_text(it.kind), None),
                      COL_STATUS: (status_text(it.status), None),
-                     COL_REASON: (reason, reason),
+                     COL_REASON: (reason, podpowiedz),
                      COL_NAME: (name_text(it), None),
                      COL_DIR: (rel_text(folder, self._archive_root), folder),
                      COL_RELEASE: (release_text(it), None)}
@@ -1290,10 +1329,11 @@ class HarvestDialog(QDialog):
         self._grow_to_table()
 
     # ---- lista wydań ----
-    def _show_rel_notice(self, text, role=None):
+    def _show_rel_notice(self, text, role=None, tip=""):
         """Zdanie nad listą wydań (brak kart, liczenie, pusta lista, błąd). Z kartami wiersz zdania
-        zostaje także pusty - miejsce listy jest zarezerwowane; bez kart pusty tekst go chowa."""
-        _ustaw_zdanie(self.rel_notice, text)
+        zostaje także pusty - miejsce listy jest zarezerwowane; bez kart pusty tekst go chowa.
+        `tip` - szczegół systemu w podpowiedzi (`_ustaw_zdanie`)."""
+        _ustaw_zdanie(self.rel_notice, text, tip)
         self.rel_notice.setProperty("role", role or "")
         self.rel_notice.style().unpolish(self.rel_notice)
         self.rel_notice.style().polish(self.rel_notice)
@@ -1381,7 +1421,7 @@ class HarvestDialog(QDialog):
         else:
             self._on_output_edited()                 # nic do wciągnięcia - podgląd pamięci pola
 
-    @Slot(int, str)
+    @Slot(int, object)
     def _on_releases_failed(self, gen, msg):
         if self._closing:
             return
@@ -1389,7 +1429,9 @@ class HarvestDialog(QDialog):
             self._rel_pending = True
             return
         self._rel_missing = ()                       # braki kart należą do listy, która się udała
-        self._show_rel_notice(i18n.t("harvest.rel.failed", msg=msg), "error")
+        # Błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem (AR-184).
+        self._show_rel_notice(i18n.t("harvest.rel.failed", msg=tekst_powodu(msg)), "error",
+                              wiersz_systemu(msg))
         if not self._rel_started:
             self._rel_started = True
             if not self._field_taken():
@@ -1655,7 +1697,9 @@ class HarvestDialog(QDialog):
         c = status_counts(res.items)
         self._show_head_done(c, cancelled=res.cancelled)
         if res.manifest_error:
-            self._show_notice(i18n.t("harvest.manifest_error", err=res.manifest_error), "warn")
+            # Błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem (AR-184).
+            self._show_notice(i18n.t("harvest.manifest_error", err=tekst_powodu(res.manifest_error)),
+                              "warn", wiersz_systemu(res.manifest_error))
         else:
             self._show_notice("")
         self._set_summary(c, cancelled_n=c.get("cancelled", 0) if res.cancelled else 0)
@@ -1664,11 +1708,13 @@ class HarvestDialog(QDialog):
         self._sync_buttons()
         self._trigger_releases()                     # zeznanie biegu zmieniło stan wydania na liście
 
-    @Slot(str)
-    def _on_apply_failed(self, msg):
+    @Slot(object)
+    def _on_apply_failed(self, powod):
         """Wyjątek rdzenia w biegu. Tabela, liczby i `summary` biorą prawdę z postępu: pozycja,
         która przeszła przez klingę, ma jej status; reszta planu nie została tknięta (`cancelled`).
-        Kopie, które leżą, dalej można przyjąć."""
+        Kopie, które leżą, dalej można przyjąć. Błąd systemu klasą mówi w języku UI w notce
+        i w zdaniu paska (`_set_summary`), surowy tekst systemu - pod kursorem notki (AR-184)."""
+        msg = tekst_powodu(powod)
         done_n, total = self._apply_seen
         self._apply_end()
         items = [dataclasses.replace(it, status=self._run_status.get(it.dst, "cancelled"))
@@ -1678,7 +1724,8 @@ class HarvestDialog(QDialog):
         c = status_counts(items)
         self._show_head_done(c, cancelled=bool(c.get("cancelled")))
         made = i18n.t("harvest.made_before_error", done=done_n, total=total) if done_n else ""
-        self._show_notice(i18n.t("harvest.apply_error", msg=msg, made=made), "error")
+        self._show_notice(i18n.t("harvest.apply_error", msg=msg, made=made), "error",
+                          wiersz_systemu(powod))
         self._set_summary(c, cancelled_n=0, error=msg)
         self._outcome = i18n.t("harvest.btn_error")
         self._sync_buttons()

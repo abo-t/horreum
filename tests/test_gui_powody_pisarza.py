@@ -363,14 +363,10 @@ def test_ogon_przerwanego_cofniecia_mowi_reszte_z_rdzenia(jezyk, lang):
 # Zapadka powodów w zdaniach GUI (AR-167): parametr `reason=`/`reasons=` w `i18n.t`/`t_plural` idzie
 # przez `tekst_powodu`/`czytelny_powod` albo jest tekstem z katalogu. Znane wyjątki - jawnie,
 # z kategorią; nowy surowy przypadek = czerwień, naprawiony wyjątek schodzi z listy.
-_DLUG_MAKRA = ("dług AR-181: powody bramek celu i makra surowo w oknach kart (`resolve_target`, "
-               "`_evaluate_change` - proza PL w UI EN)")
 _ZNANE_SUROWE = {
-    ("app.py", "_build_ui", "reason", "powod"): _DLUG_MAKRA,
-    ("app.py", "_on_save", "reason", "skipped[0][1] if skipped else ''"): _DLUG_MAKRA,
-    ("app.py", "_on_save", "reason", "err"): "`_validate_object_value`: zdania katalogu, nazwa karty "
-                                             "nieosiągalna dla `OBJECT`",
-    ("app.py", "_sync_preview", "reason", "err"): "jak wyżej (`_validate_object_value`)",
+    ("app.py", "_on_save", "reason", "err"): "`plan_kart_naprawy`/`_validate_object_value`: zdania "
+                                             "katalogu, reguła karty przez `tekst_powodu`",
+    ("app.py", "_sync_preview", "reason", "err"): "jak wyżej (`plan_kart_naprawy`)",
     ("app.py", "_build_ui", "reason", "s['reason']"): "suma per folder - `tekst_powodu` przy "
                                                      "`_split_rows`",
     ("app.py", "_copy_reason", "reason", "diagnoza"): "diagnoza odczytu kopii (skan), nie zapis",
@@ -382,8 +378,6 @@ _ZNANE_SUROWE = {
         "klucze odmów przez `tekst_powodu`/katalog wyżej",
     ("grid.py", "_policz_rodowod_kalibracji", "reason", "powod"): "zdanie etapu (katalog)",
     ("grid.py", "_on_lineage_offset", "reason", "powod"): "zdanie etapu (katalog)",
-    ("grid_model.py", "_zdanie_kopii_wiodacej", "reason", "res.reason or ''"): "gest kopii "
-                                                                               "wiodącej, nie zapis",
     ("pipeline.py", "_review_line", "reasons", "powody"): "zdania katalogu",
     ("pipeline.py", "_format_presence", "reason", "powod"): "zdania katalogu",
     ("pipeline.py", "_on_source_unreachable", "reason", "powod"): "zdanie katalogu",
@@ -492,7 +486,8 @@ def test_szuflada_po_cofnieciu_niesie_szczegol_systemu(en, widok, ogon):
 def test_awaria_calej_operacji_mowi_bledem_systemu_w_jezyku_UI(en, tmp_path, monkeypatch):
     """AR-168: wyjątek całej operacji zapisu (`WritebackWorker.run`) nie idzie już surowym
     `PermissionError: [WinError 5] Odmowa dostępu.` - zdanie klasy w języku UI; wyjątek spoza
-    klas zostaje tekstem `Typ: opis`. Kształt sygnału bez zmian (odbiorcy biorą tekst).
+    klas zostaje tekstem `Typ: opis`. Sygnał niesie trzy argumenty (op, zdanie, podpowiedź ze
+    szczegółem systemu, AR-185) - odbiorca przyjmuje wszystkie trzy, asercja dotyczy zdania.
     Falsyfikator: `run` z `f"{type(exc).__name__}: {exc}"` → polski komunikat systemu w EN."""
     from horreum.gui.wb_worker import WritebackWorker
     sciezka = str(tmp_path / "w.db")
@@ -505,6 +500,222 @@ def test_awaria_calej_operacji_mowi_bledem_systemu_w_jezyku_UI(en, tmp_path, mon
             raise wyjatek
         monkeypatch.setitem(WritebackWorker._OPS, "commit", _pada)
         w = WritebackWorker(sciezka, "commit", "R", now_fn=lambda: NOW)
-        w.failed.connect(lambda op, msg: bledy.append(msg))
+        w.failed.connect(lambda op, msg, podpowiedz: bledy.append(msg))
         w.run()
         assert bledy[-1] == oczek, bledy
+
+
+# ============================ AR-181: powody bramek celu i makra w oknach kart i w gridzie
+
+from test_gui_app_object import _okno_sciezki, sciezka_karty  # noqa: E402,F401 - fikstura okna
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_podglad_makra_brak_karty_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
+    """Podgląd makra `set` na karcie, której plik nie ma (droga 7 XISF bez `TELESCOP` w archiwum):
+    podpowiedź komórki „(pominięto)” mówi powód w języku UI - PL znak w znak jak zdanie makra.
+    Falsyfikator: `_evaluate_change` z gołym f-stringiem → „brak karty…” w EN."""
+    jezyk(lang)
+    view, con, _p = _widok_nad(qapp, tmp_path)
+    tip = _podglad_makra(view, "OBSERVER", "Zdzin")
+    zdanie = {"pl": "brak karty 'OBSERVER' do modyfikacji (uzyj add)",
+              "en": "no card 'OBSERVER' to modify (use add)"}[lang]
+    assert tip == i18n.t("grid.preview.skipped_tip", reason=zdanie), tip
+    view.close()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_lista_pominietych_mowi_bramke_celu_w_jezyku_UI(qapp, tmp_path, jezyk,
+                                                                       lang):
+    """„Napraw nagłówek…”: klatka z dwiema obecnymi kopiami stoi na liście pominiętych z powodem
+    bramki celu w języku UI - kluczem katalogu `repair.skip.item`, nie f-stringiem z pauzą.
+    Falsyfikator: element listy z gołym `reason` → „wiele obecnych kopii…” w EN."""
+    import os as _os
+    from test_gui_object_change import _lighty, _okno_naprawy
+    from horreum import repo
+    from horreum.gui import queries
+    jezyk(lang)
+    con = db.open_db(str(tmp_path / "n.db"))
+    (p,) = _lighty(tmp_path / "ASTRO_", con, "NGC7635", 1, baza=5)
+    fid = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
+    repo.add_location(con, frame_id=fid, volume="V", header_hash="h-kopia", now=NOW,
+                      path=str(tmp_path / "kopia" / p.name))
+    dlg = _okno_naprawy(con)
+    (pozycja,) = [dlg.skipped_list.item(i).text() for i in range(dlg.skipped_list.count())]
+    plik = queries.nameless_frames(con)[0]["path"]
+    powod = {"pl": "wiele obecnych kopii (2) -- writeback poza v1 (D-W1)",
+             "en": "several present copies (2) - writeback outside v1 (D-W1)"}[lang]
+    assert pozycja == f"{_os.path.basename(plik)} - {powod}", pozycja
+    assert "—" not in pozycja                        # pauza dawnego f-stringu
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_wszystko_pominiete_mowi_powod_makra_w_jezyku_UI(qapp, tmp_path, jezyk,
+                                                                        lang):
+    """„Napraw nagłówek…”: grupa, której każda klatka ma już kartę `OBJECT` - prawdziwy klik
+    „Zapisz karty” kończy się zdaniem „Nic do zapisu” z powodem makra w języku UI, zero zapisu.
+    Falsyfikator: `_on_save` z gołym `skipped[0][1]` → „karta 'OBJECT' juz istnieje…” w EN."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from test_gui_object_change import _niebo
+    from horreum.gui import queries
+    from horreum.gui.app import RepairHeaderDialog
+    jezyk(lang)
+    con = db.open_db(str(tmp_path / "w.db"))
+    fid = _niebo(con, tmp_path / "ASTRO_", r"LIGHTS\NGC7635\cam\a.fits", obj="xx", ra=None)
+    path = con.execute("SELECT path FROM location WHERE frame_id = ?", (fid,)).fetchone()[0]
+    przed = open(path, "rb").read()
+    dlg = RepairHeaderDialog(con, rows=[{"frame_id": fid, "path": path, "kind": "light"}],
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    dlg._runner.async_ok = False
+    dlg.show()
+    (g,) = dlg._groups
+    if not g["check"].isChecked():
+        QTest.mouseClick(g["check"], Qt.LeftButton)
+    g["edit"].clear()
+    QTest.keyClicks(g["edit"], "NGC 7635")
+    QTest.mouseClick(dlg.save_btn, Qt.LeftButton)
+    powod = {"pl": "karta 'OBJECT' juz istnieje (uzyj set)",
+             "en": "card 'OBJECT' already exists (use set)"}[lang]
+    assert dlg.error.text() == i18n.t("repair.err.all_skipped", reason=powod), dlg.error.text()
+    assert open(path, "rb").read() == przed
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Zatwierdz_ze_sciezki_lista_bez_karty_mowi_w_jezyku_UI(sciezka_karty, jezyk, lang):
+    """„Zatwierdź ze ścieżki…”: lista „bez karty w pliku” mówi powody bramek celu i makra w języku
+    UI (karta pusta już jest, dwie obecne kopie, RAW). Falsyfikator: `reason=powod` bez
+    `tekst_powodu` → polska proza makra w EN."""
+    jezyk(lang)
+    v, con, _pliki, _fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    try:
+        pozycje = sorted(dlg.cards_skipped.item(i).text() for i in range(dlg.cards_skipped.count()))
+        powody = {"pl": ["karta 'OBJECT' juz istnieje (uzyj set)",
+                         "plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)",
+                         "wiele obecnych kopii (2) -- writeback poza v1 (D-W1)"],
+                  "en": ["RAW file (DSLR) - Horreum does NOT write it (read-only)",
+                         "card 'OBJECT' already exists (use set)",
+                         "several present copies (2) - writeback outside v1 (D-W1)"]}[lang]
+        assert pozycje == sorted(i18n.t("path.cards_skipped_item", reason=p, n=1)
+                                 for p in powody), pozycje
+    finally:
+        dlg.reject()
+
+
+def test_walidacja_nazwy_mowi_naruszenie_nazwy_karty_w_jezyku_UI(en, monkeypatch):
+    """`_validate_object_value`: naruszenie NAZWY karty (dla stałej `OBJECT` nieosiągalne, ale
+    reguła ma kod) mówi w języku UI, nie surową prozą. Falsyfikator: `return None,
+    naruszenie.reason` → polskie zdanie reguły w EN."""
+    from horreum import card_rules, writeback
+    from horreum.gui.app import _validate_object_value
+    naruszenie = card_rules.card_violation("OBJECTNAM", "v", new_card=True)
+    monkeypatch.setattr(writeback, "card_violation", lambda *a, **k: naruszenie)
+    assert _validate_object_value(None, "M 42") == (
+        None, "card name 'OBJECTNAM' breaks the FITS 4.0 rules - up to 8 characters from A-Z, "
+              "0-9, '_' and '-'")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_pusta_komorka_karty_mowi_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
+    """Podpowiedź komórki keyworda, której plik tej klatki nie ma: z katalogu (`grid.cell.
+    no_card_tip`) - PL „brak karty” znak w znak, EN „no card”. Falsyfikator: literał PL
+    w `grid_model._kw_cell`."""
+    import numpy as np
+    from astropy.io import fits
+    from PySide6.QtCore import Qt
+    from horreum.gui.grid import FramesView
+    jezyk(lang)
+    con = db.open_db(str(tmp_path / "c.db"))
+    for nazwa, obserwator in (("a.fits", "Zdzin"), ("b.fits", None)):
+        hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + (0 if obserwator else 1))
+        hdu.header["IMAGETYP"] = "Light"
+        if obserwator:
+            hdu.header["OBSERVER"] = obserwator
+        hdu.writeto(str(tmp_path / nazwa))
+        scan.ingest_record(con, scan.scan_file(str(tmp_path / nazwa)), volume="V", now=NOW,
+                           summary=scan.ScanSummary())
+    view = FramesView(con, now_fn=lambda: NOW)
+    m, kol = view.model, _kolumna(view, "OBSERVER")
+    tipy = {m.data(m.index(r, kol), Qt.ToolTipRole) for r in range(m.rowCount())}
+    assert {"pl": "brak karty", "en": "no card"}[lang] in tipy, tipy
+    view.close()
+    con.close()
+
+
+# Zapadka POMOCNICZA f-stringów w `gui/` (AR-181): pole f-stringu, którego wyrażenie wygląda na
+# powód, idzie przez `tekst_powodu`/`czytelny_powod` albo katalog. OGRANICZENIE: powód rozpoznany
+# po NAZWIE (`reason`/`powod`, `.reason`/`.refusal`, indeks `[1]` par `skipped`) - ten sam powód
+# pod inną nazwą przejdzie, więc to alarm, nie dowód; kompletność czterech ujść okien kart pinują
+# testy zachowania wyżej. f-string będący KLUCZEM katalogu (pierwszy argument `i18n.t`) - poza.
+_ZNANE_FSTRINGI = {
+    ("grid_lineage.py", "_calibration_item_text", "powod"): "zdanie katalogu (`grid.lin.cal.gap.*`)",
+}
+
+
+def _fstringi_z_powodem_gui():
+    """`{(plik, funkcja, wyrażenie pola)}` f-stringów `horreum/gui/*.py` z polem-powodem bez
+    opakowania (`tekst_powodu`, `czytelny_powod`, `i18n.t`/`t_plural`)."""
+    import ast
+    from pathlib import Path
+    import horreum.gui as gui
+
+    def _powod(v):
+        if isinstance(v, ast.Name):
+            return "reason" in v.id.lower() or "powod" in v.id.lower()
+        if isinstance(v, ast.Attribute):
+            return v.attr in ("reason", "powod", "refusal")
+        if isinstance(v, ast.Subscript) and isinstance(v.slice, ast.Constant):
+            k = v.slice.value
+            if isinstance(k, str):
+                return "reason" in k or "powod" in k
+            return k == 1 and any(s in ast.unparse(v.value).lower() for s in ("skip", "pomin"))
+        return False
+    wynik = set()
+    for plik in sorted(Path(gui.__file__).parent.glob("*.py")):
+        drzewo = ast.parse(plik.read_text(encoding="utf-8"))
+        rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+
+        def _funkcja(w):
+            while w in rodzic:
+                w = rodzic[w]
+                if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return w.name
+            return None
+
+        def _klucz_katalogu(w):
+            r = rodzic.get(w)
+            return (isinstance(r, ast.Call) and isinstance(r.func, ast.Attribute)
+                    and r.func.attr in ("t", "t_plural") and bool(r.args) and r.args[0] is w)
+        for w in ast.walk(drzewo):
+            if not isinstance(w, ast.JoinedStr) or _klucz_katalogu(w):
+                continue
+            for c in w.values:
+                if not isinstance(c, ast.FormattedValue):
+                    continue
+                v = c.value
+                if isinstance(v, ast.Call):
+                    nazwa = v.func.attr if isinstance(v.func, ast.Attribute) else getattr(
+                        v.func, "id", None)
+                    if nazwa in _OPAKOWANIA or nazwa in ("t", "t_plural"):
+                        continue
+                if _powod(v):
+                    wynik.add((plik.name, _funkcja(w), ast.unparse(v)))
+    return wynik
+
+
+def test_zapadka_powodow_w_fstringach_GUI():
+    """AR-181 (zapadka pomocnicza): f-string w `gui/` z polem-powodem bez opakowania = czerwień
+    (lista pominiętych „Napraw nagłówek…” składała tak zdanie PL w UI EN); wyjątki z listy
+    `_ZNANE_FSTRINGI` z kategorią, naprawiony schodzi z listy. Falsyfikator: element listy
+    pominiętych z powrotem jako `f"{…} - {reason}"` → nowy wpis spoza listy."""
+    znalezione = _fstringi_z_powodem_gui()
+    nowe = znalezione - set(_ZNANE_FSTRINGI)
+    stare = set(_ZNANE_FSTRINGI) - znalezione
+    assert not nowe, f"surowy powód w f-stringu GUI: {sorted(nowe)}"
+    assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"

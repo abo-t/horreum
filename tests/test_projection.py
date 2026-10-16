@@ -1088,7 +1088,8 @@ def test_copy_master_brak_zrodla_error_bez_part(tmp_path):
     dst = _master_dst(tmp_path)
     status, why = projection.copy_master(str(tmp_path / "brak.xisf"), dst, expected_sha1="x",
                                          library_root=_lib(tmp_path))
-    assert status == "error" and "FileNotFoundError" in why
+    assert status == "error" and why.code == "os_missing"                # błąd systemu klasą (AR-184)
+    assert "FileNotFoundError" in dict(why.params)["detail"]
     assert not os.path.exists(dst) and not os.path.exists(dst + ".part")
 
 

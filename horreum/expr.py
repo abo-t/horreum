@@ -24,6 +24,8 @@ import ast
 import operator
 from dataclasses import dataclass
 
+from .item_reasons import PowodPozycji     # powód z kodem (AR-181) - liść bez importów projektu
+
 # Funkcje wpuszczone do wyrazen. Nazwy sa malymi literami — keywordy FITS sa wielkimi
 # (<=8 znakow), wiec nie ma kolizji `min` (funkcja) vs `MIN` (keyword).
 _ALLOWED_FUNCS = {
@@ -152,15 +154,22 @@ def _eval(node: ast.AST, env: dict[str, object]) -> object:
 
 def eval_for(expr: Expr, env: dict[str, object]) -> EvalResult:
     """Liczy wyrazenie w srodowisku `env` (nazwa -> wartosc). Brak operandu / blad ->
-    `EvalResult(ok=False, reason=...)`, nigdy wyjatek wysadzajacy potok."""
+    `EvalResult(ok=False, reason=...)`, nigdy wyjatek wysadzajacy potok.
+
+    Brak operandu i dzielenie przez zero mowia `PowodPozycji` z kodem (AR-181) - makro wstawia
+    je do swojego powodu parametrem, a okno mowi je w jezyku UI. Tekst wyjatku Pythona
+    (`TypeError: ...`) zostaje proza - jawna granica, jak tekst systemu w pisarzu."""
     try:
         value = _eval(expr.node.body, env)
     except _MissingOperand as exc:
         return EvalResult(
-            ok=False, value=None, reason=f"brak operandu: {exc.name}", missing_operand=True
+            ok=False, value=None, missing_operand=True,
+            reason=PowodPozycji(f"brak operandu: {exc.name}", "macro_missing_operand",
+                                name=exc.name),
         )
     except ZeroDivisionError:
-        return EvalResult(ok=False, value=None, reason="dzielenie przez zero")
+        return EvalResult(ok=False, value=None,
+                          reason=PowodPozycji("dzielenie przez zero", "macro_zero_division"))
     except ExprError as exc:
         return EvalResult(ok=False, value=None, reason=str(exc))
     except (TypeError, ValueError, OverflowError) as exc:

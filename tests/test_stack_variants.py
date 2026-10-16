@@ -890,7 +890,8 @@ def test_samodzielny_blad_odczytu_to_unreadable_a_cli_bez_tracebacku(samodzielne
         return stack_variants.hashing.sha1_of(path)
     it = _po_zrodle(stack_variants.plan_standalone(
         s["con"], str(s["old"]), [g1.src], library_root=str(s["arch"]), sha1_fn=_hasz))[g1.src]
-    assert (it.status, it.reason) == ("standalone_conflict", "unreadable") and g1.dst in it.detail
+    assert (it.status, it.reason) == ("standalone_conflict", "unreadable") and it.dst == g1.dst
+    assert "zerwany udzial" in it.detail and g1.dst not in it.detail     # cel raz - w `dst` (P4-6)
     lista = s["tmp"] / "brak.tsv"
     lista.write_text(f"autocrop\n{brak}\n", encoding="utf-8")
     s["con"].close()

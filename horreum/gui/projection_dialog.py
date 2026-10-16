@@ -63,6 +63,8 @@ from horreum import db, projection
 from horreum.gui import facet_model, i18n, queries, theme
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.i18n_catalog import CATALOG
+from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu   # błąd systemu w języku UI (AR-184)
+from horreum.item_reasons import blad_systemu
 from horreum.volumes import volume_serial
 
 _TREE_CAP = 30                        # ile folderów kategorii pokazać w raporcie dialogu
@@ -392,7 +394,8 @@ class DryWorker(QObject):
     sondował DRY, zamiast składać go drugi raz."""
 
     done = Signal(int, object)        # (generacja, payload: plan/res/decyzja/rozmiar/korzeń)
-    failed = Signal(int, str)         # (generacja, komunikat)
+    # (generacja, powód) - `object`: `Signal(str)` zgubiłby kod błędu systemu klasą (AR-184)
+    failed = Signal(int, object)
     finished = Signal()
 
     def __init__(self, db_path, frame_ids, layout, root, force_copy, now, gen, con=None,
@@ -419,8 +422,8 @@ class DryWorker(QObject):
             self.done.emit(self._gen, self._compute())
         except ValueError as exc:                    # guard korzenia klingi (druga linia po walidacji celu)
             self.failed.emit(self._gen, str(exc))
-        except Exception as exc:                     # OSError sondy FS itp. — szczerze, nie cicha śmierć wątku
-            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+        except Exception as exc:                     # OSError sondy FS itp. - szczerze, nie cicha śmierć wątku
+            self.failed.emit(self._gen, blad_systemu(exc))
         finally:
             self.finished.emit()
 
@@ -470,7 +473,7 @@ class ApplyWorker(QObject):
     progress = Signal(int, int, str, str)   # done, total, dst, status — MID-apply
     done = Signal(object)                   # ApplyResult (może nieść cancelled=True)
     aborted = Signal(str, object)           # komunikat, CZĘŚCIOWY ApplyResult (sonda hardlinka)
-    failed = Signal(str)                    # wyjątek → sygnał, NIE crash apki
+    failed = Signal(object)                 # powód wyjątku → sygnał, NIE crash apki (kod: AR-184)
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
     def __init__(self, plan, root, copy, now, manifest):
@@ -495,8 +498,8 @@ class ApplyWorker(QObject):
             self.aborted.emit(str(exc), exc.result)
         except ValueError as exc:                    # guard korzenia klingi (druga linia)
             self.failed.emit(str(exc))
-        except Exception as exc:                     # OSError itp. — szczerze, nie cicha śmierć wątku
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+        except Exception as exc:                     # OSError itp. - szczerze, nie cicha śmierć wątku
+            self.failed.emit(blad_systemu(exc))
         else:
             self.done.emit(res)
         finally:
@@ -942,7 +945,7 @@ class ProjectionDialog(QDialog):
             # niego od razu, bez „wydania" zera pozycji tylko po to, żeby przycisk się pojawił.
             self._arm_open(payload["root"] if dry_complete(payload["res"]) else None)
 
-    @Slot(int, str)
+    @Slot(int, object)
     def _on_dry_failed(self, gen, msg):
         if gen != self._gen:
             self._dry_pending = True
@@ -953,7 +956,9 @@ class ProjectionDialog(QDialog):
         self._dry = None
         self.btn_apply.setEnabled(False)
         self._arm_open(None)                         # sonda bieżących parametrów padła - folderu nie znamy
-        self._show_report(i18n.t("proj.dry_failed", msg=msg), "error")
+        # Błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem raportu (AR-184).
+        self._show_report(i18n.t("proj.dry_failed", msg=tekst_powodu(msg)), "error",
+                          tip=wiersz_systemu(msg))
         if self._object_id is not None:
             self._show_object_head(None)             # liczby poprzedniego planu kłamałyby o bieżącym
 
@@ -1212,22 +1217,26 @@ class ProjectionDialog(QDialog):
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(i18n.t("proj.btn_not_created"))  # NIE obiecuje akcji, której raport zabrania (wiz #4)
 
-    @Slot(str)
+    @Slot(object)
     def _on_apply_failed(self, msg):
         # Ile już powstało PRZED błędem — bez tego user widzi samą awarię i nie wie, że w celu leży
-        # częściowe drzewo (ścieżka anulowania to mówi, ścieżka błędu milczała — wiz #2).
+        # częściowe drzewo (ścieżka anulowania to mówi, ścieżka błędu milczała - wiz #2). Błąd
+        # systemu klasą w języku UI, surowy tekst systemu pod kursorem raportu (AR-184).
         done_n, total = self._apply_seen
         self._apply_end()
         made = i18n.t("proj.made_before_error", done=done_n, total=total) if done_n else ""
-        self._show_report(i18n.t("proj.apply_error", msg=msg, made=made), "error")
+        self._show_report(i18n.t("proj.apply_error", msg=tekst_powodu(msg), made=made), "error",
+                          tip=wiersz_systemu(msg))
         self.btn_apply.setEnabled(False)             # dysk mógł się zmienić częściowo — DRY musi przeliczyć
         self.btn_apply.setText(i18n.t("proj.btn_error"))
 
-    def _show_report(self, text, outcome=None, warn=()):
+    def _show_report(self, text, outcome=None, warn=(), tip=""):
         """JEDYNA droga tekstu do panelu raportu. `outcome` (None | 'ok' | 'warn' | 'error') koloruje
         PIERWSZY BLOK — wynik widać, zanim user przeczyta słupek liczb (wizytacja P2: `pipeline`
         koloruje błąd, a ten dialog był jednolicie szary). `warn` - wiersze (pełny tekst bloku) luk
         z `_format`, malowane kolorem roli `warn`: liczby braków miały kolor liczb tego, co jest.
+        `tip` - podpowiedź raportu (szczegół systemu awarii, AR-184); każdy raport stawia ją od nowa,
+        więc szczegół jednej awarii nie zostaje pod następnym raportem.
 
         Tekst zostaje NIETKNIĘTY: `toPlainText()` oddaje dokładnie argument, bo kolor to warstwa
         formatu, nie treść — kontrakt „raport zaczyna się od «Przerwano»" (wiz #6) i wszystkie
@@ -1238,6 +1247,7 @@ class ProjectionDialog(QDialog):
         pierwsza linia stoi, gdzie stała, a zawinięta kontynuacja zaczyna się `_REPORT_HANG` znaków
         głębiej niż własne wcięcie wiersza - zawinięcie nie łamie słupka monospace."""
         self.report.setPlainText(text)
+        self.report.setToolTip(tip)
         znak = QFontMetricsF(self.report.font()).horizontalAdvance(" ")
         ostrzezenia = set(warn)
         blok = self.report.document().firstBlock()

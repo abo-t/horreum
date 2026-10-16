@@ -19,7 +19,9 @@ Krok po kroku dla każdego frame'a z `frame_ids` (już przefiltrowanych przez `f
 3. kroki `compute` (`horreum.expr`) → do `env`; policz `assign` → operacja `set`/`add`.
 
 Plik bez operandu / z błędem obliczenia / łamiący regułę operacji → POMINIĘTY z jawnym powodem
-(zebrany w `MacroRun.skipped`). Reguły operacji: `set` wymaga istniejącej karty (keyword
+(zebrany w `MacroRun.skipped`). Powód bramki celu i zmiany to `item_reasons.PowodPozycji` z kodem
+`macro_*` (AR-181): zdanie PL bez zmiany znaku (CLI, testy, sklejenia biorą je jak tekst), a okno
+składa z kodu zdanie w języku UI (`gui.wb_worker.tekst_powodu`). Reguły operacji: `set` wymaga istniejącej karty (keyword
 kardynalności >1 wymaga jawnego `idx`); `add` wymaga braku karty. Operand `0` to WARTOSC, nie brak.
 Zmiana łamiąca reguły karty FITS 4.0 (`card_rules.card_violation` - ten sam właściciel, którego
 pyta pisarz) też jest pominięciem z powodem już w PODGLĄDZIE, a nie 'blocked' przy commicie (AR-9).
@@ -46,6 +48,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from . import card_rules, expr
+from .item_reasons import PowodPozycji     # powód z kodem (AR-181) - liść bez importów projektu
 from .resolve import paths as _paths
 from .resolve._coerce import _to_text as _tekst
 from .resolve._text import norm as _norm, path_segments as _path_segments
@@ -251,9 +254,11 @@ def _evaluate_change(
 
     if md.assign.op == "set":
         if cardinality == 0:
-            return None, f"brak karty '{kw}' do modyfikacji (uzyj add)"
+            return None, PowodPozycji(f"brak karty '{kw}' do modyfikacji (uzyj add)",
+                                      "macro_set_missing", keyword=kw)
         if cardinality > 1 and md.assign.idx is None:
-            return None, f"keyword '{kw}' ma wiele wystapien -- wymagany jawny idx"
+            return None, PowodPozycji(f"keyword '{kw}' ma wiele wystapien -- wymagany jawny idx",
+                                      "macro_idx_required", keyword=kw)
         idx = md.assign.idx if md.assign.idx is not None else 0
         existing = first.get(kw)
         old_value = existing["value_raw"] if existing is not None else None
@@ -262,7 +267,8 @@ def _evaluate_change(
         )
     else:  # add
         if cardinality > 0:
-            return None, f"karta '{kw}' juz istnieje (uzyj set)"
+            return None, PowodPozycji(f"karta '{kw}' juz istnieje (uzyj set)", "macro_add_exists",
+                                      keyword=kw)
         idx = None
         old_value = None
         base_type = md.assign.value_type
@@ -273,7 +279,9 @@ def _evaluate_change(
         for name, compiled in computes:
             cres = expr.eval_for(compiled, env)
             if not cres.ok:
-                return None, f"compute {name}: {cres.reason}"
+                # Powód wyrażenia (`expr.eval_for`) jedzie parametrem - z kodem albo tekstem wyjątku.
+                return None, PowodPozycji(f"compute {name}: {cres.reason}", "macro_compute",
+                                          name=name, inner=cres.reason)
             env[name] = cres.value
         res = expr.eval_for(assign_expr, env)
         if res.ok:
@@ -281,17 +289,21 @@ def _evaluate_change(
         elif res.missing_operand:
             value = _coerce_to_type(md.assign.expr, base_type)  # np. 'RC8' -> tekst 'RC8'
         else:
-            return None, f"assign: {res.reason}"  # realny blad obliczenia -> pomijamy
+            # realny blad obliczenia -> pomijamy
+            return None, PowodPozycji(f"assign: {res.reason}", "macro_assign", inner=res.reason)
 
     value_type = base_type or _infer_type(value)
 
     if value_type == "int" and isinstance(value, float) and not value.is_integer():
-        return None, f"wynik niecalkowity ({value!r}) dla keyworda '{kw}' typu int"
+        return None, PowodPozycji(f"wynik niecalkowity ({repr(value)}) dla keyworda '{kw}' typu int",
+                                  "macro_not_int", value=repr(value), keyword=kw)
 
     try:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
-        return None, f"wartosc '{md.assign.expr}' nie pasuje do typu '{value_type}'"
+        return None, PowodPozycji(f"wartosc '{md.assign.expr}' nie pasuje do typu '{value_type}'",
+                                  "macro_type_mismatch", value=md.assign.expr,
+                                  value_type=value_type)
 
     naruszenie = card_rules.card_violation(kw, new_value, md.assign.comment,
                                            new_card=md.assign.op == "add")
@@ -326,23 +338,30 @@ def resolve_target(rows) -> tuple[dict | None, str | None]:
     wiersz z `location_id IS NULL`. Zwraca (wiersz_celu | None, powod | None)."""
     filetype = rows[0]["filetype"]
     if filetype == "raw":
-        return None, "plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)"
+        return None, PowodPozycji("plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)",
+                                  "macro_raw")
     present = [r for r in rows if r["location_id"] is not None]
     if not present:
-        return None, "brak obecnej kopii do zapisu (wszystkie present=0)"
+        return None, PowodPozycji("brak obecnej kopii do zapisu (wszystkie present=0)",
+                                  "macro_no_present_copy")
     if len(present) > 1:
-        return None, f"wiele obecnych kopii ({len(present)}) -- writeback poza v1 (D-W1)"
+        return None, PowodPozycji(f"wiele obecnych kopii ({len(present)}) -- writeback poza v1 (D-W1)",
+                                  "macro_many_copies", n=len(present))
     target = present[0]
     if target["compressed"]:
-        return None, "skompresowany master -- edycja poza krokiem 4 (T6)"
+        return None, PowodPozycji("skompresowany master -- edycja poza krokiem 4 (T6)",
+                                  "macro_compressed")
     if rows[0]["sha1_data_uncomputable"]:
         # D-X-13: zapis zmienia `file_sha1`, a przy degeneracie `sha1_data == file_sha1`, wiec
         # re-sync zobaczylby PODMIANE TRESCI -> nowy frame + `rebind_location`, a stary zostalby
         # sierota z zeznaniem i `object_id`. Bramka ma blizniaka w pisarzu (`_xisf_gates` patrzy
         # na brak obrazu-attachmentu) -- ta czyta baze, tamta plik.
-        return None, "tozsamosc nieobliczalna (degenerat) -- zapis rozdwoilby klatke (D-X-13)"
+        return None, PowodPozycji(
+            "tozsamosc nieobliczalna (degenerat) -- zapis rozdwoilby klatke (D-X-13)",
+            "macro_degenerate")
     if target["header_hash"] is None:
-        return None, "brak header_hash (plik nieczytelny) -- brak kontroli zapisu"
+        return None, PowodPozycji("brak header_hash (plik nieczytelny) -- brak kontroli zapisu",
+                                  "macro_no_header_hash")
     return target, None
 
 
@@ -379,7 +398,8 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
     for fid in ids:
         rows = by_frame.get(fid)
         if not rows:                              # frame zniknal z bazy miedzy filtrem a makrem
-            skipped.append(SkippedFrame(fid, "", "frame nieobecny w bazie"))
+            skipped.append(SkippedFrame(fid, "", PowodPozycji("frame nieobecny w bazie",
+                                                              "macro_frame_gone")))
             continue
         target, reason = resolve_target(rows)
         if target is None:
@@ -436,8 +456,9 @@ def evaluate_manual_change(cards, keyword: str, new_text: str,
         value_type = _infer_type(value)
     else:
         if len(matching) > 1:
-            return ManualResult(
-                False, f"keyword '{keyword}' ma wiele wystapien -- edycja reczna poza krokiem 4")
+            return ManualResult(False, PowodPozycji(
+                f"keyword '{keyword}' ma wiele wystapien -- edycja reczna poza krokiem 4",
+                "macro_manual_many", keyword=keyword))
         card = matching[0]
         op, idx, old_value = "set", int(card["idx"]), card["value_raw"]
         value_type = card["value_type"]
@@ -446,11 +467,15 @@ def evaluate_manual_change(cards, keyword: str, new_text: str,
             value_type = _infer_type(value)
 
     if value_type == "int" and isinstance(value, float) and not value.is_integer():
-        return ManualResult(False, f"wynik niecalkowity ({value!r}) dla keyworda typu int")
+        return ManualResult(False, PowodPozycji(
+            f"wynik niecalkowity ({repr(value)}) dla keyworda typu int", "macro_manual_not_int",
+            value=repr(value)))
     try:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
-        return ManualResult(False, f"wartosc '{new_text}' nie pasuje do typu '{value_type}'")
+        return ManualResult(False, PowodPozycji(
+            f"wartosc '{new_text}' nie pasuje do typu '{value_type}'", "macro_type_mismatch",
+            value=new_text, value_type=value_type))
     naruszenie = card_rules.card_violation(keyword, new_value, comment, new_card=op == "add")
     if naruszenie is not None:                       # AR-9: te same reguły co pisarz
         return ManualResult(False, naruszenie.reason)
@@ -475,7 +500,7 @@ def plan_manual_change(rows, keyword: str, new_text: str, *, cards_fn,
     Zwraca `(PendingPreview, None)` albo `(None, powod)`; pusta lista wierszy (klatka zniknela
     z bazy miedzy edycja a zapisem) to powod, nie wyjatek - ten sam, co w `run_macro`."""
     if not rows:
-        return None, "frame nieobecny w bazie"
+        return None, PowodPozycji("frame nieobecny w bazie", "macro_frame_gone")
     target, reason = resolve_target(rows)
     if target is None:
         return None, reason

@@ -900,7 +900,9 @@ def plan_kart_sciezki(con, canon, frame_ids):
     powod = None
     if naruszenie is not None:
         powod = i18n.t("path.card_skip.invalid", value=value, reason=tekst_powodu(naruszenie.reason))
-    elif forma is None:
+    elif forma is None or canon in resolver.kanony_regionow():
+        # Forma obiektu-regionu wraca wyłącznie klatce, którą region obejmuje (`resolver.karta_wraca`,
+        # AR-177), a ta droga nie pyta per klatka - pomija kartę tym samym powodem co forma None.
         powod = i18n.t("path.card_skip.no_roundtrip", value=value, canon=canon)
     if powod is not None:
         return value, [], [(fid, "", powod) for fid in frame_ids]

@@ -574,3 +574,141 @@ def test_kotwica_nawrotu_rozdziela_format_bez_karty(tmp_path):
     # RAW nie przecieka do procentu ani do delty (nie ma nazwy, pod którą byłby „nierozpoznany")
     assert rep.object_delta == delta_report(con).object_delta
     con.close()
+
+
+# --- AR-177: forma karty OBJECT obiektu-regionu (Veil) i pytanie „czy karta sama wraca" ---
+
+VEIL_RA, VEIL_DEC = 312.75, 30.67          # środek regionu Veil (`resolve/data/regions.json`)
+M31_RA, M31_DEC = 10.68, 41.27             # daleko poza każdym regionem
+
+
+def _veil_light(root, rel, obj, n, ra=VEIL_RA, dec=VEIL_DEC):
+    """Light w drzewie archiwum `root/rel` z kartą `obj` (None = bez karty) i współrzędnymi."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cards = [("IMAGETYP", "LIGHT")] + ([("OBJECT", obj)] if obj is not None else [])
+    if ra is not None:
+        cards += [("RA", ra), ("DEC", dec)]
+    return _fits(path, cards, n=n)
+
+
+def _veil_baza(tmp_path, pliki):
+    """Baza po skanie i przebiegu z lightów `pliki` = [(rel, karta, n), …] pod `ASTRO_`."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    root = tmp_path / "ASTRO_"
+    for rel, obj, n in pliki:
+        _veil_light(root, rel, obj, n)
+    scan_tree(con, root, now=NOW)
+    run_resolver(con, now=NOW)
+    return con, root
+
+
+def _fid(con, nazwa):
+    return con.execute("SELECT frame_id FROM location WHERE path LIKE ?",
+                       (f"%{nazwa}",)).fetchone()[0]
+
+
+def test_forma_regionu_to_karta_kopii_blizniakow_folderu(tmp_path):
+    """AR-177 (`D-1016-3`): forma karty obiektu-regionu = tekst, który głosuje
+    najwięcej OBECNYCH KOPII klatek obiektu ze źródłem `region` albo `twin`, stojących w folderze
+    obiektu, kartą TEJ kopii (`macro._wlasna_wartosc`). Tu `'veil'` 2 głosy (w tym `twin`) wobec
+    `'Petla'` 1; nie głosują: kopie bez faktów bieżących klatek z DWIEMA lokacjami (karta klatki
+    mogła przyjść z drugiej kopii), kopie spoza folderu obiektu i klatki z ręką - każda z tych grup
+    przegłosowałaby `'veil'`, gdyby głosowała.
+    Falsyfikatory: bez warunku folderu / jednej lokacji / źródła albo bez głosu `twin` wynik to
+    `'Petla'`."""
+    from horreum import resolver
+    pliki = ([(rf"LIGHTS\Veil\cam\v{i}.fits", "veil", i) for i in (1, 2)]
+             + [(r"LIGHTS\Veil\cam\p1.fits", "Petla", 3)]
+             + [(rf"LIGHTS\Veil\cam\stara{i}.fits", "Petla", 10 + i) for i in range(3)]
+             + [(rf"LIGHTS\Inne\cam\obca{i}.fits", "Petla", 20 + i) for i in range(3)]
+             + [(rf"LIGHTS\Veil\cam\reka{i}.fits", "Petla", 30 + i) for i in range(3)])
+    con, _ = _veil_baza(tmp_path, pliki)
+    assert {r[0] for r in con.execute("SELECT DISTINCT object_source FROM frame")} == {"region"}
+    con.execute("UPDATE frame SET object_source = 'twin' WHERE id = ?", (_fid(con, "v2.fits"),))
+    # Fakty zebrane przed 0025 (reguła nieznana) - „nie wiem” - przy klatce z drugą lokacją: karta
+    # klatki nie jest wtedy kartą tej kopii. Poza klingą: tylko test.
+    con.execute("UPDATE location SET hdr_rule = NULL WHERE path LIKE '%stara_.fits'")
+    con.commit()
+    for i in range(3):
+        repo.add_location(con, frame_id=_fid(con, f"stara{i}.fits"), volume="?",
+                          path=rf"X:\L\stara{i}_kopia.fits", now=NOW)
+    reka = [_fid(con, f"reka{i}.fits") for i in range(3)]
+    con.execute("UPDATE frame SET object_source = 'user' WHERE id IN (SELECT value FROM "
+                "json_each(?))", (str(reka),))                         # ręka bez klingi - tylko test
+    con.commit()
+    assert resolver.forma_karty_object(con, "Veil") == "veil"
+    con.close()
+
+
+def test_forma_regionu_glosuja_lighty_bez_faktow_kopii_karta_klatki(tmp_path):
+    """AR-177: pojedynczy light FITS faktów kopii nie dostaje, dopóki skan go znów nie przeczyta
+    (`scan.copy_facts_candidates`) - na `pf4` 250 z 261 kopii Veil. Klatka z JEDNĄ lokacją głosuje
+    wtedy kartą `OBJECT` klatki (to karta tej kopii, `macro._wlasna_wartosc`), więc forma nie spada
+    na `header_form` `Veil` - inaczej 169 bliźniaków z `'veil'` weszłoby do Porządków dla samej
+    wielkości liter. Falsyfikator: głos wyłącznie z faktów kopii - wynik `Veil`."""
+    from horreum import resolver
+    con, _ = _veil_baza(tmp_path, [(rf"LIGHTS\Veil\cam\v{i}.fits", "veil", i) for i in (1, 2)]
+                        + [(r"LIGHTS\Veil\cam\bez.fits", None, 3)])
+    con.execute("UPDATE location SET hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
+                "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
+                "hdr_xbinning = NULL, hdr_date_obs = NULL, hdr_hash = NULL, hdr_rule = NULL")
+    con.commit()                             # stan sprzed odczytu faktów - poza klingą: tylko test
+    assert con.execute("SELECT count(*) FROM location WHERE hdr_hash IS NOT NULL").fetchone()[0] == 0
+    assert resolver.forma_karty_object(con, "Veil") == "veil"
+    con.close()
+
+
+def test_forma_regionu_remis_bez_glosow_i_kanon_spoza_regionow(tmp_path, monkeypatch):
+    """Bez głosów forma regionu = `header_form` (`Veil`); remis wygrywa `header_form`, potem
+    alfabet. Kanon, którego drabina nie zna i którego nie ma w `regions.json`, formy nie ma (jak
+    `ZW77`). Falsyfikator: gałąź regionu zwraca None - pierwsza asercja pada."""
+    from horreum import resolver
+    con, _ = _veil_baza(tmp_path, [(r"LIGHTS\Veil\cam\a.fits", None, 1)])
+    assert resolver.forma_karty_object(con, "Veil") == "Veil"
+    for i, tekst in enumerate(("veil", "Veil"), start=2):
+        _veil_light(tmp_path / "ASTRO_", rf"LIGHTS\Veil\cam\r{i}.fits", tekst, i)
+    scan_tree(con, tmp_path / "ASTRO_", now=NOW)
+    run_resolver(con, now=NOW)
+    assert resolver.forma_karty_object(con, "Veil") == "Veil"           # remis 1:1 - header_form
+    monkeypatch.setattr(resolver, "load_regions", lambda: ())
+    assert resolver.forma_karty_object(con, "Veil") is None
+    con.close()
+
+
+def test_forma_regionu_nie_prowadzi_do_innego_obiektu(tmp_path):
+    """Warunek `D-1016-3`: forma, którą drabina nazw oddałaby INNEMU obiektowi, odpada - i jako
+    głos (karta `M 31` na klatce `region` nie wygrywa mimo większości), i jako `header_form`
+    (alias `VEIL` innego obiektu → forma None). Falsyfikatory: głosowanie bez filtra drabiny
+    (wynik `M 31`), gałąź nazwy bez `else None` (wynik `Veil`)."""
+    from horreum import resolver
+    from horreum.resolve.catalog import catalog_label
+    con, _ = _veil_baza(tmp_path, [(r"LIGHTS\Veil\cam\v.fits", "veil", 1)]
+                        + [(rf"LIGHTS\Veil\cam\m{i}.fits", "M 31", 10 + i) for i in range(3)])
+    veil = con.execute("SELECT id FROM object WHERE canon = 'Veil'").fetchone()[0]
+    for i in range(3):                       # karta M 31 przy obiekcie z regionu - klingą
+        repo.assign_object(con, frame_id=_fid(con, f"m{i}.fits"), object_id=veil,
+                           object_source="region", now=NOW)
+    assert resolver.forma_karty_object(con, "Veil") == "veil"
+    oid, _ = repo.upsert_object(con, canon="NGC6992", catalog=catalog_label("NGC6992"),
+                                kind="deep_sky", now=NOW)
+    repo.add_object_alias(con, alias_norm="VEIL", object_id=oid, source="user", now=NOW)
+    assert resolver.forma_karty_object(con, "Veil") is None
+    con.close()
+
+
+def test_karta_wraca_szczeble_nazwa_blizniak_region():
+    """`karta_wraca` - kolejność szczebli `run_resolver`: nazwa rozstrzyga sama (także w środku
+    regionu), potem bliźniak (obiekt oryginału wariantu), na końcu region ze współrzędnych; brak
+    współrzędnych to brak regionu. Równoważność z prawdziwym przebiegiem pinuje
+    `test_object_change_write.py::test_karta_wraca_rownowazna_przebiegowi_po_zdjeciu_reki`.
+    Falsyfikator: gałąź regionu zawsze True - asercje „poza" padają."""
+    from horreum.resolver import karta_wraca
+    nic = lambda _k: None                                       # noqa: E731 - pusta migawka aliasów
+    assert karta_wraca(nic, "NGC 7000", "NGC7000", None, None)
+    assert not karta_wraca(nic, "NGC 7000", "Veil", VEIL_RA, VEIL_DEC)
+    assert karta_wraca(nic, "veil", "Veil", VEIL_RA, VEIL_DEC)
+    assert not karta_wraca(nic, "veil", "Veil", M31_RA, M31_DEC)
+    assert not karta_wraca(nic, "veil", "Veil", None, None)
+    assert karta_wraca(nic, "veil", "Veil", M31_RA, M31_DEC, twin_canon="Veil")
+    assert not karta_wraca(nic, "veil", "Veil", VEIL_RA, VEIL_DEC, twin_canon="NGC224")

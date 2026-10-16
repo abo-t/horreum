@@ -41,7 +41,8 @@ from horreum.resolve.paths import (STACK_KIND, STACKS_DIR, filter_folder_from_pa
 from horreum.resolve.recipe import parse_master_path
 from horreum.resolve.stack import read_testimony, signature_timestamp
 from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_lookup, alias_snapshot,
-                              forma_karty_object, library_root_from_db,
+                              forma_karty_object, kanony_regionow, karta_wraca,
+                              library_root_from_db,
                               optics_mismatch_frame_ids, path_proposals, resolve_name, review_state)
 from horreum.stacks import (REASON_DEGENERATE, REASON_MISMATCH, REASON_NO_CANDIDATES,
                             REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, propose_lineage_candidates)
@@ -2331,13 +2332,14 @@ def isolated_inplace_ops(con, frame_ids):
 SKIP_COPY_WITHOUT_FACTS = ("kopia bez zebranych faktów przy klatce z nieobecną kopią - zbierze je "
                            "„Przyjmij nowe”, gdy plik jest na dysku i nie czeka na dokończenie "
                            "przerwanego zapisu")
-# Forma karty nie wraca do kanonu (`forma_karty_object` → None, kanon znany tylko z aliasu): karta
-# z nią wypchnęłaby klatkę do nierozpoznanych. Stała, bo to samo zdanie mówi bramka karty
-# i okno zmiany obiektu, które odmawia takiego celu, zanim powstanie plan.
-SKIP_FORM_NOT_CANON = "forma karty nie wraca do kanonu (kanon znany tylko z aliasu)"
+# Forma karty nie prowadzi z powrotem do obiektu (`forma_karty_object` → None: kanon znany tylko
+# z aliasu albo forma regionu, którą drabina nazw oddałaby innemu obiektowi): karta z nią
+# wypchnęłaby klatkę do nierozpoznanych albo do innego obiektu. Stała, bo to samo zdanie mówi
+# bramka karty i okno zmiany obiektu, które odmawia takiego celu, zanim powstanie plan.
+SKIP_FORM_NOT_CANON = "forma karty nie prowadzi z powrotem do tego obiektu"
 
 
-def object_card_gate(r, *, card, form, canon, lookup):
+def object_card_gate(r, *, card, form, canon, lookup, poza_regionem=False):
     """BRAMKA ZAPISU KARTY `OBJECT` jednej klatki - pierwszy powód, dla którego kartę nie da się
     postawić w formie `form` (`set` na karcie `card` albo `add`, gdy `card` is None), albo None.
     JEDEN właściciel dla obu read-modeli piszących kartę: ujednolicenia (`object_card_form_rows`)
@@ -2349,10 +2351,14 @@ def object_card_gate(r, *, card, form, canon, lookup):
     `n_cards` (liczba kart `OBJECT`), `hdr_hash`/`hdr_rule`/`hdr_object` (fakty kopii), `vtype`
     (typ karty idx 0), `filetype`, `n_sum` (karty `CHECKSUM`/`DATASUM`). `canon` = obiekt, który
     karta ma nazwać (sklejka musi go wskazywać KAŻDYM członem), `lookup` = migawka aliasów drabiny.
+    `poza_regionem` (AR-177) = forma istnieje, ale TEJ klatki sama karta do obiektu nie sprowadzi
+    (`resolver.karta_wraca`: obiekt-region, a klatka poza jego regionem i bez oryginału wariantu
+    przy tym obiekcie) - liczy wołający, bo pyta o współrzędne i relację wariantu klatki.
 
     Kolejność bramek = kolejność z `object_card_form_rows` (powód ujednolicenia zostaje bajt
-    w bajt); RAW i region rozstrzyga WOŁAJĄCY przed tą funkcją, bo dla zmiany obiektu nie są
-    pominięciem, tylko brakiem karty (RAW przenosi się bez karty, region karty nie ma).
+    w bajt), powód `region_outside` stoi tuż za brakiem formy - to ta sama przesłanka per klatka;
+    RAW rozstrzyga WOŁAJĄCY przed tą funkcją, bo dla zmiany obiektu nie jest pominięciem, tylko
+    brakiem karty (RAW przenosi się bez karty), tak samo klatkę regionu, której forma nie utrzyma.
 
     Powód to `ZdanieRdzenia`: zdanie PL (wołający biorą je jak tekst) i kod z parametrami, z których
     okno zmiany obiektu składa zdanie `objchg.gate.<kod>` w języku UI (AR-138)."""
@@ -2386,6 +2392,9 @@ def object_card_gate(r, *, card, form, canon, lookup):
         return ZdanieRdzenia("kopia zeznaje inną kartę OBJECT niż klatka", "copy_other_card")
     if form is None:
         return ZdanieRdzenia(SKIP_FORM_NOT_CANON, "form_not_canon")
+    if poza_regionem:
+        return ZdanieRdzenia("klatka poza regionem obiektu - sama karta nie sprowadzi jej do niego",
+                             "region_outside")
     if czlony and not all(_kanon(c) == canon for c in czlony):
         return ZdanieRdzenia("sklejka oznaczeń - nie każdy człon wskazuje ten obiekt",
                              "joined_names")
@@ -2437,8 +2446,11 @@ def object_card_form_rows(con):
         niżej bez faktów jest ślepy; fakty dociąga etap Dostawy (`scan.backfill_copy_facts`);
       * kopia zeznaje INNĄ kartę niż klatka (`location.hdr_object`, gdy fakty kopii są zebrane) -
         karty w `cards` należą do KLATKI i mogą pochodzić z innej kopii;
-      * forma nie wraca do kanonu (`forma_karty_object` → None: kanon znany tylko z aliasu) -
-        karta z nią wypchnęłaby klatkę do nierozpoznanych (kimi Z1);
+      * forma nie prowadzi z powrotem do obiektu (`forma_karty_object` → None: kanon znany tylko
+        z aliasu albo forma regionu, którą drabina nazw oddałaby innemu obiektowi, AR-177) - karta
+        z nią wypchnęłaby klatkę do nierozpoznanych albo do innego obiektu (kimi Z1). Klatki
+        regionu ten wsad nie dotyka: ich karta albo jest formą, albo drabina jej nie rozpoznaje
+        (predykat wyżej), więc pytanie per klatka (`resolver.karta_wraca`) tu nie zachodzi;
       * sklejka oznaczeń (`NGC4631_PGC42637`), której NIE KAŻDY człon wskazuje ten sam kanon -
         forma zastąpiłaby zeznanie o dwóch obiektach jednym (kimi Z2c);
       * karta `OBJECT` nietekstowa (`value_type` ≠ 'str') - forma jest tekstem (kimi Z5);
@@ -2656,10 +2668,13 @@ def object_change_rows(con, frame_ids, *, target=None):
         `object_kind` (bieżące);
       * karta: `card` (idx 0, pusta = None), `card_present` (karta `OBJECT` stoi w nagłówku,
         także pusta - wtedy zapis to `set`, nie `add`), `card_comment`, `card_vtype`,
-        `header_hash`, `card_applicable` (format z kartą i - przy „Uzgodnij” - obiekt nie
-        z regionu: karta regionu nie istnieje),
+        `header_hash`, `card_applicable` (format z kartą; przy „Uzgodnij” klatka ze źródłem
+        `region` dostaje kartę wyłącznie wtedy, gdy forma sama ją do obiektu sprowadzi - inaczej
+        jedzie bez karty jak przed AR-177),
         `card_form` (forma, którą karta ma mieć: celu albo bieżącego kanonu), `card_skip` (powód
-        `object_card_gate` - liczony, gdy karta ma się zmienić; bramka ta sama co w ujednoliceniu);
+        `object_card_gate` - liczony, gdy karta ma się zmienić; bramka ta sama co w ujednoliceniu;
+        forma, która TEJ klatki sama nie utrzyma - `resolver.karta_wraca` ze współrzędnymi nagłówka
+        i obiektem oryginału wariantu - to powód `region_outside`, AR-177);
       * stosy: `variant_of` (`(oryginał, wariant)` dla wersji stosu, `stack_variant`) i `stacks`
         (dla lighta: krotki `(id stosu, nazwa pliku stosu, ((frame_id, ścieżka), …) wszystkich
         wejść)` - planer ostrzega, gdy gest rozdzieli wejścia stosu między foldery);
@@ -2706,9 +2721,10 @@ def object_change_rows(con, frame_ids, *, target=None):
         "       (SELECT count(*) FROM inplace_op io WHERE io.location_id = l.id "
         "          AND io.phase IN (SELECT value FROM json_each(?))) AS isolated, "
         "       l.id AS lid, l.volume, l.header_hash, l.compressed, l.unreadable_since, "
-        "       l.hdr_hash, l.hdr_rule, l.hdr_object "
+        "       l.hdr_hash, l.hdr_rule, l.hdr_object, h.ra_deg AS ra, h.dec_deg AS dec "
         "FROM frame f "
         "LEFT JOIN object o ON o.id = f.object_id "
+        "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
         "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
@@ -2738,6 +2754,11 @@ def object_change_rows(con, frame_ids, *, target=None):
             return ()
         return tuple(sorted(foldery.get(_klucz_folderu(canon), set()) - {canon}))
 
+    # Obiekt ORYGINAŁU wariantu po geście - szczebel bliźniaka `resolver.karta_wraca`: przy
+    # „Zmień obiekt…” para jedzie razem, więc oryginał dostaje cel; przy „Uzgodnij” zostaje przy
+    # swoim obiekcie. Oryginał bez obiektu nie daje szczebla (przebieg schodzi do regionu).
+    kanon_klatki = {int(r["fid"]): r["canon"] for r in rows}
+    regiony = kanony_regionow()
     wynik, widziane = [], set()
     for r in rows:
         fid = int(r["fid"])
@@ -2749,11 +2770,27 @@ def object_change_rows(con, frame_ids, *, target=None):
         canon_celu = target.canon if target is not None else r["canon"]
         form = target.card_form if target is not None else (
             _forma(r["canon"]) if r["canon"] is not None else None)
+        oryginal = wariant_z[fid][0] if fid in wariant_z else None
+        twin = (None if oryginal is None
+                else target.canon if target is not None else kanon_klatki.get(oryginal))
+        # AR-177: forma obiektu-regionu wraca tylko klatce, którą region (albo oryginał wariantu)
+        # sprowadzi do obiektu - pytanie per klatka. Klatka ze źródłem `region`, której forma nie
+        # utrzyma, przy „Uzgodnij” jedzie bez karty jak dotąd; każda inna dostaje powód. Forma
+        # kanonu spoza regionów wraca drabiną nazw z kontraktu `forma_karty_object` - bez pytania.
+        # Uszkodzony słownik obiektów własnych (`ValueError` drabiny) = jak w `forma_karty_object`:
+        # formy nie ma, pozycja dostaje powód bramki, a nie wyjątek w wątku licznika albo okna.
+        try:
+            wraca = form is not None and (
+                canon_celu not in regiony
+                or karta_wraca(lookup, form, canon_celu, r["ra"], r["dec"], twin_canon=twin))
+        except ValueError:
+            form, wraca = None, False
         applicable = (n["filetype"] not in NO_OBJECT_CARD_FILETYPES
-                      and (target is not None or r["object_source"] != "region"))
+                      and (target is not None or r["object_source"] != "region" or wraca))
         skip = None
         if applicable and canon_celu is not None and (form is None or card != form):
-            skip = object_card_gate(r, card=card, form=form, canon=canon_celu, lookup=lookup)
+            skip = object_card_gate(r, card=card, form=form, canon=canon_celu, lookup=lookup,
+                                    poza_regionem=form is not None and not wraca)
         n.update({
             "retired_at": r["retired_at"], "superseded_by": r["superseded_by"],
             "n_present": r["n_present"], "isolated": bool(r["isolated"]), "volume": r["volume"],
@@ -2822,10 +2859,10 @@ def file_object_mismatch_frame_ids(con):
         razem z folderem (deep sky pod `_SOLAR` to też plik w nie swoim miejscu). Plik spoza
         pozycji obiektu i kanon, którego `folder_form` nie przyjmie, nie wchodzą - gest nie ma
         dokąd ich przenieść;
-      * KARTA: format z kartą, obiekt nie z regionu (karta regionu nie istnieje), karta `OBJECT`
-        różna od formy karty kanonu (także jej brak) - i tylko gdy bramka karty przepuszcza
-        (`object_card_gate`, ta sama co w planie): karty, której gest nie zapisze, wiersz nie
-        obiecuje.
+      * KARTA: format z kartą, karta `OBJECT` różna od formy karty kanonu (także jej brak) - i tylko
+        gdy read-model gestu tę kartę zapisze: karta stosowalna (klatki regionu - gdy forma sama ją
+        do obiektu sprowadzi, AR-177) i bramka karty przepuszcza (`object_card_gate`, ta sama co
+        w planie). Karty, której gest nie zapisze, wiersz nie obiecuje.
 
     KOSZT (licznik Porządków liczy się na wątku okna): jeden SELECT po obecnych kopiach lightów
     i stosów, który sam odsiewa klatki z więcej niż jedną obecną kopią (`GROUP BY` + `HAVING`)
@@ -2836,7 +2873,7 @@ def file_object_mismatch_frame_ids(con):
     kursor = con.cursor()
     kursor.row_factory = None
     rows = kursor.execute(
-        "SELECT f.id, f.kind, f.filetype, f.object_source, o.canon, o.kind, c.value_raw, "
+        "SELECT f.id, f.kind, f.filetype, o.canon, o.kind, c.value_raw, "
         "       l.path, l.mtime "
         "FROM frame f JOIN object o ON o.id = f.object_id "
         "JOIN location l ON l.frame_id = f.id AND l.present = 1 "
@@ -2850,7 +2887,7 @@ def file_object_mismatch_frame_ids(con):
     formy: dict[str, str | None] = {}
     rozjazd_folderu: dict[tuple, bool] = {}
     wynik, kandydaci_karty = set(), []
-    for fid, kind, filetype, osrc, canon, object_kind, card, path, mtime in rows:
+    for fid, kind, filetype, canon, object_kind, card, path, mtime in rows:
         if mtime is None:
             continue
         klucz = (path[:max(path.rfind("\\"), path.rfind("/"))], canon, kind, object_kind)
@@ -2863,7 +2900,7 @@ def file_object_mismatch_frame_ids(con):
         if rozjazd_folderu[klucz]:
             wynik.add(fid)
             continue
-        if filetype in NO_OBJECT_CARD_FILETYPES or osrc == "region":
+        if filetype in NO_OBJECT_CARD_FILETYPES:
             continue
         if canon not in formy:
             formy[canon] = forma_karty_object(con, canon, lookup=lookup)
@@ -2872,8 +2909,11 @@ def file_object_mismatch_frame_ids(con):
             kandydaci_karty.append(fid)
     if kandydaci_karty:
         kandydaci = set(kandydaci_karty)                # wiersze rosną o parę stosu - ta nie wchodzi
+        # Karta stosowalna - inaczej `card_skip` jest None, bo bramki się nie liczy (klatka regionu,
+        # której forma nie utrzyma, jedzie bez karty i nie jest robotą karty, AR-177).
         wynik |= {r["frame_id"] for r in object_change_rows(con, kandydaci_karty)
-                  if r["frame_id"] in kandydaci and r["card_skip"] is None}
+                  if r["frame_id"] in kandydaci and r["card_applicable"]
+                  and r["card_skip"] is None}
     return wynik
 
 

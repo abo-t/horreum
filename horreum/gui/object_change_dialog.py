@@ -434,7 +434,8 @@ class ObjectChangeDialog(QDialog):
     Enter NIE uruchamia gestu: przyciskiem domyślnym jest „Zamknij” (zapis do plików idzie wyłącznie
     świadomym kliknięciem).
 
-    Cel z formą karty `None` (kanon znany tylko z aliasu) jest ODMOWĄ PRZED PLANEM - obietnica
+    Cel z formą karty `None` (karta z formą nie prowadzi z powrotem do obiektu - kanon znany tylko
+    z aliasu) jest ODMOWĄ PRZED PLANEM - obietnica
     „karta i folder razem” nie ma czym się spełnić. Odmowę mówi wołający (wybór celu), tu stoi
     asercja: okno z takim celem to błąd kolejności (EXPECT).
 

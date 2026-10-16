@@ -23,12 +23,13 @@ from .resolve._text import norm_alnum
 from .resolve.catalog import catalog_canon, header_form, xref_key_target
 from .resolve.channel import frame_channel
 from .resolve.filters import normalize_filter
+from .resolve.headers import FAKTY_BIEZACE, copy_facts_state
 from .resolve.objects import (STICKY_OBJECT_SOURCES, WEAK_OBJECT_SOURCES, ObjectIdentity,
                               load_own_objects, resolve_object)
 from .resolve.observatory import nearest_site, site_coords
 from .resolve.paths import (STACK_KIND, object_folder, object_from_path, filename_tokens,
-                            library_root_candidates)
-from .resolve.regions import resolve_region
+                            library_root_candidates, path_after_object_change, path_key)
+from .resolve.regions import load_regions, resolve_region
 from .resolve.solar import resolve_solar
 
 # Klatki, które MAJĄ obiekt nieba — fakt przeniesiony do liścia `resolve.frames` (S2b), bo guard
@@ -302,24 +303,130 @@ def alias_lookup(con):
 
 def forma_karty_object(con, canon, *, lookup=None):
     """Kanon Horreum → wartość karty `OBJECT` do PLIKU albo None - JEDEN punkt wyliczenia formy dla
-    wszystkich dróg piszących kartę: gestów GUI („Zatwierdź ze ścieżki…", „Napraw nagłówek…";
-    decyzje Q6 i D2 2026-09-26: jedna wersja na obiekt, nazwy zwyczajowe → oznaczenie katalogowe)
-    i wsadu ujednolicenia (`gui.queries.object_card_form_rows`, O5). Mieszka tu, a nie w GUI, bo
-    wsad jest Qt-wolny (kimi Z1, 2026-09-26).
+    wszystkich dróg piszących kartę: gestów GUI („Zatwierdź ze ścieżki…", „Napraw nagłówek…",
+    „Zmień obiekt…”, „Uzgodnij”; decyzje Q6 i D2 2026-09-26: jedna wersja na obiekt, nazwy
+    zwyczajowe → oznaczenie katalogowe) i wsadu ujednolicenia (`gui.queries.object_card_form_rows`,
+    O5). Mieszka tu, a nie w GUI, bo wsad jest Qt-wolny (kimi Z1, 2026-09-26).
 
-    Forma = `header_form(canon)` (`NGC 7635`; kanon spoza gramatyk bez zmian), ale TYLKO gdy drabina
-    resolvera sprowadza ją z powrotem do TEGO SAMEGO kanonu. Kanon nauczony wyłącznie aliasem
-    (`ZW77` znany tylko jako „Zupelnie Wymyslona 77") nie wraca z własnego zapisu - karta z nim
-    przeniosłaby klatkę po re-syncu do „nierozpoznanych". Wtedy None: wołający decyduje, co dalej
-    (ścieżka pomija kartę z powodem, naprawa zostawia tekst usera, wsad pomija klatkę z powodem).
-    Uszkodzony słownik (`ValueError`) = nie wiadomo, więc też None. `lookup` = migawka aliasów
-    (`alias_snapshot(con).get`) dla wołań w pętli; domyślnie jeden SELECT na nazwę."""
+    PRZESŁANKA FORMY: karta z nią SAMA - bez ręki - sprowadza klatkę do tego obiektu przy następnym
+    przebiegu (`run_resolver`). Kanon nauczony wyłącznie aliasem (`ZW77` znany tylko jako
+    „Zupelnie Wymyslona 77") z własnego zapisu nie wraca - karta z nim przeniosłaby klatkę po
+    re-syncu do „nierozpoznanych". Ręka (`object_source='user'`) trzymałaby klatkę i tak, ale
+    karta ma ją utrzymać także po cofnięciu ręki.
+
+    Forma = `header_form(canon)` (`NGC 7635`; kanon spoza gramatyk bez zmian), gdy drabina nazw
+    sprowadza ją do TEGO SAMEGO kanonu; drabina prowadzi do INNEGO obiektu → None. OBIEKT-REGION
+    (AR-177, `D-1016-3`): drabina o jego kanonie milczy, a klatkę sprowadza szczebel regionu ze
+    współrzędnych (`resolve_region`) - tekst karty jest dla niego obojętny, byle drabina nie
+    oddała go nikomu innemu. Forma regionu = karta bliźniaków folderu (`_forma_regionu`), bez nich
+    `header_form`. Region obejmuje klatkę albo nie, więc ta forma wraca WYŁĄCZNIE klatce, którą
+    region (albo oryginał wariantu) do obiektu sprowadzi - pytanie per klatka zadaje wołający
+    (`karta_wraca`; „Uzgodnij” i „Zmień obiekt…” w `gui.queries.object_change_rows`). Droga, która
+    per klatka nie pyta („Zatwierdź ze ścieżki…”, `gui.app.plan_kart_sciezki`), pomija kartę
+    regionu z powodem jak przy formie None. Kanon spoza `regions.json` z milczącą drabiną → None
+    (jak `ZW77`).
+
+    Wtedy None: wołający decyduje, co dalej (ścieżka pomija kartę z powodem, naprawa zostawia
+    tekst usera, gest zmiany obiektu odmawia celu albo pozycji). Uszkodzony słownik (`ValueError`)
+    = nie wiadomo, więc też None. `lookup` = migawka aliasów (`alias_snapshot(con).get`) dla wołań
+    w pętli; domyślnie jeden SELECT na nazwę."""
     value = header_form(canon)
+    lookup = lookup or alias_lookup(con)
     try:
-        wraca = resolve_name(lookup or alias_lookup(con), value)[0]
+        wraca = resolve_name(lookup, value)[0]
+        if wraca is not None:
+            return value if wraca.canon == canon else None
+        if canon not in kanony_regionow():
+            return None
+        return _forma_regionu(con, canon, lookup) or value
     except ValueError:
         return None
-    return value if wraca is not None and wraca.canon == canon else None
+
+
+def kanony_regionow():
+    """Kanony obiektów-regionów (`regions.json`, szczebel `resolve_region`) - jeden zbiór dla formy
+    karty (`forma_karty_object`) i read-modelu gestu, który pyta per klatka (`karta_wraca`)
+    WYŁĄCZNIE o formę regionu: forma każdego innego kanonu wraca drabiną nazw z definicji."""
+    return frozenset(r["canon"] for r in load_regions())
+
+
+def _forma_regionu(con, canon, lookup):
+    """Karta BLIŹNIAKÓW FOLDERU obiektu-regionu (AR-177) - tekst, który głosuje najwięcej kopii,
+    albo None (nikt nie głosuje). Dla `Veil` to `'veil'` z NINA: forma zgodna z kartami, które
+    folder już niesie, więc „Uzgodnij” dopisuje brakujące, nie przepisuje zgodnych dla samej
+    wielkości liter.
+
+    GŁOSUJĄ KOPIE, nie klatki: `cards` należą do klatki i mogły przyjść z innej albo nieobecnej
+    kopii, a tu wybieramy tekst do zapisu w realnych plikach. Głos = obecna kopia żywej klatki
+    obiektu ze źródłem `region` albo `twin` (wariant kadru niesie tę samą kartę co oryginał), której
+    ścieżka stoi w folderze obiektu (ta sama reguła pozycji co gałąź FOLDER wiersza „Plik nie
+    zgadza się z obiektem”: `path_after_object_change` daje ścieżkę bez zmiany). Tekst głosu =
+    karta TEJ kopii regułą `macro._wlasna_wartosc` (jedna reguła z planem naprawy nagłówka): fakty
+    kopii (`location.hdr_object`, 0021) zebrane dla bieżącego nagłówka regułą tej binarki, a bez
+    nich karta `OBJECT` klatki - wyłącznie gdy klatka ma JEDNĄ lokację (wtedy karty klatki są
+    kartami tej kopii). Bez tego drugiego członu głosowałyby same stosy: pojedynczy light FITS
+    faktów kopii nie dostaje, dopóki skan go znów nie przeczyta (`scan.copy_facts_candidates`) -
+    na `pf4` 250 z 261 kopii Veil, a forma stała na 2 głosach. Klatka z kilkoma lokacjami bez faktów
+    nie głosuje. Tekst niepusty, którego drabina nazw nie rozpoznaje albo rozpoznaje jako ten sam
+    kanon - głos, który drabina oddałaby innemu obiektowi, odpada. Remis: `header_form` kanonu,
+    potem alfabet."""
+    from .macro import _wlasna_wartosc          # reguła „karta tej kopii” - jeden właściciel
+    rows = con.execute(
+        "SELECT f.kind AS kind, o.kind AS okind, l.path AS path, l.header_hash AS header_hash, "
+        "       l.hdr_object AS hdr_object, l.hdr_hash AS hdr_hash, l.hdr_rule AS hdr_rule, "
+        "       c.value_raw AS karta, "
+        "       (SELECT count(*) FROM location l2 WHERE l2.frame_id = f.id) AS n_loc "
+        "FROM frame f JOIN object o ON o.id = f.object_id "
+        "JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "LEFT JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
+        "WHERE o.canon = ? AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "AND f.object_source IN ('region', 'twin')", (canon,)).fetchall()
+    root = library_root_from_db(con) if rows else None
+    glosy = {}
+    for r in rows:
+        kopia = {"n_loc": r["n_loc"], "hdr_object": r["hdr_object"],
+                 "facts_current": (r["hdr_hash"] is not None and r["hdr_hash"] == r["header_hash"]
+                                   and copy_facts_state(r["hdr_hash"], r["hdr_rule"])
+                                   == FAKTY_BIEZACE)}
+        tekst, znana = _wlasna_wartosc(kopia, "OBJECT", None if r["karta"] is None
+                                       else {"value_raw": r["karta"]})
+        if not znana or not tekst:
+            continue
+        try:
+            cel = path_after_object_change(r["path"], canon, r["kind"], root, object_kind=r["okind"])
+        except ValueError:
+            continue
+        if cel is None or path_key(cel) != path_key(r["path"]):
+            continue
+        trafienie = resolve_name(lookup, tekst)[0]
+        if trafienie is not None and trafienie.canon != canon:
+            continue
+        glosy[tekst] = glosy.get(tekst, 0) + 1
+    if not glosy:
+        return None
+    forma = header_form(canon)
+    return min(glosy.items(), key=lambda kv: (-kv[1], kv[0] != forma, kv[0]))[0]
+
+
+def karta_wraca(lookup, value, canon, ra_deg, dec_deg, *, twin_canon=None):
+    """Czy karta `OBJECT` = `value` SAMA - bez ręki - sprowadza klatkę do obiektu `canon` przy
+    następnym przebiegu (AR-177). Ta sama przesłanka co forma (`forma_karty_object`, przypadek
+    `ZW77`) i ta sama kolejność szczebli co `run_resolver`: nazwa (`resolve_name` - Układ
+    Słoneczny, katalog, słownik, alias) → BLIŹNIAK (wariant stosu z `stack_variant` bierze obiekt
+    oryginału; `twin_canon` = kanon obiektu oryginału, None - klatka nie jest wariantem albo
+    oryginał obiektu nie ma) → REGION (`resolve_region` ze współrzędnych nagłówka). Read-only.
+
+    Ręka i bieżący obiekt klatki („obiekt bez świadka zostaje”) świadomie poza pytaniem: karta ma
+    utrzymać klatkę, gdy ręki już nie ma. Równoważność z prawdziwym przebiegiem pinuje test na
+    macierzy przypadków (nazwa, region w/poza, brak współrzędnych, ręka, wariant). `ValueError`
+    drabiny (uszkodzony słownik) przechodzi do wołającego."""
+    trafienie = resolve_name(lookup, value)[0]
+    if trafienie is not None:
+        return trafienie.canon == canon
+    if twin_canon is not None:
+        return twin_canon == canon
+    region = resolve_region(ra_deg, dec_deg)
+    return region is not None and region.canon == canon
 
 
 def alias_snapshot(con):

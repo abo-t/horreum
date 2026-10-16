@@ -1012,3 +1012,135 @@ def test_meta_powod_pozycji_bez_golej_prozy_i_jeden_pisarz_trojki():
                     c.value):
                 trafienia.append(f.name)
     assert trafienia == ["_set_object_change_reason_tx"], trafienia
+
+
+# ============================================================ AR-177: karta obiektu-regionu (Veil)
+
+VEIL_RA, VEIL_DEC = 312.75, 30.67          # środek regionu Veil (`resolve/data/regions.json`)
+M31_RA, M31_DEC = 10.68, 41.27             # poza każdym regionem
+
+
+def _fits_nieba(path, *, obj=None, seed=1, ra=VEIL_RA, dec=VEIL_DEC, stos=False):
+    """FITS lighta (albo stosu - `stos`) z kartą `obj` (None = bez karty) i współrzędnymi
+    nagłówka (`ra` None = bez współrzędnych)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hdu = fits.PrimaryHDU(data=(np.arange(16, dtype=np.int16).reshape(4, 4) + seed).astype(np.int16))
+    hdu.header["IMAGETYP"] = "Master Light" if stos else "Light"
+    if obj is not None:
+        hdu.header["OBJECT"] = (obj, KOMENTARZ)
+    if ra is not None:
+        hdu.header["RA"] = ra
+        hdu.header["DEC"] = dec
+    hdu.writeto(path)
+    return path
+
+
+def _kanon(con, fid):
+    r = con.execute("SELECT o.canon FROM frame f LEFT JOIN object o ON o.id = f.object_id "
+                    "WHERE f.id = ?", (fid,)).fetchone()
+    return r[0]
+
+
+def test_uzgodnij_regionu_pisze_karte_blizniakow_a_przebieg_ja_utrzymuje(tmp_path):
+    """AR-177 na PRAWDZIWYM rdzeniu: klatka Veil z regionu bez karty dostaje w „Uzgodnij” kartę
+    bliźniaków folderu (`'veil'` z kopii obok), bez ruchu pliku; zapis, a potem przebieg resolvera
+    zostawiają ją przy Veil szczeblem regionu, a wiersz „Plik nie zgadza się z obiektem” pustoszeje.
+    Falsyfikator: forma regionu, którą drabina oddaje innemu obiektowi (`M 31`) - pozycja i przebieg
+    odprowadzają klatkę od Veil."""
+    from horreum import resolver
+    from horreum.gui import queries
+    folder = tmp_path / "ASTRO_" / "LIGHTS" / "Veil" / "cam"
+    blizniak = _fits_nieba(folder / "Veil_1.fits", obj="veil", seed=1)
+    bez = _fits_nieba(folder / "Veil_2.fits", seed=2)
+    con = db.open_db(str(tmp_path / "h.db"))
+    for p in (blizniak, bez):
+        _wczytaj(con, p)
+    resolver.run_resolver(con, NOW)
+    fb, fz = _wiersz(con, blizniak)["frame_id"], _wiersz(con, bez)["frame_id"]
+    assert queries.file_object_mismatch_frame_ids(con) == {fz}
+    rows = queries.object_change_rows(con, [fb, fz], target=None)
+    plan = oc.plan_object_change(rows, target=None, library_root=resolver.library_root_from_db(con),
+                                 location_at=queries.location_lookup(con))
+    (it,) = plan.items
+    assert (it.frame_id, it.card_op, it.card_new, it.new_path) == (fz, "add", "veil", None)
+    assert [(s.frame_id, s.code) for s in plan.skipped] == [(fb, oc.SKIP_UNCHANGED)]
+    repo.stage_object_change(con, plan=plan, now=NOW)
+    res = writeback.commit_object_change(con, plan.run_id, now=NOW)
+    assert len(res.applied) == 1 and not (res.blocked or res.failed), res
+    assert _karta(bez) == "veil"
+    resolver.run_resolver(con, NOW)
+    zrodlo = con.execute("SELECT object_source FROM frame WHERE id = ?", (fz,)).fetchone()[0]
+    assert (_kanon(con, fz), zrodlo) == ("Veil", "region")
+    assert queries.file_object_mismatch_frame_ids(con) == set()
+    con.close()
+
+
+def test_karta_wraca_rownowazna_przebiegowi_po_zdjeciu_reki(tmp_path):
+    """AR-177: `resolver.karta_wraca` mówi to samo, co PRAWDZIWY następny przebieg, gdy karta zostaje
+    sama. Macierz: nazwa katalogowa, region w środku, ręka poza regionem, ręka bez współrzędnych,
+    ręka w regionie, wariant stosu z oryginałem przy Veil (sam poza regionem) i wariant z ręką,
+    którego oryginał leży poza regionem. Karta idzie do pliku drogą pisarza (staging + `commit`),
+    ręka schodzi klingą („Cofnij przypisanie” + zgaszenie nagrobka), potem `run_resolver`.
+    Falsyfikator: `karta_wraca` bez szczebla bliźniaka - oba warianty dostają przewidywanie z regionu
+    i rozjeżdżają się z przebiegiem."""
+    from horreum import resolver
+    korzen = tmp_path / "ASTRO_"
+    lighty, stosy = korzen / "LIGHTS" / "Veil" / "cam", korzen / "STACKS" / "Veil" / "cam"
+    przypadki = {           # nazwa: (plik, karta do zapisu, ręka przed zapisem)
+        "nazwa": (_fits_nieba(lighty / "k1.fits", obj="NGC6992", seed=1), "NGC 7000", False),
+        "region": (_fits_nieba(lighty / "k2.fits", seed=2), "veil", False),
+        "reka_poza": (_fits_nieba(lighty / "k3.fits", seed=3, ra=M31_RA, dec=M31_DEC), "veil", True),
+        "reka_bez_wsp": (_fits_nieba(lighty / "k4.fits", seed=4, ra=None), "veil", True),
+        "reka_w_regionie": (_fits_nieba(lighty / "k5.fits", seed=5), "veil", True),
+        "wariant_oryginal_veil": (_fits_nieba(stosy / "w6.fits", seed=6, ra=M31_RA, dec=M31_DEC,
+                                              stos=True), "veil", False),
+        "wariant_oryginal_m31": (_fits_nieba(stosy / "w7.fits", seed=7, stos=True), "veil", True),
+    }
+    o6 = _fits_nieba(stosy / "o6.fits", seed=8, stos=True)
+    o7 = _fits_nieba(stosy / "o7.fits", obj="M 31", seed=9, ra=M31_RA, dec=M31_DEC, stos=True)
+    con = db.open_db(str(tmp_path / "h.db"))
+    for p in [p for p, _, _ in przypadki.values()] + [o6, o7]:
+        _wczytaj(con, p)
+    fid = {k: _wiersz(con, p)["frame_id"] for k, (p, _, _) in przypadki.items()}
+    for wariant, oryginal in (("wariant_oryginal_veil", o6), ("wariant_oryginal_m31", o7)):
+        repo.link_stack_variant(con, variant_frame_id=fid[wariant],
+                                original_frame_id=_wiersz(con, oryginal)["frame_id"],
+                                variant="autocrop", source="user", now=NOW)
+    reka = [fid[k] for k, (_, _, r) in przypadki.items() if r]
+    repo.user_assign_object(con, alias_norm=None, canon="Veil", catalog="region", kind="region",
+                            frame_ids=reka, now=NOW)
+    resolver.run_resolver(con, NOW)
+
+    for k, (p, karta, _) in przypadki.items():         # karta do pliku drogą pisarza
+        w = _wiersz(con, p)
+        stara = _karta(p)
+        repo.stage_pending(con, run_id="K", location_id=w["id"], keyword="OBJECT",
+                           idx=0 if stara is not None else None,
+                           op="set" if stara is not None else "add", old_value=stara,
+                           new_value=karta, new_type="str", new_comment=None,
+                           expected_header_hash=w["header_hash"])
+    wynik = writeback.commit(con, "K", now=NOW, inplace=True)
+    assert len(wynik.applied) == len(przypadki) and not wynik.failed, wynik
+    repo.clear_object_assignment(con, frame_ids=reka, now=NOW)
+    for f in reka:
+        assert repo.clear_object_tombstone(con, frame_id=f, now=NOW)
+
+    lookup = resolver.alias_snapshot(con).get
+    przewidziane = {}
+    for k, (p, karta, _) in przypadki.items():
+        assert _karta(p) == karta
+        ra, dec = con.execute("SELECT ra_deg, dec_deg FROM header WHERE frame_id = ?",
+                              (fid[k],)).fetchone()
+        blizniak = con.execute(
+            "SELECT o.canon FROM stack_variant v JOIN frame f ON f.id = v.original_frame_id "
+            "LEFT JOIN object o ON o.id = f.object_id WHERE v.variant_frame_id = ?",
+            (fid[k],)).fetchone()
+        przewidziane[k] = resolver.karta_wraca(lookup, karta, "Veil", ra, dec,
+                                               twin_canon=blizniak[0] if blizniak else None)
+    resolver.run_resolver(con, NOW)
+    po = {k: _kanon(con, fid[k]) for k in przypadki}
+    assert przewidziane == {k: kanon == "Veil" for k, kanon in po.items()}, (przewidziane, po)
+    assert po == {"nazwa": "NGC7000", "region": "Veil", "reka_poza": None, "reka_bez_wsp": None,
+                  "reka_w_regionie": "Veil", "wariant_oryginal_veil": "Veil",
+                  "wariant_oryginal_m31": "NGC224"}
+    con.close()

@@ -1875,7 +1875,7 @@ def test_plan_bramki_formy_sklejki_typu_i_sumy(tmp_path):
     con.commit()
     rows = {r["path"]: r for r in queries.object_card_form_rows(con)}
 
-    assert rows[str(alias)]["skip"].startswith("forma karty nie wraca do kanonu")
+    assert rows[str(alias)]["skip"] == queries.SKIP_FORM_NOT_CANON
     assert rows[str(skl_zla)]["skip"].startswith("sklejka oznaczeń")
     assert rows[str(skl_ok)]["skip"] is None and rows[str(skl_ok)]["form"] == "NGC 4258"
     assert rows[str(typ)]["skip"] == "karta OBJECT nietekstowa (int)"

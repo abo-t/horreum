@@ -2256,7 +2256,7 @@ def test_KAZDY_powod_bramki_karty_ma_zdanie_PL_i_EN_a_PL_to_zdanie_bramki():
                     and w.func.id == "ZdanieRdzenia"):
                 zdanie, kod = w.args
                 kody[kod.value] = (zdanie, {k.arg for k in w.keywords})
-    assert len(kody) == 13
+    assert len(kody) == 14
     for kod, (zdanie, parametry) in kody.items():
         wpis = CATALOG[f"objchg.gate.{kod}"]
         pola = {j: {f for _, f, _, _ in string.Formatter().parse(wpis[j]) if f}
@@ -3280,3 +3280,117 @@ def test_lustro_kart_obecnej_kopii_tylko_gdy_opisuje_JEJ_naglowek(archiwum):
     assert queries.present_copy_card_mirror(a.con, [fb])[fb] is None
     a.con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = 'completed'", (NOW,))
     assert queries.present_copy_card_mirror(a.con, [fb])[fb] is not None
+
+
+# ═══════════════════════════════════════════════ AR-177: okno na obiekcie-regionie (Veil)
+
+
+def _niebo(con, root, rel, *, obj=None, ra=312.75, dec=30.67, seed=0):
+    """Light FITS pod `root/rel` z kartą `obj` (None = bez karty) i współrzędnymi (`ra` None = bez)
+    wciągnięty skanem; zwraca `frame_id`. Domyślne współrzędne = środek regionu Veil."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + seed)
+    hdu.header["IMAGETYP"] = "Light"
+    hdu.header["DATE-OBS"] = f"2023-08-22T20:{seed:02d}:00"
+    if obj is not None:
+        hdu.header["OBJECT"] = obj
+    if ra is not None:
+        hdu.header["RA"], hdu.header["DEC"] = ra, dec
+    hdu.writeto(str(p))
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="VOL", now=NOW,
+                       summary=scan.ScanSummary())
+    return con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
+
+
+def _pominiecia(dlg):
+    return [dlg.skipped_tree.topLevelItem(i).text(0)
+            for i in range(dlg.skipped_tree.topLevelItemCount())]
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Zmien_obiekt_na_Veil_otwiera_okno_a_klatka_spoza_regionu_mowi_powod(qapp, tmp_path, lang):
+    """AR-177: cel Veil (obiekt-region) ma formę karty, więc okno „Zmień obiekt…” się otwiera
+    (dawniej odmowa przed oknem) na PRAWDZIWYM read-modelu i planerze: klatka w regionie jedzie
+    z kartą, klatka spoza regionu stoi w pominięciach ze zdaniem bramki `region_outside` w języku
+    UI. Falsyfikator: brak wpisu katalogu w danym języku - zdanie rdzenia PL albo `KeyError`."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "veil.db"))
+    root = tmp_path / "ASTRO_"
+    w = _niebo(con, root, r"LIGHTS\NGC6992\cam\NGC6992_1.fits", obj="NGC6992", seed=1)
+    poza = _niebo(con, root, r"LIGHTS\M31\cam\M31_2.fits", obj="M 31", ra=10.68, dec=41.27, seed=2)
+    _niebo(con, root, r"LIGHTS\Veil\cam\Veil_3.fits", seed=3)            # obiekt Veil z regionu
+    resolver.run_resolver(con, NOW)
+    cel = queries.object_target(con, "Veil")
+    assert cel is not None and cel.card_form == "Veil"
+    dlg = ObjectChangeDialog(con, frame_ids=[w, poza], target=cel, now_fn=lambda: NOW,
+                             off_thread=False)
+    assert dlg.error.text() == "" and dlg.items_tree.topLevelItemCount() == 1
+    (powod,) = _pominiecia(dlg)
+    assert CATALOG["objchg.gate.region_outside"][lang] in powod, powod
+    if lang == "en":
+        assert not set(powod) & set("ąćęłńóśźż"), powod
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Uzgodnij_forma_regionu_prowadzaca_do_innego_obiektu_mowi_prawdziwy_powod(qapp, tmp_path,
+                                                                                lang):
+    """AR-177: forma karty None ma po AR-177 drugą przyczynę - forma obiektu-regionu, którą drabina
+    nazw oddaje INNEMU obiektowi (tu alias `VEIL` przy NGC6992). Zdanie bramki mówi przyczynę
+    ogólnie („nie prowadzi z powrotem do tego obiektu”), nie „kanon znany tylko z aliasu”.
+    Klatka z ręką przy Veil w „Uzgodnij” zostaje z tym powodem w języku UI, a „Zmień obiekt…”
+    odmawia celu zdaniem `grid.sel.object_change_no_card`, też bez „aliasu”.
+    Falsyfikator: dawne zdanie `form_not_canon` albo `object_change_no_card` (o aliasie) w katalogu."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "veil.db"))
+    root = tmp_path / "ASTRO_"
+    _niebo(con, root, r"LIGHTS\NGC6992\cam\NGC6992_1.fits", obj="NGC6992", seed=1)
+    _niebo(con, root, r"LIGHTS\Veil\cam\Veil_2.fits", seed=2)              # obiekt Veil z regionu
+    reka = _niebo(con, root, r"LIGHTS\Veil\cam\Veil_3.fits", ra=None, seed=3)
+    resolver.run_resolver(con, NOW)
+    repo.user_assign_object(con, alias_norm=None, canon="Veil", catalog="region", kind="region",
+                            frame_ids=[reka], now=NOW)
+    ngc = con.execute("SELECT id FROM object WHERE canon = 'NGC6992'").fetchone()[0]
+    repo.add_object_alias(con, alias_norm="VEIL", object_id=ngc, source="user", now=NOW)
+    assert resolver.forma_karty_object(con, "Veil") is None
+    # „Zmień obiekt…” na taki cel odmawia przed oknem tym samym uogólnionym zdaniem.
+    assert queries.object_target(con, "Veil").card_form is None
+    odmowa = i18n.t("grid.sel.object_change_no_card", canon="Veil")
+    assert "alias" not in odmowa.lower() and odmowa == CATALOG[
+        "grid.sel.object_change_no_card"][lang].format(canon="Veil")
+    dlg = ObjectChangeDialog(con, frame_ids=[reka], target=None, now_fn=lambda: NOW,
+                             off_thread=False)
+    assert dlg.items_tree.topLevelItemCount() == 0
+    (powod,) = _pominiecia(dlg)
+    assert CATALOG["objchg.gate.form_not_canon"][lang] in powod, powod
+    assert "alias" not in powod.lower(), powod
+    dlg.reject()
+    con.close()
+
+
+def test_Zatwierdz_ze_sciezki_pomija_karte_regionu_z_powodem(tmp_path):
+    """AR-177: forma obiektu-regionu wraca tylko klatkom w regionie, a „Zatwierdź
+    ze ścieżki…” (`app.plan_kart_sciezki`) nie pyta per klatka - karta regionu odpada tam z tym samym
+    powodem co forma None (`path.card_skip.no_roundtrip`), dla każdej klatki, także tej w regionie.
+    Kanon spoza regionów idzie dalej do silnika makr (kontrola). Falsyfikator: bramka bez warunku
+    `kanony_regionow` - klatka spoza regionu dostaje kartę `Veil` w `touched`."""
+    from horreum.gui import app as app_mod
+    con = db.open_db(str(tmp_path / "veil.db"))
+    root = tmp_path / "ASTRO_"
+    w = _niebo(con, root, r"LIGHTS\Veil\cam\Veil_1.fits", seed=1)
+    poza = _niebo(con, root, r"LIGHTS\Veil\cam\Veil_2.fits", ra=10.68, dec=41.27, seed=2)
+    resolver.run_resolver(con, NOW)
+    value, touched, skipped = app_mod.plan_kart_sciezki(con, "Veil", [w, poza])
+    assert value == resolver.forma_karty_object(con, "Veil") == "Veil" and touched == []
+    powod = i18n.t("path.card_skip.no_roundtrip", value="Veil", canon="Veil")
+    assert skipped == [(w, "", powod), (poza, "", powod)]
+    _value, touched, _skipped = app_mod.plan_kart_sciezki(con, "NGC7000", [poza])
+    assert [t.new_value for t in touched] == ["NGC 7000"]
+    con.close()

@@ -6927,8 +6927,13 @@ CATALOG = {
         "pl": "kopia zeznaje inną kartę OBJECT niż klatka",
         "en": "the copy testifies a different OBJECT card than the frame"},
     "objchg.gate.form_not_canon": {
-        "pl": "forma karty nie wraca do kanonu (kanon znany tylko z aliasu)",
-        "en": "the card form does not lead back to the canon (canon known only from an alias)"},
+        "pl": "forma karty nie prowadzi z powrotem do tego obiektu",
+        "en": "the card form does not lead back to this object"},
+    # AR-177: forma obiektu-regionu istnieje, ale klatki spoza regionu sama karta nie utrzyma.
+    "objchg.gate.region_outside": {
+        "pl": "klatka poza regionem obiektu - sama karta nie sprowadzi jej do niego",
+        "en": "the frame lies outside the object's region - the card alone would not lead it "
+              "back"},
     "objchg.gate.joined_names": {
         "pl": "sklejka oznaczeń - nie każdy człon wskazuje ten obiekt",
         "en": "joined designations - not every part points to this object"},
@@ -7132,12 +7137,12 @@ CATALOG = {
         "pl": "Drabina nazw nie rozpoznaje „{canon}” - gest nie ruszy.",
         "en": "The name ladder does not recognise “{canon}” - the gesture will not start."},
     "grid.sel.object_change_no_card": {
-        "pl": "Obiekt {canon} nie ma formy karty OBJECT, która wróciłaby do niego przy odczycie "
-              "(kanon znany tylko z aliasu). Gest obiecuje kartę i folder razem, więc odmawia - "
-              "obiekt w samej bazie nada „Przypisz obiekt…”.",
-        "en": "Object {canon} has no OBJECT card form that would resolve back to it on reading "
-              "(canon known only from an alias). The gesture promises the card and the folder "
-              "together, so it refuses - “Assign object…” sets the object in the database only."},
+        "pl": "Obiekt {canon} nie ma formy karty OBJECT, która przy odczycie prowadziłaby z powrotem "
+              "do niego. Gest obiecuje kartę i folder razem, więc odmawia - obiekt w samej bazie "
+              "nada „Przypisz obiekt…”.",
+        "en": "Object {canon} has no OBJECT card form that would lead back to it on reading. The "
+              "gesture promises the card and the folder together, so it refuses - “Assign object…” "
+              "sets the object in the database only."},
     # Wiersz Porządków i jego perspektywa (nazwy rodziny presetów: `perspective.*`,
     # `grid.criteria.only_*` - konwencja bramki `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`).
     "tasks.file_object_mismatch_frames": {"pl": "Plik nie zgadza się z obiektem",

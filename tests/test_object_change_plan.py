@@ -38,9 +38,9 @@ class _Archiwum:
 
     def klatka(self, rel, *, canon=None, okind="deep_sky", card="auto", source="header",
                filetype="fits", kind="light", mtime="m1", header_hash="h1", plik=True,
-               date_obs="2022-03-21T20:29:01", extra_cards=()):
+               date_obs="2022-03-21T20:29:01", extra_cards=(), ra=None, dec=None):
         """Klatka z jedną obecną kopią pod `rel`. `card="auto"` = forma karty kanonu (karta zgodna),
-        None = brak karty `OBJECT`."""
+        None = brak karty `OBJECT`. `ra`/`dec` = współrzędne nagłówka (szczebel regionu, AR-177)."""
         self._n += 1
         fid, _ = repo.upsert_frame(self.con, sha1_data=f"s{self._n}", kind=kind, filetype=filetype,
                                    camera_id=None, now=NOW)
@@ -49,7 +49,7 @@ class _Archiwum:
         karty = ([Card("OBJECT", 0, card, None, "str", "Name of the object")] if card is not None
                  else []) + list(extra_cards)
         repo.record_header(self.con, frame_id=fid, raw_json="{}", now=NOW, cards=karty or None,
-                           date_obs=date_obs, object_raw=card)
+                           date_obs=date_obs, object_raw=card, ra_deg=ra, dec_deg=dec)
         sciezka = self.sciezka(rel)
         if plik:
             os.makedirs(os.path.dirname(sciezka), exist_ok=True)
@@ -616,3 +616,98 @@ def test_odmowa_nie_niesie_kodu_bez_zmian(arch):
     fid = arch.klatka(r"LIGHTS\X\cam\1.fits", canon="NGC224", mtime=None)
     assert [s.code for s in arch.plan([fid]).skipped] == ["no_mtime"]
     assert object_change.SKIP_UNCHANGED != "no_mtime"
+
+
+# ═══════════════════════════════════════════════════════════════════ AR-177: obiekt-region
+
+VEIL = {"ra": 312.75, "dec": 30.67}            # środek regionu Veil (`resolve/data/regions.json`)
+M31 = {"ra": 10.68, "dec": 41.27}              # poza każdym regionem
+
+
+def _region(arch, rel, *, card=None, source="region", date_obs="2022-03-21T20:29:01", **wsp):
+    return arch.klatka(rel, canon="Veil", okind="region", source=source, card=card,
+                       date_obs=date_obs, **wsp)
+
+
+def test_uzgodnij_klatka_regionu_bez_karty_dostaje_forme_a_blizniak_zostaje(arch):
+    """AR-177 (`D-1016-3`): „Uzgodnij” pisze kartę obiektu-regionu jak dla obiektu z karty - klatka
+    `region` w regionie bez karty dostaje `add` formy (bez głosów kopii: `header_form` `Veil`), plik
+    zostaje; bliźniak z kartą w formie - bez zmian. Klatka `region` bez współrzędnych (forma sama jej
+    nie utrzyma) jedzie jak przed AR-177: do folderu obiektu, bez karty.
+    Falsyfikator: wykluczenie regionu w `card_applicable` - pierwsza klatka bez karty."""
+    bez = _region(arch, r"LIGHTS\Veil\cam\Veil_1.fits", **VEIL)
+    blizniak = _region(arch, r"LIGHTS\Veil\cam\Veil_2.fits", card="Veil",
+                       date_obs="2022-03-21T20:35:00", **VEIL)
+    slepa = _region(arch, r"LIGHTS\Petla\cam\3.fits", date_obs="2022-03-26T00:00:00")
+    rows = {r["frame_id"]: r for r in queries.object_change_rows(arch.con, [bez, blizniak, slepa])}
+    assert (rows[bez]["card_applicable"], rows[bez]["card_form"], rows[bez]["card_skip"]) == \
+        (True, "Veil", None)
+    assert rows[slepa]["card_applicable"] is False and rows[slepa]["card_skip"] is None
+    plan = arch.plan([bez, blizniak, slepa])
+    poz = {i.frame_id: i for i in plan.items}
+    assert set(poz) == {bez, slepa}
+    assert (poz[bez].card_op, poz[bez].card_new, poz[bez].new_path) == ("add", "Veil", None)
+    assert poz[slepa].card_op is None
+    assert poz[slepa].new_path == arch.sciezka(r"LIGHTS\Veil\cam\3.fits")
+    assert [(s.frame_id, s.code) for s in plan.skipped] == [(blizniak, object_change.SKIP_UNCHANGED)]
+
+
+def test_zmien_obiekt_cel_region_bez_odmowy_a_klatka_spoza_regionu_z_powodem(arch):
+    """AR-177: cel `Veil` ma formę karty (`object_target`), więc „Zmień obiekt…” go nie odmawia -
+    klatka w regionie jedzie z kartą i ręką; klatka spoza regionu dostaje pominięcie z bramką
+    `region_outside` (karta sama by jej przy Veil nie utrzymała, a karta i folder idą razem).
+    Falsyfikatory: forma regionu None (cel odmówiony przed planem), sprawdzenie per klatka zawsze
+    True (klatka M31 dostaje kartę `Veil`)."""
+    arch.obiekt("Veil", "region")
+    w = arch.klatka(r"LIGHTS\NGC6992\cam\NGC6992_1.fits", canon="NGC6992", **VEIL)
+    poza = arch.klatka(r"LIGHTS\M31\cam\M31_2.fits", canon="NGC224",
+                       date_obs="2022-03-22T20:29:01", **M31)
+    cel = queries.object_target(arch.con, "Veil")
+    assert (cel.canon, cel.kind, cel.card_form) == ("Veil", "region", "Veil")
+    plan = arch.plan([w, poza], target=cel)
+    it = _jedna(plan)
+    assert (it.frame_id, it.card_op, it.card_old, it.card_new, it.object_change) == \
+        (w, "set", "NGC 6992", "Veil", True)
+    assert it.new_path == arch.sciezka(r"LIGHTS\Veil\cam\Veil_1.fits")
+    (s,) = plan.skipped
+    assert (s.frame_id, s.code, dict(s.params)["gate"]) == (poza, "card_skip", "region_outside")
+
+
+def test_predykat_porzadkow_region_zbior_id(arch):
+    """AR-177: wiersz „Plik nie zgadza się z obiektem” liczy klatkę `region` w regionie bez karty
+    (plik nie ma karty, a „Uzgodnij” ją zapisze). NIE liczy: bliźniaka z kartą w formie, klatki
+    `region` bez współrzędnych (forma sama jej nie utrzyma - jedzie bez karty) ani klatki z ręką
+    przy Veil spoza regionu (bramka `region_outside`). Zbiór id, nie liczba; zero zapisu.
+    Falsyfikatory: przywrócone wykluczenie regionu (pierwsza nie wchodzi), filtr bez
+    `card_applicable` (wchodzi klatka bez współrzędnych), sprawdzenie per klatka zawsze True
+    (wchodzi ręka spoza regionu)."""
+    wchodzi = _region(arch, r"LIGHTS\Veil\cam\Veil_1.fits", **VEIL)
+    _region(arch, r"LIGHTS\Veil\cam\Veil_2.fits", card="Veil", date_obs="2022-03-21T20:35:00",
+            **VEIL)
+    _region(arch, r"LIGHTS\Veil\cam\Veil_3.fits", date_obs="2022-03-21T20:40:00")
+    _region(arch, r"LIGHTS\Veil\cam\Veil_4.fits", source="user", date_obs="2022-03-21T20:45:00",
+            **M31)
+    przed = arch.con.total_changes
+    assert queries.file_object_mismatch_frame_ids(arch.con) == {wchodzi}
+    assert arch.con.total_changes == przed
+
+
+def test_uszkodzony_slownik_przy_pytaniu_per_klatka_to_powod_a_nie_wyjatek(arch, monkeypatch):
+    """AR-177: pytanie per klatka (`resolver.karta_wraca`) idzie drabiną nazw,
+    a ta przy uszkodzonym słowniku obiektów własnych rzuca `ValueError`. Read-model traktuje to jak
+    `forma_karty_object` - formy nie ma, pozycja dostaje powód bramki `form_not_canon`, wątek licznika
+    Porządków i okna nie dostaje wyjątku. Falsyfikator: wywołanie `karta_wraca` bez `try`."""
+    from horreum.resolve import objects as objects_mod
+    arch.obiekt("Veil", "region")
+    w = arch.klatka(r"LIGHTS\NGC6992\cam\NGC6992_1.fits", canon="NGC6992", **VEIL)
+    cel = queries.object_target(arch.con, "Veil")                # cel policzony przed uszkodzeniem
+
+    def wybuch(*_a, **_k):
+        raise ValueError("objects_own.json: rekord bez kanonu `c`")
+    monkeypatch.setattr(objects_mod, "_own_index", wybuch)
+    (wiersz,) = queries.object_change_rows(arch.con, [w], target=cel)
+    assert (wiersz["card_form"], wiersz["card_skip"].code) == (None, "form_not_canon")
+    plan = arch.plan([w], target=cel)
+    assert not plan.items
+    (s,) = plan.skipped
+    assert (s.code, dict(s.params)["gate"]) == ("card_skip", "form_not_canon")

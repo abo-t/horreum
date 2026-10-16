@@ -41,8 +41,10 @@ from .resolve.paths import STACK_KIND, object_from_path, path_after_object_chang
 @dataclasses.dataclass(frozen=True)
 class ObjectTarget:
     """Cel gestu „Zmień obiekt…”. `card_form` = forma karty `OBJECT` kanonu
-    (`resolver.forma_karty_object`) - None, gdy kanon nie wraca z formy do siebie (znany tylko
-    z aliasu): wtedy gest odmawia celu, zanim powstanie plan (obietnica „karta i folder razem”)."""
+    (`resolver.forma_karty_object`) - None, gdy karta z formą sama nie sprowadzi klatki do kanonu
+    (kanon znany tylko z aliasu, forma regionu prowadząca do innego obiektu): wtedy gest odmawia celu,
+    zanim powstanie plan (obietnica „karta i folder razem”). Forma obiektu-regionu wraca tylko
+    klatkom w regionie - resztę read-model pomija per klatka (`region_outside`, AR-177)."""
     canon: str
     catalog: str | None
     kind: str                      # objects.OBJECT_KINDS
@@ -271,8 +273,9 @@ def _powod_klatki(r, target):
 
 def _karta(r, comment_loss_lengths):
     """`(card_op, card_new)` pozycji albo `_Odmowa`, gdy karta jest potrzebna, a zapisu nie będzie -
-    wtedy plik zostaje w całości (D-1011-5 Q2: przeniesienie i karta razem albo wcale; RAW i region
-    przy „Uzgodnij” karty nie mają, więc przenoszą się bez niej). Bramka bazy (`card_skip`, ta sama
+    wtedy plik zostaje w całości (D-1011-5 Q2: przeniesienie i karta razem albo wcale; RAW i - przy
+    „Uzgodnij” - klatka regionu, której forma regionu sama nie utrzyma (AR-177), karty nie mają, więc
+    przenoszą się bez niej). Bramka bazy (`card_skip`, ta sama
     co w ujednoliceniu karty) plus dwie przepowiednie pisarza: reguły karty FITS 4.0
     (`card_rules.card_violation`) i utrata zastanego komentarza
     (`writeback.comment_loss_lengths`) - obie odmawiają w obu drogach zapisu, więc podgląd ma je

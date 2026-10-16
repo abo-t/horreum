@@ -288,3 +288,43 @@ def test_cli_project_object_nieznany_i_ujemne_okno(tmp_path, capsys):
         cli.main(["project", str(dbp), "--root", str(tmp_path / "_WBPP"), "--object", "7",
                   "--flat-window", "-1"])
     assert exc.value.code == 2
+
+
+# ============================================================ AR-197: krok wydania pada błędem systemu
+
+
+@pytest.mark.parametrize("krok, nietkniete", [("korzen", 2), ("sonda", 1), ("manifest", 0)])
+def test_cli_project_krok_wydania_bez_tracebacku_kod_1(tmp_path, capsys, monkeypatch, krok, nietkniete):
+    """`project --apply`: zerwany udział (WinError 64) na każdym kroku wydania (korzeń, sonda
+    pierwszego linku, manifest) - raport tego, co zaszło, liczba pozycji nietkniętych, wiersz
+    `blad --` ze zdaniem kroku, klasą i surowym tekstem systemu, kod 1 i bez śladu stosu; wiersza
+    `manifest:` nie ma, bo manifestu nie zapisano. Wyjście koduje się w cp1250. Falsyfikator: CLI
+    bez gałęzi `res.error` - kod 0 i wiersz manifestu kłamiący o pliku."""
+    dbp, _files = _seed(tmp_path)
+    root = tmp_path / "_WBPP" / "feed"
+    blad = OSError(None, "Komunikat systemu", r"X:\L\a.fits", 64)
+
+    def _pada(*_a, **_k):
+        raise blad
+    if krok == "korzen":
+        prawdziwy = os.makedirs
+        monkeypatch.setattr(projection.os, "makedirs", lambda p, *a, **k: (
+            _pada() if os.path.normcase(str(p)) == os.path.normcase(str(root)) else prawdziwy(p, *a, **k)))
+    else:
+        monkeypatch.setattr(projection, "_verify_content" if krok == "sonda" else "_write_manifest", _pada)
+    assert cli.main(["project", str(dbp), "--root", str(root), "--apply"]) == 1
+    wydruk = capsys.readouterr()
+    out = wydruk.out
+    assert not wydruk.err, wydruk.err                           # bez śladu stosu na stderr
+    out.encode("cp1250")
+    (wiersz,) = [w for w in out.splitlines() if w.startswith("Horreum project: blad -- ")]
+    zdanie = {"korzen": "nie założono folderu wydania: ",
+              "sonda": "link utworzony, ale sonda pierwszego linku nie odczytała plików",
+              "manifest": "nie zapisano manifestu wydania (_PROJEKCJA.json)"}[krok]
+    assert wiersz.startswith(f"Horreum project: blad -- {zdanie}"), wiersz
+    assert ("udział sieciowy albo dysk nie odpowiada (WinError 64) - OSError: [WinError 64] "
+            "Komunikat systemu") in wiersz, wiersz
+    assert f"nietkniete (wydanie przerwane): {nietkniete}" in out, out
+    assert "  manifest: " not in out, out
+    if krok == "sonda":
+        assert "niezweryfikowane: 1" in out and "UNVERIFIED " in out, out

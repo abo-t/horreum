@@ -350,17 +350,53 @@ def test_po_etapie_Dostawy_plan_liczy_sie_od_nowa_ale_nie_przy_przebiegu(qapp, c
     dlg.reject()
 
 
-def test_blad_bazy_przy_stagingu_ZOSTAWIA_okno_z_powodem(qapp, con, rdzen, monkeypatch):
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_blad_bazy_przy_stagingu_ZOSTAWIA_okno_z_powodem(qapp, con, rdzen, monkeypatch, lang):
+    """Baza zajęta przez drugi zapis (blokada trzymana drugim połączeniem do tego samego pliku):
+    PRAWDZIWY `repo.stage_object_change` pada na `BEGIN IMMEDIATE`, okno mówi klasą błędu bazy
+    w języku UI (`item_reasons.blad_systemu`), surowy tekst SQLite stoi pod kursorem, akcja zostaje
+    do ponowienia, zero commitu. Falsyfikator: `_on_action` sklejający `Typ: opis` w zdaniu."""
     import sqlite3
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu
+    from horreum.item_reasons import blad_systemu
+    bledy = []
 
-    def zajeta(con_, *, plan, now):
-        raise sqlite3.OperationalError("database is locked")
-    monkeypatch.setattr(repo, "stage_object_change", zajeta)
-    dlg = _okno(qapp, con)
-    dlg.action_btn.click()
-    assert "OperationalError: database is locked" in dlg.error.text()
-    assert rdzen.commity == [] and dlg.action_btn.isEnabled()
-    dlg.reject()
+    def staging_prawdziwy(con_, *, plan, now):
+        try:
+            return _STAGING_PRAWDZIWY(con_, plan=plan, now=now)
+        except sqlite3.Error as exc:
+            bledy.append(exc)
+            raise
+    monkeypatch.setattr(repo, "stage_object_change", staging_prawdziwy)
+    con.execute("PRAGMA busy_timeout = 0")               # sam timeout połączenia - test bez 5 s czekania
+    blokada = sqlite3.connect(queries.db_path_of(con), isolation_level=None)
+    blokada.execute("BEGIN IMMEDIATE")
+    try:
+        i18n.set_lang(lang)
+        dlg = _okno(qapp, con)
+        dlg.show()
+        QTest.mouseClick(dlg.action_btn, Qt.LeftButton)
+        (exc,) = bledy
+        assert exc.sqlite_errorname == "SQLITE_BUSY", exc
+        powod = blad_systemu(exc)
+        assert getattr(powod, "code", None) == "db_busy", powod
+        zdanie = dlg.error.text()
+        assert zdanie == i18n.t("objchg.err.stage", msg=tekst_powodu(powod)), zdanie
+        # Surowy tekst SQLite (`detail` klasy, „OperationalError: database is locked”) nie wchodzi do
+        # zdania - stoi w podpowiedzi; zdanie klasy samo może mówić „the database is locked”.
+        surowy = dict(powod.params)["detail"]
+        assert surowy not in zdanie and "OperationalError" not in zdanie and wiersz_systemu(powod), zdanie
+        assert dlg.error.toolTip() == zdanie + "\n" + wiersz_systemu(powod), dlg.error.toolTip()
+        if lang == "en":
+            assert not set(zdanie) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), zdanie
+        assert rdzen.commity == [] and dlg.action_btn.isEnabled()
+        dlg.reject()
+    finally:
+        blokada.execute("ROLLBACK")
+        blokada.close()
+        i18n.set_lang("pl")
 
 
 def test_Enter_NIE_uruchamia_gestu_prawdziwym_klawiszem(qapp, con, rdzen):
@@ -2316,16 +2352,19 @@ def _zdanie_pl_z_fstringa(w, modul):
 def _powody_pozycji():
     """`kod → [(wzór PL, nazwy parametrów)]` z KAŻDEGO `PowodPozycji(...)` w `writeback` i `repo`
     oraz w modułach, w których zdanie odmowy rodzi się z kodem (AR-158): czytnik XISF `scan`
-    i reguły karty `card_rules`, bramki makra i wyrażenia (`macro`, `expr`, AR-181) i właściciel
-    błędów systemu klasą (`item_reasons.powod_systemu`, AR-184 - z modułu tylko ta funkcja: reszta
-    kodeka składa powód z kodu odczytanego, nie z literału)."""
+    i reguły karty `card_rules`, bramki makra i wyrażenia (`macro`, `expr`, AR-181, AR-194), podgląd
+    i wzór nazw (`naming`, AR-193), wydanie obiektu (`projection`, AR-197) i właściciele błędów
+    systemu i bazy klasą (`item_reasons.powod_systemu`, `powod_bazy`, AR-184, AR-198 - z modułu tylko
+    te funkcje: reszta kodeka składa powód z kodu odczytanego, nie z literału)."""
     import ast
     import inspect
-    from horreum import card_rules, expr, item_reasons, macro, scan
+    from horreum import card_rules, expr, item_reasons, macro, naming, projection, scan
     from horreum import repo as repo_mod
     out = {}
-    zrodla = [(m, inspect.getsource(m)) for m in (writeback, repo_mod, scan, card_rules, macro, expr)]
-    zrodla.append((item_reasons, inspect.getsource(item_reasons.powod_systemu)))
+    zrodla = [(m, inspect.getsource(m)) for m in (writeback, repo_mod, scan, card_rules, macro, expr,
+                                                  naming, projection)]
+    zrodla += [(item_reasons, inspect.getsource(f))
+               for f in (item_reasons.powod_systemu, item_reasons.powod_bazy)]
     for modul, zrodlo in zrodla:
         for w in ast.walk(ast.parse(zrodlo)):
             if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
@@ -2850,7 +2889,8 @@ def test_Napraw_naglowek_szczegol_spadku_w_podpowiedzi_w_jezyku_UI(qapp, tmp_pat
     assert szczegol not in dlg.status.text()
     assert szczegol in dlg.status.toolTip(), dlg.status.toolTip()
     dlg._on_undo()
-    assert dlg.status.toolTip() == ""
+    # Protokół pola (AR-204): szczegół zapisu schodzi z cofnięciem, podpowiedź = samo zdanie.
+    assert dlg.status.szczegol() == "" and dlg.status.toolTip() == dlg.status.text()
     dlg.reject()
     con.close()
 
@@ -3097,17 +3137,19 @@ def test_Napraw_naglowek_rozne_powody_stoja_w_podpowiedzi_a_zdanie_do_niej_odsyl
     _lighty(tmp_path / "ASTRO_", con, "NGC7635", 2, baza=9)
     dlg = _okno_naprawy(con)
     zmieniony = PowodPozycji("header_hash mismatch", "header_hash_mismatch")
-    juz = PowodPozycji("już cofnięte - nagłówek i baza opisują stan sprzed commitu",
+    juz = PowodPozycji("już cofnięte - cały plik i baza opisują stan sprzed commitu",
                        "undo_already")
     b1 = writeback.FileResult(1, "X:/L/a.fits", "blocked", zmieniony)
     b2 = writeback.FileResult(2, "X:/L/b.fits", "blocked", juz)
     dlg._after_commit("commit_inplace", writeback.CommitResult("r", None, [], [b1, b2], [], []))
     assert dlg.status.text().endswith(i18n.t("wb.reasons_tip")), dlg.status.text()
-    assert dlg.status.toolTip().splitlines() == [
+    # Protokół pola (AR-204): szczegół = wiersze powodów, podpowiedź = zdanie + szczegół.
+    assert dlg.status.szczegol().splitlines() == [
         i18n.t("wb.reason_line", file="a.fits", reason=tekst_powodu(zmieniony)),
         i18n.t("wb.reason_line", file="b.fits", reason=tekst_powodu(juz))]
+    assert dlg.status.toolTip() == dlg.status.text() + "\n" + dlg.status.szczegol()
     dlg._after_commit("commit_inplace", writeback.CommitResult("r", None, [], [b1], [], []))
-    assert i18n.t("wb.reasons_tip") not in dlg.status.text() and dlg.status.toolTip() == ""
+    assert i18n.t("wb.reasons_tip") not in dlg.status.text() and dlg.status.szczegol() == ""
     dlg.reject()
     con.close()
 
@@ -3166,7 +3208,7 @@ def test_zdanie_wyniku_przy_ROZNYCH_powodach_mowi_pierwszy_z_N_a_przy_jednym_bez
                 + i18n.t("grid.wb.detail_sep", detail=detail))
 
     zmieniony = PowodPozycji("header_hash mismatch", "header_hash_mismatch")
-    juz = PowodPozycji("już cofnięte - nagłówek i baza opisują stan sprzed commitu",
+    juz = PowodPozycji("już cofnięte - cały plik i baza opisują stan sprzed commitu",
                        "undo_already")
     suma1 = PowodPozycji("FITS z sumą kontrolną (CHECKSUM) - zapis nagłówka unieważniłby ją, a "
                          "pisarz jej nie przelicza", "checksum_present", sums=["CHECKSUM"])
@@ -3578,3 +3620,82 @@ def test_recepta_kopii_ta_sama_w_wierszu_Duplikaty_i_w_oknie_Uzgodnij(qapp, tmp_
         assert not set(dlg.copies_hint.text()) & set("ąćęłńóśźż"), dlg.copies_hint.text()
     dlg.reject()
     con.close()
+
+
+# ═══════════════════════════════════════════════ odmowa stagingu w języku UI (AR-200)
+
+# PRAWDZIWY staging zapamiętany przy imporcie modułu - fikstura `rdzen` podmienia go atrapą.
+_STAGING_PRAWDZIWY = repo.stage_object_change
+_POLSKIE_LITERY = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+def _klik_akcji(dlg):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    dlg.show()
+    QTest.mouseClick(dlg.action_btn, Qt.LeftButton)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_staging_odmowa_klingi_z_powodem_mowi_w_jezyku_UI(qapp, con, rdzen, monkeypatch, lang):
+    """Odmowa klingi z kodem (`OdmowaZPowodem` - tu prawdziwa odmowa konfliktu aliasu z `repo`)
+    uciekająca ze stagingu mówi zdaniem kodu w języku UI, nie `ValueError: <proza PL>`; podpowiedź
+    = samo zdanie (odmowa nie niesie szczegółu systemu). Falsyfikator: gałąź powodu w
+    `zdanie_odmowy_stagingu` usunięta → proza PL w zdaniu EN."""
+    from horreum.gui.wb_worker import tekst_powodu
+    m42, _ = repo.upsert_object(con, canon="M42", catalog="M", kind="deep_sky", now=NOW)
+    repo.add_object_alias(con, alias_norm="flamingstar", object_id=m42, source="user", now=NOW)
+    odmowy = []
+
+    def odmowa_klingi(con_, *, plan, now):
+        try:
+            repo._object_target(con_, "IC405", "flamingstar")
+        except ValueError as exc:
+            odmowy.append(exc)
+            raise
+    monkeypatch.setattr(repo, "stage_object_change", odmowa_klingi)
+    try:
+        i18n.set_lang(lang)
+        dlg = _okno(qapp, con)
+        _klik_akcji(dlg)
+        (exc,) = odmowy
+        assert exc.powod.code == "alias_conflict", exc
+        zdanie = dlg.error.text()
+        assert zdanie == i18n.t("objchg.err.stage", msg=tekst_powodu(exc.powod)), zdanie
+        assert "ValueError" not in zdanie and dlg.error.toolTip() in ("", zdanie), dlg.error.toolTip()
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE_LITERY, zdanie
+        assert rdzen.commity == [] and dlg.action_btn.isEnabled()
+        dlg.reject()
+    finally:
+        i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_staging_niespojny_plan_mowi_w_jezyku_UI_a_inwariant_w_szczegole(qapp, con, rdzen, monkeypatch,
+                                                                        lang):
+    """Plan łamiący inwariant stagingu (CAS ręki nie-trójką) - PRAWDZIWY `repo.stage_object_change`
+    odmawia gołym `ValueError` (EXPECT, błąd programu): zdanie okna w języku UI
+    (`objchg.err.stage_plan`), surowy tekst inwariantu wyłącznie w szczególe technicznym pod
+    kursorem. Falsyfikator: gałąź EXPECT mówiąca `tekst_powodu(powod_wyjatku(e))` → proza PL
+    w zdaniu EN."""
+    import dataclasses
+    rdzen.plany = [_plan(items=(dataclasses.replace(_pozycja(1), expected_object=(7, "header")),))]
+    monkeypatch.setattr(repo, "stage_object_change", _STAGING_PRAWDZIWY)
+    try:
+        i18n.set_lang(lang)
+        dlg = _okno(qapp, con)
+        _klik_akcji(dlg)
+        zdanie = dlg.error.text()
+        assert zdanie == i18n.t("objchg.err.stage", msg=i18n.t("objchg.err.stage_plan")), zdanie
+        szczegol = i18n.t("objchg.st.detail_tip",
+                          detail="frame:1: CAS ręki to trójca (object_id, object_source, "
+                                 "object_cleared_id)")
+        assert dlg.error.toolTip() == zdanie + "\n" + szczegol, dlg.error.toolTip()
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE_LITERY, zdanie
+        assert con.execute("SELECT COUNT(*) FROM object_change_run").fetchone()[0] == 0
+        assert rdzen.commity == [] and dlg.action_btn.isEnabled()
+        dlg.reject()
+    finally:
+        i18n.set_lang("pl")

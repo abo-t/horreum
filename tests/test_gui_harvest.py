@@ -2175,8 +2175,8 @@ def test_pierwsza_lista_nie_nadpisuje_pola_w_ktorym_czlowiek_pisze(qapp, tmp_pat
 def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_path, ustawienia, monkeypatch,
                                                                     szersza, skala):
     """Z kartami miejsce listy stoi od startu (pusta tabela, „Liczę wydania…”, zarezerwowany wiersz
-    zdania): lista i podgląd, które dochodzą z tła, nie przesuwają pola, „Wskaż…” ani „Zmień…”,
-    a okno nie zmienia szerokości.
+    zdania): lista i podgląd, które dochodzą z tła, nie przesuwają NA EKRANIE pola, „Wskaż…”
+    ani „Zmień…”.
 
     AR-140: zdanie podglądu niesie ścieżkę wydania, a zawijanie łamie wiersz tylko na spacjach -
     ścieżka dłuższa od okna poszerzała je samo (980 → 1126 px), wskazówka u góry traciła wiersz
@@ -2194,9 +2194,19 @@ def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_pa
     `tmp_path`, ucinana na 64 znakach), łamanie ścieżki po `-` i po `C:`, sufit MAX_PATH.
     Warunek wstępny przed listą: okno otwiera się w wysokości treści, najwyżej `_SCREEN_SHARE`
     ekranu (`_fit_height`). Falsyfikator: zdejmij `_fit_height` z `showEvent` → warunek pada
-    w każdym wariancie i przy każdym basetemp."""
+    w każdym wariancie i przy każdym basetemp.
+
+    AR-201 - pozycja na ekranie zamiast szerokości okna: natywnie okno po pierwszym podglądzie rośnie
+    pod tabelę (980 → 1080 px przy foncie ×1, → 1655 px przy ×1,6) i ten wzrost jest zamierzony
+    (`_grow_to_table`); offscreen nie rośnie nigdy (ekran 800 px, sufit 720 px), więc asercja szerokości
+    była tu pusta, a natywnie czerwona. Pod kursorem liczy się, gdzie NA EKRANIE stoją „Wskaż…”,
+    „Zmień…” i pole: okno rośnie w lewo (przyciski stoją przy prawej krawędzi), a zdania nad polem
+    trzymają wysokość (`_zapadka_zdan_nad_polem`). Warunek wariantu mierzy ścieżkę metryką fontu
+    zdania, nie minimum etykiety (to zależy od jej klasy). Falsyfikator natywny: okno rosnące w prawo
+    → „Wskaż…” +100 px (×1) / +675 px (×1,6); bez zapadki przy ×1,6 pole -44 px."""
     import math
 
+    from PySide6.QtCore import QPoint
     from PySide6.QtGui import QFont, QFontMetrics
     if skala != 1.0:
         font = QFont(QApplication.font())
@@ -2223,15 +2233,22 @@ def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_pa
     sufit = int(dlg.screen().availableGeometry().height() * hd_mod._SCREEN_SHARE)
     assert dlg.height() >= min(dlg.layout().totalHeightForWidth(dlg.width()), sufit), (
         f"okno {dlg.height()} px niższe od treści - tabela pozycji bez zapasu pod przyrost zdania")
-    przed = (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y(), dlg.width())
+
+    def na_ekranie():
+        p = {w: w.mapToGlobal(QPoint(0, 0)) for w in (dlg.btn_pick, dlg.btn_archive, dlg.edit_output)}
+        return ((p[dlg.btn_pick].x(), p[dlg.btn_pick].y()), (p[dlg.btn_archive].x(), p[dlg.btn_archive].y()),
+                p[dlg.edit_output].y())
+    szerokosc = dlg.width()
+    przed = na_ekranie()
     gate.set()
     assert _wait_until(lambda: dlg._rel_thread is None and dlg._dry_thread is None and dlg.btn_apply.isEnabled())
     QTest.qWait(30)
     assert dlg.rel_table.rowCount() == 1 and dlg.rel_notice.text() == ""
     if szersza:     # warunek wariantu: ścieżka w zdaniu podglądu naprawdę szersza od okna sprzed listy
-        assert str(work) in dlg.notice.text() and dlg.notice.minimumSizeHint().width() > przed[-1], (
-            f"głębokość {glebia} (sufit MAX_PATH) nie dała ścieżki szerszej od okna {przed[-1]} px")
-    assert (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y(), dlg.width()) == przed
+        assert (str(work) in dlg.notice.text()
+                and dlg.notice.fontMetrics().horizontalAdvance(str(work)) > szerokosc), (
+            f"głębokość {glebia} (sufit MAX_PATH) nie dała ścieżki szerszej od okna {szerokosc} px")
+    assert na_ekranie() == przed
     con.close()
 
 
@@ -2465,3 +2482,450 @@ def test_zamkniete_okno_bez_watku_zwalnia_sie_samo(qapp, tmp_path, ustawienia, m
     assert not isValid(dlg) and gospodarz.findChildren(QDialog) == []
     assert dlg.summary == zdanie
     con.close()
+
+
+# ---------------------------------------------------------------- układ okna pod zdarzeniami z tła (AR-201)
+# i brak folderu wyjścia klasą błędu systemu (AR-199)
+
+def _pompuj(ms):
+    """Pętla zdarzeń przez `ms` - `processEvents` + `sleep`, nie `qWait` (trzyma GIL wątkom tła)."""
+    koniec = time.monotonic() + ms / 1000
+    while time.monotonic() < koniec:
+        QApplication.processEvents()
+        time.sleep(0.005)
+
+
+def _czekaj_az(warunek, ms=10_000):
+    """Pętla zdarzeń do warunku (wynik wątku tła dolatuje sygnałem kolejkowanym)."""
+    koniec = time.monotonic() + ms / 1000
+    while time.monotonic() < koniec:
+        QApplication.processEvents()
+        if warunek():
+            return True
+        time.sleep(0.005)
+    return warunek()
+
+
+def _na_ekranie(*widzety):
+    """Współrzędne widżetów NA EKRANIE - przycisk pod kursorem to pozycja globalna, nie lokalna okna."""
+    from PySide6.QtCore import QPoint
+    return tuple((p.x(), p.y()) for p in (w.mapToGlobal(QPoint(0, 0)) for w in widzety))
+
+
+def test_naglowek_pozycji_zawija_sie_i_nie_podnosi_podlogi_szerokosci(qapp, tmp_path, ustawienia):
+    """AR-201: zdanie liczb nad tabelą pozycji - najdłuższe, jakie okno składa (wynik biegu z kłopotami
+    i przerwaniem) - nie podnosi podłogi szerokości okna: podłoga z nim = podłoga z pustym. Zdanie łamie
+    się na „ · ” i zostaje całe (co najmniej dwa wiersze przy szerokości podłogi), nie ucięte. Natywnie
+    przy foncie ×1,6 to zdanie trzymało minimum okna na 1287 px, offscreen poszerzało okno 980 → 1010.
+
+    Falsyfikator: `head_label` bez `setWordWrap(True)` - podłoga rośnie do szerokości zdania."""
+    from collections import Counter
+    con, _profile, _flats = _baza(tmp_path)
+    dlg = _dlg(con, tmp_path / "ARCH")
+
+    def podloga():
+        dlg.layout().activate()
+        return dlg.minimumSizeHint().width()
+
+    pusta = podloga()
+    dlg._show_head_done(Counter(placed=12, exists=3, review=2, conflict=1, error=1, verify_bad=1, cancelled=5),
+                        cancelled=True)
+    tekst, fm = dlg.head_label.text(), dlg.head_label.fontMetrics()
+    assert tekst.startswith("Wciągnięto 12 · ") and "konflikty 1" in tekst and tekst.endswith(": 5"), tekst
+    assert fm.horizontalAdvance(tekst) > pusta, "zdanie węższe od podłogi - test niczego by nie pokazał"
+    assert podloga() == pusta
+    assert dlg.head_label.heightForWidth(pusta) >= 2 * fm.height()          # dwa wiersze, nie ucięte
+    con.close()
+
+
+@pytest.mark.parametrize("skala", [pytest.param(1.0, id="font_x1"),
+                                   pytest.param(1.6, id="font_x1_6", marks=pytest.mark.zmienia_motyw)])
+def test_okno_scisniete_do_minimum_pole_nie_zjezdza(qapp, tmp_path, ustawienia, monkeypatch, skala):
+    """AR-201: okno ściśnięte ręką do minimum wysokości, zanim lista i podgląd doszły z tła. Zdanie
+    podglądu ze ścieżką szerszą od okna dokłada wiersz POD polem; Qt liczył minimum okna bez zawijania,
+    więc okno stało niżej od treści i ten wiersz układ zabierał liście wydań NAD polem - pole, „Wskaż…”
+    i „Zmień…” podjeżdżały pod kursorem (natywnie -8 px przy ×1, -26 px przy ×1,6; offscreen -8/-13).
+    Teraz podłoga wysokości okna idzie za treścią (`_podloga_wysokosci`, najwyżej `_SCREEN_SHARE`
+    ekranu) i okno rośnie od dołu, a lista wydań ma wysokość stałą - układ nie może jej ścisnąć.
+
+    Falsyfikatory: `_podloga_wysokosci` bez działania → pole zjeżdża; `setFixedHeight` listy z powrotem
+    na `setMaximumHeight` → lista ściśnięta poniżej swojego maksimum."""
+    import math
+
+    from PySide6.QtGui import QFont, QFontMetrics
+    if skala != 1.0:
+        font = QFont(QApplication.font())
+        font.setPointSizeF(font.pointSizeF() * skala)
+        QApplication.setFont(font)
+    con, _profile, _flats = _baza(tmp_path)
+    fm = QFontMetrics(QApplication.font())
+    wydanie = tmp_path / "_WBPP" / projection.OBJECT_NAMESPACE / "A"
+    najglebszy = wydanie / projection.OUTPUT_DIR / "master" / "masterFlat_A.xisf"
+    glebia = math.ceil((1.3 * 980 - fm.horizontalAdvance(str(wydanie))) / fm.horizontalAdvance("x"))
+    glebia = min(max(glebia, 1), 255, 259 - len(str(najglebszy)) - 1)
+    work = tmp_path / ("x" * glebia) / "_WBPP"
+    _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con), {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    gate, entered = _wolna_lista(monkeypatch)
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work), off_thread=True)
+    dlg.show()
+    assert entered.wait(10)
+    _pompuj(50)
+    dlg.resize(dlg.width(), 0)                       # ręka: okno do minimum wysokości przed listą
+    _pompuj(50)
+    def miejsce():      # przyciski - cała pozycja na ekranie; pole - wysokość (rośnie w bok z oknem)
+        pick, arch, pole = _na_ekranie(dlg.btn_pick, dlg.btn_archive, dlg.edit_output)
+        return pick, arch, pole[1]
+    przed = miejsce()
+    zdanie_przed = dlg.notice.height()
+    gate.set()
+    assert _czekaj_az(lambda: dlg._rel_thread is None and dlg._dry_thread is None and dlg.btn_apply.isEnabled())
+    _pompuj(50)
+    assert str(work) in dlg.notice.text() and dlg.notice.height() > zdanie_przed, (
+        "zdanie podglądu nie urosło pod polem - test niczego by nie pokazał")
+    assert miejsce() == przed
+    sufit = int(dlg._ekran().availableGeometry().height() * hd_mod._SCREEN_SHARE)
+    assert dlg.minimumHeight() <= sufit
+    assert dlg.height() >= min(dlg.layout().totalMinimumHeightForWidth(dlg.width()), sufit)
+    lista = dlg.rel_table
+    assert lista.minimumHeight() == lista.maximumHeight() > 0 and lista.height() == lista.maximumHeight()
+    con.close()
+
+
+def _atrapa_ekranu(ekran):
+    """Ekran, którego obszar roboczy test zmienia w biegu (`ekran.geo`)."""
+    return SimpleNamespace(availableGeometry=lambda: ekran.geo)
+
+
+def _okno_z_ekranem(con, archive, lewo=0, **kw):
+    """Okno z rodzicem; ekran rodzica (przed rozmieszczeniem) i WŁASNY ekran pokazanego okna podaje
+    test (`_ekran`): ekran offscreen ma 800 px, a sufit `_grow_to_table` z niego (720 px) nie dałby
+    oknu urosnąć w bok. Ekran startowy 1000 px od `lewo` - sufit 900 px trzyma okno na 980 px, dopóki
+    test go nie poszerzy. Lewa krawędź > 0 pozwala postawić okno „za krawędzią” na dodatnich
+    współrzędnych (offscreen przesuwa okno o ramkę przy ujemnym x)."""
+    from PySide6.QtCore import QRect
+    ekran = SimpleNamespace(geo=QRect(lewo, 0, 1000, 2100))
+    rodzic = QWidget()
+    rodzic.screen = lambda: _atrapa_ekranu(ekran)
+    dlg = _dlg(con, archive, parent=rodzic, **kw)
+    dlg.screen = lambda: _atrapa_ekranu(ekran)
+    return dlg, rodzic, ekran
+
+
+def _poszerz_z_tla(dlg, ekran, przyrost=400):
+    """Wynik z tła, który poszerza okno o ~`przyrost` px: sufit `_grow_to_table` z ekranu = szerokość
+    okna + przyrost, a powód pozycji (600 znaków) jest szerszy od każdego sufitu."""
+    import dataclasses
+    import math
+
+    from PySide6.QtCore import QRect
+    ekran.geo = QRect(ekran.geo.x(), 0, math.ceil((dlg.width() + przyrost) / hd_mod._SCREEN_SHARE), 2100)
+    dlg._fill([dataclasses.replace(dlg._plan.items[0], status="conflict", detail="x" * 600)])
+
+
+def _okno_z_podgladem(con, tmp_path, monkeypatch, x, lewo=0, **kw):
+    """Pokazane okno z podglądem jednej pozycji, lewym górnym rogiem obszaru klienta w (`x`, 200);
+    wyjście WBPP w atrybucie `dlg.test_out` (ponowny podgląd tego samego wyjścia)."""
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg, rodzic, ekran = _okno_z_ekranem(con, tmp_path / "ARCH", lewo, **kw)
+    dlg.test_out = str(out)
+    dlg.show()
+    _pompuj(50)
+    dlg._set_output(str(out))
+    dlg.setGeometry(x, 200, dlg.width(), dlg.height())
+    _pompuj(50)
+    return dlg, rodzic, ekran
+
+
+def test_poszerzenie_okna_pod_tabele_nie_podnosi_pola(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-201: wynik z tła poszerza okno pod tabelę (`_grow_to_table`), a szersze okno łamie wskazówkę
+    u góry na mniej wierszy - wysokość, którą oddawała, podnosiła pole i „Wskaż…” pod kursorem
+    (natywnie przy foncie ×1,6: 980 → 1655 px, wskazówka 78 → 52 px, pole -44 px). Zapadka
+    (`_zapadka_zdan_nad_polem`) trzyma wysokość zdań nad polem przy wzroście z tła.
+
+    Falsyfikator: `_grow_to_table` bez `_zapadka_zdan_nad_polem()` - pole i „Wskaż…” wyżej."""
+    con, _profile, _flats = _baza(tmp_path)
+    dlg, _rodzic, ekran = _okno_z_podgladem(con, tmp_path, monkeypatch, 600)
+    szerokosc, wskazowka = dlg.width(), dlg.hint_label.height()
+    # Warunek liczony PRZED wzrostem: po nim minimum z zapadki podnosi też `heightForWidth` etykiety.
+    assert dlg.hint_label.heightForWidth(dlg.hint_label.width() + 900) < wskazowka, (
+        "wskazówka w szerszym oknie nie traci wiersza - test niczego by nie pokazał")
+    przed = _na_ekranie(dlg.btn_pick, dlg.edit_output)
+    _poszerz_z_tla(dlg, ekran, przyrost=1000)        # wskazówka traci wiersz: natywnie od ~1800 px okna
+    _pompuj(50)
+    assert dlg.width() >= szerokosc + 900, "okno nie urosło - test niczego by nie pokazał"
+    assert dlg.hint_label.height() == wskazowka
+    assert [y for _x, y in _na_ekranie(dlg.btn_pick, dlg.edit_output)] == [y for _x, y in przed]
+    con.close()
+
+
+@pytest.mark.parametrize("przypadek", ["miejsce_na_lewo", "za_malo_miejsca", "za_lewa_krawedzia",
+                                       "zmaksymalizowane"])
+def test_poszerzenie_okna_pod_tabele_w_lewo_przyciski_stoja(qapp, tmp_path, ustawienia, monkeypatch, przypadek):
+    """AR-201: okno pokazane rośnie pod tabelę W LEWO - „Wskaż…”, „Zmień…” i „Zamknij” stoją przy prawej
+    krawędzi i nie uciekają spod kursora (natywnie okno rosnące w prawo przenosiło je o +100 px przy
+    foncie ×1 i +675 px przy ×1,6). Brak miejsca: lewa krawędź ramki staje na krawędzi ekranu, resztę
+    wzrostu bierze prawa strona. Okno już za lewą krawędzią nie skacze w prawo. Okno zmaksymalizowane
+    się nie rusza.
+
+    Falsyfikatory: wzrost przez `resize` (w prawo) - przyciski uciekają; clamp bez `min(g.x(), …)` -
+    okno za lewą krawędzią skacze w prawo; bez strażnika `isMaximized` - zmaksymalizowane zmienia
+    geometrię."""
+    con, _profile, _flats = _baza(tmp_path)
+    x0, lewo = {"miejsce_na_lewo": (600, 0), "za_malo_miejsca": (100, 0), "za_lewa_krawedzia": (450, 500),
+                "zmaksymalizowane": (600, 0)}[przypadek]
+    dlg, _rodzic, ekran = _okno_z_podgladem(con, tmp_path, monkeypatch, x0, lewo)
+    if przypadek == "zmaksymalizowane":
+        dlg.showMaximized()
+        _pompuj(50)
+        assert dlg.isMaximized()
+    geometria, szerokosc = dlg.geometry(), dlg.width()
+    przyciski = (dlg.btn_pick, dlg.btn_archive, dlg.btn_close)
+    przed = _na_ekranie(*przyciski)
+    _poszerz_z_tla(dlg, ekran)
+    _pompuj(50)
+    if przypadek == "zmaksymalizowane":
+        assert dlg.geometry() == geometria and dlg.isMaximized()
+        con.close()
+        return
+    assert dlg.width() >= szerokosc + 300, "okno nie urosło - test niczego by nie pokazał"
+    if przypadek == "miejsce_na_lewo":
+        assert _na_ekranie(*przyciski) == przed and dlg.geometry().x() < x0
+    elif przypadek == "za_malo_miejsca":
+        assert dlg.frameGeometry().x() == 0                      # lewa krawędź ekranu rodzica
+        po = _na_ekranie(*przyciski)
+        assert all(p[1] == q[1] and q[0] - p[0] == dlg.width() - szerokosc - (x0 - dlg.geometry().x())
+                   for p, q in zip(przed, po)), (przed, po)
+    else:
+        assert dlg.geometry().x() == geometria.x()               # nie skacze w prawo, rośnie w prawo
+    con.close()
+
+
+def test_pokazane_okno_rosnie_do_krawedzi_wlasnego_ekranu_nie_ekranu_rodzica(qapp, tmp_path, ustawienia,
+                                                                            monkeypatch):
+    """AR-201: okno przeniesione ręką na inny monitor niż rodzic rośnie pod tabelę względem ekranu,
+    na którym STOI (`_ekran` po rozmieszczeniu = `self.screen()`): lewa krawędź ramki zatrzymuje się na
+    krawędzi jego ekranu, sufit szerokości też liczy się z niego. Ekran rodzica (szeroki, od 0) służy
+    wyłącznie przed pierwszym rozmieszczeniem.
+
+    Falsyfikator: `_ekran` zawsze z rodzica - okno rośnie pod sufit ekranu rodzica i staje na jego
+    lewej krawędzi (x = 0), poza własnym ekranem."""
+    from PySide6.QtCore import QRect
+    con, _profile, _flats = _baza(tmp_path)
+    dlg, _rodzic, ekran = _okno_z_podgladem(con, tmp_path, monkeypatch, 600)
+    ekran.geo = QRect(0, 0, 3800, 2100)                          # ekran rodzica: szeroki, od 0
+    wlasny = SimpleNamespace(geo=QRect(500, 0, 1000, 2100))       # ekran, na którym okno stoi
+    dlg.screen = lambda: _atrapa_ekranu(wlasny)
+    szerokosc = dlg.width()
+    _poszerz_z_tla(dlg, wlasny)                                  # sufit własnego ekranu = szerokość + 400
+    _pompuj(50)
+    assert szerokosc + 300 <= dlg.width() <= szerokosc + 400, (szerokosc, dlg.width())
+    assert dlg.frameGeometry().x() == 500                        # lewa krawędź WŁASNEGO ekranu
+    con.close()
+
+
+def test_podloga_przy_dolnej_krawedzi_ramka_zostaje_na_ekranie(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-201: okno ściśnięte ręką i postawione kilka pikseli nad dolną krawędzią obszaru roboczego
+    ekranu; zdanie z tła rośnie o kilka wierszy, a podłoga wysokości podnosi okno od dołu. Ramka zostaje
+    w obszarze ekranu: okno podnosi się o tyle, ile by wystawało - dolny rząd przycisków nie schodzi pod
+    ekran (pasek zadań).
+
+    Falsyfikator: `_podloga_wysokosci` bez `_rama_w_obszarze_ekranu` - dolna krawędź ramki pod ekranem."""
+    from PySide6.QtCore import QRect
+    con, _profile, _flats = _baza(tmp_path)
+    dlg, _rodzic, ekran = _okno_z_ekranem(con, tmp_path / "ARCH")
+    dlg.show()
+    _pompuj(50)
+    dlg.resize(dlg.width(), 0)                                   # ręka: minimum wysokości
+    dlg.move(100, 600)                                           # dodatnie y także po podniesieniu (offscreen)
+    _pompuj(50)
+    dol = dlg.frameGeometry().bottom() + 3                       # okno 3 px nad dolną krawędzią obszaru
+    ekran.geo = QRect(0, dol + 1 - 2000, 1000, 2000)             # wysoki obszar: sufit podłogi go nie tnie
+    wysokosc = dlg.height()
+    dlg._show_notice("zdanie stanu, które łamie się na wiele wierszy " * 12, "error")
+    _pompuj(50)
+    assert dlg.height() > wysokosc, "podłoga nie podniosła okna - test niczego by nie pokazał"
+    rama = dlg.frameGeometry()
+    assert ekran.geo.top() <= rama.top() and rama.bottom() <= ekran.geo.bottom(), (rama, ekran.geo)
+    con.close()
+
+
+def _okno_z_zapadka(con, tmp_path, monkeypatch, zdanie):
+    """Okno z kartą (folder bez wydań - zdanie listy ma zarezerwowany wiersz) i podglądem; zdanie
+    listy `zdanie`, potem wzrost z tła - zapadka trzyma wysokość zdania. Zwraca (okno, rodzic, ekran,
+    wysokość zdania w chwili zapadki)."""
+    karta = tmp_path / "_WBPP"
+    karta.mkdir()
+    dlg, rodzic, ekran = _okno_z_podgladem(con, tmp_path, monkeypatch, 600, work_root=str(karta))
+    dlg._show_rel_notice(zdanie, "error")
+    _pompuj(50)
+    wysokosc = dlg.rel_notice.height()
+    _poszerz_z_tla(dlg, ekran)
+    _pompuj(50)
+    assert dlg.rel_notice.minimumHeight() == wysokosc, "zapadka nie złapała zdania - test niczego by nie pokazał"
+    return dlg, rodzic, ekran, wysokosc
+
+
+def test_zapadka_puszcza_gdy_zdanie_listy_znika(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-201: zapadka wysokości zdań nad polem trzyma tylko do zmiany stanu. Ostrzeżenie listy (kilka
+    wierszy) złapane przy wzroście okna z tła, potem zdanie znika: etykieta wraca do swojego minimum
+    sprzed zapadki, a okno daje się znów zmniejszyć - puste zdanie nie trzyma wierszy ostrzeżenia.
+
+    Falsyfikator: `event` bez `_zwolnij_zapadke(tylko_puste=True)` - minimum zdania i okna zostaje."""
+    con, _profile, _flats = _baza(tmp_path)
+    dlg, _rodzic, _ekran, wysokosc = _okno_z_zapadka(con, tmp_path, monkeypatch,
+                                                     "ostrzeżenie listy wydań na kilka wierszy " * 12)
+    podstawa = dlg._podstawy_zdan[dlg.rel_notice]
+    assert wysokosc > 2 * podstawa, "zdanie bez kilku wierszy - test niczego by nie pokazał"
+    minimum_okna = dlg.minimumHeight()
+    dlg._show_rel_notice("")
+    _pompuj(50)
+    assert dlg.rel_notice.minimumHeight() == podstawa and dlg.rel_notice.height() < wysokosc
+    assert dlg.minimumHeight() < minimum_okna
+    dlg.resize(dlg.width(), 0)
+    _pompuj(50)
+    assert dlg.height() < minimum_okna
+    con.close()
+
+
+def test_nowy_podglad_puszcza_zapadke_a_kolejny_wzrost_lapie_biezace_zdanie(qapp, tmp_path, ustawienia,
+                                                                           monkeypatch):
+    """AR-201: zapadka nie przechodzi z jednego podglądu na następny. Ostrzeżenie listy (kilka wierszy)
+    złapane przy wzroście z tła, potem krótkie zdanie - zapadka dalej trzyma (zdanie nie jest puste).
+    Nowy podgląd (gest człowieka: to samo wyjście jeszcze raz) oddaje zapadkę, a kolejny wzrost z tła
+    łapie wysokość BIEŻĄCEGO zdania, nie największą z życia okna.
+
+    Falsyfikator: `_invalidate` bez `_zwolnij_zapadke()` - minimum zdania zostaje na wysokości ostrzeżenia."""
+    con, _profile, _flats = _baza(tmp_path)
+    dlg, _rodzic, ekran, wysokosc = _okno_z_zapadka(con, tmp_path, monkeypatch,
+                                                    "ostrzeżenie listy wydań na kilka wierszy " * 12)
+    dlg._show_rel_notice("krótkie zdanie", "error")
+    _pompuj(50)
+    assert dlg.rel_notice.minimumHeight() == wysokosc               # zdanie jest - zapadka trzyma
+    dlg._set_output(dlg.test_out)                                   # nowy podgląd
+    _pompuj(50)
+    jeden_wiersz = dlg.rel_notice.height()
+    assert jeden_wiersz < wysokosc
+    _poszerz_z_tla(dlg, ekran)
+    _pompuj(50)
+    assert dlg.rel_notice.minimumHeight() == jeden_wiersz
+    con.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_lista_wydan_maly_font_stan_nie_wystaje_poza_kadr(qapp, tmp_path, ustawienia, monkeypatch):
+    """Rozciągana ostatnia sekcja listy wydań („Stan”) nie schodzi poniżej domyślnej szerokości sekcji
+    (100 px). Przy foncie, w którym treść stanu jest od niej węższa, a karta za długa na kadr (natywnie
+    już font ×1: stan 95 px), karta liczona z samej treści stanu zostawiała sumę kolumn szerszą od kadru
+    (natywnie 1061 > 1056) i pasek przewijania w bok, który zjada wiersz listy. Font testu liczony
+    z metryki: zdanie stanu ~85 px (offscreen metryka jest ~2× natywnej - tam font ~×0,45). Okno
+    zwężone tak, że na kartę zostaje połowa jej treści - karta ucięta niezależnie od długości
+    katalogu tymczasowego (z krótkim basetemp karta mieściła się cała i test nic nie mierzył).
+
+    Falsyfikator: `_fit_rel_columns` bez podłogi `defaultSectionSize` dla stanu - suma > kadr."""
+    from PySide6.QtGui import QFont, QFontMetrics
+    skala = min(1.0, 85 / QFontMetrics(QApplication.font()).horizontalAdvance("do wciągnięcia 1"))
+    font = QFont(QApplication.font())
+    font.setPointSizeF(font.pointSizeF() * skala)
+    QApplication.setFont(font)
+    con, _profile, _flats = _baza(tmp_path)
+    work = tmp_path.joinpath("MC_76ED_2023-08_Bulgaria", "Veil_2023-08-22_76ED_2600C_0300s_Bulgaria",
+                             "WBPP2", "_WBPP")
+    _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con), {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work))
+    dlg.show()
+    _pompuj(50)
+    t, rh = dlg.rel_table, dlg.rel_table.horizontalHeader()
+
+    def tresc(c):
+        return max(t.sizeHintForColumn(c), rh.sectionSizeHint(c))
+    kadr = (tresc(hd_mod.REL_OBJECT) + tresc(hd_mod.REL_DATE) + rh.defaultSectionSize()
+            + tresc(hd_mod.REL_CARD) // 2)
+    dlg.resize(dlg.width() + kadr - t.viewport().width(), dlg.height())
+    _pompuj(50)
+    assert t.viewport().width() == kadr, "okno nie dało się zwęzić - test niczego by nie pokazał"
+    assert t.sizeHintForColumn(REL_STATE) < rh.defaultSectionSize(), (
+        "treść stanu nie jest węższa od domyślnej sekcji - test niczego by nie pokazał")
+    assert t.columnWidth(hd_mod.REL_CARD) < t.sizeHintForColumn(hd_mod.REL_CARD)       # karta elidowana
+    assert sum(t.columnWidth(c) for c in range(t.columnCount())) <= t.viewport().width()
+    assert not t.horizontalScrollBar().isVisible()
+    con.close()
+
+
+def _stat_z_bledem(monkeypatch, sciezka, exc):
+    """`os.stat`, który dla JEDNEJ ścieżki rzuca `exc`, a resztę oddaje prawdziwemu (pytest, `pathlib`)."""
+    prawdziwy = os.stat
+
+    def stat(p, *a, **kw):
+        if isinstance(p, (str, os.PathLike)) and os.fspath(p) == sciezka:
+            raise exc
+        return prawdziwy(p, *a, **kw)
+    monkeypatch.setattr(os, "stat", stat)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("przypadek", ["brak_folderu", "brak_rodzica", "plik", "udzial_53", "odmowa_5"])
+def test_wyjscie_brak_zostaje_brakiem_a_blad_systemu_mowi_klasa(qapp, tmp_path, ustawienia, monkeypatch,
+                                                                przypadek, lang):
+    """AR-199: folder wyjścia sprawdza `os.stat` z klasą błędu systemu, nie `os.path.isdir`, który
+    połykał każdy błąd jako „nie ma”. Brak (WinError 2 - folder, 3 - rodzic albo dysk) i plik zamiast
+    folderu mówią „Katalog nie istnieje”, bez szczegółu systemu. Zerwany udział (53) i odmowa (5) mówią
+    zdaniem klasy w języku UI („Nie można: udział sieciowy albo dysk nie odpowiada (WinError 53)”),
+    surowy tekst systemu stoi w podpowiedzi; plan znika, „Wciągnij” zgaszony, pamięć pola nie bierze
+    ścieżki, której nie dało się przeczytać.
+
+    Falsyfikatory: `os.path.isdir` z powrotem - 53 i 5 mówią „Katalog nie istnieje”; każdy `OSError` jako
+    brak - to samo; bez gałęzi braku - 2 i 3 mówią zdaniem klasy."""
+    from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu
+    from horreum.item_reasons import powod_systemu
+    i18n.set_lang(lang)
+    con, _profile, _flats = _baza(tmp_path)
+    sciezka = os.path.normpath(str({"brak_folderu": tmp_path / "nie_ma",
+                                    "brak_rodzica": tmp_path / "nie_ma" / "out",
+                                    "plik": tmp_path / "h.db",
+                                    "udzial_53": tmp_path / "udzial" / "out",
+                                    "odmowa_5": tmp_path / "odmowa" / "out"}[przypadek]))
+    winerror = {"udzial_53": 53, "odmowa_5": 5}.get(przypadek)
+    if winerror is not None:
+        exc = OSError(None, "Komunikat systemu", sciezka, winerror)
+        _stat_z_bledem(monkeypatch, sciezka, exc)
+    dlg = _dlg(con, tmp_path / "ARCH")
+    dlg._set_output(sciezka)
+    zdanie = dlg.notice.text()
+    if winerror is None:
+        assert zdanie == i18n.t("harvest.missing_dir", path=sciezka), zdanie
+        assert "WinError" not in dlg.notice.toolTip()
+    else:
+        powod = powod_systemu(exc)
+        assert powod.code == {53: "os_share_lost", 5: "os_denied"}[winerror]
+        assert zdanie == i18n.t("harvest.dry_failed", msg=tekst_powodu(powod)), zdanie
+        assert wiersz_systemu(powod) and wiersz_systemu(powod) in dlg.notice.toolTip()
+        if lang == "en":
+            assert not _PL_LITERY.search(zdanie), zdanie
+    assert dlg.notice.property("role") == "error"
+    assert dlg._plan is None and not dlg.btn_apply.isEnabled() and dlg.table.rowCount() == 0
+    assert str(ustawienia.value("harvest/last_output", "") or "") == ""
+    con.close()
+
+
+@pytest.mark.parametrize("przypadek", ["nazwa_123", "znak_nul"])
+def test_wyjscie_blad_bez_klasy_idzie_porazka_tekstem_systemu(qapp, tmp_path, przypadek):
+    """AR-199: błąd sprawdzenia folderu wyjścia bez klasy - nazwa niepoprawna (WinError 123, znak `?`)
+    i znak NUL (`ValueError`) - nie udaje braku: sonda pada (`failed`) z tekstem systemu przez
+    właściciela (`blad_systemu`: „Typ: opis”), jak każdy kod spoza klas. `isdir` mówił o obu „nie ma”.
+
+    Falsyfikator: `os.path.isdir` z powrotem albo każdy `OSError` jako brak - sonda oddaje `missing`."""
+    sciezka = str(tmp_path / "a?b") if przypadek == "nazwa_123" else str(tmp_path) + "\\a\x00b"
+    w = hd_mod.HarvestDryWorker(None, sciezka, str(tmp_path / "ARCH"), 7, con=None)
+    wyniki, bledy = [], []
+    w.done.connect(lambda gen, payload: wyniki.append(payload))
+    w.failed.connect(lambda gen, msg: bledy.append((gen, msg)))
+    w.run()
+    assert wyniki == [] and len(bledy) == 1 and bledy[0][0] == 7, (wyniki, bledy)
+    msg = bledy[0][1]
+    if przypadek == "nazwa_123":
+        assert msg.startswith("OSError: [WinError 123]") and getattr(msg, "code", None) is None, msg
+    else:
+        assert msg.startswith("ValueError: "), msg

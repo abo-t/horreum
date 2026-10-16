@@ -17,6 +17,8 @@ from horreum.gui import pola as pola_mod
 from horreum.gui import assign_dialog
 from horreum.gui.grid_model import (_adnotuj_rodowod, _adnotuj_wersje, _derive, _dolacz_kopie,
                                     _STANY_RODOWODU)
+from horreum.gui.wb_worker import tekst_powodu       # zdanie błędu w języku UI (AR-198)
+from horreum.item_reasons import blad_systemu
 
 
 class PolaWorker(QObject):
@@ -72,7 +74,10 @@ class PolaWorker(QObject):
                         self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
                         self._con = None
         except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
-            error = f"{type(exc).__name__}: {exc}"
+            # Zdanie w języku UI składane TU (wzorzec `WritebackWorker.run`): odbiorca w `grid.py`
+            # bierze tekst. Pokrycie czyta wyłącznie bazę, więc realna awaria to błąd SQLite -
+            # klasą bazy (AR-198); przerwanie zapytania (stara generacja) zostaje tekstem SQLite.
+            error = tekst_powodu(blad_systemu(exc))
         if error is not None:
             self.failed.emit(self._gen, error)
         else:
@@ -332,7 +337,7 @@ class ZbiorWorker(QObject):
                     self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
                     self._con = None
         except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
-            error = f"{type(exc).__name__}: {exc}"
+            error = tekst_powodu(blad_systemu(exc))    # jak `PolaWorker.run` (AR-198)
         if error is not None:
             self.failed.emit(self._gen, error)
         else:

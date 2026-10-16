@@ -12,12 +12,13 @@ import os
 
 import pytest
 
-from horreum import harvest, item_reasons, lead_copy, object_change, projection, scan, stack_variants
+from horreum import db, harvest, item_reasons, lead_copy, object_change, projection, scan, stack_variants
 from horreum import writeback
 from horreum.item_reasons import PowodPozycji, blad_systemu, powod_systemu
 
 from test_harvest import NOW as NOW_ZNIW, _would_place, con  # noqa: F401 - fikstura `con`
 from test_lead_copy import LATER, _loc, niezgodne  # noqa: F401 - fikstura `niezgodne`
+from test_presence import tree  # noqa: F401 - fikstura `tree` (ogon `presence --apply`)
 from test_projection import _lib, _master_dst
 from test_stack_variants import _plan_sam, _po_zrodle, samodzielne  # noqa: F401 - fikstura
 
@@ -440,3 +441,251 @@ def test_planer_brak_miejsca_bez_winerror_i_drugi_odczyt_z_pamieci():
     assert kod == "dir_no_space" and dict(params) == {
         "dir": katalog, "os_code": "Errno 28", "detail": "OSError: [Errno 28] No space left on device"}
     assert zdanie == f"brak miejsca na dysku (Errno 28) - katalog celu: {katalog}"
+
+
+# ============================================================ AR-198: klasa błędu bazy, druki CLI
+
+_ZERWANY = r"X:\L\a.fits"
+
+
+def _zerwany_udzial(sciezka=_ZERWANY):
+    return OSError(None, "Komunikat systemu", sciezka, 64)
+
+
+def _prawdziwy_blad_sqlite(tmp_path, rodzaj):
+    """PRAWDZIWY wyjątek SQLite (z `sqlite_errorcode`/`sqlite_errorname`) - sztuczny
+    `OperationalError("database is locked")` kodu nie niesie i klasy nie dostaje."""
+    import sqlite3
+
+    def baza(nazwa, wierszy=50):
+        p = str(tmp_path / nazwa)
+        c = sqlite3.connect(p)
+        c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        c.executemany("INSERT INTO t (v) VALUES (?)", [("x" * 500,)] * wierszy)
+        c.commit()
+        c.close()
+        return p
+    trzymane = []
+    try:
+        if rodzaj == "busy":
+            p = baza("busy.db")
+            a = sqlite3.connect(p)
+            trzymane.append(a)
+            a.execute("BEGIN EXCLUSIVE")
+            b = sqlite3.connect(p, timeout=0)
+            trzymane.append(b)
+            b.execute("SELECT * FROM t").fetchall()
+        elif rodzaj == "locked":
+            c = sqlite3.connect(baza("locked.db"))
+            trzymane.append(c)
+            kursor = c.execute("SELECT * FROM t")     # otwarty odczyt trzyma tabelę (referencja!)
+            kursor.fetchone()
+            c.execute("DROP TABLE t")
+        elif rodzaj == "cantopen":
+            sqlite3.connect(str(tmp_path / "brak_katalogu" / "x.db")).execute("SELECT 1")
+        elif rodzaj == "readonly":
+            c = sqlite3.connect(f"file:{baza('ro.db')}?mode=ro", uri=True)
+            trzymane.append(c)
+            c.execute("INSERT INTO t (v) VALUES ('z')")
+        elif rodzaj == "full":
+            c = sqlite3.connect(baza("full.db", wierszy=1))
+            trzymane.append(c)
+            c.execute("PRAGMA max_page_count = 3")
+            c.executemany("INSERT INTO t (v) VALUES (?)", [("x" * 4000,)] * 50)
+        elif rodzaj == "notadb":
+            p = tmp_path / "smieci.db"
+            p.write_bytes(b"to nie jest baza" * 512)
+            c = sqlite3.connect(str(p))
+            trzymane.append(c)
+            c.execute("SELECT * FROM sqlite_master").fetchall()
+        elif rodzaj == "corrupt":
+            p = baza("corrupt.db", wierszy=400)
+            with open(p, "r+b") as fh:
+                fh.seek(4096 * 3)
+                fh.write(b"\xa5" * 4096 * 5)
+            c = sqlite3.connect(p)
+            trzymane.append(c)
+            c.execute("SELECT * FROM t").fetchall()
+        elif rodzaj == "zamkniete":
+            c = sqlite3.connect(baza("closed.db"))
+            c.close()
+            c.execute("SELECT 1")
+        elif rodzaj == "przerwane":
+            c = sqlite3.connect(baza("int.db", wierszy=1))
+            trzymane.append(c)
+            c.set_progress_handler(lambda: 1, 1)
+            c.execute("SELECT * FROM t").fetchall()
+        elif rodzaj == "ograniczenie":
+            c = sqlite3.connect(baza("con.db", wierszy=1))
+            trzymane.append(c)
+            c.execute("INSERT INTO t (id, v) VALUES (1, 'dup')")
+    except sqlite3.Error as e:
+        return e
+    finally:
+        for c in trzymane:
+            c.close()
+    raise AssertionError(f"brak błędu SQLite: {rodzaj}")
+
+
+@pytest.mark.parametrize("rodzaj, kod, nazwa", [
+    ("busy", "db_busy", "SQLITE_BUSY"), ("locked", "db_busy", "SQLITE_LOCKED"),
+    ("cantopen", "db_unavailable", "SQLITE_CANTOPEN"), ("readonly", "db_unavailable", "SQLITE_READONLY"),
+    ("full", "db_full", "SQLITE_FULL"), ("notadb", "db_damaged", "SQLITE_NOTADB"),
+    ("corrupt", "db_damaged", "SQLITE_CORRUPT")])
+def test_klasa_bazy_na_prawdziwych_bledach_SQLite(tmp_path, rodzaj, kod, nazwa):
+    """AR-198: prawdziwy błąd SQLite (drugie połączenie przy blokadzie zapisu, baza poza zasięgiem,
+    pełna, uszkodzona) to klasa bazy z nazwą błędu SQLite; surowy tekst w `detail`, za zdaniem
+    w kolumnie prozowej. `blad_systemu` pyta obu właścicieli. Falsyfikator: `_DB_KLASY` bez kodu
+    głównego - klasa przepada, wraca `OperationalError: …`."""
+    exc = _prawdziwy_blad_sqlite(tmp_path, rodzaj)
+    powod = blad_systemu(exc)
+    assert isinstance(powod, PowodPozycji) and powod.code == kod, (rodzaj, powod)
+    assert item_reasons.powod_bazy(exc) == powod and powod_systemu(exc) is None
+    assert dict(powod.params) == {"db_code": nazwa, "detail": f"{type(exc).__name__}: {exc}"}
+    assert nazwa in powod and str(exc) not in powod
+    assert item_reasons.proza_z_diagnoza(powod) == f"{powod} - {type(exc).__name__}: {exc}"
+    assert kod in item_reasons.SYSTEM_REASON_CODES
+
+
+@pytest.mark.parametrize("rodzaj", ["zamkniete", "przerwane", "ograniczenie", "sztuczny"])
+def test_poza_klasa_bazy_tekst_jak_dotad(tmp_path, rodzaj):
+    """Operacja na zamkniętym połączeniu (cykl życia, bez kodu SQLite), przerwanie zapytania
+    (anulowanie wątku tła) i ograniczenie (odmowa klingi bazy) nie są stanem bazy - tekst wyjątku
+    jak dotąd; sztuczny `OperationalError` z testów (bez kodu) też. Falsyfikator: klasa dla
+    każdego `OperationalError` - przerwanie dostaje zdanie „baza zablokowana”."""
+    import sqlite3
+    exc = (sqlite3.OperationalError("database is locked") if rodzaj == "sztuczny"
+           else _prawdziwy_blad_sqlite(tmp_path, rodzaj))
+    assert item_reasons.powod_bazy(exc) is None
+    assert blad_systemu(exc) == f"{type(exc).__name__}: {exc}"
+    assert blad_systemu(exc, z_typem=False) == str(exc)
+
+
+def test_druk_presence_zerwany_udzial_klasa_kod_1(tmp_path, capsys, monkeypatch):
+    """`presence`: zerwany udział (53 to `FileNotFoundError`) - wiersz `blad --` mówi klasą
+    z surowym tekstem, kod 1 bez śladu stosu; odmowa korzenia (`canonize_root`) zdaniem jak dotąd."""
+    from horreum import cli, presence
+    dbp = str(tmp_path / "p.db")
+    db.open_db(dbp).close()
+    for exc, oczekiwany in [
+            (FileNotFoundError(None, "Komunikat systemu", r"X:\L", 53),
+             "udział sieciowy albo dysk nie odpowiada (WinError 53) - FileNotFoundError: [WinError 53]"),
+            (FileNotFoundError(r"root skanu nie istnieje albo niedostępny: X:\L"),
+             r"root skanu nie istnieje albo niedostępny: X:\L")]:
+        def _pada(*_a, exc=exc, **_k):
+            raise exc
+        monkeypatch.setattr(presence, "check", _pada)
+        assert cli.main(["presence", dbp, "--root", str(tmp_path), "--volume", "V"]) == 1
+        out = capsys.readouterr().out
+        out.encode("cp1250")
+        (wiersz,) = [w for w in out.splitlines() if w.startswith("Horreum presence: blad -- ")]
+        assert wiersz.startswith("Horreum presence: blad -- " + oczekiwany), wiersz
+
+
+def test_druk_ogona_presence_klasa_kod_2(tree, capsys, monkeypatch):  # noqa: F811
+    """Ogon `presence --apply` pada zerwanym udziałem: wiersz ogona mówi klasą z surowym tekstem
+    (ścieżka jest tylko w nim), kod 2 jak dotąd. Falsyfikator: `{type(exc).__name__}: {exc}`."""
+    from horreum import cli
+    con, root, vol, paths = tree
+    con.commit()
+    dbp = con.execute("PRAGMA database_list").fetchone()[2]
+    os.remove(paths[0])
+
+    def _ogon(con_, root_, *, now):
+        yield "  fakty kopii: etap przed awaria"
+        raise _zerwany_udzial()
+    monkeypatch.setattr(cli, "_presence_tail", _ogon)
+    assert cli.main(["presence", dbp, "--root", root, "--volume", vol, "--apply"]) == 2
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    assert ("blad ogona zapisu -- udział sieciowy albo dysk nie odpowiada (WinError 64) - "
+            "OSError: [WinError 64] Komunikat systemu") in out, out
+
+
+@pytest.mark.parametrize("polecenie", ["rederive-kind", "header-fix"])
+def test_druk_planu_apply_nieczytelny_klasa_kod_2(tmp_path, capsys, monkeypatch, polecenie):
+    """`rederive-kind`/`header-fix --apply --plan`: plik planu na zerwanym udziale - odmowa mówi
+    klasą z surowym tekstem, kod 2 jak dotąd; zła treść planu (`ValueError`) - zdaniem jak dotąd."""
+    from horreum import cli
+    dbp = str(tmp_path / "p.db")
+    db.open_db(dbp).close()
+    for exc, oczekiwany in [(_zerwany_udzial(r"X:\plany\p.json"),
+                             "odmowa - udział sieciowy albo dysk nie odpowiada (WinError 64) - "
+                             "OSError: [WinError 64] Komunikat systemu"),
+                            (ValueError("plan innej bazy"), "odmowa - plan innej bazy")]:
+        def _pada(*_a, exc=exc, **_k):
+            raise exc
+        monkeypatch.setattr(cli, "_wczytaj_plan", _pada)
+        assert cli.main([polecenie, dbp, "--apply", "--plan", r"X:\plany\p.json"]) == 2
+        out = capsys.readouterr().out
+        out.encode("cp1250")
+        assert f"(APPLY): {oczekiwany}" in out, out
+
+
+def test_druk_listy_samodzielnych_nieczytelnej_klasa_kod_2(samodzielne, capsys, monkeypatch):  # noqa: F811
+    """`stack-versions --standalone`: lista na zerwanym udziale - klasa z surowym tekstem, kod 2."""
+    from horreum import cli
+    s = samodzielne
+
+    def _pada(_sciezka):
+        raise _zerwany_udzial(r"X:\L\lista.tsv")
+    monkeypatch.setattr(stack_variants, "read_standalone_list", _pada)
+    s["con"].close()
+    assert cli.main(["stack-versions", str(s["old"]), s["db"], "--archive", str(s["arch"]),
+                     "--standalone", r"X:\L\lista.tsv"]) == 2
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    assert ("stack-versions: lista samodzielnych nieczytelna: udział sieciowy albo dysk nie "
+            "odpowiada (WinError 64) - OSError: [WinError 64] Komunikat systemu") in out, out
+
+
+def test_odmowa_przeliczenia_rodzaju_klasa_i_druk_dry(tmp_path, capsys, monkeypatch):
+    """`kind_rederive_plan`: odczyt kopii pada zerwanym udziałem - odmowa „odczyt <klasa> - <surowy
+    tekst ze ścieżką>” i ten wiersz w druku `rederive-kind` (DRY; import dawcy liczy odmowy, ale
+    ich nie drukuje). Falsyfikator: `f"odczyt {type(exc).__name__}: {exc}"`."""
+    from horreum import cli
+    from test_rederive_kind import _baza_flat
+    dbp = str(tmp_path / "h.db")
+    c = db.open_db(dbp)
+    fid, _lid, _hh = _baza_flat(c, tmp_path)
+    sciezka = c.execute("SELECT path FROM location WHERE frame_id = ?", (fid,)).fetchone()[0]
+
+    def _pada(path, size):
+        raise _zerwany_udzial(path)
+    monkeypatch.setattr(scan, "_read_meta", _pada)
+    zmiany, _bez, odmowy = scan.kind_rederive_plan(c)
+    c.close()
+    assert zmiany == [] and [f for f, _ in odmowy] == [fid]
+    powod = odmowy[0][1]
+    assert powod.startswith("odczyt udział sieciowy albo dysk nie odpowiada (WinError 64) - "
+                            "OSError: [WinError 64] Komunikat systemu"), powod
+    assert powod.count(os.path.basename(sciezka)) == 1, powod
+    assert cli.main(["rederive-kind", dbp, "--plan-dir", str(tmp_path / "plany")]) == 1
+    assert f"frame {fid}: {powod}" in capsys.readouterr().out
+
+
+def test_abort_importu_przy_bledzie_bazy_mowi_klasa(tmp_path, monkeypatch):
+    """Backstop wjazdu importu: zapis do bazy i szkielet padają PRAWDZIWYM błędem SQLite (baza
+    zajęta) - `ImportAbort` mówi klasą bazy, nie `OperationalError: database is locked`; ścieżka stoi
+    w zdaniu raz. Falsyfikator: `({type(exc).__name__}: {exc})`."""
+    from horreum import import_fitsmirror as imp
+    from test_import_fitsmirror import NOW as NOW_IMP, SPECS, _mk_donor
+    busy = _prawdziwy_blad_sqlite(tmp_path, "busy")
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    pada = str(files[os.path.join("LIGHTS", "m31_2.fits")][0])
+    prawdziwy = imp.ingest_record
+
+    def _wjazd(con, rec, **kw):
+        if rec.path == pada:
+            raise busy
+        return prawdziwy(con, rec, **kw)
+
+    def _szkielet(*_a, **_k):
+        raise busy
+    monkeypatch.setattr(imp, "ingest_record", _wjazd)
+    monkeypatch.setattr(imp, "_szkielet_po_awarii_zapisu", _szkielet)
+    with pytest.raises(imp.ImportAbort) as abort:
+        imp.import_fitsmirror(str(donor_path), str(tmp_path / "horreum.db"), now=NOW_IMP, rng_seed=1)
+    tekst = str(abort.value)
+    assert tekst == (f"wjazd {pada} padl (baza zablokowana (SQLITE_BUSY)), a szkielet "
+                     f"tez nie wszedl (baza zablokowana (SQLITE_BUSY))"), tekst

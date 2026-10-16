@@ -71,13 +71,15 @@ def test_awaria_calej_operacji_niesie_szczegol_trzecim_argumentem(tmp_path, monk
 
 def test_etykieta_bledu_zdejmuje_podpowiedz_z_nowym_zdaniem(qapp):
     """Zwykły `QLabel` trzyma podpowiedź po `clear()` i po nowym `setText` (zmierzone, PySide6 6.9),
-    więc szczegół jednej awarii stałby pod zdaniem walidacji. Falsyfikator: bez nadpisanego `clear`."""
+    więc szczegół jednej awarii stałby pod zdaniem walidacji. Podpowiedź pola niesie samo nowe zdanie
+    (protokół AR-204: zdanie + szczegół, szczegół należy do zdania). Falsyfikator: bez nadpisanego
+    `clear`."""
     pole = EtykietaBledu("")
-    for zmiana in (lambda: pole.setText("inne zdanie"), pole.clear):
+    for zmiana, zdanie in ((lambda: pole.setText("inne zdanie"), "inne zdanie"), (pole.clear, "")):
         pole.setText("awaria")
         pole.setToolTip("szczegół")
         zmiana()
-        assert pole.toolTip() == ""
+        assert pole.toolTip() == zdanie and pole.szczegol() == ""
 
 
 def _klik(przycisk):
@@ -95,7 +97,7 @@ def test_okna_kart_po_awarii_operacji_szczegol_w_podpowiedzi(qapp, tmp_path, jez
     """Oba okna kart („Napraw nagłówek…”, „Zatwierdź ze ścieżki…”) przez PRZYCISK zapisu i ich
     produkcyjne podpięcie uchwytu: awaria całej operacji mówi klasą w języku UI, szczegół systemu pod
     kursorem pola błędu, a następne zdanie okna (`_fail`/`setText` - walidacja, „brak gospodarza”) go
-    zdejmuje. Falsyfikator: `_on_failed` bez `setToolTip`, pole błędu jako zwykły `QLabel` albo
+    zdejmuje. Falsyfikator: `_on_failed` bez szczegółu, pole błędu jako zwykły `QLabel` albo
     odbiorca porażki podpięty z dwoma parametrami (`WritebackRunner.start` odmawia od razu)."""
     jezyk(lang)
     if ktore == "naprawa":
@@ -115,11 +117,12 @@ def test_okna_kart_po_awarii_operacji_szczegol_w_podpowiedzi(qapp, tmp_path, jez
     _klik(przycisk)
     zdanie = dlg.error.text()
     assert i18n.t("objchg.item.os_denied", os_code="WinError 5") in zdanie, zdanie
-    assert dlg.error.toolTip() == _tip(), dlg.error.toolTip()
+    assert dlg.error.szczegol() == _tip()                              # protokół pola (AR-204)
+    assert dlg.error.toolTip() == zdanie + "\n" + _tip(), dlg.error.toolTip()
     if lang == "en":
         assert not set(zdanie) & _POLSKIE, zdanie
     dlg.error.setText(i18n.t("repair.err.no_host"))
-    assert dlg.error.toolTip() == ""
+    assert dlg.error.toolTip() == i18n.t("repair.err.no_host")      # samo nowe zdanie (AR-204)
     dlg.reject()
     if ktore == "naprawa":
         con.close()
@@ -234,7 +237,7 @@ def test_zmiana_obiektu_awaria_operacji_i_planu_szczegol_w_podpowiedzi(qapp, tmp
     zdanie = dlg.error.text()
     assert zdanie == i18n.t("objchg.err.plan", msg=i18n.t("objchg.item.os_share_lost",
                                                          os_code="WinError 64")), zdanie
-    assert dlg.error.toolTip() == i18n.t(
+    assert dlg.error.toolTip() == zdanie + "\n" + i18n.t(   # protokół `EtykietaBledu.ustaw`
         "wb.os_detail_tip", detail=r"OSError: [WinError 64] Nazwa sieciowa jest już niedostępna: 'X:\L'")
     dlg._licz_plan()                                    # „Policz plan ponownie” - pole błędu od nowa
     assert dlg.error.toolTip() == ""
@@ -246,7 +249,7 @@ def test_zmiana_obiektu_awaria_operacji_i_planu_szczegol_w_podpowiedzi(qapp, tmp
     zmiana.show()
     _klik(zmiana.action_btn)
     assert i18n.t("objchg.item.os_denied", os_code="WinError 5") in zmiana.error.text()
-    assert zmiana.error.toolTip() == _tip()
+    assert zmiana.error.toolTip() == zmiana.error.text() + "\n" + _tip()
     if lang == "en":
         assert not set(zmiana.error.text()) & _POLSKIE, zmiana.error.text()
     zmiana.reject()
@@ -297,8 +300,9 @@ def test_planer_zerwany_udzial_w_oknie_jezyk_UI_i_szczegol(qapp, tmp_path, jezyk
 @pytest.mark.parametrize("lang", ["pl", "en"])
 def test_okno_wydania_awaria_klasa_i_szczegol_a_nastepny_raport_go_zdejmuje(qapp, tmp_path, ustawienia,
                                                                          jezyk, lang, monkeypatch):
-    """Okno wydania: wyjątek `apply` (np. `os.makedirs` korzenia na zerwanym udziale) mówi klasą
-    w języku UI, szczegół systemu pod kursorem raportu; następny raport go zdejmuje. Falsyfikator:
+    """Okno wydania: wyjątek spoza kroków wydania (nieoczekiwany błąd systemu w `apply` - kroki
+    korzenia, sondy i manifestu oddają wynik z powodem, AR-197) mówi klasą w języku UI, szczegół
+    systemu pod kursorem raportu; następny raport go zdejmuje. Falsyfikator:
     `_show_report` bez zerowania podpowiedzi."""
     from horreum.gui import projection_dialog as pd_mod
     from test_gui_projection import _dlg, _seed_files, _target
@@ -595,23 +599,15 @@ _ZNANE_SUROWE_MSG = {
     ("app.py", "_on_merge", "e", "e"): _ODMOWA_OSI,
     ("app.py", "_on_unmerge", "e", "e"): _ODMOWA_OSI,
     ("grid.py", "_on_wb_failed", "msg", "msg"): "zdanie z wykonawcy (`WritebackWorker.run` - `tekst_powodu`)",
-    ("grid.py", "_on_pola_failed", "msg", "msg"): "worker pól gridu - poza drogami plików (rejestr)",
+    ("grid.py", "_on_pola_failed", "msg", "msg"): "zdanie z wykonawcy (`PolaWorker.run` - `tekst_powodu`)",
     ("grid.py", "_after_undo", "msg", "msg"): "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
     ("grid.py", "_after_undo_rename", "msg", "msg"): "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
-    ("grid.py", "_on_rename_preview", "e", "e"): "błąd wzoru nazwy (`ValueError`)",
-    ("grid.py", "_on_rename_stage", "e", "e"): "błąd wzoru nazwy (`ValueError`)",
     ("grid.py", "_on_transfer_facts", "err", "str(e)"): _ODMOWA_OSI,
     ("harvest_dialog.py", "_on_apply_failed", "msg", "msg"): "zdanie po `tekst_powodu` w tej funkcji",
     ("harvest_dialog.py", "_summary_fact", "msg", "self._last_error"): "zdanie z `_on_apply_failed`",
     ("harvest_dialog.py", "_summary_tail", "msg", "self._last_error"): "zdanie z `_on_apply_failed`",
-    ("home.py", "_on_teczki_failed", "msg", "msg"): "worker Domu - poza drogami plików (rejestr)",
-    ("object_change_dialog.py", "_on_action", "msg", "f'{type(e).__name__}: {e}'"):
-        "odmowa klingi i staging bazy - rejestr",
     ("observatory_dialog.py", "_validate_and_accept", "e", "e"): _ODMOWA_OSI,
-    ("pipeline.py", "_on_failed", "msg", "msg"): "worker Dostawy - poza drogami plików (rejestr)",
     ("pipeline.py", "_pokaz_odmowe", "msg", "msg"): "worker Dostawy - poza drogami plików (rejestr)",
-    ("projection_dialog.py", "_on_apply_aborted", "msg", "msg"): "sonda hardlinka (`ProjectionAbort`) - rejestr",
-    ("projection_dialog.py", "_add_target_path", "e", "exc"): "odmowa celu wydania (`ValueError`)",
 }
 
 

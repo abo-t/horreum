@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
 
 from horreum import db, repo, sky, targets
 from horreum.gui import i18n, planner_model as pm, queries, theme
+from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
+from horreum.item_reasons import blad_systemu
 
 # Debounce zmian parametrów: pojedyncze kliknięcie w strzałkę spinboxa nie ma prawa startować
 # rachunku nocy, a przytrzymana strzałka wygenerowałaby ich kilkanaście.
@@ -119,7 +121,8 @@ class PlanWorker(QObject):
     sygnał (precedens `stage_done` w `pipeline.py`)."""
 
     done = Signal(int, object)          # (generacja, targets.PlanResult)
-    failed = Signal(int, str)           # (generacja, komunikat)
+    # (generacja, powód) - zdanie rdzenia (`ValueError`) albo błąd bazy/systemu klasą (AR-198)
+    failed = Signal(int, object)
     no_site = Signal(int, str)          # (generacja, komunikat) - `targets.BrakStanowiska` (AR-48)
     finished = Signal()
 
@@ -144,7 +147,9 @@ class PlanWorker(QObject):
             # samo w sobie opisem, więc idzie na ekran SUROWE, bez nazwy klasy.
             self.failed.emit(self._gen, str(exc))
         except Exception as exc:
-            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+            # Planer czyta bazę i dane pakietu - realna awaria to błąd SQLite: klasą bazy w języku
+            # UI, surowy tekst w szczególe nagłówka (AR-198).
+            self.failed.emit(self._gen, blad_systemu(exc))
         finally:
             self.finished.emit()
 
@@ -381,7 +386,9 @@ class PlannerView(QWidget):
 
     def _build(self):
         outer = QVBoxLayout(self)
-        self.night_label = QLabel("")
+        # Pole z protokołu „zdanie + szczegół” (AR-198): błąd rachunku ze szczegółem pod kursorem,
+        # a tekst nocy policzonego planu (`setText`) szczegół zdejmuje.
+        self.night_label = EtykietaBledu("")
         self.night_label.setWordWrap(True)
         nf = self.night_label.font()          # kotwica nagłówka WAGĄ, nie tylko kolorem (wiz T5 R6)
         nf.setBold(True)
@@ -1150,12 +1157,14 @@ class PlannerView(QWidget):
         self._render_orphans(result)
         self._render_rows()
 
-    @Slot(int, str)
-    def _on_failed(self, gen, message):
-        """Rachunek padł z powodu INNEGO niż brak stanowiska - surowy komunikat zostaje (Z2)."""
+    @Slot(int, object)
+    def _on_failed(self, gen, powod):
+        """Rachunek padł z powodu INNEGO niż brak stanowiska - komunikat zostaje: błąd bazy
+        albo systemu klasą w języku UI, szczegół pod kursorem nagłówka (AR-198)."""
         if gen != self._gen:
             return
-        self._pokaz_blad(gen, message, bez_stanowiska=False)
+        self._pokaz_blad(gen, tekst_powodu(powod), bez_stanowiska=False,
+                         szczegol=wiersz_systemu(powod))
 
     @Slot(int, str)
     def _on_no_site(self, gen, message):
@@ -1179,16 +1188,18 @@ class PlannerView(QWidget):
             return
         self._pokaz_blad(gen, i18n.t("planner.no_site_title"), bez_stanowiska=True)
 
-    def _pokaz_blad(self, gen, message, *, bez_stanowiska):
+    def _pokaz_blad(self, gen, message, *, bez_stanowiska, szczegol=""):
         """Ekran po nieudanym rachunku. BAZA BEZ STANOWISKA TO STAN, NIE AWARIA (AR-48): dostaje
         pusty stan z gestem i zdanie z katalogu (surowe zdanie rdzenia szło dotąd na nagłówek i na
-        pasek stanu, także nad ekranem Dostawy). Każdy inny błąd - tabela i surowy komunikat. To,
-        czy zdanie w ogóle padnie na pasek, rozstrzyga gospodarz (tylko przy widocznym planerze)."""
+        pasek stanu, także nad ekranem Dostawy). Każdy inny błąd - tabela i komunikat. To,
+        czy zdanie w ogóle padnie na pasek, rozstrzyga gospodarz (tylko przy widocznym planerze).
+        `szczegol` - wiersz szczegółu systemu albo bazy pod kursorem nagłówka (AR-198); następny
+        tekst nagłówka (noc policzonego planu) go zdejmuje."""
         self._result = None
         self._shown_gen = gen
         self.model.set_rows(())
         self.bez_stanowiska = bez_stanowiska
-        self.night_label.setText(message)
+        self.night_label.ustaw(message, szczegol)
         self.counts_label.setText("")
         self.warn_label.setText("")
         self.notes_label.setText("")

@@ -31,7 +31,7 @@ def test_ponowione_undo_juz_cofniete_osobnym_wierszem_i_kod_zero(tmp_path, capsy
     kod, out = _cli(capsys, "header-fix", dbp, "--undo", commit)
     assert kod == 0, out
     assert "przywrocone 0 (bez powrotu zeznania 0), zablokowane 0, nieudane 0" in out, out
-    assert "\n  juz cofniete 2 - stan sprzed commitu jest juz na dysku i w bazie" in out, out
+    assert "\n  juz cofniete 2 - wynik cofniecia jest juz na dysku i w bazie" in out, out
     assert "    blocked: " not in out, out
 
 
@@ -94,3 +94,32 @@ def test_undo_bez_backupow_zera_i_kod_zero(tmp_path, capsys, monkeypatch):
     assert kod == 0, out
     assert out.strip() == (f"Horreum header-fix {tmp_path / 'u.db'} (UNDO commit 7): przywrocone 0 "
                            f"(bez powrotu zeznania 0), zablokowane 0, nieudane 0"), out
+
+
+def test_undo_po_zmianie_od_commitu_ponowienie_mowi_neutralnie(tmp_path, capsys):
+    """AR-182 na prawdziwym commicie atomowym: drugie HDU zmienione od commitu - `--undo`
+    przywraca nagłówek (zmiana zostaje w pliku), kod 0; ponowne `--undo` - plik „już cofnięty”
+    wynikiem własnym, wiersz NIE twierdzi, że na dysku jest stan sprzed commitu (nieprawda: obca
+    zmiana została), kod z `complete` = 0, ASCII pod cp1250. Falsyfikator: dawne zdanie „stan sprzed
+    commitu jest juz na dysku”."""
+    from horreum import writeback
+    from test_powody_pisarza import _fits_dwa_hdu
+    from test_writeback_inplace import NOW, _baza_z_plikiem
+    p = _fits_dwa_hdu(tmp_path / "d.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW)
+    assert len(res.applied) == 1 and not res.in_place, res
+    con.close()
+    dane = bytearray(p.read_bytes())
+    i = dane.index(b"'aaaa ")
+    dane[i:i + 5] = b"'bbbb"
+    p.write_bytes(bytes(dane))
+    dbp = str(tmp_path / "h.db")
+    kod, out = _cli(capsys, "header-fix", dbp, "--undo", str(res.commit_id))
+    assert kod == 0 and "przywrocone 1" in out and "juz cofniete" not in out, out
+    assert b"'bbbb" in p.read_bytes() and fits.getheader(str(p))["OBJECT"] == "NGC6992"
+    kod, out = _cli(capsys, "header-fix", dbp, "--undo", str(res.commit_id))
+    assert kod == 0, out
+    assert "\n  juz cofniete 1 - wynik cofniecia jest juz na dysku i w bazie" in out, out
+    assert "stan sprzed commitu" not in out, out
+    out.encode("cp1250")

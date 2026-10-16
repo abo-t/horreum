@@ -1253,3 +1253,41 @@ def test_Dom_i_sidebar_po_angielsku(qapp, tmp_path):
         assert [k.accessibleName() for k in h.karty] == ["Wiekszy", "Sredni", "Mniejszy"]
     finally:
         win.close()
+
+
+# ============================================================ AR-198: błąd bazy klasą na Domu
+
+_POLSKIE = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_teczki_blad_bazy_klasa_w_jezyku_UI_szczegol_w_podpowiedzi(qapp, tmp_path, lang):
+    """Teczki czytają WYŁĄCZNIE bazę (zmierzone: 0 wywołań systemu plików), więc ich realna awaria
+    to błąd SQLite: tu PRAWDZIWY - plik bazy nie jest bazą (SQLITE_NOTADB). Zdanie klasy w języku
+    UI zamiast `DatabaseError: file is not a database`, surowy tekst w szczególe; następny bieg
+    zdejmuje szczegół. Falsyfikator: `TeczkiWorker.run` z `f"{type(exc).__name__}: {exc}"`."""
+    import sqlite3
+    i18n.set_lang(lang)
+    con = _baza_domu(str(tmp_path / "d.db"), _obiekty(2), extra=False)
+    smieci = tmp_path / "smieci.db"
+    smieci.write_bytes(b"to nie jest baza" * 512)
+    zla = sqlite3.connect(str(smieci))
+    h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
+    try:
+        h.con = zla
+        h.odswiez_teczki()
+        zdanie = i18n.t("home.folders.failed",
+                        msg=i18n.t("objchg.item.db_damaged", db_code="SQLITE_NOTADB"))
+        assert h.teczki_status.text() == zdanie and not h.teczki_status.isHidden()
+        assert h.teczki_status.toolTip() == zdanie + "\n" + i18n.t(
+            "wb.os_detail_tip", detail="DatabaseError: file is not a database")
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE, zdanie
+        h.con = con
+        h.odswiez_teczki()
+        assert h.teczki_status.szczegol() == "" and "file is not a database" not in h.teczki_status.toolTip()
+    finally:
+        h.close()
+        zla.close()
+        con.close()
+        i18n.set_lang("pl")

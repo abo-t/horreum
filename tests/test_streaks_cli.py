@@ -132,9 +132,27 @@ def test_blad_zapisu_raportu_to_kod_2_ascii_bez_tracebacku(tmp_path, noc, monkey
     monkeypatch.setattr(raport, "_zapisz_plik", odmowa_zapisu)
     kod = cli.main(["streaks", "--folder", str(root), "--out", str(out), "--archive-root", str(archiwum)])
     wydruk = capsys.readouterr().out
-    assert kod == 2 and "BLAD I/O raportu -- PermissionError errno=13" in wydruk and wydruk.isascii()
+    assert kod == 2 and "BLAD I/O raportu -- PermissionError Errno 13" in wydruk and wydruk.isascii()
     assert not (out / "manifest.json").exists()
     os.rename(out, tmp_path / "r_stary")
+
+
+def test_blad_zapisu_raportu_na_zerwanym_udziale_mowi_kod_windows(tmp_path, noc, monkeypatch, capsys):
+    """Zerwany udział pod katalogiem raportu: numer od właściciela klasy (kod Windows przed errno -
+    `WinError 64`, nie `errno=22` z mapy CPythona), wiersz dalej ASCII, kod 2. Falsyfikator: `errno=`
+    wprost z wyjątku."""
+    from horreum import raport
+    root, archiwum = noc
+
+    def zerwany(cel, kawalki):
+        raise OSError(None, "Komunikat systemu", cel, 64)
+
+    monkeypatch.setattr(raport, "_zapisz_plik", zerwany)
+    kod = cli.main(["streaks", "--folder", str(root), "--out", str(tmp_path / "r"),
+                    "--archive-root", str(archiwum)])
+    wydruk = capsys.readouterr().out
+    assert kod == 2 and "BLAD I/O raportu -- OSError WinError 64 " in wydruk, wydruk
+    assert "errno=" not in wydruk and wydruk.isascii()
 
 
 def test_odmowa_drzwi_w_trakcie_zapisu_to_kod_2(tmp_path, noc, monkeypatch, capsys):

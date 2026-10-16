@@ -1062,7 +1062,7 @@ class ConfirmPathObjectsDialog(QDialog):
         self.bar = QProgressBar()
         self.bar.setVisible(False)
         lay.addWidget(self.bar)
-        self.status = QLabel("")
+        self.status = EtykietaBledu("")     # zdanie wyniku + szczegół (protokół pola, AR-204)
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)   # `commit_id` do skopiowania
         lay.addWidget(self.status)
@@ -1235,9 +1235,6 @@ class ConfirmPathObjectsDialog(QDialog):
         Zapis w miejscu (`commit_inplace`) mówi o drodze zapisu tylko przy spadku na atomową."""
         summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied",
                                               w_miejscu=op == "commit_inplace")
-        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
-        # razem z pozostałymi powodami (okno nie ma listy pozycji).
-        self.status.setToolTip(podpowiedz_kart(res))
         if cofnij is not None:
             self._commit_id = cofnij
             self.undo_btn.setVisible(True)
@@ -1246,7 +1243,9 @@ class ConfirmPathObjectsDialog(QDialog):
         if res.cancelled:
             self._porzuc_staging()               # reszta runu to sierota - nikt jej nie dokończy
         self._run_id = None                      # run domknięty commitem (R#5) - nie kasuj przy zamknięciu
-        self.status.setText(self.status.text() + "\n" + summary)
+        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
+        # razem z pozostałymi powodami (okno nie ma listy pozycji) - protokół pola (AR-204).
+        self.status.ustaw(self.status.text() + "\n" + summary, podpowiedz_kart(res))
         self._end_progress()
         dopasuj_wysokosc(self)                   # zdanie bazy + zdanie plików (`config_dialog`)
         self.changed.emit()
@@ -1259,8 +1258,7 @@ class ConfirmPathObjectsDialog(QDialog):
         self._domkniety = self._commit_id is not None
         self._end_progress()
         from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
-        self.error.setText(i18n.t("grid.wb.error", msg=czytelny_powod(msg)))
-        self.error.setToolTip(podpowiedz)
+        self.error.ustaw(i18n.t("grid.wb.error", msg=czytelny_powod(msg)), podpowiedz)
         self.changed.emit()
 
     def _porzuc_staging(self):
@@ -1296,9 +1294,8 @@ class ConfirmPathObjectsDialog(QDialog):
             self.resolve_btn.setVisible(False)
             self._commit_id = None
             self._domkniety = False
-        self.status.setText(msg)
         from horreum.gui.wb_worker import podpowiedz_systemu   # szczegół systemu cofnięcia (AR-168)
-        self.status.setToolTip(podpowiedz_systemu(res))
+        self.status.ustaw(msg, podpowiedz_systemu(res))
         self._end_progress()
         # Okno rośnie do zawiniętego zdania z receptą (AR-160, wspólny pomocnik `config_dialog`),
         # a cofnięcie to zapis - gospodarz odświeża kolejkę. Emisja stała dotąd w pomocniku
@@ -1745,7 +1742,7 @@ class RepairHeaderDialog(QDialog):
         self.bar = QProgressBar()
         self.bar.setVisible(False)
         lay.addWidget(self.bar)
-        self.status = QLabel("")
+        self.status = EtykietaBledu("")     # zdanie wyniku + szczegół (protokół pola, AR-204)
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)   # `commit_id` do skopiowania
         lay.addWidget(self.status)
@@ -1823,8 +1820,8 @@ class RepairHeaderDialog(QDialog):
         self.save_btn.setText(i18n.t("repair.save_btn_n", n=ready)
                               if ready and not self._committed else i18n.t("repair.save_btn"))
 
-    def _fail(self, msg):
-        self.error.setText(msg)
+    def _fail(self, msg, szczegol=""):
+        self.error.ustaw(msg, szczegol)          # zdanie + szczegół (protokół pola, AR-204)
         dopasuj_wysokosc(self)                   # błąd też zawija (AR-176)
 
     # ---------------------------------------------------------------- takt 1+2: staging + commit
@@ -1905,9 +1902,6 @@ class RepairHeaderDialog(QDialog):
         self.bar.setVisible(False)
         summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied",
                                               w_miejscu=op == "commit_inplace")
-        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
-        # razem z pozostałymi powodami (okno nie ma listy pozycji).
-        self.status.setToolTip(podpowiedz_kart(res))
         if cofnij is not None:
             self._commit_id = cofnij
             self._committed = True
@@ -1919,7 +1913,9 @@ class RepairHeaderDialog(QDialog):
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
         self._sync_preview()
-        self.status.setText(summary)
+        # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
+        # razem z pozostałymi powodami (okno nie ma listy pozycji) - protokół pola (AR-204).
+        self.status.ustaw(summary, podpowiedz_kart(res))
         # STATUS UCINAŁ SIĘ (AR-176, zmierzone natywnie): przy jednej grupie zdanie z trzema powodami
         # dostawało 44 px przy potrzebnych 64 - okno nie rosło. Wysokość PRZED emisją `changed`
         # (gospodarz odświeża po niej kolejkę).
@@ -1928,16 +1924,15 @@ class RepairHeaderDialog(QDialog):
 
     def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera: staging runu jest sierotą (C1) - sprzątany od razu, nie przy zamknięciu.
-        Szczegół systemu (`podpowiedz`, AR-185) - pod kursorem pola błędu, PO tekście (`_fail` go
-        zdejmuje razem ze starym zdaniem)."""
+        Szczegół systemu (`podpowiedz`, AR-185) - razem ze zdaniem błędu (`_fail`, protokół pola
+        AR-204); następne zdanie pola go zdejmuje."""
         self._porzuc_staging()
         self.bar.setVisible(False)
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
         self._sync_preview()                     # PRZED `_fail`: podgląd czyści pole błędu
         from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
-        self._fail(i18n.t("grid.wb.error", msg=czytelny_powod(msg)))
-        self.error.setToolTip(podpowiedz)
+        self._fail(i18n.t("grid.wb.error", msg=czytelny_powod(msg)), podpowiedz)
         self.changed.emit()
 
     def _porzuc_staging(self):
@@ -1968,10 +1963,9 @@ class RepairHeaderDialog(QDialog):
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
         self._sync_preview()
-        self.status.setText(msg)
         # Szczegół spadku mówił o zapisie - zostaje szczegół systemu cofnięcia (AR-168) albo nic.
         from horreum.gui.wb_worker import podpowiedz_systemu
-        self.status.setToolTip(podpowiedz_systemu(res))
+        self.status.ustaw(msg, podpowiedz_systemu(res))
         dopasuj_wysokosc(self)                   # zdanie z receptą zawija (AR-176), przed `changed`
         self.changed.emit()
 

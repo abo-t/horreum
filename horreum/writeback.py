@@ -352,11 +352,14 @@ class _PodmianaRozdarta(Exception):
 
 
 def _nazwa_kopii(path: str) -> str:
-    """Wolna nazwa kopii pliku wypartego w katalogu pliku (ten sam wolumen)."""
+    """Wolna nazwa kopii pliku wypartego w katalogu pliku (ten sam wolumen) - wolna RAZEM ze swoją
+    kopią zwrotną (`_nazwa_zwrotna`), bo zwrotną wylicza się z niej (zamiar podmiany AR-64, ślad
+    cofnięcia AR-127): podmiana systemowa nadpisuje istniejący plik kopii, więc zajęta nazwa zwrotna
+    zatarłaby resztkę poprzedniej próby."""
     katalog, nazwa = os.path.split(os.path.abspath(path))
     while True:
         kopia = os.path.join(katalog, f"{nazwa}.{os.urandom(4).hex()}{_KOPIA_SUFFIX}")
-        if not os.path.exists(kopia):
+        if not os.path.exists(kopia) and not os.path.exists(_nazwa_zwrotna(kopia)):
             return kopia
 
 
@@ -383,6 +386,24 @@ class _Zamiar:
 def _zamiar(path: str, tmp: str, sha1: str, size: int) -> _Zamiar:
     kopia = _nazwa_kopii(path)
     return _Zamiar(kopia, _nazwa_zwrotna(kopia), tmp, sha1, size)
+
+
+@dataclasses.dataclass(frozen=True)
+class _PrzygotowaneCofniecie:
+    """Ślad cofnięcia drogą atomową (0044, `atomic_undo`) - to, co `write_full_header` za chwilę położy
+    pod ścieżką, i to, co pod nią zastał, zebrane PRZED podmianą (`persist_result`, AR-182):
+    wersja przygotowana (`result_*` - sha1 i rozmiar pliku tymczasowego z aktu jego zapisu, nagłówek
+    formułą skanu, `byte_exact` jak w `WriteResult`), plik pod ścieżką pod blokadą (`source_*` - sha1
+    z tego samego przebiegu albo z uchwytu blokady) oraz nazwy plików, które cofnięcie może zostawić na
+    dysku (kopia wyparta - z niej wylicza się zwrotną, `_nazwa_zwrotna` - i plik tymczasowy, AR-127)."""
+    result_sha1: str
+    result_size: int
+    result_hash: str
+    byte_exact: bool | None
+    source_sha1: str
+    source_size: int
+    displaced_path: str
+    prepared_path: str
 
 
 class _StrumienSha1:
@@ -527,9 +548,11 @@ def _oddaj_wyparty(path: str, kopia: str, rozjazd: list[str], nasza: _Odcisk) ->
     ścieżką, B pod kopią, obie zostają.
 
     Wyłącznie droga BEZ zamiaru podmiany (cofnięcie atomowe): zapis z zamiarem oddaje cudzą wersję
-    automatem rekoncyliacji (`_WypartaDoPowrotu` → `_rekoncyliuj_zamiar`, AR-64 C3)."""
+    automatem rekoncyliacji (`_WypartaDoPowrotu` → `_rekoncyliuj_zamiar`, AR-64 C3). Nazwa drugiej
+    kopii wynika z nazwy kopii wypartej (`_nazwa_zwrotna`, wolna razem z nią - `_nazwa_kopii`), więc
+    ślad cofnięcia, który utrwala kopię wypartą, zna też ją (AR-127)."""
     zmiana = _zmiana_w_oknie(rozjazd)
-    zwrotna = _nazwa_kopii(path)
+    zwrotna = _nazwa_zwrotna(kopia)
     blad = _replace_z_ponowieniem(path, kopia, zwrotna)
     try:
         zaszedl = _czy_zaszla(path, kopia, zwrotna, blad)
@@ -571,7 +594,7 @@ def _zmiana_w_oknie(rozjazd) -> PowodPozycji:
 
 
 def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=None, *,
-             zamiar: _Zamiar | None = None) -> str | None:
+             zamiar: _Zamiar | None = None, kopia: str | None = None) -> str | None:
     """PODMIANA SYSTEMOWA (sekcja wyżej): `ReplaceFileW` z kopią pliku wypartego, rozpoznanie stanu
     z dysku, rewalidacja kopii wobec `odcisk` i sprzątnięcie kopii. Zwraca uwagę dla wyniku (kopia,
     której nie dało się skasować) albo `None`; błąd podmiany przy pliku nietkniętym albo podmienionym
@@ -592,8 +615,14 @@ def _podmien(tmp: str, path: str, replace_guard, odcisk: _Odcisk, po_podmianie=N
     backupie (`po_podmianie` i zamknięcie straży bez błędu): gdy potwierdzenie przepadło, backup
     zostaje niepotwierdzony, a kopia jest dowodem dla rekoncyliacji (Z12) - ta ją sprzątnie po
     rozpoznaniu pełnym sha1. Cudza wersja wykryta rewalidacją przy zamiarze NIE wraca tutaj:
-    `_WypartaDoPowrotu` wycofuje straż, a powrót robi automat rekoncyliacji orkiestracji (C3)."""
-    kopia = _nazwa_kopii(path) if zamiar is None else zamiar.displaced_path
+    `_WypartaDoPowrotu` wycofuje straż, a powrót robi automat rekoncyliacji orkiestracji (C3).
+
+    `kopia` (bez zamiaru) = nazwa kopii pliku wypartego wybrana przez wołającego (`_nazwa_kopii`) -
+    cofnięcie atomowe utrwala ją w śladzie przed tą chwilą (AR-127); bez niej nazwa wybierana tutaj."""
+    if zamiar is not None:
+        kopia = zamiar.displaced_path
+    elif kopia is None:
+        kopia = _nazwa_kopii(path)
     nasza = None
     if zamiar is None:
         with open(tmp, "rb") as fh:      # odcisk NASZEJ wersji - powrót wypartego ją rozpozna (A1)
@@ -964,6 +993,14 @@ def _backup_nie_powstal(exc) -> PowodPozycji:
                         f"nietknięty: {blad}", "backup_not_saved", detail=blad)
 
 
+def _slad_nie_powstal(exc) -> PowodPozycji:
+    """Powód cofnięcia atomowego, gdy ślad wyniku (`atomic_undo`, AR-182) nie wszedł do bazy przed
+    podmianą - pliku nie ruszono."""
+    blad = _blad_systemu(exc)
+    return PowodPozycji(f"ślad cofnięcia NIE powstał w bazie, więc podmiany nie było - plik "
+                        f"nietknięty: {blad}", "undo_record_not_saved", detail=blad)
+
+
 def _sprzatnij_tmp(tmp: str | None, zachowaj: bool) -> None:
     """Plik tymczasowy, którego podmiana nie zużyła - precz, chyba że `zachowaj`
     (`_PodmianaRozdarta.zachowaj_tmp`: może być jedyną kopią danych)."""
@@ -975,7 +1012,9 @@ def _sprzatnij_tmp(tmp: str | None, zachowaj: bool) -> None:
 
 
 def write_full_header(path, header_text: str, expected_hash: str | None, *,
-                      replace_guard=None) -> WriteResult:
+                      replace_guard=None,
+                      persist_result: Callable[[_PrzygotowaneCofniecie], None] | None = None,
+                      expect_file_sha1: str | None = None) -> WriteResult:
     """Atomowo przywróć nagłówek z backupu (ścieżka undo): plik tymczasowy + `os.replace`. Kontrola
     `header_hash` jak w `write_changes` (dysk ≠ `expected_hash` → 'blocked'). `header_text` = backup
     dowolnej generacji: koperta `RegionBackup` (od 2026-09-26) albo tekst sprzed niej
@@ -1002,7 +1041,19 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
     nie niesie. Backup tekstowy albo układ, który się nie zgadza → droga SEMANTYCZNA jak dotąd
     (nagłówek odtworzony z treści, astropy / `build_xisf_header_region`), `byte_exact=False`
     i powód „cofnięte semantycznie".
-    Pod blokadą i z podmianą systemową jak `write_changes` (AR-18)."""
+    Pod blokadą i z podmianą systemową jak `write_changes` (AR-18).
+
+    ŚLAD COFNIĘCIA (AR-182, 0044): `persist_result(_PrzygotowaneCofniecie)` - gdy podany - utrwala
+    w bazie wynik, który podmiana za chwilę położy pod ścieżką (sha1 i rozmiar pliku tymczasowego
+    z aktu jego zapisu, nagłówek), plik zastany pod blokadą (sha1 z tego samego przebiegu składania;
+    droga semantyczna FITS - jeden pełny odczyt uchwytu więcej) i nazwy kopii wypartej oraz pliku
+    tymczasowego (AR-127) - PRZED podmianą, jak backup zapisu. Porażka → 'failed', plik nietknięty.
+    Ponowienie rozpozna po nim własny wynik także wtedy, gdy nie jest plikiem sprzed commitu.
+
+    ZMIANA OD COMMITU: `expect_file_sha1` = sha1 wersji zapisanej przez commit
+    (`replace_intent.prepared_sha1`). Plik zastany z innym sha1 zmienił się poza nagłówkiem od
+    commitu - cofnięcie idzie (nagłówek wraca, zmiana zostaje w pliku, nikt jej nie traci), a powód
+    mówi to wprost (`undo_outside_changed`) zamiast „cofnięte semantycznie” artefaktu serializacji."""
     if _is_raw(path):
         return WriteResult("blocked", _RAW_READ_ONLY, None)
     path = os.fspath(path)
@@ -1018,7 +1069,10 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
                 return plan
             if plan is not None:
                 czesci, odcisk = plan
-                tmp, sha1_tmp, _ = _zloz_plik_tymczasowy(path, fh, czesci)
+                # sha1 pliku zastanego liczy ten sam przebieg po ogonie (jedyna część bajtowa to
+                # region koperty w miejscu bieżącego nagłówka) - bez drugiego odczytu.
+                tmp, sha1_tmp, sha1_zrodla = _zloz_plik_tymczasowy(path, fh, czesci,
+                                                                   oryginal_region=odcisk.region)
                 # Plik tymczasowy czytany TĄ SAMĄ formułą co skan, zanim zastąpi oryginał - region
                 # backupu ma się czytać nagłówkiem, który backup opisuje.
                 written_hash = (scan.read_xisf_meta_full(tmp) if xisf
@@ -1035,10 +1089,19 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
                                else _fits_semantyczny(path, fh, tekst, expected_hash))
                 if isinstance(semantyczny, WriteResult):
                     return semantyczny
-                tmp, written_hash, odcisk = semantyczny
+                tmp, written_hash, odcisk, sha1_tmp, sha1_zrodla = semantyczny
                 bajtowo = False
                 nota = _NOTA_SEMANTYCZNIE
-        uwaga = _podmien(tmp, path, replace_guard, odcisk)
+        if bajtowo is False and expect_file_sha1 is not None and sha1_zrodla != expect_file_sha1:
+            nota = _NOTA_ZMIANA_OD_COMMITU
+        kopia = _nazwa_kopii(path)
+        if persist_result is not None:
+            try:
+                persist_result(_PrzygotowaneCofniecie(sha1_tmp, os.path.getsize(tmp), written_hash,
+                                                      bajtowo, sha1_zrodla, odcisk.size, kopia, tmp))
+            except Exception as exc:  # noqa: BLE001 - bez śladu nie podmieniamy
+                return WriteResult("failed", _slad_nie_powstal(exc), None)
+        uwaga = _podmien(tmp, path, replace_guard, odcisk, kopia=kopia)
         tmp = None
     except _XisfRefusal as ref:
         return WriteResult("blocked", ref.reason, None)
@@ -1069,6 +1132,12 @@ _NOTA_SEMANTYCZNIE_POZA_NAGLOWKIEM = PowodPozycji(
 _NOTA_SEMANTYCZNIE = PowodPozycji(
     f"{_COFNIETE_SEMANTYCZNIE} - nagłówek odtworzony z treści backupu, bajty pliku inne niż przed "
     f"commitem", "undo_semantic")
+# AR-182: plik zastany przez cofnięcie nie jest wersją zapisaną przez commit - zmiana poza
+# nagłówkiem od commitu (cudza albo wynik semantycznego cofnięcia nowszego commitu tej lokacji), więc
+# zdanie mówi fakt, nie sprawcę.
+_NOTA_ZMIANA_OD_COMMITU = PowodPozycji(
+    f"{_COFNIETE_SEMANTYCZNIE} - nagłówek przywrócony, ale plik zmienił się poza nagłówkiem od commitu "
+    f"(sha1 pliku inny niż zapisany przez commit); ta zmiana zostaje w pliku", "undo_outside_changed")
 
 
 def _xisf_bloki(xml: bytes) -> list[str]:
@@ -1128,7 +1197,10 @@ def _plan_przywrocenia(path: str, fh, env: RegionBackup, expected_hash: str | No
 
 def _fits_semantyczny(path: str, fh, tekst: str, expected_hash: str | None):
     """Droga semantyczna cofnięcia FITS pod blokadą: nagłówek z tekstu backupu, plik tymczasowy
-    z `writeto` astropy → `(tmp, written_hash, odcisk)` | `WriteResult('blocked')`."""
+    z `writeto` astropy przez strumień liczący sha1 (`_zapisz_tymczasowy_fits`, te same bajty co
+    zapis do ścieżki) → `(tmp, written_hash, odcisk, sha1 tmp, sha1 pliku zastanego)` |
+    `WriteResult('blocked')`. sha1 pliku zastanego (ślad cofnięcia, AR-182) to pełny odczyt uchwytu
+    blokady - astropy przepisuje cały plik, więc przebiegu po ogonie do współdzielenia nie ma."""
     tmp = None
     try:
         with fits.open(path, mode="readonly", memmap=False) as hdul:
@@ -1141,9 +1213,10 @@ def _fits_semantyczny(path: str, fh, tekst: str, expected_hash: str | None):
             hdu.header = fits.Header.fromstring(tekst)
             fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
             os.close(fd)
-            hdul.writeto(tmp, overwrite=True)
+            strumien = _zapisz_tymczasowy_fits(hdul, tmp)
         written_hash = scan.read_fits_meta(tmp).header_hash
-        return tmp, written_hash, _odcisk(fh, start, data_start - start)
+        return (tmp, written_hash, _odcisk(fh, start, data_start - start), strumien.hexdigest(),
+                _sha1_uchwytu(fh))
     except BaseException:
         _sprzatnij_tmp(tmp, False)
         raise
@@ -1152,8 +1225,9 @@ def _fits_semantyczny(path: str, fh, tekst: str, expected_hash: str | None):
 def _xisf_semantyczny(path: str, fh, xml_text: str, expected_hash: str | None):
     """Droga semantyczna cofnięcia XISF pod blokadą (backup tekstowy albo inne adresy bloków): region
     złożony z XML-a backupu (`build_xisf_header_region` - ta sama bramka mieszczenia się co zapis,
-    wypełnienie po skróceniu wraca jako ZERA) + ogon bieżącego pliku → `(tmp, written_hash, odcisk)`
-    | `WriteResult('blocked')`. Hash zapisanego XML-a znany bez odczytu (D-X-3)."""
+    wypełnienie po skróceniu wraca jako ZERA) + ogon bieżącego pliku → `(tmp, written_hash, odcisk,
+    sha1 tmp, sha1 pliku zastanego)` | `WriteResult('blocked')`. Hash zapisanego XML-a znany bez
+    odczytu (D-X-3); oba sha1 liczy ten sam przebieg po ogonie (ślad cofnięcia, AR-182)."""
     meta = _read_xisf_or_refuse(path)
     if expected_hash is not None and meta.header_hash != expected_hash:
         return WriteResult("blocked", _UNDO_HEADER_CHANGED, None)
@@ -1164,8 +1238,9 @@ def _xisf_semantyczny(path: str, fh, xml_text: str, expected_hash: str | None):
         raise _XisfRefusal(powod_wyjatku(exc)) from exc
     _xisf_region_from_handle(fh, meta, scan.build_xisf_header_region(meta, meta.xml_bytes))
     odcisk = _odcisk(fh, 0, meta.first_attachment)
-    tmp, _, _ = _zloz_plik_tymczasowy(path, fh, [region, (meta.first_attachment, None)])
-    return tmp, hashlib.sha1(xml).hexdigest(), odcisk
+    tmp, sha1_tmp, sha1_zrodla = _zloz_plik_tymczasowy(
+        path, fh, [region, (meta.first_attachment, None)], oryginal_region=odcisk.region)
+    return tmp, hashlib.sha1(xml).hexdigest(), odcisk, sha1_tmp, sha1_zrodla
 
 
 # ============================================================ PISARZ XISF (P6c — łata bajtowa)
@@ -1829,11 +1904,22 @@ class _KontrolaDanych:
     równość z kotwicą dowodzi, że żaden bajt POZA regionem nagłówka się nie zmienił, także drugie
     HDU FITS i kolejne obrazy/załączniki XISF, których nie widzą ani próbki, ani `sha1_data`. Liczy
     go ten sam pełny odczyt, który re-sync i tak robi (`_skan_kontrolny` → `scan_file(substitute=)`,
-    AR-24), pod blokadą pliku - więc hasze pliku, danych i podstawiony opisują te same bajty."""
+    AR-24), pod blokadą pliku - więc hasze pliku, danych i podstawiony opisują te same bajty.
+
+    `wlasne` (cofnięcie drogą atomową, AR-182) = pary `(sha1 pliku, header_hash)` wyników WŁASNYCH
+    cofnięć z ich śladów (`atomic_undo`): plik, którego oba odciski są parą JEDNEGO śladu, jest wynikiem
+    tego cofnięcia - także wtedy, gdy nie jest plikiem sprzed commitu (zmiana od commitu, droga
+    semantyczna, backup tekstowy). Para, nie sam sha1: rekord złożony z dwóch wersji pliku nie
+    przejdzie. Bez regionu (`old_region=None` - backup tekstowy) nie ma podstawienia ani kotwicy."""
     offset: int
-    old_region: bytes
+    old_region: bytes | None
     anchor_sha1: str | None
     header_hash: str
+    wlasne: frozenset = frozenset()
+
+    def __post_init__(self):
+        if self.anchor_sha1 is not None and self.old_region is None:
+            raise ValueError("kotwica sha1 bez regionu do podstawienia - błąd wołającego")
 
 
 @contextlib.contextmanager
@@ -2513,14 +2599,33 @@ _JUZ_REGION = PowodPozycji("już cofnięte - region nagłówka jest stanem sprze
                            "undo_already_region")
 _REGION_ZMIENIONY = PowodPozycji("plik zmienił się od commitu - region nagłówka nie jest tym, "
                                  "który commit zapisał", "undo_region_changed")
+# „Już cofnięte” drogi atomowej (AR-182) - każde z dowodem tego, co mówi: cały plik sprzed commitu
+# (kotwica koperty), wynik własnego cofnięcia (para odcisków ze śladu `atomic_undo`) albo - backup
+# tekstowy bez śladu - sam nagłówek i baza, bo backup sprzed odcisku pliku reszty nie zna.
+_JUZ_ATOMOWO = PowodPozycji("już cofnięte - cały plik i baza opisują stan sprzed commitu",
+                            "undo_already")
+_JUZ_WLASNE = PowodPozycji("już cofnięte - plik jest wynikiem cofnięcia zapisanym przez Horreum, "
+                           "a baza go opisuje", "undo_already_own")
+_JUZ_TEKST = PowodPozycji("już cofnięte - nagłówek i baza opisują stan sprzed commitu; backup sprzed "
+                          "odcisku pliku nie pozwala sprawdzić reszty pliku", "undo_already_text")
 
 
 def _bez_dowodu(niezgodne) -> PowodPozycji:
-    """AR-169: region nagłówka jest już stanem sprzed commitu, ale cały plik nie ma dowodu stanu
-    sprzed commitu (`niezgodne` - werdykt kontroli danych) - cofnięcie nie jest domknięte."""
+    """AR-169, AR-182: region nagłówka jest już stanem sprzed commitu (w miejscu i atomowo), ale cały
+    plik nie ma dowodu stanu sprzed commitu ani wyniku własnego cofnięcia (`niezgodne` - werdykt
+    kontroli danych) - cofnięcie nie jest domknięte."""
     return PowodPozycji(f"region nagłówka jest już stanem sprzed commitu, ale całego pliku nie da "
                         f"się potwierdzić ({niezgodne}) - przeskanuj plik; zmianę poza nagłówkiem "
                         f"rozstrzyga człowiek", "undo_region_unproven", inner=niezgodne)
+
+
+def _bez_dowodu_wlasnego(niezgodne) -> PowodPozycji:
+    """AR-182: plik rozpoznany NAGŁÓWKIEM (backup tekstowy albo nagłówek wyniku własnego cofnięcia,
+    gdy bajty regionu koperty są inne), ale nie jest wynikiem cofnięcia ze śladu - zmienił się po nim;
+    cofnięcie nie jest domknięte."""
+    return PowodPozycji(f"plik ma nagłówek sprzed commitu, ale nie jest wynikiem cofnięcia zapisanym "
+                        f"przez Horreum ({niezgodne}) - przeskanuj plik; zmianę poza nagłówkiem "
+                        f"rozstrzyga człowiek", "undo_own_unproven", inner=niezgodne)
 
 
 def _stan_posredni(biezacy: bytes, spec: OpSpec) -> bool:
@@ -2844,8 +2949,9 @@ def _skan_kontrolny(path, kontrola):
     """`scan.scan_file` pod werdykt `_kontrola_danych` - jedyne miejsce, które wiąże kontrolę danych
     z podstawieniem: z `kontrola` ten sam pełny odczyt liczy też `file_sha1_substituted` (sha1 pliku
     ze starym regionem operacji w miejscu nowego), bez niej - zwykły skan bez trzeciego hasha. Każda
-    droga pytająca o werdykt (re-sync, powrót z `written`) czyta przez nią plik raz."""
-    if kontrola is None:
+    droga pytająca o werdykt (re-sync, powrót z `written`) czyta przez nią plik raz. Kontrola bez
+    regionu (backup tekstowy, AR-182) - zwykły skan: dowodem jest wtedy wyłącznie wynik własny."""
+    if kontrola is None or kontrola.old_region is None:
         return scan.scan_file(path)
     return scan.scan_file(path, substitute=(kontrola.offset, kontrola.old_region))
 
@@ -2862,12 +2968,18 @@ def _kontrola_danych(rec, expect_sha1_data, kontrola) -> str | None:
     mutowalna `location.file_sha1`, a „sha1 == kotwica" przepuszczał każdy plik, którego fakty ktoś
     zdążył wciągnąć - także plik z bajtem zmienionym poza nagłówkiem. Kotwica niezmienna od chwili
     utrwalenia pozwala liczyć kontrolę od nowa przy każdym ponowieniu - w tym samym pełnym odczycie,
-    który zwykła ścieżka i tak robi (bez osobnego odczytu, AR-24)."""
+    który zwykła ścieżka i tak robi (bez osobnego odczytu, AR-24).
+
+    WYNIK WŁASNY (cofnięcie drogą atomową, AR-182): para `(file_sha1, header_hash)` rekordu równa
+    parze jednego śladu cofnięcia (`kontrola.wlasne`) przechodzi bez kotwicy - to odcisk treści
+    zapisanej przez Horreum. Tożsamość klatki (`sha1_data`) sprawdzana jest i tak, przed nią."""
     if expect_sha1_data is not None and rec.sha1_data != expect_sha1_data:
         return PowodPozycji(f"plik ZMIENIONY, ale sha1_data po zapisie ({rec.sha1_data}) różni się "
                             f"od tożsamości klatki - baza NIE zsynchronizowana",
                             "data_identity_changed", sha1=rec.sha1_data)
     if kontrola is None:
+        return None
+    if (rec.file_sha1, rec.header_hash) in kontrola.wlasne:
         return None
     if rec.header_hash != kontrola.header_hash:
         return PowodPozycji("plik ZMIENIONY, ale nagłówek na dysku nie jest tym, który operacja "
@@ -4351,10 +4463,22 @@ def undo(con, commit_id, *, now,
         blokadą dowód CAŁEGO pliku (kontrola danych z kotwicą operacji commitu, AR-169): baza
         opisuje ten plik → 'blocked' „już cofnięte"; baza nie → re-sync z tym samym dowodem; bez
         dowodu (brak kotwicy, bajty poza regionem inne) → 'blocked' z receptą skanu, uchwyt zostaje;
-      * droga atomowa - z pliku i kompletu faktów bazy: nagłówek na dysku = backup (dla koperty:
-        CAŁY region bajt w bajt, dla backupu tekstowego: hash) i baza opisuje ten plik (`header_hash`
-        ORAZ `mtime`, `_baza_opisuje`) → 'blocked' „już cofnięte"; plik = backup, a baza nie → sam
-        re-sync.
+      * droga atomowa (AR-182) - ze ŚLADU własnego cofnięcia (`atomic_undo`, 0044, utrwalony przed
+        każdą podmianą cofnięcia) i z pliku: baza wciągnęła wynik własny (ślad z `synced_at`, para
+        `location.file_sha1`/`header_hash` = para śladu) i `mtime` pliku jest tym z bazy →
+        'blocked' „już cofnięte” BEZ odczytu pliku - ta sama granica zaufania co faza `synced`
+        operacji w miejscu i bramka przyrostowa skanu (pisarz, który zachowuje `mtime`, jest poza
+        nią); plik z nagłówkiem sprzed commitu (koperta: region bajt w bajt, tekst: hash) albo
+        z nagłówkiem wyniku własnego → pod jedną blokadą dowód CAŁEGO pliku: kotwica koperty
+        (`RegionBackup.file_sha1`) albo para odcisków śladu (wynik semantyczny, zmiana od commitu,
+        backup tekstowy); baza opisuje plik → „już cofnięte”, nie → re-sync z tym samym dowodem; bez
+        dowodu → 'blocked' z receptą skanu. Backup tekstowy bez śladu (cofnięty przed 0044) - jak
+        dawniej, z uczciwym zdaniem, że reszty pliku nie da się sprawdzić.
+
+    PIERWSZE COFNIĘCIE ATOMOWE: ślad przed podmianą (porażka → 'failed', plik nietknięty), plik
+    zmieniony poza nagłówkiem od commitu (`replace_intent.prepared_sha1` ≠ plik zastany) - cofnięcie
+    idzie, powód to mówi; re-sync pod blokadą pliku wciąga WYŁĄCZNIE wynik własny (para śladu)
+    albo plik sprzed commitu - zmiana w oknie między podmianą a odczytem → 'failed' bez re-syncu.
 
     PRZERWANIE (`should_cancel`): `UndoResult.remaining` = ile nieprzetworzonych backupów NIE ma
     trwałego dowodu zakończenia (`_cofniecie_zakonczone`, bez odczytu plików, AR-176) - zdanie okna
@@ -4418,34 +4542,69 @@ def _cofniecie_zakonczone(con, commit_id, b) -> bool:
     bez odczytu pliku (AR-176): commit pliku nie podmienił (`unreplaced_at`) albo operacja cofnięcia
     w miejscu jest zamknięta (`undo` w `synced`). Zgodny `header_hash` lokacji tym dowodem NIE jest:
     skan po zewnętrznym powrocie pliku wyrównuje nagłówek, a cały plik i skutki cofnięcia w bazie
-    (nagrobek AR-38, wstrzymania) mogą być inne - rozstrzyga dopiero cofnięcie tego backupu. Każdy
-    inny backup (droga atomowa nie zostawia zapisu zakończenia) wymaga sprawdzenia."""
+    (nagrobek AR-38, wstrzymania) mogą być inne - rozstrzyga dopiero cofnięcie tego backupu. Droga
+    atomowa (AR-182): ślad własnego cofnięcia, który baza wciągnęła (`_wynik_wlasny_w_bazie`). Każdy
+    inny backup wymaga sprawdzenia."""
     if con.execute("SELECT unreplaced_at FROM header_backups WHERE id = ?",
                    (b["id"],)).fetchone()[0] is not None:
         return True
     op_u = _ostatnia_operacja(con, commit_id, int(b["location_id"]), "undo")
-    return op_u is not None and op_u["phase"] == "synced"
+    if op_u is not None and op_u["phase"] == "synced":
+        return True
+    return _wynik_wlasny_w_bazie(con, b) is not None
+
+
+def _wynik_wlasny_w_bazie(con, b):
+    """Ślad cofnięcia backupu `b` drogą atomową (`atomic_undo`, AR-182), który baza wciągnęła
+    (`synced_at`) i którego para odcisków jest parą lokacji (`location.file_sha1`/`header_hash`) -
+    ostatni pełny odczyt bazy to był ten wynik; najnowszy taki albo `None`. Bez odczytu pliku: JEDNA
+    reguła dla dowodu zakończenia (`_cofniecie_zakonczone`) i szybkiej ścieżki „już cofnięte”
+    (`_cofnij_lokacje`, która dokłada `mtime` pliku)."""
+    return con.execute(
+        "SELECT au.id, au.result_sha1, au.result_hash FROM atomic_undo au "
+        "JOIN location l ON l.id = ? "
+        "WHERE au.backup_id = ? AND au.synced_at IS NOT NULL "
+        "AND au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash "
+        "ORDER BY au.id DESC LIMIT 1", (int(b["location_id"]), b["id"])).fetchone()
+
+
+def _slad_pary(con, backup_id, sha1, naglowek):
+    """Najnowszy ślad cofnięcia backupu z parą odcisków `(sha1, naglowek)` - bez względu na
+    `synced_at` (AR-182): oznaczenie wciągnięcia dotyczy wyłącznie jego, a starsza próba z tym samym
+    wynikiem (śmierć między śladem a podmianą, potem ponowienie) zostaje, jaka była. `None` = plik
+    nie jest wynikiem żadnego cofnięcia tego backupu."""
+    return con.execute(
+        "SELECT max(id) FROM atomic_undo WHERE backup_id = ? AND result_sha1 = ? "
+        "AND result_hash = ?", (backup_id, sha1, naglowek)).fetchone()[0]
 
 
 def _resync_padl(exc) -> PowodPozycji:
     """Powód cofnięcia, w którym nagłówek wrócił, a zapis bazy (re-sync albo rozliczenie skutków
     cofnięcia) padł - ponowienie dokończy samą synchronizację."""
-    blad = _blad_systemu(exc)
+    return _baza_po_przywroceniu_padla(_blad_systemu(exc))
+
+
+def _baza_po_przywroceniu_padla(blad) -> PowodPozycji:
+    """`_resync_padl` z gotowym błędem systemu klasą (`_blad_systemu`) - także dla blokady pliku pod
+    re-sync, której wynik `_pod_blokada` oddaje już sklasyfikowany."""
     return PowodPozycji(f"nagłówek PRZYWRÓCONY, ale re-sync padł - {blad}; ponowne undo dokończy "
                         f"samą synchronizację", "undo_resync_failed", detail=blad)
 
 
-def _rozlicz_cofniecie_w_bazie(con, commit_id, loc, *, now) -> None:
+def _rozlicz_cofniecie_w_bazie(con, commit_id, loc, *, now, slad=None) -> None:
     """Skutki cofnięcia commitu w bazie BEZ pliku - ta sama klinga co re-sync cofnięcia (`_sync`):
     otwarte wstrzymanie commitu na tej lokacji → `undone` (`repo.close_withheld_undone`) i nagrobek
     ręki zgaszony przez ten commit na tym pliku → odtworzony (`repo.restore_object_tombstone`, AR-38).
     Jedna transakcja; idempotentne (zamyka tylko otwarte, nagrobek raz na parę commit-plik, nowszy
     werdykt ręki wygrywa). Woła je każde „już cofnięte” (AR-169): skan po zewnętrznym powrocie pliku
-    wyrównuje nagłówek, ale nagrobka nie odtwarza."""
+    wyrównuje nagłówek, ale nagrobka nie odtwarza. `slad` = ślad cofnięcia (`atomic_undo.id`), którego
+    wynik leży na dysku i w bazie - oznaczany w tej samej transakcji (AR-182)."""
     with repo.atomic(con):
         repo.close_withheld_undone(con, commit_id=commit_id, location_id=loc["id"], now=now)
         repo.restore_object_tombstone(con, frame_id=loc["frame_id"], commit_id=commit_id,
                                       location_id=loc["id"], now=now)
+        if slad is not None:
+            repo.mark_atomic_undo_synced(con, undo_id=slad, now=now)
 
 
 def _baza_opisuje(loc, path, naglowek) -> bool:
@@ -4476,14 +4635,21 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
     """CIAŁO `undo` DLA JEDNEGO BACKUPU commitu - wspólne dla `undo` i cofnięcia zmiany obiektu
     (`undo_object_change`: karta per pozycja, przed powrotem pliku). Drogi, bramki i statusy - opis
     `undo`."""
-    def _sync(loc, path, expect, powod, semantycznie=False, kontrola=None):
+    def _sync(loc, path, expect, powod, semantycznie=False, kontrola=None, odmowa=_bez_dowodu,
+              slad=None):
         """Re-sync drogi atomowej (bez operacji w dzienniku) - w jego transakcji odtworzenie
         nagrobka zgaszonego przez ten commit na tym pliku (AR-38). `semantycznie` - plik wrócił
         cofnięciem semantycznym (AR-19), wynik trafia też do `semantic`.
 
-        `kontrola` (region w miejscu już sprzed commitu, AR-169): ten sam pełny odczyt re-syncu
-        dowodzi CAŁEGO pliku sprzed commitu (`_kontrola_danych`); bez dowodu nic nie wjeżdża,
-        a wynik to blokada z receptą skanu (`_bez_dowodu`), nie błąd.
+        `kontrola` (region w miejscu już sprzed commitu, AR-169; plik sprzed commitu albo wynik
+        własny drogi atomowej, AR-182): ten sam pełny odczyt re-syncu dowodzi CAŁEGO pliku
+        (`_kontrola_danych`); bez dowodu nic nie wjeżdża, a wynik to blokada z receptą skanu
+        (`odmowa`), nie błąd - albo, przy `odmowa=None` (re-sync zaraz po podmianie: plik JEST
+        zmieniony, baza nie), 'failed' z werdyktem kontroli.
+
+        ŚLAD (AR-182): w transakcji re-syncu wciągnięty wynik własny dostaje `synced_at` - ślad
+        `slad` (przebieg, który go utrwalił), gdy to on leży w bazie, a bez `slad` najnowszy ślad
+        z parą odcisków wciągniętej lokacji (ponowienie).
 
         ZEZNANIE (AR-82): OTWARTE wstrzymanie cofanego commitu zamyka się jako `undone` przed
         wjazdem rekordu, a cofnięcie, którego nagłówka zeznanie nie przyjęło, zakłada wstrzymanie
@@ -4500,20 +4666,23 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         def _nagrobek(zeznanie):
             repo.restore_object_tombstone(con, frame_id=loc["frame_id"], commit_id=commit_id,
                                           location_id=loc["id"], now=now)
+            sha1, naglowek = con.execute("SELECT file_sha1, header_hash FROM location WHERE id = ?",
+                                         (loc["id"],)).fetchone()
+            pasujacy = _slad_pary(con, b["id"], sha1, naglowek)
+            if pasujacy is not None and slad in (None, pasujacy):
+                repo.mark_atomic_undo_synced(con, undo_id=pasujacy, now=now)
             if zeznanie or zamkniete[0]:
                 return
             powod_w = repo.withheld_reason(con, location_id=loc["id"], commit_id=commit_id,
                                            undo=True)
-            naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?",
-                                   (loc["id"],)).fetchone()[0]
             repo.withhold_write(con, kind="undo", location_id=loc["id"], commit_id=commit_id,
                                 header_hash=naglowek, reason=powod_w, now=now)
             wstrzymanie.append(powod_w)
         try:
             wynik = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect,
                             kontrola=kontrola, przed_wciagnieciem=_przed, w_transakcji=_nagrobek)
-            if kontrola is not None and wynik.niezgodne is not None:
-                return _blok(loc, path, _bez_dowodu(wynik.niezgodne))
+            if kontrola is not None and wynik.niezgodne is not None and odmowa is not None:
+                return _blok(loc, path, odmowa(wynik.niezgodne))
             niezgodne = wynik.niezgodne
         except Exception as exc:  # noqa: BLE001 - nagłówek przywrócony, pętla idzie dalej
             niezgodne = _resync_padl(exc)
@@ -4543,11 +4712,12 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
             f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja IZOLOWANA od skanu - ponowne undo "
             f"dokończy samą synchronizację", "undo_finish_failed", inner=wynik.reason))
 
-    def _blok(loc, path, powod, juz=False):
+    def _blok(loc, path, powod, juz=False, slad=None):
         if juz:
-            # „Już cofnięte” rozlicza skutki cofnięcia w bazie - JEDNA reguła każdej drogi (AR-169).
+            # „Już cofnięte” rozlicza skutki cofnięcia w bazie - JEDNA reguła każdej drogi (AR-169);
+            # wynik własny drogi atomowej dostaje przy tym `synced_at` swojego śladu (AR-182).
             try:
-                _rozlicz_cofniecie_w_bazie(con, commit_id, loc, now=now)
+                _rozlicz_cofniecie_w_bazie(con, commit_id, loc, now=now, slad=slad)
             except Exception as exc:  # noqa: BLE001 - plik cofnięty, baza do ponowienia
                 return _pad(loc, path, _resync_padl(exc))
         return _CofniecieLokacji(FileResult(loc["id"], path, "blocked", powod), juz=juz)
@@ -4555,31 +4725,51 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
     def _pad(loc, path, powod):
         return _CofniecieLokacji(FileResult(loc["id"], path, "failed", powod))
 
-    def _region_sprzed(loc, path, env, op_c):
-        """AR-169: region nagłówka na dysku już równy stanowi sprzed commitu w miejscu (powrót spoza
-        Horreum). „Już cofnięte” i re-sync wymagają dowodu CAŁEGO pliku sprzed commitu - pod jedną
-        blokadą, tą samą kontrolą danych, którą zapis w miejscu chroni bajty poza regionem: plik
-        z podstawionym regionem backupu (tu: bieżącym) ma sha1 kotwicy sprzed commitu
-        (`inplace_op.anchor_sha1` operacji commitu, a dla operacji sprzed 0023 - `file_sha1`
-        koperty; nigdy mutowalne `location.file_sha1`), nagłówek = `pre_hash`, `sha1_data` klatki.
-        Baza opisuje ten plik → „już cofnięte” (`juz`); baza nie → re-sync z tym samym dowodem
-        (nagrobek AR-38 i wstrzymania jak w drodze atomowej); bez dowodu → blokada z receptą
-        skanu, uchwyt „Cofnij” zostaje (drugie HDU albo dane zmienione obok regionu)."""
-        kontrola = _KontrolaDanych(env.offset, env.region, op_c["anchor_sha1"] or env.file_sha1,
-                                   env.pre_hash)
+    def _kontrola(env, op_c, naglowek, wlasne):
+        """Kontrola całego pliku cofnięcia: region i kotwica sprzed commitu z koperty (kotwica
+        operacji commitu w miejscu, a dla operacji sprzed 0023 i commitu atomowego - `file_sha1`
+        koperty; nigdy mutowalne `location.file_sha1`) i pary odcisków wyników własnych (AR-182).
+        Backup tekstowy - bez regionu i bez kotwicy: dowodem jest wyłącznie wynik własny."""
+        if env is None:
+            return _KontrolaDanych(0, None, None, naglowek, wlasne)
+        kotwica = (op_c["anchor_sha1"] if op_c is not None else None) or env.file_sha1
+        return _KontrolaDanych(env.offset, env.region, kotwica, naglowek, wlasne)
+
+    def _region_sprzed(loc, path, env, op_c, wlasne=frozenset(), naglowek=None):
+        """AR-169: region nagłówka na dysku już równy stanowi sprzed commitu (w miejscu: powrót spoza
+        Horreum; atomowo, AR-182: także wynik własnego cofnięcia). „Już cofnięte” i re-sync wymagają
+        dowodu CAŁEGO pliku - pod jedną blokadą, tą samą kontrolą danych, którą zapis w miejscu
+        chroni bajty poza regionem: plik z podstawionym regionem backupu (tu: bieżącym) ma sha1
+        kotwicy sprzed commitu (`_kontrola`), nagłówek = `pre_hash`, `sha1_data` klatki - albo para
+        odcisków pliku jest parą śladu własnego cofnięcia (`wlasne`). Baza opisuje ten plik → „już
+        cofnięte” (`juz`); baza nie → re-sync z tym samym dowodem (nagrobek AR-38 i wstrzymania jak
+        w drodze atomowej); bez dowodu → blokada z receptą skanu, uchwyt „Cofnij” zostaje (drugie
+        HDU albo dane zmienione obok regionu).
+
+        `naglowek` = plik rozpoznany NAGŁÓWKIEM, nie bajtami regionu koperty (backup tekstowy,
+        nagłówek wyniku własnego z innymi bajtami regionu): bez porównania regionu pod blokadą,
+        a odmowa mówi o wyniku własnym (`_bez_dowodu_wlasnego`), nie o regionie."""
+        po_naglowku = naglowek is not None
+        kontrola = _kontrola(env, op_c, naglowek if po_naglowku else env.pre_hash, wlasne)
+        odmowa = _bez_dowodu_wlasnego if po_naglowku else _bez_dowodu
 
         def _dzialanie(fh):
-            fh.seek(env.offset)
-            if fh.read(len(env.region)) != env.region:      # zmiana między blokadami
-                return _blok(loc, path, _REGION_ZMIENIONY)
-            if _baza_opisuje(loc, path, env.pre_hash):
-                niezgodne = _kontrola_danych(_skan_kontrolny(path, kontrola), loc["sha1_data"],
-                                             kontrola)
+            if not po_naglowku:
+                fh.seek(env.offset)
+                if fh.read(len(env.region)) != env.region:      # zmiana między blokadami
+                    return _blok(loc, path, _REGION_ZMIENIONY)
+            if _baza_opisuje(loc, path, kontrola.header_hash):
+                rec = _skan_kontrolny(path, kontrola)
+                niezgodne = _kontrola_danych(rec, loc["sha1_data"], kontrola)
                 if niezgodne is not None:
-                    return _blok(loc, path, _bez_dowodu(niezgodne))
-                return _blok(loc, path, _JUZ_REGION, juz=True)
+                    return _blok(loc, path, odmowa(niezgodne))
+                if (rec.file_sha1, rec.header_hash) in wlasne:
+                    return _blok(loc, path, _JUZ_WLASNE, juz=True,
+                                 slad=_slad_pary(con, b["id"], rec.file_sha1, rec.header_hash))
+                return _blok(loc, path, _JUZ_REGION if op_c is not None else _JUZ_ATOMOWO,
+                             juz=True)
             return _sync(loc, path, loc["sha1_data"], _UNDO_DOKONCZONA_SYNCHRONIZACJA,
-                         kontrola=kontrola)
+                         kontrola=kontrola, odmowa=odmowa)
         wynik = _pod_blokada(path, _dzialanie)
         if isinstance(wynik, WriteResult):                  # blokada nie powstała / wyjątek
             return _pad(loc, path, wynik.reason)
@@ -4637,6 +4827,9 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         blad = _blad_systemu(exc, z_typem=False)
         return _pad(loc, path, PowodPozycji(f"uszkodzona koperta backupu: {blad}",
                                             "backup_envelope_broken", detail=blad))
+    # Ślady własnych cofnięć tego backupu drogą atomową (0044, AR-182) - pary odcisków wyników.
+    slady = repo.atomic_undos(con, b["id"])
+    wlasne = frozenset((s["result_sha1"], s["result_hash"]) for s in slady)
 
     if env is not None and op_c is not None and op_c["phase"] == "synced":
         class _Dziennik:
@@ -4659,7 +4852,7 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
             if res.status == "applied":
                 return _dokoncz_undo(loc, path, dziennik.op_id, None)
             if res.code == CODE_REGION_SPRZED:
-                return _region_sprzed(loc, path, env, op_c)
+                return _region_sprzed(loc, path, env, op_c, wlasne)
             if res.status == "blocked":
                 return _blok(loc, path, res.reason)
             if not res.in_place:
@@ -4669,37 +4862,74 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
                 f"{_droga_przywroc(dziennik.op_id)}", "undo_partial_isolated", inner=res.reason,
                 way=_droga_przywroc(dziennik.op_id)))
 
-    # Droga atomowa: najpierw rozpoznanie „już przywrócone" z pliku i kompletu faktów bazy.
+    # Droga atomowa. SZYBKA ŚCIEŻKA (AR-182): baza wciągnęła wynik własnego cofnięcia (para odcisków
+    # lokacji = para śladu z `synced_at`), a `mtime` pliku jest tym z bazy → „już cofnięte” bez
+    # odczytu pliku. Granica zaufania jak faza `synced` operacji w miejscu i bramka przyrostowa
+    # skanu: pisarz, który zmienia plik z zachowanym `mtime`, jest poza nią; zmiana z nowym `mtime`
+    # (także wciągnięta skanem - inna para lokacji) idzie niżej, do dowodu całego pliku.
+    domkniety = _wynik_wlasny_w_bazie(con, b)
+    if domkniety is not None and _baza_opisuje(loc, path, domkniety["result_hash"]):
+        return _blok(loc, path, _JUZ_WLASNE, juz=True)
+    # Rozpoznanie „już przywrócone” z pliku: koperta - bajty regionu sprzed commitu, backup
+    # tekstowy - nagłówek; plik z nagłówkiem wyniku własnego (droga semantyczna z innymi bajtami
+    # regionu) też idzie do dowodu całego pliku.
+    naglowek = None
     try:
         if env is not None:
             with open(path, "rb") as fh:
                 fh.seek(env.offset)
                 na_miejscu = fh.read(len(env.region)) == env.region
         else:
-            na_miejscu = _post_hash(path) == _backup_pre_hash(path, b["header_text"])
+            naglowek = _post_hash(path)
+            na_miejscu = naglowek == _backup_pre_hash(path, b["header_text"])
+        if not na_miejscu and slady:
+            naglowek = naglowek or _post_hash(path)
+            na_miejscu = naglowek in {s["result_hash"] for s in slady}
     except Exception:  # noqa: BLE001 - rozpoznanie tylko pomaga; decyduje pisarz niżej
         na_miejscu = False
     if na_miejscu:
-        if env is not None and op_c is not None:
-            # Commit zapisany W MIEJSCU, a plik nie przeszedł do cofnięcia w miejscu (inny rozmiar
-            # albo `st_ino` - `Fallback`): region sprzed commitu też tylko z dowodem CAŁEGO pliku
-            # (AR-169) - inaczej podmieniona kopia z innym drugim HDU byłaby „już cofnięta”.
-            return _region_sprzed(loc, path, env, op_c)
-        przywrocony = env.pre_hash if env is not None else _post_hash(path)
-        if _baza_opisuje(loc, path, przywrocony):
-            return _blok(loc, path, PowodPozycji("już cofnięte - nagłówek i baza opisują stan "
-                                                 "sprzed commitu", "undo_already"), juz=True)
-        return _sync(loc, path, loc["sha1_data"], _UNDO_DOKONCZONA_SYNCHRONIZACJA)
+        if env is None and not slady:
+            # Backup tekstowy cofnięty przed 0044: bez kotwicy i bez śladu - jak dawniej, ale zdanie
+            # mówi, czego nie sprawdzono.
+            if _baza_opisuje(loc, path, naglowek):
+                return _blok(loc, path, _JUZ_TEKST, juz=True)
+            return _sync(loc, path, loc["sha1_data"], _UNDO_DOKONCZONA_SYNCHRONIZACJA)
+        # Region sprzed commitu (każda droga commitu, AR-169/AR-182) albo nagłówek wyniku własnego -
+        # wyłącznie z dowodem CAŁEGO pliku; inaczej podmieniona kopia z innym drugim HDU byłaby
+        # „już cofnięta”.
+        return _region_sprzed(loc, path, env, op_c, wlasne, naglowek)
+    zamiar = repo.replace_intent(con, b["id"])
+    utrwalony: list[tuple[int, str, str]] = []
+
+    def _utrwal(w):
+        utrwalony.append((repo.record_atomic_undo(
+            con, backup_id=b["id"], result_sha1=w.result_sha1, result_size=w.result_size,
+            result_hash=w.result_hash, byte_exact=w.byte_exact, source_sha1=w.source_sha1,
+            source_size=w.source_size, displaced_path=w.displaced_path,
+            prepared_path=w.prepared_path, now=now), w.result_sha1, w.result_hash))
     res = write_full_header(
         path, b["header_text"], b["post_hash"],
-        replace_guard=lambda: repo.guard_file_replace(con, location_id=loc["id"], generation=gen))
+        replace_guard=lambda: repo.guard_file_replace(con, location_id=loc["id"], generation=gen),
+        persist_result=_utrwal,
+        expect_file_sha1=(zamiar["prepared_sha1"] if zamiar is not None
+                          and zamiar["outcome"] == "replaced" else None))
     if res.status == "applied":
         # Kontrola tożsamości jak w commicie i w gałęzi „już przywrócone": astropy zapisuje cały
         # `HDUList`, więc inna serializacja sekcji danych dałaby nowe `sha1_data`, a re-sync bez
         # kotwicy przepiąłby lokację na nową klatkę, zostawiając fakty ręki na starej. Powód
-        # niesie prawdę o bajtach (AR-19): `None` = cały plik jak przed commitem.
-        return _sync(loc, path, loc["sha1_data"], res.reason,
-                     semantycznie=res.byte_exact is False)
+        # niesie prawdę o bajtach (AR-19): `None` = cały plik jak przed commitem. Re-sync pod
+        # blokadą pliku (jak `_region_sprzed`) wciąga WYŁĄCZNIE wynik tego cofnięcia (para śladu)
+        # albo plik sprzed commitu (kotwica) - zmiana w oknie po podmianie → 'failed' (AR-182).
+        if not utrwalony:
+            raise AssertionError("cofnięcie podmieniło plik bez śladu wyniku - błąd pisarza")
+        slad, sha1, naglowek_wyniku = utrwalony[0]
+        kontrola = _kontrola(env, op_c, res.post_hash, wlasne | {(sha1, naglowek_wyniku)})
+        wynik = _pod_blokada(path, lambda fh: _sync(
+            loc, path, loc["sha1_data"], res.reason, semantycznie=res.byte_exact is False,
+            kontrola=kontrola, odmowa=None, slad=slad))
+        if isinstance(wynik, WriteResult):          # blokada pod re-sync nie powstała
+            return _pad(loc, path, _baza_po_przywroceniu_padla(wynik.reason))
+        return wynik
     if res.status == "blocked":
         return _blok(loc, path, res.reason)
     if res.backup_text is not None:

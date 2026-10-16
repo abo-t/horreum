@@ -51,7 +51,7 @@ def _probki():
         "length": 70, "limit": 68,
         "features": [writeback._CECHA_ROZMIAR, writeback._CECHA_NAGLOWEK],
         "paths": ["X:/L/a", "X:/L/b"], "sums": ["CHECKSUM", "DATASUM"],
-        "os_code": "WinError 5",
+        "os_code": "WinError 5", "db_code": "SQLITE_BUSY",
     }
 
 
@@ -839,8 +839,9 @@ _DROGI_PLIKOW = {
     "writeback.py": {("_xisf_verify", "ET.ParseError")},
     # właściciel: `powod_systemu`, `blad_systemu`; poza nim - powód odmowy KLINGI (`powod_wyjatku`:
     # `OdmowaZPowodem.powod` albo tekst odmowy, nie system) i nazwa TYPU wartości w komunikacie
-    # EXPECT kodeka (`_do_slownika`, nie tekst wyjątku)
-    "item_reasons.py": {("powod_wyjatku", None), ("_do_slownika", None)},
+    # EXPECT kodeka (`_do_slownika`, nie tekst wyjątku); `_surowy` - jedyne złożenie `Typ: opis`,
+    # wołane wyłącznie przez właścicieli klas systemu i bazy (`powod_systemu`, `powod_bazy`, AR-198)
+    "item_reasons.py": {("powod_wyjatku", None), ("_do_slownika", None), ("_surowy", None)},
     # `e` to etykieta zestawu w składaniu nazwy folderu (`zestawy_configow`), nie wyjątek
     "projection.py": {("zestawy_configow", None)},
     # `naming.stack_name` (segment siedziby pusty) i diagnoza czytnika żniw poza klasą błędu
@@ -851,12 +852,36 @@ _DROGI_PLIKOW = {
     "lead_copy.py": set(),
     # reguła formy folderu kanonu (`FolderFormError` z kodem i `ValueError`) - nie system
     "object_change.py": {("plan_object_change", "FolderFormError"), ("plan_object_change", "ValueError")},
-    # strażnik korzenia klingi (`ValueError`) i sonda hardlinka (`ProjectionAbort`) - proza rdzenia
-    "gui/projection_dialog.py": {("run", "ValueError"), ("run", "projection.ProjectionAbort")},
+    # strażnik korzenia klingi i sonda hardlinka mówią powodem z kodem (`powod_wyjatku`, AR-200)
+    "gui/projection_dialog.py": set(),
+    # workery spoza dróg zapisu (AR-198): Dostawa, teczki Domu, liczniki Porządków, planer, Pola
+    # i skład zbioru - błąd systemu albo bazy klasą
+    "gui/pipeline.py": set(),
+    "gui/home.py": set(),
+    "gui/tasks.py": set(),
+    "gui/grid_workers.py": set(),
+    # stan bazy bez stanowiska (AR-48) i zdanie rdzenia planera (`ValueError`) - nie błąd systemu
+    "gui/planner.py": {("run", "targets.BrakStanowiska"), ("run", "ValueError")},
+    # ścieżka katalogu nieprzeczytanego (`errors_out` walkera, nie powód); właściciel DIAGNOZY odczytu
+    # do `location.unreadable_reason` i `failed_paths` (P4-2, P4-6: kod Windows przed errno, bez
+    # ścieżki); odmowy klingi rodzaju i generacji zapisu w miejscu
+    "scan.py": {("_on_error", None), ("unreadable_reason_of", None),
+                ("rederive_kinds", "repo.KindWitnessStale"),
+                ("backfill_xisf_headers", "repo.StaleScanRecord")},
+    # odmowy domeny w drukach CLI: baza nowsza (AR-69), stanowisko, wzór nazwy, korzeń wydania (§0),
+    # dawca, werdykt sondy hardlinka, drzwi raportu, obserwatorium, klinga rodzaju, przebieg zmiany
+    # obiektu, plan nagłówków; `streaks` - wiersz ASCII z kontraktu (typ + numer od właściciela)
+    "cli.py": {("main", "db.SchemaTooNew"), ("_main", "ValueError"), ("_main", "ImportAbort"),
+               ("_main", "projection.ProjectionAbort"), ("_cmd_streaks", "raport.RaportOdmowa"),
+               ("_cmd_streaks", "OSError"), ("_cmd_observatory", "ValueError"),
+               ("_cmd_rederive_kind", "repo.KindWitnessStale"), ("_cmd_object_change", "ValueError"),
+               ("_cmd_header_fix", "ValueError")},
+    # wspólny korzeń dawcy (`os.path.commonpath` - różne dyski) i odmowa generacji zapisu w miejscu
+    "import_fitsmirror.py": {("preflight", "ValueError"), ("run_import", "repo.StaleScanRecord")},
     "gui/harvest_dialog.py": set(),
     "gui/wb_worker.py": set(),                     # wykonawca zapisu: wyjątek całej operacji (AR-185)
-    # odmowa klingi i staging bazy (`ValueError`, `sqlite3.Error`) - nie błąd systemu plików
-    "gui/object_change_dialog.py": {("_on_action", "(ValueError, sqlite3.Error)")},
+    # odmowa stagingu mówi powodem (`zdanie_odmowy_stagingu`, AR-200) - bez sklejki z wyjątku
+    "gui/object_change_dialog.py": set(),
 }
 _WLASCICIEL = {"powod_systemu", "blad_systemu"}
 _SZEROKIE = {"Exception", "BaseException", "OSError"}
@@ -1086,12 +1111,14 @@ def test_region_sprzed_bez_dowodu_calego_pliku_nie_jest_juz_cofniety(tmp_path, s
 
 
 def test_juz_cofniete_jedna_regula_obu_drog():
-    """AR-169: „baza opisuje plik sprzed commitu” to jedna reguła (`_baza_opisuje`) dla drogi atomowej
-    i dla regionu w miejscu. Falsyfikator: kopia warunku `header_hash`/`mtime` w jednej gałęzi."""
+    """AR-169, AR-182: „baza opisuje plik” to jedna reguła (`_baza_opisuje`) każdej drogi cofnięcia -
+    trzy wołania: szybka ścieżka wyniku własnego drogi atomowej, dowód całego pliku
+    (`_region_sprzed`, obie drogi commitu) i backup tekstowy bez śladu. Falsyfikator: kopia warunku
+    `header_hash`/`mtime` w jednej gałęzi albo czwarte wołanie."""
     zrodlo = ast.parse(inspect.getsource(writeback._cofnij_lokacje))
     wolania = [w for w in ast.walk(zrodlo)
                if isinstance(w, ast.Call) and getattr(w.func, "id", None) == "_baza_opisuje"]
-    assert len(wolania) == 2, len(wolania)
+    assert len(wolania) == 3, len(wolania)
 
 
 # ============================================================ AR-176: przerwane cofnięcie liczy resztę
@@ -1102,9 +1129,9 @@ def test_przerwane_cofniecie_liczy_reszte_z_bazy(tmp_path, inplace):
     """AR-176 pkt 4 (sonda: ponowienie przerwane, a reszta już cofnięta, szuflada obiecywała
     „dokończy resztę”): rdzeń przy przerwaniu liczy z bazy, ile nieprzetworzonych backupów NIE ma
     trwałego dowodu zakończenia - przed pierwszym: wszystkie; po części: reszta; po pełnym
-    cofnięciu: zero wyłącznie tam, gdzie dowód jest (operacja cofnięcia w miejscu zamknięta), a droga
-    atomowa zapisu zakończenia nie zostawia - jej reszta dalej wymaga sprawdzenia. Bez przerwania
-    `None`. Falsyfikator: `remaining` z samej liczby nieprzetworzonych → w miejscu 2 zamiast 0."""
+    cofnięciu: zero, bo dowód jest w obu drogach (operacja cofnięcia w miejscu zamknięta; ślad
+    cofnięcia atomowego wciągnięty przez bazę, AR-182). Bez przerwania `None`. Falsyfikator:
+    `remaining` z samej liczby nieprzetworzonych albo `_cofniecie_zakonczone` bez śladu → 2 zamiast 0."""
     from test_writeback_inplace import _fits, _loc, _scan_in, _stage
     con = db.open_db(str(tmp_path / "h.db"))
     for i in range(3):
@@ -1129,7 +1156,7 @@ def test_przerwane_cofniecie_liczy_reszte_z_bazy(tmp_path, inplace):
     assert pelne.complete and pelne.remaining is None, pelne
     ponowione = writeback.undo(con, res.commit_id, now=NOW, should_cancel=_po(1))
     assert len(ponowione.already) == 1, ponowione
-    assert ponowione.remaining == (0 if inplace else 2), ponowione
+    assert ponowione.remaining == 0, ponowione
     con.close()
 
 

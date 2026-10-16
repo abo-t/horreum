@@ -581,6 +581,12 @@ CATALOG = {
     # Surowy tekst błędu systemu w podpowiedzi okien zapisu (AR-168, `wb_worker.podpowiedz_systemu`)
     # - zdanie mówi klasę i numer w języku UI, komunikat systemu jest w języku systemu.
     "wb.os_detail_tip": {"pl": "Szczegół systemu: {detail}", "en": "System detail: {detail}"},
+    # Pole zdania okien zapisu (AR-204, `wb_worker.EtykietaBledu`): glif przed zdaniem, gdy pod
+    # kursorem stoi szczegół, i menu prawego kliku, które go kopiuje.
+    "wb.detail_marker": {"pl": "ⓘ", "en": "ⓘ"},
+    "wb.copy_sentence": {"pl": "Kopiuj zdanie", "en": "Copy sentence"},
+    "wb.copy_detail": {"pl": "Kopiuj szczegół", "en": "Copy details"},
+    "wb.copy_selection": {"pl": "Kopiuj zaznaczenie", "en": "Copy selection"},
     # Cofnięcie przerwane na żądanie (AR-176): ile nieprzetworzonych backupów nie ma trwałego dowodu
     # zakończenia (`UndoResult.remaining`) - wymagają sprawdzenia ponowieniem; zero - bez obietnicy.
     "wb.undo_cancelled_check": {
@@ -2144,6 +2150,9 @@ CATALOG = {
     "grid.preview.name": {"pl": "nazwa →", "en": "name →"},
     "grid.preview.skipped": {"pl": "(pominięto)", "en": "(skipped)"},
     "grid.preview.skipped_tip": {"pl": "pominięto: {reason}", "en": "skipped: {reason}"},
+    # Podpowiedź dotkniętego wiersza podglądu nazw (AR-193): stara i nowa nazwa pliku.
+    "grid.preview.rename_tip": {"pl": "nazwa pliku: {old!r} → {new!r} (rename)",
+                                "en": "file name: {old!r} → {new!r} (rename)"},
     "grid.preview.owner_macro": {"pl": "makra", "en": "macro"},
     "grid.preview.owner_rename": {"pl": "nazw", "en": "names"},
     "grid.preview.takeover": {
@@ -3406,17 +3415,44 @@ CATALOG = {
     },
     "grid.rename.renamed_label": {"pl": "Przemianowano: {n}", "en": "Renamed: {n}"},
     "grid.wb.error": {"pl": "BŁĄD: {msg}", "en": "ERROR: {msg}"},
-    "grid.wb.failed": {
-        "pl": "Writeback „{op}” nie powiódł się: {msg}",
-        "en": "Writeback “{op}” failed: {msg}",
-    },
+    # Awaria całej operacji uchwytu zapisu Zbiorów na pasku (AR-204): zdanie per operacja startowana
+    # z widoku (`FramesView._on_wb_failed`), bez tokenu operacji i bez żargonu „Writeback”.
+    "grid.wb.op.commit": {"pl": "Zapis zmian do plików nie powiódł się: {msg}",
+                          "en": "Writing the changes to files failed: {msg}"},
+    "grid.wb.op.undo": {"pl": "Cofnięcie zapisu nie powiodło się: {msg}",
+                        "en": "Undoing the write failed: {msg}"},
+    "grid.wb.op.commit_rename": {"pl": "Zmiana nazw plików nie powiodła się: {msg}",
+                                 "en": "Renaming the files failed: {msg}"},
+    "grid.wb.op.undo_rename": {"pl": "Cofnięcie zmiany nazw nie powiodło się: {msg}",
+                               "en": "Undoing the renames failed: {msg}"},
+    "grid.wb.op.lead_copy": {"pl": "Wskazanie kopii wiodącej nie powiodło się: {msg}",
+                             "en": "Setting the lead copy failed: {msg}"},
+    "grid.wb.op.finish_inplace": {"pl": "Dokończenie zapisu nie powiodło się: {msg}",
+                                  "en": "Finishing the write failed: {msg}"},
+    "grid.wb.op.recover_torn": {"pl": "Przywrócenie nagłówka sprzed zapisu nie powiodło się: {msg}",
+                                "en": "Restoring the header from before the write failed: {msg}"},
+    "grid.wb.op.release_inplace": {"pl": "Zwolnienie pliku do skanu nie powiodło się: {msg}",
+                                   "en": "Releasing the file to the scan failed: {msg}"},
     "grid.wb.cancelling": {"pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)"},
     "grid.wb.status": {"pl": "Writeback: {summary}", "en": "Writeback: {summary}"},
     "grid.wb.undo_status": {"pl": "Undo: {msg}", "en": "Undo: {msg}"},
     "grid.wb.rejected": {"pl": "Odrzucono {n} zmian", "en": "Discarded {n} changes"},
     "grid.rename.staging_busy_tip": {
-        "pl": "staging nazw w toku ({n} zmian)", "en": "name staging in progress ({n} changes)",
+        "pl": {"one": "staging nazw w toku ({n} zmiana)", "few": "staging nazw w toku ({n} zmiany)",
+               "many": "staging nazw w toku ({n} zmian)"},
+        "en": {"one": "name staging in progress ({n} change)",
+               "other": "name staging in progress ({n} changes)"},
     },
+    # Bliźniak dla przycisku „Do stagingu” nazw, gdy czekają karty makra (AR-205: był literał PL).
+    "grid.macro.staging_busy_tip": {
+        "pl": {"one": "staging makra w toku ({n} zmiana)", "few": "staging makra w toku ({n} zmiany)",
+               "many": "staging makra w toku ({n} zmian)"},
+        "en": {"one": "macro staging in progress ({n} change)",
+               "other": "macro staging in progress ({n} changes)"},
+    },
+    # Etykieta celu panelu nazw (AR-205: był literał „Cel:” także w UI EN); `what` = „N zaznaczonych”
+    # albo „N widocznych” (`grid.selected` / `grid.visible`).
+    "grid.rename.target": {"pl": "Cel: {what}", "en": "Target: {what}"},
     "grid.rename.no_count": {
         "pl": "Rename: brak klatek do policzenia", "en": "Rename: no frames to count",
     },
@@ -3940,10 +3976,10 @@ CATALOG = {
         "pl": "Etap „{stage}” przerwany.", "en": "Stage „{stage}” interrupted.",
     },
     "pipeline.stage_failed_status": {
-        "pl": "Etap „{stage}” nie powiódł się.", "en": "Stage „{stage}” failed.",
+        "pl": "Etap „{stage}” nie powiódł się.", "en": "Stage “{stage}” failed.",
     },
     "pipeline.stage_failed_line": {
-        "pl": "BŁĄD — etap „{stage}”: {msg}", "en": "ERROR — stage „{stage}”: {msg}",
+        "pl": "BŁĄD - etap „{stage}”: {msg}", "en": "ERROR - stage “{stage}”: {msg}",
     },
 
     # --- sekcja zniknięć: zdanie po zapisie ---
@@ -4571,6 +4607,14 @@ CATALOG = {
         "pl": "  nietknięte: {n} (plan zostaje - wznów przez „Odśwież podgląd”)",
         "en": "  untouched: {n} (the plan stays - resume via “Refresh preview”)",
     },
+    # Nagłówek raportu, gdy pliki wydania leżą, a manifestu nie zapisano (AR-197): bez rady
+    # „Odśwież podgląd” - sonda zobaczy komplet, a ponowienie z okna niczego nie dopisze.
+    "proj.manifest_error_head": {"pl": "Błąd: {msg}\n\n", "en": "Error: {msg}\n\n"},
+    # Pozycja z linkiem utworzonym, którego sonda pierwszego linku nie przeczytała (AR-197).
+    "proj.unverified": {
+        "pl": "  niezweryfikowane (link utworzony, sonda nie przeczytała plików): {n}",
+        "en": "  unverified (link created, the probe could not read the files): {n}",
+    },
     "proj.multi_present": {
         "pl": "  wiele obecnych kopii: {n} (użyto pierwszej)",
         "en": "  multiple present copies: {n} (used the first)",
@@ -5072,6 +5116,11 @@ CATALOG = {
     # --- tasks.py (widok Porządki): _TASKS + tytuły podstron trzymają KLUCZE ---
     "tasks.list_title": {
         "pl": "Porządki — zadania ze stanu bazy", "en": "Housekeeping — tasks from the database state",
+    },
+    # Rachunek liczników padł w tle i przy ponowieniu (AR-198) - lista zostaje przy stanie poprzednim.
+    "tasks.counts_failed": {
+        "pl": "Liczniki Porządków się nie przeliczyły (lista mówi stan poprzedni): {msg}",
+        "en": "Housekeeping counts could not be recomputed (the list shows the previous state): {msg}",
     },
     "tasks.back": {"pl": "← Porządki", "en": "← Housekeeping"},
     "tasks.telescope_axis": {"pl": "Oś teleskopu", "en": "Telescope axis"},
@@ -6987,12 +7036,41 @@ CATALOG = {
         "pl": "{inner}; lokacja IZOLOWANA od skanu, odzysk: {way}",
         "en": "{inner}; the location is ISOLATED from the scan, recovery: {way}"},
     "objchg.item.undo_already": {
-        "pl": "już cofnięte - nagłówek i baza opisują stan sprzed commitu",
-        "en": "already undone - the header and the database describe the state from before the "
+        "pl": "już cofnięte - cały plik i baza opisują stan sprzed commitu",
+        "en": "already undone - the whole file and the database describe the state from before the "
               "commit"},
     "objchg.item.undo_not_synced": {
         "pl": "{inner}; baza NIE zsynchronizowana - przeskanuj plik albo ponów cofnięcie",
         "en": "{inner}; database NOT synchronized - scan the file or retry the undo"},
+    # Cofnięcie atomowe z dowodem całego pliku i śladem własnego wyniku (AR-182, `atomic_undo`).
+    "objchg.item.undo_already_own": {
+        "pl": "już cofnięte - plik jest wynikiem cofnięcia zapisanym przez Horreum, a baza go "
+              "opisuje",
+        "en": "already undone - the file is the undo result written by Horreum, and the database "
+              "describes it"},
+    "objchg.item.undo_already_text": {
+        "pl": "już cofnięte - nagłówek i baza opisują stan sprzed commitu; backup sprzed odcisku "
+              "pliku nie pozwala sprawdzić reszty pliku",
+        "en": "already undone - the header and the database describe the state from before the "
+              "commit; a backup from before the file fingerprint cannot check the rest of the "
+              "file"},
+    "objchg.item.undo_outside_changed": {
+        "pl": "cofnięte semantycznie - nagłówek przywrócony, ale plik zmienił się poza nagłówkiem "
+              "od commitu (sha1 pliku inny niż zapisany przez commit); ta zmiana zostaje w pliku",
+        "en": "restored semantically - header restored, but the file changed outside the header "
+              "since the commit (the file's sha1 differs from the one the commit wrote); that "
+              "change stays in the file"},
+    "objchg.item.undo_record_not_saved": {
+        "pl": "ślad cofnięcia NIE powstał w bazie, więc podmiany nie było - plik nietknięty: "
+              "{detail}",
+        "en": "the undo record was NOT saved in the database, so no replacement happened - file "
+              "untouched: {detail}"},
+    "objchg.item.undo_own_unproven": {
+        "pl": "plik ma nagłówek sprzed commitu, ale nie jest wynikiem cofnięcia zapisanym przez "
+              "Horreum ({inner}) - przeskanuj plik; zmianę poza nagłówkiem rozstrzyga człowiek",
+        "en": "the file has the header from before the commit, but it is not the undo result "
+              "written by Horreum ({inner}) - rescan the file; a change outside the header is for "
+              "a person to decide"},
     "objchg.item.recover_not_open": {
         "pl": "operacja {op_id} nie jest otwarta ({phase}) - odzysk dotyczy wyłącznie przerwanego "
               "zapisu",
@@ -7153,6 +7231,105 @@ CATALOG = {
     "objchg.item.macro_missing_operand": {"pl": "brak operandu: {name}",
                                           "en": "missing operand: {name}"},
     "objchg.item.macro_zero_division": {"pl": "dzielenie przez zero", "en": "division by zero"},
+    # Pominięcia podglądu renamu i błędy wzoru nazwy (AR-193, `naming.run_rename`, `resolve_dt`,
+    # `compose_name`, `_flatgrp_segment`, `validate_template`). PL = zdanie rdzenia znak w znak.
+    "objchg.item.rename_no_time_source": {"pl": "brak źródła czasu '{value}'",
+                                          "en": "no time source '{value}'"},
+    "objchg.item.rename_no_datetime": {"pl": "brak rozstrzygniętej daty-godziny",
+                                       "en": "no resolved date and time"},
+    "objchg.item.rename_flat_no_copy": {"pl": "flat podpięty, ale master bez obecnej kopii",
+                                        "en": "flat linked, but the master has no present copy"},
+    "objchg.item.rename_flat_no_group": {"pl": "brak FLATGRP w nazwie mastera flat: {name}",
+                                         "en": "no FLATGRP in the master flat name: {name}"},
+    "objchg.item.rename_flat_empty_group": {
+        "pl": "pusta grupa FLATGRP w nazwie mastera flat: {name}",
+        "en": "empty FLATGRP group in the master flat name: {name}"},
+    "objchg.item.rename_flat_many_groups": {"pl": "kopie mastera flat o różnych grupach: {value}",
+                                            "en": "master flat copies with different groups: {value}"},
+    "objchg.item.rename_no_present_copy": {"pl": "brak obecnej kopii do renamu (wszystkie present=0)",
+                                           "en": "no present copy to rename (all present=0)"},
+    "objchg.item.rename_many_copies": {
+        "pl": "wiele obecnych kopii ({n}) -- rename multi-location poza v1",
+        "en": "several present copies ({n}) - multi-location rename is outside v1"},
+    "objchg.item.rename_frame_gone": {"pl": "frame nieobecny w bazie",
+                                      "en": "frame missing from the database"},
+    "objchg.item.rename_no_time": {"pl": "brak DATE-OBS ani czasu w nazwie",
+                                   "en": "no DATE-OBS and no time in the name"},
+    "objchg.item.rename_unchanged": {"pl": "nazwa bez zmian", "en": "name unchanged"},
+    "objchg.item.rename_collision": {
+        "pl": "kolizja nazwy w wsadzie: {name} - dodaj token disc lub zmień wzór",
+        "en": "name collision in the batch: {name} - add the disc token or change the pattern"},
+    "objchg.item.rename_tpl_bad_regex": {"pl": "zły regex w tokenie 'orig': {value} ({detail})",
+                                         "en": "bad regex in token 'orig': {value} ({detail})"},
+    "objchg.item.rename_tpl_trail_not_last": {"pl": "token 'trail' musi być ostatni we wzorze",
+                                              "en": "the 'trail' token must be last in the pattern"},
+    "objchg.item.rename_tpl_bad_case": {"pl": "nieznana wielkość liter tokenu 'kind': {value}",
+                                        "en": "unknown letter case for token 'kind': {value}"},
+    "objchg.item.rename_tpl_unknown_token": {"pl": "nieznany token szablonu: {value}",
+                                             "en": "unknown pattern token: {value}"},
+    # Błędy definicji makra i wyrażenia (AR-194, `expr.compile_expr`, `expr._eval`,
+    # `macro.MacroDef.from_dict`). PL = zdanie rdzenia znak w znak (ASCII, jak `macro_*`).
+    "objchg.item.expr_empty": {"pl": "puste wyrazenie", "en": "empty expression"},
+    "objchg.item.expr_syntax": {"pl": "blad skladni: {detail}", "en": "syntax error: {detail}"},
+    "objchg.item.expr_bad_const": {"pl": "niedozwolona stala: {value}",
+                                   "en": "constant not allowed: {value}"},
+    "objchg.item.expr_store": {"pl": "przypisanie w wyrazeniu niedozwolone",
+                               "en": "assignment inside an expression is not allowed"},
+    "objchg.item.expr_call_not_allowed": {"pl": "dozwolone tylko wywolania z bialej listy funkcji",
+                                          "en": "only calls of allowed functions are permitted"},
+    "objchg.item.expr_kwargs": {"pl": "argumenty nazwane niedozwolone",
+                                "en": "keyword arguments are not allowed"},
+    "objchg.item.expr_starred": {"pl": "rozpakowanie argumentow niedozwolone",
+                                 "en": "argument unpacking is not allowed"},
+    "objchg.item.expr_bad_node": {"pl": "niedozwolony element wyrazenia: {name}",
+                                  "en": "element not allowed in an expression: {name}"},
+    "objchg.item.macro_def_no_assign": {"pl": "definicja makra wymaga pola 'assign'",
+                                        "en": "the macro definition needs an 'assign' field"},
+    "objchg.item.macro_def_bad_assign": {"pl": "niepoprawne 'assign': {detail}",
+                                         "en": "invalid 'assign': {detail}"},
+    "objchg.item.macro_def_bad_op": {"pl": "niedozwolona operacja: {op}",
+                                     "en": "operation not allowed: {op}"},
+    # Błąd bazy klasą (AR-198, `item_reasons.powod_bazy`) - nazwa błędu SQLite w nawiasie, surowy
+    # tekst SQLite w podpowiedzi (`detail`), jak przy błędzie systemu.
+    "objchg.item.db_busy": {"pl": "baza zablokowana ({db_code})",
+                            "en": "the database is locked ({db_code})"},
+    "objchg.item.db_unavailable": {"pl": "baza niedostępna do odczytu albo zapisu ({db_code})",
+                                   "en": "the database cannot be read or written ({db_code})"},
+    "objchg.item.db_full": {"pl": "brak miejsca na bazę ({db_code})",
+                            "en": "no space left for the database ({db_code})"},
+    "objchg.item.db_damaged": {"pl": "plik bazy uszkodzony albo nie jest bazą ({db_code})",
+                               "en": "the database file is damaged or is not a database ({db_code})"},
+    # Wydanie obiektu (`projection`, AR-197, AR-200): odmowy klingi wydania i kroki przerwane błędem
+    # systemu (klasa w `inner`). PL = zdanie rdzenia znak w znak.
+    "objchg.item.proj_root_not_excluded": {
+        "pl": "korzeń projekcji {dir} nie zawiera segmentu wykluczonego ({name}) - projekcja poza "
+              "wykluczeniem wróciłaby jako wejście skanu",
+        "en": "the release root {dir} has no excluded segment ({name}) - a release outside the "
+              "exclusion would come back as scan input"},
+    "objchg.item.proj_first_link": {
+        "pl": "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) - wolumen nie "
+              "wspiera hardlinków? włącz tryb kopii",
+        "en": "the first link failed the identity probe (inode/size/content) - does the volume not "
+              "support hard links? turn on copy mode"},
+    "objchg.item.proj_root_failed": {"pl": "nie założono folderu wydania: {inner}",
+                                     "en": "the release folder was not created: {inner}"},
+    "objchg.item.proj_out_failed": {
+        "pl": "folder wydania założony, ale folder wyjścia WBPP (out) nie powstał: {inner}",
+        "en": "the release folder was created, but the WBPP output folder (out) was not: {inner}"},
+    "objchg.item.proj_verify_failed": {
+        "pl": "link utworzony, ale sonda pierwszego linku nie odczytała plików - wydanie zatrzymane "
+              "przed masą: {inner}",
+        "en": "the link was created, but the first-link probe could not read the files - the release "
+              "stopped before the bulk: {inner}"},
+    "objchg.item.proj_manifest_failed": {
+        "pl": "nie zapisano manifestu wydania (_PROJEKCJA.json) - pliki tego wydania leżą w celu, ale "
+              "manifest ich nie opisuje (brak go albo został poprzedni), więc rozpoznanie obiektu przy "
+              "wciąganiu wyników WBPP i kontrola układu drzewa przy następnym wydaniu mogą być "
+              "niepełne: {inner}",
+        "en": "the release manifest (_PROJEKCJA.json) was not written - the files of this release are "
+              "in the target, but the manifest does not describe them (it is missing or the previous "
+              "one remains), so recognizing the object when taking in WBPP results and checking the "
+              "tree layout on the next release may be incomplete: {inner}"},
     # Reguła formy folderu obiektu (`resolve.catalog.FOLDER_RULE_CODES`, AR-141) - szczegół
     # pominięcia `bad_target` w języku UI.
     "objchg.folder.empty": {"pl": "kanon pusty albo nie jest tekstem",
@@ -7370,6 +7547,11 @@ CATALOG = {
                                      "en": "FITS: the whole file is rewritten - {reason}."},
     "objchg.err.stage": {"pl": "Zapis planu do bazy odmówiony: {msg}",
                          "en": "Saving the plan to the database was refused: {msg}"},
+    # Staging odbity na inwariancie planu (`repo.stage_object_change` - `ValueError` EXPECT, błąd
+    # programu): zdanie w języku UI, surowy tekst inwariantu w szczególe (AR-200).
+    "objchg.err.stage_plan": {
+        "pl": "plan niespójny z regułami zapisu (błąd programu) - szczegół w podpowiedzi",
+        "en": "the plan breaks the saving rules (a program error) - details in the tooltip"},
     "objchg.res.notes": {"pl": " · z uwagą: {n} - {note}", "en": " · with a note: {n} - {note}"},
     "objchg.res.rescan": {
         "pl": {"one": " · {n} plik zmienił się od ostatniego skanu - najpierw przebieg Dostawy "

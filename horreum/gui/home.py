@@ -48,6 +48,8 @@ from horreum.gui.grid import Recepta
 # Stan teczki → rola koloru i zdanie pod kursorem: jeden właściciel z oknem teczek „Wydaj obiekt…".
 # Role są nazwami ról QSS (`theme.ROLES`), więc kropka bierze kolor z motywu, nie z literału.
 from horreum.gui.projection_dialog import _STATE_ROLES, _STATE_TIPS
+from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
+from horreum.item_reasons import blad_systemu
 
 # Teczki Domu: trzy kolumny, do sześciu rzędów - a rzędów tyle, ile mieści wysokość okna
 # (`_dopasuj_rzedy`). Reszta jest o jedno zapytanie dalej, w Znajdź (stopka to mówi).
@@ -196,7 +198,8 @@ class TeczkiWorker(QObject):
     synchronicznie. Wynik niesie generację startu - widok odrzuca stale."""
 
     done = Signal(int, object)          # (generacja, wiersze `release_readiness`)
-    failed = Signal(int, str)           # (generacja, komunikat)
+    # (generacja, powód) - `object`: kod błędu bazy klasą (AR-198) przeżywa sygnał
+    failed = Signal(int, object)
     finished = Signal()
 
     def __init__(self, db_path, gen, con=None):
@@ -210,7 +213,9 @@ class TeczkiWorker(QObject):
         try:
             self.done.emit(self._gen, self._compute())
         except Exception as exc:        # szczerze na ekran, nie cicha śmierć wątku
-            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+            # Teczki czytają WYŁĄCZNIE bazę (zmierzone: 0 wywołań systemu plików), więc realną
+            # awarią jest błąd SQLite - klasą bazy w języku UI, surowy tekst w szczególe (AR-198).
+            self.failed.emit(self._gen, blad_systemu(exc))
         finally:
             self.finished.emit()
 
@@ -359,7 +364,10 @@ class HomeView(QWidget):
         v.addWidget(self.co_mam)
 
         v.addWidget(_etykieta(i18n.t("home.folders.title"), pogrubiona=True))
-        self.teczki_status = _etykieta(rola="secondary")
+        # Pole z protokołu „zdanie + szczegół” (AR-198): szczegół awarii biegu teczek pod kursorem,
+        # a „Liczę gotowość…” i pusty stan (`setText`) go zdejmują.
+        self.teczki_status = EtykietaBledu("")
+        self.teczki_status.setProperty("role", "secondary")
         self.teczki_status.setWordWrap(True)
         v.addWidget(self.teczki_status)
         siatka = QWidget()
@@ -511,12 +519,13 @@ class HomeView(QWidget):
         self._pokazana_gen = gen
         self._render_teczki(rows)
 
-    @Slot(int, str)
-    def _on_teczki_failed(self, gen, msg):
+    @Slot(int, object)
+    def _on_teczki_failed(self, gen, powod):
         if gen != self._gen:
             return
         self._pokazana_gen = gen
-        self.teczki_status.setText(i18n.t("home.folders.failed", msg=msg))
+        self.teczki_status.ustaw(i18n.t("home.folders.failed", msg=tekst_powodu(powod)),
+                                 wiersz_systemu(powod))
         self.teczki_status.setVisible(True)
         self._dopasuj_rzedy()            # komunikat zostaje obok starych kart do następnego biegu
 

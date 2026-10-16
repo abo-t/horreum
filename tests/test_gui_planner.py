@@ -863,3 +863,33 @@ def test_guzik_przeniesienia_aktywny_bez_kolizji_niesie_zapowiedz_gestu(view):
     view.orphan_list.setCurrentRow(0)
     assert view.orphan_move_btn.isEnabled() is True
     assert view.orphan_move_btn.toolTip() == i18n.t("planner.orphan_move_tip", where="C9")
+
+
+# ============================================================ AR-198: błąd bazy klasą w nagłówku
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_planer_baza_niedostepna_klasa_i_szczegol(view, tmp_path, lang):
+    """Rachunek nocy czyta bazę i dane pakietu - realna awaria to błąd SQLite: tu PRAWDZIWY, plik
+    bazy niedostępny (katalog odpięty, SQLITE_CANTOPEN). Nagłówek i pasek stanu mówią klasą bazy
+    w języku UI, surowy tekst SQLite w szczególe nagłówka; udany rachunek zdejmuje szczegół.
+    Falsyfikator: `PlanWorker.run` z `f"{type(exc).__name__}: {exc}"`."""
+    from horreum.gui import i18n
+    i18n.set_lang(lang)
+    pasek = []
+    view.status_message.connect(pasek.append)
+    try:
+        prawdziwa = view._db_path
+        view._db_path = str(tmp_path / "odpiety" / "planer.db")
+        view._off_thread = False
+        view.replan()
+        zdanie = i18n.t("objchg.item.db_unavailable", db_code="SQLITE_CANTOPEN")
+        assert view.night_label.text() == zdanie and pasek[-1] == zdanie
+        assert view.night_label.toolTip() == zdanie + "\n" + i18n.t(
+            "wb.os_detail_tip", detail="OperationalError: unable to open database file")
+        if lang == "en":
+            assert not set(zdanie) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), zdanie
+        view._db_path = prawdziwa
+        view.replan()
+        assert "2026-08-15" in view.night_label.text() and view.night_label.szczegol() == ""
+    finally:
+        i18n.set_lang("pl")

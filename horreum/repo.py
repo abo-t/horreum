@@ -4581,6 +4581,13 @@ def replace_intent(con, backup_id):
     return con.execute("SELECT * FROM replace_intent WHERE backup_id = ?", (backup_id,)).fetchone()
 
 
+def atomic_undos(con, backup_id):
+    """Ślady cofnięć backupu drogą atomową (0044, AR-182), od najstarszego - pusta lista dla backupu
+    cofanego wyłącznie w miejscu albo przed 0044."""
+    return con.execute("SELECT * FROM atomic_undo WHERE backup_id = ? ORDER BY id",
+                       (backup_id,)).fetchall()
+
+
 def mark_location_rescan(con, *, location_id, now, reason, actor="user:local"):
     """TRWAŁY ZNACZNIK „PRZECZYTAJ OD NOWA” (AR-64, C7): `location.mtime` → NULL, więc brama
     przyrostowa skanu nie pominie pliku (NULL nie równa się niczemu) - jak przy drodze powrotu
@@ -4657,6 +4664,41 @@ def confirm_backup_replaced(con, *, backup_id, now):
                     "WHERE id = ?", (backup_id,))
         con.execute("UPDATE replace_intent SET phase = 'closed', outcome = 'replaced', "
                     "closed_at = ? WHERE backup_id = ?", (now, backup_id))
+
+
+def record_atomic_undo(con, *, backup_id, result_sha1, result_size, result_hash, byte_exact,
+                       source_sha1, source_size, displaced_path, prepared_path, now):
+    """ŚLAD COFNIĘCIA DROGĄ ATOMOWĄ (0044, AR-182): co cofnięcie backupu położy pod ścieżką (wynik:
+    sha1, rozmiar, nagłówek, `byte_exact`), co pod nią zastało (źródło) i jakie pliki może zostawić
+    na dysku (kopia wyparta, plik tymczasowy - AR-127). Utrwalany PRZED podmianą (reguła „backup
+    przed `os.replace`” z 2026-09-26): ponowienie rozpozna po nim własny wynik także po śmierci
+    procesu w oknie podmiany. Dlatego ślad musi być ZATWIERDZONY, zanim plik się ruszy - wołanie
+    w otwartej transakcji (np. w zakresie `atomic`, który wycofałby go razem z błędem po podmianie)
+    to błąd wołającego (EXPECT, `ValueError`, zero zapisu). Append-only; staging pisarza - bez
+    eventu. Zwraca id śladu (`mark_atomic_undo_synced`)."""
+    if con.in_transaction:
+        raise ValueError("ślad cofnięcia w otwartej transakcji - nie byłby zatwierdzony przed "
+                         "podmianą pliku")
+    with con:
+        cur = con.execute(
+            "INSERT INTO atomic_undo(backup_id, result_sha1, result_size, result_hash, byte_exact, "
+            "source_sha1, source_size, displaced_path, prepared_path, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (backup_id, result_sha1, result_size, result_hash,
+             None if byte_exact is None else int(bool(byte_exact)), source_sha1, source_size,
+             displaced_path, prepared_path, now))
+    return cur.lastrowid
+
+
+def mark_atomic_undo_synced(con, *, undo_id, now):
+    """WYNIK COFNIĘCIA WCIĄGNIĘTY (0044, AR-182): baza opisuje plik, który zapisało cofnięcie
+    o śladzie `undo_id` - w transakcji re-syncu cofnięcia albo rozliczenia „już cofnięte” (dołącza
+    do zakresu `atomic` wołającego). Pierwsza chwila zostaje: ślad już oznaczony → `False` bez zmian;
+    oznacza WYŁĄCZNIE wskazany ślad, nigdy starszą próbę z tym samym wynikiem. Bez eventu."""
+    with _immediate(con):
+        n = con.execute("UPDATE atomic_undo SET synced_at = ? WHERE id = ? AND synced_at IS NULL",
+                        (now, undo_id)).rowcount
+    return n == 1
 
 
 def pending_header_backups(con, location_id):

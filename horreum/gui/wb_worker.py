@@ -9,8 +9,9 @@ i cleanup z `wait()`.
 
 Warstwa widżetów (import Qt uprawniony), ale worker ŻADNEGO widżetu nie dotyka: postęp/koniec/błąd
 wracają sygnałami, a wołający sam gasi przyciski i rysuje pasek - dlatego w `grid.py` zostaje
-kilkulinijkowy launcher robiący WYŁĄCZNIE rzeczy widżetowe. Jedyny widżet modułu to pole błędu okien
-zapisu (`EtykietaBledu`, AR-185): wspólne dla okien, które biorą stąd zdania wyniku.
+kilkulinijkowy launcher robiący WYŁĄCZNIE rzeczy widżetowe. Jedyny widżet modułu to pole zdania okien
+zapisu (`EtykietaBledu`, AR-185, AR-204): jeden protokół „zdanie + szczegół” dla okien, które biorą
+stąd zdania wyniku, szuflady Zbiorów, notek żniw i pól błędu stron.
 
 Uchwyt jest PER POWIERZCHNIA, nie singleton: wspólna instancja zlałaby `is_busy`, `cancel()`
 i callbacki dwóch niezależnych operacji. Wzajemne wykluczenie DWÓCH powierzchni jest więc
@@ -25,12 +26,13 @@ import re
 import string
 import threading
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import QObject, QRect, QSize, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QGuiApplication, QPainter
+from PySide6.QtWidgets import QLabel, QMenu
 
 from horreum import db, lead_copy, writeback
 from horreum.gui import i18n
-from horreum.item_reasons import (OS_REASON_CODES, PowodPozycji,   # powód z kodem (AR-141)
+from horreum.item_reasons import (SYSTEM_REASON_CODES, PowodPozycji,   # powód z kodem (AR-141)
                                   blad_systemu, param_ok, powod_systemu)
 from horreum.gui.i18n_catalog import CATALOG
 
@@ -196,10 +198,16 @@ class WritebackRunner(QObject):
         - TEN moduł nie wie, co jest paskiem, a co przyciskiem. `on_failed(op, zdanie, podpowiedź)`:
         trzy parametry - PySide przycina argumenty sygnału po cichu, więc odbiorca z dwoma zgubiłby
         szczegół systemu bez błędu (AR-185). Zła arność odbiorcy = `TypeError` od razu (EXPECT),
-        nie cisza dopiero przy pierwszej awarii."""
-        inspect.signature(on_failed).bind("op", "zdanie", "podpowiedź")
+        nie cisza dopiero przy pierwszej awarii; odbiorca bez sygnatury do sprawdzenia (wbudowany,
+        np. `max`) - też `TypeError`: arności nie da się dowieść. Sprawdzenie stoi ZA zajętością -
+        operacja w biegu odpowiada `False` każdemu wołającemu (wołający nie dostaje wtedy callbacków)."""
         if self._thread is not None:
             return False
+        try:
+            sygnatura = inspect.signature(on_failed)
+        except ValueError as exc:
+            raise TypeError(f"odbiorca porażki bez sygnatury do sprawdzenia: {on_failed!r}") from exc
+        sygnatura.bind("op", "zdanie", "podpowiedź")
         self._worker = WritebackWorker(self._db_path, op, target_id, now_fn=self._now)
         self._worker.progress.connect(on_progress)
         self._worker.done.connect(on_done)
@@ -344,18 +352,19 @@ def podpowiedz_kart(res):
 
 
 def szczegol_systemu(powod):
-    """Surowy tekst systemu (`Typ: [WinError N] opis`) pierwszego błędu systemu klasą
-    (`item_reasons.OS_REASON_CODES`) w drzewie powodu - parametry-powody, listy, uwagi - albo
+    """Surowy tekst systemu albo bazy (`Typ: [WinError N] opis`) pierwszego błędu klasą
+    (`item_reasons.SYSTEM_REASON_CODES`) w drzewie powodu - parametry-powody, listy, uwagi - albo
     None. Zdanie mówi klasę i numer w języku UI, komunikat systemu (w języku systemu) schodzi tu."""
     surowy = _surowy_systemu(powod)
     return None if surowy is None else _bez_repr_sciezek(surowy)
 
 
 def _surowy_systemu(powod):
-    """`detail` pierwszego błędu systemu klasą w drzewie powodu (tekst jak od systemu) albo None."""
+    """`detail` pierwszego błędu klasą (system, baza) w drzewie powodu (tekst jak od systemu) albo
+    None."""
     if not isinstance(powod, PowodPozycji):
         return None
-    if powod.code in OS_REASON_CODES:
+    if powod.code in SYSTEM_REASON_CODES:
         detail = dict(powod.params).get("detail")
         return detail if isinstance(detail, str) else None
     for _nazwa, wartosc in powod.params:
@@ -392,19 +401,115 @@ def podpowiedz_systemu(res):
 
 
 class EtykietaBledu(QLabel):
-    """Pole błędu okna zapisu: podpowiedź (szczegół systemu awarii, AR-185) należy do BIEŻĄCEGO
-    zdania - każde nowe `setText` i `clear` ją zdejmuje, więc szczegół jednej awarii nie zostaje pod
-    zdaniem walidacji albo „brak gospodarza”. Zwykły `QLabel` podpowiedzi przy `clear()` nie rusza,
-    a C++ `clear` nie woła pythonowego `setText` (zmierzone, PySide6 6.9) - stąd nadpisane oba.
-    Wołający stawia podpowiedź PO tekście (`setToolTip`). Wzorzec `grid_selection._ZdanieWyniku`."""
+    """Pole zdania okna zapisu - JEDYNY protokół „zdanie + szczegół” (AR-204): pole błędu okien kart,
+    zmiany obiektu i stron Dostawy, wynik szuflady Zbiorów (`grid_selection._ZdanieWyniku`), notki
+    żniw. Do AR-204 były trzy drogi (`setText` + `setToolTip` z samym szczegółem, `_ustaw_zdanie`
+    żniw, `_podpowiedz_wyniku` szuflady) i dwa kształty podpowiedzi.
+
+    `ustaw(zdanie, szczegol)` to jedyna droga zdania ze szczegółem; `setText` i `clear` to `ustaw`
+    bez szczegółu, więc zdanie spoza protokołu (walidacja, „brak gospodarza”, postęp szuflady)
+    zdejmuje szczegół poprzedniego - szczegół jednej awarii nie stoi pod innym zdaniem. C++ `clear`
+    nie woła pythonowego `setText` (zmierzone, PySide6 6.9) - stąd nadpisane oba.
+
+    `text()` = samo zdanie (wołający czytają je jako treść), podpowiedź = zdanie + wiersze szczegółu.
+    MINIMUM SZEROKOŚCI 0 (wzorzec `_ZdanieWyniku`): zawijanie łamie wiersz tylko na spacjach, więc
+    ścieżka w zdaniu (plik zajęty 32/33, kod spoza klas) była jednym słowem, a minimum pola - jej
+    szerokością; zmierzone natywnie: okno „Napraw nagłówek…” 596 → 829 px po awarii (×1,6: 864 →
+    1299 px). Pole bierze szerokość od okna, ucięty koniec ścieżki stoi w podpowiedzi.
+
+    WSKAŹNIK SZCZEGÓŁU: przy niepustym szczególe glif `wb.detail_marker` w wcięciu przed zdaniem
+    (malowany, nie w tekście - `text()` zostaje treścią) i szczegół jako opis dostępności; menu
+    prawego kliku kopiuje zdanie albo szczegół (pole błędu nie jest zaznaczalne, a w szczególe stoi
+    plik, który padł). Bez szczegółu - menu domyślne pola (zaznaczalne notki żniw kopiują jak dotąd)."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._szczegol = ""
+        self._wciecie = None            # wcięcie sprzed wskaźnika; None = wskaźnik zdjęty
+        self._menu = None
+        self.ustaw(text)
+
+    def ustaw(self, zdanie, szczegol=""):
+        """Zdanie i jego szczegół (wiersze `wiersz_systemu`/`podpowiedz_*`) - razem albo wcale:
+        szczegół bez zdania nie ma do czego należeć."""
+        zdanie = zdanie or ""
+        self._szczegol = (szczegol or "") if zdanie else ""
+        super().setText(zdanie)
+        self.setToolTip("\n".join(p for p in (zdanie, self._szczegol) if p))
+        self.setAccessibleDescription(self._szczegol)
+        self._sync_wskaznika()
+
+    def szczegol(self):
+        """Szczegół BIEŻĄCEGO zdania albo `""`."""
+        return self._szczegol
 
     def setText(self, text):
-        super().setText(text)
-        self.setToolTip("")
+        self.ustaw(text)
 
     def clear(self):
-        super().clear()
-        self.setToolTip("")
+        self.ustaw("")
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def _szerokosc_wskaznika(self):
+        fm = self.fontMetrics()
+        return fm.horizontalAdvance(i18n.t("wb.detail_marker")) + fm.horizontalAdvance(" ")
+
+    def _sync_wskaznika(self):
+        """Wcięcie tekstu pod glif - tylko przy zmianie stanu (postęp szuflady woła `setText`
+        kilka razy na sekundę). `indent`, nie marginesy: marginesów pilnuje arkusz stylu."""
+        if self._szczegol and self._wciecie is None:
+            self._wciecie = self.indent()
+            self.setIndent(self._szerokosc_wskaznika())
+        elif not self._szczegol and self._wciecie is not None:
+            self.setIndent(self._wciecie)
+            self._wciecie = None
+
+    def _prostokat_tekstu(self):
+        """Prostokąt zdania - `contentsRect` bez wcięcia wskaźnika (dla malujących zdanie sami)."""
+        r = self.contentsRect()
+        return r.adjusted(self.indent(), 0, 0, 0) if self._wciecie is not None else r
+
+    def _maluj_wskaznik(self, painter):
+        """Glif w wcięciu, na wysokości pierwszego wiersza zdania, kolorem zdania (rola pola)."""
+        if self._wciecie is None:
+            return
+        r = self.contentsRect()
+        fm = self.fontMetrics()
+        pion = self.alignment() & Qt.AlignVertical_Mask
+        gora = r.top()
+        if pion & Qt.AlignVCenter:
+            flagi = int(self.alignment()) | (Qt.TextWordWrap.value if self.wordWrap() else 0)
+            blok = fm.boundingRect(self._prostokat_tekstu(), flagi, self.text())
+            gora = r.top() + max(0, (r.height() - blok.height()) // 2)
+        elif pion & Qt.AlignBottom:
+            gora = r.bottom() - fm.height()
+        self.style().drawItemText(painter, QRect(r.left(), gora, self.indent(), fm.height()),
+                                  int(Qt.AlignLeft | Qt.AlignTop), self.palette(), self.isEnabled(),
+                                  i18n.t("wb.detail_marker"), self.foregroundRole())
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._wciecie is not None:
+            self._maluj_wskaznik(QPainter(self))
+
+    def contextMenuEvent(self, event):
+        if not self._szczegol:
+            super().contextMenuEvent(event)
+            return
+        if self._menu is not None:
+            self._menu.deleteLater()
+        self._menu = QMenu(self)
+        if self.hasSelectedText():
+            self._menu.addAction(i18n.t("wb.copy_selection"),
+                                 lambda: QGuiApplication.clipboard().setText(self.selectedText()))
+        self._menu.addAction(i18n.t("wb.copy_sentence"),
+                             lambda: QGuiApplication.clipboard().setText(self.text()))
+        self._menu.addAction(i18n.t("wb.copy_detail"),
+                             lambda: QGuiApplication.clipboard().setText(self._szczegol))
+        self._menu.popup(event.globalPos())
+        event.accept()
 
 
 def _klucz_powodu(powod):

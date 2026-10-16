@@ -58,6 +58,7 @@ from urllib.request import pathname2url
 
 from . import db, derive, repo
 from .grouper import NO_TELESCOPE_KINDS
+from .item_reasons import blad_systemu     # błąd systemu i bazy klasą w komunikacie abortu (AR-198)
 from .resolve.cameras import normalize_camera
 from .resolve.frames import normalize_kind
 from .scan import (
@@ -632,9 +633,10 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, relocatio
                     reason=unreadable_reason_of(exc), now=now, summary=summary.scan,
                     actor=ACTOR)
             except Exception as exc2:
+                # Klasa błędu systemu albo bazy z właściciela (AR-198); ścieżka stoi już w zdaniu.
                 raise ImportAbort(
-                    f"wjazd {path} padl ({type(exc).__name__}: {exc}), a szkielet tez nie "
-                    f"wszedl ({type(exc2).__name__}: {exc2})") from exc2
+                    f"wjazd {path} padl ({blad_systemu(exc)}), a szkielet tez nie "
+                    f"wszedl ({blad_systemu(exc2)})") from exc2
             summary.ingest_failed += 1
             summary.ingest_failed_paths.append(path)
             summary.ingest_failed_frames += summary.scan.frames_new - przed

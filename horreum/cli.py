@@ -10,6 +10,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import db
+from .item_reasons import (   # błąd systemu i bazy klasą w drukach (AR-197, AR-198) - liść, bez astropy
+    blad_systemu, powod_systemu, proza_z_diagnoza)
 
 
 class _VersionAction(argparse.Action):
@@ -713,6 +715,11 @@ def _main(argv=None):
             return 1
         con.close()
         print(_format_project(root, res, proj, limit=args.limit))
+        if res.error is not None:
+            # Krok wydania przerwany błędem systemu (AR-197): wynik z powodem, nie ślad stosu. Zdanie
+            # kroku z klasą i surowy tekst systemu ze ścieżką - wiersz CLI nie ma jej obok.
+            print(f"Horreum project: blad -- {proza_z_diagnoza(res.error)}")
+            return 1
         return 0
     if args.cmd == "presence":
         from . import presence                            # lazy: astropy dopiero tu (przez scan)
@@ -723,7 +730,9 @@ def _main(argv=None):
                                force=args.force, now=now)
         except (ValueError, FileNotFoundError) as exc:    # root UNC / nieistniejacy (EXPECT)
             con.close()
-            print(f"Horreum presence: blad -- {exc}")
+            # Odmowa korzenia (`canonize_root`) mówi zdaniem rdzenia jak dotąd; plik z kodem
+            # systemu (zerwany udział: 53/67 to `FileNotFoundError`) - klasą (AR-198).
+            print(f"Horreum presence: blad -- {proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
             return 1
         # OGON ZAPISU (AR-5-CLI): zdjęta obecność to chwila, w której klatka zaczyna mówić głosem
         # skasowanego pliku - `--apply` puszcza fakty kopii, przejęcie zeznania ocalałej kopii
@@ -742,7 +751,7 @@ def _main(argv=None):
                 for wiersz in _presence_tail(con, args.root, now=now):
                     print(wiersz)
         except Exception as exc:  # noqa: BLE001 - raport zamiast śladu stosu, kod niżej
-            print(f"Horreum presence: blad ogona zapisu -- {type(exc).__name__}: {exc}")
+            print(f"Horreum presence: blad ogona zapisu -- {proza_z_diagnoza(blad_systemu(exc))}")
             kod = 2
         finally:
             con.close()
@@ -887,7 +896,12 @@ def _cmd_streaks(args):
         print(f"Horreum streaks: ODMOWA -- {exc}")
         return 2
     except OSError as exc:
-        print(f"Horreum streaks: BLAD I/O raportu -- {type(exc).__name__} errno={exc.errno} "
+        # Numer od właściciela klasy (AR-198): kod Windows przed errno - zerwany udział to
+        # „WinError 64”, a nie „errno=22” (EINVAL z mapy CPythona). Komunikatu systemu wiersz nie
+        # niesie (bywa po polsku, wiersz ma zostać ASCII); poza klasą - errno jak dotąd.
+        klasa = powod_systemu(exc)
+        numer = dict(klasa.params)["os_code"] if klasa is not None else f"errno={exc.errno}"
+        print(f"Horreum streaks: BLAD I/O raportu -- {type(exc).__name__} {numer} "
               f"{exc.filename or ''} (raport bez manifest.json jest niekompletny)")
         return 2
     print(_format_streaks(folder, r.katalog, streaks.summary(res)))
@@ -1230,17 +1244,24 @@ def _format_object(info):
 
 def _format_project(root, res, proj, *, limit):
     """Raport projekcji (ASCII-safe — konsola cp1250: `->` nie `→`). DRY: stan celu + drzewo kategorii;
-    --apply: liczności utworzenia + manifest. Anomalie (conflict/verify_bad/error) listowane do limitu."""
+    --apply: liczności utworzenia + manifest. Anomalie (conflict/verify_bad/error/unverified) listowane
+    do limitu. Wydanie przerwane (`res.error`, AR-197: krok z błędem systemu albo werdykt sondy) mówi,
+    ile pozycji planu zostało nietkniętych, a wiersza manifestu nie ma - manifestu wtedy nie zapisano."""
     from .projection import MANIFEST_NAME                    # stały literał nazwy manifestu (SPOT)
     c = res.counts
     mode = (("--apply --copy" if res.copy else "--apply") if res.do_apply
             else "DRY -- bez zmian na dysku")
     lines = [f"Horreum project {root} ({mode}; layout {res.layout}):"]
     if res.do_apply:
+        niezweryfikowane = f"; niezweryfikowane: {c['unverified']}" if c.get("unverified") else ""
         lines.append(
             f"  zlinkowano: {c.get('linked',0)}; istnialo: {c.get('exists',0)}; "
             f"konflikty: {c.get('conflict',0)}; verify_bad: {c.get('verify_bad',0)}; "
-            f"bledy: {c.get('error',0)}; pominieto: {c.get('skipped',0)}")
+            f"bledy: {c.get('error',0)}; pominieto: {c.get('skipped',0)}{niezweryfikowane}")
+        if res.error is not None or res.cancelled:
+            ruszone = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error", "verify_bad",
+                                                "unverified"))
+            lines.append(f"  nietkniete (wydanie przerwane): {max(len(proj.items) - ruszone, 0)}")
     else:
         lines.append(
             f"  do zlinkowania: {c.get('would-link',0)}; istnieje: {c.get('exists',0)}; "
@@ -1263,11 +1284,11 @@ def _format_project(root, res, proj, *, limit):
     if len(folders) > limit:
         lines.append(f"    ... (+{len(folders) - limit} folderow; zwieksz --limit)")
 
-    anomalies = [r for r in res.results if r.status in ("conflict", "verify_bad", "error")]
+    anomalies = [r for r in res.results if r.status in ("conflict", "verify_bad", "error", "unverified")]
     for r in anomalies[:limit]:
         name = Path(r.dst).name if r.dst else ""
         lines.append(f"    {r.status.upper()} {name}: {r.reason}")
-    if res.do_apply:
+    if res.do_apply and res.error is None:
         lines.append(f"  manifest: {Path(root) / MANIFEST_NAME}")
     return "\n".join(lines)
 
@@ -1896,7 +1917,7 @@ def _stack_versions_standalone(con, args, archiwum, stack_variants):
     try:
         zrodla = stack_variants.read_standalone_list(args.standalone)
     except (OSError, ValueError) as exc:
-        print(f"stack-versions: lista samodzielnych nieczytelna: {type(exc).__name__}: {exc}")
+        print(f"stack-versions: lista samodzielnych nieczytelna: {proza_z_diagnoza(blad_systemu(exc))}")
         return 2
     plan = stack_variants.plan_standalone(con, args.root, zrodla, library_root=archiwum)
     c = stack_variants.standalone_counts(plan)
@@ -2113,7 +2134,8 @@ def _cmd_rederive_kind(args):
         try:
             plan = _wczytaj_plan(args.plan, "rederive-kind", args.db)
         except (OSError, ValueError) as exc:
-            print(f"Horreum rederive-kind {args.db} (APPLY): odmowa - {exc}")
+            print(f"Horreum rederive-kind {args.db} (APPLY): odmowa - "
+                  f"{proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
             return 2
         chciane = {it["frame_id"]: (it["before"], it["after"], sorted(map(tuple, it["witnesses"])))
                    for it in plan["items"]}
@@ -2274,7 +2296,9 @@ def _cmd_header_fix(args):
                      f"{len(res.restored)} (bez powrotu zeznania {len(res.withheld)}), "
                      f"zablokowane {len(zablokowane)}, nieudane {len(res.failed)}"]
             if res.already:
-                lines.append(f"  juz cofniete {len(res.already)} - stan sprzed commitu jest juz na "
+                # Zdanie neutralne (AR-182): „już cofnięte” bywa wynikiem własnego cofnięcia, w którym
+                # zmiana poza nagłówkiem od commitu została - nie zawsze stanem sprzed commitu.
+                lines.append(f"  juz cofniete {len(res.already)} - wynik cofniecia jest juz na "
                              f"dysku i w bazie, nie ma czego cofac")
             lines += [f"    {fr.status}: {fr.path} - {fr.reason}"
                       for fr in (res.withheld + zablokowane + res.failed)[:args.limit]]
@@ -2286,7 +2310,8 @@ def _cmd_header_fix(args):
             try:
                 zapisany = _wczytaj_plan(args.plan, "header-fix", args.db)
             except (OSError, ValueError) as exc:
-                print(f"Horreum header-fix {args.db} (APPLY): odmowa - {exc}")
+                print(f"Horreum header-fix {args.db} (APPLY): odmowa - "
+                      f"{proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
                 return 2
             ids, keywords = set(zapisany["frames"]), tuple(zapisany["keywords"])
             forms = zapisany["filter_forms"]

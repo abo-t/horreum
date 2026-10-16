@@ -73,6 +73,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import os
+import stat
 import threading
 from collections import Counter
 from datetime import datetime
@@ -88,8 +89,9 @@ from horreum import db, harvest, projection
 from horreum.gui import i18n, queries
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.projection_dialog import _COLORS, _elide_path
-from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu   # błąd systemu w języku UI (AR-184)
-from horreum.item_reasons import blad_systemu
+from horreum.gui.wb_worker import (EtykietaBledu, tekst_powodu,   # błąd systemu w języku UI (AR-184)
+                                   wiersz_systemu)
+from horreum.item_reasons import blad_systemu, powod_systemu
 
 # Ile poziomów nad wyjściem WBPP szukać manifestu wydania: WBPP pisze `master/` (i `calibrated/`)
 # wewnątrz katalogu roboczego, który wydanie obiektu kładzie pod `<karta>/OBJECTS/<obiekt>` -
@@ -495,7 +497,18 @@ class HarvestDryWorker(QObject):
             self.finished.emit()
 
     def _compute(self):
-        if not os.path.isdir(self._wbpp_dir):
+        # `os.stat`, nie `os.path.isdir` (AR-199): `isdir` połyka każdy błąd jako False, więc zerwany
+        # udział (WinError 53, 67, 64…) mówił „Katalog nie istnieje”. Brak (2/3: folder, rodzic, dysk)
+        # i plik zamiast folderu zostają brakiem; każdy inny błąd systemu - także bez klasy (123: nazwa
+        # niepoprawna) - idzie wyjątkiem do `run`, które oddaje go `failed` klasą przez właściciela.
+        try:
+            jest = stat.S_ISDIR(os.stat(self._wbpp_dir).st_mode)
+        except OSError as exc:
+            powod = powod_systemu(exc)
+            if powod is None or powod.code != "os_missing":
+                raise
+            jest = False
+        if not jest:
             return {"wbpp_dir": self._wbpp_dir, "missing": True}
         manifest_root, manifest = find_manifest(self._wbpp_dir)
         own = bool(self._db_path)
@@ -603,19 +616,12 @@ def _szerokosc_od_okna(label):
     wracało, wskazówka u góry traciła wiersz, a pole z „Wskaż…” i „Zmień…” podjeżdżało pod kursorem
     o ten wiersz. Etykieta bierze szerokość, którą daje jej okno; ścieżki dłuższej od okna nie widać
     do końca, więc droga do pełnej treści stoi tu, przy samej regule: etykieta jest zaznaczalna
-    (kopia z menu kontekstowego), a pełny tekst pod kursorem stawia `_ustaw_zdanie`."""
+    (kopia z menu kontekstowego), a pełny tekst pod kursorem stawia pole zdania (`EtykietaBledu.ustaw`,
+    AR-204 - zdanie ze szczegółem systemu, ten sam protokół co pola okien zapisu i szuflada)."""
     sp = label.sizePolicy()
     sp.setHorizontalPolicy(QSizePolicy.Ignored)
     label.setSizePolicy(sp)
     label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-
-
-def _ustaw_zdanie(label, text, tip=""):
-    """Tekst etykiety z `_szerokosc_od_okna` i ten sam tekst pod kursorem - ucięta ścieżka jest
-    czytelna w całości bez zaznaczania. `tip` - wiersz pod zdaniem w podpowiedzi (szczegół systemu,
-    AR-184); każde zdanie stawia podpowiedź od nowa, więc szczegół nie zostaje pod innym zdaniem."""
-    label.setText(text)
-    label.setToolTip("\n".join(p for p in (text, tip) if p))
 
 
 class HarvestDialog(QDialog):
@@ -681,6 +687,8 @@ class HarvestDialog(QDialog):
         self._table_viewport = None      # viewport tabeli po budowie (filtr zdarzeń zmiany rozmiaru)
         self._rel_viewport = None        # viewport listy wydań po budowie (szerokość kolumny „Karta”)
         self._first_pick_checked = False  # pierwsze użycie: wybór katalogu raz po pokazaniu (`showEvent`)
+        self._rozmieszczone = False      # okno ma już własne miejsce na ekranie (po pierwszym `QDialog.showEvent`, `_ekran`)
+        self._podstawy_zdan = {}         # etykieta zdania nad polem → minimum wysokości sprzed zapadki (`_zwolnij_zapadke`)
         self._rel_gen = 0                # licznik generacji listy wydań - lista starszego zamówienia odpada
         self._rel_thread = None
         self._rel_worker = None
@@ -706,10 +714,10 @@ class HarvestDialog(QDialog):
     # ---- budowa ----
     def _build_ui(self):
         v = QVBoxLayout(self)
-        hint = QLabel(i18n.t("harvest.hint"))
-        hint.setProperty("role", "secondary")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
+        self.hint_label = QLabel(i18n.t("harvest.hint"))
+        self.hint_label.setProperty("role", "secondary")
+        self.hint_label.setWordWrap(True)
+        v.addWidget(self.hint_label)
 
         # Lista wydań z kart. Zdanie nad nią: brak kart, liczenie, pusta lista, błąd listy. Z kartami
         # miejsce listy stoi od startu (widoczne zdanie, także puste, pusta tabela, zarezerwowany wiersz
@@ -718,7 +726,7 @@ class HarvestDialog(QDialog):
         # zaznaczalna liczy ją z dokumentu, zmierzone: z minimum 0 układ identyczny) - minimum niżej to
         # tylko podłoga wysokości, liczona fontem z konstrukcji.
         reserve = bool(self._rel_roots)
-        self.rel_notice = QLabel("")
+        self.rel_notice = EtykietaBledu("")          # zdanie + szczegół systemu (AR-204)
         self.rel_notice.setWordWrap(True)
         self.rel_notice.setMinimumHeight(self.rel_notice.fontMetrics().lineSpacing())   # podłoga wysokości
         _szerokosc_od_okna(self.rel_notice)          # błąd listy niesie ścieżkę karty
@@ -740,7 +748,10 @@ class HarvestDialog(QDialog):
         rh.setSectionResizeMode(QHeaderView.ResizeToContents)
         rh.setSectionResizeMode(REL_CARD, QHeaderView.Interactive)
         rh.setStretchLastSection(True)
-        self.rel_table.setMaximumHeight(
+        # Wysokość STAŁA (AR-201), nie tylko sufit: lista stoi NAD polem, a układ ściskał ją pod przyrost
+        # zdań spod pola (okno ściśnięte ręką: 56 → 48 px natywnie) - pole, „Wskaż…” i „Zmień…”
+        # podjeżdżały o tyle pod kursorem. Brakującą wysokość daje teraz okno (`_podloga_wysokosci`).
+        self.rel_table.setFixedHeight(
             rh.sizeHint().height() + _REL_VISIBLE_ROWS * self.rel_table.verticalHeader().defaultSectionSize()
             + 2 * self.rel_table.frameWidth())
         self.rel_table.itemSelectionChanged.connect(self._on_release_selected)
@@ -789,7 +800,7 @@ class HarvestDialog(QDialog):
         row_a.addWidget(self.btn_archive)
         v.addLayout(row_a)
         row_w = QHBoxLayout()
-        self.archive_warn = QLabel("")               # archiwum okna ≠ archiwum bazy (`_show_archive`)
+        self.archive_warn = EtykietaBledu("")        # archiwum okna ≠ archiwum bazy (`_show_archive`)
         self.archive_warn.setProperty("role", "warn")
         self.archive_warn.setWordWrap(True)
         _szerokosc_od_okna(self.archive_warn)        # ostrzeżenie niesie ścieżki obu archiwów
@@ -806,9 +817,13 @@ class HarvestDialog(QDialog):
 
         self.head_label = QLabel("")
         _fh = self.head_label.font(); _fh.setBold(True); self.head_label.setFont(_fh)
+        # Zdanie liczb (z dopiskami kłopotów i przerwania) zawija się na „ · ” jak nagłówek okna wydania,
+        # zamiast dyktować minimum szerokości okna (AR-201: najdłuższe 1287 px przy foncie ×1,6). Zawijanie,
+        # nie elizja - elizja zjadłaby końcowe „konflikty”, „błędy” i „przerwano”.
+        self.head_label.setWordWrap(True)
         v.addWidget(self.head_label)
         # Stan okna jednym zdaniem: sonda w biegu, brak wyjścia, pusty katalog, błąd, bieg apply.
-        self.notice = QLabel("")
+        self.notice = EtykietaBledu("")              # zdanie + szczegół systemu (AR-204)
         self.notice.setWordWrap(True)
         _szerokosc_od_okna(self.notice)              # podgląd z tła niesie ścieżkę wydania (zaznaczalna)
         v.addWidget(self.notice)
@@ -890,8 +905,8 @@ class HarvestDialog(QDialog):
             self.archive_label.setText(i18n.t("harvest.archive_unset"))
             self.archive_label.setToolTip("")
         differs = self._archive_differs()
-        _ustaw_zdanie(self.archive_warn, i18n.t("harvest.archive_differs", db=self._db_archive)
-                      if differs else "")
+        self.archive_warn.ustaw(i18n.t("harvest.archive_differs", db=self._db_archive)
+                                if differs else "")
         self.archive_warn.setVisible(differs)
         self.btn_archive_back.setVisible(differs)
 
@@ -921,12 +936,16 @@ class HarvestDialog(QDialog):
         wyboru nie wyskakuje nad nią. Raz na okno, po pokazaniu (kolejka zdarzeń), żeby wybór
         stał nad oknem żniw, a nie przed nim; anulowanie zostawia okno z pustym polem.
         Pierwsze pokazanie dopasowuje też wysokość (`_fit_height`) - przed `QDialog.showEvent`,
-        które ustawia pozycję okna pod jego rozmiar."""
+        które ustawia pozycję okna pod jego rozmiar - a po nim stawia podłogę wysokości
+        (`_podloga_wysokosci`), bez czekania na pierwszy `LayoutRequest`."""
         first = not self._first_pick_checked
         if first:
             self._first_pick_checked = True
             self._fit_height()
         super().showEvent(event)
+        if first:
+            self._rozmieszczone = True               # od teraz ekran = ten, na którym okno stoi (`_ekran`)
+            self._podloga_wysokosci()
         if first and not self._rel_roots and not str(self._settings().value("harvest/last_output", "") or ""):
             QTimer.singleShot(0, self._on_pick_output)
 
@@ -939,17 +958,75 @@ class HarvestDialog(QDialog):
         13-19 px. W wysokości treści tabela pozycji stoi na swoim sizeHint i to jej zapas bierze
         przyrost zdania."""
         want = self.layout().totalHeightForWidth(self.width())
-        screen = self._ekran()
-        if screen is not None:
-            want = min(want, int(screen.availableGeometry().height() * _SCREEN_SHARE))
+        sufit = self._sufit_wysokosci()
+        if sufit is not None:
+            want = min(want, sufit)
         if want > self.height():
             self.resize(self.width(), want)
 
+    def _sufit_wysokosci(self):
+        """`_SCREEN_SHARE` dostępnej wysokości ekranu okna albo None (okno bez ekranu)."""
+        screen = self._ekran()
+        return int(screen.availableGeometry().height() * _SCREEN_SHARE) if screen is not None else None
+
+    def _podloga_wysokosci(self):
+        """Minimum wysokości okna = minimum treści przy BIEŻĄCEJ szerokości (`totalMinimumHeightForWidth`,
+        AR-201), najwyżej `_sufit_wysokosci` - okno nie wymusza wysokości większej niż ekran, pod którą
+        dolny rząd przycisków wyszedłby poza niego. Qt liczy minimum okna bez zawijania zdań: okno
+        ściśnięte ręką do minimum przed dojściem listy stało niżej od treści, a wiersz, który zdanie
+        podglądu z tła dokłada pod polem, układ zabierał liście wydań NAD nim - pole, „Wskaż…”
+        i „Zmień…” podjeżdżały pod kursorem (natywnie -8 px przy foncie ×1, -26 px przy ×1,6). Z podłogą
+        okno rośnie od dołu: w oknie ściśniętym dolny rząd zjeżdża o przyrost zdania - przycisk, który
+        w tej chwili dopiero się uzbraja, nie pole, w które człowiek właśnie celuje. Okno postawione
+        przy dolnej krawędzi ekranu podnosi się o tyle, ile wystaje (`_rama_w_obszarze_ekranu`) - dolny
+        rząd przycisków nie schodzi pod ekran. Niepokazane okno (testy inline) nie dostaje podłogi -
+        wysokość stawia mu pierwsze pokazanie. Guard równości zamyka pętlę `LayoutRequest` (wzorzec
+        `grid_selection`)."""
+        if not self.isVisible():
+            return
+        want = self.layout().totalMinimumHeightForWidth(self.width())
+        sufit = self._sufit_wysokosci()
+        if sufit is not None:
+            want = min(want, sufit)
+        if want != self.minimumHeight():
+            wysokosc = self.height()
+            self.setMinimumHeight(want)
+            if self.height() > wysokosc:
+                self._rama_w_obszarze_ekranu()
+
+    def _rama_w_obszarze_ekranu(self):
+        """Okno, które urosło od dołu z podłogi wysokości, podnosi się o tyle, ile jego ramka wystaje pod
+        dolną krawędź obszaru roboczego swojego ekranu (`_ekran`), nie wyżej niż jego górna krawędź.
+        Zmaksymalizowanego nie rusza - jego geometrię trzyma system."""
+        screen = self._ekran()
+        if screen is None or self.isMaximized():
+            return
+        obszar = screen.availableGeometry()
+        nadmiar = self.frameGeometry().bottom() - obszar.bottom()
+        if nadmiar > 0:
+            self.move(self.x(), max(obszar.top(), self.y() - nadmiar))
+
+    def event(self, e):
+        # Treść zmienia wysokość przy każdym zdaniu z tła - podłoga idzie za nią (`_podloga_wysokosci`);
+        # zdanie, które zniknęło, oddaje zapadkę (`_zwolnij_zapadke`), zanim podłoga się przeliczy.
+        wynik = super().event(e)
+        if e.type() == QEvent.LayoutRequest:
+            self._zwolnij_zapadke(tylko_puste=True)
+            self._podloga_wysokosci()
+        return wynik
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if e.size().width() != e.oldSize().width():
+            self._podloga_wysokosci()                 # węższe okno łamie zdania na więcej wierszy
+
     def _ekran(self):
-        """Ekran, na którym okno stanie: rodzica (`QDialog.showEvent` centruje okno na nim), a bez
-        rodzica - własny. `self.screen()` niepokazanego okna z rodzicem na drugim monitorze to ekran
-        główny, więc sufit wysokości i szerokości liczyłby się z innego ekranu."""
-        return (self.parentWidget() or self).screen()
+        """Ekran okna. Przed pierwszym rozmieszczeniem - ten, na którym okno STANIE: rodzica
+        (`QDialog.showEvent` centruje okno na nim), a bez rodzica - własny; `self.screen()` niepokazanego
+        okna z rodzicem na drugim monitorze to ekran główny, więc sufit startowy liczyłby się z innego
+        ekranu. Po rozmieszczeniu - ten, na którym okno STOI (`self.screen()`): okno przeniesione ręką na
+        inny monitor niż rodzic rośnie w lewo do krawędzi SWOJEGO ekranu (AR-201), a nie ekranu rodzica."""
+        return self.screen() if self._rozmieszczone else (self.parentWidget() or self).screen()
 
     # ---- szerokości (powód w kadrze, ścieżki odróżnialne) ----
     def _fit_columns(self):
@@ -976,12 +1053,15 @@ class HarvestDialog(QDialog):
         """Szerokość kolumny „Karta” listy wydań: jej treść, gdy wiersz mieści się w kadrze, a gdy
         nie - reszta viewportu po obiekcie, dacie i stanie liczonych w pełnej treści (nie mniej niż
         minimum sekcji; elizja środkiem robi resztę). Stan stoi ostatni i rozciąga się na resztę, więc
-        zostaje cały zawsze, gdy w kadrze mieści się karta o minimalnej szerokości."""
+        zostaje cały zawsze, gdy w kadrze mieści się karta o minimalnej szerokości. Rozciągana sekcja
+        ostatnia nie schodzi poniżej domyślnej szerokości sekcji (zmierzone natywnie: 100 px przy treści
+        95) - liczona samą treścią dawała sumę o 5 px szerszą od kadru i pasek przewijania w bok."""
         if self._rel_viewport is None:
             return
         rh = self.rel_table.horizontalHeader()
         tresc = {c: max(self.rel_table.sizeHintForColumn(c), rh.sectionSizeHint(c))
                  for c in range(len(_REL_HEADERS))}
+        tresc[REL_STATE] = max(tresc[REL_STATE], rh.defaultSectionSize())
         inne = sum(w for c, w in tresc.items() if c != REL_CARD)
         width = max(min(tresc[REL_CARD], self.rel_table.viewport().width() - inne),
                     rh.minimumSectionSize())
@@ -991,7 +1071,14 @@ class HarvestDialog(QDialog):
     def _grow_to_table(self):
         """Szerokość okna pod treść tabeli: suma kolumn (powód w pełnej treści) + ramy, najwyżej
         90% dostępnej szerokości ekranu. Okno tylko ROŚNIE - nie zabiera szerokości, którą user mu
-        dał - i nie schodzi poniżej szerokości startowej."""
+        dał - i nie schodzi poniżej szerokości startowej.
+
+        Pokazane okno rośnie W LEWO (AR-201): wzrost przychodzi z tła (podgląd, wynik biegu), a każdy
+        przycisk wierszy nad tabelą i pod nią („Wskaż…”, „Zmień…”, „Wciągnij”, „Zamknij”) stoi przy
+        prawej krawędzi - okno rosnące w prawo przenosiło je spod kursora o +100 px (font ×1) i +675 px
+        (×1,6), natywnie. Lewa krawędź ekranu okna (`_ekran`) zatrzymuje wzrost w lewo, resztę bierze
+        prawa strona; okno już za lewą krawędzią nie skacze w prawo, okno zmaksymalizowane się nie
+        rusza. Przed wzrostem zdania nad polem dostają zapadkę wysokości (`_zapadka_zdan_nad_polem`)."""
         if self.table.rowCount() == 0:
             return
         hh = self.table.horizontalHeader()
@@ -1003,9 +1090,45 @@ class HarvestDialog(QDialog):
         screen = self._ekran()
         cap = int(screen.availableGeometry().width() * _SCREEN_SHARE) if screen is not None else total + overhead
         target = min(total + overhead, cap)
-        if target > self.width():
-            self.resize(target, self.height())
+        if target > self.width() and not self.isMaximized():
+            self._zapadka_zdan_nad_polem()
+            g = self.geometry()
+            if self.isVisible() and screen is not None:
+                # Lewa krawędź obszaru klienta: krawędź ekranu + ramka okna (geometria bez ramki).
+                lewo = screen.availableGeometry().left() + (g.x() - self.frameGeometry().x())
+                x = min(g.x(), max(lewo, g.x() - (target - g.width())))
+                self.setGeometry(x, g.y(), target, g.height())
+            else:
+                self.resize(target, self.height())
         self._fit_columns()
+
+    def _zapadka_zdan_nad_polem(self):
+        """Zdania nad polem (wskazówka, zdanie listy wydań, zarezerwowane zdanie wiersza wydania) nie
+        maleją, gdy okno poszerza się pod tabelę z tła (AR-201): szersze okno łamie je na mniej
+        wierszy, a wysokość, którą oddawały, podnosiła pole, „Wskaż…” i „Zmień…” pod kursorem -
+        natywnie przy foncie ×1,6 o 44 px (980 → 1655 px: wskazówka 78 → 52, zdanie wiersza 52 → 34).
+        Minimum każdego = jego bieżąca wysokość, tekst u góry etykiety (wolne miejsce pod nim, nie nad);
+        zwężenie okna ręką dalej je podnosi - minimum to podłoga. Zapadka trzyma tylko do zmiany stanu
+        (`_zwolnij_zapadke`). Niepokazane okno nie ma jeszcze wysokości z układu (`height()` niepołożonej
+        etykiety to domyślne 30 px) - wtedy nic; tak samo etykieta ukryta bez zarezerwowanego miejsca."""
+        if not self.isVisible():
+            return
+        for lab in (self.hint_label, self.rel_notice, self.rel_done_note):
+            if lab.isVisibleTo(self) or lab.sizePolicy().retainSizeWhenHidden():
+                self._podstawy_zdan.setdefault(lab, lab.minimumHeight())
+                lab.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+                lab.setMinimumHeight(max(lab.minimumHeight(), lab.height()))
+
+    def _zwolnij_zapadke(self, *, tylko_puste=False):
+        """Minimum zdań nad polem wraca do wartości sprzed zapadki (`_podstawy_zdan`): na początku
+        NOWEGO podglądu (`_invalidate` - nowe wyjście, wiersz listy, zmiana archiwum) i - z
+        `tylko_puste` - dla zdania, które zniknęło (`LayoutRequest`). Bez tego zapadka trzymała
+        największą wysokość z życia okna: puste zdanie listy po zniknięciu ostrzeżenia dalej zajmowało
+        jego wiersze, a cykle zwężenie → wynik z tła zatrzaskiwały minimum coraz wyżej. Pole może wtedy
+        podjechać - to zmiana stanu (gest człowieka albo koniec zdania), nie przyrost z tła."""
+        for lab, podstawa in self._podstawy_zdan.items():
+            if (not tylko_puste or not lab.text()) and lab.minimumHeight() != podstawa:
+                lab.setMinimumHeight(podstawa)
 
     # ---- parametry ----
     def _pick_start(self):
@@ -1089,7 +1212,9 @@ class HarvestDialog(QDialog):
         self._trigger_dry()
 
     def _invalidate(self):
-        """Nowe parametry unieważniają podgląd: generacja ++, plan, tabela i słowo skutku znikają."""
+        """Nowe parametry unieważniają podgląd: generacja ++, plan, tabela i słowo skutku znikają,
+        a zdania nad polem oddają zapadkę wysokości z poprzedniego podglądu (`_zwolnij_zapadke`)."""
+        self._zwolnij_zapadke()
         self._gen += 1
         self._plan = None
         self._probed = None
@@ -1290,10 +1415,10 @@ class HarvestDialog(QDialog):
 
     def _show_notice(self, text, role=None, tip="", *, remember=True):
         """Komunikat stanu. `remember=False` - zdanie chwilowe (pole odbiega od podglądu), po którym
-        wraca poprzedni komunikat. `tip` - szczegół systemu w podpowiedzi (`_ustaw_zdanie`)."""
+        wraca poprzedni komunikat. `tip` - szczegół systemu w podpowiedzi (`EtykietaBledu.ustaw`)."""
         if remember:
             self._notice_state = (text, role, tip)
-        _ustaw_zdanie(self.notice, text, tip)
+        self.notice.ustaw(text, tip)
         self.notice.setProperty("role", role or "")
         self.notice.style().unpolish(self.notice)    # rola zmienia kolor z motywu dopiero po repolish
         self.notice.style().polish(self.notice)
@@ -1332,8 +1457,8 @@ class HarvestDialog(QDialog):
     def _show_rel_notice(self, text, role=None, tip=""):
         """Zdanie nad listą wydań (brak kart, liczenie, pusta lista, błąd). Z kartami wiersz zdania
         zostaje także pusty - miejsce listy jest zarezerwowane; bez kart pusty tekst go chowa.
-        `tip` - szczegół systemu w podpowiedzi (`_ustaw_zdanie`)."""
-        _ustaw_zdanie(self.rel_notice, text, tip)
+        `tip` - szczegół systemu w podpowiedzi (`EtykietaBledu.ustaw`)."""
+        self.rel_notice.ustaw(text, tip)
         self.rel_notice.setProperty("role", role or "")
         self.rel_notice.style().unpolish(self.rel_notice)
         self.rel_notice.style().polish(self.rel_notice)

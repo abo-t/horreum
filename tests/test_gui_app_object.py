@@ -3303,7 +3303,9 @@ def test_okna_kart_pisza_W_MIEJSCU_a_FITS_bez_zapasu_SPADA_i_MOWI_to(
         assert "potrzebuje 1 wolnego rekordu" in szczegol
         assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()
         assert szczegol not in dlg.status.text()
-        assert dlg.status.toolTip() == i18n.t("objchg.st.detail_tip", detail=szczegol)
+        # Protokół pola (AR-204): podpowiedź = zdanie + szczegół.
+        assert dlg.status.szczegol() == i18n.t("objchg.st.detail_tip", detail=szczegol)
+        assert dlg.status.toolTip() == dlg.status.text() + "\n" + dlg.status.szczegol()
     dlg.reject()
     if con is not None:
         con.close()
@@ -3380,7 +3382,8 @@ def test_spadek_na_droge_atomowa_MOWI_szczegol_w_podpowiedzi_a_UWAGE_w_zdaniu(kt
     assert i18n.t("wb.inplace_fallback", n=1) + i18n.t("objchg.res.notes", n=1, note=uwaga) \
         in zdanie, zdanie
     assert "brak miejsca w nagłówku" not in zdanie and writeback.PREFIKS_DROGI_ATOMOWEJ not in zdanie
-    assert dlg.status.toolTip() == i18n.t("objchg.st.detail_tip", detail="brak miejsca w nagłówku")
+    assert dlg.status.szczegol() == i18n.t("objchg.st.detail_tip", detail="brak miejsca w nagłówku")
+    assert dlg.status.toolTip() == zdanie + "\n" + dlg.status.szczegol()      # protokół pola (AR-204)
     dlg._commit_id = None                                  # nie cofamy atrapy przy zamknięciu
     dlg.reject()
 

@@ -1854,3 +1854,140 @@ def test_cel_gestu_poza_zbiorem_po_dostawie_ustepuje_zaznaczeniu_czlowieka(qapp,
         assert grid._cel_gestu == []
     finally:
         win.close()
+
+
+# ============================================================ AR-198: błąd bazy klasą w workerach odczytu
+
+_POLSKIE = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_pola_i_sklad_zbioru_mowia_klasa_bazy_w_jezyku_UI(qapp, tmp_path, lang):
+    """Pokrycie Pól i skład zbioru czytają WYŁĄCZNIE bazę (zmierzone: 0 wywołań systemu plików):
+    PRAWDZIWY błąd SQLite (plik bazy niedostępny, SQLITE_CANTOPEN) idzie do `grid.py` zdaniem klasy
+    w języku UI, bez surowego `OperationalError: unable to open database file`. Falsyfikator:
+    worker z `f"{type(exc).__name__}: {exc}"`."""
+    from horreum.gui.grid_workers import PolaWorker, ZbiorWorker
+    odpiety = str(tmp_path / "odpiety" / "p.db")
+    i18n.set_lang(lang)
+    try:
+        zdanie = i18n.t("objchg.item.db_unavailable", db_code="SQLITE_CANTOPEN")
+        for w in (PolaWorker(1, None, db_path=odpiety), ZbiorWorker(1, None, odpiety)):
+            bledy = []
+            w.failed.connect(lambda _gen, msg: bledy.append(msg))
+            w.run()
+            assert bledy == [zdanie], (type(w).__name__, bledy)
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE, zdanie
+    finally:
+        i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_liczniki_porzadkow_druga_porazka_mowi_klasa_zamiast_wyjatku(qapp, tmp_path, lang):
+    """Liczniki Porządków w tle padają (plik bazy niedostępny), slot ponawia rachunek na wątku GUI
+    i ten też pada PRAWDZIWYM błędem SQLite (plik nie jest bazą): zamiast wyjątku ze slotu i
+    plakietki zamrożonej bez słowa - wiersz błędu nad listą mówi klasą w języku UI, ze szczegółem;
+    udany rachunek go gasi. Droga produkcyjna: `refresh_counts(w_tle=True)` → `QThread` → sygnał →
+    slot. Falsyfikator: `_on_liczniki_failed` bez `try` - wyjątek ze slotu, wiersz schowany."""
+    import sqlite3
+    i18n.set_lang(lang)
+    win = MainWindow(_baza_obiektu(tmp_path))
+    smieci = tmp_path / "smieci.db"
+    smieci.write_bytes(b"to nie jest baza" * 512)
+    zla = sqlite3.connect(str(smieci))
+    tasks = win.tasks_view
+    prawdziwa_sciezka, prawdziwe = tasks._db_path, tasks.con
+    try:
+        _czekaj_na_pola(win.grid_view)
+        tasks._db_path = str(tmp_path / "odpiety" / "obj.db")
+        tasks.refresh_counts(w_tle=True)
+        assert tasks._liczniki_thread is not None
+        # Porażka wątku dochodzi do slotu kolejką, czyli dopiero w `processEvents` niżej - podmiana
+        # połączenia GUI teraz trafia w ponowienie ze slotu, nie w start biegu.
+        tasks.con = zla
+        _czekaj(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(),
+                "druga porażka liczników nie doszła do wiersza błędu")
+        zdanie = i18n.t("tasks.counts_failed",
+                        msg=i18n.t("objchg.item.db_damaged", db_code="SQLITE_NOTADB"))
+        assert tasks.blad_licznikow.text() == zdanie
+        assert tasks.blad_licznikow.toolTip() == zdanie + "\n" + i18n.t(
+            "wb.os_detail_tip", detail="DatabaseError: file is not a database")
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE, zdanie
+        tasks._db_path, tasks.con = prawdziwa_sciezka, prawdziwe
+        tasks.refresh_counts()
+        assert tasks.blad_licznikow.isHidden() and tasks.blad_licznikow.text() == ""
+    finally:
+        tasks._db_path, tasks.con = prawdziwa_sciezka, prawdziwe
+        win.close()
+        zla.close()
+        i18n.set_lang("pl")
+
+
+def test_worker_licznikow_niesie_powod_z_kodem(tmp_path):
+    """`_LicznikiWorker` emituje POWÓD (klasa bazy z kodem), nie tekst - slot ma z czego złożyć
+    zdanie w języku UI. Falsyfikator: `Signal(int, str)` / f-string `Typ: opis`."""
+    from horreum.gui.tasks import _LicznikiWorker
+    from horreum.item_reasons import PowodPozycji
+    w = _LicznikiWorker(7, str(tmp_path / "odpiety" / "x.db"))
+    bledy = []
+    w.failed.connect(lambda gen, powod: bledy.append((gen, powod)))
+    w.run()
+    ((gen, powod),) = bledy
+    assert gen == 7 and isinstance(powod, PowodPozycji) and powod.code == "db_unavailable", powod
+
+
+def test_wejscie_w_porzadki_i_gest_w_tle_na_bazie_ktora_nie_jest_baza_mowia_zdaniem(qapp, tmp_path):
+    """Każda droga rachunku liczników mówi zdaniem, nie wyjątkiem ze slotu: wejście w Porządki
+    (`odswiez_przy_wejsciu` - skrót po odcisku też czyta bazę) i gest Zbiorów w tle (odcisk biegu
+    czytany na połączeniu okna) na PRAWDZIWYM błędzie SQLite (plik nie jest bazą). Po naprawie
+    połączenia wejście liczy od nowa mimo niezmienionego odcisku - skrót tylko przy schowanym
+    wierszu. Falsyfikator: `refresh_counts` bez łapania albo skrót bez `isHidden()` - wiersz
+    zostaje widoczny nad prawdziwą listą."""
+    import sqlite3
+    win = MainWindow(_baza_obiektu(tmp_path))
+    smieci = tmp_path / "smieci.db"
+    smieci.write_bytes(b"to nie jest baza" * 512)
+    zla = sqlite3.connect(str(smieci))
+    tasks = win.tasks_view
+    prawdziwe = tasks.con
+    try:
+        _czekaj_na_pola(win.grid_view)
+        tasks.refresh_counts()                       # odcisk przyłożonego rachunku stoi
+        assert tasks._odcisk_licznikow is not None and tasks.blad_licznikow.isHidden()
+        zdanie = i18n.t("tasks.counts_failed",
+                        msg=i18n.t("objchg.item.db_damaged", db_code="SQLITE_NOTADB"))
+        tasks.con = zla
+        tasks.odswiez_przy_wejsciu()
+        assert not tasks.blad_licznikow.isHidden() and tasks.blad_licznikow.text() == zdanie
+        tasks.blad_licznikow.clear()
+        tasks.blad_licznikow.setVisible(False)
+        tasks.refresh_counts(w_tle=True)             # gest Zbiorów: odcisk biegu na połączeniu okna
+        assert tasks._liczniki_thread is None and tasks.blad_licznikow.text() == zdanie
+        tasks.con = prawdziwe
+        tasks.odswiez_przy_wejsciu()                 # odcisk bez zmian, ale wiersz widoczny - liczy
+        assert tasks.blad_licznikow.isHidden() and tasks.blad_licznikow.szczegol() == ""
+    finally:
+        tasks.con = prawdziwe
+        win.close()
+        zla.close()
+
+
+def test_blad_programu_w_rachunku_licznikow_leci_dalej(qapp, tmp_path, monkeypatch):
+    """EXPECT: łapany jest wyłącznie błąd bazy albo systemu; błąd programu w rachunku (tu
+    `RuntimeError`) nie zostaje zdaniem „lista mówi stan poprzedni” - leci do wołającego.
+    Falsyfikator: `except Exception` w `refresh_counts`."""
+    from horreum.gui import tasks as tasks_mod
+    win = MainWindow(_baza_obiektu(tmp_path))
+    try:
+        _czekaj_na_pola(win.grid_view)
+
+        def _pada(con):
+            raise RuntimeError("błąd programu")
+        monkeypatch.setattr(tasks_mod, "_stan_licznikow", _pada)
+        with pytest.raises(RuntimeError, match="błąd programu"):
+            win.tasks_view.refresh_counts()
+        assert win.tasks_view.blad_licznikow.isHidden()
+    finally:
+        win.close()

@@ -50,7 +50,8 @@ from datetime import datetime
 
 from . import hashing, lineage, naming
 from .gui import queries
-from .item_reasons import blad_systemu   # błąd systemu klasą - jeden właściciel (AR-184)
+from .item_reasons import (   # błąd systemu klasą - jeden właściciel (AR-184); odmowy z kodem (AR-200)
+    OdmowaZPowodem, PowodPozycji, blad_systemu)
 from .resolve.paths import STACKS_DIR
 from .scan import EXCLUDED_DIR_NAMES
 
@@ -456,9 +457,12 @@ _MTIME_TOLERANCE_NS = 2_000_000_000
 class ProjectionAbort(Exception):
     """Sonda pierwszego linku wykazała rozjazd (wolumen nie daje hardlinków — SMB dał kopię) → abort
     PRZED masą. Niesie CZĘŚCIOWY `ApplyResult` (co najwyżej 1 utworzony link) do raportu wołającego —
-    wzorzec `import_fitsmirror.ImportAbort` (cli.py łapie i raportuje)."""
+    wzorzec `import_fitsmirror.ImportAbort` (cli.py łapie i raportuje). `message` to powód z kodem
+    (`PowodPozycji`, AR-200): `str` wyjątku = zdanie PL dla CLI, `powod` - zdanie okna w języku UI
+    (`item_reasons.powod_wyjatku`)."""
     def __init__(self, message, result):
         super().__init__(message)
+        self.powod = message
         self.result = result
 
 
@@ -471,13 +475,18 @@ def _assert_excluded_segment(root):
     Sprawdzamy ścieżkę ZNORMALIZOWANĄ (`abspath` + `normpath`), nie surowy tekst: `R:/ASTRO_/_WBPP/../LIGHTS`
     ma segment `_WBPP` w napisie, a system plików rozwiązuje `..` i pisze do `LIGHTS` - czyli do
     wejścia skanu. Wołający dalej używa `root` tak, jak go podał (Win32 rozwiązuje `..` tak samo),
-    więc ścieżki w wyniku i manifeście się nie zmieniają."""
-    parts = [p for p in re.split(r"[\\/]+", os.path.normpath(os.path.abspath(str(root)))) if p]
+    więc ścieżki w wyniku i manifeście się nie zmieniają.
+
+    Odmowa to `OdmowaZPowodem` (podklasa `ValueError` - każdy `except ValueError` czyta zdanie PL jak
+    dotąd) z kodem `proj_root_not_excluded`: okno wydania mówi ją w języku UI (AR-200)."""
+    korzen = str(root)
+    parts = [p for p in re.split(r"[\\/]+", os.path.normpath(os.path.abspath(korzen))) if p]
     if not any(p.lower() in EXCLUDED_DIR_NAMES for p in parts):
         names = " / ".join(sorted(n.upper() for n in EXCLUDED_DIR_NAMES))   # czytelne, wprost z setu (SPOT)
-        raise ValueError(
-            f"korzeń projekcji {root} nie zawiera segmentu wykluczonego ({names}) - "
-            "projekcja poza wykluczeniem wróciłaby jako wejście skanu")
+        raise OdmowaZPowodem(PowodPozycji(
+            f"korzeń projekcji {korzen} nie zawiera segmentu wykluczonego ({names}) - "
+            "projekcja poza wykluczeniem wróciłaby jako wejście skanu", "proj_root_not_excluded",
+            dir=korzen, name=names))
 
 
 def _link_to(src, dst, *, do_apply, copy):
@@ -556,7 +565,9 @@ class LinkResult:
     frame_id: int
     src: str
     dst: str
-    status: str                       # would-link|linked|exists|conflict|verify_bad|error|skipped
+    # would-link|linked|exists|conflict|verify_bad|error|skipped|unverified (link utworzony, sonda
+    # pierwszego linku nie przeczytała plików - AR-197)
+    status: str
     reason: str | None = None
 
 
@@ -613,6 +624,11 @@ class ApplyResult:
     # Ostrzeżenie, NIE blokada: rozstrzygnięcie („inny korzeń czy świadome dołożenie") należy do
     # człowieka, a projekcja jest kasowalna w Eksploratorze.
     drift: str | None = None
+    # Wydanie przerwane przed końcem (AR-197): krok z błędem systemu (`proj_root_failed`,
+    # `proj_out_failed`, `proj_verify_failed`, `proj_manifest_failed` - klasa systemu w `inner`) albo
+    # werdykt sondy pierwszego linku (`proj_first_link`, wynik częściowy `ProjectionAbort`). `None` =
+    # wydanie doszło do końca; manifest leży wtedy i tylko wtedy, gdy `do_apply` i `error is None`.
+    error: object = None
 
     @property
     def counts(self) -> dict:
@@ -631,17 +647,37 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
     = `ProjectionAbort` (częściowy wynik: 1 link). `progress(done,total,dst,status)` po KAŻDYM frame'ie
     (Qt-wolne). `should_cancel` PRZED frame'em (anulowanie na granicy pliku). Przy `do_apply` pisze
     `_PROJEKCJA.json` obok korzenia (PLIK, nie DB), a wydanie obiektu zakłada też `<root>/out`
-    (`OUTPUT_DIR`, wyjście WBPP). Pominięte z planu dochodzą jako `skipped`."""
+    (`OUTPUT_DIR`, wyjście WBPP). Pominięte z planu dochodzą jako `skipped`.
+
+    BŁĄD SYSTEMU W KROKU WYDANIA (AR-197) to wynik z powodem (`ApplyResult.error`), nie wyjątek:
+    korzeń (nic nie powstało), wyjście WBPP (korzeń już stoi), sonda pierwszego linku, która nie
+    przeczytała plików (link powstał - pozycja `unverified`, masa nie rusza), manifest (pliki
+    wydania leżą, poprzedni manifest nietknięty). Dawniej `OSError` z tych kroków wychodził z CLI
+    `project` śladem stosu."""
     _assert_excluded_segment(root)
     # PRZED czymkolwiek: `_write_manifest` nadpisze zeznanie starego drzewa, więc po masie nie byłoby
     # już czego czytać. DRY sonduje ten sam fakt, bo to właśnie DRY ma ostrzec PRZED wydaniem.
     drift = manifest_drift(root, projection.layout)
     if do_apply:
-        os.makedirs(root, exist_ok=True)           # korzeń istnieje dla linków I manifestu (KLINGA)
+        try:
+            os.makedirs(root, exist_ok=True)       # korzeń istnieje dla linków I manifestu (KLINGA)
+        except OSError as exc:
+            inner = blad_systemu(exc)
+            return ApplyResult(root, projection.layout, do_apply, copy, _z_kwarantanna([], projection),
+                               False, drift, PowodPozycji(
+                                   f"nie założono folderu wydania: {inner}", "proj_root_failed",
+                                   inner=inner))
         if projection.layout == OBJECT_LAYOUT:
             # Wyjście WBPP wydania obiektu powstaje razem z wydaniem, nie przy wyborze folderu
             # roboczego: slot GUI nie dotyka dysku, a DRY niczego nie zakłada.
-            os.makedirs(os.path.join(root, OUTPUT_DIR), exist_ok=True)
+            try:
+                os.makedirs(os.path.join(root, OUTPUT_DIR), exist_ok=True)
+            except OSError as exc:
+                inner = blad_systemu(exc)
+                return ApplyResult(root, projection.layout, do_apply, copy,
+                                   _z_kwarantanna([], projection), False, drift, PowodPozycji(
+                                       f"folder wydania założony, ale folder wyjścia WBPP ({OUTPUT_DIR}) "
+                                       f"nie powstał: {inner}", "proj_out_failed", inner=inner))
 
     results: list[LinkResult] = []
     cancelled = False
@@ -661,31 +697,63 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
         # (szybki i-węzeł już padł). Bez tego SMB-kopia zlinkowałaby całą masę zamiast abortować.
         if do_apply and not copy and status in ("linked", "verify_bad") and not first_hardlink_checked:
             first_hardlink_checked = True
-            if status == "verify_bad" or not _verify_content(item.src, dst):
+            try:
+                zly = status == "verify_bad" or not _verify_content(item.src, dst)
+            except OSError as exc:
+                # Link POWSTAŁ (`_link_to`), a sonda nie przeczytała plików: tożsamości nie
+                # dowiedziono, więc masa nie rusza. Pozycja mówi „utworzony, niezweryfikowany”
+                # (`unverified`) i liczy się do postępu jak każda inna.
+                inner = blad_systemu(exc)
+                powod = PowodPozycji(
+                    f"link utworzony, ale sonda pierwszego linku nie odczytała plików - wydanie "
+                    f"zatrzymane przed masą: {inner}", "proj_verify_failed", inner=inner)
+                results.append(LinkResult(item.frame_id, item.src, dst, "unverified", powod))
+                done += 1
+                if progress is not None:
+                    progress(done, total, dst, "unverified")
+                return ApplyResult(root, projection.layout, do_apply, copy,
+                                   _z_kwarantanna(results, projection), cancelled, drift, powod)
+            if zly:
                 results.append(LinkResult(item.frame_id, item.src, dst, "verify_bad",
                                           reason or "sonda pierwszego linku: cel nie jest hardlinkiem (i-węzeł/treść)"))
-                # Kwarantanna planu dochodzi TAKŻE do wyniku częściowego — inaczej raport abortu
-                # zawsze głosi „pominięto: 0", choćby plan miał klatki bez obecnej kopii (R#6).
-                partial_results = results + [LinkResult(fid, "", "", "skipped", why)
-                                             for fid, why in projection.skipped]
-                partial = ApplyResult(root, projection.layout, do_apply, copy, partial_results,
-                                      cancelled, drift)
-                raise ProjectionAbort(
-                    "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) — "
-                    "wolumen nie wspiera hardlinków? włącz tryb kopii", partial)
+                abort = PowodPozycji(
+                    "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) - "
+                    "wolumen nie wspiera hardlinków? włącz tryb kopii", "proj_first_link")
+                partial = ApplyResult(root, projection.layout, do_apply, copy,
+                                      _z_kwarantanna(results, projection), cancelled, drift, abort)
+                raise ProjectionAbort(abort, partial)
 
         results.append(LinkResult(item.frame_id, item.src, dst, status, reason))
         done += 1
         if progress is not None:
             progress(done, total, dst, status)
 
-    for fid, reason in projection.skipped:         # kwarantanna z planu → wynik
-        results.append(LinkResult(fid, "", "", "skipped", reason))
-
-    result = ApplyResult(root, projection.layout, do_apply, copy, results, cancelled, drift)
+    result = ApplyResult(root, projection.layout, do_apply, copy, _z_kwarantanna(results, projection),
+                         cancelled, drift)
     if do_apply:
-        _write_manifest(root, result, now=now, manifest=manifest)
+        try:
+            _write_manifest(root, result, now=now, manifest=manifest)
+        except OSError as exc:
+            inner = blad_systemu(exc)
+            # Zdanie mówi, CZEGO brakuje i PO CO: z manifestu żniwa rozpoznają obiekt wydania
+            # (`harvest`, okno żniw), a strażnik rozjazdu układu (`manifest_drift`) czyta z niego
+            # kształt drzewa - pliki leżą, więc „odśwież i ponów” niczego by nie dopisało. Zapis
+            # atomowy zostawia manifest POPRZEDNIEGO wydania, gdy był - zdanie nie obiecuje więc ani
+            # braku rozpoznania, ani braku ostrzeżenia, tylko to, że manifest tych plików nie opisuje.
+            return dataclasses.replace(result, error=PowodPozycji(
+                f"nie zapisano manifestu wydania ({MANIFEST_NAME}) - pliki tego wydania leżą w celu, "
+                f"ale manifest ich nie opisuje (brak go albo został poprzedni), więc rozpoznanie "
+                f"obiektu przy wciąganiu wyników WBPP i kontrola układu drzewa przy następnym "
+                f"wydaniu mogą być niepełne: {inner}",
+                "proj_manifest_failed", inner=inner))
     return result
+
+
+def _z_kwarantanna(results, projection):
+    """Pozycje wydania + kwarantanna planu (`skipped`) - JEDNA reguła dla wyniku pełnego i każdego
+    przerwanego (abort sondy, krok z błędem systemu): bez niej raport przerwanego wydania głosił
+    „pominięto: 0”, choćby plan miał klatki bez obecnej kopii (R#6)."""
+    return results + [LinkResult(fid, "", "", "skipped", why) for fid, why in projection.skipped]
 
 
 def _write_manifest(root, result: ApplyResult, *, now, manifest):
@@ -693,7 +761,12 @@ def _write_manifest(root, result: ApplyResult, *, now, manifest):
     nietknięta; brief §3). Snapshot: layout/korzeń/tryb/ts/liczności + `manifest` wołającego
     (perspektywa/filtr/wolumen). `open(...,'w')` żyje w tej klindze (DOOR meta-testu). Wydanie obiektu
     scala `zestawy` ze starym manifestem tego samego obiektu (`_merge_object_manifest`); układy
-    kolumnowe piszą dokładnie to, co pisały."""
+    kolumnowe piszą dokładnie to, co pisały.
+
+    Publikacja ATOMOWA (AR-197): treść idzie do `.part` obok, `fsync`, potem `os.replace` na manifest.
+    Dawny `open(manifest, "w")` ucinał plik przy awarii w połowie zapisu i niszczył zeznanie
+    poprzedniego wydania, z którego żniwa rozpoznają pliki. `.part` to plik tej klingi (resztka po
+    przerwanym biegu jest nadpisywana); przy błędzie jest zdejmowany, a błąd idzie do wołającego."""
     # `segments` obok `layout`: sama NAZWA presetu nie identyfikuje drzewa — zmiana definicji layoutu
     # (P2: `telescope_label`→coalesce z `telescop_canon`) albo nazwanie teleskopu przez usera przesuwa
     # katalogi, a ponowne wydanie do tego samego korzenia zbudowałoby DRUGIE drzewo obok starego
@@ -713,8 +786,16 @@ def _write_manifest(root, result: ApplyResult, *, now, manifest):
                                               cancelled=result.cancelled)
         payload.update(manifest)
     path = os.path.join(root, MANIFEST_NAME)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
+    part = path + PART_SUFFIX
+    try:
+        with open(part, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(part, path)
+    except BaseException:
+        _drop_part(part)
+        raise
 
 
 def _merge_object_manifest(old, manifest, *, now, root, cancelled):

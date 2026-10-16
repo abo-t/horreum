@@ -31,6 +31,16 @@ def _reset_i18n_lang():
 
 
 @pytest.fixture(autouse=True)
+def _straznik_powodu_w_zdaniu(monkeypatch):
+    """Bateria = tryb dev strażnika `i18n._STRAZNIK_POWODU` (AR-204): powód z kodem wstawiony surowo
+    w zdanie UI (`i18n.t(..., msg=powod)` zamiast `tekst_powodu(powod)`) to `TypeError` w teście,
+    a nie polskie zdanie w UI EN. W produkcie strażnik milczy (wartość domyślna - test
+    `test_gui_protokol_zdania.py::test_straznik_powodu_w_produkcie_wylaczony`)."""
+    monkeypatch.setattr(i18n, "_STRAZNIK_POWODU", True)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _izoluj_qsettings(tmp_path_factory, monkeypatch):
     """Żaden test nie pisze do PRAWDZIWYCH ustawień usera (Windows: rejestr
     `HKCU\\Software\\Horreum\\Horreum`). Dowód defektu 2026-09-26: `ostatnia_baza` wskazywała bazę

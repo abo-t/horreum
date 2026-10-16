@@ -1208,7 +1208,7 @@ def test_run_all_on_skanuje_podany_korzen_bez_zapisu_zrodla(qapp, tmp_path, usta
     # Nowy przebieg zaczyna zapis od zera - stary wynik skanu nie przeżywa do raportu innego etapu.
     view._begin_run()
     assert view.last_run == {"stage": None, "since": None, "results": {}, "cancelled": None,
-                             "failed": None, "refused": None}
+                             "failed": None, "failed_tip": None, "refused": None}
 
 
 def test_zapis_przebiegu_niesie_odmowe_startu(qapp, tmp_path):
@@ -1837,3 +1837,154 @@ def test_luki_rodowodu_i_braki_przepisu_w_logu_jezykiem_ekranu(qapp, tmp_path):
     assert "luki: dark: brak w archiwum czegokolwiek o tej nastawie ×2, flat: są klatki surowe" in linia
     assert PipelineView._format_calibrate(PipelineView, kal).endswith(
         "braki: dark: brak camera_id, xbinning, exptime, set_temp_c, gain, offset_adu ×1")
+
+
+# ============================================================ AR-198: awaria etapu klasą w języku UI
+
+_POLSKIE = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+def _czekaj_na(warunek, s=15):
+    """Pętla zdarzeń do warunku (wątek etapów) - `processEvents` + `sleep`, nie `qWait`."""
+    import time
+    koniec = time.monotonic() + s
+    while not warunek():
+        assert time.monotonic() < koniec, "bezpiecznik: wątek Dostawy nie skończył"
+        QApplication.processEvents()
+        time.sleep(0.01)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("typ, kod", [(OSError, 64), (FileNotFoundError, 53)], ids=["64", "53"])
+def test_awaria_etapu_dostawy_klasa_w_jezyku_UI_szczegol_w_podpowiedzi(qapp, tmp_path, monkeypatch,
+                                                                       lang, typ, kod):
+    """Klik „Skanuj”, skan w PRAWDZIWYM wątku pada zerwanym udziałem (64; 53 to
+    `FileNotFoundError`, nie „brak pliku”): pole błędu mówi klasą w języku UI, surowy komunikat
+    systemu (po polsku na tej maszynie) tylko w szczególe podpowiedzi; zapis przebiegu niesie oba
+    (strona Przyjmij); następny bieg zdejmuje szczegół. Falsyfikator: worker z
+    `f"{type(exc).__name__}: {exc}"` albo `lbl_error` jako zwykły `QLabel`."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from horreum.gui import pipeline as pipeline_mod
+    i18n.set_lang(lang)
+    try:
+        view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+        view._root = _tree(tmp_path, 1)
+        view._sync_actions()
+        blad = typ(None, "Komunikat systemu", r"X:\L\a.fits", kod)
+
+        def _pada(*_a, **_k):
+            raise blad
+        monkeypatch.setattr(pipeline_mod, "scan_tree", _pada)
+        view.show()
+        assert view.btn_scan.isVisible() and view.btn_scan.isEnabled()
+        QTest.mouseClick(view.btn_scan, Qt.LeftButton)
+        _czekaj_na(lambda: view._thread is None and view.last_run["failed"])
+        klasa = i18n.t("objchg.item.os_share_lost", os_code=f"WinError {kod}")
+        zdanie = i18n.t("pipeline.stage_failed_line", stage=pipeline_mod._stage_label("scan"), msg=klasa)
+        szczegol = i18n.t("wb.os_detail_tip",
+                          detail=rf"{typ.__name__}: [WinError {kod}] Komunikat systemu: 'X:\L\a.fits'")
+        assert view.lbl_error.text() == zdanie and "Komunikat systemu" not in zdanie
+        assert view.lbl_error.toolTip() == zdanie + "\n" + szczegol
+        assert view.last_run["failed"] == zdanie and view.last_run["failed_tip"] == szczegol
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE, zdanie
+        view._begin_run()
+        assert view.lbl_error.toolTip() == "" and view.lbl_error.szczegol() == ""
+        view.close()
+    finally:
+        i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_klingi_uciekajaca_z_etapu_mowi_kodem(qapp, tmp_path, monkeypatch, lang):
+    """Odmowa klingi z kodem ucieka z etapu (`resolve` → `repo.upsert_object` bez handlera):
+    worker niesie POWÓD z kodem, nie `OdmowaZPowodem: …` po polsku; szczegółu systemu brak.
+    Falsyfikator: worker z samym `blad_systemu(exc)`."""
+    from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu
+    from horreum.item_reasons import OdmowaZPowodem, PowodPozycji
+    powod = PowodPozycji("obiekt 'M33' to nagrobek, a jego kanon prowadzi dziś przez parę katalogową "
+                         "do 'NGC598' - nagrobka nie wskrzeszam, celem jest 'NGC598'", "retired_via_xref",
+                         canon="M33", target="NGC598")
+
+    def _pada(self, con, etap):
+        raise OdmowaZPowodem(powod)
+    monkeypatch.setattr(PipelineWorker, "_bulk", _pada)
+    w = PipelineWorker(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    w.configure("resolve")
+    bledy = []
+    w.failed.connect(lambda n, p: bledy.append((n, p)))
+    w.run()
+    assert bledy == [("resolve", powod)] and bledy[0][1].code == "retired_via_xref"
+    i18n.set_lang(lang)
+    try:
+        zdanie = tekst_powodu(bledy[0][1])
+        assert "OdmowaZPowodem" not in zdanie and wiersz_systemu(bledy[0][1]) == ""
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE, zdanie
+    finally:
+        i18n.set_lang("pl")
+
+
+def _sygnaly_klas(drzewa):
+    """{klasa: {sygnał: [typy argumentów]}} z `nazwa = Signal(...)` w ciele klas `horreum/gui/`."""
+    import ast
+    wynik = {}
+    for drzewo in drzewa.values():
+        for kl in (n for n in ast.walk(drzewo) if isinstance(n, ast.ClassDef)):
+            for st in kl.body:
+                if (isinstance(st, ast.Assign) and len(st.targets) == 1
+                        and isinstance(st.targets[0], ast.Name) and isinstance(st.value, ast.Call)
+                        and getattr(st.value.func, "id", None) == "Signal"):
+                    wynik.setdefault(kl.name, {})[st.targets[0].id] = [ast.unparse(a) for a in st.value.args]
+    return wynik
+
+
+def test_slot_sygnalu_z_object_ma_object_na_tej_pozycji():
+    """AST całego `horreum/gui/`: sygnał workera z `object` na pozycji N (powód z kodem, wynik)
+    podłączony do `self.<slot>` z dekoratorem `@Slot(...)` wymaga `object` na pozycji N - inaczej
+    PySide konwertuje powód do gołego `str` i kod klasy błędu znika po cichu (przy połączeniu
+    kolejkowanym z wątku). Odbiorca rozpoznany po przypisaniu `x = KlasaWorkera(...)` w tej samej
+    metodzie. Falsyfikator: `@Slot(int, str)` na `HomeView._on_teczki_failed`."""
+    import ast
+    from pathlib import Path
+    import horreum.gui as gui
+    drzewa = {p: ast.parse(p.read_text(encoding="utf-8"))
+              for p in sorted(Path(gui.__file__).parent.rglob("*.py"))}
+    sygnaly = _sygnaly_klas(drzewa)
+    naruszenia, sprawdzone = [], set()
+    for plik, drzewo in drzewa.items():
+        for kl in (n for n in ast.walk(drzewo) if isinstance(n, ast.ClassDef)):
+            metody = {f.name: f for f in kl.body if isinstance(f, ast.FunctionDef)}
+            for f in metody.values():
+                klasa_odbiorcy = {ast.unparse(t): n.value.func.id for n in ast.walk(f)
+                                  if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                                  and isinstance(n.value.func, ast.Name) for t in n.targets}
+                for n in ast.walk(f):
+                    if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                            and n.func.attr == "connect" and isinstance(n.func.value, ast.Attribute)
+                            and len(n.args) == 1 and isinstance(n.args[0], ast.Attribute)
+                            and isinstance(n.args[0].value, ast.Name) and n.args[0].value.id == "self"):
+                        continue
+                    klasa = klasa_odbiorcy.get(ast.unparse(n.func.value.value))
+                    typy = sygnaly.get(klasa, {}).get(n.func.value.attr)
+                    slot = metody.get(n.args[0].attr)
+                    if typy is None or slot is None or "object" not in typy:
+                        continue
+                    dekoratory = [d for d in slot.decorator_list if isinstance(d, ast.Call)
+                                  and getattr(d.func, "id", None) == "Slot"]
+                    if not dekoratory:
+                        continue
+                    typy_slotu = [ast.unparse(a) for a in dekoratory[0].args]
+                    sprawdzone.add((klasa, n.func.value.attr))
+                    for i, typ in enumerate(typy):
+                        # Dekorator krótszy od sygnału też łamie regułę: Qt przytnie argumenty i powód
+                        # z kodem zginie bez błędu tak samo jak przy `str` na tej pozycji.
+                        if typ == "object" and (i >= len(typy_slotu) or typy_slotu[i] != "object"):
+                            naruszenia.append(f"{plik.name}: {klasa}.{n.func.value.attr} -> "
+                                              f"{kl.name}.{slot.name} @Slot({', '.join(typy_slotu)})")
+    assert not naruszenia, naruszenia
+    # Rozpoznanie odbiorcy działa na workerach błędu systemu i bazy klasą (AR-184, AR-198):
+    assert {("PipelineWorker", "failed"), ("TeczkiWorker", "failed"), ("_LicznikiWorker", "failed"),
+            ("PlanWorker", "failed"), ("DryWorker", "failed"), ("ApplyWorker", "aborted"),
+            ("ApplyWorker", "failed")} <= sprawdzone, sorted(sprawdzone)

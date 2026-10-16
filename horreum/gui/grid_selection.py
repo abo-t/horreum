@@ -7,7 +7,7 @@ Warstwa widżetów.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, QSize, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QFont, QPainter
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QDialog, QDialogButtonBox,
@@ -18,6 +18,7 @@ from horreum import stacks
 from horreum.gui import i18n
 from horreum.gui.grid_model import PREZENTACJA_KLASYCZNA, PREZENTACJA_ZNAJDZ, _set_role
 from horreum.gui.grid_panels import ElidedLabel
+from horreum.gui.wb_worker import EtykietaBledu   # pole zdania okien zapisu (AR-204)
 
 
 class SelectionBar(QFrame):
@@ -473,30 +474,26 @@ class _PanelStack(QStackedWidget):
 
 
 
-class _ZdanieWyniku(QLabel):
-    """Zdanie wyniku szuflady: `text()` i podpowiedź niosą PEŁNĄ treść, render jest elidowany
-    w prawo do bieżącej szerokości, a minimum szerokości NIE zależy od długości zdania.
+class _ZdanieWyniku(EtykietaBledu):
+    """Zdanie wyniku szuflady: pole zdania okien zapisu (`EtykietaBledu` - `text()` i podpowiedź
+    niosą PEŁNĄ treść, szczegół wyniku przez `ustaw`, minimum szerokości 0), a render jest elidowany
+    w prawo do bieżącej szerokości.
 
-    Zwykły `QLabel` bez zawijania zgłasza minimum = szerokość całego tekstu i to minimum idzie
-    w górę aż do okna: zdanie porażki gestu (368 znaków, firsthand) podniosło minimum okna do
-    2613 px logicznych - 103 px poza ekranem 2560, bez możliwości zwężenia. Zawijanie odpadło, bo
-    szuflada jest jednym wierszem, a jej wysokość ruszałaby tabelą przy każdym wyniku. Elizja
-    w malowaniu, nie w `setText`: wołający czytają `text()` jako treść wyniku, więc przycięta wersja
-    w tym polu mówiłaby mniej, niż gest powiedział."""
-
-    def setText(self, text):
-        super().setText(text)
-        self.setToolTip(text)
-
-    def minimumSizeHint(self):
-        return QSize(0, super().minimumSizeHint().height())
+    Minimum szerokości NIE zależy od długości zdania: zwykły `QLabel` bez zawijania zgłasza minimum
+    = szerokość całego tekstu i to minimum idzie w górę aż do okna - zdanie porażki gestu (368
+    znaków, firsthand) podniosło minimum okna do 2613 px logicznych, 103 px poza ekranem 2560.
+    Zawijanie odpadło, bo szuflada jest jednym wierszem, a jej wysokość ruszałaby tabelą przy każdym
+    wyniku. Elizja w malowaniu, nie w `setText`: wołający czytają `text()` jako treść wyniku, więc
+    przycięta wersja w tym polu mówiłaby mniej, niż gest powiedział. Wskaźnik szczegółu stoi przed
+    zdaniem, więc elizja go nie zjada."""
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        rect = self.contentsRect()
+        rect = self._prostokat_tekstu()
         tekst = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, rect.width())
         self.style().drawItemText(painter, rect, int(self.alignment()), self.palette(),
                                   self.isEnabled(), tekst, self.foregroundRole())
+        self._maluj_wskaznik(painter)
 
 
 class StagingDrawer(QFrame):

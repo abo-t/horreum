@@ -1326,3 +1326,41 @@ def test_cofniecie_mowi_do_czego_wrocil_kazdy_stos(qapp, tmp_path, ustawienia, m
         assert stan() == przed
     finally:
         win.close()
+
+
+# ---------------------------------------------------------------- AR-198: awaria etapu ze szczegółem
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_awaria_przyjecia_klasa_w_jezyku_UI_szczegol_w_podpowiedzi(strona, tmp_path, monkeypatch, lang):
+    """Przyjmij nowe (przebieg „all” w prawdziwym wątku) pada zerwanym udziałem: wiersz błędu strony
+    to ten sam wiersz co pod przyciskami Dostawy, klasą w języku UI, a surowy komunikat systemu
+    w szczególe podpowiedzi; zapis odmowy zdejmuje go z pola. Falsyfikator: `_render` z `setText`
+    bez szczegółu albo pole jako zwykły `QLabel`."""
+    from horreum.gui import pipeline as pipeline_mod
+
+    def _pada(*_a, **_k):
+        raise OSError(None, "Komunikat systemu", r"X:\L\a.fits", 64)
+    i18n.set_lang(lang)
+    try:
+        monkeypatch.setattr(pipeline_mod, "scan_tree", _pada)
+        tree = _drzewo(tmp_path, "d_blad", [(1, PLAMA)])
+        zapis = _przebieg(strona.pipeline_view, lambda: strona.pipeline_view.run_all_on(tree))
+        klasa = i18n.t("objchg.item.os_share_lost", os_code="WinError 64")
+        szczegol = i18n.t("wb.os_detail_tip", detail=r"OSError: [WinError 64] Komunikat systemu: 'X:\L\a.fits'")
+        assert klasa in zapis["failed"] and zapis["failed_tip"] == szczegol
+        zdanie = i18n.t("intake.failed", line=zapis["failed"])
+        assert strona.lbl_error.text() == zdanie and not strona.lbl_error.isHidden()
+        assert strona.lbl_error.toolTip() == zdanie + "\n" + szczegol
+        if lang == "en":
+            assert not set(zdanie) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), zdanie
+        strona.pipeline_view.run_finished.emit(_zapis_przebiegu(refused="źródło niedostępne"))
+        assert strona.lbl_error.isHidden() and strona.lbl_error.szczegol() == ""
+        assert strona.lbl_error.text() == ""
+        # Ta sama awaria, potem bieg bez awarii - pole gaśnie razem ze szczegółem.
+        strona.pipeline_view.run_finished.emit(_zapis_przebiegu(failed=zapis["failed"],
+                                                                failed_tip=szczegol))
+        assert strona.lbl_error.szczegol() == szczegol
+        strona.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert strona.lbl_error.isHidden() and strona.lbl_error.szczegol() == ""
+    finally:
+        i18n.set_lang("pl")

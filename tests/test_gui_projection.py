@@ -2059,3 +2059,143 @@ def test_karty_jednym_stylem_separatora_i_nazwa_folderu_roboczego(qapp, tmp_path
     assert pd_mod.card_name("Working folder") == "Folder roboczy"
     assert pd_mod.card_name("Moja karta") == "Moja karta"
     con.close()
+
+
+# ============================================================ AR-197, AR-200: kroki wydania i odmowy w języku UI
+
+_POLSKIE = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+_SZCZEGOL = r"OSError: [WinError 64] Komunikat systemu: 'X:\L\a.fits'"
+
+
+@pytest.fixture
+def jezyk():
+    yield i18n.set_lang
+    i18n.set_lang("pl")
+
+
+def _klik(przycisk):
+    assert przycisk.isVisible() and przycisk.isEnabled(), przycisk.text()
+    QTest.mouseClick(przycisk, Qt.LeftButton)
+
+
+def _nazwy_wykluczone():
+    from horreum.scan import EXCLUDED_DIR_NAMES
+    return " / ".join(sorted(n.upper() for n in EXCLUDED_DIR_NAMES))
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("krok, kod, nietkniete", [
+    ("korzen", "proj_root_failed", 3), ("sonda", "proj_verify_failed", 2),
+    ("manifest", "proj_manifest_failed", 0)])
+def test_okno_wydania_krok_pada_raport_bledu_z_liczbami(qapp, tmp_path, ustawienia, monkeypatch, jezyk,
+                                                      lang, krok, kod, nietkniete):
+    """AR-197: krok wydania pada zerwanym udziałem (korzeń, sonda pierwszego linku, manifest) -
+    klik „Utwórz” kończy się raportem: zdanie kroku z klasą w języku UI, pod nim liczby tego, co
+    zaszło, i nietknięte; szczegół systemu pod kursorem raportu; „Przerwane błędem”, bez „Otwórz
+    w Eksploratorze”. Falsyfikator: `_on_apply_done` bez gałęzi `res.error` - raport „Utworzono”."""
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "k.db"))
+    ids = _seed_files(con, tmp_path, 3)
+    root = tmp_path / "_WBPP" / "feed"
+    _target(ustawienia, root)
+    dlg = _dlg(con, ids)
+    blad = OSError(None, "Komunikat systemu", r"X:\L\a.fits", 64)
+
+    def _pada(*_a, **_k):
+        raise blad
+    if krok == "korzen":
+        prawdziwy = os.makedirs
+        monkeypatch.setattr(projection.os, "makedirs", lambda p, *a, **k: (
+            _pada() if os.path.normcase(str(p)) == os.path.normcase(str(root)) else prawdziwy(p, *a, **k)))
+    else:
+        monkeypatch.setattr(projection, "_verify_content" if krok == "sonda" else "_write_manifest", _pada)
+    dlg.show()
+    _klik(dlg.btn_apply)
+    raport = dlg.report.toPlainText()
+    klasa = i18n.t("objchg.item.os_share_lost", os_code="WinError 64")
+    zdanie = i18n.t(f"objchg.item.{kod}", inner=klasa)
+    rada_odswiez = i18n.t("proj.apply_error", msg="", made="").split("\n\n")[-1]
+    if krok == "manifest":
+        # Pliki leżą, sonda zobaczy komplet: bez rady „Odśwież podgląd” i bez „nietknięte: 0 … wznów”;
+        # zdanie powodu mówi, czego brakuje (manifest) i po co (żniwa, strażnik układu).
+        assert raport.startswith(i18n.t("proj.manifest_error_head", msg=zdanie)), raport
+        assert rada_odswiez not in raport, raport
+        assert i18n.t("proj.untouched", n=0) not in raport, raport
+        assert "WBPP" in zdanie and "_PROJEKCJA.json" in zdanie
+    else:
+        assert raport.startswith(i18n.t("proj.apply_error", msg=zdanie, made="")), raport
+        assert i18n.t("proj.untouched", n=nietkniete) in raport, raport
+    assert (i18n.t("proj.unverified", n=1) in raport) == (krok == "sonda"), raport
+    assert dlg.report.toolTip() == i18n.t("wb.os_detail_tip", detail=_SZCZEGOL)
+    assert dlg.btn_apply.text() == i18n.t("proj.btn_error") and not dlg.btn_apply.isEnabled()
+    assert dlg.btn_open.isHidden() and dlg.summary is None
+    if lang == "en":
+        assert not set(raport.split("\n")[0]) & _POLSKIE, raport
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_straznika_korzenia_przy_dodaniu_celu_w_jezyku_UI(qapp, tmp_path, monkeypatch, jezyk,
+                                                               lang):
+    """AR-200: cel bez segmentu wykluczonego - odmowa strażnika mówi kodem w języku UI (dawniej
+    zdanie PL rdzenia także w UI EN). Falsyfikator: `proj.add_failed` z `e=exc`."""
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "g.db"))
+    dlg = _dlg(con, _seed_files(con, tmp_path, 1))
+    zly = str(tmp_path / "LIGHTS")
+    assert dlg._add_target_path(zly, "zly") is False
+    oczekiwany = i18n.t("proj.add_failed", e=i18n.t("objchg.item.proj_root_not_excluded", dir=zly,
+                                                   name=_nazwy_wykluczone()))
+    assert dlg.report.toPlainText() == oczekiwany
+    if lang == "en":
+        assert not set(oczekiwany) & _POLSKIE, oczekiwany
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_sonda_DRY_na_karcie_bez_segmentu_mowi_kodem(qapp, tmp_path, ustawienia, monkeypatch, jezyk,
+                                                     lang):
+    """AR-200: karta celu bez segmentu wykluczonego zapisana w ustawieniach (np. przed walidacją
+    dodania) - sonda DRY odmawia strażnikiem klingi, raport mówi kodem w języku UI. Falsyfikator:
+    `DryWorker` z `str(exc)`."""
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "d.db"))
+    zly = tmp_path / "LIGHTS"
+    _target(ustawienia, zly)
+    dlg = _dlg(con, _seed_files(con, tmp_path, 1))
+    oczekiwany = i18n.t("proj.dry_failed", msg=i18n.t(
+        "objchg.item.proj_root_not_excluded", dir=pd_mod._canon_path(zly), name=_nazwy_wykluczone()))
+    assert dlg.report.toPlainText() == oczekiwany
+    if lang == "en":
+        assert not set(oczekiwany) & _POLSKIE, oczekiwany
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_abort_sondy_pierwszego_linku_w_jezyku_UI(qapp, tmp_path, ustawienia, monkeypatch, jezyk, lang):
+    """AR-200: sonda pierwszego linku wykazała kopię zamiast hardlinka - „ABORT:” ze zdaniem kodu
+    `proj_first_link` w języku UI, nad wynikiem częściowym z liczbą nietkniętych. Falsyfikator:
+    `ApplyWorker` z `str(exc)` - zdanie PL w UI EN."""
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    monkeypatch.setattr(projection, "_verify_content", lambda src, dst, nbytes=65536: False)
+    con = db.open_db(str(tmp_path / "a.db"))
+    ids = _seed_files(con, tmp_path, 3)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    dlg.show()
+    _klik(dlg.btn_apply)
+    raport = dlg.report.toPlainText()
+    assert raport.startswith(i18n.t("proj.abort_prefix", msg=i18n.t("objchg.item.proj_first_link")))
+    assert i18n.t("proj.untouched", n=2) in raport, raport
+    assert dlg.btn_apply.text() == i18n.t("proj.btn_not_created")
+    if lang == "en":
+        assert not set(raport.split("\n")[0]) & _POLSKIE, raport
+    dlg.reject()
+    con.close()

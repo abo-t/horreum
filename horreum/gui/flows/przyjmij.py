@@ -25,6 +25,7 @@ from horreum.gui import busy, i18n, portfolio, queries
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.grid import zdanie_pominiec
 from horreum.gui.pipeline import _stage_label
+from horreum.gui.wb_worker import EtykietaBledu       # zdanie + szczegół awarii etapu (AR-198)
 from horreum.resolve._text import norm_alnum
 
 __all__ = ["PrzyjmijView"]
@@ -114,7 +115,9 @@ class PrzyjmijView(QWidget):
         self.lbl_warn.setProperty("role", "warn")
         self.lbl_warn.setWordWrap(True)
         pv.addWidget(self.lbl_warn)
-        self.lbl_error = QLabel("")
+        # Pole z protokołu „zdanie + szczegół” (AR-198): wiersz awarii etapu z szczegółem systemu
+        # albo bazy pod kursorem - ten sam, który stoi pod przyciskami Dostawy.
+        self.lbl_error = EtykietaBledu("")
         self.lbl_error.setProperty("role", "error")
         self.lbl_error.setWordWrap(True)
         pv.addWidget(self.lbl_error)
@@ -267,6 +270,7 @@ class PrzyjmijView(QWidget):
         if zapis["refused"]:
             self.lbl_warn.setText(i18n.t("intake.refused", reason=zapis["refused"]))
             self.lbl_warn.setVisible(True)
+            self.lbl_error.clear()                   # zdanie i szczegół awarii poprzedniego biegu
             self.lbl_error.setVisible(False)
             for w in (self.lbl_head, self.lbl_objects, self.lbl_cal, self.lbl_unresolved,
                       self.lbl_cleared):
@@ -281,7 +285,9 @@ class PrzyjmijView(QWidget):
             self.lbl_warn.setText(i18n.t("intake.cancelled", stage=_stage_label(zapis["cancelled"])))
         self.lbl_error.setVisible(bool(zapis["failed"]))
         if zapis["failed"]:
-            self.lbl_error.setText(i18n.t("intake.failed", line=zapis["failed"]))
+            self.lbl_error.ustaw(i18n.t("intake.failed", line=zapis["failed"]), zapis["failed_tip"] or "")
+        else:
+            self.lbl_error.clear()
         r = queries.delivery_report(self.con, zapis["since"], until=self._until)
         self.lbl_head.setText(self._zdanie_dostawy(zapis, r))
         self.lbl_head.setVisible(True)

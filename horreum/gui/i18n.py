@@ -23,6 +23,12 @@ DEFAULT = "pl"
 _LANGS = [("pl", "Polski"), ("en", "English")]
 _LANG = DEFAULT
 _missing = set()   # klucze już zalogowane jako brak — log raz, nie zalewaj konsoli
+# STRAŻNIK POWODU Z KODEM W ZDANIU UI (AR-204): parametr `t`/`t_plural` typu
+# `item_reasons.PowodPozycji` to zdanie PL powodu wstawione surowo - w UI EN mówi po polsku, a droga
+# to `gui.wb_worker.tekst_powodu`. Włącza go bateria testów (`tests/conftest.py`); w produkcie
+# wyłączony: wyjątek w slocie okna zgubiłby całe zdanie, a polskie zdanie przynajmniej coś mówi.
+# Pomiar przed włączeniem: 0 trafień na 681 testach ośmiu plików GUI z powodami.
+_STRAZNIK_POWODU = False
 
 
 def normalize(lang):
@@ -52,9 +58,22 @@ def _warn_missing(key):
         _LOG.warning("i18n: brak klucza %r (język %r) — renderuję klucz", key, _LANG)
 
 
+def _straznik_powodu(key, kw):
+    """`TypeError`, gdy strażnik jest włączony, a parametr zdania to powód z kodem (`PowodPozycji`).
+    Import leniwy - moduł zostaje bez zależności poza katalogiem."""
+    if not (_STRAZNIK_POWODU and kw):
+        return
+    from horreum.item_reasons import PowodPozycji
+    for nazwa, wartosc in kw.items():
+        if isinstance(wartosc, PowodPozycji):
+            raise TypeError(f"i18n: parametr {nazwa!r} klucza {key!r} to powód z kodem "
+                            f"{wartosc.code!r} - zdanie w języku UI daje wb_worker.tekst_powodu")
+
+
 def t(key, **kw):
     """Etykieta UI dla bieżącego języka. Brak klucza / zły kształt (wpis mnogi) → klucz + log dev.
     Brak bieżącego języka → spadek na PL, potem na klucz. Interpolacja `str.format(**kw)`."""
+    _straznik_powodu(key, kw)
     forms = CATALOG.get(key)
     if not isinstance(forms, dict) or isinstance(forms.get(_LANG, forms.get(DEFAULT)), dict):
         _warn_missing(key)
@@ -78,6 +97,7 @@ def t_plural(key, n, **kw):
     """Fraza odmieniona przez `n` (FRAZA, nie słowo — PL odmienia przymiotnik, EN rzeczownik, więc
     forma = pełna fraza per język). Wstrzykuje `n=n` (+ `kw`) przez `str.format`. Zły kształt/brak →
     klucz + log dev."""
+    _straznik_powodu(key, kw)
     forms = CATALOG.get(key)
     lang_forms = forms.get(_LANG) if isinstance(forms, dict) else None
     if not isinstance(lang_forms, dict):

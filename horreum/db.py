@@ -152,6 +152,10 @@ from importlib import resources
 # 0043 to PRZYROST (CREATE INDEX, AR-154): `idx_frame_object` na `frame(object_id)` - materiał okna
 # stosu pyta o lighty jednego obiektu, a kubełek rodowodu woła propozycję także dla stosów bez
 # werdyktu z powodem okna. Zero ruszonych wierszy.
+# 0044 to PRZYROST (nowa tabela, AR-182): `atomic_undo` - ślad własnego cofnięcia drogą atomową
+# utrwalony przed podmianą: para odcisków wyniku (sha1 pliku i nagłówka), plik zastany i nazwy
+# plików, które cofnięcie może zostawić na dysku (AR-127). Ponowienie rozpoznaje po nim własny wynik.
+# Wchodzi PUSTA - cofnięcia sprzed migracji śladu nie zostawiły.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -195,6 +199,7 @@ MIGRATIONS = [
     (41, "0041_object_change_reason_code.sql"),
     (42, "0042_writer_reason_code.sql"),
     (43, "0043_frame_object_index.sql"),
+    (44, "0044_atomic_undo.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

@@ -48,14 +48,19 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from horreum import db, object_change, repo, resolver
+from horreum import db, object_change, repo, resolver, writeback
 from horreum.gui import i18n, queries
 from horreum.gui.i18n_catalog import CATALOG
 # Zdania wspólne okien zapisu mieszkają w `wb_worker` (jeden dom: czytelny powód rdzenia, status
 # wiersza ze spadkiem na drogę atomową, podział powodu spadku); `grid` importuje go i tak.
-from horreum.gui.wb_worker import (EtykietaBledu, czytelny_powod, podziel_powod_spadku,
-                                   status_pozycji, tekst_powodu, wiersz_systemu, wiersz_szczegolu)
-from horreum.item_reasons import blad_systemu   # wyjątek planu - błąd systemu klasą (AR-184)
+# `wb_worker` ciągnie `writeback` (astropy) już tutaj, więc oba stoją na górze - import w funkcji
+# niczego by nie odłożył.
+from horreum.gui.wb_worker import (EtykietaBledu, WritebackRunner, czytelny_powod,
+                                   podziel_powod_spadku, spadek_na_droge_atomowa, status_pozycji,
+                                   tekst_powodu, wiersz_systemu, wiersz_szczegolu,
+                                   zdanie_wyniku_zapisu)
+# Wyjątek planu - błąd systemu klasą (AR-184); odmowa stagingu z powodem albo tekstem (AR-200).
+from horreum.item_reasons import blad_systemu, powod_wyjatku
 from horreum.resolve.paths import STACK_KIND, object_folder
 
 # Kolumny listy pozycji: plik dziś, plik po zmianie, karta `OBJECT` stara → nowa i - po biegu
@@ -174,7 +179,6 @@ def drogi_dopisania(con, plan):
     kopii (`queries.present_copy_card_mirror`); lustro, które nie opisuje tej kopii, daje „zależy
     od pliku”. Pozycje bez dopisania do FITS (podmiana karty, XISF, bez karty) nie wchodzą - ich
     drogi okno nie przewiduje. ZERO ZAPISU, zero dysku - liczone obok planu, na jego wątku."""
-    from horreum import writeback          # lazy: astropy, jak w `zdanie_wyniku_zmiany`
     dopisania = [it for it in plan.items
                  if ObjectChangeDialog._dopisanie_fits(it.card_op, it.old_path)]
     if not dopisania:
@@ -194,7 +198,6 @@ def drogi_kart(con, plan):
     w jednym rekordzie; lustro, które kopii nie opisuje → `_DROGA_NIEZNANA` („zależy od pliku”).
     Znaczniki wierszy czytają drogę wyłącznie dla dopisań FITS (`_tekst_karty`), sumę - wszystkie
     (`sumy_drog`). ZERO ZAPISU, zero dysku."""
-    from horreum import writeback          # lazy: astropy, jak w `drogi_dopisania`
     drogi = drogi_dopisania(con, plan)
     podmiany = [it for it in plan.items if it.card_op and it.location_id not in drogi]
     if not podmiany:
@@ -460,8 +463,6 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
         (`horreum object-change finish|undo DB RUN_ID`), jak `commit_id` w oknach kart;
       * ostrzeżenia rdzenia - po kodzie w języku UI (`tekst_ostrzezenia`).
     Całość przechodzi przez `czytelny_powod` (plik zajęty, ścieżki z `repr`)."""
-    from horreum import writeback          # lazy: `writeback` i `wb_worker` ciągną astropy
-    from horreum.gui.wb_worker import spadek_na_droge_atomowa, zdanie_wyniku_zapisu
     msg = (zdanie_wyniku_zapisu(res, "objchg.res.undone") if cofniecie
            else zdanie_wyniku_zapisu(res, "objchg.res.applied"))
     z_powodem = [fr for fr in res.applied if fr.reason and fr not in res.withheld]
@@ -491,6 +492,19 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
         msg += "\n" + tekst_ostrzezenia(getattr(ostrzezenie, "code", None),
                                         getattr(ostrzezenie, "params", ()), ostrzezenie)
     return czytelny_powod(msg)
+
+
+def zdanie_odmowy_stagingu(exc):
+    """Odmowa stagingu planu (`repo.stage_object_change`) → `(zdanie, szczegół)` pola błędu okna
+    (AR-200). Odmowa klingi z powodem (`OdmowaZPowodem`) i błąd bazy (`sqlite3.Error` - klasę
+    błędu bazy ma jeden właściciel, `item_reasons.blad_systemu`) mówią powodem w języku UI,
+    szczegół systemu idzie pod kursor (`wiersz_systemu`). Goły `ValueError` to inwariant planu
+    (EXPECT w klindze - błąd programu): zdanie w języku UI, surowy tekst inwariantu w szczególe."""
+    powod = blad_systemu(exc) if isinstance(exc, sqlite3.Error) else getattr(exc, "powod", None)
+    if powod is not None:
+        return i18n.t("objchg.err.stage", msg=tekst_powodu(powod)), wiersz_systemu(powod)
+    return (i18n.t("objchg.err.stage", msg=i18n.t("objchg.err.stage_plan")),
+            i18n.t("objchg.st.detail_tip", detail=powod_wyjatku(exc)))
 
 
 def ruszyl_cokolwiek(res):
@@ -527,9 +541,6 @@ class ObjectChangeDialog(QDialog):
     def __init__(self, con, *, frame_ids=None, target=None, run_id=None, now_fn, db_path=None,
                  off_thread=True, parent=None):
         super().__init__(parent)
-        # Lazy jak w oknach kart: `wb_worker` ciągnie `writeback` → astropy.
-        from horreum.gui.wb_worker import WritebackRunner
-
         przebieg = None
         if run_id is not None:
             assert frame_ids is None and target is None, (
@@ -837,8 +848,7 @@ class ObjectChangeDialog(QDialog):
         if gen != self._gen:
             return
         self.counts.setText("")
-        self.error.setText(i18n.t("objchg.err.plan", msg=tekst_powodu(powod)))
-        self.error.setToolTip(wiersz_systemu(powod))
+        self.error.ustaw(i18n.t("objchg.err.plan", msg=tekst_powodu(powod)), wiersz_systemu(powod))
         self._sync_akcji()
 
     def _kolumna_po_zmianie(self, sciezki):
@@ -1180,7 +1190,7 @@ class ObjectChangeDialog(QDialog):
             try:
                 repo.stage_object_change(self.con, plan=self._plan, now=self._now())
             except (ValueError, sqlite3.Error) as e:
-                self.error.setText(i18n.t("objchg.err.stage", msg=f"{type(e).__name__}: {e}"))
+                self.error.ustaw(*zdanie_odmowy_stagingu(e))
                 return
             self._run_id = self._plan.run_id
             total = len(self._plan.items)
@@ -1254,9 +1264,9 @@ class ObjectChangeDialog(QDialog):
             else:
                 self._pozostalo, self._dokonczenie = 0, False
                 self._stan_przebiegu = "undoing"
-        self.error.setText(i18n.t("grid.wb.error", msg=czytelny_powod(msg))
-                           + (i18n.t("objchg.res.run", run_id=self._run_id) if self._run_id else ""))
-        self.error.setToolTip(podpowiedz)
+        self.error.ustaw(i18n.t("grid.wb.error", msg=czytelny_powod(msg))
+                         + (i18n.t("objchg.res.run", run_id=self._run_id) if self._run_id else ""),
+                         podpowiedz)
         self._sync_akcji()
         self.changed.emit()
 

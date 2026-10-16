@@ -460,8 +460,10 @@ def test_okna_kart_po_cofnieciu_niosa_szczegol_systemu(qapp, tmp_path, jezyk, la
                                        now_fn=lambda: NOW, db_path=queries.db_path_of(con))
     for dlg in (naprawa, sciezka):
         dlg._after_undo("undo", res)
-        assert dlg.status.toolTip() == tip, (type(dlg).__name__, dlg.status.toolTip())
         zdanie = dlg.status.text()
+        # Protokół pola (AR-204): podpowiedź = zdanie + szczegół, szczegół też w `szczegol()`.
+        assert dlg.status.szczegol() == tip, (type(dlg).__name__, dlg.status.toolTip())
+        assert dlg.status.toolTip() == zdanie + "\n" + tip, (type(dlg).__name__, dlg.status.toolTip())
         assert i18n.t("objchg.item.os_denied", os_code="WinError 5") in zdanie, zdanie
         if lang == "en":
             assert _bez_polskiego(zdanie), zdanie
@@ -719,3 +721,118 @@ def test_zapadka_powodow_w_fstringach_GUI():
     stare = set(_ZNANE_FSTRINGI) - znalezione
     assert not nowe, f"surowy powód w f-stringu GUI: {sorted(nowe)}"
     assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"
+
+
+# ============================ AR-193, AR-194: podgląd nazw i błąd definicji makra w języku UI
+
+from test_gui_grid import rn_view  # noqa: E402,F401 - fikstura widoku nad dwoma FITS z DATE-OBS
+
+
+def _klik_w(widzet):
+    """Prawdziwy klik myszą w środek widżetu (widok pokazany)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    assert widzet.isVisible() and widzet.isEnabled(), widzet
+    QTest.mouseClick(widzet, Qt.LeftButton)
+
+
+def _panel_nazw(view):
+    """Widok pokazany, panel „Uporządkuj nazwy plików…” otwarty kliknięciem paska zbioru."""
+    view.show()
+    QApplication.processEvents()
+    _klik_w(view.sel_bar.btn_rename)
+    QApplication.processEvents()
+    return view.rename_bar
+
+
+def _komorka_podgladu(view, rola):
+    from PySide6.QtCore import Qt
+    m = view.model
+    r = next(i for i, row in enumerate(m._rows) if row.get("frame_id"))
+    return m.data(m.index(r, m._preview_col()), {"tip": Qt.ToolTipRole, "tekst": Qt.DisplayRole}[rola])
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_podglad_nazw_pominiecie_mowi_w_jezyku_UI(rn_view, jezyk, lang):
+    """AR-193: źródło „nazwa pliku” bez fallbacku nad plikami bez czasu w nazwie - „Podgląd” klikiem:
+    podpowiedź „(pominięto)” mówi powód w języku UI (EN dokładnie), a zdanie paska mówi cel
+    odmienioną frazą katalogu (dawniej literał „2 widocznych” w UI EN). Falsyfikator: `resolve_dt`
+    z gołym f-stringiem → „brak źródła czasu…” w EN; `_rename_target_ids` z literałem PL."""
+    jezyk(lang)
+    view, _con, _pliki = rn_view
+    bar = _panel_nazw(view)
+    komunikaty = _komunikaty(view)
+    bar.src.setCurrentIndex(bar.src.findData("filename"))
+    _klik_w(bar.fallback)
+    assert not bar.fallback.isChecked()
+    _klik_w(bar.btn_prev)
+    zdanie = {"pl": "brak źródła czasu 'filename'", "en": "no time source 'filename'"}[lang]
+    assert _komorka_podgladu(view, "tip") == i18n.t("grid.preview.skipped_tip", reason=zdanie)
+    cel = {"pl": "2 widoczne", "en": "2 visible"}[lang]
+    assert komunikaty[-1] == i18n.t("grid.rename.preview_result", t=0, s=2, target=cel), komunikaty
+    if lang == "en":
+        assert _bez_polskiego(komunikaty[-1]), komunikaty[-1]
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_podglad_nazw_dotkniety_wiersz_mowi_w_jezyku_UI(rn_view, jezyk, lang):
+    """AR-193: podpowiedź dotkniętego wiersza podglądu nazw - dawniej `nazwa pliku: …` z literału PL
+    w gridzie także w UI EN; PL znak w znak jak dotąd. Falsyfikator: gałąź `rename` w
+    `_preview_cell` usunięta (podpowiedź z pola `keyword`)."""
+    jezyk(lang)
+    view, _con, _pliki = rn_view
+    bar = _panel_nazw(view)
+    _klik_w(bar.btn_prev)
+    nowa = _komorka_podgladu(view, "tekst")
+    assert nowa.startswith("2024"), nowa
+    tip = _komorka_podgladu(view, "tip")
+    stara = next(os.path.basename(r["path"]) for r in view.model._rows if r.get("frame_id"))
+    poczatek = {"pl": "nazwa pliku: ", "en": "file name: "}[lang]
+    assert tip == f"{poczatek}{stara!r} → {nowa!r} (rename)", tip
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zly_wzor_nazwy_mowi_w_jezyku_UI_w_podgladzie_i_stagingu(rn_view, jezyk, lang):
+    """AR-193: zły regex tokenu `orig` - „Podgląd” i „Do stagingu” (kliki) mówią odmowę wzoru
+    w języku UI (EN dokładnie, tekst `re.error` znak w znak), zero stagingu. Falsyfikator:
+    `grid.rename.error` z `e=e` → „zły regex…” w EN."""
+    jezyk(lang)
+    view, _con, _pliki = rn_view
+    bar = _panel_nazw(view)
+    komunikaty = _komunikaty(view)
+    bar.template_editor.set_template([{"t": "orig", "re": "("}])
+    zdanie = {"pl": "zły regex w tokenie 'orig': '(' (missing ), unterminated subpattern at "
+                    "position 0)",
+              "en": "bad regex in token 'orig': '(' (missing ), unterminated subpattern at "
+                    "position 0)"}[lang]
+    for przycisk in (bar.btn_prev, bar.btn_stage):
+        _klik_w(przycisk)
+        assert komunikaty[-1] == i18n.t("grid.rename.error", e=zdanie), komunikaty
+    assert view._rename_pending_count() == 0
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_blad_skladni_makra_mowi_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
+    """AR-194: krok „Oblicz” z błędem składni - „Podgląd” klikiem: pasek stanu i wynik szuflady
+    mówią błąd definicji w języku UI (EN dokładnie; PL znak w znak jak dotąd - `Błąd makra: blad
+    skladni: …`). Falsyfikator: `_run` z `exc=exc` → „blad skladni” w EN."""
+    jezyk(lang)
+    view, con, _p = _widok_nad(qapp, tmp_path)
+    view.show()
+    QApplication.processEvents()
+    _klik_w(view.sel_bar.btn_macro)
+    komunikaty = _komunikaty(view)
+    bar = view.macro_bar
+    bar.comp_name.setText("x")
+    bar.comp_expr.setText("1 +")
+    bar.asg_kw.setCurrentText("TELESCOP")
+    bar.asg_op.setCurrentIndex(0)
+    bar.asg_expr.setText("EQ6")
+    _klik_w(bar.btn_prev)
+    blad = {"pl": "blad skladni: invalid syntax (<unknown>, line 1)",
+            "en": "syntax error: invalid syntax (<unknown>, line 1)"}[lang]
+    oczek = i18n.t("grid.macro.error", exc=blad)
+    assert komunikaty[-1] == oczek, komunikaty
+    assert view.drawer.result.text() == oczek, view.drawer.result.text()
+    view.close()
+    con.close()

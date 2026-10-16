@@ -515,6 +515,9 @@ _FLAGA_OPTYKI = "_only_f_ratio_mismatch"
 # „Odrzuć nowsze niż obraz we wszystkich obrazach", a wejście w nią otwiera panel „Rodowód" na
 # pierwszym obrazie (AR-178) - ta sama figura: jedna flaga, pod stałą.
 _FLAGA_NOWSZYCH = "_only_lineage_newer"
+# Perspektywa „Rodowód do potwierdzenia” - druga kolejka gestu jednego stosu w panelu „Rodowód”:
+# stos, któremu gest dał rodowód, z niej wypada, więc cel przechodzi na następny obraz (AR-196).
+_FLAGA_POTWIERDZENIA = "_only_lineage"
 # Te same zasady dla dwóch perspektyw izolacji zapisu w miejscu: w nich menu tabeli pokazuje drogi
 # wyjścia z izolacji także nad pustym zaznaczeniem (wygaszone z powodem), a wejście w perspektywę
 # podaje receptę gestu (`_RECEPTY_ZAPISU`). Klucz = flaga z `_TRIMY`.
@@ -795,9 +798,11 @@ _ODWROT_WYCOFANIA = _Odwrot("grid.sel.frame_retire_undo", "grid.sel.frame_retire
 # Droga powrotu gestu UWAG nie jest pozycją menu: odwrotem jest przywrócenie stanu sprzed gestu,
 # a ten zna wyłącznie migawka widoku (`FramesView._migawka_uwag`) - recepta jest jedynym wejściem.
 # Zdanie członu mówi więc samą czynność; `menu`/`akcja` wskazują nazwę gestu, nie napis menu.
+# Bez widoku (AR-195): cel bierze się z migawki, nie z zaznaczenia, więc cofnięcie nie wymaga
+# odsłonięcia - klatka wypchnięta gestem z widoku uwag („uwagi:…”) wraca do niego sama.
 _ODWROT_UWAG = _Odwrot("grid.notes.undo", "grid.notes.undo_after",
                        "grid.notes.action", "grid.notes.action",
-                       "_cofnij_uwagi", "_ile_uwag_do_cofniecia")
+                       "_cofnij_uwagi", "_ile_uwag_do_cofniecia", bez_widoku=True)
 # Droga powrotu WERDYKTU RĘKI w panelu rodowodu (D-1011-4): odwrotem nie jest werdykt przeciwny,
 # tylko stan SPRZED gestu (`repo.restore_integration_judgment`), znany wyłącznie migawce widoku
 # (`FramesView._migawka_werdyktu`) - recepta jest jedynym wejściem, jak przy uwagach. Cel recepty
@@ -860,12 +865,32 @@ def _zdanie_gestu_zapisu(op, res):
     if res.cancelled:
         msg += i18n.t("grid.inplace.cancelled")
     from horreum.gui.wb_worker import tekst_powodu   # powód rdzenia w języku UI (AR-148)
-    for powod in (next((w for w in zablokowane + bledy + wstrzymane if w.reason), None),
-                  next((w for w in wyniki if w.status == sukces and w.reason), None)):
-        if powod is not None:
-            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path),
-                          detail=tekst_powodu(powod.reason))
+    for powod in _powody_gestu_zapisu(op, res):
+        msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path),
+                      detail=tekst_powodu(powod.reason))
     return msg
+
+
+def _powody_gestu_zapisu(op, res):
+    """Wyniki, których powód mówi zdanie gestu izolacji (`_zdanie_gestu_zapisu`), w kolejności
+    zdania: pierwszy problem z powodem (blokada przed błędem przed wstrzymaniem) i pierwszy sukces
+    z powodem. Jeden wybór dla zdania i jego szczegółu (`_podpowiedz_gestu_zapisu`)."""
+    _klucz, sukces = _GESTY_ZAPISU[op]
+    wyniki = list(res.results)
+    problemy = ([w for w in wyniki if w.status == "blocked"]
+                + [w for w in wyniki if w.status not in (sukces, "blocked", "withheld")]
+                + [w for w in wyniki if w.status == "withheld"])
+    return [w for w in (next((w for w in problemy if w.reason), None),
+                        next((w for w in wyniki if w.status == sukces and w.reason), None))
+            if w is not None]
+
+
+def _podpowiedz_gestu_zapisu(op, res):
+    """Szczegół zdania gestu izolacji pod kursorem szuflady (AR-204): surowy tekst systemu powodów,
+    które zdanie mówi klasą w języku UI (`wiersz_systemu`), wiersz na powód; `""` bez błędu systemu
+    klasą - zdanie mówi wtedy wszystko. Czysta funkcja."""
+    from horreum.gui.wb_worker import wiersz_systemu   # lazy: `wb_worker` woła ten moduł leniwie
+    return "\n".join(w for w in (wiersz_systemu(p.reason) for p in _powody_gestu_zapisu(op, res)) if w)
 
 
 def _kopia_krotko(path):
@@ -1461,6 +1486,7 @@ class GridTableModel(QAbstractTableModel):
         self._base = BASE_COLS
         self._nowe_wiersze = False   # reset w toku przykłada NOWY zbiór (`set_data`) - AR-187
         self._reset_podgladu = False  # reset w toku stawia albo zdejmuje podgląd klingi - AR-187
+        self._reset_zdejmuje = False  # …i czy go ZDEJMUJE (pusty podgląd) - AR-207
 
     def reset_tych_samych_wierszy(self):
         """Czy TRWAJĄCY reset modelu przebudowuje te same wiersze - sort z nagłówka, grupowanie,
@@ -1474,6 +1500,12 @@ class GridTableModel(QAbstractTableModel):
         gest, którego celem bywa zaznaczenie (nazwy, edycja komórki), więc widok odtwarza je przy
         takim resecie bez progu kosztu - utrata zaznaczenia zmieniłaby cel następnego gestu."""
         return self._reset_podgladu
+
+    def reset_zdejmuje_podglad(self):
+        """Czy TRWAJĄCY reset podglądu go ZDEJMUJE (kierunek `reset_podgladu`, AR-207). Stawianie
+        i podmiana podglądu odtwarzają zaznaczenie zawsze (zakres stagingu musi być prawdziwy);
+        zdjęcie podlega progowi kosztu, gdy zaznaczenie obejmuje cały widok - decyzja widoku."""
+        return self._reset_podgladu and self._reset_zdejmuje
 
     def set_base_columns(self, cols, *, version_col):
         """Przełącz zestaw kolumn bazowych (prezentacja) na TYCH SAMYCH wierszach - bez nowych
@@ -1498,15 +1530,21 @@ class GridTableModel(QAbstractTableModel):
         (`FramesView._uloz_belki_i_wersje`), nie nowym indeksem, więc numery keywordów, sort
         i szerokości się nie przesuwają. Podgląd stał ostatni także wizualnie (rename: indeks 14
         z 15, x=1300 przy viewporcie 1076 px; makro i edycja komórki: ~130 px na końcu), więc
-        tego, co miał pokazać, nie było widać bez przewijania - ani obok starej wartości."""
-        self._reset_podgladu = True
+        tego, co miał pokazać, nie było widać bez przewijania - ani obok starej wartości.
+
+        Zdjęcie podglądu, którego nie ma, nie resetuje modelu: reset zdjęcia podlega progowi
+        odtworzenia zaznaczenia, więc „Wyczyść podgląd” na pustym podglądzie zdejmowałby zaznaczenie
+        całego widoku bez niczego do zdjęcia (AR-207)."""
+        if not preview and not self._preview:
+            return
+        self._reset_podgladu, self._reset_zdejmuje = True, not preview
         try:
             self.beginResetModel()
             self._preview = dict(preview or {})
             self._preview_label = label if label is not None else i18n.t("grid.preview.macro")
             self.endResetModel()
         finally:
-            self._reset_podgladu = False
+            self._reset_podgladu = self._reset_zdejmuje = False
 
     def _preview_active(self):
         return bool(self._preview)
@@ -1845,6 +1883,8 @@ class GridTableModel(QAbstractTableModel):
             old = "∅" if pv.get("old") is None else str(pv["old"])
             return f"{old} → {pv['new']}"
         if role == Qt.ToolTipRole:
+            if pv.get("op") == "rename":       # stara i nowa nazwa pliku w języku UI (AR-193)
+                return i18n.t("grid.preview.rename_tip", old=pv.get("old"), new=pv["new"])
             return f"{pv['keyword']}: {pv.get('old')!r} → {pv['new']!r} ({pv['op']})"
         if role == Qt.FontRole:
             f = QFont(); f.setBold(True); return f

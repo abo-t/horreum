@@ -28,6 +28,8 @@ from horreum.gui import i18n, queries
 from horreum.gui.grid import PRESET_LINEAGE, PRESET_VANISHED
 from horreum.gui.grid_lineage import SciezkaLabel
 from horreum.gui.progress import counts_snapshot, should_emit
+from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
+from horreum.item_reasons import blad_systemu
 from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
 from horreum.volumes import volume_serial
@@ -52,13 +54,14 @@ class PipelineWorker(QObject):
 
     Sygnały: `progress(done,total,path,counts:dict)` (mid-skan, DICT-migawka), `stage_done(name,
     summary)` (po etapie — `summary` już niemutowany, więc obiekt wolno przekazać), `cancelled(name,
-    summary)`, `failed(name, msg)` (wyjątek → komunikat, NIE crash)."""
+    summary)`, `failed(name, powód)` (wyjątek → powód, NIE crash)."""
 
     progress = Signal(int, int, str, dict)
     stage_started = Signal(str)            # przed każdym (pod)etapem — UI pokazuje „… w toku"
     stage_done = Signal(str, object)       # po (pod)etapie — summary/report
     cancelled = Signal(str, object)
-    failed = Signal(str, str)
+    # (etap, powód) - `object`: `Signal(str, str)` zgubiłby kod błędu systemu i bazy klasą (AR-198)
+    failed = Signal(str, object)
     source_unreachable = Signal(str, str)  # (etap, korzeń) - korzeń nie jest osiągalnym katalogiem
     source_ready = Signal(str, str)        # (korzeń, serial albo '?') - zmierzone w TYM wątku
     start_refused = Signal(str)            # powód wstrzymania skanu przed pierwszym plikiem
@@ -120,7 +123,10 @@ class PipelineWorker(QObject):
             else:
                 self.failed.emit(self._stage or "?", f"nieznany etap: {self._stage!r}")
         except Exception as exc:                       # błąd etapu → sygnał, NIE crash apki
-            self.failed.emit(self._stage or "?", f"{type(exc).__name__}: {exc}")
+            # Błąd systemu albo bazy KLASĄ (AR-198): zerwany udział mówił surowym tekstem systemu
+            # po polsku także w UI EN. Odmowa klingi z kodem (`OdmowaZPowodem` - resolver woła
+            # `repo.upsert_object` bez handlera) mówi swoim kodem, jak w `WritebackWorker.run`.
+            self.failed.emit(self._stage or "?", getattr(exc, "powod", None) or blad_systemu(exc))
         finally:
             if con is not None:
                 con.close()
@@ -884,7 +890,9 @@ class PipelineView(QWidget):
         # Kolor Z MOTYWU (`role="error"` → `theme.qss`), nie inline: sztywne `#b00020` przeżyło F6
         # i na ciemnej bazie #2B2B2B dawało 1,6:1 — jedyny sygnał porażki etapu był nieczytelny
         # dokładnie w motywie DOMYŚLNYM (P-C).
-        self.lbl_error = QLabel("")
+        # Pole z protokołu „zdanie + szczegół” (`EtykietaBledu`, AR-198): szczegół systemu awarii
+        # etapu pod kursorem, a każde następne zdanie pola (odmowa, wyczyszczenie) go zdejmuje.
+        self.lbl_error = EtykietaBledu("")
         self.lbl_error.setProperty("role", "error")
         self.lbl_error.setWordWrap(True)
         self.lbl_error.setVisible(False)
@@ -1464,8 +1472,9 @@ class PipelineView(QWidget):
 
     @staticmethod
     def _pusty_zapis_przebiegu():
+        # `failed_tip` - szczegół systemu awarii etapu (wiersz podpowiedzi albo "", AR-198)
         return {"stage": None, "since": None, "results": {}, "cancelled": None, "failed": None,
-                "refused": None}
+                "failed_tip": None, "refused": None}
 
     def _start_stage(self, stage, **params):
         # Znacznik startu z TEGO SAMEGO zegara, którym worker pisze `first_seen_at` - raport
@@ -1650,16 +1659,22 @@ class PipelineView(QWidget):
         self.last_run["refused"] = msg          # jak przy źródle nieosiągalnym: nie ruszył, nie „pusty”
         self._pokaz_odmowe(msg)
 
-    @Slot(str, str)
-    def _on_failed(self, name, msg):
+    @Slot(str, object)
+    def _on_failed(self, name, powod):
+        """Etap padł: zdanie klasy w języku UI (`tekst_powodu`), surowy tekst systemu albo SQLite
+        w szczególe pola (`wiersz_systemu`, AR-198). Zapis przebiegu niesie oba - strona Przyjmij
+        mówi ten sam wiersz z tym samym szczegółem."""
         self._uzupelnienia = None                       # dalsze etapy łańcucha nie biegły
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
-        self.last_run["failed"] = i18n.t("pipeline.stage_failed_line", stage=_stage_label(name), msg=msg)
-        self.lbl_error.setText(i18n.t("pipeline.stage_failed_line", stage=_stage_label(name), msg=msg))
+        wiersz = i18n.t("pipeline.stage_failed_line", stage=_stage_label(name), msg=tekst_powodu(powod))
+        szczegol = wiersz_systemu(powod)
+        self.last_run["failed"] = wiersz
+        self.last_run["failed_tip"] = szczegol
+        self.lbl_error.ustaw(wiersz, szczegol)
         self.lbl_error.setVisible(True)                 # czerwony, osobny wiersz — nie ginie w panelu
-        self.status_message.emit(i18n.t("pipeline.stage_failed_status", stage=name))
+        self.status_message.emit(i18n.t("pipeline.stage_failed_status", stage=_stage_label(name)))
 
     # ---------------------------------------------------------------- formatowanie / stan przycisków
 

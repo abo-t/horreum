@@ -63,6 +63,7 @@ from astropy.io import fits
 from . import exif, repo
 from .hashing import sha1_of, sha1_of_span
 from .item_reasons import OdmowaZPowodem, PowodPozycji   # odmowy XISF z kodem (AR-158) - liść
+from .item_reasons import blad_systemu, proza_z_diagnoza   # błąd systemu klasą w odmowie (AR-198)
 from .resolve.cameras import camera_identity
 from .resolve.frames import (HISTORY_MASTER_KINDS, kind_from_path, kind_from_testimony,
                              normalize_kind)
@@ -1724,7 +1725,9 @@ def kind_rederive_plan(con, frame_ids=None):
                     break
                 header, _cards, header_hash, *_reszta, history = _read_meta(k["path"], st.st_size)
             except Exception as exc:                   # czkawka udziału: odmowa tej klatki, nie przebiegu
-                powod = f"odczyt {type(exc).__name__}: {exc}"
+                # Klasa z właściciela i surowy tekst ze ścieżką za nią (AR-198) - odmowę czyta druk
+                # `rederive-kind`, który ścieżki nie ma obok.
+                powod = f"odczyt {proza_z_diagnoza(blad_systemu(exc))}"
                 break
             if header_hash != k["header_hash"]:
                 powod = f"naglowek zmieniony od ostatniego skanu (najpierw Dostawa): {k['path']}"

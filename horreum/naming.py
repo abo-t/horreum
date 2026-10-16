@@ -23,6 +23,13 @@ ROZSTRZYGANIE DATY (§2): dwa ekstraktory (`header_dt` z DATE-OBS, `filename_dt`
 `{source, offset_hours}` per homogeniczny wsad. BEZ ZAŁOŻENIA STREFY — pełno-godzinny offset to
 prawomocny czas innego stanowiska, nie anomalia. Data-only DATE-OBS → None (zgłoszone jako brak
 czasu, NIGDY cicha północ — R3 #10).
+
+POWODY Z KODEM (AR-193): powód pominięcia klatki w podglądzie renamu (`SkippedRename.reason`, problem
+`compose_name`/`resolve_dt`) i błąd wzoru nazwy (`OdmowaZPowodem` - nadal `ValueError`) to
+`item_reasons.PowodPozycji` z kodem `rename_*`: zdanie PL bez zmiany znaku (CLI, testy biorą je jak
+tekst), a okno składa z kodu zdanie w języku UI (`gui.wb_worker.tekst_powodu`). Nazwy stosu i mastera
+flat (`stack_name`, `master_flat_name`) zostają przy `ValueError` prozą - ich odmowy mapują żniwa na
+własne tokeny przeglądu.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from .item_reasons import OdmowaZPowodem, PowodPozycji   # powód z kodem (AR-193) - liść bez importów
 from .resolve.catalog import folder_form   # forma systemu plików kanonu (token obiektu, D-1011-5)
 from .resolve.channel import channel_from_name
 from .resolve.frames import LIGHT_KINDS   # jedyne z obiektem (kind-aware) — właściciel w liściu
@@ -85,7 +93,8 @@ def resolve_dt(hdr_dt, fname_dt, *, source, offset_hours):
     NIE flagowane). Brak wybranego źródła → problem (wołający: D1 fallback albo skip+raport)."""
     base = hdr_dt if source == "date_obs" else fname_dt
     if base is None:
-        return None, f"brak źródła czasu '{source}'"
+        return None, PowodPozycji(f"brak źródła czasu '{source}'", "rename_no_time_source",
+                                  value=source)
     return base + timedelta(hours=int(offset_hours)), None
 
 
@@ -170,18 +179,22 @@ def _flatgrp_segment(facts):
         return f"FLATGRP_{_NOFLAT}", None
     paths = facts.get("flat_paths") or []
     if not paths:
-        return None, "flat podpięty, ale master bez obecnej kopii"
+        return None, PowodPozycji("flat podpięty, ale master bez obecnej kopii", "rename_flat_no_copy")
     groups = set()
     for p in paths:
         grupa = parse_master_path(p).get("flatgrp")
         if grupa is None:
-            return None, f"brak FLATGRP w nazwie mastera flat: {os.path.basename(p)}"
+            return None, PowodPozycji(f"brak FLATGRP w nazwie mastera flat: {os.path.basename(p)}",
+                                      "rename_flat_no_group", name=os.path.basename(p))
         grupa = _sanitize(grupa)
         if not grupa:
-            return None, f"pusta grupa FLATGRP w nazwie mastera flat: {os.path.basename(p)}"
+            return None, PowodPozycji(
+                f"pusta grupa FLATGRP w nazwie mastera flat: {os.path.basename(p)}",
+                "rename_flat_empty_group", name=os.path.basename(p))
         groups.add(grupa)
     if len(groups) > 1:
-        return None, f"kopie mastera flat o różnych grupach: {', '.join(sorted(groups))}"
+        return None, PowodPozycji(f"kopie mastera flat o różnych grupach: {', '.join(sorted(groups))}",
+                                  "rename_flat_many_groups", value=", ".join(sorted(groups)))
     return f"FLATGRP_{groups.pop()}", None
 
 
@@ -371,7 +384,7 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
         tok, args = _spec_parts(spec)
         if tok == "datetime":
             if dt is None:
-                return None, "brak rozstrzygniętej daty-godziny"
+                return None, PowodPozycji("brak rozstrzygniętej daty-godziny", "rename_no_datetime")
             tokens.append(dt.strftime("%Y%m%d_%H%M%S"))
         elif tok == "object":
             if kind in LIGHT_KINDS:                    # kalibracja: token pominięty (bez _UNSET)
@@ -388,7 +401,9 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
             seg = _sanitize(kind) or "unknown"
             case = args.get("case")
             if case not in (None, *_KIND_CASES):
-                raise ValueError(f"nieznana wielkość liter tokenu 'kind': {case!r}")
+                raise OdmowaZPowodem(PowodPozycji(
+                    f"nieznana wielkość liter tokenu 'kind': {repr(case)}", "rename_tpl_bad_case",
+                    value=repr(case)))
             tokens.append(seg.upper() if case == "upper" else seg.lower() if case == "lower" else seg)
         elif tok == "flatgrp":
             if kind == "light":                        # kalibracja/master_light: brak ogniwa z definicji
@@ -398,7 +413,8 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
                 tokens.append(seg)
         elif tok == "trail":
             if i != len(specs) - 1:
-                raise ValueError("token 'trail' musi być ostatni we wzorze")
+                raise OdmowaZPowodem(PowodPozycji("token 'trail' musi być ostatni we wzorze",
+                                                  "rename_tpl_trail_not_last"))
             trail = True
         elif tok == "filter":
             fc = _sanitize(facts.get("filter_canon"))
@@ -421,7 +437,8 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
             if seg:
                 tokens.append(seg)
         else:
-            raise ValueError(f"nieznany token szablonu: {tok!r}")
+            raise OdmowaZPowodem(PowodPozycji(f"nieznany token szablonu: {repr(tok)}",
+                                              "rename_tpl_unknown_token", value=repr(tok)))
     return "_".join(t for t in tokens if t) + ("_" if trail else "") + ext, None
 
 
@@ -455,11 +472,17 @@ def validate_template(template):
                 try:
                     re.compile(args.get("re", ""))
                 except re.error as e:
-                    raise ValueError(f"zły regex w tokenie 'orig': {args.get('re')!r} ({e})")
+                    # Tekst `re.error` (język Pythona) jedzie parametrem - jawna granica, jak tekst systemu.
+                    raise OdmowaZPowodem(PowodPozycji(
+                        f"zły regex w tokenie 'orig': {repr(args.get('re'))} ({str(e)})",
+                        "rename_tpl_bad_regex", value=repr(args.get("re")), detail=str(e)))
             elif tok == "trail" and i != len(specs) - 1:
-                raise ValueError("token 'trail' musi być ostatni we wzorze")
+                raise OdmowaZPowodem(PowodPozycji("token 'trail' musi być ostatni we wzorze",
+                                                  "rename_tpl_trail_not_last"))
             elif tok == "kind" and args.get("case") not in (None, *_KIND_CASES):
-                raise ValueError(f"nieznana wielkość liter tokenu 'kind': {args.get('case')!r}")
+                raise OdmowaZPowodem(PowodPozycji(
+                    f"nieznana wielkość liter tokenu 'kind': {repr(args.get('case'))}",
+                    "rename_tpl_bad_case", value=repr(args.get("case"))))
 
 
 # ============================================================ silnik run_rename (§3)
@@ -498,9 +521,12 @@ def _resolve_target(rows):
     (R3 #7 — jedna nazwa na 2 pliki = kolizja; fan-out poza v1)."""
     present = [r for r in rows if r["location_id"] is not None]
     if not present:
-        return None, "brak obecnej kopii do renamu (wszystkie present=0)"
+        return None, PowodPozycji("brak obecnej kopii do renamu (wszystkie present=0)",
+                                  "rename_no_present_copy")
     if len(present) > 1:
-        return None, f"wiele obecnych kopii ({len(present)}) -- rename multi-location poza v1"
+        return None, PowodPozycji(
+            f"wiele obecnych kopii ({len(present)}) -- rename multi-location poza v1",
+            "rename_many_copies", n=len(present))
     return present[0], None
 
 
@@ -553,12 +579,18 @@ def run_rename(frame_ids, *, targets_fn, source, offset_hours, template=DEFAULT_
     for fid in ids:
         rows = by_frame.get(fid)
         if not rows:
-            skipped.append(SkippedRename(fid, "", "frame nieobecny w bazie"))
+            skipped.append(SkippedRename(fid, "", PowodPozycji("frame nieobecny w bazie",
+                                                               "rename_frame_gone")))
             continue
+        # Pominięcie ZAWSZE z powodem (AR-193): `_resolve_target`, `resolve_dt` i `compose_name`
+        # oddają brak wyniku wyłącznie z powodem - pusty powód to złamany inwariant (EXPECT), nie
+        # zdanie zastępcze bez kodu.
         target, reason = _resolve_target(rows)
         if target is None:
+            if not reason:
+                raise AssertionError(f"frame {fid}: brak celu renamu bez powodu")
             path = next((r["path"] for r in rows if r["path"]), "")
-            skipped.append(SkippedRename(fid, path or "", reason or ""))
+            skipped.append(SkippedRename(fid, path or "", reason))
             continue
 
         old_path = target["path"]
@@ -570,19 +602,25 @@ def run_rename(frame_ids, *, targets_fn, source, offset_hours, template=DEFAULT_
             dt, prob = resolve_dt(header_dt(target["date_obs"]), filename_dt(basename),
                                   source=alt, offset_hours=0)
             if dt is None:                             # oba źródła puste → powód ŁĄCZNY (wiz #9):
-                prob = "brak DATE-OBS ani czasu w nazwie"   # komunikat z fallbacku mylił (drugie źródło)
+                # komunikat z fallbacku mylił (drugie źródło)
+                prob = PowodPozycji("brak DATE-OBS ani czasu w nazwie", "rename_no_time")
         if dt is None:
-            skipped.append(SkippedRename(fid, old_path, prob or "brak daty"))
+            if not prob:
+                raise AssertionError(f"frame {fid}: brak daty bez powodu")
+            skipped.append(SkippedRename(fid, old_path, prob))
             continue
 
         specs = _pick_template(template, target["kind"], target["filetype"])   # wzór wg typu pliku (§3)
         new_name, prob = compose_name(_facts_of(target), dt, template=specs)
         if new_name is None:
-            skipped.append(SkippedRename(fid, old_path, prob or "compose"))
+            if not prob:
+                raise AssertionError(f"frame {fid}: nazwa nie złożona bez powodu")
+            skipped.append(SkippedRename(fid, old_path, prob))
             continue
         new_path = os.path.join(os.path.dirname(old_path), new_name)
         if new_path == old_path:
-            skipped.append(SkippedRename(fid, old_path, "nazwa bez zmian"))
+            skipped.append(SkippedRename(fid, old_path, PowodPozycji("nazwa bez zmian",
+                                                                     "rename_unchanged")))
             continue
         previews.append(RenamePreview(
             frame_id=fid, location_id=int(target["location_id"]),
@@ -598,9 +636,9 @@ def run_rename(frame_ids, *, targets_fn, source, offset_hours, template=DEFAULT_
     touched: list[RenamePreview] = []
     for p in previews:
         if counts[p.new_path] > 1:
-            skipped.append(SkippedRename(
-                p.frame_id, p.old_path,
-                f"kolizja nazwy w wsadzie: {os.path.basename(p.new_path)} — dodaj token disc lub zmień wzór"))
+            skipped.append(SkippedRename(p.frame_id, p.old_path, PowodPozycji(
+                f"kolizja nazwy w wsadzie: {os.path.basename(p.new_path)} - dodaj token disc lub zmień wzór",
+                "rename_collision", name=os.path.basename(p.new_path))))
         else:
             touched.append(p)
 

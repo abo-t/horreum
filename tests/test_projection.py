@@ -1211,3 +1211,134 @@ def test_meta_test_klingi_przepuszcza_projekcje():
     wbs.test_mutacja_plikow_tylko_w_writeback()
     wbs.test_klinga_projekcji_istnieje()
     wbs.test_klinga_plikow_istnieje()
+
+
+# ============================================================ AR-197, AR-200: kroki wydania, odmowy z kodem
+
+
+def _zerwany(sciezka=r"X:\L\a.fits"):
+    return OSError(None, "Komunikat systemu", sciezka, 64)
+
+
+def _plan_trzech(tmp_path):
+    con = db.open_db(str(tmp_path / "k.db"))
+    ids = [_seed_file(con, tmp_path, f"k{i}.fits", filter_canon="Ha", data=b"DANE-%d" % i)[0]
+           for i in range(3)]
+    return con, projection.plan(con, ids, "po-obiektach")
+
+
+def _inner(res):
+    return dict(res.error.params)["inner"]
+
+
+def test_apply_korzen_nie_powstaje_wynik_z_powodem(tmp_path, monkeypatch):
+    """Korzeń wydania: `os.makedirs` korzenia pada zerwanym udziałem - `apply` oddaje wynik z powodem
+    `proj_root_failed` (klasa w `inner`), nie wyjątek; nic nie powstało, manifestu nie ma.
+    Falsyfikator: `os.makedirs` korzenia poza `try` - `OSError` wylatuje."""
+    con, plan = _plan_trzech(tmp_path)
+    root = str(tmp_path / "_WBPP" / "feed")
+    prawdziwy = os.makedirs
+
+    def makedirs(p, *a, **k):
+        if os.path.normcase(str(p)) == os.path.normcase(root):
+            raise _zerwany(root)
+        return prawdziwy(p, *a, **k)
+    monkeypatch.setattr(projection.os, "makedirs", makedirs)
+    res = projection.apply(plan, root, do_apply=True, now=NOW)
+    assert res.error.code == "proj_root_failed" and _inner(res).code == "os_share_lost", res.error
+    assert res.counts == {} and not os.path.exists(root)
+    con.close()
+
+
+def test_apply_wyjscie_wbpp_nie_powstaje_korzen_zostaje(obiekt, tmp_path, monkeypatch):
+    """Wyjście WBPP: korzeń wydania obiektu powstał, `out` pada - powód `proj_out_failed` mówi, że folder
+    wydania jest założony; korzeń stoi na dysku, linków brak, kwarantanna planu w wyniku."""
+    con, _i = obiekt
+    p = projection.plan_object(con, 1)
+    root = projection.object_root(str(tmp_path / "_WBPP" / "karta"), p)
+    prawdziwy = os.makedirs
+
+    def makedirs(sciezka, *a, **k):
+        if os.path.basename(str(sciezka)) == projection.OUTPUT_DIR:
+            raise _zerwany(str(sciezka))
+        return prawdziwy(sciezka, *a, **k)
+    monkeypatch.setattr(projection.os, "makedirs", makedirs)
+    res = projection.apply(p, root, do_apply=True, now=NOW, manifest=projection.object_manifest(p))
+    assert res.error.code == "proj_out_failed" and _inner(res).code == "os_share_lost", res.error
+    assert "założony" in res.error
+    assert os.path.isdir(root) and os.listdir(root) == []
+    assert res.counts == {"skipped": len(p.skipped)}
+
+
+def test_apply_sonda_pierwszego_linku_nie_czyta_pozycja_niezweryfikowana(tmp_path, monkeypatch):
+    """Sonda pierwszego linku: link POWSTAŁ, sonda nie przeczytała plików - pozycja `unverified` z powodem
+    `proj_verify_failed` (nie `error`: plik leży), postęp jak przy każdej pozycji, masa nie rusza
+    (dwie pozostałe nietknięte), manifestu brak. Falsyfikator: sonda poza `try`."""
+    con, plan = _plan_trzech(tmp_path)
+    root = str(tmp_path / "_WBPP" / "feed")
+
+    def verify(*_a, **_k):
+        raise _zerwany()
+    monkeypatch.setattr(projection, "_verify_content", verify)
+    postep = []
+    res = projection.apply(plan, root, do_apply=True, now=NOW,
+                           progress=lambda *a: postep.append(a))
+    assert res.error.code == "proj_verify_failed" and _inner(res).code == "os_share_lost", res.error
+    assert res.counts == {"unverified": 1}
+    (pierwsza,) = res.results
+    assert pierwsza.reason is res.error and pierwsza.status == "unverified"
+    assert os.stat(pierwsza.dst).st_ino == os.stat(pierwsza.src).st_ino      # link leży na dysku
+    assert postep == [(1, 3, pierwsza.dst, "unverified")]
+    nietkniete = [it for it in plan.items[1:]
+                  if os.path.exists(os.path.join(root, *it.segments, it.basename))]
+    assert nietkniete == [] and len(plan.items) - len(res.results) == 2
+    assert not os.path.exists(os.path.join(root, projection.MANIFEST_NAME))
+    con.close()
+
+
+def test_apply_manifest_pada_w_polowie_stary_przezywa_bajt_w_bajt(tmp_path, monkeypatch):
+    """Manifest i publikacja atomowa: poprawny manifest poprzedniego wydania leży, zapis nowego pada
+    zerwanym udziałem W POŁOWIE treści - wynik z powodem `proj_manifest_failed` (pliki wydane), stary
+    manifest bajt w bajt, żadnego `.part`. Falsyfikator: `open(manifest, "w")` wprost - plik ucięty."""
+    con, plan = _plan_trzech(tmp_path)
+    root = str(tmp_path / "_WBPP" / "feed")
+    assert projection.apply(plan, root, do_apply=True, now=NOW).error is None
+    manifest = os.path.join(root, projection.MANIFEST_NAME)
+    przed = open(manifest, "rb").read()
+    assert json.loads(przed)["counts"] == {"linked": 3}
+
+    def dump(obj, fh, **kw):
+        fh.write('{"layout": "po-ob')
+        fh.flush()
+        raise _zerwany(manifest)
+    monkeypatch.setattr(projection.json, "dump", dump)
+    res = projection.apply(plan, root, do_apply=True, now="T2")
+    monkeypatch.undo()
+    assert res.error.code == "proj_manifest_failed" and _inner(res).code == "os_share_lost", res.error
+    assert res.counts == {"exists": 3}
+    assert open(manifest, "rb").read() == przed
+    assert sorted(os.listdir(root)) == sorted(["_UNSET", projection.MANIFEST_NAME])   # bez `.part`
+    con.close()
+
+
+def test_odmowy_wydania_niosa_kod_a_tekst_PL_bez_zmian(tmp_path, monkeypatch):
+    """AR-200: odmowa strażnika korzenia to `OdmowaZPowodem` (dalej `ValueError`) z kodem
+    `proj_root_not_excluded` i zdaniem PL jak dotąd; abort sondy pierwszego linku niesie powód
+    `proj_first_link` (bez pauzy) - także w wyniku częściowym (`error`)."""
+    from horreum.item_reasons import OdmowaZPowodem
+    korzen = r"R:\ASTRO_\LIGHTS"
+    with pytest.raises(ValueError) as odmowa:
+        projection._assert_excluded_segment(korzen)
+    nazwy = " / ".join(sorted(n.upper() for n in EXCLUDED_DIR_NAMES))
+    assert isinstance(odmowa.value, OdmowaZPowodem)
+    assert odmowa.value.powod.code == "proj_root_not_excluded"
+    assert dict(odmowa.value.powod.params) == {"dir": korzen, "name": nazwy}
+    assert str(odmowa.value) == (f"korzeń projekcji {korzen} nie zawiera segmentu wykluczonego "
+                                 f"({nazwy}) - projekcja poza wykluczeniem wróciłaby jako wejście skanu")
+    con, plan = _plan_trzech(tmp_path)
+    monkeypatch.setattr(projection, "_verify_content", lambda *a, **k: False)
+    with pytest.raises(projection.ProjectionAbort) as abort:
+        projection.apply(plan, str(tmp_path / "_WBPP" / "feed"), do_apply=True, now=NOW)
+    assert abort.value.powod.code == "proj_first_link" and "—" not in str(abort.value)
+    assert abort.value.result.error is abort.value.powod
+    con.close()

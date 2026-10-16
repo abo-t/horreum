@@ -64,7 +64,7 @@ from horreum.gui import facet_model, i18n, queries, theme
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.i18n_catalog import CATALOG
 from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu   # błąd systemu w języku UI (AR-184)
-from horreum.item_reasons import blad_systemu
+from horreum.item_reasons import blad_systemu, powod_wyjatku     # odmowy klingi z kodem (AR-200)
 from horreum.volumes import volume_serial
 
 _TREE_CAP = 30                        # ile folderów kategorii pokazać w raporcie dialogu
@@ -421,7 +421,7 @@ class DryWorker(QObject):
         try:
             self.done.emit(self._gen, self._compute())
         except ValueError as exc:                    # guard korzenia klingi (druga linia po walidacji celu)
-            self.failed.emit(self._gen, str(exc))
+            self.failed.emit(self._gen, powod_wyjatku(exc))   # odmowa z kodem - zdanie w języku UI (AR-200)
         except Exception as exc:                     # OSError sondy FS itp. - szczerze, nie cicha śmierć wątku
             self.failed.emit(self._gen, blad_systemu(exc))
         finally:
@@ -468,11 +468,13 @@ class ApplyWorker(QObject):
     callback synchronicznie w TYM wątku); `request_cancel` przez `threading.Event` (jak
     `WritebackWorker` — flaga stawiana w wątku głównym, czytana tu) łapie na GRANICY PLIKU.
     `ProjectionAbort` (sonda pierwszego linku) idzie OSOBNYM sygnałem z wynikiem częściowym — to
-    werdykt o wolumenie, nie awaria."""
+    werdykt o wolumenie, nie awaria. Krok wydania przerwany błędem systemu (AR-197) wraca `done`
+    z wynikiem niosącym powód (`ApplyResult.error`) - liczby tego, co zaszło, zostają w raporcie."""
 
     progress = Signal(int, int, str, str)   # done, total, dst, status — MID-apply
-    done = Signal(object)                   # ApplyResult (może nieść cancelled=True)
-    aborted = Signal(str, object)           # komunikat, CZĘŚCIOWY ApplyResult (sonda hardlinka)
+    done = Signal(object)                   # ApplyResult (może nieść cancelled=True albo error)
+    # powód z kodem (`ProjectionAbort.powod`, AR-200), CZĘŚCIOWY ApplyResult (sonda hardlinka)
+    aborted = Signal(object, object)
     failed = Signal(object)                 # powód wyjątku → sygnał, NIE crash apki (kod: AR-184)
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
@@ -495,9 +497,9 @@ class ApplyWorker(QObject):
                                    now=self._now, manifest=self._manifest,
                                    progress=self._emit_progress, should_cancel=self._cancel.is_set)
         except projection.ProjectionAbort as exc:
-            self.aborted.emit(str(exc), exc.result)
+            self.aborted.emit(powod_wyjatku(exc), exc.result)
         except ValueError as exc:                    # guard korzenia klingi (druga linia)
-            self.failed.emit(str(exc))
+            self.failed.emit(powod_wyjatku(exc))
         except Exception as exc:                     # OSError itp. - szczerze, nie cicha śmierć wątku
             self.failed.emit(blad_systemu(exc))
         else:
@@ -832,8 +834,8 @@ class ProjectionDialog(QDialog):
         w klindze zostaje drugą linią). Zwraca True gdy dodano (seam testowy — bez QFileDialog)."""
         try:
             projection._assert_excluded_segment(path)
-        except ValueError as exc:
-            self._show_report(i18n.t("proj.add_failed", e=exc), "error")
+        except ValueError as exc:                    # odmowa strażnika z kodem - w języku UI (AR-200)
+            self._show_report(i18n.t("proj.add_failed", e=tekst_powodu(powod_wyjatku(exc))), "error")
             return False
         canon = remember_target(name, path)
         self._reload_targets(select_path=canon)      # nowa karta zaznaczona → auto-DRY
@@ -1177,7 +1179,23 @@ class ProjectionDialog(QDialog):
     @Slot(object)
     def _on_apply_done(self, res):
         """Wydanie skończone (pełne albo anulowane): raport z rdzenia, „Utwórz" gaśnie — dysk się
-        zmienił, więc kolejne wydanie wymaga ŚWIEŻEGO DRY („Odśwież podgląd")."""
+        zmienił, więc kolejne wydanie wymaga ŚWIEŻEGO DRY („Odśwież podgląd").
+
+        Krok wydania przerwany błędem systemu (AR-197, `res.error`): zdanie błędu w języku UI nad
+        raportem częściowym (liczby tego, co zaszło, i nietknięte), szczegół systemu pod kursorem,
+        „Przerwane błędem” - jak awaria całej operacji (`_on_apply_failed`), ale z liczbami.
+        Niezapisany manifest (`proj_manifest_failed`) nie dostaje rady „Odśwież podgląd”: pliki
+        leżą, sonda zobaczy komplet, a zdanie powodu mówi, czego brakuje i po co."""
+        if res.error is not None:
+            self._apply_end()
+            text, warn = self._format(res, self._plan, dry=False, partial=True)
+            glowa = (i18n.t("proj.manifest_error_head", msg=tekst_powodu(res.error))
+                     if res.error.code == "proj_manifest_failed"
+                     else i18n.t("proj.apply_error", msg=tekst_powodu(res.error), made="") + "\n\n")
+            self._show_report(glowa + text, "error", warn=warn, tip=wiersz_systemu(res.error))
+            self.btn_apply.setEnabled(False)
+            self.btn_apply.setText(i18n.t("proj.btn_error"))
+            return
         self._apply_end()
         # Cel był ZAMROŻONY na czas biegu, więc `_current_root()` to dokładnie ten, na który wydano.
         _settings().setValue("projection/last_target", _canon_path(self._current_root()))   # ostatnio UŻYTY = domyślny
@@ -1208,12 +1226,14 @@ class ProjectionDialog(QDialog):
             i18n.t("proj.btn_created_ok") if res.counts.get("linked", 0)
             else i18n.t("proj.btn_nothing_new")))
 
-    @Slot(str, object)
-    def _on_apply_aborted(self, msg, partial):
-        """Sonda pierwszego linku padła (SMB oddał kopię zamiast hardlinka) — werdykt o wolumenie."""
+    @Slot(object, object)
+    def _on_apply_aborted(self, powod, partial):
+        """Sonda pierwszego linku padła (SMB oddał kopię zamiast hardlinka) - werdykt o wolumenie.
+        Powód z kodem (`proj_first_link`, AR-200) mówi w języku UI."""
         self._apply_end()
         text, warn = self._format(partial, self._plan, dry=False, partial=True)
-        self._show_report(i18n.t("proj.abort_prefix", msg=msg) + text, "error", warn=warn)
+        self._show_report(i18n.t("proj.abort_prefix", msg=tekst_powodu(powod)) + text, "error",
+                          warn=warn, tip=wiersz_systemu(powod))
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(i18n.t("proj.btn_not_created"))  # NIE obiecuje akcji, której raport zabrania (wiz #4)
 
@@ -1307,12 +1327,22 @@ class ProjectionDialog(QDialog):
                                 exists=c.get("exists", 0), conflict=c.get("conflict", 0),
                                 vbad=c.get("verify_bad", 0), errors=c.get("error", 0),
                                 skipped=c.get("skipped", 0)))
-            if res.cancelled:
+            if c.get("unverified"):
+                # Link utworzony, sonda nie przeczytała plików (AR-197) - leży na dysku, więc nie
+                # znika z liczb, ale nie jest „zlinkowany” z dowodem tożsamości.
+                lines.append(i18n.t("proj.unverified", n=c["unverified"]))
+            if res.cancelled or res.error is not None:
                 # Ile planu ZOSTAŁO: drzewo kategorii niżej rysuje się z PEŁNEGO planu, więc bez tej
-                # linii raport po anulowaniu wygląda na kompletny. PO liczbach tego, co się stało —
-                # pierwsza liczba pod nagłówkiem ma mówić o skutku, nie o jego braku (wiz #11).
-                touched = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error", "verify_bad"))
-                lines.append(i18n.t("proj.untouched", n=max(len(plan.items) - touched, 0)))
+                # linii raport po anulowaniu albo przerwaniu (abort sondy, krok z błędem systemu -
+                # AR-197) wygląda na kompletny. PO liczbach tego, co się stało - pierwsza liczba pod
+                # nagłówkiem ma mówić o skutku, nie o jego braku (wiz #11).
+                # Przerwanie bez nietkniętych (manifest po komplecie plików) nie dostaje wiersza
+                # „nietknięte: 0 … wznów”: wznawiać nie ma czego.
+                touched = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error",
+                                                    "verify_bad", "unverified"))
+                nietkniete = max(len(plan.items) - touched, 0)
+                if res.cancelled or nietkniete:
+                    lines.append(i18n.t("proj.untouched", n=nietkniete))
         if plan.info is not None:                          # wydanie obiektu: zestawy i powody luk
             for wiersz, rola in object_report_lines(plan.info):
                 lines.append(wiersz)

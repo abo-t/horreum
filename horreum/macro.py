@@ -48,7 +48,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from . import card_rules, expr
-from .item_reasons import PowodPozycji     # powód z kodem (AR-181) - liść bez importów projektu
+from .item_reasons import OdmowaZPowodem, PowodPozycji   # powód z kodem (AR-181, AR-194) - liść
 from .resolve import paths as _paths
 from .resolve._coerce import _to_text as _tekst
 from .resolve._text import norm as _norm, path_segments as _path_segments
@@ -81,8 +81,11 @@ class MacroDef:
 
     @staticmethod
     def from_dict(d: dict) -> MacroDef:
+        # Blad definicji to `OdmowaZPowodem` z kodem `macro_def_*` (AR-194): nadal `ValueError`
+        # z dotychczasowym zdaniem PL, a okno mowi je w jezyku UI.
         if not isinstance(d, dict) or "assign" not in d:
-            raise ValueError("definicja makra wymaga pola 'assign'")
+            raise OdmowaZPowodem(PowodPozycji("definicja makra wymaga pola 'assign'",
+                                              "macro_def_no_assign"))
         a = d["assign"]
         try:
             assign = Assign(
@@ -94,9 +97,11 @@ class MacroDef:
                 idx=a.get("idx"),
             )
         except (KeyError, TypeError) as exc:
-            raise ValueError(f"niepoprawne 'assign': {exc}") from exc
+            raise OdmowaZPowodem(PowodPozycji(f"niepoprawne 'assign': {str(exc)}",
+                                              "macro_def_bad_assign", detail=str(exc))) from exc
         if assign.op not in ("set", "add"):
-            raise ValueError(f"niedozwolona operacja: {assign.op!r}")
+            raise OdmowaZPowodem(PowodPozycji(f"niedozwolona operacja: {repr(assign.op)}",
+                                              "macro_def_bad_op", op=repr(assign.op)))
         computes = [
             ComputeStep(name=c["name"], expr=c["expr"])
             for c in d.get("computes", [])
@@ -372,7 +377,7 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
     wolajacy przez `repo.stage_pending`.
 
     Blad DEFINICJI makra (skladnia/wezel `expr`) rzuca `ExprError`/`ValueError` JUZ przy kompilacji
-    (przed petla) — to blad uzytkownika. Blad DANYCH pojedynczego frame'a / niedostepny cel → frame do
+    (przed petla) - to blad uzytkownika; oba niosa `powod` z kodem (`expr_*`, `macro_def_*`, AR-194). Blad DANYCH pojedynczego frame'a / niedostepny cel → frame do
     `skipped` z powodem, potok leci dalej. Po bramkach celu - bramka sumy kontrolnej z faktu
     `n_sum` wiersza celu (AR-166): FITS z `CHECKSUM`/`DATASUM` pisarz odmowi, wiec podglad mowi to
     przed stagingiem (powod z kodem, `card_rules.BRAMKA_SUMY`)."""

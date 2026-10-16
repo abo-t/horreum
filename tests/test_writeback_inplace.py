@@ -1952,7 +1952,7 @@ def test_cofniecie_domkniete_liczy_rdzen_juz_cofniete_to_nie_blokada_do_ponowien
     assert pierwsze.already == [] and not pierwsze.complete       # b NIE wrócił - do ponowienia
     drugie = writeback.undo(con, res.commit_id, now=NOW)
     juz = [fr for fr in drugie.blocked if fr.path == str(a)]
-    assert juz and juz[0].reason.code in ("undo_already", "undo_already_op"), drugie
+    assert juz and juz[0].reason.code in ("undo_already_own", "undo_already_op"), drugie
     assert juz == [fr for fr in drugie.already if fr.path == str(a)]
     assert not drugie.complete                                     # b dalej zablokowany
     con.close()

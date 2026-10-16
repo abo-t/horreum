@@ -21,6 +21,8 @@ w podstronach piszą wstrzykniętym zegarem, asercja tożsamości `_now` w testa
 `refresh_counts()` woła gospodarz przy montażu / po przebiegu Dostawy / na wejściu w Porządki,
 a sam widok przy powrocie „← Porządki" (user mógł nazwać teleskopy w podstronie). Po gestach
 Zbiorów gospodarz woła `refresh_counts(w_tle=True)` - stan liczy wątek tła (`_LicznikiWorker`)."""
+import sqlite3
+
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
@@ -43,6 +45,8 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_F_RATIO_
                               zdanie_kopii_bez_zeznania)
 from horreum.gui.grid_model import PRESET_LINEAGE_NEWER, PRESET_XREF_RECONCILE
 from horreum.gui.rows import TwoPartDelegate
+from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
+from horreum.item_reasons import blad_systemu
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
 # wewnętrznego stacku (int), nazwa perspektywy Zbiorów (str — sygnał `open_collection`) albo None
@@ -331,7 +335,7 @@ class _LicznikiWorker(QObject):
     wątku (sqlite `check_same_thread`), a slot widoku tylko przykłada wynik do listy."""
 
     done = Signal(int, object)     # generacja, `(liczniki, kandydaci)`
-    failed = Signal(int, str)      # generacja, komunikat
+    failed = Signal(int, object)   # generacja, powód (klasa błędu bazy albo systemu, AR-198)
     finished = Signal()            # run() wrócił KAŻDĄ drogą → quit wątku
 
     def __init__(self, gen, db_path):
@@ -349,7 +353,7 @@ class _LicznikiWorker(QObject):
                 con.close()                # PRZED emisją - wątek GUI czyta przez swoje połączenie
             self.done.emit(self._gen, wynik)
         except Exception as exc:           # szczerze do widoku, nie cicha śmierć wątku
-            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+            self.failed.emit(self._gen, blad_systemu(exc))
         finally:
             self.finished.emit()
 
@@ -458,6 +462,14 @@ class TasksView(QWidget):
         list_page = QWidget()
         lv = QVBoxLayout(list_page)
         lv.addWidget(QLabel(i18n.t("tasks.list_title")))
+        # Rachunek liczników na wątku GUI padł (każda droga `refresh_counts`, także ponowienie po
+        # biegu w tle): lista zostaje przy stanie poprzednim, a ten wiersz mówi klasą błędu, ze
+        # szczegółem pod kursorem (AR-198). Schowany do porażki, gaśnie przy przyłożonym rachunku.
+        self.blad_licznikow = EtykietaBledu("")
+        self.blad_licznikow.setProperty("role", "error")
+        self.blad_licznikow.setWordWrap(True)
+        self.blad_licznikow.setVisible(False)
+        lv.addWidget(self.blad_licznikow)
         self.tasks = QListWidget()
         # NoSelection: highlight selekcji Qt byłby drugim „zaznaczeniem" obok treści (wzorzec F4R2#3);
         # klik = WYŁĄCZNIE gest usera przez itemClicked (F4R#4 — nigdy selection-based).
@@ -559,7 +571,12 @@ class TasksView(QWidget):
         i plakietka trzymają stan poprzedni do przyłożenia wyniku (`_on_liczniki`). Zlecenie w trakcie
         biegu zamawia jeden bieg więcej po nim, na stanie z TAMTEJ chwili. Odczyt synchroniczny
         (wejście w Porządki, powrót z podstrony) podbija generację, więc wynik biegu sprzed niego
-        idzie do kosza - nie nadpisze nowszego stanu starszym."""
+        idzie do kosza - nie nadpisze nowszego stanu starszym.
+
+        JEDYNY WŁAŚCICIEL PORAŻKI RACHUNKU (AR-198): błąd bazy albo systemu w odczycie synchronicznym
+        stawia wiersz błędu nad listą (lista zostaje przy stanie poprzednim) i zwraca `None` - każda
+        droga (montaż, wejście w Porządki, powrót z podstrony, ponowienie po biegu w tle) mówi zdaniem
+        klasy zamiast wyjątku ze slotu. Błąd programu (inny wyjątek) leci dalej (EXPECT)."""
         self._liczniki_gen += 1
         if w_tle and self._db_path and not self._liczniki_stop:
             if self._liczniki_thread is not None:
@@ -569,8 +586,16 @@ class TasksView(QWidget):
             return None
         # Odcisk PRZED rachunkiem: zapis w jego trakcie zmieni odcisk, więc wejście policzy jeszcze
         # raz - odwrotna kolejność mogłaby przypisać staremu rachunkowi stan nowszy od niego.
-        odcisk = queries.odcisk_bazy(self.con)
-        badge = self._przyloz_liczniki(*_stan_licznikow(self.con))
+        try:
+            odcisk = queries.odcisk_bazy(self.con)
+            stan = _stan_licznikow(self.con)
+        except (sqlite3.Error, OSError) as exc:
+            powod = blad_systemu(exc)
+            self.blad_licznikow.ustaw(i18n.t("tasks.counts_failed", msg=tekst_powodu(powod)),
+                                      wiersz_systemu(powod))
+            self.blad_licznikow.setVisible(True)
+            return None
+        badge = self._przyloz_liczniki(*stan)
         self._odcisk_licznikow = odcisk
         return badge
 
@@ -579,15 +604,29 @@ class TasksView(QWidget):
         gdy odcisk bazy (`queries.odcisk_bazy`) nie zmienił się od ostatniego przyłożonego - lista
         mówi wtedy prawdę, a rachunek kosztował na wejściu 0,7-1,9 s na kopii pf4, choć tło po
         geście już go zrobiło (AR-84). Przy zmianie - pełny rachunek, jak dotąd (prawda na wejściu).
-        Wysokość listy mierzy się i tak: metryki fontu są prawdziwe dopiero po pokazaniu."""
-        if (self._odcisk_licznikow is not None
-                and queries.odcisk_bazy(self.con) == self._odcisk_licznikow):
-            self._fit_task_list()
-            return
+        Wysokość listy mierzy się i tak: metryki fontu są prawdziwe dopiero po pokazaniu.
+
+        Skrót tylko przy SCHOWANYM wierszu błędu: po porażce rachunku lista nie mówi prawdy, choćby
+        odcisk się nie zmienił. Odcisk, którego nie da się przeczytać, też nie jest „bez zmian” -
+        pełny rachunek powie błąd zdaniem (`refresh_counts`, AR-198)."""
+        if self._odcisk_licznikow is not None and self.blad_licznikow.isHidden():
+            try:
+                bez_zmian = queries.odcisk_bazy(self.con) == self._odcisk_licznikow
+            except (sqlite3.Error, OSError):
+                bez_zmian = False
+            if bez_zmian:
+                self._fit_task_list()
+                return
         self.refresh_counts()
 
     def _start_licznikow(self):
-        self._odcisk_biegu = queries.odcisk_bazy(self.con)   # przed odczytem w wątku - jak wyżej
+        try:
+            self._odcisk_biegu = queries.odcisk_bazy(self.con)   # przed odczytem w wątku - jak wyżej
+        except (sqlite3.Error, OSError):
+            # Połączenie okna nie czyta bazy - bieg w tle nie rusza, rachunek synchroniczny mówi
+            # błąd zdaniem (jeden właściciel, `refresh_counts`), zamiast wyjątku z gestu Zbiorów.
+            self.refresh_counts()
+            return
         worker = _LicznikiWorker(self._liczniki_gen, self._db_path)
         worker.done.connect(self._on_liczniki)
         worker.failed.connect(self._on_liczniki_failed)
@@ -606,11 +645,13 @@ class TasksView(QWidget):
         self._przyloz_liczniki(*wynik)
         self._odcisk_licznikow = self._odcisk_biegu
 
-    @Slot(int, str)
-    def _on_liczniki_failed(self, gen, msg):
+    @Slot(int, object)
+    def _on_liczniki_failed(self, gen, _powod):
         """Bieg w tle padł: drugie podejście na wątku GUI (wzór `FramesView._on_zbior_failed`) -
-        błąd, który nie jest przypadłością wątku, wychodzi stamtąd, zamiast plakietki zamrożonej
-        bez słowa."""
+        przypadłość wątku znika przy ponowieniu. Błąd trwały (dziś realnie: SQLite - baza
+        zablokowana, niedostępna) padał drugi raz WYJĄTKIEM ZE SLOTU, a plakietka zostawała
+        zamrożona bez słowa; teraz drugą porażkę mówi klasą właściciel - `refresh_counts` (AR-198).
+        Powód pierwszej porażki nie idzie na ekran - mówi o stanie sprzed ponowienia."""
         if gen != self._liczniki_gen:
             return
         self.refresh_counts()
@@ -648,7 +689,10 @@ class TasksView(QWidget):
         self._liczniki_thread = None
 
     def _przyloz_liczniki(self, state, kandydaci):
-        """Fakty `_stan_licznikow` → wiersze listy, podpowiedzi i badge (wątek GUI)."""
+        """Fakty `_stan_licznikow` → wiersze listy, podpowiedzi i badge (wątek GUI). Przyłożony
+        rachunek gasi wiersz błędu poprzedniej porażki (`_on_liczniki_failed`)."""
+        self.blad_licznikow.clear()
+        self.blad_licznikow.setVisible(False)
         czeka = len(kandydaci)
         badge = 0
         self._niewiadome = set()

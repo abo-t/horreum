@@ -68,7 +68,14 @@ _ALLOWED_NODES = (
 
 
 class ExprError(Exception):
-    """Wyrazenie odrzucone przy kompilacji (niedozwolony element / skladnia)."""
+    """Wyrazenie odrzucone przy kompilacji (niedozwolony element / skladnia). `powod` = to samo
+    zdanie jako `item_reasons.PowodPozycji` z kodem `expr_*` (AR-194) - okno mowi je w jezyku UI
+    (`gui.wb_worker.tekst_powodu`), a `str(exc)` zostaje dotychczasowym zdaniem PL (ASCII).
+    Baza `Exception` bez zmiany: wolajacy lapia `ExprError` wprost, nie jako `ValueError`."""
+
+    def __init__(self, powod: PowodPozycji) -> None:
+        super().__init__(str(powod))
+        self.powod = powod
 
 
 class _MissingOperand(Exception):
@@ -104,32 +111,39 @@ def _validate(tree: ast.Expression) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant):
             if not isinstance(node.value, (int, float, str, bool)):
-                raise ExprError(f"niedozwolona stala: {node.value!r}")
+                raise ExprError(PowodPozycji(f"niedozwolona stala: {repr(node.value)}",
+                                             "expr_bad_const", value=repr(node.value)))
         elif isinstance(node, ast.Name):
             if not isinstance(node.ctx, ast.Load):
-                raise ExprError("przypisanie w wyrazeniu niedozwolone")
+                # Straz: `ast.walk` odwiedza `NamedExpr`/komprehensje przed ich `Name(Store)`, wiec
+                # z tekstu wyrazenia odrzuca je galaz elementu - ta zostaje na wypadek szerszej listy.
+                raise ExprError(PowodPozycji("przypisanie w wyrazeniu niedozwolone", "expr_store"))
             if node.id not in _ALLOWED_FUNCS:  # nazwa funkcji to nie zmienna z env
                 names.add(node.id)
         elif isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCS:
-                raise ExprError("dozwolone tylko wywolania z bialej listy funkcji")
+                raise ExprError(PowodPozycji("dozwolone tylko wywolania z bialej listy funkcji",
+                                             "expr_call_not_allowed"))
             if node.keywords:
-                raise ExprError("argumenty nazwane niedozwolone")
+                raise ExprError(PowodPozycji("argumenty nazwane niedozwolone", "expr_kwargs"))
             if any(isinstance(a, ast.Starred) for a in node.args):
-                raise ExprError("rozpakowanie argumentow niedozwolone")
+                raise ExprError(PowodPozycji("rozpakowanie argumentow niedozwolone", "expr_starred"))
         elif not isinstance(node, _ALLOWED_NODES):
-            raise ExprError(f"niedozwolony element wyrazenia: {type(node).__name__}")
+            raise ExprError(PowodPozycji(f"niedozwolony element wyrazenia: {type(node).__name__}",
+                                         "expr_bad_node", name=type(node).__name__))
     return names
 
 
 def compile_expr(text: str) -> Expr:
     """Parsuje i waliduje wyrazenie. Rzuca `ExprError` dla niedozwolonej skladni/wezla."""
     if not isinstance(text, str) or not text.strip():
-        raise ExprError("puste wyrazenie")
+        raise ExprError(PowodPozycji("puste wyrazenie", "expr_empty"))
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
-        raise ExprError(f"blad skladni: {exc}") from exc
+        # Tekst `SyntaxError` (jezyk Pythona) jedzie parametrem - jawna granica, jak tekst systemu.
+        raise ExprError(PowodPozycji(f"blad skladni: {str(exc)}", "expr_syntax",
+                                     detail=str(exc))) from exc
     names = _validate(tree)
     return Expr(text=text, node=tree, names=frozenset(names))
 
@@ -149,16 +163,18 @@ def _eval(node: ast.AST, env: dict[str, object]) -> object:
     if isinstance(node, ast.Call):
         func = _ALLOWED_FUNCS[node.func.id]  # type: ignore[attr-defined]  # walidacja gwarantuje Name
         return func(*[_eval(a, env) for a in node.args])
-    raise ExprError(f"niedozwolony element wyrazenia: {type(node).__name__}")
+    raise ExprError(PowodPozycji(f"niedozwolony element wyrazenia: {type(node).__name__}",
+                                 "expr_bad_node", name=type(node).__name__))
 
 
 def eval_for(expr: Expr, env: dict[str, object]) -> EvalResult:
     """Liczy wyrazenie w srodowisku `env` (nazwa -> wartosc). Brak operandu / blad ->
     `EvalResult(ok=False, reason=...)`, nigdy wyjatek wysadzajacy potok.
 
-    Brak operandu i dzielenie przez zero mowia `PowodPozycji` z kodem (AR-181) - makro wstawia
-    je do swojego powodu parametrem, a okno mowi je w jezyku UI. Tekst wyjatku Pythona
-    (`TypeError: ...`) zostaje proza - jawna granica, jak tekst systemu w pisarzu."""
+    Brak operandu, dzielenie przez zero (AR-181) i `ExprError` z obliczenia (AR-194) mowia
+    `PowodPozycji` z kodem - makro wstawia je do swojego powodu parametrem, a okno mowi je
+    w jezyku UI. Tekst wyjatku Pythona (`TypeError: ...`) zostaje proza - jawna granica, jak tekst
+    systemu w pisarzu."""
     try:
         value = _eval(expr.node.body, env)
     except _MissingOperand as exc:
@@ -171,7 +187,7 @@ def eval_for(expr: Expr, env: dict[str, object]) -> EvalResult:
         return EvalResult(ok=False, value=None,
                           reason=PowodPozycji("dzielenie przez zero", "macro_zero_division"))
     except ExprError as exc:
-        return EvalResult(ok=False, value=None, reason=str(exc))
+        return EvalResult(ok=False, value=None, reason=exc.powod)
     except (TypeError, ValueError, OverflowError) as exc:
         return EvalResult(ok=False, value=None, reason=f"{type(exc).__name__}: {exc}")
     return EvalResult(ok=True, value=value, reason=None)

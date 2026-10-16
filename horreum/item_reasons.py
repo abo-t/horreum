@@ -30,10 +30,13 @@ BŁĘDY SYSTEMU KLASĄ (AR-168, AR-184): jeden właściciel klasyfikacji `OSErro
 dawną nazwą `_blad_systemu`), projekcji i kopii mastera (`projection`), żniw (`harvest`), wersji stosów
 (`stack_variants`), kopii wiodącej (`lead_copy`), planera zmiany obiektu (`object_change`) i wykonawców
 GUI. Tu, bo te moduły nie importują pisarza (astropy, klinga plików), a powód z kodem i tak mieszka tutaj.
+Błąd BAZY (`sqlite3.Error`) ma bliźniaczego właściciela obok (`powod_bazy`, AR-198) - `blad_systemu`
+pyta oba, więc workery odczytu GUI (Dom, Porządki, planer, Pola) mówią klasą także błędem SQLite.
 """
 
 import errno
 import json
+import sqlite3
 
 # Kody powodów pozycji - każdy ma zdanie `objchg.item.<kod>` w katalogu okna (PL+EN, test AST), PL
 # znak w znak jak zdanie rdzenia. Część kodów nazywa FRAGMENT zdania nadrzędnego (`copies`, `lead_*`),
@@ -137,11 +140,38 @@ ITEM_REASON_CODES = frozenset({
     "macro_idx_required", "macro_add_exists", "macro_compute", "macro_assign", "macro_not_int",
     "macro_type_mismatch", "macro_manual_many", "macro_manual_not_int", "macro_missing_operand",
     "macro_zero_division",
+    # --- pominięcia podglądu renamu i błędy wzoru nazwy (AR-193, `naming.run_rename`,
+    # `_resolve_target`, `resolve_dt`, `compose_name`, `_flatgrp_segment`, `validate_template`)
+    "rename_no_time_source", "rename_no_datetime", "rename_flat_no_copy", "rename_flat_no_group",
+    "rename_flat_empty_group", "rename_flat_many_groups", "rename_no_present_copy",
+    "rename_many_copies", "rename_frame_gone", "rename_no_time", "rename_unchanged",
+    "rename_collision", "rename_tpl_bad_regex", "rename_tpl_trail_not_last", "rename_tpl_bad_case",
+    "rename_tpl_unknown_token",
+    # --- błędy definicji makra i wyrażenia (AR-194, `expr.compile_expr`, `expr._eval`,
+    # `macro.MacroDef.from_dict`)
+    "expr_empty", "expr_syntax", "expr_bad_const", "expr_store", "expr_call_not_allowed",
+    "expr_kwargs", "expr_starred", "expr_bad_node", "macro_def_no_assign", "macro_def_bad_assign",
+    "macro_def_bad_op",
+    # --- błędy bazy klasą (AR-198, `powod_bazy` niżej) i wydanie obiektu (`projection`, AR-197,
+    # AR-200): odmowy klingi wydania i kroki wydania przerwane błędem systemu
+    "db_busy", "db_unavailable", "db_full", "db_damaged",
+    "proj_root_not_excluded", "proj_first_link", "proj_root_failed", "proj_out_failed",
+    "proj_verify_failed", "proj_manifest_failed",
+    # --- cofnięcie atomowe z dowodem całego pliku i śladem własnego wyniku (AR-182, `atomic_undo`,
+    # `writeback._cofnij_lokacje`, `write_full_header`)
+    "undo_already_own", "undo_already_text", "undo_outside_changed", "undo_record_not_saved",
+    "undo_own_unproven",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
 # mówi klasę i numer (`os_code`), komunikat systemu jest w języku systemu, nie UI.
 OS_REASON_CODES = frozenset({"os_denied", "os_missing", "os_no_space", "os_share_lost"})
+# Kody błędu bazy klasą (AR-198, `powod_bazy`): zdanie mówi klasę i nazwę błędu SQLite (`db_code`),
+# surowy tekst SQLite jedzie w `detail` jak przy systemie.
+DB_REASON_CODES = frozenset({"db_busy", "db_unavailable", "db_full", "db_damaged"})
+# Kody niosące surowy tekst w `detail` - JEDYNE źródło dla szczegółu w podpowiedzi okna
+# (`szczegoly_systemu`, `gui.wb_worker`) i w kolumnie prozowej (`proza_z_diagnoza`).
+SYSTEM_REASON_CODES = OS_REASON_CODES | DB_REASON_CODES
 
 # Rodzaj wartości każdego parametru powodu (kontrakt kodeka i zdania okna; test AST pilnuje, że
 # rdzeń nie podaje parametru spoza tej listy): `text` = tekst (także powód zagnieżdżony, fragment
@@ -160,7 +190,9 @@ PARAM_KINDS = {
                      # czytnik XISF i reguły karty (AR-158)
                      "attr", "attrs", "char", "name",
                      # błąd systemu klasą (AR-168): „WinError 5” / „Errno 13”
-                     "os_code"), "text"),
+                     "os_code",
+                     # błąd bazy klasą (AR-198): „SQLITE_BUSY” - nazwa błędu SQLite
+                     "db_code"), "text"),
     **dict.fromkeys(("n", "tries", "winerror", "op_id", "location", "object_id", "rename_id",
                      "commit_id", "before", "after", "free", "length", "limit"), "int"),
     **dict.fromkeys(("features", "paths", "sums"), "list"),
@@ -358,15 +390,22 @@ _OS_ERRNO = {errno.EACCES: "denied", errno.EPERM: "denied", errno.ENOENT: "missi
              errno.ENOSPC: "no_space"}
 
 
+def _surowy(exc):
+    """Surowy tekst wyjątku `Typ: opis` - JEDYNE złożenie (meta-test `tests/test_powody_pisarza.py`):
+    `detail` obu klas (`powod_systemu`, `powod_bazy`) i tekst spoza klas w `blad_systemu`."""
+    return f"{type(exc).__name__}: {exc}"
+
+
 def powod_systemu(exc):
     """Błąd systemu KLASĄ → `PowodPozycji` (`os_denied`, `os_missing`, `os_no_space`,
     `os_share_lost`: krótka fraza z numerem `os_code`, surowy tekst `Typ: opis` w `detail`) albo
     None - błąd spoza klas, wyjątek nie-`OSError`. Wołający z WŁASNĄ diagnozą spoza klas (czytnik
-    żniw, kopia wiodąca) pyta tylko o klasę; reszta bierze `blad_systemu`. JEDYNE miejsce rdzenia,
-    w którym tekst wyjątku systemu staje się powodem (meta-test `tests/test_powody_pisarza.py`)."""
+    żniw, kopia wiodąca) pyta tylko o klasę; reszta bierze `blad_systemu`. Razem z `powod_bazy`
+    JEDYNE miejsce rdzenia, w którym tekst wyjątku staje się powodem (meta-test
+    `tests/test_powody_pisarza.py`)."""
     if not isinstance(exc, OSError):
         return None
-    surowy = f"{type(exc).__name__}: {exc}"
+    surowy = _surowy(exc)
     kod_win = getattr(exc, "winerror", None)
     if kod_win is not None:
         klasa, os_code = _OS_WINERROR.get(kod_win), f"WinError {kod_win}"
@@ -387,23 +426,70 @@ def powod_systemu(exc):
     return None
 
 
+# Klasa błędu BAZY (AR-198) po głównym kodzie SQLite (`sqlite_errorcode & 0xFF` - kod rozszerzony
+# niesie w młodszym bajcie kod główny). Zbiór zmierzony na prawdziwych błędach (SQLite 3.51.1,
+# Python 3.13): drugie połączenie przy blokadzie zapisu → BUSY (5), tabela zablokowana w tym samym
+# połączeniu → LOCKED (6), brak katalogu bazy → CANTOPEN (14), zapis do bazy `mode=ro` → READONLY
+# (8), `max_page_count` → FULL (13), nadpisane strony → CORRUPT (11), śmieci zamiast bazy → NOTADB
+# (26); IOERR (10) - zerwany dysk pod otwartą bazą: NIEZWERYFIKOWANE POMIAREM (lokalnie nie do
+# wywołania; klasa z dokumentacji SQLite, bez testu i bez mutanta). Poza klasą (tekst SQLite jak dotąd): przerwanie
+# zapytania (INTERRUPT - anulowanie wątku tła), ograniczenia (CONSTRAINT - odmowa klingi bazy),
+# operacja na zamkniętym połączeniu (`ProgrammingError` bez kodu). Do AR-198 workery odczytu
+# (Dom, Porządki, planer, Pola) i okno zmiany obiektu mówiły surowym `OperationalError: …` po
+# angielsku w każdym języku UI.
+_DB_KLASY = {
+    sqlite3.SQLITE_BUSY: "busy", sqlite3.SQLITE_LOCKED: "busy",
+    sqlite3.SQLITE_CANTOPEN: "unavailable", sqlite3.SQLITE_IOERR: "unavailable",
+    sqlite3.SQLITE_READONLY: "unavailable",
+    sqlite3.SQLITE_FULL: "full",
+    sqlite3.SQLITE_CORRUPT: "damaged", sqlite3.SQLITE_NOTADB: "damaged",
+}
+
+
+def powod_bazy(exc):
+    """Błąd bazy KLASĄ → `PowodPozycji` (`db_busy`, `db_unavailable`, `db_full`, `db_damaged`:
+    krótka fraza z nazwą błędu SQLite `db_code`, surowy tekst `Typ: opis` w `detail`) albo None -
+    błąd spoza klas, wyjątek nie-`sqlite3.Error`. Bliźniak `powod_systemu` dla silnika bazy."""
+    if not isinstance(exc, sqlite3.Error):
+        return None
+    kod = getattr(exc, "sqlite_errorcode", None)
+    klasa = _DB_KLASY.get(kod & 0xFF) if isinstance(kod, int) else None
+    db_code = getattr(exc, "sqlite_errorname", None) or type(exc).__name__
+    surowy = _surowy(exc)
+    if klasa == "busy":
+        # Bez „przez inny zapis”: LOCKED to blokada tabeli TEGO SAMEGO połączenia (otwarty kursor),
+        # przyczynę mówi nazwa błędu SQLite w nawiasie.
+        return PowodPozycji(f"baza zablokowana ({db_code})", "db_busy",
+                            db_code=db_code, detail=surowy)
+    if klasa == "unavailable":
+        return PowodPozycji(f"baza niedostępna do odczytu albo zapisu ({db_code})", "db_unavailable",
+                            db_code=db_code, detail=surowy)
+    if klasa == "full":
+        return PowodPozycji(f"brak miejsca na bazę ({db_code})", "db_full",
+                            db_code=db_code, detail=surowy)
+    if klasa == "damaged":
+        return PowodPozycji(f"plik bazy uszkodzony albo nie jest bazą ({db_code})", "db_damaged",
+                            db_code=db_code, detail=surowy)
+    return None
+
+
 def blad_systemu(exc, *, z_typem=True):
-    """Powód z wyjątku: błąd systemu klasą (`powod_systemu`) albo - błąd spoza klas, wyjątek
-    nie-`OSError` - tekst wyjątku jak dotąd: `Typ: opis` (`z_typem=False`: `str(exc)`, miejsca, które
-    składały powód bez typu). Ten sam tekst co w `detail` klasy, więc kod spoza tabeli mówi znak
-    w znak to, co system."""
-    powod = powod_systemu(exc)
+    """Powód z wyjątku: błąd systemu klasą (`powod_systemu`), błąd bazy klasą (`powod_bazy`, AR-198)
+    albo - błąd spoza klas - tekst wyjątku jak dotąd: `Typ: opis` (`z_typem=False`: `str(exc)`,
+    miejsca, które składały powód bez typu). Ten sam tekst co w `detail` klasy, więc kod spoza
+    tabeli mówi znak w znak to, co system albo SQLite."""
+    powod = powod_systemu(exc) or powod_bazy(exc)
     if powod is not None:
         return powod
-    return f"{type(exc).__name__}: {exc}" if z_typem else str(exc)
+    return _surowy(exc) if z_typem else str(exc)
 
 
 def szczegoly_systemu(powod) -> list[str]:
-    """Surowe teksty systemu (`detail`) błędów systemu klasą w drzewie powodu (parametry-powody,
-    listy, uwagi) - w kolejności zdania."""
+    """Surowe teksty systemu i bazy (`detail`) błędów klasą (`SYSTEM_REASON_CODES`) w drzewie
+    powodu (parametry-powody, listy, uwagi) - w kolejności zdania."""
     if not isinstance(powod, PowodPozycji):
         return []
-    if powod.code in OS_REASON_CODES:
+    if powod.code in SYSTEM_REASON_CODES:
         return [dict(powod.params)["detail"]]
     wynik = []
     for _nazwa, wartosc in powod.params:

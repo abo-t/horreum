@@ -6,6 +6,46 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.16.0] - 2026-10-16
+
+Wydanie o **błędach mówionych jednym zdaniem i cofaniu zapisu ze śladem w bazie**. Awaria dysku sieciowego albo
+bazy - przy zapisie kart, w Dostawie, na Domu, w planerze, w Porządkach i w wydaniu obiektu - mówi krótkim
+zdaniem w języku interfejsu, a surowy komunikat systemu jest pod kursorem (z prawym klikiem „Kopiuj szczegół”).
+Cofnięcie zapisu kart drogą atomową zostawia trwały ślad w bazie, więc ponowienie rozpoznaje własny wynik.
+**Schemat bazy 43 → 44** (nowa tabela `atomic_undo`): bazę otwartą w tej wersji 0.15.0 już nie otworzy -
+przed pierwszym uruchomieniem zrób kopię pliku bazy.
+
+### Dodane
+
+- **Ślad cofnięcia zapisu atomowego** (migracja 0044): wynik cofnięcia utrwalony przed podmianą pliku;
+  ponowienie po przerwanym albo padniętym cofnięciu domyka je z dowodem, „już cofnięte” bez ponownego
+  czytania pliku; pierwsze cofnięcie nazywa zmianę pliku poza nagłówkiem od zapisu.
+- **Klasa błędu bazy:** baza zajęta, niedostępna, pełna albo uszkodzona - zdanie w języku interfejsu
+  z nazwą błędu SQLite, w każdym oknie i druku.
+- **Pole zdania ze szczegółem:** glif ⓘ przy szczególe, prawy klik „Kopiuj zdanie / Kopiuj szczegół”, pole nie
+  rozpycha okna od długiej ścieżki.
+- „Rodowód do potwierdzenia”: gest w panelu przechodzi na następny obraz kolejki.
+
+### Zmienione
+
+- Błędy systemu przy wydaniu obiektu, kopii mastera, żniwach, wersjach stosów, kopii wiodącej, w Dostawie,
+  na Domu, w planerze i w druku poleceń mówią klasą (odmowa dostępu, brak pliku, brak miejsca, zerwany
+  udział); wydanie z błędem kroku podaje, co zostało na dysku, a polecenie `project` kończy się kodem 1 bez
+  śladu stosu; manifest wydania zapisywany atomowo.
+- Interfejs angielski: powody pominięć w podglądzie zmiany nazw, błędy makra, odmowy w oknach zmiany obiektu
+  i wydania, etykieta celu panelu nazw i okna kart bez polskich zdań.
+- Zbiory: zaznaczenie przeżywa sortowanie, „Grupuj wg” i podgląd; „Wyczyść podgląd” przy zaznaczeniu całego
+  archiwum bez kilkusekundowego odtwarzania; kolumna podglądu znika zaraz po zapisie; Ctrl+A na dużym
+  archiwum kilka razy szybciej.
+- „Odrzuć nowsze niż obraz we wszystkich obrazach” jednym gestem z menu perspektywy, z „Cofnij werdykt”.
+- Okno żniw: pole archiwum i przyciski stoją po dojściu listy wydań (także przy dużym foncie), okno rośnie
+  w lewo; brak folderu wyjścia odróżniony od zerwanego udziału.
+- Porządki: lista bez rosnącej podłogi okna; trwały błąd bazy przy liczeniu mówi wierszem nad listą.
+
+### Naprawione
+
+- Cofnięcie uwag w Znajdź jednym kliknięciem, także gdy klatka wypadła z widoku.
+
 ## [0.15.0] - 2026-10-16
 
 Wydanie o **uzgadnianiu kart z folderem i rodowodzie bez klatek spoza czasu obrazu**. „Uzgodnij” z wiersza
@@ -1437,7 +1477,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.15.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/abo-t/horreum/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/abo-t/horreum/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/abo-t/horreum/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/abo-t/horreum/compare/v0.12.0...v0.13.0

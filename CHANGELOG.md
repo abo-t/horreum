@@ -6,6 +6,49 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.14.0] - 2026-10-16
+
+Wydanie o **karcie FITS dopisanej w miejscu i powodach zapisu w języku interfejsu**. „Zmień obiekt…”
+dopisuje brakującą kartę `OBJECT` do pliku FITS bez przepisywania całego pliku, więc dowiązania twarde
+w wydaniach do WBPP widzą zmianę od razu, a okno jeszcze przed zapisem mówi przy każdej pozycji, którą
+drogą pójdzie karta. Powody zapisu, blokad i cofnięcia mówią w języku interfejsu. Propozycja rodowodu
+stosu nie podsuwa klatek nagranych po powstaniu obrazu. Schemat bazy rośnie z wersji 41 do 43.
+
+Bazy otwartej w tej wersji nie otworzysz już w 0.13.0 - tamto wydanie odmówi bazy z nowszego
+schematu. Przed pierwszym otwarciem zrób kopię bazy, jeśli chcesz zachować drogę powrotu.
+
+### Dodane
+
+- **Dopisanie karty FITS w miejscu:** gdy plik FITS nie ma karty `OBJECT`, a za `END` jest wolny rekord,
+  „Zmień obiekt…” dopisuje kartę w miejscu - w tym samym położeniu i kolejności, jakie dałby pełny zapis.
+  Bez wolnego miejsca karta idzie zapisem całego pliku z powodem przy pozycji. Cofnięcie oddaje plik bajt
+  w bajt.
+- **Prognoza drogi zapisu** w oknie „Zmień obiekt…”: przy każdej pozycji „w miejscu”, „cały plik” albo
+  „zależy od pliku”, a pod listą jedno zdanie wyjaśnienia.
+- **Rodowód stosu bez klatek nowszych niż obraz:** propozycja pomija klatki nagrane po zapisaniu stosu,
+  a panel Rodowód mówi „Pominiętych N klatek nowszych niż obraz” - także poza trybem propozycji.
+
+### Zmienione
+
+- Powody zapisu kart i zmiany nazw, odmowy czytnika XISF i naruszenia reguł karty mówią w języku
+  interfejsu - wersja angielska nie pokazuje w oknach zapisu polskich zdań.
+- Okna kart: „Cofnij” znika dopiero po cofnięciu domkniętym, a przy blokadzie albo przerwaniu zostaje
+  z powodem; wynik osobno liczy pozycje „już cofnięte”. Blokady z różnych powodów: zdanie podaje
+  „pierwszy z N różnych powodów”, pozostałe są w podpowiedzi.
+- „Napraw nagłówek…” i „Zatwierdź ze ścieżki…” pomijają pliki FITS z sumą kontrolną (`CHECKSUM`,
+  `DATASUM`) już w podglądzie i wskazują ich folder; licznik przycisku ich nie liczy.
+- Kubełek „Rodowód do potwierdzenia” w Porządkach nie trzyma stosów, którym zostały wyłącznie klatki
+  nowsze niż obraz.
+- Planer: jedna reguła „ta nazwa to ten cel” dla szukania i planu; `horreum plan --find` mówi, gdy cel
+  chowają filtry, a najbliżsi kandydaci idą po pewności dopasowania.
+- Schemat bazy v43: wersja 42 zapisuje powody pozycji zapisu kodem, wersja 43 dokłada indeks klatek
+  po obiekcie. Migracje wjeżdżają same przy pierwszym otwarciu i nie ruszają klatek ani kopii.
+
+### Naprawione
+
+- Po cofnięciu w oknach kart przycisk zapisu nie wracał od razu do aktywnego.
+- Zaznaczenie w Zbiorach zaraz po wejściu ginęło przy przeładowaniu Pól.
+
 ## [0.13.0] - 2026-10-15
 
 Wydanie o **gestach, które cofasz bez śladu, i planerze, który zna nazwy katalogowe**. Cofnięcie
@@ -1357,7 +1400,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.13.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/abo-t/horreum/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/abo-t/horreum/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/abo-t/horreum/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/abo-t/horreum/compare/v0.10.0...v0.11.0

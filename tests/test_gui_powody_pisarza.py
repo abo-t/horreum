@@ -363,7 +363,7 @@ def test_ogon_przerwanego_cofniecia_mowi_reszte_z_rdzenia(jezyk, lang):
 # Zapadka powodów w zdaniach GUI (AR-167): parametr `reason=`/`reasons=` w `i18n.t`/`t_plural` idzie
 # przez `tekst_powodu`/`czytelny_powod` albo jest tekstem z katalogu. Znane wyjątki - jawnie,
 # z kategorią; nowy surowy przypadek = czerwień, naprawiony wyjątek schodzi z listy.
-_DLUG_MAKRA = ("dług: powody bramek celu i makra surowo w oknach kart (`resolve_target`, "
+_DLUG_MAKRA = ("dług AR-181: powody bramek celu i makra surowo w oknach kart (`resolve_target`, "
                "`_evaluate_change` - proza PL w UI EN)")
 _ZNANE_SUROWE = {
     ("app.py", "_build_ui", "reason", "powod"): _DLUG_MAKRA,

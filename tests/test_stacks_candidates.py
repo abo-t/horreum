@@ -390,3 +390,56 @@ def test_licznik_po_zintegrowaniu_nie_liczy_klatek_obcego_teleskopu(con):
     _, _, po = propose_lineage_candidates(con, fid)
 
     assert po == 1
+
+
+# ======================= AR-153 · ta sama reguła orzeka o rodowodzie ZAPISANYM (SPOT)
+
+@pytest.mark.parametrize("date_obs, filetype, creation_time, offset, nowsza", [
+    ("2023-04-22T09:00:01", "fits", "2023-04-22T09:00:00Z", None, True),     # sekunda po zapisie
+    ("2023-04-22T09:00:00", "fits", "2023-04-22T09:00:00Z", None, False),    # ta sama sekunda
+    ("2023-04-22T09:00:00.9", "xisf", "2023-04-22T09:00:00Z", None, False),  # ułamek nie przesuwa
+    ("2023-04-21T22:00:00", "fits", "2023-04-22T09:00:00Z", None, False),    # przed zapisem
+    ("2023-04-22T21:00:00", "fits", None, None, False),                      # obraz nie zna chwili
+    ("2023-04-22T21:00:00", "fits", "2023-04-22T09:00:00", None, False),     # chwila bez strefy
+    (None, "fits", "2023-04-22T09:00:00Z", None, False),                     # klatka bez czasu
+    ("2023-04-22T21:00:00", "raw", "2023-04-21T22:00:00Z", None, False),     # RAW bez zegara
+    ("2023-04-21T23:30:00", "raw", "2023-04-21T22:00:00Z", 120, False),      # 21:30 UTC - przed
+    ("2023-04-22T01:00:00", "raw", "2023-04-21T22:00:00Z", 120, True),       # 23:00 UTC - po
+])
+def test_regula_wejscia_nowszego_niz_obraz_tabela(date_obs, filetype, creation_time, offset, nowsza):
+    """AR-153: fakt o wejściu rodowodu zapisanego idzie tą samą regułą, co odcięcie propozycji -
+    ostre `>` po pełnych sekundach, UTC z `Z`, RAW przez wskazane odniesienie, niewiedza nie tnie.
+
+    Falsyfikatory (każdy pada TU i w testach propozycji wyżej - jeden normalizator): `>` → `>=`
+    (wiersz „ta sama sekunda"), zdjęty warunek `Z` w `integration_moment` (wiersz „bez strefy" tu,
+    `test_creation_time_BEZ_strefy_UTC_nie_odcina_niczego` w propozycji), dodanie offsetu zamiast
+    odjęcia w `moment_klatki` (oba wiersze RAW z offsetem tu, test RAW w propozycji)."""
+    from horreum.stacks import input_after_integration
+    assert input_after_integration(date_obs, filetype, creation_time, offset) is nowsza
+
+
+def test_normalizator_czasu_klatki_odroznia_RAW_bez_zegara_od_braku_czasu():
+    """`moment_klatki` mówi DWIE rzeczy, bo propozycja potrzebuje obu: RAW bez odniesienia czeka na
+    zegar (licznik panelu i recepta „wskaż odniesienie"), klatka bez czasu - nie czeka na nic."""
+    from datetime import datetime
+    from horreum.stacks import moment_klatki
+    assert moment_klatki("2023-04-22T01:00:00", "raw", None) == (None, True)
+    assert moment_klatki(None, "raw", None) == (None, False)
+    assert moment_klatki("śmieć", "raw", 60) == (None, False)
+    assert moment_klatki("2023-04-22T01:00:00", "raw", 120) == (datetime(2023, 4, 21, 23), False)
+    assert moment_klatki("2023-04-22T01:00:00.5", "fits", 120) == (datetime(2023, 4, 22, 1), False)
+
+
+def test_propozycja_nie_trzyma_wlasnej_kopii_reguly_czasu():
+    """SPOT: odcięcie propozycji woła normalizator i regułę, z których korzysta
+    fakt o rodowodzie zapisanym - nie parsuje czasu ani nie przesuwa RAW-u po swojemu. Kopia
+    rozjechałaby panel z propozycją przy pierwszej poprawce strefy albo offsetu.
+
+    Falsyfikator: wróć w `propose_lineage_candidates` do `header_dt(...)` i `czas -= timedelta(...)`."""
+    import inspect
+    from horreum import stacks
+    zrodlo = inspect.getsource(stacks.propose_lineage_candidates)
+    for wolanie in ("integration_moment(", "moment_klatki(", "taken_after_integration("):
+        assert wolanie in zrodlo, wolanie
+    for kopia in ("header_dt(", "timedelta(", ".endswith(\"Z\")"):
+        assert kopia not in zrodlo, f"propozycja trzyma własną kopię reguły: {kopia}"

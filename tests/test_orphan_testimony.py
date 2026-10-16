@@ -184,11 +184,12 @@ def test_ocalala_FITS_bez_faktow_dostaje_je_a_potem_przejecie_dziala(tmp_path):
     con.close()
 
 
-def test_plan_karty_OBJECT_pomija_ocalala_kopie_bez_faktow(tmp_path):
-    """Plan ujednolicenia karty `OBJECT` nie pisze do ocalałej kopii bez zebranych faktów, gdy
-    klatka ma kopię nieobecną: karty klatki mogły przyjść ze skasowanego pliku, a strażnik „kopia
-    zeznaje inną kartę" bez faktów jest ślepy. Powód pominięcia mówi, co zrobić. Po uzupełnieniu
-    faktów (tu: kopie zgodne) klatka wraca do planu."""
+def test_karta_OBJECT_w_uzgodnij_pomija_ocalala_kopie_bez_faktow(tmp_path):
+    """Gest „Uzgodnij” (bramka karty read-modelu `object_change_rows`, AR-157 - dawniej plan
+    ujednolicenia O5) nie pisze do ocalałej kopii bez zebranych faktów, gdy klatka ma kopię
+    nieobecną: karty klatki mogły przyjść ze skasowanego pliku, a strażnik „kopia zeznaje inną
+    kartę" bez faktów jest ślepy. Powód pominięcia mówi, co zrobić. Po uzupełnieniu faktów (tu:
+    kopie zgodne) bramka przepuszcza kartę."""
     from horreum import resolver
     from test_writeback_inplace import _fits as _light
     (tmp_path / "A").mkdir()
@@ -201,20 +202,21 @@ def test_plan_karty_OBJECT_pomija_ocalala_kopie_bez_faktow(tmp_path):
     fid = _loc(con, a)["frame_id"]
     _bez_faktow(con, a, b)
     _zniknij(con, a)
-    rows = [r for r in queries.object_card_form_rows(con) if r["frame_id"] == fid]
-    assert len(rows) == 1 and rows[0]["path"] == str(b)
-    assert rows[0]["skip"] == queries.SKIP_COPY_WITHOUT_FACTS
-    assert fid not in queries.object_card_form_frame_ids(con)
+    (wiersz,) = queries.object_change_rows(con, [fid], target=None)
+    assert wiersz["path"] == str(b) and wiersz["card_form"] == "NGC 6992"
+    assert wiersz["card_skip"] == queries.SKIP_COPY_WITHOUT_FACTS
+    assert wiersz["card_skip"].code == "copy_without_facts"
     scan.backfill_copy_facts(con, now=LATER)
-    assert fid in queries.object_card_form_frame_ids(con)
+    assert queries.object_change_rows(con, [fid], target=None)[0]["card_skip"] is None
     con.close()
 
 
-def test_plan_karty_OBJECT_pomija_nieczytelna_kopie_bez_faktow_ktorej_dostawa_nie_czeka(tmp_path):
+def test_karta_OBJECT_w_uzgodnij_pomija_nieczytelna_kopie_bez_faktow_ktorej_dostawa_nie_czeka(
+        tmp_path):
     """Ocalała kopia bez faktów, która do tego jest oznaczona jako nieczytelna, NIE jest kandydatem
-    uzupełnienia (fakty przyniesie jej skan po wyzdrowieniu), a plan ujednolicenia karty `OBJECT`
+    uzupełnienia (fakty przyniesie jej skan po wyzdrowieniu), a bramka karty gestu „Uzgodnij”
     dalej ją pomija - z powodem „nieczytelna", nie „najpierw Przyjmij nowe", bo dostawa jej nie
-    naprawi. Po udanym odczycie skanem fakty są, marker zgasł i klatka wraca do planu."""
+    naprawi. Po udanym odczycie skanem fakty są, marker zgasł i bramka przepuszcza kartę."""
     from horreum import resolver
     from test_writeback_inplace import _fits as _light
     (tmp_path / "A").mkdir()
@@ -233,13 +235,14 @@ def test_plan_karty_OBJECT_pomija_nieczytelna_kopie_bez_faktow_ktorej_dostawa_ni
         con, location_id=lb["id"], sha1_data=sha1, path=str(b), mtime=lb["mtime"],
         reason="OSError: test", kind="io", now=NOW)
     assert scan.copy_facts_candidates(con) == []
-    rows = [r for r in queries.object_card_form_rows(con) if r["frame_id"] == fid]
-    assert len(rows) == 1 and rows[0]["skip"] == "kopia oznaczona jako nieczytelna"
+    (wiersz,) = queries.object_change_rows(con, [fid], target=None)
+    assert wiersz["card_skip"] == "kopia oznaczona jako nieczytelna"
+    assert wiersz["card_skip"].code == "unreadable"
     scan.ingest_record(con, scan.scan_file(str(b)), volume="?", now=LATER,
                        summary=scan.ScanSummary())
     lb = _loc(con, b)
     assert lb["unreadable_since"] is None and lb["hdr_hash"] == lb["header_hash"]
-    assert fid in queries.object_card_form_frame_ids(con)
+    assert queries.object_change_rows(con, [fid], target=None)[0]["card_skip"] is None
     con.close()
 
 

@@ -392,7 +392,8 @@ Pogrubiona liczba to robota; szare wiersze to historia albo stan bez roboty.
 | Zadanie | Co znaczy | Dokąd prowadzi |
 |---|---|---|
 | **Klatki bez obiektu** | automat nie wie, co jest na zdjęciu | **Przegląd obiektów** |
-| **Obrazy bez rodowodu** | gotowy obraz nie wie, z czego powstał | perspektywa **Rodowód do potwierdzenia** |
+| **Rodowód do potwierdzenia** | gotowy obraz nie wie, z czego powstał | perspektywa o tej nazwie, gesty w panelu **Rodowód** |
+| **Rodowód z klatkami nowszymi niż obraz** | Twój werdykt potwierdził klatkę zrobioną po zintegrowaniu obrazu - nie mogła do niego wejść | perspektywa o tej nazwie, w panelu **Rodowód** przycisk **Odrzuć nowsze niż obraz** (cofniesz go „Cofnij werdykt” na pasku) |
 | **Klatki bez zestawu** | brak teleskopu × kamery (typowo RAW z lustrzanki) | **Przegląd obiektów**, gest **Przypisz zestaw…** |
 | **Ogniskowa niezgodna z teleskopem** | ogniskowa w pliku odbiega od teleskopu o ponad 5 % | **Przegląd obiektów**, gest **Przypisz zestaw…** |
 | **f/ niezgodna z teleskopem** | f/ w pliku odbiega od teleskopu o ponad 5 % (np. f/200 zamiast f/8) | perspektywa o tej nazwie, prawy klik **Popraw f/ w plikach (zgodnie z teleskopem)…** |

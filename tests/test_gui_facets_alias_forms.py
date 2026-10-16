@@ -2,6 +2,10 @@
 `alias_norm → brzmienie`, ta sama, którą okno „Przypisz obiekt” pokazuje aliasy), a nie kluczem
 `alias_norm`. Dopasowanie dalej idzie po kluczu. Falsyfikator: wróć do `alias=hit` w
 `FacetRail._filter_objects` - tooltip pokaże `LARGEMAGELLANICCLOUD`."""
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 
 pytest.importorskip("PySide6")

@@ -286,6 +286,12 @@ PRESET_VANISHED = "Zniknięte"
 # prowadzić POZA Zbiorami: perspektywa jest tu jedyną drogą od liczby do listy. Stała współdzielona
 # z TasksView po nazwie — jak u dwóch sąsiadów wyżej.
 PRESET_LINEAGE = "Rodowód"
+# PRESET_LINEAGE_NEWER - bliźniak rodowodu (AR-153). Wiersz Porządków „Rodowód z klatkami nowszymi
+# niż obraz" prowadzi do obrazów, których werdykt ręki potwierdził klatki zrobione po zapisie stosu;
+# gest „Odrzuć nowsze niż obraz" mieszka w panelu „Rodowód" tego widoku. Grupowanie po stanie
+# rodowodu stawia je pod belką, pod którą człowiek je ogląda („dokładny"). Predykat
+# `queries.lineage_newer_frame_ids`, ten sam co liczba wiersza. Stała współdzielona z TasksView.
+PRESET_LINEAGE_NEWER = "Rodowód z klatkami nowszymi niż obraz"
 # PRESET_SUPERSEDED — czwarty bliźniak (0809, decyzja Zdzinia „z widocznym nagrobkiem"). Klatka
 # zastąpiona wypadła ze WSZYSTKICH kubełków kolejki (nie jest robotą), więc bez własnej perspektywy
 # byłaby wyłącznie w gridzie pełnym — czyli do znalezienia tylko przez przypadek. Stała współdzielona
@@ -393,6 +399,7 @@ PRESETS = {
     PRESET_DUPS: {"filter": None, "group_by": None, "only_dups": True},
     PRESET_VANISHED: {"filter": None, "group_by": None, "only_vanished": True},
     PRESET_LINEAGE: {"filter": None, "group_by": None, "only_lineage": True},
+    PRESET_LINEAGE_NEWER: {"filter": None, "group_by": "_rodowod", "only_lineage_newer": True},
     PRESET_SUPERSEDED: {"filter": None, "group_by": None, "only_superseded": True},
     PRESET_RETIRED: {"filter": None, "group_by": None, "only_retired": True},
     PRESET_RETIRED_CONFLICT: {"filter": None, "group_by": None, "only_retired_conflict": True},
@@ -422,6 +429,7 @@ _PRESET_LABELS = {
     PRESET_DUPS: "perspective.dups",
     PRESET_VANISHED: "perspective.vanished",
     PRESET_LINEAGE: "perspective.lineage",
+    PRESET_LINEAGE_NEWER: "perspective.lineage_newer",
     PRESET_SUPERSEDED: "perspective.superseded",
     PRESET_RETIRED: "perspective.retired",
     PRESET_RETIRED_CONFLICT: "perspective.retired_conflict",
@@ -470,6 +478,7 @@ _TRIMY = (
     ("_only_review", "review_frame_ids"),
     ("_only_vanished", "vanished_frame_ids"),
     ("_only_lineage", "lineage_pending_frame_ids"),
+    ("_only_lineage_newer", "lineage_newer_frame_ids"),
     ("_only_superseded", "superseded_frame_ids"),
     ("_only_retired", "retired_frame_ids"),
     ("_only_retired_conflict", "retired_conflict_frame_ids"),
@@ -1123,6 +1132,7 @@ _STANY_RODOWODU = {
     "mixed": "grid.lineage.state.mixed",
     "window": "grid.lineage.state.window",
     "rejected": "grid.lineage.state.rejected",
+    "only_newer": "grid.lineage.state.only_newer",
     "none": "grid.lineage.state.none",
     "uncounted": "grid.lineage.state.uncounted",
 }
@@ -1133,20 +1143,24 @@ _TIPY_RODOWODU = {
     "window": "grid.lineage.tip.window",
     "pending": "grid.lineage.tip.pending",
     "rejected": "grid.lineage.tip.rejected",
+    "only_newer": "grid.lineage.tip.only_newer",
     "none": "grid.lineage.tip.none",
     "uncounted": "grid.lineage.tip.uncounted",
 }
 # Stany, które są BRAKIEM rodowodu - komórka maluje je rolą braku (szarość + kursywa), jak brak
 # karty keyworda: „nie wiadomo, z czego powstał" nie jest ostrzeżeniem, tylko pustym miejscem.
-_RODOWOD_BRAK = frozenset({"rejected", "none", "uncounted"})
+_RODOWOD_BRAK = frozenset({"rejected", "only_newer", "none", "uncounted"})
 
 
-def _adnotuj_rodowod(base, stany):
+def _adnotuj_rodowod(base, stany, nowsze=()):
     """Dołóż wierszom gridu `_rodowod` = token stanu (`queries.stack_lineage_states`) albo `None`
-    dla klatki, która nie jest gotowym obrazem. Czysta funkcja nad gotowym słownikiem, zero SQL;
-    mutuje dicty `base` w miejscu, jak `_adnotuj_wersje`."""
+    dla klatki, która nie jest gotowym obrazem, i `_rodowod_nowsze` = obraz ma wejście ręki nowsze
+    niż on sam (`nowsze` = `queries.lineage_newer_frame_ids` tego składu, AR-153 - wariant
+    podpowiedzi komórki). Czysta funkcja nad gotowymi zbiorami, zero SQL; mutuje dicty `base`
+    w miejscu, jak `_adnotuj_wersje`."""
     for row in base:
         row["_rodowod"] = stany.get(row.get("frame_id"))
+        row["_rodowod_nowsze"] = row.get("frame_id") in nowsze
 
 
 class _ElizjaWSrodku(QStyledItemDelegate):
@@ -1758,7 +1772,9 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.ForegroundRole:
                 return _COLORS["missing"]
             if role == Qt.ToolTipRole:
-                return i18n.t("grid.preview.skipped_tip", reason=pv['skipped'])
+                # Powód makra z kodem (reguła karty, suma kontrolna) w języku UI (AR-167).
+                from horreum.gui.wb_worker import tekst_powodu
+                return i18n.t("grid.preview.skipped_tip", reason=tekst_powodu(pv["skipped"]))
             return None
         if "cards" in pv:
             # Wpis ze stagingu przebiegu (AR-61): wszystkie karty klatki, które zapisze commit. Jedna
@@ -1915,6 +1931,11 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.DisplayRole:
                 return i18n.t(_STANY_RODOWODU[stan])
             if role == Qt.ToolTipRole:
+                # „Dokładny" z werdyktem ręki na klatce nowszej niż obraz (AR-153): pewność
+                # deklarowana, nie faktyczna - podpowiedź mówi to i nazywa gest panelu.
+                if stan == "exact" and row.get("_rodowod_nowsze"):
+                    return i18n.t("grid.lineage.tip.exact_newer",
+                                  reject=i18n.t("grid.lin.reject_newer"))
                 return i18n.t(_TIPY_RODOWODU[stan])
             # Role z motywu: „do potwierdzenia" to robota (warn), „z okna czasu" - kandydat, którego
             # nikt nie potwierdził (secondary); brak rodowodu - rola braku, jak brak karty.

@@ -3408,7 +3408,7 @@ def test_okno_wyboru_obiektu_rosnie_gdy_zdania_sie_zawijaja(qapp, tmp_path, lang
     wpisaniu nowej nazwy druga linia nagłówka i zdania „…zapis założy go w bazie” była ucięta
     w pół wiersza - okno zostawało przy wysokości z otwarcia. Okno rośnie w górę po każdej zmianie
     zawijanych zdań: każda etykieta ma co najmniej wysokość, której jej tekst potrzebuje przy jej
-    szerokości. Mutant: `_dopasuj_wysokosc` bez działania - etykiety ściśnięte."""
+    szerokości. Mutant: `config_dialog.dopasuj_wysokosc` bez działania - etykiety ściśnięte."""
     from horreum.gui.assign_dialog import AssignObjectDialog
     i18n.set_lang(lang)
     con = db.open_db(str(tmp_path / "w1.db"))
@@ -3487,7 +3487,10 @@ def test_cofniecie_kart_PRZERWANE_zostawia_Cofnij_karty_takze_po_czesci_plikow(
         m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
             c, t, now=now, progress=pr, should_cancel=lambda: True))
         dlg._on_undo()
-    assert przerwane in dlg.status.text().splitlines()[-1], dlg.status.text()
+    # Rdzeń zna resztę (AR-176): każdy backup nieprzetworzony wymaga sprawdzenia - bez obietnicy.
+    reszta = len(writeback.backups_for_commit(con, commit_id))
+    assert i18n.t_plural("wb.undo_cancelled_check", reszta, undo=i18n.t("path.undo_cards_btn")) \
+        in dlg.status.text().splitlines()[-1], dlg.status.text()
     assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
     assert _karta_object(pliki["zapis"]) == "NGC 7635" and not dlg.confirm_btn.isEnabled()
     wrocil = writeback.FileResult(1, str(pliki["zapis"]), "restored", None)
@@ -3543,7 +3546,7 @@ def test_plan_kart_sciezki_pomija_FITS_z_suma_kontrolna_z_powodem(sciezka_karty,
     suma = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
     _value, touched, skipped = plan_kart_sciezki(con, "NGC7635", [fid["zapis"], suma])
     assert [t.path for t in touched] == [str(pliki["zapis"])]
-    assert (suma, str(p), i18n.t("objchg.gate.fits_checksum")) in skipped, skipped
+    assert (suma, str(p), i18n.t("objchg.item.fits_checksum")) in skipped, skipped
 
 
 def _czekaj_na_uchwyt(dlg, limit_s=20.0):
@@ -3601,4 +3604,28 @@ def test_status_okna_sciezki_to_BIEZACY_wynik_a_recepta_miesci_sie_w_etykiecie(s
     assert tekst.endswith(i18n.t("grid.wb.undo_retry", undo=i18n.t("path.undo_cards_btn"))), tekst
     assert dlg.status.height() >= dlg.status.heightForWidth(dlg.status.width()), (
         dlg.status.height(), dlg.status.heightForWidth(dlg.status.width()))
+    dlg.reject()
+
+
+def test_okno_sciezki_emituje_changed_raz_po_zapisie_i_raz_po_cofnieciu(sciezka_karty):
+    """AR-176 (wspólny pomocnik wysokości okien): emisja `changed` stała w pomocniku wysokości okna
+    ścieżki, więc ogon zapisu emitował ją DWA razy (pomocnik + ogon), a cofnięcie przy oknie
+    niepokazanym - wcale. Pomocnik mieszka w `config_dialog` i tylko ustawia wysokość; każdy ogon
+    emituje raz. Okno POKAZANE - pomocnik działa wyłącznie na widocznym oknie (na HEAD tylko tak
+    widać podwójną emisję).
+
+    Falsyfikator: emisja `changed` z powrotem w pomocniku wysokości → 3 po zapisie."""
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    emisje = []
+    dlg.changed.connect(lambda: emisje.append(1))
+    dlg.show()
+    QApplication.instance().processEvents()
+    dlg._on_confirm()
+    po_zapisie = len(emisje)
+    assert dlg._commit_id is not None and _karta_object(pliki["zapis"]) == "NGC 7635"
+    dlg._on_undo()
+    assert _karta_object(pliki["zapis"]) is None
+    # zapis: potwierdzenie w bazie (`_on_confirm`) + ogon kart; cofnięcie: ogon
+    assert (po_zapisie, len(emisje) - po_zapisie) == (2, 1), emisje
     dlg.reject()

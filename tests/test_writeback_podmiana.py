@@ -514,7 +514,7 @@ def test_smierc_przed_podmiana_a_plik_zmieniony_poza_programem(tmp_path, monkeyp
     with fits.open(str(p), mode="update") as hdul:
         hdul[0].header["TELESCOP"] = "OBCY"
     res = writeback.commit(con, "R", now=NOW)
-    assert len(res.blocked) == 1 and "header_hash mismatch" in res.blocked[0].reason, res
+    assert len(res.blocked) == 1 and res.blocked[0].reason.code == "header_hash_mismatch", res
     (b,) = _backupy(con)
     assert (b["pending_since"], b["unreplaced_at"]) == (None, NOW)
     con.close()

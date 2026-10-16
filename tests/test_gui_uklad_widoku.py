@@ -102,7 +102,8 @@ def test_BP6_kolumny_usera_przezywaja_zapis_perspektywy_i_klik_w_facet(view, mon
 
 def test_BP6_kolumny_usera_przezywaja_przebieg_dostawy_takze_gdy_karty_sie_zmienily(view, gcon):
     """Drugi wariant hipotezy: gospodarz po przebiegu Dostawy woła `grid_view._load_facets()`
-    i `grid_view.refresh()` (`MainWindow._odswiez_widoki_po_przebiegu`). Dostawa dopisała karty
+    i przeładowanie zbioru (`grid_view.przeladuj_z_zaznaczeniem()` - ten sam `refresh` ze znacznikiem
+    zaznaczenia, AR-172; `MainWindow._odswiez_widoki_po_przebiegu`). Dostawa dopisała karty
     z NOWYM keywordem, więc pokrycie liczy się naprawdę od nowa (inny odcisk kart) - i dopiero
     wtedy reset kolumn miałby okazję się wydarzyć. Wybór usera zostaje; nowy keyword trafia
     do „Pól" bez zaznaczenia.

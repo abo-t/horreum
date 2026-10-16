@@ -51,6 +51,7 @@ def _probki():
         "length": 70, "limit": 68,
         "features": [writeback._CECHA_ROZMIAR, writeback._CECHA_NAGLOWEK],
         "paths": ["X:/L/a", "X:/L/b"], "sums": ["CHECKSUM", "DATASUM"],
+        "os_code": "WinError 5",
     }
 
 
@@ -385,8 +386,9 @@ def test_kodek_listy_cech_i_zagniezdzen_przezywa_baze():
 def test_cofniecie_atomowe_odmawia_kodem_cofniecia_na_kazdej_drodze(tmp_path, fmt, koperta):
     """Kontrola `header_hash` cofnięcia atomowego (`write_full_header`) porównuje z nagłówkiem
     zapisanym przez COMMIT - każda z czterech dróg (koperta bajtowa / tekst semantycznie, FITS /
-    XISF) odmawia kodem `undo_header_changed`, a proza zostaje „header_hash mismatch” znak w znak.
-    Zapis (`write_changes`) na tym samym pliku mówi kodem zapisu (od stagingu)."""
+    XISF) odmawia kodem `undo_header_changed` i prozą „od commitu”. Zapis (`write_changes`) na tym
+    samym pliku mówi kodem i prozą zapisu („od stagingu”) - obie zdaniem po polsku, nie gołym
+    „header_hash mismatch”."""
     from test_writeback_inplace import _fits, _xisf
     p = str(_fits(tmp_path / "a.fits") if fmt == "fits" else _xisf(tmp_path / "a.xisf"))
     op = writeback.WriteOp("OBJECT", "set", "IC 405", "str")
@@ -398,7 +400,8 @@ def test_cofniecie_atomowe_odmawia_kodem_cofniecia_na_kazdej_drodze(tmp_path, fm
     assert (writeback.RegionBackup.decode(tekst) is not None) is koperta
     res = writeback.write_full_header(p, tekst, "zly")
     assert res.status == "blocked" and res.reason.code == "undo_header_changed", res
-    assert str(res.reason) == str(zapis.reason) == "header_hash mismatch"
+    assert str(res.reason) == "nagłówek pliku zmienił się od commitu (header_hash niezgodny)"
+    assert str(zapis.reason) == "nagłówek pliku zmienił się od stagingu (header_hash niezgodny)"
 
 
 def test_wpis_mnogi_wolnych_rekordow_PL_jak_rdzen_EN_odmienia():
@@ -643,3 +646,505 @@ def test_naruszenie_reguly_karty_mowi_w_oknie_kodem(tmp_path, fmt, op, pl, kod, 
     assert naruszenie.reason == res.reason and naruszenie.field == pole
     if kod in ("card_value_chars", "card_comment_chars"):
         assert naruszenie.char == "é" and naruszenie.kind == "chars"
+
+
+# ============================================================ AR-166: suma kontrolna na obu drogach
+
+
+def _fits_z_suma(path, seed=0):
+    """FITS z poprawnymi kartami `CHECKSUM`/`DATASUM` (astropy `writeto(checksum=True)`)."""
+    import numpy as np
+    from astropy.io import fits
+    hdu = fits.PrimaryHDU(data=(np.arange(64, dtype=np.int16).reshape(8, 8) + seed)
+                          .astype(np.int16))
+    hdu.header["IMAGETYP"] = "Light"
+    hdu.header["OBJECT"] = ("NGC6992", "nazwa obiektu")
+    hdu.writeto(path, checksum=True)
+    return path
+
+
+def _sumy_zgodne(path):
+    import warnings
+    from astropy.io import fits
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with fits.open(path) as h:
+            return h[0].verify_checksum() == 1 and h[0].verify_datasum() == 1
+
+
+def test_FITS_z_suma_odmowa_na_OBU_drogach_tym_samym_powodem(tmp_path):
+    """AR-166 (sonda: droga atomowa `applied 1`, `verify_checksum` 0): FITS z sumą odmawia
+    w OBU drogach tym samym powodem z nazwami kart, plik bajt w bajt, suma zgodna, bez backupu.
+    Falsyfikator: zdejmij `_odmowa_sumy` z `write_changes` → 'applied', suma niezgodna."""
+    p = _fits_z_suma(tmp_path / "s.fits")
+    przed = p.read_bytes()
+    op = [writeback.WriteOp("OBJECT", "set", "NGC 6992", "str", idx=0)]
+    atom = writeback.write_changes(str(p), op, None)
+    miejsce = writeback.write_changes_inplace(str(p), op, None)
+    for res in (atom, miejsce):
+        assert res.status == "blocked" and res.backup_text is None, res
+        assert res.reason.code == "checksum_present", res
+        assert dict(res.reason.params)["sums"] == ["CHECKSUM", "DATASUM"]
+    assert str(atom.reason) == str(miejsce.reason)
+    assert p.read_bytes() == przed and _sumy_zgodne(p)
+
+
+def test_szuflada_commit_FITS_z_suma_blokuje_bez_commit_id(tmp_path):
+    """AR-166: op szuflady Zbiorów (`commit` bez `inplace`, AR-161) na FITS z sumą - 'blocked', commit
+    bez `commit_id` (nic nie podmieniono), wpis stagingu niesie kod i nazwy kart (trójka 0042)."""
+    from test_writeback_inplace import _baza_z_plikiem
+    p = _fits_z_suma(tmp_path / "s.fits")
+    przed = p.read_bytes()
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW)
+    (fr,) = res.blocked
+    assert not res.applied and res.commit_id is None and fr.reason.code == "checksum_present"
+    (w,) = con.execute("SELECT status, reason_code, reason_args FROM pending_changes "
+                       "WHERE run_id = 'R'")
+    assert (w[0], w[1]) == ("blocked", "checksum_present")
+    assert json.loads(w[2])["sums"] == ["CHECKSUM", "DATASUM"]
+    assert p.read_bytes() == przed and _sumy_zgodne(p)
+    con.close()
+
+
+def test_jedna_regula_sumy_dla_obu_drog():
+    """AR-166: odmowę sumy mówi JEDEN predykat (`_odmowa_sumy`) - obie drogi FITS go wołają, a literał
+    kodu `checksum_present` stoi w module raz. Falsyfikator: kopia literału w `_fits_inplace_plan`."""
+    for fn in (writeback.write_changes, writeback._fits_inplace_plan):
+        assert any(isinstance(w, ast.Call) and getattr(w.func, "id", None) == "_odmowa_sumy"
+                   for w in ast.walk(ast.parse(inspect.getsource(fn)))), fn.__name__
+    literaly = [w for w in ast.walk(ast.parse(inspect.getsource(writeback)))
+                if isinstance(w, ast.Constant) and w.value == "checksum_present"]
+    assert len(literaly) == 1, len(literaly)
+
+
+# ============================================================ AR-168: błędy systemu klasą
+
+
+_KLASY_WINERROR = [(5, "os_denied"), (19, "os_denied"), (65, "os_denied"), (2, "os_missing"),
+                   (3, "os_missing"), (112, "os_no_space"), (39, "os_no_space"),
+                   (64, "os_share_lost"), (59, "os_share_lost"), (53, "os_share_lost"),
+                   (67, "os_share_lost"), (121, "os_share_lost"), (1231, "os_share_lost"),
+                   (21, "os_share_lost")]
+
+
+@pytest.mark.parametrize("winerror, kod", _KLASY_WINERROR, ids=[str(w) for w, _ in _KLASY_WINERROR])
+def test_blad_systemu_klasa_po_winerror_przed_errno(winerror, kod):
+    """AR-168: klasa po kodzie Windows - podklasa i errno CPythona tu kłamią: 53/67 (ścieżka
+    sieciowa) to `FileNotFoundError`, 21 (urządzenie niegotowe) to `PermissionError`, 39 i błędy
+    sieci to EINVAL (mapa CPythona z konstruktora `OSError`, numery z Microsoft Learn). Zdanie: fraza z numerem,
+    surowy tekst systemu w `detail`. Falsyfikator: klasa po podklasie → 53 = `os_missing`."""
+    exc = OSError(None, "komunikat systemu", r"X:\L\a.fits", winerror)
+    powod = writeback._blad_systemu(exc)
+    assert isinstance(powod, PowodPozycji) and powod.code == kod, (winerror, powod)
+    p = dict(powod.params)
+    assert p["os_code"] == f"WinError {winerror}" and p["detail"] == f"{type(exc).__name__}: {exc}"
+    assert f"(WinError {winerror})" in powod
+
+
+@pytest.mark.parametrize("nazwa, kod", [("EACCES", "os_denied"), ("EPERM", "os_denied"),
+                                        ("ENOENT", "os_missing"), ("ENOSPC", "os_no_space")])
+def test_blad_systemu_bez_winerror_po_errno(nazwa, kod):
+    """AR-168: funkcje CRT (`open()`, plik tymczasowy, zapis strumienia) dają samo `errno` - klasa
+    po nim. Falsyfikator: zdejmij `_OS_ERRNO` → ENOSPC surowo."""
+    import errno
+    exc = OSError(getattr(errno, nazwa), "komunikat")
+    powod = writeback._blad_systemu(exc)
+    assert isinstance(powod, PowodPozycji) and powod.code == kod, powod
+    assert dict(powod.params)["os_code"] == f"Errno {exc.errno}"
+
+
+@pytest.mark.parametrize("exc", [
+    OSError(None, "zajęty", None, 32), OSError(None, "blokada", None, 33),
+    OSError(None, "błąd urządzenia", None, 1117), OSError(None, "x", None, 1177),
+    OSError(5, "I/O error"), OSError(22, "Invalid argument"), OSError("gołe"),
+    ValueError("nie system")],
+    ids=["32", "33", "1117", "1177", "EIO", "EINVAL", "gole", "ValueError"])
+def test_nieznany_blad_systemu_zostaje_uczciwy(exc):
+    """AR-168: błąd spoza klas zostaje tekstem systemu znak w znak (bez zmyślonego kodu), a kod
+    Windows spoza tabeli NIE schodzi do errno - 32 to EACCES, byłby „odmową dostępu” zamiast
+    zajętości, którą mówi `czytelny_powod`. Falsyfikator: zejście do errno przy nieznanym `winerror`."""
+    assert writeback._blad_systemu(exc) == f"{type(exc).__name__}: {exc}"
+    assert not isinstance(writeback._blad_systemu(exc), PowodPozycji)
+    assert writeback._blad_systemu(exc, z_typem=False) == str(exc)
+
+
+def test_kazdy_kod_systemu_w_oknie_PL_i_EN():
+    """AR-168: każdy kod błędu systemu w oknie - PL = zdanie rdzenia, EN po angielsku z numerem
+    i BEZ komunikatu systemu (ten jest w języku systemu i schodzi do podpowiedzi)."""
+    pytest.importorskip("PySide6")
+    for kod_win in (5, 2, 112, 64):
+        powod = writeback._blad_systemu(OSError(None, "Odmowa dostępu", None, kod_win))
+        _pl, en = _okno(powod)
+        assert f"WinError {kod_win}" in en and "Odmowa" not in en, en
+
+
+def test_plik_tylko_do_odczytu_mowi_kodem_na_obu_drogach_i_w_bazie(tmp_path):
+    """AR-168 (wizytacja natywna): prawdziwy plik tylko do odczytu - obie drogi i commit przez
+    bazę mówią kodem `os_denied` z numerem, a surowy tekst systemu zostaje w bazie (`reason_args`,
+    pole `detail`). Falsyfikator: `_pod_blokada`/`write_changes` z gołym tekstem wyjątku."""
+    import os
+    import stat
+    from test_writeback_inplace import _baza_z_plikiem, _fits
+    p = _fits(tmp_path / "ro.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    os.chmod(p, stat.S_IREAD)
+    try:
+        op = [writeback.WriteOp("OBJECT", "set", "NGC 6992", "str", idx=0)]
+        for res in (writeback.write_changes(str(p), op, None),
+                    writeback.write_changes_inplace(str(p), op, None)):
+            assert res.status == "failed" and res.reason.code == "os_denied", res
+            assert dict(res.reason.params)["os_code"] == "WinError 5"
+        (fr,) = writeback.commit(con, "R", now=NOW).failed
+        assert fr.reason.code == "os_denied"
+        (w,) = con.execute("SELECT reason, reason_code, reason_args FROM pending_changes "
+                           "WHERE run_id = 'R'")
+        assert w[0] == str(fr.reason) and w[1] == "os_denied"
+        assert json.loads(w[2])["detail"].startswith("PermissionError: [WinError 5]")
+    finally:
+        os.chmod(p, stat.S_IREAD | stat.S_IWRITE)
+        con.close()
+
+
+def test_brak_miejsca_i_zerwany_udzial_na_prawdziwej_drodze(tmp_path, monkeypatch):
+    """AR-168: klasa z prawdziwej drogi pisarza - blokada pliku pada zerwanym udziałem
+    (`ctypes.WinError(64)`), plik tymczasowy drogi atomowej brakiem miejsca (CRT: samo errno 28)."""
+    import ctypes
+    import errno
+    from test_writeback_inplace import _fits
+    p = _fits(tmp_path / "a.fits")
+    op = [writeback.WriteOp("OBJECT", "set", "NGC 6992", "str", idx=0)]
+
+    def _zerwany(path):
+        raise ctypes.WinError(64)
+    monkeypatch.setattr(writeback, "_exclusive", _zerwany)
+    res = writeback.write_changes_inplace(str(p), op, None)
+    assert res.status == "failed" and res.reason.code == "os_share_lost", res
+    assert "WinError 64" in res.reason
+    monkeypatch.undo()
+
+    def _pelny(*a, **kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(writeback.tempfile, "mkstemp", _pelny)
+    res = writeback.write_changes(str(p), op, None)
+    assert res.status == "failed" and res.reason.code == "os_no_space", res
+    assert "Errno 28" in res.reason
+
+
+# Handlery łapiące WYŁĄCZNIE błąd nie-systemowy, które składają tekst z wyjątku - z uzasadnieniem.
+_GOLY_WYJATEK_POZA_SYSTEMEM = {
+    # parser XML łaty XISF: `ET.ParseError` to werdykt o bajtach, nie błąd systemu; `ValueError`
+    # z tym zdaniem trafia do wyniku przez `_blad_systemu` w `write_xisf_changes` (surowo)
+    ("_xisf_verify", "ET.ParseError"),
+}
+
+
+def test_meta_tekst_wyjatku_tylko_przez_blad_systemu():
+    """AR-168 (bramka zamiast wyliczanki): w `writeback` tekst wyjątku
+    staje się powodem WYŁĄCZNIE w `_blad_systemu` - f-string z `type(X).__name__`, f-string z gołym
+    `{exc|exc2|err|e}` albo `str(exc|exc2|blad)` poza nim = czerwień. Wyjątki: handler, który łapie
+    wyłącznie błąd nie-systemowy, z uzasadnieniem (`_GOLY_WYJATEK_POZA_SYSTEMEM`). Falsyfikator:
+    przywróć `blad = f"{type(exc).__name__}: {exc}"` albo `f"… ({exc})"` w jednym miejscu."""
+    drzewo = ast.parse(inspect.getsource(writeback))
+    rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+
+    def _otoczenie(w):
+        """(funkcja, typ handlera `except` albo None) węzła."""
+        handler = None
+        while w in rodzic:
+            w = rodzic[w]
+            if handler is None and isinstance(w, ast.ExceptHandler):
+                handler = ast.unparse(w.type) if w.type is not None else ""
+            if isinstance(w, ast.FunctionDef):
+                return w.name, handler
+        return None, handler
+    poza, wywolan = [], 0
+    for w in ast.walk(drzewo):
+        typ = isinstance(w, ast.JoinedStr) and any(
+            isinstance(v, ast.FormattedValue) and ast.unparse(v.value).startswith("type(")
+            and ast.unparse(v.value).endswith(").__name__") for v in w.values)
+        goly = isinstance(w, ast.JoinedStr) and any(
+            isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name)
+            and v.value.id in ("exc", "exc2", "err", "e") for v in w.values)
+        tekst = (isinstance(w, ast.Call) and getattr(w.func, "id", None) == "str"
+                 and len(w.args) == 1 and isinstance(w.args[0], ast.Name)
+                 and w.args[0].id in ("exc", "exc2", "blad"))
+        funkcja, handler = _otoczenie(w)
+        if (typ or goly or tekst) and funkcja != "_blad_systemu" \
+                and (funkcja, handler) not in _GOLY_WYJATEK_POZA_SYSTEMEM:
+            poza.append(f"{w.lineno}: {ast.unparse(w)[:80]}")
+        if isinstance(w, ast.Call) and getattr(w.func, "id", None) == "_blad_systemu":
+            wywolan += 1
+    assert not poza, "\n".join(poza)
+    assert wywolan >= 45, wywolan
+
+
+def test_przerwane_cofniecie_w_miejscu_zostawia_surowy_szczegol_w_bazie(tmp_path, monkeypatch):
+    """AR-168: kolumna prozowa `inplace_op.reason` nie ma `reason_args` - zdanie błędu
+    systemu niesie za sobą surowy tekst systemu, więc diagnoza z bazy nie ginie razem z kodem.
+    Prawdziwe cofnięcie w miejscu przerwane błędem systemu po pierwszym bajcie (`os.fsync`).
+    Falsyfikator: `_faza` bez `_proza_z_diagnoza` → w bazie samo zdanie z numerem."""
+    from test_writeback_inplace import _baza_z_plikiem, _fits
+    p = _fits(tmp_path / "u.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.in_place) == 1, res
+
+    def _fsync(fd):
+        raise OSError(None, "Okreslona nazwa sieciowa jest juz niedostepna", None, 64)
+    monkeypatch.setattr(writeback.os, "fsync", _fsync)
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    monkeypatch.undo()
+    (fr,) = u.failed
+    assert writeback._szczegoly_systemu(fr.reason) == [
+        "OSError: [WinError 64] Okreslona nazwa sieciowa jest juz niedostepna"]
+    (op,) = con.execute("SELECT phase, reason FROM inplace_op WHERE kind = 'undo'")
+    assert op["phase"] == "unverified", tuple(op)
+    assert "udział sieciowy albo dysk nie odpowiada (WinError 64)" in op["reason"]
+    assert op["reason"].endswith(" - OSError: [WinError 64] Okreslona nazwa sieciowa jest juz "
+                                 "niedostepna"), op["reason"]
+    con.close()
+
+
+# ============================================================ AR-169: region sprzed commitu w miejscu
+
+
+def _zewnetrzny_powrot(con, commit_id, path):
+    """Region nagłówka z koperty backupu commitu wpisany z zewnątrz - plik wraca do stanu sprzed
+    commitu bez Horreum (np. kopia z archiwum)."""
+    (txt,) = con.execute("SELECT header_text FROM header_backups WHERE commit_id = ?",
+                         (commit_id,)).fetchone()
+    env = writeback.RegionBackup.decode(txt)
+    with open(path, "r+b") as fh:
+        fh.seek(env.offset)
+        fh.write(env.region)
+    return env
+
+
+def _fits_dwa_hdu(path):
+    """FITS z obrazem w głównym HDU (to wybiera skan) i drugim HDU z kartą `NOTE` - `sha1_data`
+    nie widzi drugiego HDU."""
+    import numpy as np
+    from astropy.io import fits
+    glowne = fits.PrimaryHDU(data=np.arange(64, dtype=np.int16).reshape(8, 8))
+    glowne.header["IMAGETYP"] = "Light"
+    glowne.header["OBJECT"] = ("NGC6992", "nazwa obiektu")
+    drugie = fits.ImageHDU(data=np.zeros((2, 2), dtype=np.int16), name="EXTRA")
+    drugie.header["NOTE"] = "aaaa"
+    fits.HDUList([glowne, drugie]).writeto(path)
+    return path
+
+
+def test_region_sprzed_i_baza_sprzed_to_juz_cofniete(tmp_path):
+    """AR-169: region nagłówka na dysku już sprzed commitu w miejscu, CAŁY plik = plik sprzed commitu
+    (kotwica operacji), a baza opisuje ten plik (skan) → „już cofnięte” (`already`), cofnięcie
+    domknięte, uchwyt znika; plik nietknięty. Falsyfikator: bez `juz=True` → `already == []`."""
+    from test_writeback_inplace import _baza_z_plikiem, _fits, _scan_in
+    p = _fits(tmp_path / "a.fits")
+    przed = p.read_bytes()
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.in_place) == 1, res
+    _zewnetrzny_powrot(con, res.commit_id, p)
+    assert p.read_bytes() == przed
+    _scan_in(con, p)
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    assert u.blocked == u.already != [] and u.complete, u
+    assert u.already[0].reason.code == "undo_already_region"
+    assert p.read_bytes() == przed
+    con.close()
+
+
+def test_region_sprzed_a_baza_po_commicie_resync_z_pelnym_skutkiem(tmp_path):
+    """AR-169: region i CAŁY plik sprzed commitu, baza jeszcze po commicie → re-sync
+    z dowodem całego pliku: `header_hash` i `mtime` lokacji, karta `OBJECT` klatki, ta sama klatka
+    (bez rozdwojenia), nagrobek ręki AR-38 odtworzony, bez nowego wstrzymania; drugie `undo` - „już
+    cofnięte”, domknięte. Falsyfikator: `_baza_opisuje` zawsze prawdą → blokada zamiast re-syncu."""
+    from horreum import scan
+    from test_undo_nagrobek import _baza_z_nagrobkiem, _commit_karty, _ev, _stan
+    import os
+    con, p, lid, fid, cos = _baza_z_nagrobkiem(tmp_path)
+    karta_przed = con.execute("SELECT value_raw FROM cards WHERE frame_id = ? AND "
+                              "keyword = 'OBJECT'", (fid,)).fetchone()[0]
+    res = _commit_karty(con, lid, "R", inplace=True)
+    assert res.in_place and _stan(con, fid) == (None, None, None)        # commit zgasił nagrobek
+    env = _zewnetrzny_powrot(con, res.commit_id, p)
+    ramki = con.execute("SELECT count(*) FROM frame").fetchone()[0]
+    wstrzymania = con.execute("SELECT count(*) FROM withheld_write").fetchone()[0]
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    (fr,) = u.restored
+    assert not u.blocked and not u.failed and u.complete, u
+    assert fr.reason.code == "undo_sync_finished", fr.reason
+    loc = con.execute("SELECT header_hash, mtime, frame_id FROM location WHERE id = ?",
+                      (lid,)).fetchone()
+    assert loc["header_hash"] == env.pre_hash and loc["mtime"] == scan._mtime_iso(os.stat(p))
+    assert loc["frame_id"] == fid and con.execute("SELECT count(*) FROM frame").fetchone()[0] == ramki
+    assert con.execute("SELECT value_raw FROM cards WHERE frame_id = ? AND keyword = 'OBJECT'",
+                       (fid,)).fetchone()[0] == karta_przed
+    assert _stan(con, fid) == (None, "user_cleared", cos) and _ev(con, "object.tombstone_restored") == 1
+    assert con.execute("SELECT count(*) FROM withheld_write").fetchone()[0] == wstrzymania
+    drugie = writeback.undo(con, res.commit_id, now=NOW)
+    assert drugie.blocked == drugie.already != [] and drugie.complete, drugie
+    con.close()
+
+
+@pytest.mark.parametrize("skan", [False, True], ids=["baza_po_commicie", "baza_po_skanie"])
+def test_region_sprzed_bez_dowodu_calego_pliku_nie_jest_juz_cofniety(tmp_path, skan):
+    """AR-169 (falsyfikator dowodu): region głównego HDU sprzed commitu, ale DRUGIE HDU zmienione poza
+    regionem (`sha1_data` bez zmian) - cały plik nie jest stanem sprzed commitu. Ani „już
+    cofnięte”, ani re-sync: blokada z receptą skanu, cofnięcie NIEdomknięte (uchwyt zostaje), baza
+    nietknięta - także po skanie, który wyrównał nagłówek. Falsyfikator: `_region_sprzed` bez
+    kontroli danych → `already` (po skanie) albo `restored` (przed skanem)."""
+    from test_writeback_inplace import _baza_z_plikiem, _scan_in
+    p = _fits_dwa_hdu(tmp_path / "d.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.in_place) == 1, res
+    _zewnetrzny_powrot(con, res.commit_id, p)
+    bajty = bytearray(p.read_bytes())
+    i = bajty.index(b"'aaaa ")                # wartość FITS dopełniona do 8 znaków
+    bajty[i:i + 5] = b"'bbbb"
+    p.write_bytes(bytes(bajty))
+    if skan:
+        _scan_in(con, p)
+    sha1_data = con.execute("SELECT sha1_data FROM frame").fetchone()[0]
+    naglowek = con.execute("SELECT header_hash FROM location").fetchone()[0]
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    (fr,) = u.blocked
+    assert u.already == [] and not u.complete and not u.restored, u
+    assert fr.reason.code == "undo_region_unproven", fr.reason
+    assert dict(fr.reason.params)["inner"].code == "check_outside_changed"
+    assert con.execute("SELECT header_hash FROM location").fetchone()[0] == naglowek
+    assert con.execute("SELECT count(*), max(sha1_data) FROM frame").fetchone()[:] == (1, sha1_data)
+    con.close()
+
+
+def test_juz_cofniete_jedna_regula_obu_drog():
+    """AR-169: „baza opisuje plik sprzed commitu” to jedna reguła (`_baza_opisuje`) dla drogi atomowej
+    i dla regionu w miejscu. Falsyfikator: kopia warunku `header_hash`/`mtime` w jednej gałęzi."""
+    zrodlo = ast.parse(inspect.getsource(writeback._cofnij_lokacje))
+    wolania = [w for w in ast.walk(zrodlo)
+               if isinstance(w, ast.Call) and getattr(w.func, "id", None) == "_baza_opisuje"]
+    assert len(wolania) == 2, len(wolania)
+
+
+# ============================================================ AR-176: przerwane cofnięcie liczy resztę
+
+
+@pytest.mark.parametrize("inplace", [False, True], ids=["atomowo", "w_miejscu"])
+def test_przerwane_cofniecie_liczy_reszte_z_bazy(tmp_path, inplace):
+    """AR-176 pkt 4 (sonda: ponowienie przerwane, a reszta już cofnięta, szuflada obiecywała
+    „dokończy resztę”): rdzeń przy przerwaniu liczy z bazy, ile nieprzetworzonych backupów NIE ma
+    trwałego dowodu zakończenia - przed pierwszym: wszystkie; po części: reszta; po pełnym
+    cofnięciu: zero wyłącznie tam, gdzie dowód jest (operacja cofnięcia w miejscu zamknięta), a droga
+    atomowa zapisu zakończenia nie zostawia - jej reszta dalej wymaga sprawdzenia. Bez przerwania
+    `None`. Falsyfikator: `remaining` z samej liczby nieprzetworzonych → w miejscu 2 zamiast 0."""
+    from test_writeback_inplace import _fits, _loc, _scan_in, _stage
+    con = db.open_db(str(tmp_path / "h.db"))
+    for i in range(3):
+        p = _fits(tmp_path / f"f{i}.fits", seed=i)
+        _scan_in(con, p)
+        _stage(con, "R", _loc(con, p)["id"], "NGC 6992", _loc(con, p)["header_hash"])
+    res = writeback.commit(con, "R", now=NOW, inplace=inplace)
+    assert len(res.applied) == 3 and res.commit_id is not None, res
+
+    def _po(n):
+        pytania = []
+
+        def _pytaj():
+            pytania.append(1)
+            return len(pytania) > n
+        return _pytaj
+    przed = writeback.undo(con, res.commit_id, now=NOW, should_cancel=_po(0))
+    assert przed.cancelled and przed.remaining == 3 and not przed.complete, przed
+    czesc = writeback.undo(con, res.commit_id, now=NOW, should_cancel=_po(1))
+    assert len(czesc.restored) == 1 and czesc.remaining == 2, czesc
+    pelne = writeback.undo(con, res.commit_id, now=NOW)
+    assert pelne.complete and pelne.remaining is None, pelne
+    ponowione = writeback.undo(con, res.commit_id, now=NOW, should_cancel=_po(1))
+    assert len(ponowione.already) == 1, ponowione
+    assert ponowione.remaining == (0 if inplace else 2), ponowione
+    con.close()
+
+
+def test_przerwane_cofniecie_naglowek_wyrownany_skanem_to_nie_dowod_zakonczenia(tmp_path):
+    """AR-176 pkt 4: plik po commicie w miejscu wrócił z zewnątrz do regionu sprzed commitu, ale ma
+    zmienione DRUGIE HDU, a skan wyrównał `header_hash` lokacji - zgodny nagłówek NIE jest dowodem
+    zakończenia cofnięcia (to cofnięcie odmówi: cały plik inny). Przerwanie przed pierwszym backupem
+    liczy go jako wymagający sprawdzenia. Falsyfikator: `_cofniecie_zakonczone` po `header_hash` →
+    `remaining` 0 i zdanie „nie wymagają cofnięcia”, a ponowienie i tak zwraca niedomknięte."""
+    from test_writeback_inplace import _baza_z_plikiem, _scan_in
+    p = _fits_dwa_hdu(tmp_path / "d.fits")
+    con, _loc = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    _zewnetrzny_powrot(con, res.commit_id, p)
+    bajty = bytearray(p.read_bytes())
+    i = bajty.index(b"'aaaa ")
+    bajty[i:i + 5] = b"'bbbb"
+    p.write_bytes(bytes(bajty))
+    _scan_in(con, p)
+    przerwane = writeback.undo(con, res.commit_id, now=NOW, should_cancel=lambda: True)
+    assert przerwane.cancelled and przerwane.remaining == 1, przerwane
+    ponowione = writeback.undo(con, res.commit_id, now=NOW)
+    assert not ponowione.complete and ponowione.blocked[0].reason.code == "undo_region_unproven"
+    con.close()
+
+
+@pytest.mark.parametrize("zmiana", [True, False], ids=["drugie_HDU_inne", "kopia_wierna"])
+def test_region_sprzed_po_Fallback_tylko_z_dowodem_calego_pliku(tmp_path, zmiana):
+    """AR-169: po commicie W MIEJSCU pod ścieżką staje KOPIA (inny `st_ino` → cofnięcie w miejscu
+    spada na drogę atomową przez `Fallback`) z regionem sprzed commitu. Z innym drugim HDU - ani
+    „już cofnięte”, ani re-sync: blokada bez dowodu, cofnięcie niedomknięte, baza nietknięta;
+    kopia wierna - dowód całego pliku przechodzi, baza dociąga stan (`restored`, domknięte).
+    Falsyfikator: gałąź atomowa po commicie w miejscu bez `_region_sprzed` → `restored` dla
+    zmienionej kopii."""
+    import os
+    from test_writeback_inplace import _baza_z_plikiem
+    p = _fits_dwa_hdu(tmp_path / "d.fits")
+    przed = p.read_bytes()
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.in_place) == 1, res
+    kopia = bytearray(przed)
+    if zmiana:
+        i = kopia.index(b"'aaaa ")
+        kopia[i:i + 5] = b"'bbbb"
+    nowy = tmp_path / "kopia.fits"
+    nowy.write_bytes(bytes(kopia))
+    ino = os.stat(p).st_ino
+    os.replace(nowy, p)
+    assert os.stat(p).st_ino != ino                  # inny plik pod ścieżką - `Fallback`
+    naglowek = con.execute("SELECT header_hash FROM location").fetchone()[0]
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    if zmiana:
+        (fr,) = u.blocked
+        assert fr.reason.code == "undo_region_unproven" and not u.already and not u.complete, u
+        assert con.execute("SELECT header_hash FROM location").fetchone()[0] == naglowek
+    else:
+        assert len(u.restored) == 1 and u.complete, u
+    con.close()
+
+
+@pytest.mark.parametrize("inplace", [False, True], ids=["atomowo", "w_miejscu"])
+def test_juz_cofniete_po_skanie_odtwarza_nagrobek_raz(tmp_path, inplace):
+    """AR-169 / AR-38: commit karty `OBJECT` gasi nagrobek ręki; plik wraca z zewnątrz do stanu
+    sprzed commitu, a skan wyrównuje bazę - skan nagrobka nie odtwarza. „Już cofnięte” rozlicza
+    skutki cofnięcia w bazie tą samą klingą co re-sync (obie drogi): nagrobek wraca, cofnięcie
+    domknięte; drugie `undo` bez dubli zdarzeń. Falsyfikator: `_blok(juz=True)` bez
+    `_rozlicz_cofniecie_w_bazie` → „Cofnij” znika, wykluczenia ręki brak."""
+    from test_undo_nagrobek import _baza_z_nagrobkiem, _commit_karty, _ev, _stan
+    from test_writeback_inplace import _scan_in
+    con, p, lid, fid, cos = _baza_z_nagrobkiem(tmp_path)
+    przed = p.read_bytes()
+    res = _commit_karty(con, lid, "R", inplace=inplace)
+    assert _stan(con, fid) == (None, None, None)                     # commit zgasił nagrobek
+    p.write_bytes(przed)                                             # powrót spoza Horreum
+    _scan_in(con, p)
+    assert _stan(con, fid) == (None, None, None)                     # skan nagrobka nie odtwarza
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    assert u.blocked == u.already != [] and u.complete, u
+    assert _stan(con, fid) == (None, "user_cleared", cos), _stan(con, fid)
+    assert _ev(con, "object.tombstone_restored") == 1
+    drugie = writeback.undo(con, res.commit_id, now=NOW)
+    assert drugie.complete and _ev(con, "object.tombstone_restored") == 1, drugie
+    con.close()

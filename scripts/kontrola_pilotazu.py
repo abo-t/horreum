@@ -7,34 +7,54 @@ zapisie z PLANEM. Niezależność od pamięci podręcznej daje dopiero uruchomie
 komputera albo po restarcie - sam skrypt tego nie dowodzi.
 
 Kontrola nie woła funkcji pisarza, które składają kartę albo region - oczekiwany wynik wyznacza
-sama z kopii i planu. Z `writeback` bierze wyłącznie blokadę (`_exclusive`) do trybu `blokada`.
+sama z kopii i planu. Z `writeback` bierze wyłącznie blokadę (`_exclusive`) do pomiaru `blokada`.
 
 Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
 
-  przed KATALOG_KOPII PLAN.json
+  przed KATALOG_KOPII PLAN.json KATALOG_TESTOWY
       PLAN.json = lista pozycji `{"plik", "po"?, "keyword", "value", "comment", "op"}` (AR-156):
       `op` = `set` (podmiana istniejącej karty `keyword`), `add` (dopisanie karty, której kopia NIE
       MA) albo `none` (plik bez zmiany treści: po zapisie CAŁY plik bajt w bajt jak kopia - RAW
       albo karta już w formie); `comment` null = bez komentarza, a przy `set` - komentarz zastany.
-      Skrót sprzed AR-156: `{"plik", "object": X}` ≡ `OBJECT` `set` X bez komentarza, `"object":
-      null` ≡ `none`; pozycja z oboma kształtami naraz to odmowa. Klucze kształtu są obowiązkowe -
-      brak to literówka planu, nie „bez karty”. Keyword: FITS - dowolna karta tekstowa (`OBJECT`
-      gestu „Zmień obiekt…”, `FILTER` naprawy `header-fix`); XISF - wyłącznie `OBJECT` `set` bez
-      komentarza (model regionu XML niżej). `add` przy kopii, która kartę już ma, i `set` przy kopii
-      bez karty → odmowa, zanim powstanie jakakolwiek kopia. Opcjonalne `"po": ścieżka` - PARA
+      Skrót PLANU sprzed AR-156: `{"plik", "object": X}` ≡ `OBJECT` `set` X bez komentarza,
+      `"object": null` ≡ `none`; pozycja z oboma kształtami naraz to odmowa (manifest skrótu nie
+      zna - jego wpis ma zawsze pełny kształt). Klucze kształtu są obowiązkowe - brak to literówka
+      planu, nie „bez karty”. Ścieżki `plik` i `po` BEZWZGLĘDNE - plan czyta ponownie `po`, w innym
+      procesie i innym katalogu bieżącym (AR-165). Keyword: FITS - dowolna karta tekstowa (`OBJECT`
+      gestu „Zmień obiekt…”, `FILTER` naprawy `header-fix`); XISF - `set` wyłącznie `OBJECT` bez
+      komentarza (model wycinków XML niżej), `add` dowolnej karty, z komentarzem albo bez (model
+      wstawki niżej). `add` przy kopii, która kartę już ma, `set` przy kopii bez karty, `set`, który
+      niczego nie zmienia (ta sama wartość i komentarz - pilotaż nic by nie sprawdził; od tego jest
+      `none`), `add` karty `OBJECT` klatce kalibracyjnej (`IMAGETYP` dark/flat/bias i mastery),
+      XISF bez obrazu-attachmentu albo z niekompletnym wypełnieniem, karta XISF spoza drukowalnego
+      ASCII albo dłuższa niż jeden rekord 80 znaków i `add`, którego model niżej nie umie dopisać
+      W MIEJSCU (brak zapasu za `END`, brak rezerwy nagłówka XISF, brak wzorca karty) → odmowa,
+      zanim powstanie jakakolwiek kopia. Opcjonalne `"po": ścieżka` - PARA
       ŚCIEŻEK gestu „Zmień obiekt…” (AR-17 krok 3): `plik` = ścieżka przed przeniesieniem, `po` =
-      ścieżka po nim (jeden `os.rename` zmienia folder i nazwę). Pełna kopia
-      każdego pliku do KATALOG_KOPII (lokalny dysk, NIE udział z oryginałami), tworzona wyłącznie
-      jako NOWY plik; sha1 oryginału i kopii (muszą być równe), rozmiar, `st_ino`, granice
-      nagłówka, karty i pełny kształt pozycji → manifest.json, zapisany atomowo dopiero po
-      skopiowaniu i sprawdzeniu wszystkich plików. Katalog z manifestem albo z plikiem kopii
-      (`NNNN.*`) → odmowa: kopie sprzed zapisu są jedynym materiałem porównania i nie wolno ich
-      nadpisać.
-  po KATALOG_KOPII
-      dla każdego pliku (przy parze: pod ścieżką `po`, a pod starą nie ma już nic - rename zachowuje
-      `st_ino`, zmierzone na `R:`): kopia nietknięta (sha1), rozmiar i `st_ino` bez zmian (inny
-      `st_ino` przy `add` = plik przepisany w całości drogą atomową, nie dopisany w miejscu), a CAŁY
-      plik równy plikowi oczekiwanemu, wyznaczonemu z kopii i planu:
+      ścieżka po nim (jeden `os.rename` zmienia folder i nazwę). Tożsamość każdego pliku z UCHWYTU
+      (`GetFileInformationByHandle`: wolumin + indeks pliku, AR-165; poza Windows odmowa) - zero
+      w woluminie, indeksie albo `st_ino` → odmowa. Przed pierwszą kopią pomiar `blokada` (niżej) na
+      KATALOG_TESTOWY - katalogu testowym udziału pilotażu, poza archiwum, z WYŁĄCZNIE plikami
+      `horreum_proba_*`: cudzy plik, którykolwiek wynik „NIE”, inny korzeń ścieżki (litera dysku albo
+      `\\\\serwer\\udział`) albo wolumin niż plików planu → odmowa (blokadę mierzymy tam, gdzie pisze
+      pisarz). Pełna kopia każdego pliku do KATALOG_KOPII (lokalny dysk; katalog na woluminie plików
+      planu → odmowa), tworzona wyłącznie jako NOWY plik; manifest.json w schemacie 2 (zamkniętym):
+      kotwica planu (ścieżka i sha1 pliku PLAN.json), środowisko (`sys.version`, nazwa komputera),
+      wynik pomiaru blokady, a per pozycja sha1 oryginału i kopii (muszą
+      być równe), rozmiar, `st_ino`, tożsamość z uchwytu, granice nagłówka, karty i pełny kształt
+      pozycji - zapisany atomowo dopiero po skopiowaniu i sprawdzeniu wszystkich plików. Katalog
+      z manifestem albo z plikiem kopii (`NNNN.*`) → odmowa: kopie sprzed zapisu są jedynym
+      materiałem porównania i nie wolno ich nadpisać.
+  po KATALOG_KOPII PLAN.json
+      manifest w schemacie 2 (manifest sprzed AR-165 → NIE z powodem - kontrola nie zgaduje), obcy
+      albo brakujący klucz i typ spoza schematu → NIE; KOTWICA LICZBY POZYCJI poza manifestem =
+      plik planu: sha1 PLAN.json równy zapisanemu przy `przed`, pozycje planu = wpisy manifestu
+      (liczba, kolejność, ścieżki, kształt), kopie w katalogu = wpisy. Potem dla każdego pliku (przy
+      parze: pod ścieżką `po`, a pod starą nie ma już nic - rename zachowuje tożsamość, zmierzone na
+      `R:`): kopia nietknięta (sha1), rozmiar, `st_ino` i tożsamość z uchwytu bez zmian (inna przy
+      `add` = plik przepisany w całości drogą atomową, nie dopisany w miejscu; `st_ino` porównany
+      tylko w tym samym Pythonie co `przed`, inaczej obie wartości w uwagach raportu), a CAŁY plik
+      równy plikowi oczekiwanemu, wyznaczonemu z kopii i planu:
         FITS `set` - wszystkie bajty identyczne z kopią poza jednym 80-bajtowym rekordem karty
           `keyword[0]` w jej położeniu z kopii (pierwszy rekord tej karty w regionie
           `[hdrLoc, datLoc)` wybranego HDU); ten rekord to karta `keyword` o wartości z planu
@@ -45,9 +65,9 @@ Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
           i komentarz z planu, null = bez komentarza), potem końcowy blok kart komentarzowych
           (COMMENT/HISTORY/nazwa pusta) kopii przesunięty o rekord; pusta karta z końca zużyta
           (`END` na miejscu), a gdy jej nie ma - `END` o rekord niżej, w wolny rekord za `END`
-          kopii; reszta regionu jak w kopii. Kopia bez obu zapasów → NIE (pisarz nie dopisze
-          w miejscu).
-        XISF - bajty od `first_attachment` do końca identyczne z kopią; w regionie
+          kopii; reszta regionu jak w kopii. Plik bez obu zapasów odpada już w `przed` (ten sam
+          model, AR-165); kopia bez nich w `po` → NIE (pisarz nie dopisze w miejscu).
+        XISF `set` - bajty od `first_attachment` do końca identyczne z kopią; w regionie
           `[0, first_attachment)`: sygnatura i `reserved` z kopii, pole długości wskazuje XML
           mieszczący się w regionie, XML równy XML-owi kopii poza DWIEMA wartościami, które
           pisarz ma prawo zmienić (niżej), a wypełnienie od końca XML-a do `first_attachment`
@@ -61,18 +81,32 @@ Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
           `<Property id="Observation:Object:Name">` (atrybut `value` albo tekst elementu) -
           pisarz ją łata razem z kartą, gdy plik ją ma, żeby plik nie przeczył sam sobie; gdy
           kopia ją ma, po zapisie MUSI być równa formie. Komentarz karty zmienić się nie może.
+        XISF `add` - bajty od `first_attachment` do końca identyczne z kopią, a region
+          `[0, first_attachment)` = region kopii po dopisaniu wg reguły pisarza, wyznaczony WŁASNYM
+          modelem na bajtach XML-a kopii (AR-165): nowa karta = kopia CAŁEGO elementu wzorca
+          (ostatnia karta z wartością w apostrofach FITS, z zamknięciem, jeśli je ma) z podmienionymi
+          `name` (karta z planu), `value` (wartość z planu w apostrofach, apostrof wewnątrz
+          podwojony, escape `&` `<` `"`) i `comment` (komentarz z planu, null = pusty), wstawiona za
+          KOŃCEM elementu OSTATNIEJ karty kopii, poprzedzona jej wcięciem (białe znaki tuż przed
+          nią); pole długości wskazuje nowy XML, sygnatura i `reserved` z kopii, wypełnienie wg
+          reguły pisarza jak przy `set`. Druga droga, bez modelu bajtowego: drzewo XML po zapisie =
+          drzewo kopii + jeden element karty z planu, rodzeństwo ostatniej karty, zaraz za nią.
       Niezależnie od różnic: czytnik skanu widzi po zapisie `keyword[0]` = wartość z planu,
       z komentarzem z planu (przy `set` z komentarzem null - sprzed), a przy `add` karty przed
       zapisem nie było - brak wykonania zmiany to NIE, nie „zero różnic".
       Kod wyjścia 1 przy którymkolwiek NIE.
-  po-undo KATALOG_KOPII
-      po cofnięciu pilotażu: sha1 CAŁEGO pliku == sha1 sprzed pilotażu, ten sam rozmiar i ten sam
-      `st_ino` - pod ścieżką `plik` (przed); przy parze pod ścieżką `po` nie ma już nic.
+  po-undo KATALOG_KOPII PLAN.json
+      manifest i kotwica planu jak w `po`; po cofnięciu pilotażu: sha1 CAŁEGO pliku == sha1 sprzed
+      pilotażu, ten sam rozmiar, `st_ino` i tożsamość z uchwytu - pod ścieżką `plik` (przed); przy
+      parze pod ścieżką `po` nie ma już nic.
   blokada KATALOG_TESTOWY
       pomiar blokady `writeback._exclusive` na udziale: tworzy WŁASNE pliki testowe (unikalna nazwa,
       tworzenie wyłączne `xb`), trzyma blokadę i sprawdza, że zapis z INNEGO procesu, drugie
-      otwarcie do zapisu, usunięcie i `os.replace` na plik są odrzucane, a odczyt działa; sprząta
-      wyłącznie swoje pliki. Odmawia drzewa archiwum `R:\\ASTRO_`.
+      otwarcie do zapisu, usunięcie i `os.replace` na plik są odrzucane, a odczyt działa; że
+      tożsamość z uchwytu jest stabilna, a `os.replace` na świeżej parze własnych plików ją
+      ZMIENIA (tym `po` rozpoznaje drogę atomową - AR-165; do 3 prób co 0,5 s przy odmowie
+      dostępu, każda próba w wynikach); sprząta wyłącznie swoje pliki. Odmawia drzewa archiwum
+      `R:\\ASTRO_`.
 
 Wynik na stdout (ASCII), manifest i raport JSON w KATALOG_KOPII."""
 from __future__ import annotations
@@ -80,10 +114,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import struct
 import subprocess
 import sys
+import time
 import uuid
 import warnings
 import xml.etree.ElementTree as ET
@@ -93,6 +129,7 @@ from astropy.io import fits
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from horreum import scan, writeback  # noqa: E402
+from horreum.resolve.frames import LIGHT_KINDS, normalize_kind  # noqa: E402
 
 ARCHIWUM = "R:\\ASTRO_"
 MANIFEST = "manifest.json"
@@ -134,6 +171,54 @@ def _jest_xisf(path):
     return os.path.splitext(path)[1].lower() in scan.XISF_SUFFIXES
 
 
+def _tozsamosc(path):
+    """Tożsamość pliku z UCHWYTU (AR-165): `{"wolumin", "indeks"}` z `GetFileInformationByHandle` -
+    `dwVolumeSerialNumber` i `nFileIndexHigh/Low` struktury `BY_HANDLE_FILE_INFORMATION`; numer
+    woluminu z identyfikatorem pliku jednoznacznie wskazują plik na jednym komputerze (dokumentacja
+    Microsoft). Uchwyt WYŁĄCZNIE do odczytu atrybutów (`FILE_READ_ATTRIBUTES`) z pełnym
+    współdzieleniem - treści nie czyta, a tryb współdzielenia nie dotyczy dostępu do atrybutów,
+    więc nie koliduje z blokadą pisarza (zmierzone na NTFS w obie strony). Także katalog
+    (`FILE_FLAG_BACKUP_SEMANTICS`) - wolumin katalogu kopii.
+
+    Własny odczyt, nie `st_ino`: skąd `os.stat` bierze `st_ino`, to szczegół CPython (3.12 przeszło
+    na identyfikator 128-bitowy `FileIdInfo`), a woluminu `st_ino` nie niesie. Przez sieć API może
+    oddać informację niepełną - zero sprawdza wołający. Poza Windows `OSError`: jawna odmowa, nie
+    cichy spadek na `st_ino`."""
+    if sys.platform != "win32":
+        raise OSError("tozsamosc pliku z uchwytu wymaga Windows (GetFileInformationByHandle) - "
+                      "kontrola nie spada po cichu na st_ino")
+    import ctypes
+    from ctypes import wintypes
+
+    class _Informacja(ctypes.Structure):        # BY_HANDLE_FILE_INFORMATION, kolejność z fileapi.h
+        _fields_ = [("dwFileAttributes", wintypes.DWORD), ("ftCreationTime", wintypes.FILETIME),
+                    ("ftLastAccessTime", wintypes.FILETIME), ("ftLastWriteTime", wintypes.FILETIME),
+                    ("dwVolumeSerialNumber", wintypes.DWORD), ("nFileSizeHigh", wintypes.DWORD),
+                    ("nFileSizeLow", wintypes.DWORD), ("nNumberOfLinks", wintypes.DWORD),
+                    ("nFileIndexHigh", wintypes.DWORD), ("nFileIndexLow", wintypes.DWORD)]
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    k32.GetFileInformationByHandle.restype = wintypes.BOOL
+    k32.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.POINTER(_Informacja))
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    czytaj_atrybuty, wspoldziel_wszystko, otworz_istniejacy = 0x80, 0x7, 3
+    takze_katalog = 0x02000000                               # FILE_FLAG_BACKUP_SEMANTICS
+    uchwyt = k32.CreateFileW(os.fspath(path), czytaj_atrybuty, wspoldziel_wszystko, None,
+                             otworz_istniejacy, takze_katalog, None)
+    if uchwyt in (None, wintypes.HANDLE(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        info = _Informacja()
+        if not k32.GetFileInformationByHandle(uchwyt, ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        k32.CloseHandle(uchwyt)
+    return {"wolumin": info.dwVolumeSerialNumber,
+            "indeks": (info.nFileIndexHigh << 32) | info.nFileIndexLow}
+
+
 def _granice(path):
     """(początek, koniec) regionu nagłówka, który wolno zmienić: FITS `[hdrLoc, datLoc)` wybranego
     HDU, XISF `[0, first_attachment)`."""
@@ -161,9 +246,10 @@ def _pozycja(p):
     """Pozycja planu albo wpis manifestu w pełnym kształcie `{keyword, value, comment, op}`.
 
     Skrót sprzed AR-156: `"object": X` ≡ `OBJECT` `set` X bez komentarza, `"object": null` ≡
-    `none` (stare manifesty czyta tą samą drogą). `ValueError` z powodem: oba kształty naraz,
-    brak klucza kształtu, nieznana operacja, typ spoza kontraktu - literówka planu nie przechodzi
-    jako „bez karty”."""
+    `none` - wyłącznie w PLANIE; wpis manifestu ma klucz `object` za obcy (schemat zamknięty
+    `_manifest`, AR-165), więc tu dociera zawsze w pełnym kształcie. `ValueError` z powodem: oba
+    kształty naraz, brak klucza kształtu, nieznana operacja, typ spoza kontraktu - literówka planu
+    nie przechodzi jako „bez karty”."""
     stary, nowe = "object" in p, [k for k in _KSZTALT if k in p]
     if stary and nowe:
         raise ValueError(f"pozycja ma naraz 'object' i pelny ksztalt ({', '.join(nowe)})")
@@ -196,7 +282,9 @@ _KLUCZ_PARY = "po"                                     # opcjonalny w obu kszta�
 def _pozycja_planu(p):
     """`(plik, po, kształt)` pozycji planu - schemat ZAMKNIĘTY: obiekt JSON z kluczami dokładnie
     jednego kształtu (+ opcjonalne `po`), `plik` niepustym tekstem, `po` tekstem albo null. Obcy
-    klucz (literówka `coment`, `poo`) → `ValueError` z jego nazwą, nie cicha wartość domyślna."""
+    klucz (literówka `coment`, `poo`) → `ValueError` z jego nazwą, nie cicha wartość domyślna.
+    Ścieżka względna → `ValueError`: plan czyta też `po` (kotwica pozycji, AR-165), w innym procesie
+    i katalogu bieżącym - ta sama względna ścieżka wskazałaby tam inny plik."""
     if not isinstance(p, dict):
         raise ValueError(f"pozycja nie jest obiektem JSON ({type(p).__name__})")
     obce = sorted(set(p) - _KLUCZE_STARE - _KLUCZE_NOWE - {_KLUCZ_PARY})
@@ -207,6 +295,10 @@ def _pozycja_planu(p):
     po = p.get(_KLUCZ_PARY)
     if po is not None and (not isinstance(po, str) or not po):
         raise ValueError("'po' nie jest niepustym tekstem ani null")
+    wzgledne = [k for k in ("plik", _KLUCZ_PARY) if p.get(k) and not os.path.isabs(p[k])]
+    if wzgledne:
+        raise ValueError(f"sciezka wzgledna w {', '.join(map(repr, wzgledne))} - plan nosi sciezki "
+                         f"bezwzgledne (po czyta go w innym procesie i katalogu biezacym)")
     return os.path.abspath(p["plik"]), os.path.abspath(po) if po else None, _pozycja(p)
 
 
@@ -219,16 +311,69 @@ _FITS_UKLAD = frozenset({"SIMPLE", "XTENSION", "BITPIX", "NAXIS", "EXTEND", "PCO
                          "GROUPS", "BZERO", "BSCALE", "BLANK"})
 _FITS_NAXIS_N = re.compile(r"NAXIS\d+")
 _FITS_SUMY = ("CHECKSUM", "DATASUM")
+# Karta XISF, którą PixInsight trzyma podwójnie - także jako `<Property>` (D-X-10). Plik z własnością,
+# a bez karty: pisarz `add` MUSI odmówić (dopisana karta mogłaby własności zaprzeczyć). Własna kopia
+# mapy pisarza - celowo, jak `_FITS_UKLAD`: kontrola nie bierze reguł od tego, kogo sprawdza.
+_XISF_WLASNOSCI = {"OBJECT": "Observation:Object:Name", "TELESCOP": "Instrument:Telescope:Name",
+                   "FOCALLEN": "Instrument:Telescope:FocalLength"}
 
 
 def _karty_naglowka(path):
-    """`[(keyword, wartość)]` nagłówka (wybrane HDU FITS / karty XISF) - sam odczyt nagłówka, bez
-    haszy całego pliku (bramka planu przed kopiowaniem)."""
+    """`[(keyword, wartość, komentarz)]` nagłówka (wybrane HDU FITS / karty XISF) - sam odczyt
+    nagłówka, bez haszy całego pliku (bramka planu przed kopiowaniem)."""
     if _jest_xisf(path):
-        return [(c.keyword, c.value_raw) for c in scan.read_xisf_meta_full(path).cards]
+        return [(c.keyword, c.value_raw, c.comment) for c in scan.read_xisf_meta_full(path).cards]
     with fits.open(path, mode="readonly", memmap=False) as hdul:
         _, hdu = scan._select_hdu(hdul)
-        return [(c.keyword, c.value) for c in hdu.header.cards]
+        return [(c.keyword, c.value, c.comment) for c in hdu.header.cards]
+
+
+def _karta_w_rekordzie(kw, wartosc, komentarz):
+    """Powód, gdy karta z planu łamie reguły karty FITS 4.0, których pisarz pilnuje w OBU formatach
+    (XISF przejmuje je wprost), albo `None`: znak spoza drukowalnego ASCII 0x20-0x7E w wartości albo
+    komentarzu; karta nie mieści się w JEDNYM rekordzie 80 znaków - obraz `fits.Card` dłuższy niż
+    rekord (wartość poszła w CONTINUE) albo karta odczytana z obrazu inna niż plan (za długi
+    komentarz astropy ucina po cichu). Własny kod - reguł pisarza kontrola nie importuje."""
+    for pole, tekst in (("wartosc", wartosc), ("komentarz", komentarz or "")):
+        znak = next((ch for ch in tekst if not " " <= ch <= "~"), None)
+        if znak is not None:
+            return (f"{pole} karty {kw} ma znak {_a(repr(znak))} spoza drukowalnego ASCII - pisarz "
+                    f"odmowi")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        obraz = fits.Card(kw, wartosc, komentarz or "").image
+        karta = fits.Card.fromstring(obraz) if len(obraz) == _FITS_REKORD else None
+    if (karta is None or karta.value != wartosc.rstrip()
+            or karta.comment != (komentarz or "")):
+        return f"karta {kw} z planu nie miesci sie w jednym rekordzie 80 znakow - pisarz odmowi"
+    return None
+
+
+def _xisf_odmowa(path, poz):
+    """Bramka XISF przed kopią - to, czego pisarz XISF MUSI odmówić (bliźniaki `_xisf_gates`,
+    `build_xisf_header_region` i drugiej bramki `_xisf_add_patch`), liczone własnym kodem: brak
+    obrazu-attachmentu (tożsamość klatki nieobliczalna; obejmuje też plik bez żadnego bloku
+    `attachment:`, którego granicy nagłówka nie ma - bez tej odmowy `po` padałby na granicy None),
+    wypełnienie nagłówka niekompletne (plik przeczy sam sobie), karty pod więcej niż jednym
+    `<Image>` (cel zapisu niejednoznaczny), `add` karty z `_XISF_WLASNOSCI`, gdy plik ma już jej
+    własność. Powód albo `None`."""
+    meta = scan.read_xisf_meta_full(path)
+    if meta.image_span is None:
+        return "XISF bez obrazu-attachmentu - tozsamosc klatki nieobliczalna, pisarz odmawia"
+    if not meta.padding_complete:
+        return "XISF z niekompletnym wypelnieniem naglowka - plik przeczy sam sobie, pisarz odmawia"
+    korzen = ET.fromstring(scan.xml_parsable(meta.xml_bytes))
+    obrazy = sum(1 for e in korzen.iter() if _lokalna(e.tag) == "Image"
+                 and any(_lokalna(k.tag) == "FITSKeyword" for k in e.iter()))
+    if obrazy > 1:
+        return (f"XISF: karty pod {obrazy} elementami <Image> - cel zapisu niejednoznaczny, "
+                f"pisarz odmawia")
+    wlasnosc = _XISF_WLASNOSCI.get(poz["keyword"])
+    if poz["op"] == "add" and wlasnosc is not None and any(
+            _lokalna(e.tag) == "Property" and e.get("id") == wlasnosc for e in korzen.iter()):
+        return (f"XISF: plik ma wlasnosc {wlasnosc}, a nie ma karty {poz['keyword']} - dopisana "
+                f"karta moglaby jej zaprzeczyc, pisarz odmawia")
+    return None
 
 
 def _odmowa_pozycji(path, poz):
@@ -237,23 +382,31 @@ def _odmowa_pozycji(path, poz):
         return None
     kw = poz["keyword"]
     xisf = _jest_xisf(path)
+    if xisf and poz["op"] == "set" and (kw, poz["comment"]) != ("OBJECT", None):
+        # Model regionu XML przy `set` zna wyłącznie podmianę wartości karty OBJECT (i jej własności).
+        return (f"XISF: kontrola zna 'set' wylacznie karty OBJECT bez komentarza, plan chce "
+                f"'set' karty {kw}" + ("" if poz["comment"] is None else " z komentarzem"))
+    if not xisf or poz["op"] == "add":
+        # Nazwa nowej karty (XISF `add`) i każdej karty FITS. Przy XISF bramka ŚWIADOMIE węższa od
+        # pisarza: kart specjalnych i układu danych kontrola w XISF nie modeluje (COMMENT/HISTORY
+        # mają tam `value=""`, geometrię niesie atrybut `<Image>`).
+        if not _FITS_NAZWA.fullmatch(kw):
+            return f"nazwa karty FITS {kw!r} spoza 8 znakow A-Z 0-9 _ -"
+        if kw in _FITS_SPECJALNE or kw in _FITS_UKLAD or _FITS_NAXIS_N.fullmatch(kw):
+            return (f"karta {kw} specjalna albo ukladu danych - poza modelem kontroli (FITS: pisarz "
+                    f"nie zapisze jej w miejscu)")
     if xisf:
-        # Pisarz XISF dopisuje kartę w miejscu (`_xisf_add_patch`), ale model regionu XML tej
-        # kontroli zna wyłącznie podmianę wartości karty OBJECT (i jej własności).
-        if (kw, poz["op"], poz["comment"]) != ("OBJECT", "set", None):
-            return (f"XISF: kontrola zna wylacznie 'set' karty OBJECT bez komentarza, plan chce "
-                    f"'{poz['op']}' karty {kw}")
-    elif not _FITS_NAZWA.fullmatch(kw):
-        return f"nazwa karty FITS {kw!r} spoza 8 znakow A-Z 0-9 _ -"
-    elif kw in _FITS_SPECJALNE or kw in _FITS_UKLAD or _FITS_NAXIS_N.fullmatch(kw):
-        return f"karta {kw} specjalna albo ukladu danych - pisarz nie zapisze jej w miejscu"
+        powod = _xisf_odmowa(path, poz) or _karta_w_rekordzie(kw, poz["value"], poz["comment"])
+        if powod is not None:
+            return powod
     karty = _karty_naglowka(path)
     if not xisf:
-        sumy = [s for s in _FITS_SUMY if any(k == s for k, _ in karty)]
+        sumy = [s for s in _FITS_SUMY if any(k == s for k, _, _ in karty)]
         if sumy:
             return (f"FITS z suma kontrolna ({', '.join(sumy)}) - zmiana naglowka ja uniewazni, "
                     f"pisarz odmawia")
-    wartosci = [v for k, v in karty if k == kw]
+    zastane = [(v, c) for k, v, c in karty if k == kw]
+    wartosci = [v for v, _ in zastane]
     if poz["op"] == "add" and wartosci:
         return f"op 'add', a kopia ma juz karte {kw} - zmiana wartosci idzie przez 'set'"
     if poz["op"] == "set" and not wartosci:
@@ -263,6 +416,30 @@ def _odmowa_pozycji(path, poz):
             return f"op 'set', a karta {kw} wystepuje {len(wartosci)} razy - pisarz wymaga jednej"
         if not isinstance(wartosci[0], str):
             return f"op 'set', a zastana wartosc {kw} nie jest tekstem ({_a(repr(wartosci[0]))})"
+    if poz["op"] == "set":
+        # Pozycja, która niczego nie zmienia, przeszłaby `po` bez żadnego zapisu - plik równy
+        # kopii JEST plikiem oczekiwanym; „brak wykonania zmiany to NIE” wymaga zmiany w planie.
+        wartosc, komentarz = zastane[0]
+        if (isinstance(wartosc, str) and wartosc.rstrip() == poz["value"].rstrip()
+                and poz["comment"] in (None, komentarz)):
+            return (f"pozycja bez zmiany (karta {kw} ma juz te wartosc i komentarz) - pilotaz "
+                    f"niczego nie sprawdzi; uzyj op 'none'")
+    if poz["op"] == "add" and kw == "OBJECT":
+        # Kalibracja nie ma obiektu nieba (oś rodzaju repo, `resolve.frames`): dopisany OBJECT
+        # przypisałby masterowi dark/flat/bias obiekt, którego nie ma.
+        imagetyp = next((v for k, v, _ in karty if k == "IMAGETYP"), None)
+        rodzaj = normalize_kind(imagetyp)
+        if rodzaj not in LIGHT_KINDS and rodzaj != "unknown":
+            return (f"IMAGETYP {_a(repr(imagetyp))} = klatka kalibracyjna ({rodzaj}) - karty "
+                    f"OBJECT kalibracji nie dopisujemy")
+    if poz["op"] == "add":
+        # Model dopisania (ten sam, którym `po` wyznacza plik oczekiwany) na nagłówku pliku przed
+        # zapisem: brak zapasu, rezerwy albo wzorca karty = pisarz nie dopisze w miejscu (AR-165).
+        region = _czytaj(path, *_granice(path))
+        model = (_xisf_region_po_dopisaniu(region, poz) if xisf
+                 else _fits_po_dopisaniu(region, poz))
+        if model[0] is None:
+            return f"model dopisania: {model[1]}"
     return None
 
 
@@ -289,14 +466,86 @@ def _kopiuj(zrodlo, cel):
         os.fsync(dst.fileno())
 
 
-def przed(katalog, plan_json):
-    katalog = Path(katalog)
+def _tozsamosc_planu(p):
+    """Powód odmowy, gdy plik nie ma tożsamości, po której `po` odróżni zapis w miejscu od
+    atomowego, albo `None`. Dwie derywacje (AR-165): `st_ino` (`os.stat`) i tożsamość z uchwytu -
+    zero w którejkolwiek to brak tożsamości (przez sieć API może oddać informację niepełną)."""
+    if os.stat(p).st_ino == 0:
+        return "st_ino == 0 - brak tozsamosci pliku, zapisu w miejscu nie da sie odroznic"
+    t = _tozsamosc(p)
+    if not (t["wolumin"] and t["indeks"]):
+        return (f"tozsamosc z uchwytu niepelna (wolumin {t['wolumin']}, indeks {t['indeks']}) - "
+                f"udzial nie podaje trwalego identyfikatora, zapisu w miejscu nie da sie odroznic")
+    return None
+
+
+_PROBA_PLIK = "horreum_proba_"                 # prefiks plików pomiaru `blokada`
+
+
+def _korzen(sciezka):
+    """Korzeń ścieżki bezwzględnej - litera dysku albo `\\\\serwer\\udział` - po `normcase`."""
+    return os.path.normcase(os.path.splitdrive(os.path.abspath(sciezka))[0])
+
+
+def _blokada_udzialu(katalog, pliki):
+    """Pomiar `blokada` w katalogu testowym udziału pilotażu → wpis manifestu `{katalog, wolumin,
+    kod, wyniki}` (w `wyniki` WYŁĄCZNIE wyniki tekstowe) albo odmowa (`SystemExit`).
+
+    Katalog testowy zawiera wyłącznie pliki pomiaru (`horreum_proba_*`, także resztki biegu
+    przerwanego) - cudzy plik, zwłaszcza FITS/XISF, to znak, że wskazano nie ten katalog. Porównujemy
+    dwa fakty katalogu testowego z KAŻDYM plikiem planu: korzeń ścieżki (litera dysku albo
+    `\\\\serwer\\udział`) i wolumin pliku testowego z uchwytu. Numer woluminu podaje serwer
+    (udziały jednego serwera mogą go dzielić), a litera dysku sama nie mówi, dokąd prowadzi - razem
+    wiążą pomiar z udziałem pilotażu tak mocno, jak te dwa fakty pozwalają, nie mocniej."""
+    try:
+        obce = sorted(x.name for x in Path(katalog).iterdir() if not x.name.startswith(_PROBA_PLIK))
+    except OSError as exc:
+        raise SystemExit(f"odmowa: katalog testowy {_a(katalog)} nieczytelny: "
+                         f"{type(exc).__name__}: {_a(exc)}") from exc
+    if obce:
+        raise SystemExit(f"odmowa: katalog testowy {_a(katalog)} zawiera {len(obce)} cudzych "
+                         f"plikow ({_a(', '.join(obce[:3]))}) - pomiar tylko w katalogu wylacznie "
+                         f"na pliki {_PROBA_PLIK}*")
+    inne = sorted({_korzen(p) for p in pliki} - {_korzen(katalog)})
+    if inne:
+        raise SystemExit(f"odmowa: katalog testowy na korzeniu {_a(_korzen(katalog))}, a pliki "
+                         f"planu na {_a(', '.join(inne))} - zmierz blokade na udziale pilotazu")
+    try:
+        wyniki = dict(blokada(katalog))
+    except OSError as exc:
+        raise SystemExit(f"odmowa: pomiar blokady w {_a(katalog)} padl: {type(exc).__name__}: "
+                         f"{_a(exc)}") from exc
+    kod, wolumin = wyniki.pop("kod"), wyniki.pop("wolumin")
+    if kod != 0:
+        zle = [f"{k} = {v}" for k, v in wyniki.items()
+               if _blokada_liczy(k) and v not in _BLOKADA_DOBRE]
+        raise SystemExit(f"odmowa: blokada na udziale NIE dziala ({_a('; '.join(zle))}) - zapisu "
+                         f"w miejscu tam nie sprawdzimy")
+    inne = sorted({_tozsamosc(p)["wolumin"] for p in pliki} - {wolumin})
+    if inne:
+        raise SystemExit(f"odmowa: blokade zmierzono na woluminie {wolumin:#x}, a pliki planu leza "
+                         f"na {', '.join(f'{v:#x}' for v in inne)} - zmierz ja na udziale pilotazu")
+    return {"katalog": os.path.abspath(katalog), "wolumin": wolumin, "kod": kod, "wyniki": wyniki}
+
+
+def _wolumin_katalogu(katalog):
+    """Wolumin (tożsamość z uchwytu) najbliższego ISTNIEJĄCEGO przodka `katalog` - katalog kopii
+    przed `przed` zwykle jeszcze nie istnieje."""
+    k = Path(katalog)
+    while not k.exists() and k.parent != k:
+        k = k.parent
+    return _tozsamosc(k)["wolumin"]
+
+
+def przed(katalog, plan_json, katalog_blokady):
+    katalog = Path(os.path.abspath(katalog))
     zajety = _katalog_zajety(katalog)
     if zajety is not None:
         raise SystemExit(f"odmowa: {_a(katalog)} zawiera juz {_a(zajety)} - kopie sprzed zapisu "
                          f"nie moga byc nadpisane; podaj nowy katalog")
     try:
-        plan = json.loads(Path(plan_json).read_text(encoding="utf-8"))
+        surowy = Path(plan_json).read_bytes()          # sha1 tych bajtów = kotwica planu (AR-165)
+        plan = json.loads(surowy.decode("utf-8"))
     except (OSError, ValueError) as exc:
         raise SystemExit(f"odmowa: plan nieczytelny: {_a(exc)}") from exc
     if not isinstance(plan, list) or not plan:
@@ -306,10 +555,9 @@ def przed(katalog, plan_json):
         p = None
         try:
             p, po, poz = _pozycja_planu(pozycja)
-            powod = _odmowa_pozycji(p, poz)
-            if powod is None and os.stat(p).st_ino == 0:
-                # Zapis atomowy rozpoznajemy po zmianie `st_ino` - zero to brak tożsamości pliku.
-                powod = "st_ino == 0 - brak tozsamosci pliku, zapisu w miejscu nie da sie odroznic"
+            # Tożsamość najpierw: zapis atomowy `po` rozpoznaje po jej zmianie, więc plik bez niej
+            # (i każdy plik poza Windows) odpada, zanim cokolwiek przeczytamy z treści.
+            powod = _tozsamosc_planu(p) or _odmowa_pozycji(p, poz)
         except Exception as exc:  # noqa: BLE001 - każda porażka bramki planu to odmowa, nie wyjątek
             powod = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ValueError) else str(exc)
         if powod is not None:
@@ -326,11 +574,18 @@ def przed(katalog, plan_json):
     for p, po in zip(sciezki, pary):
         if po is not None and os.path.normcase(po) != os.path.normcase(p) and os.path.exists(po):
             raise SystemExit(f"odmowa: sciezka 'po' juz istnieje przed zapisem: {_a(po)}")
+    if _wolumin_katalogu(katalog) in {_tozsamosc(p)["wolumin"] for p in sciezki}:
+        # Kopie pod udziałem archiwum skan wziąłby za drugie lokalizacje klatek - i nie byłyby
+        # niezależne od udziału, który sprawdzają.
+        raise SystemExit(f"odmowa: katalog kopii {_a(katalog)} na woluminie plikow planu - kopie "
+                         f"na dysk lokalny, nie na udzial z oryginalami")
+    pomiar = _blokada_udzialu(katalog_blokady, sciezki)
     katalog.mkdir(parents=True, exist_ok=True)
     manifest = []
     for i, (p, poz, po) in enumerate(zip(sciezki, pozycje, pary)):
         kopia = katalog / f"{i:04d}{os.path.splitext(p)[1]}"
         st = os.stat(p)
+        tozsamosc = _tozsamosc(p)
         _kopiuj(p, kopia)
         karty, _ = _karty(p)
         # Plik bez zmiany treści (RAW, karta już w formie) nie potrzebuje granic nagłówka -
@@ -338,21 +593,31 @@ def przed(katalog, plan_json):
         granice = [0, 0] if poz["op"] == "none" else list(_granice(p))
         wpis = {"plik": p, "po": po, "kopia": str(kopia), "sha1": _sha1(p),
                 "sha1_kopii": _sha1(kopia), "rozmiar": st.st_size, "ino": st.st_ino,
-                "granice": granice, **poz, "karty": karty}
+                "tozsamosc": tozsamosc, "granice": granice, **poz, "karty": karty}
         st_po = os.stat(p)
         if wpis["sha1"] != wpis["sha1_kopii"] or os.path.getsize(kopia) != st.st_size:
             raise SystemExit(f"KOPIA NIEZGODNA: {_a(p)}")
-        if (st_po.st_size, st_po.st_mtime_ns, st_po.st_ino) != (st.st_size, st.st_mtime_ns,
-                                                                  st.st_ino):
+        if ((st_po.st_size, st_po.st_mtime_ns, st_po.st_ino) != (st.st_size, st.st_mtime_ns,
+                                                                   st.st_ino)
+                or _tozsamosc(p) != tozsamosc):
             raise SystemExit(f"PLIK ZMIENIL SIE W TRAKCIE KOPII: {_a(p)}")
         manifest.append(wpis)
-        print(f"przed OK {_a(p)} sha1={wpis['sha1']}")
+        print(f"przed OK {_a(p)} sha1={wpis['sha1']} "
+              f"tozsamosc={tozsamosc['wolumin']:#x}:{tozsamosc['indeks']}")
+    tresc = {"schemat": _SCHEMAT,
+             "plan": {"sciezka": os.path.abspath(plan_json),
+                      "sha1": hashlib.sha1(surowy).hexdigest()},
+             "srodowisko": {"python": sys.version, "komputer": platform.node()},
+             "blokada": pomiar, "pozycje": manifest}
     tmp = katalog / (MANIFEST + ".tmp")                  # manifest atomowo, po wszystkich kopiach
     with open(tmp, "x", encoding="utf-8") as fh:
-        fh.write(json.dumps(manifest, indent=1))
+        fh.write(json.dumps(tresc, indent=1))
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, katalog / MANIFEST)
+    # Liczba pozycji i sha1 planu także w wyjściu - log sterownika to trzecie miejsce kotwicy.
+    print(f"przed KONIEC pozycji={len(manifest)} plan_sha1={tresc['plan']['sha1']} "
+          f"blokada={pomiar['kod']} wolumin={pomiar['wolumin']:#x}")
 
 
 # ============================================================ po - wspólne
@@ -644,22 +909,208 @@ def _xisf_problemy(plik, kopia, fa, forma):
     return problemy + _xml_problemy(xml0, xml1, forma)
 
 
+# ============================================================ po - XISF `add` (AR-165)
+
+_XML_BIALE = b" \t\r\n"                                # białe znaki XML 1.0 (produkcja S)
+_KARTA_ATRYBUTY = frozenset({b"name", b"value", b"comment"})
+
+
+def _xml_atrybut(tekst):
+    """Wartość atrybutu w cudzysłowie `"` - escape `&` (pierwszy), `<`, `"`; `>` zostaje surowy
+    (legalny w atrybucie, a escape zmieniłby bajty)."""
+    return tekst.replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;").encode("utf-8")
+
+
+def _tekstowa(xml, atrybuty):
+    """Czy karta trzyma wartość w apostrofach FITS (surowe bajty atrybutu `value`)."""
+    if b"value" not in atrybuty:
+        return False
+    s, e = atrybuty[b"value"]
+    return e - s >= 2 and xml[s:s + 1] == b"'" == xml[e - 1:e]
+
+
+def _xisf_po_dopisaniu(xml, poz):
+    """XML nagłówka XISF po dopisaniu karty W MIEJSCU - WŁASNY model reguły pisarza
+    (`writeback._xisf_add_patch` → `scan.build_fits_keyword_element`, czytane, nie wołane) na
+    tokenizerze tej kontroli: nowa karta = kopia CAŁEGO elementu wzorca (OSTATNIA karta z wartością
+    w apostrofach FITS; z zamknięciem, jeśli je ma) z podmienionymi `name` (karta z planu), `value`
+    (wartość z planu w apostrofach, apostrof wewnątrz podwojony, escape XML) i `comment` (komentarz
+    z planu, null = pusty), wstawiona za KOŃCEM elementu OSTATNIEJ karty (nie wzorca), poprzedzona
+    jej wcięciem - białymi znakami tuż przed nią. Wzorzec daje styl, ostatnia karta - miejsce.
+
+    Zwraca `(nowy XML, (początek, koniec) wstawki)` albo `(None, powód)`, gdy pisarz nie ma czego
+    dopisać: brak kart, brak wzorca, wzorzec z obcymi atrybutami albo bez `comment=` przy komentarzu
+    z planu, karta z treścią, zagnieżdżona albo niedomknięta."""
+    ostatnia = wzorzec = otwarta = None     # (początek, koniec) / (początek, koniec, atrybuty)
+    for m in _ZNACZNIK.finditer(xml):
+        if m.group(2) is None or m.group(2).rsplit(b":", 1)[-1] != b"FITSKeyword":
+            continue
+        if m.group(1):                                     # </FITSKeyword>
+            if otwarta is None:
+                return None, "</FITSKeyword> bez otwarcia"
+            start, koniec_otwarcia, atrybuty = otwarta
+            if xml[koniec_otwarcia:m.start()].strip(_XML_BIALE):
+                return None, "karta z trescia elementu"
+            ostatnia, otwarta = (start, m.end()), None
+            if _tekstowa(xml, atrybuty):
+                wzorzec = (start, m.end(), atrybuty)
+            continue
+        if otwarta is not None:
+            return None, "karta zagniezdzona w innej karcie"
+        atrybuty = {}
+        for at in _ATRYBUT.finditer(m.group(3)):
+            grupa = 2 if at.group(2) is not None else 3
+            atrybuty.setdefault(at.group(1).rsplit(b":", 1)[-1],
+                                (m.start(3) + at.start(grupa), m.start(3) + at.end(grupa)))
+        if m.group(4):                                     # <FITSKeyword …/>
+            ostatnia = (m.start(), m.end())
+            if _tekstowa(xml, atrybuty):
+                wzorzec = (m.start(), m.end(), atrybuty)
+        else:
+            otwarta = (m.start(), m.end(), atrybuty)
+    if otwarta is not None:
+        return None, "karta bez zamkniecia"
+    if ostatnia is None:
+        return None, "XML bez kart <FITSKeyword> - nie ma wzorca nowej karty"
+    if wzorzec is None:
+        return None, "zadna karta nie trzyma wartosci w apostrofach FITS - brak wzorca karty"
+    w0, w1, atrybuty = wzorzec
+    obce = sorted(a.decode("ascii", "replace") for a in set(atrybuty) - _KARTA_ATRYBUTY)
+    if obce or b"name" not in atrybuty or b"value" not in atrybuty:
+        return None, f"wzorzec karty z obcymi atrybutami ({', '.join(obce)}) albo bez name/value"
+    if poz["comment"] and b"comment" not in atrybuty:
+        return None, "komentarz w planie, a wzorzec karty bez atrybutu comment"
+    podmiany = {b"name": _xml_atrybut(poz["keyword"]),
+                b"value": _xml_atrybut("'" + poz["value"].replace("'", "''") + "'"),
+                b"comment": _xml_atrybut(poz["comment"] or "")}
+    kawalki, ostatni = [], w0
+    for nazwa, (s, e) in sorted(atrybuty.items(), key=lambda x: x[1]):
+        kawalki += [xml[ostatni:s], podmiany[nazwa]]
+        ostatni = e
+    kawalki.append(xml[ostatni:w1])
+    przed_karta = xml[:ostatnia[0]]
+    wstawka = przed_karta[len(przed_karta.rstrip(_XML_BIALE)):] + b"".join(kawalki)
+    return (xml[:ostatnia[1]] + wstawka + xml[ostatnia[1]:],
+            (ostatnia[1], ostatnia[1] + len(wstawka)))
+
+
+def _xisf_region_po_dopisaniu(region, poz):
+    """Region `[0, first_attachment)` po dopisaniu → `(region, (początek, koniec) wstawki w regionie)`
+    albo `(None, powód)`: sygnatura i `reserved` z kopii, pole długości = nowy XML, wypełnienie wg
+    reguły pisarza (wydłużenie zjada jego początek); nowy XML musi się zmieścić w regionie - bloki
+    danych się nie ruszają, więc innej drogi dopisania w miejscu nie ma."""
+    czesci = _xisf_czesci(region)
+    if czesci is None:
+        return None, "pole dlugosci XML wychodzi poza region naglowka"
+    syg, res, xml, pad = czesci
+    nowy, wstawka = _xisf_po_dopisaniu(xml, poz)
+    if nowy is None:
+        return None, f"XISF: {wstawka}"
+    if _XISF_XML + len(nowy) > len(region):
+        return None, (f"XISF: naglowek z nowa karta ({len(nowy)} B) nie miesci sie w rezerwie "
+                      f"({len(region) - _XISF_XML} B) - dopisanie w miejscu niemozliwe")
+    return (syg + struct.pack("<I", len(nowy)) + res + nowy + pad[len(nowy) - len(xml):],
+            (_XISF_XML + wstawka[0], _XISF_XML + wstawka[1]))
+
+
+def _xisf_drzewo_po_dopisaniu(xml0, xml1, poz):
+    """Druga derywacja wstawki, bez modelu bajtowego: drzewo XML po zapisie = drzewo kopii + JEDEN
+    element `<FITSKeyword>` - bez dzieci i treści, rodzeństwo ostatniej karty kopii, zaraz za nią -
+    z kartą, wartością (w apostrofach FITS) i komentarzem z planu. Reszta drzewa bez zmian (tag,
+    atrybuty, tekst, ogon, liczba dzieci), poza dwiema rzeczami, które wstawka zmienia z konstrukcji:
+    rodzic ma o jedno dziecko więcej, a ogon ostatniej karty kopii przechodzi na nową kartę (jej
+    własny to same białe znaki - wcięcie). Łapie wspólną pomyłkę modelu bajtowego i pisarza, której
+    porównanie bajtów nie widzi, bo obie strony się zgadzają."""
+    try:
+        e0, e1 = _elementy(xml0), _elementy(xml1)
+    except ET.ParseError as exc:
+        return [f"XML po zapisie nieparsowalny: {_a(exc)}"]
+    karty0 = [i for i, e in enumerate(e0) if _lokalna(e.tag) == "FITSKeyword"]
+    if not karty0 or len(e1) != len(e0) + 1:
+        return [f"XML: {len(e1)} elementow po zapisie, oczekiwane {len(e0) + 1} (kopia + karta)"]
+    j = karty0[-1]
+    nowa = e1[j + 1]
+    rodzic = {dziecko: r for r in e1 for dziecko in r}
+    if (_lokalna(nowa.tag) != "FITSKeyword" or len(nowa) or (nowa.text or "").strip()
+            or rodzic.get(nowa) is not rodzic.get(e1[j])):
+        return ["XML: za ostatnia karta kopii nie stoi nowa karta bez tresci, rodzenstwo ostatniej"]
+    problemy = []
+    atrybuty = {_lokalna(k): v for k, v in nowa.attrib.items()}
+    wartosc = atrybuty.get("value") or ""
+    if (set(atrybuty) - {"name", "value", "comment"}
+            or (atrybuty.get("name") or "").strip().upper() != poz["keyword"]
+            or not (len(wartosc) >= 2 and wartosc[0] == wartosc[-1] == "'")
+            or _bez_apostrofow(wartosc) != poz["value"].rstrip()
+            or atrybuty.get("comment", "") != (poz["comment"] or "")):
+        problemy.append(f"XML: nowa karta {_a(atrybuty)} inna niz plan")
+    rodzic_nowej = rodzic.get(nowa)
+    for i, (x, y) in enumerate(zip(e0, e1[:j + 1] + e1[j + 2:])):
+        dzieci = len(y) - (1 if y is rodzic_nowej else 0)
+        ogon = (x.tail == y.tail if i != j
+                else nowa.tail == x.tail and not (y.tail or "").strip())
+        if (x.tag != y.tag or x.attrib != y.attrib or x.text != y.text or not ogon
+                or len(x) != dzieci):
+            return problemy + [f"XML: element {i} ({_a(_lokalna(x.tag))}) rozny od kopii poza nowa "
+                               f"karta"]
+    return problemy
+
+
+def _xisf_add_problemy(plik, kopia, fa, poz):
+    """Plik oczekiwany = kopia z regionem `[0, first_attachment)` po dopisaniu
+    (`_xisf_region_po_dopisaniu`); pierwszy rozjazd nazwany częścią regionu. Druga droga - drzewo
+    XML (`_xisf_drzewo_po_dopisaniu`)."""
+    region0 = _czytaj(kopia, 0, fa)
+    model = _xisf_region_po_dopisaniu(region0, poz)
+    if model[0] is None:
+        return [model[1]]
+    oczekiwany, (w0, w1) = model
+    problemy = []
+    if not _porownaj_poza(plik, kopia, 0, fa):
+        problemy.append("bajty od first_attachment do konca rozne od kopii")
+    region = _czytaj(plik, 0, fa)
+    if region != oczekiwany:
+        i = next((k for k, (x, y) in enumerate(zip(region, oczekiwany)) if x != y),
+                 min(len(region), len(oczekiwany)))
+        koniec_xml = _XISF_XML + struct.unpack("<I", oczekiwany[8:12])[0]
+        rodzaj = next(nazwa for granica, nazwa in (
+            (8, "sygnatura"), (12, "pole dlugosci XML"), (_XISF_XML, "reserved"),
+            (w0, "XML kopii przed nowa karta"), (w1, f"nowa karta {poz['keyword']}"),
+            (koniec_xml, "XML kopii za nowa karta"), (len(oczekiwany) + 1, "wypelnienie"))
+            if i < granica)
+        problemy.append(f"region naglowka XISF rozny od oczekiwanego od bajtu {i} "
+                        f"(oczekiwany: {_a(rodzaj)})")
+    czesci = _xisf_czesci(region)
+    if czesci is None:
+        return problemy + ["pole dlugosci XML wychodzi poza region naglowka"]
+    return problemy + _xisf_drzewo_po_dopisaniu(_xisf_czesci(region0)[2], czesci[2], poz)
+
+
 # ============================================================ po
 
 
 def _przeniesiony(w):
-    """Ścieżka `po` pary, gdy różni się od `plik` (manifest sprzed trybu pary jej nie ma) albo None."""
-    po = w.get("po")
+    """Ścieżka `po` pary, gdy różni się od `plik` (null = pozycja bez pary) albo None."""
+    po = w["po"]
     return po if po is not None and os.path.normcase(po) != os.path.normcase(w["plik"]) else None
 
 
-def _problemy_pliku(w):
+def _ino_uwaga(w, st_ino):
+    """Uwaga do raportu, gdy `st_ino` nie jest porównywalny: `po` w innym Pythonie niż `przed` -
+    skąd `os.stat` bierze `st_ino`, to szczegół CPython (3.12 zmieniło źródło), więc obie wartości
+    idą do raportu, a o tożsamości rozstrzyga ta z uchwytu."""
+    return (f"st_ino nieporownany - inny Python niz przy przed: przed {w['ino']}, po {st_ino}; "
+            f"rozstrzyga tozsamosc z uchwytu")
+
+
+def _problemy_pliku(w, ten_sam_python, uwagi):
     """Lista problemów jednego pliku pilotażu (pusta = OK). Przy parze ścieżek plik po zapisie
-    czytany pod ścieżką `po`, a pod starą nie ma już nic."""
+    czytany pod ścieżką `po`, a pod starą nie ma już nic. `ten_sam_python` - `po` w tym samym
+    Pythonie co `przed` (manifest, AR-165): tylko wtedy `st_ino` jest porównywany, inaczej obie
+    wartości trafiają do `uwagi` (informacja raportu, nie problem)."""
     problemy = []
     if _sha1(w["kopia"]) != w["sha1"]:
         return ["kopia sprzed zapisu zmieniona - brak materialu porownania"]
-    poz = _pozycja(w)                                    # manifest sprzed AR-156: skrót `object`
+    poz = _pozycja(w)
     po = _przeniesiony(w)
     plik = po or w["plik"]
     if po is not None and os.path.exists(w["plik"]):
@@ -667,17 +1118,24 @@ def _problemy_pliku(w):
     st = os.stat(plik)
     if st.st_size != w["rozmiar"]:
         problemy.append("rozmiar pliku zmieniony")
-    if st.st_ino != w["ino"]:
-        problemy.append("st_ino zmieniony - przepisany w calosci, nie w miejscu"
-                        if poz["op"] == "add" else
-                        "st_ino zmieniony - plik podmieniony, nie zapisany w miejscu ani przeniesiony")
+    skutek = ("przepisany w calosci, nie w miejscu" if poz["op"] == "add" else
+              "plik podmieniony, nie zapisany w miejscu ani przeniesiony")
+    if not ten_sam_python:
+        uwagi.append(_ino_uwaga(w, st.st_ino))
+    elif st.st_ino != w["ino"]:
+        problemy.append(f"st_ino zmieniony - {skutek}")
+    # Druga derywacja tożsamości (AR-165) - z uchwytu, z woluminem; poza Windows `OSError`, czyli NIE
+    # z powodem, a nie cichy wynik z samego `st_ino`.
+    if _tozsamosc(plik) != w["tozsamosc"]:
+        problemy.append(f"tozsamosc z uchwytu (wolumin, indeks) zmieniona - {skutek}")
     if poz["op"] == "none":
         if not _porownaj_poza(plik, w["kopia"], 0, 0):
             problemy.append("karta bez zmiany w planie, a bajty pliku rozne od kopii")
         return problemy
     a, b = w["granice"]
     if _jest_xisf(plik):
-        problemy += _xisf_problemy(plik, w["kopia"], b, poz["value"])
+        problemy += (_xisf_add_problemy(plik, w["kopia"], b, poz) if poz["op"] == "add"
+                     else _xisf_problemy(plik, w["kopia"], b, poz["value"]))
     elif poz["op"] == "add":
         problemy += _fits_add_problemy(plik, w["kopia"], a, b, poz)
     else:
@@ -709,35 +1167,114 @@ def _problemy_pliku(w):
     return problemy
 
 
-_KLUCZE_MANIFESTU = frozenset({"plik", "kopia", "sha1", "sha1_kopii", "rozmiar", "ino", "granice",
-                               "karty"})
+_SCHEMAT = 2                 # manifest AR-165: kotwica planu, tożsamość z uchwytu, pomiar blokady
+_KLUCZE_MANIFESTU = frozenset({"schemat", "plan", "srodowisko", "blokada", "pozycje"})
+_KLUCZE_PLANU = frozenset({"sciezka", "sha1"})
+_KLUCZE_SRODOWISKA = frozenset({"python", "komputer"})
+_KLUCZE_BLOKADY = frozenset({"katalog", "wolumin", "kod", "wyniki"})
+_KLUCZE_TOZSAMOSCI = frozenset({"wolumin", "indeks"})
+_KLUCZE_WPISU = frozenset({"plik", "po", "kopia", "sha1", "sha1_kopii", "rozmiar", "ino",
+                           "tozsamosc", "granice", "karty", *_KSZTALT})
 
 
-def _manifest(katalog):
-    """`(manifest, None)` albo `(None, problem)` - manifest pusty, niepełny albo rozjechany z kopiami
-    to NIE, nie „zero pozycji = zero problemów”. Wymagane: niepusta lista wpisów z pełnym schematem
-    (`po` opcjonalne - manifest sprzed pary ścieżek; kształt pozycji pełny albo skrót `object`, bez
-    obcych kluczy), kopia każdego wpisu w TYM katalogu pod numerem `NNNN` = jego pozycji (ciągła
-    numeracja od 0), a zbiór plików kopii katalogu == zbiór kopii manifestu (osierocona kopia albo
-    pozycja → NIE)."""
+def _klucze(obiekt, wymagane, gdzie):
+    """Problem schematu ZAMKNIĘTEGO (obiekt z kluczami dokładnie `wymagane`) albo `None`."""
+    if not isinstance(obiekt, dict):
+        return f"{gdzie} nie jest obiektem"
+    brak, obce = sorted(wymagane - set(obiekt)), sorted(set(obiekt) - wymagane)
+    return f"{gdzie}: brak kluczy {brak}, obce klucze {obce}" if brak or obce else None
+
+
+def _liczba(x, *, dodatnia=False):
+    return isinstance(x, int) and not isinstance(x, bool) and (x > 0 or not dodatnia)
+
+
+def _typy_wpisu(w):
+    """Czy pola wpisu mają typy schematu - typ spoza niego to NIE, nie wyjątek w środku `po`."""
+    return (all(isinstance(w[k], str) for k in ("plik", "kopia", "sha1", "sha1_kopii"))
+            and (w["po"] is None or isinstance(w["po"], str))
+            and _liczba(w["rozmiar"]) and _liczba(w["ino"]) and isinstance(w["karty"], dict)
+            and all(isinstance(k, str) and isinstance(v, list) and len(v) == 2
+                    for k, v in w["karty"].items())
+            and isinstance(w["granice"], list) and len(w["granice"]) == 2
+            and all(map(_liczba, w["granice"]))
+            and all(_liczba(v, dodatnia=True) for v in w["tozsamosc"].values()))
+
+
+def _manifest(katalog, plan_json):
+    """`(manifest, None)` albo `(None, problem)` - manifest pusty, niepełny, rozjechany z planem
+    albo z kopiami to NIE, nie „zero pozycji = zero problemów”. Schemat 2 ZAMKNIĘTY (AR-165): obiekt
+    `{schemat, plan, srodowisko, blokada, pozycje}`, w nim `plan {sciezka, sha1}` i `srodowisko
+    {python, komputer}` (tekst), `blokada {katalog, wolumin, kod, wyniki}` - wyniki tekstowe,
+    a `kod` PRZELICZONY z wyników (nie przyjęty na wiarę) równy zapisanemu i równy 0; wpisy
+    z pełnym kształtem pozycji (skrót `object` to obcy klucz - zna go wyłącznie PLAN), `po`
+    obowiązkowe (null bez pary), tożsamość z uchwytu `{wolumin, indeks}` dodatnia, `karty` jako
+    `{tekst: [wartość, komentarz]}`, typy pól jak w `przed`; brak albo obcy klucz → NIE z nazwą.
+    Manifest sprzed AR-165 (lista wpisów) → NIE z powodem - kontrola nie zgaduje, co by w nim było.
+
+    KOTWICA LICZBY POZYCJI poza manifestem = plik planu: sha1 jego bajtów == zapisany przy `przed`,
+    a pozycje planu (`_pozycja_planu`) == wpisy manifestu co do liczby, kolejności, ścieżek `plik`
+    i `po` oraz kształtu. Usunięty wpis RAZEM z kopią, katalog kopii z innego biegu albo plan
+    podmieniony po `przed` → NIE. Dalej jak dotąd: kopia każdego wpisu w TYM katalogu pod numerem
+    `NNNN` = jego pozycji (ciągła numeracja od 0), a zbiór plików kopii katalogu == zbiór kopii
+    manifestu (osierocona kopia albo pozycja → NIE)."""
     try:
         manifest = json.loads((katalog / MANIFEST).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return None, f"manifest nieczytelny: {type(exc).__name__}: {exc}"
-    if not isinstance(manifest, list) or not manifest:
-        return None, "manifest pusty albo nie jest lista wpisow"
+    if isinstance(manifest, list):
+        return None, ("manifest w schemacie sprzed AR-165 (lista wpisow bez kotwicy planu, "
+                      "tozsamosci z uchwytu i pomiaru blokady) - kontrola nie zgaduje; dokoncz "
+                      "pilotaz kontrola, ktora go zaczela, albo zrob przed od nowa")
+    problem = _klucze(manifest, _KLUCZE_MANIFESTU, "manifest")
+    if problem is None and manifest["schemat"] != _SCHEMAT:
+        problem = f"manifest w schemacie {manifest['schemat']!r}, kontrola zna {_SCHEMAT}"
+    problem = (problem or _klucze(manifest["plan"], _KLUCZE_PLANU, "plan manifestu")
+               or _klucze(manifest["srodowisko"], _KLUCZE_SRODOWISKA, "srodowisko manifestu")
+               or _klucze(manifest["blokada"], _KLUCZE_BLOKADY, "blokada manifestu"))
+    if problem is not None:
+        return None, problem
+    teksty = (*manifest["plan"].values(), *manifest["srodowisko"].values(),
+              manifest["blokada"]["katalog"])
+    if not all(isinstance(t, str) for t in teksty):
+        return None, "plan, srodowisko albo katalog blokady manifestu: pole nie jest tekstem"
+    blok = manifest["blokada"]
+    if (not _liczba(blok["wolumin"], dodatnia=True) or not isinstance(blok["wyniki"], dict)
+            or not all(isinstance(k, str) and isinstance(v, str)
+                       for k, v in blok["wyniki"].items())):
+        return None, "blokada manifestu: wolumin nie jest dodatni albo wyniki nie sa tekstem"
+    if not (blok["kod"] == _kod_blokady(blok["wyniki"]) == 0):
+        return None, (f"blokada manifestu: kod zapisany {blok['kod']!r}, z wynikow "
+                      f"{_kod_blokady(blok['wyniki'])} - blokada nie zmierzona jako dzialajaca")
+    wpisy = manifest["pozycje"]
+    if not isinstance(wpisy, list) or not wpisy:
+        return None, "manifest bez pozycji (pusta albo nie lista)"
+    try:
+        surowy = Path(plan_json).read_bytes()
+        plan = json.loads(surowy.decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"plan nieczytelny: {type(exc).__name__}: {exc}"
+    if hashlib.sha1(surowy).hexdigest() != manifest["plan"]["sha1"]:
+        return None, "plan inny niz przy przed (sha1 pliku planu) - zmieniony albo plan innego biegu"
+    if not isinstance(plan, list) or len(plan) != len(wpisy):
+        return None, (f"plan ma {len(plan) if isinstance(plan, list) else '?'} pozycji, manifest "
+                      f"{len(wpisy)} - pozycja manifestu usunieta albo dopisana")
     nazwy = []
-    for i, w in enumerate(manifest):
-        if not isinstance(w, dict):
-            return None, f"wpis {i} nie jest obiektem"
-        brak = sorted(_KLUCZE_MANIFESTU - set(w))
-        obce = sorted(set(w) - _KLUCZE_MANIFESTU - {_KLUCZ_PARY, "object", *_KSZTALT})
-        if brak or obce:
-            return None, f"wpis {i}: brak kluczy {brak}, obce klucze {obce}"
+    for i, (w, pozycja) in enumerate(zip(wpisy, plan)):
+        problem = (_klucze(w, _KLUCZE_WPISU, f"wpis {i}")
+                   or _klucze(w["tozsamosc"], _KLUCZE_TOZSAMOSCI, f"wpis {i} tozsamosc"))
+        if problem is not None:
+            return None, problem
+        if not _typy_wpisu(w):
+            return None, f"wpis {i}: typ pola spoza schematu"
         try:
-            _pozycja(w)
+            poz = _pozycja(w)
+            plik, po, poz_planu = _pozycja_planu(pozycja)
         except ValueError as exc:
             return None, f"wpis {i}: {exc}"
+        if ((os.path.normcase(plik), os.path.normcase(po or ""), poz_planu)
+                != (os.path.normcase(w["plik"]), os.path.normcase(w["po"] or ""), poz)):
+            return None, f"wpis {i} inny niz pozycja {i} planu (plik, po albo ksztalt)"
         kopia = Path(w["kopia"])
         if (not re.fullmatch(rf"{i:04d}\.[^.]*", kopia.name)
                 or os.path.normcase(kopia.resolve().parent) != os.path.normcase(katalog.resolve())):
@@ -750,47 +1287,56 @@ def _manifest(katalog):
     return manifest, None
 
 
-def po(katalog):
-    katalog = Path(katalog)
-    manifest, problem = _manifest(katalog)
+def po(katalog, plan_json):
+    katalog = Path(os.path.abspath(katalog))
+    manifest, problem = _manifest(katalog, plan_json)
     if problem is not None:
         print(f"po NIE manifest | {_a(problem)}")
         (katalog / "raport_po.json").write_text(json.dumps(
             [{"plik": None, "ok": False, "problemy": [problem]}], indent=1, ensure_ascii=False),
             encoding="utf-8")
         return 1
+    ten_sam_python = manifest["srodowisko"]["python"] == sys.version
     raport, zle = [], 0
-    for w in manifest:
+    for w in manifest["pozycje"]:
+        uwagi = []
         try:
-            problemy = _problemy_pliku(w)
+            problemy = _problemy_pliku(w, ten_sam_python, uwagi)
         except (OSError, ValueError) as exc:
             problemy = [f"kontrola padla: {type(exc).__name__}: {_a(exc)}"]
         zle += bool(problemy)
         plik = _przeniesiony(w) or w["plik"]
-        raport.append({"plik": plik, "ok": not problemy, "problemy": problemy})
+        raport.append({"plik": plik, "ok": not problemy, "problemy": problemy, "uwagi": uwagi})
         print(f"po {'OK ' if not problemy else 'NIE'} {_a(plik)}"
-              + (f" | {'; '.join(problemy)}" if problemy else ""))
+              + (f" | {'; '.join(problemy)}" if problemy else "")
+              + (f" | uwaga: {'; '.join(uwagi)}" if uwagi else ""))
     (katalog / "raport_po.json").write_text(json.dumps(raport, indent=1, ensure_ascii=False),
                                             encoding="utf-8")
     return 1 if zle else 0
 
 
-def po_undo(katalog):
-    manifest, problem = _manifest(Path(katalog))
+def po_undo(katalog, plan_json):
+    manifest, problem = _manifest(Path(os.path.abspath(katalog)), plan_json)
     if problem is not None:
         print(f"po-undo NIE manifest | {_a(problem)}")
         return 1
+    ten_sam_python = manifest["srodowisko"]["python"] == sys.version
     zle = 0
-    for w in manifest:
+    for w in manifest["pozycje"]:
         po = _przeniesiony(w)
+        uwaga = ""
         try:
             st = os.stat(w["plik"])
-            ok = (_sha1(w["plik"]) == w["sha1"] and st.st_ino == w["ino"]
+            if not ten_sam_python:
+                uwaga = f" | uwaga: {_ino_uwaga(w, st.st_ino)}"
+            ok = (_sha1(w["plik"]) == w["sha1"]
+                  and (not ten_sam_python or st.st_ino == w["ino"])
+                  and _tozsamosc(w["plik"]) == w["tozsamosc"]
                   and st.st_size == w["rozmiar"] and (po is None or not os.path.exists(po)))
-        except OSError:                                    # pod ścieżką sprzed nie ma pliku
+        except OSError:                    # pod ścieżką sprzed nie ma pliku albo poza Windows
             ok = False
         zle += not ok
-        print(f"po-undo {'OK ' if ok else 'NIE'} {_a(w['plik'])}")
+        print(f"po-undo {'OK ' if ok else 'NIE'} {_a(w['plik'])}{uwaga}")
     return 1 if zle else 0
 
 
@@ -805,14 +1351,64 @@ _INNY_PROCES = ("import sys\n"
                 "    print('odrzucone')\n")
 
 
+_BLOKADA_DOBRE = frozenset({"odrzucone", "dziala", "tak"})
+_PROBA_PODMIANY = "os.replace proba "        # zapis każdej próby podmiany - informacja, poza `kod`
+_PODMIANA_PROBY = 3
+_PODMIANA_PAUZA = 0.5                        # s między próbami po `PermissionError`
+
+
+def _blokada_liczy(klucz):
+    """Czy wynik `klucz` pomiaru `blokada` wchodzi do `kod` - zapis pojedynczej próby podmiany nie."""
+    return not klucz.startswith(_PROBA_PODMIANY)
+
+
+def _kod_blokady(wyniki):
+    """`kod` pomiaru z jego wyników tekstowych: 0 = każdy liczony wynik z `_BLOKADA_DOBRE`. Jedna
+    reguła dla `blokada` i dla `_manifest` (manifest nie bierze zapisanego `kod` na wiarę)."""
+    return 0 if all(v in _BLOKADA_DOBRE for k, v in wyniki.items() if _blokada_liczy(k)) else 1
+
+
+def _podmiana_zmienia_tozsamosc(c, d, wyniki):
+    """Czy `os.replace(D, C)` zmienia tożsamość z uchwytu pod nazwą C - na tę pliku D. Para świeża,
+    własna, nietknięta blokadą ani odczytem treści. Zmierzone 2026-10-16 na udziale SMB archiwum:
+    podmiana pliku tuż po zamknięciu jego uchwytów (blokada, odczyt) dostała `PermissionError`
+    [WinError 5], a usunięcie chwilę później przeszło - stąd do `_PODMIANA_PROBY` prób co
+    `_PODMIANA_PAUZA` s przy `PermissionError`, każda próba z wynikiem w `wyniki` (tekst).
+
+    Zwraca wynik pomiaru: `tak`, `NIE` (podmiana wykonana, a tożsamość pod C nie jest tożsamością D)
+    albo `NIE zmierzone - …` z numerem błędu ostatniej próby, gdy wszystkie padły."""
+    przed_c, zastepujacy = _tozsamosc(c), _tozsamosc(d)
+    for proba in range(1, _PODMIANA_PROBY + 1):
+        try:
+            os.replace(d, c)
+        except PermissionError as exc:
+            blad = f"{type(exc).__name__} [WinError {exc.winerror}]"
+            wyniki[f"{_PROBA_PODMIANY}{proba}"] = f"odmowa {blad}"
+            if proba < _PODMIANA_PROBY:
+                time.sleep(_PODMIANA_PAUZA)
+            continue
+        wyniki[f"{_PROBA_PODMIANY}{proba}"] = "wykonana"
+        po_podmianie = _tozsamosc(c)
+        return "tak" if po_podmianie != przed_c and po_podmianie == zastepujacy else "NIE"
+    return f"NIE zmierzone - {blad} w {_PODMIANA_PROBY} probach"
+
+
 def blokada(katalog):
-    """Pomiar blokady na udziale testowym. Zwraca dict wyników z kluczem `kod` (0 = wszystko OK)."""
+    """Pomiar blokady na udziale testowym. Zwraca dict: wyniki tekstowe (każdy liczony do `kod`
+    z `_BLOKADA_DOBRE` = OK), `kod` (0 = wszystkie OK) i `wolumin` pliku testowego (tożsamość
+    z uchwytu) - `przed` porównuje go z woluminem plików planu (AR-165).
+
+    Poza blokadą dwa pomiary tożsamości z uchwytu, bo na niej `po` opiera rozpoznanie drogi
+    atomowej: tożsamość własnego pliku stabilna (przed blokadą i po zapisie własnym uchwytem,
+    niezerowa) oraz `os.replace` ZMIENIA tożsamość pod nazwą pliku podmienianego
+    (`_podmiana_zmienia_tozsamosc`) - udział, który po podmianie oddaje starą tożsamość,
+    przepuściłby przepisanie pliku w całości jako zapis w miejscu."""
     katalog = os.path.abspath(katalog)
     if os.path.normcase(katalog).startswith(os.path.normcase(ARCHIWUM)):
         raise SystemExit(f"odmowa: {ARCHIWUM} to drzewo archiwum - pomiar tylko poza nim")
     znacznik = f"{os.getpid()}_{uuid.uuid4().hex}"
-    p = Path(katalog) / f"horreum_proba_blokady_{znacznik}.bin"
-    zapas = Path(katalog) / f"horreum_proba_podmiany_{znacznik}.bin"
+    p = Path(katalog) / f"{_PROBA_PLIK}blokady_{znacznik}.bin"
+    zapas = Path(katalog) / f"{_PROBA_PLIK}podmiany_{znacznik}.bin"
     moje = []
     wyniki = {}
     try:
@@ -821,6 +1417,7 @@ def blokada(katalog):
                 fh.write(bajt * 8192)
             moje.append(plik)
         ino = os.stat(p).st_ino
+        tozsamosc = _tozsamosc(p)
         with writeback._exclusive(str(p)) as fh:
             for nazwa, proba in (("drugie otwarcie do zapisu", lambda: open(p, "r+b").close()),
                                  ("usuniecie", lambda: os.remove(p)),
@@ -842,28 +1439,39 @@ def blokada(katalog):
         wyniki["zapis wlasnym uchwytem"] = "dziala" if p.read_bytes()[:1] == b"\x02" \
             else "NIE dziala"
         wyniki["st_ino stabilny"] = "tak" if os.stat(p).st_ino == ino and ino else "NIE"
+        wyniki["tozsamosc z uchwytu stabilna"] = (
+            "tak" if _tozsamosc(p) == tozsamosc and all(tozsamosc.values()) else "NIE")
+        c = Path(katalog) / f"{_PROBA_PLIK}tozsamosci_{znacznik}.bin"
+        d = Path(katalog) / f"{_PROBA_PLIK}zastepujacy_{znacznik}.bin"
+        for plik, bajt in ((c, b"\x03"), (d, b"\x04")):  # świeża para - bez blokady i odczytu
+            with open(plik, "xb") as fh:
+                fh.write(bajt * 8192)
+            moje.append(plik)
+        try:
+            podmiana = _podmiana_zmienia_tozsamosc(c, d, wyniki)
+        except OSError as exc:                             # jak każda próba tu: wynik, nie wyjątek
+            podmiana = f"NIE zmierzone - {type(exc).__name__} [WinError {exc.winerror}]"
+        wyniki["os.replace zmienia tozsamosc z uchwytu"] = podmiana
     finally:
         for plik in moje:                                  # sprzątanie WYŁĄCZNIE własnych plików
             if plik.exists():
                 os.remove(plik)
-    dobre = {"odrzucone", "dziala", "tak"}
-    wyniki["kod"] = 0 if all(v in dobre for v in wyniki.values()) else 1
+    wyniki["kod"] = _kod_blokady(wyniki)
+    wyniki["wolumin"] = tozsamosc["wolumin"]               # po `kod` - liczba, nie wynik pomiaru
     for k, v in wyniki.items():
         print(f"blokada {k}: {v}")
     return wyniki
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        raise SystemExit(__doc__)
-    tryb = sys.argv[1]
-    if tryb == "przed" and len(sys.argv) == 4:
-        przed(sys.argv[2], sys.argv[3])
-    elif tryb == "po":
-        sys.exit(po(sys.argv[2]))
-    elif tryb == "po-undo":
-        sys.exit(po_undo(sys.argv[2]))
-    elif tryb == "blokada":
-        sys.exit(blokada(sys.argv[2])["kod"])
+    tryb, argumenty = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
+    if tryb == "przed" and len(argumenty) == 3:
+        przed(*argumenty)
+    elif tryb == "po" and len(argumenty) == 2:
+        sys.exit(po(*argumenty))
+    elif tryb == "po-undo" and len(argumenty) == 2:
+        sys.exit(po_undo(*argumenty))
+    elif tryb == "blokada" and len(argumenty) == 1:
+        sys.exit(blokada(argumenty[0])["kod"])
     else:
         raise SystemExit(__doc__)

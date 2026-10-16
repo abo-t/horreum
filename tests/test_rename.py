@@ -884,7 +884,7 @@ def test_rename_zajety_stale_oddaje_powod_z_recepta(tmp_path, monkeypatch):
 
 def test_rename_inny_blad_bez_ponowienia(tmp_path, monkeypatch):
     """Ponowienie wyłącznie dla zajęcia (32/33) - odmowa dostępu (5) i każdy inny błąd wracają od
-    razu, surowo."""
+    razu; odmowa dostępu klasą systemu (AR-168), surowy tekst w `detail`."""
     src, dst = _para(tmp_path)
     pauzy = []
     monkeypatch.setattr(writeback.time, "sleep", pauzy.append)
@@ -896,7 +896,8 @@ def test_rename_inny_blad_bez_ponowienia(tmp_path, monkeypatch):
         raise _Odmowa(13, "Access is denied")
     monkeypatch.setattr(writeback.os, "rename", _rename)
     w = writeback.rename_file(src, dst)
-    assert w.status == "failed" and w.reason.startswith("_Odmowa:") and pauzy == []
+    assert w.status == "failed" and w.reason.code == "os_denied" and pauzy == []
+    assert dict(w.reason.params)["detail"].startswith("_Odmowa:")
 
 
 def test_rename_przeniesiony_mimo_bledu_nie_jest_odmowa(tmp_path, monkeypatch):

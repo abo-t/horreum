@@ -490,6 +490,70 @@ def propose_offset_minutes(con, master_frame_id):
     return roznice.pop() if len(roznice) == 1 else None
 
 
+# ============================================================ KLATKA NOWSZA NIŻ OBRAZ (AR-150, AR-153)
+# Jedna reguła, dwa użycia: odcięcie PROPOZYCJI kandydatów (`propose_lineage_candidates`) i fakt
+# o wejściu rodowodu ZAPISANEGO (`input_after_integration`, czyta go `gui.queries`). Obie drogi idą
+# przez ten sam odczyt chwili zapisu i ten sam normalizator czasu klatki - kopia którejkolwiek
+# połowy rozjechałaby panel z propozycją przy pierwszej poprawce strefy albo offsetu.
+
+def integration_moment(creation_time):
+    """Chwila zapisu stosu (`integration.creation_time`, `XISF:CreationTime`) jako czas porównania
+    z klatką - `datetime` w UTC albo `None`.
+
+    ZEGAR PORÓWNANIA JEST JEDEN - UTC. `creation_time` pisze UTC z sufiksem `Z` (zmierzone: 290 z 290
+    wartości, w pliku własność typu `String`; luka do sygnatury integracji ma medianę 11-13 min ZIMĄ
+    I LATEM - czas lokalny dałby zimą co najmniej 60, latem 120). Wartość BEZ sufiksu `Z` nie tnie
+    niczego: `header_dt` strefę gubi, a czas lokalny przyciąłby w złej osi bez śladu (populacja 0
+    z 290). `None` (plik tej chwili nie zna) też nie tnie - oś, której obraz nie zna, nie zawęża."""
+    if not (isinstance(creation_time, str) and creation_time.rstrip().endswith("Z")):
+        return None
+    return header_dt(creation_time)
+
+
+def moment_klatki(date_obs, filetype, utc_offset_min):
+    """Czas klatki w zegarze obrazu (UTC) → `(datetime | None, raw_bez_zegara)` - JEDYNY normalizator
+    czasu kandydata propozycji i wejścia rodowodu zapisanego.
+
+    FITS i XISF niosą `DATE-OBS` w UTC (naiwne ISO, bez strefy - inwariant `header.date_obs`), więc
+    wchodzą bez zmiany; `header_dt` ucina ułamki sekund. RAW (EXIF) niesie czas LOKALNY aparatu
+    i schodzi do UTC przez ODJĘCIE wskazanego odniesienia stosu (umowa 0016 `lokalny = UTC + offset`).
+    RAW BEZ ODNIESIENIA → `(None, True)`: nie wiadomo, kiedy powstał, więc nie stoi do porównania -
+    wołający liczy go osobno (klatki czekające na zegar). Brak albo śmieć w `date_obs` → `(None, False)`,
+    także dla RAW: klatka bez czasu nie czeka na zegar, tylko czasu nie ma."""
+    t = header_dt(date_obs)
+    if t is None:
+        return None, False
+    if filetype == "raw":
+        # `is None` WYSTARCZA I NIE POTRZEBUJE DRUGIEJ OCHRONY. `integration.utc_offset_min` jest
+        # kolumną INTEGER (0016), a jej jedyny pisarz `repo.set_integration_offset` odrzuca wszystko
+        # poza `int`/`None` - token `offset_unknown` mieszka w CHECK-u SĄSIEDNIEJ kolumny
+        # `unresolved_reason` i tutaj nie ma jak trafić. Pin imienny, bo bramka pakietu 3a (0808)
+        # dostała ten sam fałszywy zarzut od DWÓCH silników naraz: oba czytały nazwę tokenu jako
+        # wartość offsetu i proponowały strażnika na stan nieosiągalny (lustro pinu przy
+        # `exptime is None` w `_window_candidates`).
+        if utc_offset_min is None:
+            return None, True
+        t -= timedelta(minutes=utc_offset_min)
+    return t, False
+
+
+def taken_after_integration(czas, moment):
+    """Reguła AR-150: klatka zrobiona PO zapisie stosu nie mogła do niego wejść. Porównanie ostre
+    (`>`), po pełnych sekundach - klatka z tej samej sekundy co zapis zostaje. Czas nieznany po
+    którejkolwiek stronie → `False`: na niewiedzy nie tniemy."""
+    return czas is not None and moment is not None and czas > moment
+
+
+def input_after_integration(date_obs, filetype, creation_time, utc_offset_min):
+    """FAKT o wejściu rodowodu ZAPISANEGO (AR-153): czy klatka powstała po zintegrowaniu obrazu -
+    ta sama reguła i ten sam normalizator co odcięcie propozycji. Liczony dla KAŻDEGO źródła
+    (`window`, `history`, `harvest`, `user`); co z tym faktem zrobić, rozstrzyga wołający - gest
+    odrzucenia dotyczy wyłącznie werdyktów ręki (`gui.queries`), bo tylko tam fakt znaczy pomyłkę
+    werdyktu, a nie zegar do sprawdzenia."""
+    czas, _ = moment_klatki(date_obs, filetype, utc_offset_min)
+    return taken_after_integration(czas, integration_moment(creation_time))
+
+
 NIGHT_SPLIT_HOUR = 12
 """Godzina, o której tniemy dobę na NOCE OBSERWACYJNE (UTC). Noc przechodzi przez północ, więc
 klatka z 01:00 należy do wieczoru dnia poprzedniego; podział o południu jest konwencją astronomiczną
@@ -583,16 +647,14 @@ def propose_lineage_candidates(con, master_frame_id):
     RAW-ów bez odniesienia), bo „klatki są, tylko powstały później" to inna odpowiedź niż „klatek
     nie ma". Panel bez tej reguły podsuwał noce PO obrazie jak każde inne, a werdykt ręki nie ma
     czym ich odróżnić: zmierzone na kopii żywej bazy - 9 stosów NGC7635 ma 270 wejść potwierdzonych
-    ręką, zrobionych po `creation_time` swojego stosu.
-    ZEGAR PORÓWNANIA JEST JEDEN - UTC. `creation_time` pisze UTC z sufiksem `Z` (zmierzone: 290 z 290
-    wartości, w pliku własność typu `String`; luka do sygnatury integracji ma medianę 11-13 min ZIMĄ
-    I LATEM - czas lokalny dałby zimą co najmniej 60, latem 120), `date_obs` FITS/XISF też, a RAW
-    przechodzi na UTC wskazanym odniesieniem, zanim stanie do porównania. RAW BEZ ODNIESIENIA nie
-    jest tu ani odcinany, ani liczony: nie wiadomo, kiedy powstał, więc zostaje w liczniku klatek
-    czekających na zegar. Master BEZ `creation_time` (albo z wartością bez sufiksu `Z`, której strefy
-    nie znamy) nie odcina niczego - oś, której master nie zna, nie zawęża. Licznik odsiewa teleskop PER KLATKĘ (granica licznika RAW-ów wyżej): na nocy mastera
-    z kartą-śmieciem klatka obcego teleskopu po zintegrowaniu nie zostanie policzona - populacja
-    rozjazdu teleskopu: 0. Porównanie ostre (`>`), po pełnych sekundach (`header_dt`).
+    ręką, zrobionych po `creation_time` swojego stosu (AR-153 - ta sama reguła orzeka o nich).
+    REGUŁA I JEJ ZEGAR MAJĄ JEDNEGO WŁAŚCICIELA: chwila zapisu - `integration_moment` (UTC z `Z`;
+    NULL albo wartość bez `Z` nie tnie), czas kandydata - `moment_klatki` (RAW przez wskazane
+    odniesienie), porównanie - `taken_after_integration` (ostre `>`, pełne sekundy). RAW BEZ
+    ODNIESIENIA nie jest tu ani odcinany, ani liczony: nie wiadomo, kiedy powstał, więc zostaje
+    w liczniku klatek czekających na zegar. Licznik odsiewa teleskop PER KLATKĘ (granica licznika
+    RAW-ów wyżej): na nocy mastera z kartą-śmieciem klatka obcego teleskopu po zintegrowaniu nie
+    zostanie policzona - populacja rozjazdu teleskopu: 0.
 
     Zwraca `(tuple[CandidateNight, …], raw_bez_odniesienia, po_zintegrowaniu)`; pusta krotka = nie
     ma czego proponować (brak obiektu, brak czasu ekspozycji albo brak `DATE-OBS` - zmierzone: 1 stos
@@ -617,10 +679,7 @@ def propose_lineage_candidates(con, master_frame_id):
         "SELECT input_frame_id FROM integration_input WHERE integration_id = ?",
         (row["integration_id"],)).fetchall()} if row["integration_id"] else set()
     noc_mastera = _night_key(start)
-    # UTC (`Z`) - patrz docstring; None nie tnie. Wartość BEZ sufiksu `Z` też nie tnie: `header_dt`
-    # strefę gubi, a czas lokalny przyciąłby propozycję w złej osi bez śladu (populacja dziś 0 z 290).
-    ct = row["creation_time"]
-    zintegrowany = header_dt(ct) if isinstance(ct, str) and ct.rstrip().endswith("Z") else None
+    zintegrowany = integration_moment(row["creation_time"])   # None nie tnie - patrz docstring
     wg_nocy = {}
     raw_bez_odniesienia = 0
     po_zintegrowaniu = 0
@@ -633,23 +692,14 @@ def propose_lineage_candidates(con, master_frame_id):
             continue
         # TELESKOP NIE ODSIEWA TU - rozstrzyga go reguła niżej, po podziale na noce (B3a-2).
         obcy = row["telescope_id"] is not None and r["telescope_id"] != row["telescope_id"]
-        czas = header_dt(r["date_obs"])
+        czas, bez_zegara = moment_klatki(r["date_obs"], r["filetype"], row["utc_offset_min"])
+        if bez_zegara:
+            if not obcy:                      # licznik odsiewa teleskop per klatkę - granica wyżej
+                raw_bez_odniesienia += 1      # NIE `continue` po cichu - patrz docstring
+            continue
         if czas is None:
             continue
-        if r["filetype"] == "raw":
-            # `is None` WYSTARCZA I NIE POTRZEBUJE DRUGIEJ OCHRONY. `integration.utc_offset_min`
-            # jest kolumną INTEGER (0016), a jej jedyny pisarz `repo.set_integration_offset`
-            # odrzuca wszystko poza `int`/`None` - token `offset_unknown` mieszka w CHECK-u
-            # SĄSIEDNIEJ kolumny `unresolved_reason` i tutaj nie ma jak trafić. Pin imienny, bo
-            # bramka pakietu 3a (0808) dostała ten sam fałszywy zarzut od DWÓCH silników naraz:
-            # oba czytały nazwę tokenu jako wartość offsetu i proponowały strażnika na stan
-            # nieosiągalny (lustro pinu przy `exptime is None` w `_window_candidates`).
-            if row["utc_offset_min"] is None:
-                if not obcy:                  # licznik odsiewa teleskop per klatkę - granica wyżej
-                    raw_bez_odniesienia += 1  # NIE `continue` po cichu - patrz docstring
-                continue
-            czas -= timedelta(minutes=row["utc_offset_min"])
-        if zintegrowany is not None and czas > zintegrowany:
+        if taken_after_integration(czas, zintegrowany):
             # PO ZINTEGROWANIU OBRAZU - nie mogła do niego wejść (AR-150). Odcięcie stoi PRZED
             # podziałem na noce, bo taka klatka nie ma też prawa głosować w regule teleskopu nocy
             # mastera; licznik odsiewa teleskop per klatkę - granica w docstringu.

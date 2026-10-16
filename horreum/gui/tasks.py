@@ -41,7 +41,7 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_F_RATIO_
                               PRESET_SUPERSEDED, PRESET_VANISHED, PRESET_WITHHELD_TESTIMONY,
                               PRESET_KEPT_COPIES,
                               zdanie_kopii_bez_zeznania)
-from horreum.gui.grid_model import PRESET_XREF_RECONCILE
+from horreum.gui.grid_model import PRESET_LINEAGE_NEWER, PRESET_XREF_RECONCILE
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -116,6 +116,12 @@ _TASKS = [
     # predykat (`queries.interrupted_object_change_runs`, licznik w `_liczniki_osi`).
     ("object_change_interrupted", "tasks.object_change_interrupted", _OKNO_PRZEBIEGU),
     ("stacks_lineage_pending", "tasks.stacks_lineage", PRESET_LINEAGE),
+    # Wiersz AKCYJNY i ROBOTA (AR-153, `D-1016-1`) - liczy OBRAZY, których werdykt ręki potwierdził
+    # klatki zrobione po zapisie stosu (nie mogły do niego wejść). Gest „Odrzuć nowsze niż obraz"
+    # mieszka w panelu „Rodowód" w Zbiorach i działa z zaznaczenia jednego obrazu, więc wiersz prowadzi
+    # do perspektywy tych obrazów; podpowiedź mówi, ile wejść czeka i gdzie gest. Liczba i lista czytają
+    # jeden predykat (`queries.lineage_newer_inputs`, licznik w `_liczniki_osi`).
+    ("lineage_newer", "tasks.lineage_newer", PRESET_LINEAGE_NEWER),
     # Dwa wiersze AKCYJNE i ROBOTA (AR-59) - liczą KLATKI, które czekają na gest ręki na osi
     # sprzętu i na osi stanowiska. Do tej zmiany gesty istniały, ale prowadziły do nich wiersze
     # liczące co innego (teleskopy bez etykiety, stanowiska bez nazwy) - szare „0" mówiło „nie ma
@@ -264,6 +270,9 @@ def _liczniki_osi(con):
         (AR-121) - ta sama lista, z której klik bierze przebieg do okna.
       * `xref_reconcile_frames` = klatki pozycji `queries.xref_reconcile_rows` (AR-135), a obok
         pary „nazwa → cel” do zdania podpowiedzi (`xref_reconcile_pairs`) - jeden odczyt.
+      * `lineage_newer` = obrazy z `queries.lineage_newer_inputs` (AR-153) - ten sam zbiór, co trim
+        perspektywy pod klikiem; obok liczba ich wejść do odrzucenia (`lineage_newer_inputs`) do
+        zdania podpowiedzi - jeden odczyt.
 
     Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
     1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów. Po AR-80 (kopia v36,
@@ -271,7 +280,11 @@ def _liczniki_osi(con):
     niezgodne = queries.copy_conflict_frame_ids(con)
     stan = resolver.review_state(con)
     xref = queries.xref_reconcile_rows(con)
+    nowsze = queries.lineage_newer_inputs(con)
     return {
+        # AR-153: obrazy i ich wejścia do odrzucenia - jeden odczyt predykatu.
+        "lineage_newer": len(nowsze),
+        "lineage_newer_inputs": sum(len(w) for w in nowsze.values()),
         # AR-135: liczba klatek i pary „nazwa → cel” do zdania podpowiedzi - jeden odczyt predykatu.
         "xref_reconcile_frames": len(set().union(*(f for _n, _c, _t, f in xref))),
         "xref_reconcile_pairs": tuple(dict.fromkeys(f"{n} → {t}" for n, _c, t, _f in xref)),
@@ -355,6 +368,11 @@ _PODPOWIEDZI_OSI = {
                                     {"align": "grid.sel.object_change_align"}),
     # AR-121: klik otwiera okno przebiegu - podpowiedź mówi, co tam czeka.
     "object_change_interrupted": ("tasks.object_change_interrupted_tip", {}),
+    # AR-157: droga od klatki z kilkoma obecnymi kopiami do jednej - JEDNA recepta; okno zmiany
+    # obiektu przywołuje ten sam wpis przy pominięciu `many_copies` (`object_change_dialog`).
+    "dup_frames": ("tasks.dup_frames_tip", {"persp": "perspective.dups", "place": "nav.dostawa",
+                                            "check": "pipeline.btn.presence",
+                                            "mark": "pipeline.btn.mark_vanished"}),
 }
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
@@ -653,6 +671,10 @@ class TasksView(QWidget):
                 tip = i18n.t("tasks.xref_reconcile_tip",
                              pairs=", ".join(state["xref_reconcile_pairs"]),
                              change=i18n.t("grid.sel.object_change"))
+            elif key == "lineage_newer" and n > 0:
+                # AR-153: ile wejść czeka i gdzie gest - przycisk panelu nazwany z katalogu.
+                tip = i18n.t("tasks.lineage_newer_tip", n=state["lineage_newer_inputs"],
+                             reject=i18n.t("grid.lin.reject_newer"), undo=i18n.t("grid.lin.undo"))
             if robota != n:                             # część liczby z decyzją - nie robota
                 tip += _zdanie_podzbioru(key, n - robota)
             if czesciowe:

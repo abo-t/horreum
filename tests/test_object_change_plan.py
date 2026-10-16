@@ -498,12 +498,15 @@ def test_predykat_folder_karta_i_bramki(arch):
     stos = _stos(arch, r"STACKS\IC405\c\Ha\IC405_2025-08-23_c_Ha_60s_mono.xisf")
     przed = arch.con.total_changes
     ids = queries.file_object_mismatch_frame_ids(arch.con)
-    assert ids == {folder, karta, kometa}
-    assert not {sklejka, region, raw, pisownia, dwie, zgodna, stos} & ids
+    # AR-157: klatka z dwiema obecnymi kopiami w wierszu jest (rozjazd folderu), zamiast ginąć
+    # po cichu - „Uzgodnij” mówi jej powód.
+    assert ids == {folder, karta, kometa, dwie}
+    assert not {sklejka, region, raw, pisownia, zgodna, stos} & ids
     assert arch.con.total_changes == przed
 
     plan = arch.plan(sorted(ids))                              # „Uzgodnij” zamyka wiersz
-    assert {i.frame_id for i in plan.items} == ids
+    assert {i.frame_id for i in plan.items} == ids - {dwie}
+    assert [(s.frame_id, s.code) for s in plan.skipped] == [(dwie, "many_copies")]
     nowe = {i.frame_id: i for i in plan.items}
     assert nowe[karta].new_path is None and nowe[karta].card_op == "set"
     assert nowe[kometa].new_path.startswith(arch.sciezka(r"LIGHTS\_COMETS\C2023A3_Tsuchinshan-ATLAS"))
@@ -711,3 +714,122 @@ def test_uszkodzony_slownik_przy_pytaniu_per_klatka_to_powod_a_nie_wyjatek(arch,
     assert not plan.items
     (s,) = plan.skipped
     assert (s.code, dict(s.params)["gate"]) == ("card_skip", "form_not_canon")
+
+
+# ═══════════════════════════════════════════════════════════════════ AR-157: para stosu w „Uzgodnij”
+
+_ORYGINAL = r"STACKS\NGC3034\A140R\L\NGC3034_2025-08-23_A140R_L_60s_mono_WBPP.xisf"
+_WARIANT = r"STACKS\NGC3034\A140R\L\NGC3034_2025-08-23_A140R_L_60s_mono_autocrop_WBPP.xisf"
+
+
+def _para(arch, *, karta_o="auto", karta_v="auto", canon_v="NGC3034", plik_v=_WARIANT):
+    """Oryginał stosu i jego wariant `autocrop` w jednym katalogu - `(oryginał, wariant)`."""
+    o = arch.klatka(_ORYGINAL, canon="NGC3034", kind="master_light", filetype="xisf",
+                    card=karta_o, date_obs="2025-08-23T20:00:00")
+    v = arch.klatka(plik_v, canon=canon_v, kind="master_light", filetype="xisf", card=karta_v,
+                    source="twin" if canon_v == "NGC3034" else "user",
+                    date_obs="2025-08-23T20:00:00")
+    repo.link_stack_variant(arch.con, variant_frame_id=v, original_frame_id=o, variant="autocrop",
+                            source="user", now=NOW)
+    return o, v
+
+
+def test_para_stosu_polowka_bez_zmian_nie_zdejmuje_drugiej_z_sama_karta(arch):
+    """AR-157 (krok 0): wiersz Porządków liczył 53 warianty `autocrop` z kartą w innej formie, a
+    „Uzgodnij” nie robiło żadnego - reguła pary („razem albo wcale”) brała pominięcie BEZ ZMIAN
+    oryginału za odmowę i zdejmowała wariant. Połówka bez zmian nie odmawia: druga, która zmienia
+    wyłącznie kartę w miejscu, zostaje - w obu orientacjach pary, z obu połówek zaznaczenia. Para
+    nie rozchodzi się: jeden katalog, nazwa wariantu z nazwy oryginału.
+    Falsyfikator: dawna reguła kroku 6 - zero pozycji, pominięcie `pair`."""
+    from horreum import naming
+    o, v = _para(arch, karta_v="M 82")
+    for wybor in ([o], [v]):
+        plan = arch.plan(wybor)
+        it = _jedna(plan)
+        assert (it.frame_id, it.card_op, it.card_old, it.card_new, it.new_path) == \
+            (v, "set", "M 82", "NGC 3034", None)
+        assert [(s.frame_id, s.code) for s in plan.skipped] == [(o, object_change.SKIP_UNCHANGED)]
+    sciezka_o, sciezka_v = arch.sciezka(_ORYGINAL), arch.sciezka(_WARIANT)
+    assert os.path.dirname(sciezka_o) == os.path.dirname(sciezka_v)
+    assert naming.variant_stack_name(os.path.basename(sciezka_o), "autocrop") == \
+        os.path.basename(sciezka_v)
+
+
+def test_para_stosu_odwrotnie_oryginal_z_karta_przy_wariancie_bez_zmian(arch):
+    """Druga orientacja pary: oryginał z kartą w innej formie, wariant bez zmian - oryginał jedzie
+    z samą kartą, wariant zostaje bez zmian, bez `pair`."""
+    o, v = _para(arch, karta_o="M 82")
+    plan = arch.plan([o])
+    it = _jedna(plan)
+    assert (it.frame_id, it.card_op, it.card_new, it.new_path) == (o, "set", "NGC 3034", None)
+    assert [(s.frame_id, s.code) for s in plan.skipped] == [(v, object_change.SKIP_UNCHANGED)]
+
+
+def test_para_stosu_ruch_drugiej_polowki_dalej_razem_albo_wcale(arch):
+    """Wyjątek obejmuje WYŁĄCZNIE pozycję z samą kartą w miejscu. Druga połówka z przemianowaniem
+    (nazwa wariantu nie wynika z nazwy oryginału) dalej idzie z regułą „razem albo wcale” -
+    pominięcie `pair` z pominiętą połówką bez zmian w środku. Falsyfikator: wyjątek bez warunku
+    ruchu pliku."""
+    o, v = _para(arch, plik_v=r"STACKS\NGC3034\A140R\L\NGC3034_inna_nazwa_autocrop.xisf")
+    plan = arch.plan([o])
+    assert not plan.items
+    pary = {s.frame_id: (s.code, dict(s.params).get("inner_code")) for s in plan.skipped}
+    assert pary == {o: (object_change.SKIP_UNCHANGED, None),
+                    v: ("pair", object_change.SKIP_UNCHANGED)}
+
+
+def test_ujednolicenie_karty_ma_jedna_droge_gest_Uzgodnij():
+    """AR-157 krok (4): martwa para planu ujednolicenia (O5) - plan i predykat bez wołającego
+    w produkcji - zniknęła; jej funkcję niesie gest „Uzgodnij” (predykat wiersza
+    `file_object_mismatch_frame_ids`, read-model `object_change_rows`, planer). Druga droga do tej
+    samej roboty nie wraca po cichu."""
+    from horreum import macro
+    assert not hasattr(macro, "plan_object_card_form") and not hasattr(macro, "CardFormPlan")
+    assert not hasattr(queries, "object_card_form_rows")
+    assert not hasattr(queries, "object_card_form_frame_ids")
+
+
+@pytest.mark.parametrize("najpierw_zla", [False, True])
+def test_wiersz_widzi_klatke_z_kilkoma_kopiami_po_kazdej_kopii(arch, najpierw_zla):
+    """AR-157 krok (2): klatka z kilkoma obecnymi kopiami nie ginie z wiersza „Plik nie zgadza się
+    z obiektem” po cichu. Rozjazd folderu liczy się na KTÓREJKOLWIEK obecnej kopii - w obu
+    kolejnościach wstawienia kopii; rozjazd samej karty wchodzi z odmową bramki `many_copies`.
+    „Uzgodnij” mówi powód planera, nie pisze. Falsyfikatory: ocena wyłącznie pierwszej kopii
+    (jedna z kolejności gubi klatkę), filtr karty bez wyjątku `many_copies`, kopie bez `mtime`
+    liczone jak kopie z `mtime`."""
+    dobra, zla = r"LIGHTS\NGC224\cam\NGC224_1.fits", r"LIGHTS\Zly\cam\NGC224_1.fits"
+    pierwsza, druga = (zla, dobra) if najpierw_zla else (dobra, zla)
+    folder = arch.klatka(pierwsza, canon="NGC224")
+    repo.add_location(arch.con, frame_id=folder, volume="VOL", path=arch.sciezka(druga),
+                      mtime="m", now=NOW)
+    karta = arch.klatka(r"LIGHTS\NGC224\cam\NGC224_2.fits", canon="NGC224", card="M 31",
+                        date_obs="2022-03-22T20:29:01")
+    repo.add_location(arch.con, frame_id=karta, volume="VOL",
+                      path=arch.sciezka(r"LIGHTS\NGC224\inny\NGC224_2.fits"), mtime="m", now=NOW)
+    zgodna = arch.klatka(r"LIGHTS\NGC224\cam\NGC224_3.fits", canon="NGC224",
+                         date_obs="2022-03-23T20:29:01")
+    repo.add_location(arch.con, frame_id=zgodna, volume="VOL",
+                      path=arch.sciezka(r"LIGHTS\NGC224\inny\NGC224_3.fits"), mtime="m", now=NOW)
+    # Kopie bez `mtime` nie wprowadzają klatki także przy kilku kopiach - po zdjęciu duplikatu gest
+    # i tak by jej nie ruszył (`no_mtime`).
+    bez_mtime = arch.klatka(r"LIGHTS\Zly\cam\NGC224_4.fits", canon="NGC224", mtime=None,
+                            date_obs="2022-03-24T20:29:01")
+    repo.add_location(arch.con, frame_id=bez_mtime, volume="VOL",
+                      path=arch.sciezka(r"LIGHTS\Q\c\NGC224_4.fits"), now=NOW)
+    assert queries.file_object_mismatch_frame_ids(arch.con) == {folder, karta}
+    plan = arch.plan([folder, karta])
+    assert not plan.items
+    assert {(s.frame_id, s.code) for s in plan.skipped} == {(folder, "many_copies"),
+                                                           (karta, "many_copies")}
+
+
+def test_para_stosu_zmiana_obiektu_drugiej_polowki_dalej_razem_albo_wcale(arch):
+    """Jak wyżej, oś zmiany obiektu: wariant przy innym obiekcie (ręka) w katalogu oryginału,
+    „Zmień obiekt…” na kanon oryginału - oryginał bez zmian, wariant zmienia obiekt bez ruchu pliku:
+    para zostaje regułą „razem albo wcale”. Falsyfikator: wyjątek bez warunku zmiany obiektu."""
+    o, v = _para(arch, canon_v="NGC3031", karta_v="NGC 3031")
+    plan = arch.plan([o], target=queries.object_target(arch.con, "NGC3034"))
+    assert not plan.items
+    pary = {s.frame_id: (s.code, dict(s.params).get("inner_code")) for s in plan.skipped}
+    assert pary == {o: (object_change.SKIP_UNCHANGED, None),
+                    v: ("pair", object_change.SKIP_UNCHANGED)}

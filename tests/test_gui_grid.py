@@ -1605,7 +1605,8 @@ def test_cofniecie_renamu_z_bledem_pokazuje_powod_i_zostawia_Cofnij(rn_view, mon
     zostaje przy tym samym przebiegu z receptą, a drugi klik cofa resztę.
 
     Falsyfikator: przywróć w `_after_undo_rename` bezwarunkowe zgaszenie „Cofnij" → asercja
-    o widoczności pada; zdejmij człon powodu → asercja o „PermissionError" pada."""
+    o widoczności pada; zdejmij człon powodu → asercja o „Errno 13" pada (odmowa dostępu klasą
+    systemu z numerem, AR-168)."""
     import os as _os
     from horreum.gui import i18n
     view, con, files = rn_view
@@ -1625,7 +1626,7 @@ def test_cofniecie_renamu_z_bledem_pokazuje_powod_i_zostawia_Cofnij(rn_view, mon
     monkeypatch.undo()
     tekst = view.drawer.result.text()
     assert "1 przywrócony" in tekst and "przywróconych" not in tekst and "1 błąd" in tekst \
-        and "PermissionError" in tekst, tekst
+        and "Errno 13" in tekst, tekst
     assert i18n.t("grid.action.undo") in tekst, "recepta ponowienia nazywa przycisk"
     assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "rename"
     assert view._undo_rename_run_id == run
@@ -6385,7 +6386,9 @@ def test_cofniecie_makra_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(wb_view, 
         m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
             c, t, now=now, progress=pr, should_cancel=lambda: True))
         view._dispatch_undo()
-    assert przerwane in view.drawer.result.text(), view.drawer.result.text()
+    # Rdzeń zna resztę (AR-176): 1 nieprzetworzony plik wymaga sprawdzenia - bez obietnicy wyniku.
+    assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in \
+        view.drawer.result.text(), view.drawer.result.text()
     assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
     assert view._undo_commit_id == commit_id and fits.getheader(str(p))["TELESCOP"] == "EQ6"
     wrocil = writeback.FileResult(1, str(p), "restored", None)
@@ -6462,3 +6465,104 @@ def test_cofniecie_renamu_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(rn_view,
     view._dispatch_undo()
     assert all(f.exists() for f in files)
     assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None
+
+
+# ---------- szuflada: pozostałe powody w podpowiedzi, zdanie przerwanego zapisu (AR-176) ----------
+# Okna kart od AR-162 niosą pozostałe powody w podpowiedzi zdania, szuflada Zbiorów - nigdzie.
+
+def _wynik_przechwycony(view, nazwa):
+    """Podmiana ogona szuflady na instancji: zapamiętuje wynik rdzenia i woła prawdziwy ogon."""
+    wyniki = []
+    prawdziwy = getattr(view, nazwa)
+    setattr(view, nazwa, lambda op, res: wyniki.append(res) or prawdziwy(op, res))
+    return wyniki
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_szuflada_rozne_powody_pozostale_w_podpowiedzi(rn_view, lang):
+    """AR-176: zapis z DWOMA różnymi powodami na prawdziwym rdzeniu (plik A tylko do odczytu - błąd
+    systemu, plik B zmieniony po stagingu - blokada), klik „Zatwierdź”. Zdanie mówi „pierwszy z 2
+    różnych powodów” i odsyła pod kursor, podpowiedź niesie wiersze `podpowiedz_kart` (wspólne
+    z oknami kart); pasek statusu podpowiedzi nie ma, więc wskazania tam nie ma.
+
+    Falsyfikator: zdejmij `_podpowiedz_wyniku` z `_after_commit` → podpowiedź == samo zdanie."""
+    import stat
+    from astropy.io import fits
+    from PySide6.QtTest import QTest
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import podpowiedz_kart
+    i18n.set_lang(lang)
+    view, con, files = rn_view
+    view.resize(1400, 800)
+    view.show()
+    QApplication.processEvents()
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    wyniki = _wynik_przechwycony(view, "_after_commit")
+    komunikaty = []
+    view.status_message.connect(komunikaty.append)
+    os.chmod(files[0], stat.S_IREAD)                         # A: zapis padnie (odmowa dostępu)
+    fits.setval(str(files[1]), "IMAGETYP", value="Flat")      # B: nagłówek zmieniony po stagingu
+    try:
+        QTest.mouseClick(view.drawer.btn_commit, Qt.LeftButton)
+        QApplication.processEvents()
+    finally:
+        os.chmod(files[0], stat.S_IREAD | stat.S_IWRITE)
+    res = wyniki[-1]
+    assert len(res.failed) == 1 and len(res.blocked) == 1, res
+    tekst = view.drawer.result.text()
+    assert i18n.t("wb.reasons_first", n=2, detail="") in tekst, tekst      # „pierwszy z 2 …: ”
+    assert tekst.endswith(i18n.t("wb.reasons_tip")), tekst
+    podpowiedz = podpowiedz_kart(res)
+    assert podpowiedz.count("\n") >= 1, podpowiedz                 # dwa powody - dwa wiersze
+    assert view.drawer.result.toolTip() == tekst + "\n" + podpowiedz
+    assert komunikaty and not any(i18n.t("wb.reasons_tip") in k for k in komunikaty), komunikaty
+
+
+def test_szuflada_nazw_rozne_powody_w_podpowiedzi(rn_view):
+    """AR-176 dla szuflady nazw (ten sam `_commit_summary`): wynik z dwiema blokadami RÓŻNYCH kodów
+    złożony wprost - zdanie odsyła pod kursor, podpowiedź niesie oba powody z plikami.
+
+    Falsyfikator: zdejmij `_podpowiedz_wyniku` z `_after_commit_rename` → podpowiedź == zdanie."""
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import podpowiedz_kart
+    from horreum.item_reasons import PowodPozycji
+    view, con, files = rn_view
+    zmieniony = PowodPozycji("plik zmieniony od ostatniego skanu - Dostawa, potem gest ponownie",
+                             "changed_since_scan")
+    naglowek = PowodPozycji("nagłówek zmieniony od podglądu albo bez kotwicy (header_hash) - karta "
+                            "nie wejdzie; odśwież podgląd", "header_changed")
+    res = writeback.CommitResult("r", None, [],
+                                 [writeback.FileResult(1, str(files[0]), "blocked", zmieniony),
+                                  writeback.FileResult(2, str(files[1]), "blocked", naglowek)], [], [])
+    view._after_commit_rename("commit_rename", res)
+    tekst = view.drawer.result.text()
+    assert tekst.endswith(i18n.t("wb.reasons_tip")), tekst
+    podpowiedz = podpowiedz_kart(res)
+    assert files[0].name in podpowiedz and files[1].name in podpowiedz, podpowiedz
+    assert view.drawer.result.toolTip() == tekst + "\n" + podpowiedz
+
+
+def test_szuflada_przerwany_zapis_zostawia_zdanie(rn_view, monkeypatch):
+    """Zapis przerwany po pierwszym pliku (prawdziwy `writeback.commit` z `should_cancel` po op
+    `commit`): zdanie „przerwano, N do dokończenia” zostaje w szufladzie. Dawniej `_refresh_drawer`
+    na końcu ogona wołał `set_count(N)` bez wyniku - czyszczenie jak przy nowym stagingu - i zdanie
+    znikało w chwili, w której padło (sonda fazy 1: zdanie `''`).
+
+    Falsyfikator: `_refresh_drawer()` z powrotem PO zdaniu wyniku w `_after_commit` → zdanie puste."""
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import WritebackWorker
+    view, con, files = rn_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    pytania = []
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", lambda c, t, now, pr, sc: writeback.commit(
+        c, t, now=now, progress=pr, should_cancel=lambda: pytania.append(1) or len(pytania) > 1))
+    view._on_commit()
+    assert view._pending_count() == 1, "jeden plik czeka na dokończenie"
+    tekst = view.drawer.result.text()
+    assert tekst.endswith(i18n.t("grid.wb.interrupted", n=1)), repr(tekst)

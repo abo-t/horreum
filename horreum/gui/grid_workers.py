@@ -129,9 +129,15 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
     # ZBIÓR KUBEŁKA RODOWODU TEŻ RAZ (AR-154): liczy propozycję dla ~33 stosów (36 ms na kopii pf4),
     # a perspektywa „Rodowód do potwierdzenia" bierze go dodatkowo jako trim - ten sam wynik idzie
     # do stanów i do trimu, zamiast drugiego liczenia.
-    oczekujace = queries.lineage_pending_frame_ids(con)
-    stany = queries.stack_lineage_states(con, oczekujace=oczekujace)
-    gotowe_trimy = {"lineage_pending_frame_ids": oczekujace}
+    # Ten sam przebieg daje też stosy z samymi klatkami nowszymi niż obraz (stan `only_newer`, AR-171).
+    zbiory = queries.lineage_hand_sets(con)
+    stany = queries.stack_lineage_states(con, zbiory=zbiory)
+    gotowe_trimy = {"lineage_pending_frame_ids": zbiory.pending}
+    # Obrazy z wejściem ręki nowszym niż obraz (AR-153) - trim perspektywy wiersza Porządków i wariant
+    # podpowiedzi „dokładny" w kolumnie. Liczone RAZ na skład: tu, gdy perspektywa je przycina, niżej
+    # (po wierszach) - tylko gdy w zbiorze stoi obraz „dokładny" i podpowiedź ma kogo dotyczyć.
+    if "lineage_newer_frame_ids" in stan["trimy"]:
+        gotowe_trimy["lineage_newer_frame_ids"] = queries.lineage_newer_frame_ids(con)
     leaf_fn, universe_fn = _memo_leaf_fns(con, stany)
     frame_ids = filter_engine.run(stan["drzewo"], leaf_fn=leaf_fn, universe_fn=universe_fn)
     # JEDNA derywacja trimu dla zbioru głównego I dla sibling-setów listwy (SPOT, F4R2#2) -
@@ -160,7 +166,10 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
         frame_ids = frame_ids & trim
     przerwij()
     base = [_derive(r) for r in queries.base_rows(con, list(frame_ids))]
-    _adnotuj_rodowod(base, stany)                 # kolumna „Rodowód" - ten sam słownik co facet
+    nowsze = gotowe_trimy.get("lineage_newer_frame_ids")
+    if nowsze is None and any(stany.get(b["frame_id"]) == "exact" for b in base):
+        nowsze = queries.lineage_newer_frame_ids(con)
+    _adnotuj_rodowod(base, stany, nowsze or ())   # kolumna „Rodowód" - ten sam słownik co facet
     if stan["wersje"]:
         _adnotuj_wersje(base, queries.stack_version_groups(con))
     # Fakty KOPII (0021) - pytamy wyłącznie o klatki z kilkoma obecnymi kopiami: kolumna

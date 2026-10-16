@@ -27,7 +27,8 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from horreum import db, lead_copy, writeback
 from horreum.gui import i18n
-from horreum.item_reasons import PowodPozycji, param_ok   # powód pozycji z kodem (AR-141)
+from horreum.item_reasons import (OS_REASON_CODES, PowodPozycji,   # powód z kodem (AR-141)
+                                  param_ok)
 from horreum.gui.i18n_catalog import CATALOG
 
 
@@ -133,7 +134,9 @@ class WritebackWorker(QObject):
             result = self._OPS[self._op](con, self._target_id, self._now(),
                                          self._emit_progress, self._cancel.is_set)
         except Exception as exc:                # błąd → sygnał, NIE crash
-            error = f"{type(exc).__name__}: {exc}"
+            # Błąd systemu klasą, zdaniem w języku UI (AR-168) - nie surowy `PermissionError: […]`
+            # z komunikatem w języku systemu; inny wyjątek zostaje tekstem `Typ: opis`.
+            error = tekst_powodu(writeback.blad_systemu(exc))
         finally:
             if con is not None:
                 con.close()                     # zamknij PRZED done — main czyta tylko przez self.con
@@ -319,9 +322,40 @@ def podpowiedz_powodow(res):
 
 
 def podpowiedz_kart(res):
-    """Podpowiedź zdania commitu okna kart: szczegół spadku na drogę atomową (`podpowiedz_spadku`)
-    i różne powody blokad/błędów (`podpowiedz_powodow`) - wiersze, które są; `""`, gdy żadnych."""
-    return "\n".join(p for p in (podpowiedz_spadku(res), podpowiedz_powodow(res)) if p)
+    """Podpowiedź zdania commitu okna kart: szczegół spadku na drogę atomową (`podpowiedz_spadku`),
+    różne powody blokad/błędów (`podpowiedz_powodow`) i surowy tekst systemu pierwszego błędu
+    systemu (`podpowiedz_systemu`, AR-168) - wiersze, które są; `""`, gdy żadnych. Wspólna dla okien
+    kart i szuflady Zbiorów."""
+    return "\n".join(p for p in (podpowiedz_spadku(res), podpowiedz_powodow(res),
+                                 podpowiedz_systemu(res)) if p)
+
+
+def szczegol_systemu(powod):
+    """Surowy tekst systemu (`Typ: [WinError N] opis`) pierwszego błędu systemu klasą
+    (`item_reasons.OS_REASON_CODES`) w drzewie powodu - parametry-powody, listy, uwagi - albo
+    None. Zdanie mówi klasę i numer w języku UI, komunikat systemu (w języku systemu) schodzi tu."""
+    if not isinstance(powod, PowodPozycji):
+        return None
+    if powod.code in OS_REASON_CODES:
+        detail = dict(powod.params).get("detail")
+        return _REPR_SCIEZKI.sub(lambda m: "'" + _bez_repr(m.group(1)) + "'", detail) \
+            if isinstance(detail, str) else None
+    for _nazwa, wartosc in powod.params:
+        for w in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
+            znaleziony = szczegol_systemu(w)
+            if znaleziony is not None:
+                return znaleziony
+    return None
+
+
+def podpowiedz_systemu(res):
+    """Wiersz podpowiedzi „Szczegół systemu: …” dla pierwszej pozycji wyniku z błędem systemu
+    (błąd przed wstrzymaniem przed blokadą, jak w zdaniu wyniku) albo `""`."""
+    for fr in res.failed + list(getattr(res, "withheld", [])) + res.blocked:
+        szczegol = szczegol_systemu(fr.reason)
+        if szczegol is not None:
+            return i18n.t("wb.os_detail_tip", detail=szczegol)
+    return ""
 
 
 def _klucz_powodu(powod):
@@ -429,9 +463,12 @@ def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
     (`podziel_powod_spadku`). Spadek rozpoznaje KOD - wyniku (`CODE_INPLACE_FALLBACK`, jak zdanie
     wyniku) albo powodu (`PowodPozycji` `inplace_fallback`, także z bazy po 0041, AR-141); wiersz
     z bazy bez kodu (`z_bazy`, sprzed 0041) rozpoznaje prefiks rdzenia (`PREFIKS_DROGI_ATOMOWEJ`).
-    Każdy inny powód mówi zdaniem w języku UI (`tekst_powodu`)."""
+    Każdy inny powód mówi zdaniem w języku UI (`tekst_powodu`). Błąd systemu w powodzie (AR-168)
+    dokłada do podpowiedzi surowy tekst systemu (`szczegol_systemu`)."""
     if not powod:
         return stan, stan
+    systemu = szczegol_systemu(powod)
+    tip_systemu = "" if systemu is None else "\n" + i18n.t("wb.os_detail_tip", detail=systemu)
     szczegol = None
     if (kod == writeback.CODE_INPLACE_FALLBACK or _spadek_z_kodu(powod)
             or (z_bazy and not _spadek_z_kodu(powod)
@@ -441,8 +478,8 @@ def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
         powod = i18n.t("objchg.st.rewritten") + (f"; {uwaga}" if uwaga else "")
     status = stan + i18n.t("objchg.st.reason", reason=tekst_powodu(powod))
     if szczegol is None:
-        return status, status
-    return status, status + "\n" + i18n.t("objchg.st.detail_tip", detail=szczegol)
+        return status, status + tip_systemu
+    return status, status + "\n" + i18n.t("objchg.st.detail_tip", detail=szczegol) + tip_systemu
 
 
 # Plik zajęty przez inny program w powodzie rdzenia (`f"{type(exc).__name__}: {exc}"`):
@@ -467,8 +504,10 @@ def czytelny_powod(tekst):
     (`objchg.reason.busy`, bliźniak powodu przeniesienia rdzenia po AR-125) zamiast surowego
     `PermissionError: [WinError 32] …` - ścieżka zajętego pliku zostaje w nawiasie - a ścieżka
     z zapisu `repr` bez podwojonych ukośników. Reszta zdania znak w znak: powód rdzenia jest
-    zdaniem dla człowieka, a przekład innych błędów systemu to robota rdzenia, nie ekranu. Jedna
-    funkcja dla okien zapisu (zdanie wyniku `zdanie_wyniku_zapisu`, statusy okna zmiany obiektu)."""
+    zdaniem dla człowieka, a przekład innych błędów systemu robi rdzeń (`writeback._blad_systemu`,
+    AR-168: odmowa dostępu, brak pliku, brak miejsca, udział - z kodem). Zajętość zostaje tutaj:
+    rdzeń jej nie koduje, a wiersze bazy sprzed kodów są surowe. Jedna funkcja dla okien zapisu
+    (zdanie wyniku `zdanie_wyniku_zapisu`, statusy okna zmiany obiektu)."""
     if not tekst:
         return tekst
 
@@ -591,11 +630,17 @@ def ogon_cofniecia(res, przycisk):
         weryfikacji, operacja w miejscu przerwana; także błąd, którego ponowienie nie naprawi
         (uszkodzona koperta backupu) - uchwyt nie ginie, zdanie mówi powód;
       * `cancelled` - pętla `writeback.undo` przerywa PRZED kolejnymi backupami (także
-        `restored` + `cancelled`); ponowienie dokończy resztę;
+        `restored` + `cancelled`); ponowienie sprawdzi pozostałe pliki;
       * `blocked` bez „już cofnięte” - nieudana rekoncyliacja backupu (`backup_reconcile_failed`
         wprost każe ponowić), izolacja cudzą operacją, plik zmieniony od commitu: plik NIE wrócił,
         więc „pliki są bez karty” byłoby fałszem, a zgaszony uchwyt - utratą jedynej drogi.
-    Ponowienie jest bezpieczne: plik już cofnięty rdzeń odda jako 'blocked' „już cofnięte”."""
+    Ponowienie jest bezpieczne: plik już cofnięty rdzeń odda jako 'blocked' „już cofnięte”.
+
+    PRZERWANIE MÓWI PRAWDĘ RDZENIA, BEZ OBIETNICY (AR-176): `UndoResult.remaining` = ile
+    nieprzetworzonych backupów nie ma trwałego dowodu zakończenia - „N nieprzetworzonych plików
+    wymaga sprawdzenia; „Cofnij” ponowi próbę” albo, przy zerze, „pozostałe pliki nie wymagają
+    cofnięcia”; wynik bez tej wiedzy (`None`, cofnięcie Nazw) - „„Cofnij” ponowi próbę dla
+    pozostałych plików”. Uchwyt zostaje przy każdym przerwaniu: ponowienie rozstrzyga pliki."""
     from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
     msg = zdanie_undo_kart(res)
     # Powód „już cofnięte” nie mówi niczego, co człon „N już cofniętych” nie powiedział (AR-160).
@@ -605,7 +650,13 @@ def ogon_cofniecia(res, przycisk):
         msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
                       detail=tekst_powodu(detail.reason))
     if res.cancelled:
-        msg += i18n.t("wb.undo_cancelled", undo=przycisk)
+        reszta = getattr(res, "remaining", None)
+        if reszta is None:
+            msg += i18n.t("wb.undo_cancelled", undo=przycisk)
+        elif reszta:
+            msg += i18n.t_plural("wb.undo_cancelled_check", reszta, undo=przycisk)
+        else:
+            msg += i18n.t("wb.undo_cancelled_done")
     elif not res.complete:
         msg += i18n.t("grid.wb.undo_retry", undo=przycisk)
     return msg, not res.complete

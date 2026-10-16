@@ -230,7 +230,7 @@ def test_writeback_reeksportuje_tego_samego_wlasciciela():
 
 def _cel(fid=1):
     return {"frame_id": fid, "filetype": "fits", "location_id": 10 + fid, "path": f"R:/{fid}.fits",
-            "compressed": 0, "sha1_data_uncomputable": 0, "header_hash": "h"}
+            "compressed": 0, "sha1_data_uncomputable": 0, "header_hash": "h", "n_sum": 0}
 
 
 def _karta(keyword, raw):

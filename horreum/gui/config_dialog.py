@@ -62,6 +62,24 @@ def default_dialog_size(widget):
     return QSize(w, h)
 
 
+def dopasuj_wysokosc(okno):
+    """Okno ROŚNIE (tylko w górę) do wysokości, której treść potrzebuje przy BIEŻĄCEJ szerokości -
+    etykiety zawijają zdania (nagłówek, zdanie na żywo, status wyniku z receptą, błąd), więc ich
+    wysokość zależy od szerokości (`heightForWidth`). Bez tego okno zostawało przy rozmiarze
+    z otwarcia, a ostatni wiersz zdania był ucięty w pół (wizytacja natywna: etykieta 24 px przy
+    potrzebnych 32; status „Napraw nagłówek…” 44 px przy 64, AR-176). JEDEN pomocnik dla okien
+    wyboru obiektu, ścieżki i naprawy nagłówka - wołany po każdej zmianie tych zdań i przy
+    pokazaniu okna; okno niepokazane nie ma jeszcze szerokości."""
+    if not okno.isVisible():
+        return
+    lay = okno.layout()
+    lay.activate()
+    potrzeba = (lay.totalHeightForWidth(okno.width()) if lay.hasHeightForWidth()
+                else lay.totalSizeHint().height())
+    if potrzeba > okno.height():
+        okno.resize(okno.width(), potrzeba)
+
+
 def folder_hit(needle, text):
     """Czy wiersz `text` pasuje do frazy filtra? KAŻDE słowo frazy musi wystąpić w wierszu,
     wielkość liter bez znaczenia (`LMC 2024` trafia `R:\\...\\LMC\\2024-01-05`). Pusta fraza

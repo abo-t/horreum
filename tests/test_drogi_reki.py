@@ -263,7 +263,7 @@ def test_odmiana_polska_nowych_kluczy_takze_nascie(n, forma):
 def _cel(**kw):
     """Wiersz `queries.writeback_frame_targets` jednej klatki z jedną obecną kopią."""
     w = {"frame_id": 1, "filetype": "fits", "sha1_data_uncomputable": 0, "location_id": 7,
-         "path": "/a/f1.fits", "header_hash": "hh", "hdu_index": 0, "compressed": 0}
+         "path": "/a/f1.fits", "header_hash": "hh", "hdu_index": 0, "compressed": 0, "n_sum": 0}
     w.update(kw)
     return w
 

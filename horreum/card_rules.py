@@ -22,6 +22,12 @@ XML 1.0 (spec §9.5 - PixInsight takiego pliku nie otworzy). Czytnik Horreum ten
 Reguły pilnują TREŚCI ŁATY, nie pliku: zastana nielegalna treść (w archiwum jest plik z bajtem
 0x07 w historii przetwarzania) nie blokuje łaty legalnej wartości. Nazwę sprawdzamy tylko wtedy,
 gdy łata ją WNOSI (nowa karta) - `set` na istniejącej karcie jej nazwy nie zmienia.
+
+JEDNA REGUŁA PLIKU: suma kontrolna (FITS 4.0, dodatek J). Zmiana bajtu nagłówka unieważnia
+`CHECKSUM`, a pisarz jej nie przelicza, więc odmawia FITS z kartą `CHECKSUM`/`DATASUM` na OBU
+drogach zapisu (`writeback._odmowa_sumy`, z nazwami kart z pliku). Tę samą odmowę przed zapisem
+przewiduje z faktów bazy `bramka_sumy` - jedno zdanie (`BRAMKA_SUMY`) dla podglądu makra, edycji
+komórki, planu naprawy nagłówków i bramki okien kart (`gui.queries.fits_checksum_gate`, AR-167).
 """
 
 from __future__ import annotations
@@ -37,6 +43,16 @@ FITS_RECORD = 80
 _FITS_VALUE_START = 10    # nazwa (8) + wskaźnik wartości "= " (2)
 _FITS_FIXED_FIELD = 20    # stały format (§4.2): pole wartości zajmuje co najmniej kolumny 11-30
 _FITS_COMMENT_SEP = 3     # " / "
+
+# Bramka sumy kontrolnej z faktów bazy (AR-166, AR-167): baza wie TYLKO, że klatka ma kartę sumy
+# (`n_sum`), nie którą - stąd „CHECKSUM/DATASUM”; pisarz, który widzi plik, mówi nazwy kart.
+BRAMKA_SUMY = PowodPozycji("FITS z sumą kontrolną (CHECKSUM/DATASUM)", "fits_checksum")
+
+
+def bramka_sumy(filetype, n_sum):
+    """`BRAMKA_SUMY`, gdy FITS ma kartę `CHECKSUM`/`DATASUM` (`n_sum` - liczba albo prawdziwość
+    z read-modelu), inaczej None. XISF nie odpada: pisarz XISF sumy FITS nie pilnuje."""
+    return BRAMKA_SUMY if filetype == "fits" and n_sum else None
 
 
 @dataclasses.dataclass(frozen=True)

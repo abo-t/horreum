@@ -13,7 +13,8 @@ Makro NIE zapisuje.
 Krok po kroku dla każdego frame'a z `frame_ids` (już przefiltrowanych przez `filter_engine`):
 1. bramki celu (kolejność): FORMAT (RAW → skip zawsze; XISF+`add` → skip, D-PD-5); 0 obecnych kopii → skip;
    >1 obecna kopia → skip (D-W1(0), fan-out poza v1); skompresowany master → skip (T6);
-   nagłówek niekontrolowalny (header_hash NULL) → skip;
+   nagłówek niekontrolowalny (header_hash NULL) → skip; FITS z kartą `CHECKSUM`/`DATASUM` → skip
+   (`card_rules.bramka_sumy` - pisarz odmówi na obu drogach, AR-166);
 2. `env` z kart frame'a (keyword → `value_num` gdy liczbowa, inaczej `value_raw`; brak → poza env),
 3. kroki `compute` (`horreum.expr`) → do `env`; policz `assign` → operacja `set`/`add`.
 
@@ -22,8 +23,8 @@ Plik bez operandu / z błędem obliczenia / łamiący regułę operacji → POMI
 kardynalności >1 wymaga jawnego `idx`); `add` wymaga braku karty. Operand `0` to WARTOSC, nie brak.
 Zmiana łamiąca reguły karty FITS 4.0 (`card_rules.card_violation` - ten sam właściciel, którego
 pyta pisarz) też jest pominięciem z powodem już w PODGLĄDZIE, a nie 'blocked' przy commicie (AR-9).
-Silnik nie importuje astropy: reguły mieszkają w `card_rules`, a `writeback` (przewidywanie drogi
-zapisu dla planu karty OBJECT) jest importowany leniwie w `plan_object_card_form`.
+Silnik nie importuje astropy: reguły mieszkają w `card_rules` (ujednolicenie karty OBJECT, które
+przewidywało tu drogę zapisu pisarzem, przejął gest „Uzgodnij” - `object_change`, AR-157).
 Makra są JSON-serializowalne (`to_dict`/`from_dict`), ale **NIE SĄ NIGDZIE UTRWALANE** — definicja
 powstaje w pasku (`gui.grid.MacroBar.macro_def`) na czas jednego przebiegu i ginie z zamknięciem okna.
 Tabela `macros` (migracja 0003) stoi PUSTA i taka zostaje: **decyzja Zdzinia 2026-08-01 (D-P-I-4,
@@ -353,7 +354,9 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
 
     Blad DEFINICJI makra (skladnia/wezel `expr`) rzuca `ExprError`/`ValueError` JUZ przy kompilacji
     (przed petla) — to blad uzytkownika. Blad DANYCH pojedynczego frame'a / niedostepny cel → frame do
-    `skipped` z powodem, potok leci dalej."""
+    `skipped` z powodem, potok leci dalej. Po bramkach celu - bramka sumy kontrolnej z faktu
+    `n_sum` wiersza celu (AR-166): FITS z `CHECKSUM`/`DATASUM` pisarz odmowi, wiec podglad mowi to
+    przed stagingiem (powod z kodem, `card_rules.BRAMKA_SUMY`)."""
     md = MacroDef.from_dict(macro_def) if isinstance(macro_def, dict) else macro_def
     run_id = run_id or uuid.uuid4().hex
 
@@ -383,6 +386,10 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
             path = next((r["path"] for r in rows if r["path"]), "")
             skipped.append(SkippedFrame(fid, path or "", reason or ""))
             continue
+        suma = card_rules.bramka_sumy(target["filetype"], target["n_sum"])   # AR-166
+        if suma is not None:                     # pisarz odmówi - pominięcie w podglądzie
+            skipped.append(SkippedFrame(fid, target["path"], suma))
+            continue
         change, reason = _evaluate_change(md, computes, assign_expr, cards_fn(fid))
         if change is None:
             skipped.append(SkippedFrame(fid, target["path"], reason or ""))
@@ -396,66 +403,6 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
         ))
 
     return MacroRun(run_id=run_id, touched=touched, skipped=skipped)
-
-
-@dataclass(frozen=True)
-class CardFormPlan:
-    """Plan ujednolicenia karty `OBJECT` (O5) = podgląd przed stagingiem. `run` ma kształt makra
-    (`touched` idzie do `repo.stage_pending_many`, `skipped` niesie powody), `swaps` = zamiany
-    `(stara, nowa, liczba)` malejąco, `in_place`/`fallback` = PRZEWIDYWANA droga zapisu
-    (`writeback.inplace_route`; ostatnie słowo ma pisarz na pliku), `fallback_reasons` = powody
-    drogi dotychczasowej z liczbami."""
-    run: MacroRun
-    swaps: list[tuple[str, str, int]]
-    in_place: int
-    fallback: int
-    fallback_reasons: list[tuple[str, int]]
-
-
-def plan_object_card_form(rows, *, run_id=None) -> CardFormPlan:
-    """Wiersze `queries.object_card_form_rows` → `CardFormPlan`. CZYSTA funkcja (zero DB, zero
-    zapisu): klatka z powodem pominięcia → `skipped`; reszta → jeden `set` karty `OBJECT` (idx 0,
-    typ `str`, komentarz BEZ zmian - `None`) na formę nagłówka, z kotwicą `header_hash` kopii.
-    Wykonanie to istniejący staging i commit writebacku: `repo.stage_pending_many` +
-    `writeback.commit(..., inplace=True)`. Drugi plan po udanym wykonaniu jest pusty z konstrukcji
-    predykatu (karta == forma nie wchodzi).
-
-    `writeback` importowany TU, nie na górze modułu: ciągnie astropy, a silnik makr ma się
-    importować bez niego (meta-test w `tests/test_card_rules.py`)."""
-    from . import writeback
-    run_id = run_id or uuid.uuid4().hex
-    touched: list[PendingPreview] = []
-    skipped: list[SkippedFrame] = []
-    swaps: Counter = Counter()
-    routes: Counter = Counter()
-    in_place = 0
-    for r in rows:
-        if r["skip"] is not None:
-            skipped.append(SkippedFrame(r["frame_id"], r["path"], r["skip"]))
-            continue
-        # AR-47: komentarz, który nie przeżyje nowej formy, odmawia w OBU drogach zapisu (AR-7) -
-        # to pominięcie z powodem pisarza, nie „spadek na drogę dotychczasową".
-        odmowa = writeback.comment_loss_route(r["filetype"], "OBJECT", r["form"], r["comment"])
-        if odmowa is not None:
-            skipped.append(SkippedFrame(r["frame_id"], r["path"], odmowa))
-            continue
-        touched.append(PendingPreview(
-            location_id=int(r["location_id"]), path=r["path"], keyword="OBJECT", idx=0, op="set",
-            old_value=r["card"], new_value=r["form"], new_type="str", comment=None,
-            expected_header_hash=r["header_hash"]))
-        swaps[(r["card"], r["form"])] += 1
-        powod = writeback.inplace_route(r["filetype"], "OBJECT", r["form"], r["value_type"],
-                                        r["comment"])
-        if powod is None:
-            in_place += 1
-        else:
-            routes[powod] += 1
-    return CardFormPlan(
-        run=MacroRun(run_id=run_id, touched=touched, skipped=skipped),
-        swaps=[(stara, nowa, n) for (stara, nowa), n in
-               sorted(swaps.items(), key=lambda kv: (-kv[1], kv[0]))],
-        in_place=in_place, fallback=sum(routes.values()),
-        fallback_reasons=sorted(routes.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 @dataclass(frozen=True)
@@ -520,8 +467,9 @@ def plan_manual_change(rows, keyword: str, new_text: str, *, cards_fn,
 
     Te same dwie bramki co makro, w tej samej kolejnosci: najpierw CEL (`resolve_target` na wierszach
     `queries.writeback_frame_targets` JEDNEJ klatki - RAW, brak/wiele obecnych kopii, kompresja,
-    degenerat tozsamosci, brak `header_hash`), potem ZMIANA (`evaluate_manual_change` na kartach
-    tej kopii, `cards_fn(location_id)` = `queries.location_cards`). Komorka edytowalna w gridzie
+    degenerat tozsamosci, brak `header_hash`, suma kontrolna FITS - AR-166), potem ZMIANA
+    (`evaluate_manual_change` na kartach tej kopii, `cards_fn(location_id)` =
+    `queries.location_cards`). Komorka edytowalna w gridzie
     nie obiecuje wiec niczego, czego makro na tej samej klatce by nie zrobilo.
 
     Zwraca `(PendingPreview, None)` albo `(None, powod)`; pusta lista wierszy (klatka zniknela
@@ -531,6 +479,9 @@ def plan_manual_change(rows, keyword: str, new_text: str, *, cards_fn,
     target, reason = resolve_target(rows)
     if target is None:
         return None, reason
+    suma = card_rules.bramka_sumy(target["filetype"], target["n_sum"])       # AR-166
+    if suma is not None:
+        return None, suma
     res = evaluate_manual_change(cards_fn(int(target["location_id"])), keyword, new_text,
                                  comment=comment)
     if not res.ok:
@@ -633,8 +584,9 @@ class HeaderFixPlan:
 
 def _bramka_celu(row):
     """Powód, dla którego kopii nie zapisujemy w miejscu, albo None - bramki `resolve_target`
-    i planu karty `OBJECT` (`gui.queries.object_card_form_rows`), PER KOPIA: plan nie odmawia
-    klatce z kilkoma kopiami, każda kopia ma własną kotwicę `header_hash`."""
+    dla planu naprawy nagłówka (`plan_header_fix`), PER KOPIA: plan nie odmawia
+    klatce z kilkoma kopiami, każda kopia ma własną kotwicę `header_hash`. Suma kontrolna - jedno
+    zdanie z kodem dla wszystkich bramek (`card_rules.bramka_sumy`, AR-167)."""
     if row["filetype"] == "raw":
         return "plik RAW (DSLR) - Horreum go nie zapisuje"
     if row["compressed"]:
@@ -645,9 +597,7 @@ def _bramka_celu(row):
         return "brak header_hash - brak kontroli zapisu"
     if row["unreadable_since"] is not None:
         return "kopia oznaczona jako nieczytelna"
-    if row["filetype"] == "fits" and row["n_sum"]:
-        return "FITS z sumą kontrolną (CHECKSUM/DATASUM)"
-    return None
+    return card_rules.bramka_sumy(row["filetype"], row["n_sum"])   # jedno zdanie bramki (AR-167)
 
 
 def _wlasna_wartosc(row, keyword, karta):

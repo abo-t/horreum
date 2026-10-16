@@ -356,7 +356,7 @@ def test_xisf_stale_header_hash_blokuje_bez_tkniecia(tmp_path):
     przed = _sha_pliku(p)
     res = writeback.write_xisf_changes(
         str(p), [writeback.WriteOp("TELESCOP", "set", "ED120R", "str")], "nie-ten-hash")
-    assert res.status == "blocked" and res.reason == "header_hash mismatch"
+    assert res.status == "blocked" and res.reason.code == "header_hash_mismatch"
     assert _sha_pliku(p) == przed
 
 
@@ -486,7 +486,8 @@ def test_xisf_awaria_io_to_failed_nie_blocked(tmp_path):
     o pliku, którego nawet nie otworzyliśmy."""
     res = writeback.write_xisf_changes(str(tmp_path / "nie-ma.xisf"),
                                        [writeback.WriteOp("TELESCOP", "set", "X", "str")], None)
-    assert res.status == "failed" and "FileNotFoundError" in res.reason
+    assert res.status == "failed" and res.reason.code == "os_missing"           # klasa (AR-168)
+    assert dict(res.reason.params)["detail"].startswith("FileNotFoundError: ")   # surowo w detail
 
 
 # ============================================================ REGUŁY KARTY I WERYFIKACJA ŁATY

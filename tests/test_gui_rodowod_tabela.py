@@ -200,10 +200,35 @@ def test_most_gospodarza_dostaje_wejscie_gdy_wstrzykniety(strona):
 
 # ---------- R1: read-model stanu, kolumna, facet, preset ----------
 
+def _seed_tylko_nowsze(con, fid=28, light=29):
+    """Stos `fid` (M101, Ha, 300 s) bez werdyktu, z powodem `no_candidates` i zapisem 2023-04-21
+    22:30Z; jedyny pasujący light (`light`) powstał noc PÓŹNIEJ - propozycja pomija go jako
+    nowszy niż obraz i nie ma nic do dania (AR-171, stan `only_newer`)."""
+    import json
+    con.execute("INSERT OR IGNORE INTO object (id, canon, catalog, kind) "
+                "VALUES (8, 'M101', 'catalog', 'deep_sky')")
+    raw = {"IMAGETYP": "Master Light", "EXPTIME": 300.0,
+           "DATE-OBS": "2023-04-21T20:00:00", "DATE-END": "2023-04-21T22:00:00"}
+    con.execute("UPDATE frame SET object_id = 8, filter_canon = 'Ha' WHERE id = ?", (fid,))
+    con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                "VALUES (?, ?, '2023-04-21T20:00:00', 300.0)", (fid, json.dumps(raw)))
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch, unresolved_reason, creation_time) "
+                "VALUES (?, ?, ?, 0, 0, 0, 'no_candidates', '2023-04-21T22:30:00Z')",
+                (fid, fid, NOW))
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                "first_seen_at) VALUES (?, ?, 'light', 'fits', 8, 'Ha', ?)", (light, f"k{light}", NOW))
+    con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                "VALUES (?, '{}', '2023-04-22T21:00:00', 300.0)", (light,))
+    con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                (light, f"/a/N/l{light}.fits"))
+
+
 def _seed_stany(con):
-    """Po jednym gotowym obrazie na każdy stan rodowodu (frame 20..27), wejścia z lightów 1-3."""
+    """Po jednym gotowym obrazie na każdy stan rodowodu (frame 20..28), wejścia z lightów 1-3;
+    stos 28 - same klatki nowsze niż obraz (`_seed_tylko_nowsze`, light 29)."""
     stosy = {20: "window", 21: "mixed", 22: "history", 23: "exact", 24: "pending",
-             25: "rejected", 26: "none", 27: "uncounted"}
+             25: "rejected", 26: "none", 27: "uncounted", 28: "only_newer"}
     for fid in stosy:
         con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
                     "VALUES (?, ?, 'master_light', 'xisf', ?)", (fid, f"s{fid}", NOW))
@@ -223,6 +248,7 @@ def _seed_stany(con):
                (25, 1, "user", 1)]
     con.executemany("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by, "
                     "excluded) VALUES (?, ?, ?, ?)", wejscia)
+    _seed_tylko_nowsze(con)
     con.commit()
     return stosy
 
@@ -253,8 +279,9 @@ def test_liczniki_memo_sa_rozlaczne_i_licza_ze_stanu(con):
     con.execute("UPDATE location SET present = 0 WHERE frame_id = 27")
     con.commit()
     n = queries.stack_lineage_counts(con)
-    # żywe: 10, 20-25, 27 = 8; z wejściami 10,20,21,22,23 = 5; bez wejść 24,25 = 2; nieliczony 27
-    assert n == {"all": 8, "uncounted": 1, "with_inputs": 5, "without_inputs": 2, "no_copy": 1}
+    # żywe: 10, 20-25, 27, 28 = 9; z wejściami 10,20,21,22,23 = 5; bez wejść 24,25,28 = 3;
+    # nieliczony 27
+    assert n == {"all": 9, "uncounted": 1, "with_inputs": 5, "without_inputs": 3, "no_copy": 1}
     assert n["all"] == n["uncounted"] + n["with_inputs"] + n["without_inputs"]
 
 
@@ -525,7 +552,7 @@ def test_memo_dostawy_mowi_liczniki_stosow_ze_stanu(qapp, tmp_path):
     view = PipelineView(path, now_fn=lambda: NOW)
     try:
         linie = view.lbl_stacks_memo.text().split("\n")
-        assert linie[1] == i18n.t("pipeline.stacks_counts", all=9, with_inputs=5, without=3,
+        assert linie[1] == i18n.t("pipeline.stacks_counts", all=10, with_inputs=5, without=4,
                                   uncounted=1)
         assert view.lbl_stacks_memo.toolTip() == i18n.t("pipeline.stacks_counts_tip", no_copy=0)
     finally:
@@ -690,12 +717,12 @@ def test_sklad_perspektywy_rodowodu_liczy_zbior_kubelka_raz(strona, con, monkeyp
     potrzebuje go dwa razy - w stanach (kolumna, facet) i jako trim. Jeden skład = jedno liczenie;
     stany i trim mówią o tym samym zbiorze.
 
-    Falsyfikator: `stack_lineage_states(con)` bez `oczekujace=` w `_sklad_zbioru` → dwa liczenia."""
+    Falsyfikator: `stack_lineage_states(con)` bez `zbiory=` w `_sklad_zbioru` → dwa liczenia."""
     _seed_stany(con)
     v = strona.frames_view
     wolania = []
-    prawdziwa = queries.lineage_pending_frame_ids
-    monkeypatch.setattr(queries, "lineage_pending_frame_ids",
+    prawdziwa = queries.lineage_hand_sets
+    monkeypatch.setattr(queries, "lineage_hand_sets",
                         lambda c: wolania.append(1) or prawdziwa(c))
     v.apply_perspective(grid_mod.PRESET_LINEAGE)
     assert v._frame_ids == [24]
@@ -784,11 +811,13 @@ def test_grupa_rodowodu_miesci_wartosci_bez_suwaka_a_listwa_sie_przewija(strona,
     v.apply_perspective(grid_mod.PRESET_READY_IMAGES)
     lw = v.facet_rail._lists["lineage"]
     wiersz = lw.sizeHintForRow(0)
-    assert lw.count() == 8
-    assert lw.height() == 6 * wiersz + 2 * lw.frameWidth()          # sufit 6 przy 8 wartościach
+    assert lw.count() == 9
+    assert lw.height() == 6 * wiersz + 2 * lw.frameWidth()          # sufit 6 przy 9 wartościach
     _klik_facetu(v.facet_rail, "lineage", "pending")
     v._facet_state = {"kind": {"in": [["master_light", "master_light"]]}}
     con.execute("DELETE FROM integration_input WHERE integration_id IN (21, 22, 23)")
+    # stos 28 bez wiersza `integration` = „nie liczono" - wartości zostaje 5, poniżej sufitu
+    con.execute("DELETE FROM integration WHERE id = 28")
     con.commit()
     v.refresh()
     assert lw.height() == lw.count() * wiersz + 2 * lw.frameWidth()   # mniej wartości - bez pustki
@@ -888,13 +917,15 @@ def test_stos_z_samymi_klatkami_nowszymi_niz_obraz_wypada_a_panel_mowi_licznik(s
     """AR-154 (powód okna innego niż `no_candidates`): cały materiał powstał po zintegrowaniu
     obrazu - stos wypada z kubełka, panel nie otwiera trybu nocy, a zdanie „Pominięte N klatek
     nowszych niż obraz" zostaje w nocie (bez niego pusta lista nie mówiłaby, dlaczego jest pusta).
+    Od AR-171 taki stos ma własny stan „tylko klatki nowsze niż obraz", a nota mówi też, że
+    przeliczenie niczego nie zmieni (dawny stan „brak" odsyłał do Dostawy).
 
     Falsyfikator: zgub człon `elif propozycja is not None` w `_refresh_lineage` (`grid.py`) albo
     dopisek noty poza trybem propozycji w `set_lineage` → zdanie znika."""
     _seed_stos_okna(con, "degenerate_window", creation_time="2023-04-21T22:30:00Z",
                     lighty=[(52, "2023-04-22T20:00:00"), (53, "2023-04-22T21:00:00")])
     assert 50 not in queries.lineage_pending_frame_ids(con)
-    assert queries.stack_lineage_states(con)[50] == "none"
+    assert queries.stack_lineage_states(con)[50] == "only_newer"
     v = strona.frames_view
     v.refresh()
     _zaznacz(v, [50])
@@ -903,5 +934,506 @@ def test_stos_z_samymi_klatkami_nowszymi_niz_obraz_wypada_a_panel_mowi_licznik(s
     assert bar.night_row.isHidden() and bar.items.count() == 0
     assert bar.head.text() == i18n.t("grid.lin.reason.degenerate_window")
     assert i18n.t_plural("grid.lin.cand.after_integration", 2) in bar.note.full_text()
+    assert i18n.t("grid.lin.cand.only_newer") in bar.note.full_text()
     assert not bar.note.isHidden()
-    assert _tekst_komorki(v, 50, "_rodowod") == i18n.t("grid.lineage.state.none")
+    assert _tekst_komorki(v, 50, "_rodowod") == i18n.t("grid.lineage.state.only_newer")
+
+
+# ---------- AR-153: wejścia ręki nowsze niż obraz - fakt, gest, wiersz Porządków, perspektywa ----------
+
+def _seed_nowsze(con, *, okno_po=False):
+    """Stos 60 (M101, Ha) zapisany 2023-04-22 09:00Z (integracja 61) z wejściami: 62 - ręka, noc
+    obrazu (prawdziwe); 63, 64 - ręka, noce PO zapisie (pomyłka werdyktu, `D-1016-1`); 66 - ręka po
+    zapisie, już odrzucone. `okno_po` dokłada 65 - wejście z okna czasu po zapisie (zegar do
+    sprawdzenia, nie werdykt)."""
+    con.execute("INSERT OR IGNORE INTO object (id, canon, catalog, kind) "
+                "VALUES (8, 'M101', 'catalog', 'deep_sky')")
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                "first_seen_at) VALUES (60, 'm60', 'master_light', 'xisf', 8, 'Ha', ?)", (NOW,))
+    con.execute("INSERT INTO location (frame_id, volume, path, present) "
+                "VALUES (60, 'V', '/a/S/stosM101.xisf', 1)")
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch, creation_time) VALUES (61, 60, ?, 0, 0, 0, "
+                "'2023-04-22T09:00:00Z')", (NOW,))
+    wejscia = [(62, "2023-04-21T22:00:00", "user", 0), (63, "2023-04-22T21:00:00", "user", 0),
+               (64, "2023-04-23T21:00:00", "user", 0), (66, "2023-04-24T21:00:00", "user", 1)]
+    if okno_po:
+        wejscia.append((65, "2023-04-22T22:00:00", "window", 0))
+    for fid, czas, zrodlo, wykl in wejscia:
+        con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                    "first_seen_at) VALUES (?, ?, 'light', 'fits', 8, 'Ha', ?)", (fid, f"n{fid}", NOW))
+        con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                    "VALUES (?, '{}', ?, 300.0)", (fid, czas))
+        con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                    (fid, f"/a/N/l{fid}.fits"))
+        con.execute("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by, "
+                    "excluded) VALUES (61, ?, ?, ?)", (fid, zrodlo, wykl))
+    con.commit()
+
+
+def test_wejscia_panelu_niosa_fakt_nowsze_a_gest_bierze_tylko_reke(con):
+    """FAKT („klatka powstała po zintegrowaniu obrazu") i GEST to dwa pojęcia.
+    Fakt niesie każde źródło (także wiersz odrzucony - panel mówi przy nim, dlaczego), gest
+    i wiersz Porządków biorą wyłącznie werdykt ręki: wejście z okna czasu po zapisie to zegar do
+    sprawdzenia, nie pomyłka werdyktu.
+
+    Falsyfikator: zdejmij `asserted_by == "user"` z `queries._do_odrzucenia` → 65 staje się
+    „do odrzucenia"."""
+    _seed_nowsze(con, okno_po=True)
+    w = {r["input_frame_id"]: (r["newer"], r["rejectable"])
+         for r in queries.stack_lineage_inputs(con, 60)}
+    assert w == {62: (False, False), 63: (True, True), 64: (True, True), 65: (True, False),
+                 66: (True, True)}
+    assert queries.lineage_newer_inputs(con) == {60: (63, 64)}
+    assert queries.lineage_newer_frame_ids(con) == {60}
+
+
+def test_fakt_rodowodu_zapisanego_wola_regule_rdzenia():
+    """SPOT: read-model nie trzyma kopii reguły czasu - woła `stacks.input_after_integration`
+    (ten sam normalizator, co odcięcie propozycji). Falsyfikator: porównanie czasu inline."""
+    import inspect
+    assert "input_after_integration(" in inspect.getsource(queries._wejscie_nowsze)
+
+
+def _stos_nowszy(con, fid, iid, *, ct, offset=None, retired=False, superseded=None, wejscia=()):
+    """Stos `fid` z integracją `iid` (`creation_time` = `ct`, odniesienie `offset`) i wejściami
+    `(frame_id, date_obs, filetype, excluded)` - wszystkie z ręki."""
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at, retired_at, "
+                "superseded_by) VALUES (?, ?, 'master_light', 'xisf', ?, ?, ?)",
+                (fid, f"s{fid}", NOW, NOW if retired else None, superseded))
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch, creation_time, utc_offset_min) VALUES (?, ?, ?, 0, 0, 0, ?, ?)",
+                (iid, fid, NOW, ct, offset))
+    for wid, czas, typ, wykl in wejscia:
+        con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                    "VALUES (?, ?, 'light', ?, ?)", (wid, f"w{wid}", typ, NOW))
+        con.execute("INSERT INTO header (frame_id, raw_json, date_obs) VALUES (?, '{}', ?)",
+                    (wid, czas))
+        con.execute("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by, "
+                    "excluded) VALUES (?, ?, 'user', ?)", (iid, wid, wykl))
+
+
+def test_predykat_globalny_rowny_fladze_panelu_na_formatach_RAW_i_populacji(con):
+    """Wiersz Porządków liczy z SQL-a z NADZBIOREM (`julianday`, pas RAW), panel - wiersz po wierszu.
+    Obie drogi mają mówić to samo na każdym zmierzonym formacie `date_obs` (bez ułamków, `.SSS`,
+    `.SSSSSSS`), na RAW z odniesieniem UJEMNYM (czas lokalny wcześniejszy niż zapis stosu w UTC,
+    a klatka i tak nowsza - pas nadzbioru musi ją przepuścić) i różnić się wyłącznie populacją
+    akcyjną: wejście odrzucone, stos wycofany i zastąpiony nie są robotą.
+
+    Falsyfikatory: pas RAW `?` = 0 (73 znika), zdjęte `ii.excluded = 0` (76 wchodzi), zdjęty warunek
+    żywego stosu (80, 85 wchodzą), dodanie offsetu zamiast odjęcia w `stacks.moment_klatki` (73 znika
+    z obu dróg)."""
+    ct = "2023-04-22T09:00:00Z"
+    _stos_nowszy(con, 70, 71, ct=ct, offset=-600, wejscia=[
+        (72, "2023-04-21T22:30:00", "raw", 0),         # lokalnie 22:30, UTC 08:30 - przed zapisem
+        (73, "2023-04-21T23:30:00", "raw", 0),         # lokalnie 23:30, UTC 09:30 - po zapisie
+        (74, "2023-04-22T09:00:00.1234567", "fits", 0),   # ta sama sekunda - nie
+        (75, "2023-04-22T09:00:01.123", "xisf", 0),    # sekunda po - tak
+        (76, "2023-04-22T21:00:00", "fits", 1)])       # odrzucone - poza robotą
+    _stos_nowszy(con, 80, 81, ct=ct, retired=True, wejscia=[(82, "2023-04-22T21:00:00", "fits", 0)])
+    _stos_nowszy(con, 85, 86, ct=ct, superseded=70, wejscia=[(87, "2023-04-22T21:00:00", "fits", 0)])
+    con.commit()
+    assert queries.lineage_newer_inputs(con) == {70: (73, 75)}
+    z_panelu = {}
+    for mid in (70, 80, 85):
+        ids = tuple(r["input_frame_id"] for r in queries.stack_lineage_inputs(con, mid)
+                    if r["rejectable"] and not r["excluded"])
+        if ids:
+            z_panelu[mid] = ids
+    assert z_panelu == {70: (73, 75), 80: (82,), 85: (87,)}     # fakt o stosie bez populacji
+
+
+def test_predykat_globalny_czyta_naglowki_od_integracji(con):
+    """Koszt (pomiar na kopii pf4): `header.date_obs` stoi za `raw_json`, więc planer przy
+    zwykłym `JOIN` zaczynał od skanu `header` - 79-196 ms zamiast 13-49 ms. Kolejność złączeń jest
+    WYMUSZONA; bramka strukturalna czyta SQL wykonany (przechwycony `set_trace_callback`), a plan
+    zapytania liczy się z literału funkcji z PODANYMI parametrami - bez zależności od tego, czy
+    dana wersja sqlite oddaje w śladzie SQL z wartościami, czy ze znakami `?`.
+
+    Falsyfikator: `CROSS JOIN` → `JOIN` w `queries.lineage_newer_inputs`."""
+    import re
+    from horreum.repo import UTC_OFFSET_MAX_MIN
+    _seed_nowsze(con)
+    zapisane = []
+    con.set_trace_callback(zapisane.append)
+    try:
+        queries.lineage_newer_inputs(con)
+    finally:
+        con.set_trace_callback(None)
+    wykonany = next(s for s in zapisane
+                    if "integration_input" in s and s.lstrip().startswith("SELECT"))
+    assert ("FROM integration i CROSS JOIN integration_input ii CROSS JOIN header h "
+            "CROSS JOIN frame f") in " ".join(wykonany.split())
+    literal = next(c for c in queries.lineage_newer_inputs.__code__.co_consts
+                   if isinstance(c, str) and "integration_input ii" in c)
+    plan = [r[3] for r in con.execute("EXPLAIN QUERY PLAN " + literal,
+                                      (UTC_OFFSET_MAX_MIN / 1440.0, 1.0 / 86400))]
+    # Pierwsza pętla na aliasie `i`, w każdym zapisie planu („SCAN i", „SCAN i USING …", starsze
+    # „SCAN TABLE integration AS i"); granica słowa odrzuca „SCAN ii" - plan zwykłego `JOIN`.
+    assert re.match(r"(SCAN|SEARCH)( TABLE \w+ AS)? i\b", plan[0]), plan
+
+
+def _klik_wiersza_zadania(tv, klucz):
+    lista = tv.tasks
+    it = next(lista.item(i) for i in range(lista.count()) if lista.item(i).data(Qt.UserRole) == klucz)
+    QApplication.processEvents()
+    lista.scrollToItem(it)
+    QTest.mouseClick(lista.viewport(), Qt.LeftButton, Qt.NoModifier, lista.visualItemRect(it).center())
+    QApplication.processEvents()
+    return it
+
+
+def test_przycisk_odrzuca_tylko_nowsze_a_cofnij_przywraca(strona, con):
+    """Cała droga gestu prawdziwym kliknięciem: panel nazywa liczbę wejść nowszych niż obraz,
+    znakuje je w wierszu (tekst i kolor), „Odrzuć nowsze niż obraz" odrzuca WYŁĄCZNIE je - werdykt
+    ręki sprzed zapisu stosu zostaje - a „Cofnij werdykt" z paska wraca do stanu sprzed gestu.
+
+    Falsyfikator: `_emit_newer` emituje wszystkie wiersze listy → 62 też odrzucone."""
+    _seed_nowsze(con)
+    v = strona.frames_view
+    recepty, zdania = [], []
+    v.status_recipe.connect(recepty.append)
+    v.status_message.connect(zdania.append)
+    v.refresh()
+    _zaznacz(v, [60])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    assert bar.btn_reject_newer.isVisible() and bar.btn_reject_newer.isEnabled()
+    assert bar.btn_reject_newer.toolTip() == i18n.t("grid.lin.reject_newer_tip",
+                                                    undo=i18n.t("grid.lin.undo"))
+    assert f"„{i18n.t('grid.lin.undo')}”" in bar.btn_reject_newer.toolTip()   # napis recepty paska
+    assert i18n.t_plural("grid.lin.flag.newer", 2) in bar.warn.full_text()
+    assert i18n.t("grid.lin.flag.newer_clock") not in bar.warn.full_text()
+    nowszy = _wiersz_listy(bar.items, 63)
+    assert f"[{i18n.t('grid.lin.src.user')} · {i18n.t('grid.lin.src.newer')}]" in nowszy.text()
+    assert nowszy.foreground().color() == grid_model._COLORS["warn"]
+    assert i18n.t("grid.lin.src.newer") not in _wiersz_listy(bar.items, 62).text()
+    odrzucony = _wiersz_listy(bar.items, 66)                   # znacznik mówi, dlaczego odrzucono
+    assert i18n.t("grid.lin.src.newer") in odrzucony.text()
+    assert odrzucony.foreground().color() == grid_model._COLORS["secondary_text"]
+
+    _klik(bar.btn_reject_newer)
+    assert _stan_wejscia(con, 63, 61) == _stan_wejscia(con, 64, 61) == ("user", 1)
+    assert _stan_wejscia(con, 62, 61) == ("user", 0)
+    assert zdania[-1] == i18n.t("grid.lin.judged_excluded", n=2)
+    assert queries.lineage_newer_inputs(con) == {}
+    assert not bar.btn_reject_newer.isVisible()                # nie ma już czego odrzucić
+    assert i18n.t_plural("grid.lin.flag.newer", 2) not in bar.warn.full_text()
+
+    recepta = recepty[-1]
+    assert str(recepta) == i18n.t("grid.lin.undo")
+    recepta.czlony[0].wykonaj()
+    assert _stan_wejscia(con, 63, 61) == _stan_wejscia(con, 64, 61) == ("user", 0)
+    assert queries.lineage_newer_inputs(con) == {60: (63, 64)}
+    assert bar.btn_reject_newer.isVisible()
+
+
+def test_przycisk_nowszych_milczy_w_biegu_i_poza_stosem_z_takimi_wejsciami(strona, con):
+    """Etap w tle gasi gest jak sąsiednie werdykty (ten sam stół `integration_input`); stos bez
+    wejść nowszych niż obraz przycisku nie pokazuje wcale. Falsyfikator: `setEnabled(True)`."""
+    _seed_nowsze(con)
+    v = strona.frames_view
+    v.refresh()
+    _zaznacz(v, [60])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    emisje = []
+    bar.judged.connect(lambda *a: emisje.append(a))
+    bar.set_busy(True)
+    assert not bar.btn_reject_newer.isEnabled()
+    _klik(bar.btn_reject_newer)
+    assert emisje == []
+    bar.set_busy(False)
+    _zaznacz(v, [10])                                          # stos z `_seed` - same wejścia okna
+    assert bar.isVisible() and not bar.btn_reject_newer.isVisible()
+
+
+def test_wejscie_spoza_reki_nowsze_niz_obraz_mowi_o_zegarze_bez_gestu(strona, con):
+    """Fakt bez gestu: wejście z okna czasu po zapisie stosu dostaje znacznik i JEDNO zdanie „sprawdź
+    zegar" - bez przycisku i bez werdyktu (populacja żywego archiwum: 0, stąd syntetyka)."""
+    _seed_nowsze(con, okno_po=True)
+    con.execute("UPDATE integration_input SET excluded = 1 WHERE input_frame_id IN (63, 64)")
+    con.commit()
+    v = strona.frames_view
+    v.refresh()
+    _zaznacz(v, [60])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    assert i18n.t("grid.lin.flag.newer_clock") in bar.warn.full_text()
+    assert bar.items.isVisible() and not bar.btn_reject_newer.isVisible()
+    assert i18n.t("grid.lin.src.newer") in _wiersz_listy(bar.items, 65).text()
+    i18n.set_lang("en")                                        # conftest zeruje język przed testem
+    v._refresh_lineage()
+    assert "check the clock in the header" in bar.warn.full_text()
+
+
+def test_wiersz_porzadkow_nowszych_liczy_obrazy_i_gasnie_po_gescie(qapp, con):
+    """Wiersz Porządków liczy OBRAZY (= długość listy pod klikiem, D-PD-10), podpowiedź - wejścia
+    i gest. Robota: pogrubienie i plakietka; po geście stan, nie dziennik - szare zero.
+
+    Falsyfikatory: wiersz w `_BEZ_ROBOTY` (bez pogrubienia), licznik liczący wejścia (2 zamiast 1)."""
+    from horreum import repo
+    from horreum.gui import rows, tasks as tasks_mod
+    _seed_nowsze(con)
+    licz = tasks_mod._liczniki_osi(con)
+    assert licz["lineage_newer"] == len(queries.lineage_newer_frame_ids(con)) == 1
+    assert licz["lineage_newer_inputs"] == 2
+    tv = tasks_mod.TasksView(con)
+    try:
+        badge = tv.refresh_counts()
+        it = next(tv.tasks.item(i) for i in range(tv.tasks.count())
+                  if tv.tasks.item(i).data(Qt.UserRole) == "lineage_newer")
+        assert it.text() == i18n.t("tasks.lineage_newer")
+        assert it.data(rows.SECONDARY) == "1  ›" and it.data(rows.STRONG) is True
+        assert it.toolTip() == i18n.t("tasks.lineage_newer_tip", n=2,
+                                      reject=i18n.t("grid.lin.reject_newer"),
+                                      undo=i18n.t("grid.lin.undo"))
+        assert f"„{i18n.t('grid.lin.undo')}”" in it.toolTip()
+        repo.judge_integration_inputs(con, integration_id=61, input_frame_ids=[63, 64],
+                                      excluded=True, now=NOW)
+        assert tv.refresh_counts() == badge - 1
+        assert it.data(rows.SECONDARY) == "0  ›" and it.data(rows.STRONG) is False
+        assert it.foreground().color() == tasks_mod._DIM["fg"]
+    finally:
+        tv.close()
+
+
+def test_wiersz_porzadkow_nowszych_prowadzi_do_perspektywy_z_belka_dokladny(qapp, tmp_path,
+                                                                           monkeypatch):
+    """Klik myszą w wiersz → Zbiory z perspektywą tych obrazów, pogrupowaną po stanie rodowodu:
+    obraz stoi pod belką „dokładny" (tam Zdzin oglądał te stosy). Lista = predykat wiersza.
+
+    Falsyfikator: zła nazwa zapytania w `_TRIMY` albo `group_by` None w presecie."""
+    from horreum.gui.app import MainWindow, NAV_PORZADKI, STRONA_ZBIORY
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    path = str(tmp_path / "n.db")
+    c = db.open_db(path)
+    _seed(c)
+    _seed_nowsze(c)
+    c.close()
+    win = MainWindow(path)
+    try:
+        win.show()
+        win._show_view(NAV_PORZADKI)
+        _klik_wiersza_zadania(win.tasks_view, "lineage_newer")
+        assert win._strona() == STRONA_ZBIORY
+        g = win.grid_view
+        assert g.combo_persp.currentData() == ("preset", grid_model.PRESET_LINEAGE_NEWER)
+        assert g.combo_persp.currentText() == i18n.t("tasks.lineage_newer")
+        assert set(g._frame_ids) == queries.lineage_newer_frame_ids(win.con) == {60}
+        assert [r["_group"] for r in g.model._rows if "_group" in r] == [
+            i18n.t("grid.lineage.state.exact")]
+    finally:
+        win.close()
+
+
+def test_jeden_zbior_nowszych_ma_jedna_nazwe_na_trzech_powierzchniach():
+    """Wiersz Porządków, perspektywa i pasek kryteriów mówią jedną nazwą (wzór
+    `test_i18n.test_jeden_zbior_rodowodu_ma_jedna_nazwe_na_trzech_powierzchniach`)."""
+    for lang in ("pl", "en"):
+        i18n.set_lang(lang)
+        nazwa = i18n.t("perspective.lineage_newer")
+        assert i18n.t("tasks.lineage_newer") == nazwa, lang
+        assert nazwa.lower() in i18n.t("grid.criteria.only_lineage_newer").lower(), lang
+
+
+_PO_OBRAZIE = "po zintegrowaniu obrazu - nie"
+
+
+@pytest.mark.parametrize("n, zdanie", [
+    (1, f"⚠ 1 klatka na liście powstała {_PO_OBRAZIE} mogła do niego wejść"),
+    (2, f"⚠ 2 klatki na liście powstały {_PO_OBRAZIE} mogły do niego wejść"),
+    (5, f"⚠ 5 klatek na liście powstało {_PO_OBRAZIE} mogło do niego wejść"),
+    (12, f"⚠ 12 klatek na liście powstało {_PO_OBRAZIE} mogło do niego wejść"),
+    (22, f"⚠ 22 klatki na liście powstały {_PO_OBRAZIE} mogły do niego wejść")])
+def test_zdanie_o_wejsciach_nowszych_sie_odmienia(n, zdanie):
+    """Całe zdanie, oba czasowniki w zgodzie z liczebnikiem („5 klatek powstało - nie mogło")."""
+    assert i18n.t_plural("grid.lin.flag.newer", n) == zdanie
+
+
+@pytest.mark.parametrize("n, fraza", [(1, "⚠ 1 listed frame was"), (2, "⚠ 2 listed frames were"),
+                                      (22, "⚠ 22 listed frames were")])
+def test_zdanie_o_wejsciach_nowszych_EN_one_other(n, fraza):
+    i18n.set_lang("en")
+    assert i18n.t_plural("grid.lin.flag.newer", n).startswith(fraza)
+
+
+# ---------- AR-171: stan „tylko klatki nowsze niż obraz" ----------
+
+def test_stan_tylko_nowsze_ma_podpowiedz_role_braku_lisc_fasetu_i_zdanie_panelu(strona, con):
+    """Każdy konsument tokenu zna `only_newer`: komórka (tekst, podpowiedź, rola braku), liść fasetu
+    klikany myszą, liść silnika filtra i nota panelu w obu językach. Podpowiedź nie odsyła do
+    Dostawy - przeliczenie niczego tu nie zmieni (dawny stan „brak").
+
+    Falsyfikatory: token poza `_RODOWOD_BRAK` (rola), brak gałęzi w `_stan_rodowodu` („brak")."""
+    _seed_stany(con)
+    v = strona.frames_view
+    v.apply_perspective(grid_mod.PRESET_READY_IMAGES)
+    assert _tekst_komorki(v, 28, "_rodowod") == i18n.t("grid.lineage.state.only_newer")
+    assert _tekst_komorki(v, 28, "_rodowod", Qt.ToolTipRole) == i18n.t("grid.lineage.tip.only_newer")
+    assert "Dostaw" in i18n.t("grid.lineage.tip.only_newer")      # mówi, że Dostawa NIE pomoże
+    assert _tekst_komorki(v, 28, "_rodowod", Qt.ForegroundRole) == grid_model._COLORS["missing"]
+    assert filter_engine.run({"facet": "lineage", "value": "only_newer"},
+                             leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
+                             universe_fn=lambda: queries.all_frame_ids(con)) == {28}
+    _klik_facetu(v.facet_rail, "lineage", "only_newer")
+    assert v._frame_ids == [28]
+    _zaznacz(v, [28])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    assert bar.head.text() == i18n.t("grid.lin.reason.no_candidates_after_integration")
+    assert i18n.t("grid.lin.cand.only_newer") in bar.note.full_text()
+    i18n.set_lang("en")
+    v._refresh_lineage()
+    assert "recomputing lineage in Intake will not change that" in bar.note.full_text()
+
+
+def test_werdykt_reki_wygrywa_z_samymi_nowszymi(strona, con):
+    """Stos z odrzuconym kandydatem nocy obrazu i samymi nowszymi poza nim - „wszystkie odrzucone",
+    nie „tylko nowsze": werdykt ręki jest faktem mocniejszym niż stan wyprowadzony z propozycji.
+    Panel nie mówi nad tą listą „nie ma tu czego potwierdzić" - odrzucony wiersz da się potwierdzić.
+    Falsyfikatory: kolejność gałęzi w `_stan_rodowodu`; zdanie noty bez warunku na `inputs`."""
+    from horreum import repo
+    _seed_stos_okna(con, "degenerate_window", creation_time="2023-04-21T22:30:00Z",
+                    lighty=[(52, "2023-04-21T21:00:00"), (53, "2023-04-22T21:00:00")])
+    assert queries.stack_lineage_states(con)[50] == "pending"   # 52 z nocy obrazu czeka na gest
+    repo.judge_integration_inputs(con, integration_id=51, input_frame_ids=[52], excluded=True,
+                                  now=NOW)
+    zbiory = queries.lineage_hand_sets(con)
+    assert 50 not in zbiory.pending and 50 in zbiory.only_newer
+    assert queries.stack_lineage_states(con)[50] == "rejected"
+    v = strona.frames_view
+    v.refresh()
+    _zaznacz(v, [50])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    assert bar.items.isVisible() and _wiersz_listy(bar.items, 52)          # werdykt do cofnięcia
+    assert i18n.t_plural("grid.lin.cand.after_integration", 1) in bar.note.full_text()
+    assert i18n.t("grid.lin.cand.only_newer") not in bar.note.full_text()
+
+
+def test_karta_teleskopu_po_werdyktach_zostaje_w_kubelku(strona, con):
+    """AR-171 pkt 3: receptą `telescope_mismatch` jest naprawa karty, a ta od listy kandydatów nie
+    zależy - odrzucenie ostatniego kandydata nie zdejmuje stosu z kubełka (wcześniej taki stos
+    wypadał jako „wszystkie odrzucone"). Panel nie otwiera wtedy trybu nocy z pustą nocą i zdaniem
+    „archiwum nie ma ani jednej klatki" (fałsz - klatka jest, odrzucona ręką): nagłówek mówi powód
+    z receptą, lista - własny werdykt do cofnięcia. Populacja żywego archiwum: 0.
+
+    Falsyfikatory: zdejmij `REASON_TELESCOPE` z gałęzi w `queries._reka_i_propozycja` (stos wypada);
+    zdejmij warunek na własne werdykty przed `_set_candidates` w `set_lineage` (pusta noc wraca)."""
+    from horreum import repo
+    _seed_stos_okna(con, "telescope_mismatch", lighty=[(52, "2023-04-21T21:00:00")])
+    repo.judge_integration_inputs(con, integration_id=51, input_frame_ids=[52], excluded=True,
+                                  now=NOW)
+    assert 50 in queries.lineage_pending_frame_ids(con)
+    assert queries.stack_lineage_states(con)[50] == "pending"
+    v = strona.frames_view
+    v.refresh()
+    _zaznacz(v, [50])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    assert bar.head.text() == i18n.t("grid.lin.reason.telescope_mismatch")
+    assert not bar.night_row.isVisible()
+    assert i18n.t("grid.lin.cand.empty_all") not in bar.note.full_text()
+    assert bar.items.isVisible() and _wiersz_listy(bar.items, 52)          # werdykt do cofnięcia
+
+
+def test_gest_w_perspektywie_nowszych_cofa_sie_oboma_czlonami_recepty(strona, con):
+    """Główna droga z wiersza Porządków: perspektywa „Rodowód z klatkami nowszymi niż obraz", klik
+    gestu - obraz wypada z perspektywy (stan, nie dziennik), więc recepta ma DWA człony: odsłonięcie
+    (wykonalne) i „potem cofniesz werdykt" (bez wykonawcy, póki obraz poza widokiem). Wykonanie obu
+    przywraca CAŁĄ tabelę `integration_input` sprzed gestu; dziennik niesie po jednym zdarzeniu
+    werdyktu i cofnięcia na każde wejście.
+
+    Falsyfikator: recepta bez członu odsłonięcia (cofnięcie wisi na obrazie, którego nie widać)."""
+    _seed_nowsze(con)
+    v = strona.frames_view
+    recepty = []
+    v.status_recipe.connect(recepty.append)
+
+    def tabela():
+        return [tuple(r) for r in con.execute("SELECT * FROM integration_input ORDER BY rowid")]
+
+    def zdarzenia(verb):
+        return con.execute("SELECT COUNT(*) FROM event WHERE verb = ?", (verb,)).fetchone()[0]
+
+    przed = tabela()
+    v.apply_perspective(grid_model.PRESET_LINEAGE_NEWER)
+    assert v._frame_ids == [60]
+    _zaznacz(v, [60])
+    v._toggle_panel("lineage")
+    assert v.lineage_bar.btn_reject_newer.isVisible()
+    _klik(v.lineage_bar.btn_reject_newer)
+    assert v._frame_ids == []
+    recepta = recepty[-1]
+    assert len(recepta.czlony) == 2
+    assert recepta.czlony[0].wykonaj is not None and recepta.czlony[1].wykonaj is None
+    recepta.czlony[0].wykonaj()                                  # odsłoń obraz
+    QApplication.processEvents()
+    assert 60 in v._frame_ids
+    assert str(recepty[-1]) == i18n.t("grid.lin.undo")          # został sam człon cofnięcia
+    cofnij = [c for c in recepty[-1].czlony if c.wykonaj is not None]
+    assert len(cofnij) == 1
+    cofnij[0].wykonaj()
+    QApplication.processEvents()
+    assert tabela() == przed
+    assert zdarzenia("integration.judged") == 2
+    assert zdarzenia("integration.judgment_restored") == 2
+    assert queries.lineage_newer_inputs(con) == {60: (63, 64)}
+
+
+def test_potwierdz_ostrzega_przy_zaznaczonej_klatce_nowszej_niz_obraz(strona, con):
+    """„Potwierdź zaznaczone" zostaje czynne - werdykt należy do człowieka - ale przy zaznaczeniu
+    z klatką nowszą niż obraz podpowiedź mówi, co ten werdykt zapisze. Zaznaczenie bez takiej klatki
+    wraca do zwykłej podpowiedzi. Falsyfikator: podpowiedź bez warunku na zaznaczenie."""
+    _seed_nowsze(con)
+    v = strona.frames_view
+    v.refresh()
+    _zaznacz(v, [60])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    _klik_wiersza(bar.items, 66)                                 # odrzucona i nowsza niż obraz
+    assert bar.btn_confirm.isEnabled()
+    assert bar.btn_confirm.toolTip() == i18n.t("grid.lin.confirm_tip_newer")
+    _klik_wiersza(bar.items, 62)                                 # prawdziwe wejście nocy obrazu
+    assert bar.btn_confirm.toolTip() == i18n.t("grid.lin.confirm_tip")
+
+
+def test_nadzbior_sql_przepuszcza_chwile_zapisu_ktorej_julianday_nie_czyta(con):
+    """`creation_time` z sufiksem `Z`, który reguła czyta (`header_dt` - prefiks), a `julianday` nie
+    (`…ZZ` → NULL): porównanie z NULL wycinałoby wiersz z nadzbioru po cichu, a panel i tak by go
+    oflagował. Obie drogi mówią to samo. Falsyfikator: zdejmij `OR julianday(i.creation_time) IS
+    NULL` z `queries.lineage_newer_inputs`."""
+    _stos_nowszy(con, 90, 91, ct="2023-04-22T09:00:00ZZ", wejscia=[
+        (92, "2023-04-22T21:00:00", "fits", 0), (93, "2023-04-21T21:00:00", "fits", 0)])
+    con.commit()
+    assert con.execute("SELECT julianday('2023-04-22T09:00:00ZZ')").fetchone()[0] is None
+    assert queries.lineage_newer_inputs(con) == {90: (92,)}
+    assert [r["input_frame_id"] for r in queries.stack_lineage_inputs(con, 90) if r["rejectable"]] \
+        == [92]
+
+
+def test_podpowiedz_dokladny_mowi_o_wejsciach_nowszych_a_zbior_liczy_sie_raz(strona, con,
+                                                                            monkeypatch):
+    """„Dokładny" z werdyktem ręki na klatce nowszej niż obraz ma własną podpowiedź z nazwą gestu;
+    zwykły „dokładny" - dotychczasową. Zbiór `lineage_newer_frame_ids` liczy się RAZ na skład: przy
+    perspektywie wiersza Porządków jeden odczyt służy trimowi i podpowiedzi, a bez obrazu „dokładny"
+    w zbiorze nie liczy się wcale. Falsyfikatory: podpowiedź bez wariantu; drugi odczyt w składzie."""
+    _seed_stany(con)
+    _seed_nowsze(con)
+    v = strona.frames_view
+    wolania = []
+    prawdziwa = queries.lineage_newer_frame_ids
+    monkeypatch.setattr(queries, "lineage_newer_frame_ids",
+                        lambda c: wolania.append(1) or prawdziwa(c))
+    v.apply_perspective(grid_mod.PRESET_READY_IMAGES)
+    assert len(wolania) == 1
+    assert _tekst_komorki(v, 60, "_rodowod", Qt.ToolTipRole) == i18n.t(
+        "grid.lineage.tip.exact_newer", reject=i18n.t("grid.lin.reject_newer"))
+    assert _tekst_komorki(v, 23, "_rodowod", Qt.ToolTipRole) == i18n.t("grid.lineage.tip.exact")
+    wolania.clear()
+    v.apply_perspective(grid_model.PRESET_LINEAGE_NEWER)
+    assert v._frame_ids == [60] and len(wolania) == 1
+    wolania.clear()
+    v.apply_perspective("Kalibracja")                            # bez gotowych obrazów
+    assert len(wolania) == 0

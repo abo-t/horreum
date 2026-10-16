@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from horreum import resolver
 from horreum.gui import facet_model, i18n, queries
+from horreum.gui.config_dialog import dopasuj_wysokosc   # wspólny pomocnik okien (AR-176)
 from horreum.resolve._text import LITERY_BEZ_ROZKLADU, norm_alnum
 from horreum.resolve.catalog import catalog_canon, header_form, xref, xref_aliases
 from horreum.resolve.objects import common_name_form, load_own_objects
@@ -493,7 +494,7 @@ class AssignObjectDialog(QDialog):
 
     def _fail(self, msg):
         self.error.setText(msg)
-        self._dopasuj_wysokosc()
+        dopasuj_wysokosc(self)
 
     _broni_sie_sama = staticmethod(broni_sie_sama)     # funkcja modułowa (R-S2b-12) — jeden właściciel
 
@@ -555,27 +556,11 @@ class AssignObjectDialog(QDialog):
             self.canon_preview.setVisible(True)
             self.canon_preview.setText(i18n.t("assign.xref_redirect", old=wybor[1],
                                               new=cel["canon"]))
-        self._dopasuj_wysokosc()
-
-    def _dopasuj_wysokosc(self):
-        """Okno ROŚNIE (tylko w górę) do wysokości, której treść potrzebuje przy BIEŻĄCEJ
-        szerokości - etykiety zawijają zdania (nagłówek, zdanie na żywo, noty, błąd), więc ich
-        wysokość zależy od szerokości (`heightForWidth`). Bez tego okno zostawało przy rozmiarze
-        z otwarcia, a druga linia zdania „…zapis założy go w bazie” i nagłówka była ucięta
-        w pół wiersza (wizytacja natywna: etykiety 24 px przy potrzebnych 32). Wołane po każdej
-        zmianie tych zdań i przy pokazaniu okna; okno niepokazane nie ma jeszcze szerokości."""
-        if not self.isVisible():
-            return
-        lay = self.layout()
-        lay.activate()
-        potrzeba = (lay.totalHeightForWidth(self.width()) if lay.hasHeightForWidth()
-                    else lay.totalSizeHint().height())
-        if potrzeba > self.height():
-            self.resize(self.width(), potrzeba)
+        dopasuj_wysokosc(self)          # okno rośnie do zawiniętych zdań (`config_dialog`)
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._dopasuj_wysokosc()
+        dopasuj_wysokosc(self)
 
     def _ustaw_zakladanie(self, canon):
         """Przycisk akcji mówi WPROST, że zapis założy obiekt `canon` („Załóż NGC1952 · Przypisz

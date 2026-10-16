@@ -304,9 +304,9 @@ def alias_lookup(con):
 def forma_karty_object(con, canon, *, lookup=None):
     """Kanon Horreum → wartość karty `OBJECT` do PLIKU albo None - JEDEN punkt wyliczenia formy dla
     wszystkich dróg piszących kartę: gestów GUI („Zatwierdź ze ścieżki…", „Napraw nagłówek…",
-    „Zmień obiekt…”, „Uzgodnij”; decyzje Q6 i D2 2026-09-26: jedna wersja na obiekt, nazwy
-    zwyczajowe → oznaczenie katalogowe) i wsadu ujednolicenia (`gui.queries.object_card_form_rows`,
-    O5). Mieszka tu, a nie w GUI, bo wsad jest Qt-wolny (kimi Z1, 2026-09-26).
+    „Zmień obiekt…”, „Uzgodnij” - ten od AR-157 ujednolica też istniejące karty, O5; decyzje Q6
+    i D2 2026-09-26: jedna wersja na obiekt, nazwy zwyczajowe → oznaczenie katalogowe). Mieszka tu,
+    a nie w GUI, bo planer gestu i jego read-model są Qt-wolne (kimi Z1, 2026-09-26).
 
     PRZESŁANKA FORMY: karta z nią SAMA - bez ręki - sprowadza klatkę do tego obiektu przy następnym
     przebiegu (`run_resolver`). Kanon nauczony wyłącznie aliasem (`ZW77` znany tylko jako

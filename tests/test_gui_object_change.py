@@ -13,6 +13,10 @@ import dataclasses
 import os
 import time
 
+# Platforma PRZED importem Qt (AR-170): plik puszczony sam biegł natywnie - geometria okien zależała
+# od maszyny (styl, ekran, DPR), w baterii platformę stawiał moduł zebrany wcześniej.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 
 pytest.importorskip("PySide6")
@@ -2162,7 +2166,9 @@ def test_powody_pominiec_w_jezyku_UI_na_PRAWDZIWYM_planerze_i_w_oknie(qapp, tmp_
             assert (wewn != p["inner"]) == (lang == "en"), wewn
         else:
             if s.code == "card_skip":                  # szczegół bramki karty w języku UI
-                p["detail"] = i18n.t(f"objchg.gate.{p.pop('gate')}", **dict(p.pop("gate_params")))
+                bramka = p.pop("gate")
+                rodzina = "gate" if f"objchg.gate.{bramka}" in CATALOG else "item"   # suma (AR-167)
+                p["detail"] = i18n.t(f"objchg.{rodzina}.{bramka}", **dict(p.pop("gate_params")))
             assert tekst == czytelny(i18n.t(f"objchg.skip.{s.code}", **p)), (s.code, tekst)
         assert "\\\\" not in tekst, tekst
         if lang == "en" and s.code != "dir_unreadable":        # szczegół z komunikatu systemu
@@ -2256,7 +2262,7 @@ def test_KAZDY_powod_bramki_karty_ma_zdanie_PL_i_EN_a_PL_to_zdanie_bramki():
                     and w.func.id == "ZdanieRdzenia"):
                 zdanie, kod = w.args
                 kody[kod.value] = (zdanie, {k.arg for k in w.keywords})
-    assert len(kody) == 14
+    assert len(kody) == 13
     for kod, (zdanie, parametry) in kody.items():
         wpis = CATALOG[f"objchg.gate.{kod}"]
         pola = {j: {f for _, f, _, _ in string.Formatter().parse(wpis[j]) if f}
@@ -2612,8 +2618,9 @@ def test_ostrzezenia_STEROWNIKA_niosa_kod_i_mowia_w_jezyku_UI(tmp_path, monkeypa
     monkeypatch.undo()
     uwaga, = [w for w in wynik.warnings if getattr(w, "code", None) == "dir_not_removed"]
     assert dict(uwaga.params)["dir"] == str(s.zrodlo)
-    assert dict(uwaga.params)["detail"].startswith("PermissionError: ")
-    assert uwaga.startswith(f"katalog {s.zrodlo} nie usunięty (PermissionError: ")   # zdanie PL
+    assert dict(uwaga.params)["detail"].code == "os_denied"           # błąd systemu klasą (AR-168)
+    assert uwaga.startswith(f"katalog {s.zrodlo} nie usunięty (odmowa dostępu do pliku "
+                            f"(Errno 13))")                                       # zdanie PL
     s.con.close()
     # katalog założony bez potwierdzenia (śmierć po `mkdir`) - własność niepewna
     s = _Scena(tmp_path / "b")
@@ -2629,12 +2636,15 @@ def test_ostrzezenia_STEROWNIKA_niosa_kod_i_mowia_w_jezyku_UI(tmp_path, monkeypa
 
     wynik = dataclasses.replace(wynik, warnings=(uwaga, niepewna, "zdanie rdzenia bez kodu"))
     zdanie = zdanie_wyniku_zmiany(wynik)
+    from horreum.gui.wb_worker import tekst_powodu
     for w in (uwaga, niepewna):
-        assert czytelny(i18n.t(f"objchg.warn.{w.code}", **dict(w.params))) in zdanie
+        p = {k: tekst_powodu(v) if hasattr(v, "code") else v for k, v in w.params}
+        assert czytelny(i18n.t(f"objchg.warn.{w.code}", **p)) in zdanie
     assert zdanie.endswith("\nzdanie rdzenia bez kodu")
     if lang == "en":
         assert "nie usunięty" not in zdanie and "własność niepewna" not in zdanie
-        assert "not removed (PermissionError: " in zdanie and "ownership uncertain" in zdanie
+        assert "not removed (access to the file denied (Errno 13))" in zdanie
+        assert "ownership uncertain" in zdanie
 
 
 def czytelny(tekst):
@@ -2768,9 +2778,9 @@ def test_Napraw_naglowek_rozmiar_OD_TRESCI_a_zapis_nie_rozpycha_okna(qapp, tmp_p
     w podpowiedzi - osobny test bez geometrii
     (`test_Napraw_naglowek_szczegol_spadku_w_podpowiedzi_w_jezyku_UI`).
 
-    AR-159: ten plik nie stawia `QT_QPA_PLATFORM=offscreen`, więc puszczony sam biegł na platformie
-    natywnej (Windows: styl `windows11`, dwa ekrany, DPR 1,5), a w baterii - offscreen (`fusion`,
-    ekran 800×800), bo platformę stawia moduł testów zebrany wcześniej. Asercja `isHidden()` suwaka
+    AR-159: do AR-170 ten plik nie stawiał `QT_QPA_PLATFORM=offscreen`, więc puszczony sam biegł na
+    platformie natywnej (Windows: styl `windows11`, dwa ekrany, DPR 1,5), a w baterii - offscreen
+    (`fusion`, ekran 800×800), bo platformę stawiał moduł testów zebrany wcześniej. Asercja `isHidden()` suwaka
     poziomego zależała od stylu: `windows11` trzyma suwak niechowany przy zakresie 0 (zmierzone:
     zakres 0, viewport 788 px ≥ treść 776 px, a `isHidden()` False). Reguła „wiersze się mieszczą”
     to ZAKRES suwaka 0 - nic do przewinięcia w poziomie - niezależnie od stylu. Sufit liczony
@@ -2890,7 +2900,7 @@ def test_Napraw_naglowek_FITS_z_suma_kontrolna_POMINIETY_przed_zapisem_z_foldere
     dlg = _okno_naprawy(con)
     assert [len(g["rows"]) for g in dlg._groups] == [4]
     assert dlg.save_btn.text() == i18n.t("repair.save_btn_n", n=4) and dlg.save_btn.isEnabled()
-    powod = i18n.t("objchg.gate.fits_checksum")
+    powod = i18n.t("objchg.item.fits_checksum")         # powód rdzenia bramki sumy (AR-167)
     pozycje = sorted(dlg.skipped_list.item(i).text() for i in range(dlg.skipped_list.count()))
     assert pozycje == sorted([
         i18n.t_plural("repair.skip.checksum", 2, folder="NGC7635\\RC8_2600MC\\OSC", reason=powod),
@@ -2917,7 +2927,7 @@ def test_Napraw_naglowek_folder_TYLKO_z_suma_mowi_wprost_i_nie_ma_czego_zapisac(
     assert dlg.save_btn.text() == i18n.t("repair.save_btn") and not dlg.save_btn.isEnabled()
     assert [dlg.skipped_list.item(i).text() for i in range(dlg.skipped_list.count())] == [
         i18n.t_plural("repair.skip.checksum_all", 5, folder="IC405\\RC8_2600MC\\OSC",
-                      reason=i18n.t("objchg.gate.fits_checksum"))]
+                      reason=i18n.t("objchg.item.fits_checksum"))]
     dlg.reject()
     con.close()
     caly = {"pl": "X: cały folder pominięty ({}) - r", "en": "X: whole folder skipped ({}) - r"}
@@ -2972,7 +2982,7 @@ def test_Napraw_naglowek_cofniecie_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy
         qapp, tmp_path, monkeypatch):
     """AR-160 (cancelled): anulowanie przerywa pętlę rdzenia PRZED kolejnymi backupami - jeden plik
     wrócił, drugi nie (`restored` + `cancelled`), więc commit nie jest cofnięty. „Cofnij” zostaje,
-    zdanie mówi o przerwaniu i o tym, że ponowienie dokończy resztę; ponowienie kończy i chowa
+    zdanie mówi o przerwaniu i o plikach do sprawdzenia, bez obietnicy wyniku; ponowienie kończy i chowa
     przycisk. Falsyfikator: reguła „Cofnij zostaje” tylko przy `failed`."""
     from astropy.io import fits
     from horreum.gui.wb_worker import WritebackWorker, _liczba
@@ -2993,7 +3003,9 @@ def test_Napraw_naglowek_cofniecie_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy
         dlg._on_undo()
     tekst = dlg.status.text()
     assert _liczba("grid.wb.restored", 1) in tekst, tekst
-    assert i18n.t("wb.undo_cancelled", undo=i18n.t("grid.action.undo")) in tekst, tekst
+    # Rdzeń zna resztę (AR-176): 1 nieprzetworzony plik wymaga sprawdzenia - bez obietnicy.
+    assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in tekst, \
+        tekst
     assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id
     assert not dlg.save_btn.isEnabled()
     assert sorted(fits.getheader(str(p)).get("OBJECT") is None for p in pliki) == [False, True]
@@ -3393,4 +3405,167 @@ def test_Zatwierdz_ze_sciezki_pomija_karte_regionu_z_powodem(tmp_path):
     assert skipped == [(w, "", powod), (poza, "", powod)]
     _value, touched, _skipped = app_mod.plan_kart_sciezki(con, "NGC7000", [poza])
     assert [t.new_value for t in touched] == ["NGC 7000"]
+    con.close()
+
+
+# ═══════════════════════════════════════════════ „Napraw nagłówek…”: status nie ucina zdania (AR-176)
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Napraw_naglowek_status_nie_ucina_zdania_wyniku(qapp, tmp_path, lang):
+    """AR-176 (zmierzone natywnie): przy JEDNEJ grupie okno ma pion tylko na listę i rząd przycisków,
+    a zdanie cofnięcia z błędem, blokadą, przerwaniem i receptą zawija się w kilka wierszy - etykieta
+    statusu dostawała 44 px przy potrzebnych 64, okno nie rosło. Okno rośnie (tylko w górę) do
+    zawiniętego zdania wspólnym pomocnikiem okien (`config_dialog.dopasuj_wysokosc`); reguła, nie
+    piksele: etykieta ma co najmniej wysokość, której jej tekst potrzebuje przy jej szerokości.
+
+    Falsyfikator: zdejmij `dopasuj_wysokosc(self)` z `RepairHeaderDialog._after_undo` → etykieta
+    niższa niż `heightForWidth` (offscreen: 56 px przy 70)."""
+    from horreum.gui.app import RepairHeaderDialog
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "n.db"))
+    _bezimienne(tmp_path / "ASTRO_", con, ["NGC7635"])
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW)
+    dlg._runner.async_ok = False
+    try:
+        dlg.show()
+        QCoreApplication.processEvents()
+        wysokosc = dlg.height()
+        sciezka = str(tmp_path / "NGC7635_20230103_200000_LIGHT_OSC_300s_FLATGRP_NOFLAT_.fits")
+        dlugi = ("kopia nagłówka sprzed zapisu nie zgadza się z plikiem na dysku, a baza opisuje "
+                 "jeszcze inny stan tej lokacji - ponowne cofnięcie sprawdzi plik raz jeszcze "
+                 "i dokończy samą synchronizację bazy")
+        res = writeback.UndoResult(
+            4711, [writeback.FileResult(1, sciezka, "restored")],
+            [writeback.FileResult(2, sciezka, "blocked", "plik zmieniony od commitu")],
+            [writeback.FileResult(3, sciezka, "failed", dlugi)], cancelled=True)
+        dlg._commit_id = res.commit_id
+        dlg.undo_btn.setVisible(True)
+        dlg.resolve_btn.setVisible(True)
+        dlg._after_undo("undo", res)
+        QCoreApplication.processEvents()
+        s = dlg.status
+        assert dlugi[:40] in s.text(), s.text()
+        assert s.height() >= s.heightForWidth(s.width()), (s.height(), s.heightForWidth(s.width()))
+        assert dlg.height() >= wysokosc                  # tylko w górę
+    finally:
+        dlg.reject()
+        con.close()
+
+
+# ═══════════════════════════════════════════════ AR-157: „Uzgodnij” przejmuje ujednolicenie karty
+
+
+def test_drogi_i_suma_drog_zapisu_kart_klasyfikacja(con):
+    """AR-157 krok (1): suma dróg zapisu kart planu - `None` w miejscu, `route_depends` i brak
+    prognozy „zależy od pliku”, każdy inny powód pisarza (`fb_no_room`, `fb_card_too_long`) cały
+    plik przepisany; pozycja bez karty się nie liczy. `drogi_kart` daje prognozę każdej karcie:
+    XISF (podmiana i dopisanie) w miejscu, podmiana FITS bez lustra kopii - „zależy od pliku”.
+    Falsyfikatory: powód pisarza liczony jako „zależy”, `drogi_kart` bez gałęzi XISF."""
+    from horreum.gui import object_change_dialog as ocd
+    from horreum.item_reasons import PowodPozycji
+    plan = _plan(items=tuple(_pozycja(i) for i in range(1, 6)) + (_pozycja(6, karta=False),),
+                 skipped=())
+    drogi = {11: None, 12: PowodPozycji("x", "fb_no_room"), 13: PowodPozycji("x", "fb_card_too_long"),
+             14: PowodPozycji("x", "route_depends")}
+    assert ocd.sumy_drog(plan, drogi) == {"inplace": 1, "rewrite": 2, "depends": 2}
+    xisf = dataclasses.replace(_pozycja(7), old_path=rf"{STARY}\f7.xisf")
+    dodaj = dataclasses.replace(_pozycja(8), old_path=rf"{STARY}\f8.xisf", card_op="add")
+    plan = _plan(items=(xisf, dodaj, _pozycja(9)), skipped=())
+    drogi = ocd.drogi_kart(con, plan)
+    assert drogi == {17: None, 18: None, 19: ocd._DROGA_NIEZNANA}
+    assert ocd.sumy_drog(plan, drogi) == {"inplace": 2, "rewrite": 0, "depends": 1}
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_okno_mowi_sume_drog_zapisu_na_PRAWDZIWYM_planerze(qapp, archiwum, lang):
+    """AR-157 krok (1): podgląd mówi SUMĘ dróg zapisu kart przed kliknięciem - dopisanie FITS
+    z zapasem i podmiana karty FITS w miejscu, dopisanie bez zapasu - cały plik przepisany (dawny
+    `in_place`/`fallback` martwego planu ujednolicenia). Po biegu suma się chowa - drogę pliku
+    mówi jego status. Falsyfikator: `drogi_kart` bez gałęzi podmiany (podmiana „zależy od pliku”)."""
+    from horreum.gui import object_change_dialog as ocd
+    i18n.set_lang(lang)
+    a = archiwum
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", seed=2)
+    fc, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\c.fits", date="2022-03-26T21:32:00", seed=3,
+                   bez_zapasu=True)
+    fd, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\d.fits", obj="NGC3034", date="2022-03-26T21:33:00",
+                   seed=4)
+    dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fb, fc, fd])
+    assert sorted(it.card_op for it in dlg._plan.items) == ["add", "add", "set"]
+    assert ocd.sumy_drog(dlg._plan, dlg._drogi) == {"inplace": 2, "rewrite": 1, "depends": 0}
+    assert dlg.routes.text() == i18n.t("objchg.routes", inplace=2, rewrite=1, depends=0)
+    assert not dlg.routes.isHidden()
+    if lang == "en":
+        assert not set(dlg.routes.text()) & set("ąćęłńóśźż"), dlg.routes.text()
+    dlg.action_btn.click()
+    assert dlg.routes.isHidden()
+    dlg.reject()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_Uzgodnij_klatka_z_kilkoma_kopiami_jest_w_wierszu_i_mowi_powod(qapp, tmp_path, lang):
+    """AR-157 krok (2): klatka z dwiema obecnymi kopiami (jedna w złym folderze) jest w wierszu
+    „Plik nie zgadza się z obiektem”, a okno „Uzgodnij” na PRAWDZIWYM read-modelu i planerze mówi
+    jej powód (`objchg.skip.many_copies`) w języku UI i niczego nie pisze. Do AR-157 wiersz gubił
+    ją po cichu. Falsyfikator: brak wpisu katalogu w danym języku."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "kopie.db"))
+    root = tmp_path / "ASTRO_"
+    fid = _niebo(con, root, r"LIGHTS\NGC6992\cam\NGC6992_1.fits", obj="NGC 6992", ra=None, seed=1)
+    repo.add_location(con, frame_id=fid, volume="VOL", path=str(root / r"LIGHTS\Zly\cam\x.fits"),
+                      mtime="m", now=NOW)
+    resolver.run_resolver(con, NOW)
+    assert fid in queries.file_object_mismatch_frame_ids(con)
+    dlg = ObjectChangeDialog(con, frame_ids=[fid], target=None, now_fn=lambda: NOW,
+                             off_thread=False)
+    assert dlg.items_tree.topLevelItemCount() == 0
+    (powod,) = _pominiecia(dlg)
+    assert CATALOG["objchg.skip.many_copies"][lang].format(n=2) in powod, powod
+    if lang == "en":
+        assert not set(powod) & set("ąćęłńóśźż"), powod
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_recepta_kopii_ta_sama_w_wierszu_Duplikaty_i_w_oknie_Uzgodnij(qapp, tmp_path, lang):
+    """AR-157 krok (2): droga od klatki z kilkoma obecnymi kopiami do jednej to JEDNA recepta -
+    podpowiedź wiersza Porządków „Duplikaty” i zdanie okna „Uzgodnij” pod pominięciem
+    `many_copies` niosą ten sam tekst, w obu językach; nazwy w recepcie to te, które UI pokazuje
+    (perspektywa, strona Dostawy, przyciski sprawdzenia obecności i oznaczenia zniknięć - z katalogu).
+    Falsyfikatory: brak wpisu wiersza w `_PODPOWIEDZI_OSI` (pusta podpowiedź), zdanie okna bez
+    recepty, zdanie okna niewidoczne, brak wpisu EN."""
+    from horreum.gui import rows
+    from horreum.gui import tasks as tasks_mod
+    from horreum.gui.object_change_dialog import ObjectChangeDialog
+    from PySide6.QtCore import Qt
+    i18n.set_lang(lang)
+    con = db.open_db(str(tmp_path / "kopie.db"))
+    root = tmp_path / "ASTRO_"
+    fid = _niebo(con, root, r"LIGHTS\NGC6992\cam\NGC6992_1.fits", obj="NGC 6992", ra=None, seed=1)
+    repo.add_location(con, frame_id=fid, volume="VOL", path=str(root / r"LIGHTS\Zly\cam\x.fits"),
+                      mtime="m", now=NOW)
+    resolver.run_resolver(con, NOW)
+    tv = tasks_mod.TasksView(con)
+    try:
+        tv.refresh_counts()
+        wiersz = next(tv.tasks.item(i) for i in range(tv.tasks.count())
+                      if tv.tasks.item(i).data(Qt.UserRole) == "dup_frames")
+        assert wiersz.data(rows.SECONDARY).startswith("1")
+        recepta = wiersz.toolTip()
+    finally:
+        tv.close()
+    for nazwa in ("perspective.dups", "nav.dostawa", "pipeline.btn.presence",
+                  "pipeline.btn.mark_vanished"):
+        assert i18n.t(nazwa) in recepta, (nazwa, recepta)
+    dlg = ObjectChangeDialog(con, frame_ids=[fid], target=None, now_fn=lambda: NOW,
+                             off_thread=False)
+    assert not dlg.copies_hint.isHidden()
+    assert dlg.copies_hint.text() == i18n.t("objchg.many_copies_hint", recipe=recepta)
+    assert recepta in dlg.copies_hint.text()
+    if lang == "en":
+        assert not set(dlg.copies_hint.text()) & set("ąćęłńóśźż"), dlg.copies_hint.text()
+    dlg.reject()
     con.close()

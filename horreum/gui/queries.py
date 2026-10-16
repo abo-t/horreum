@@ -15,8 +15,10 @@ import json
 import ntpath
 import os
 import re
+from typing import NamedTuple
 
 from horreum import item_reasons                    # kodek powodu pozycji zmiany obiektu (AR-141)
+from horreum import card_rules                      # bramka sumy kontrolnej - zdanie rdzenia (AR-167)
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.grouper import OPTICS_TOLERANCE, optics_from_files   # optyka teleskopu (AR-128)
 from horreum.lineage import RAW_FLAT_WINDOW_DAYS, raw_flats_for   # surowe flaty teczek wydania
@@ -45,7 +47,9 @@ from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_lookup, alias_snap
                               library_root_from_db,
                               optics_mismatch_frame_ids, path_proposals, resolve_name, review_state)
 from horreum.stacks import (REASON_DEGENERATE, REASON_MISMATCH, REASON_NO_CANDIDATES,
-                            REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, propose_lineage_candidates)
+                            REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, REASON_TELESCOPE,
+                            input_after_integration, propose_lineage_candidates)
+from horreum.repo import UTC_OFFSET_MAX_MIN    # sufit zegarów świata - pas nadzbioru RAW (AR-153)
 
 
 PATH_TAIL_DIRS = 2
@@ -2327,8 +2331,8 @@ def isolated_inplace_ops(con, frame_ids):
         (json.dumps(ids), json.dumps(list(INPLACE_ISOLATING_PHASES)))).fetchall()]
 
 
-# Powód pominięcia w planie ujednolicenia karty `OBJECT` (`object_card_form_rows`): stała, bo czyta
-# go też test i podpowiedź powierzchni - tekst mówi, co zrobić, żeby klatka wróciła do planu.
+# Powód bramki karty `OBJECT` (`object_card_gate`) przy kopii bez faktów: stała, bo czyta go też
+# test i podpowiedź powierzchni - tekst mówi, co zrobić, żeby karta wróciła do planu gestu.
 SKIP_COPY_WITHOUT_FACTS = ("kopia bez zebranych faktów przy klatce z nieobecną kopią - zbierze je "
                            "„Przyjmij nowe”, gdy plik jest na dysku i nie czeka na dokończenie "
                            "przerwanego zapisu")
@@ -2342,11 +2346,10 @@ SKIP_FORM_NOT_CANON = "forma karty nie prowadzi z powrotem do tego obiektu"
 def object_card_gate(r, *, card, form, canon, lookup, poza_regionem=False):
     """BRAMKA ZAPISU KARTY `OBJECT` jednej klatki - pierwszy powód, dla którego kartę nie da się
     postawić w formie `form` (`set` na karcie `card` albo `add`, gdy `card` is None), albo None.
-    JEDEN właściciel dla obu read-modeli piszących kartę: ujednolicenia (`object_card_form_rows`)
-    i zmiany obiektu (`object_change_rows`) - dwie kopie listy rozjechałyby podgląd jednego gestu
-    z drugim przy pierwszej nowej bramce.
+    Właściciel bramki read-modelu gestów piszących kartę z obiektem (`object_change_rows` - „Zmień
+    obiekt…” i „Uzgodnij”, które od AR-157 przejęło też ujednolicenie istniejących kart, O5).
 
-    `r` = fakty klatki i jej obecnej kopii pod nazwami kolumn obu read-modeli: `n_present`,
+    `r` = fakty klatki i jej obecnej kopii pod nazwami kolumn read-modelu: `n_present`,
     `n_absent`, `compressed`, `degen` (`sha1_data_uncomputable`), `header_hash`, `unreadable_since`,
     `n_cards` (liczba kart `OBJECT`), `hdr_hash`/`hdr_rule`/`hdr_object` (fakty kopii), `vtype`
     (typ karty idx 0), `filetype`, `n_sum` (karty `CHECKSUM`/`DATASUM`). `canon` = obiekt, który
@@ -2355,8 +2358,8 @@ def object_card_gate(r, *, card, form, canon, lookup, poza_regionem=False):
     (`resolver.karta_wraca`: obiekt-region, a klatka poza jego regionem i bez oryginału wariantu
     przy tym obiekcie) - liczy wołający, bo pyta o współrzędne i relację wariantu klatki.
 
-    Kolejność bramek = kolejność z `object_card_form_rows` (powód ujednolicenia zostaje bajt
-    w bajt), powód `region_outside` stoi tuż za brakiem formy - to ta sama przesłanka per klatka;
+    Kolejność bramek = kolejność dawnego planu ujednolicenia (O5 - powód zostaje bajt w bajt), powód
+    `region_outside` stoi tuż za brakiem formy - to ta sama przesłanka per klatka;
     RAW rozstrzyga WOŁAJĄCY przed tą funkcją, bo dla zmiany obiektu nie jest pominięciem, tylko
     brakiem karty (RAW przenosi się bez karty), tak samo klatkę regionu, której forma nie utrzyma.
 
@@ -2405,122 +2408,14 @@ def object_card_gate(r, *, card, form, canon, lookup, poza_regionem=False):
 
 
 def fits_checksum_gate(r):
-    """BRAMKA SUMY KONTROLNEJ FITS - powód (`ZdanieRdzenia` z kodem `fits_checksum`, zdanie okna
-    `objchg.gate.fits_checksum`) albo None. Pisarz odmawia FITS z kartą `CHECKSUM`/`DATASUM`
-    (`writeback._fits_inplace_plan`, kod `checksum_present`): zapis nagłówka unieważniłby sumę.
-    JEDEN właściciel warunku dla powierzchni, które mówią to PRZED zapisem: bramki karty `OBJECT`
-    (`object_card_gate`) i podglądu „Napraw nagłówek…” (`RepairHeaderDialog`, AR-163 - cel
-    z `writeback_frame_targets`). `r` = wiersz z `filetype` i `n_sum` (liczba kart sumy klatki)."""
-    if r["filetype"] == "fits" and r["n_sum"]:
-        return ZdanieRdzenia("FITS z sumą kontrolną (CHECKSUM/DATASUM)", "fits_checksum")
-    return None
-
-
-def object_card_form_rows(con):
-    """KARTA `OBJECT` W INNEJ FORMIE (O5, 2026-09-26): klatki, których karta `OBJECT` wskazuje TEN
-    SAM obiekt co klatka, ale innym zapisem niż jedna forma karty (`resolver.forma_karty_object` -
-    ta sama funkcja, której używają gesty GUI piszące kartę):
-    `NGC6992` → `NGC 6992`, `M 106` → `NGC 4258`, `ksiezyc` → `Moon`. JEDEN właściciel predykatu
-    dla planu ujednolicenia (`macro.plan_object_card_form`) i dla wiersza Porządków
-    (`object_card_form_frame_ids`).
-
-    PREDYKAT (klatka wchodzi): rodzaj z `LIGHT_KINDS`, obiekt przypisany, karta `OBJECT` niepusta,
-    drabina nazwy przebiegu (`resolver.resolve_name` na migawce aliasów - ta sama co w przebiegu
-    i w `path_header_conflict_frame_ids`) daje TEN SAM kanon co obiekt klatki, a karta różni się od
-    formy karty kanonu. Karta wskazująca INNY obiekt albo nierozpoznana nie jest „inną formą",
-    tylko innym zeznaniem - tu nie wchodzi (to robota E5-2). Wycofana i zastąpiona wypadają.
-    Wchodzą też komety, Księżyc, nazwy zwyczajowe i klatki z obiektem nadanym ręką - decyzja
-    usera 2026-09-26: „jedna wersja na obiekt", „przestaw jednakowo" (odwrócone D-PD-9).
-
-    BRAMKI CELU (klatka zostaje w wyniku z `skip` = powód, żeby podgląd powiedział, czego NIE
-    ruszamy) - wzorzec `macro.resolve_target`, plus trzy własne:
-      * RAW (read-only, #2), obiekt z REGIONU (współrzędne, nie karta), brak obecnej kopii albo
-        wiele obecnych (D-W1), skompresowany master (T6), degenerat tożsamości (D-X-13), brak
-        `header_hash` (brak kontroli zapisu);
-      * kopia oznaczona jako nieczytelna (`unreadable_since`, #13) - jej `header_hash` jest
-        z ostatniego UDANEGO odczytu, więc kotwica zapisu mogłaby kłamać;
-      * więcej niż jedna karta `OBJECT` - zeznanie bierze ostatnią (`_put`), a zapis musiałby
-        zgadywać, którą ujednolicić;
-      * kopia bez zebranych faktów (`hdr_hash` NULL), gdy klatka ma kopię NIEOBECNĄ
-        (`SKIP_COPY_WITHOUT_FACTS`) - karty klatki mogły przyjść ze skasowanego pliku, a strażnik
-        niżej bez faktów jest ślepy; fakty dociąga etap Dostawy (`scan.backfill_copy_facts`);
-      * kopia zeznaje INNĄ kartę niż klatka (`location.hdr_object`, gdy fakty kopii są zebrane) -
-        karty w `cards` należą do KLATKI i mogą pochodzić z innej kopii;
-      * forma nie prowadzi z powrotem do obiektu (`forma_karty_object` → None: kanon znany tylko
-        z aliasu albo forma regionu, którą drabina nazw oddałaby innemu obiektowi, AR-177) - karta
-        z nią wypchnęłaby klatkę do nierozpoznanych albo do innego obiektu (kimi Z1). Klatki
-        regionu ten wsad nie dotyka: ich karta albo jest formą, albo drabina jej nie rozpoznaje
-        (predykat wyżej), więc pytanie per klatka (`resolver.karta_wraca`) tu nie zachodzi;
-      * sklejka oznaczeń (`NGC4631_PGC42637`), której NIE KAŻDY człon wskazuje ten sam kanon -
-        forma zastąpiłaby zeznanie o dwóch obiektach jednym (kimi Z2c);
-      * karta `OBJECT` nietekstowa (`value_type` ≠ 'str') - forma jest tekstem (kimi Z5);
-      * FITS z kartą `CHECKSUM`/`DATASUM` - zapis nagłówka unieważniłby sumę (astra Z5).
-
-    Karta i komentarz pochodzą z `cards` (idx 0), bo tam jest też `value_type` i komentarz, z których
-    plan przewiduje drogę zapisu. Zwraca listę dict: `frame_id`, `location_id`, `path`,
-    `filetype`, `header_hash`, `canon`, `card`, `form`, `value_type`, `comment`, `skip`."""
-    rows = con.execute(
-        "SELECT f.id AS fid, f.filetype, f.sha1_data_uncomputable AS degen, "
-        "       f.object_source AS osrc, o.canon AS canon, "
-        "       c.value_raw AS card, c.value_type AS vtype, c.comment AS comment, "
-        "       (SELECT count(*) FROM cards c2 WHERE c2.frame_id = f.id "
-        "          AND c2.keyword = 'OBJECT') AS n_cards, "
-        "       (SELECT count(*) FROM location l2 WHERE l2.frame_id = f.id "
-        "          AND l2.present = 1) AS n_present, "
-        "       (SELECT count(*) FROM location l4 WHERE l4.frame_id = f.id "
-        "          AND l4.present = 0) AS n_absent, "
-        "       (SELECT count(*) FROM cards c3 WHERE c3.frame_id = f.id "
-        "          AND c3.keyword IN ('CHECKSUM', 'DATASUM')) AS n_sum, "
-        "       l.id AS lid, l.path, l.header_hash, l.compressed, l.unreadable_since, "
-        "       l.hdr_hash, l.hdr_rule, l.hdr_object "
-        "FROM frame f "
-        "JOIN object o ON o.id = f.object_id "
-        "JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
-        "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
-        "WHERE f.kind IN (SELECT value FROM json_each(?)) "
-        "  AND f.retired_at IS NULL AND f.superseded_by IS NULL "
-        "ORDER BY f.id, l.id",
-        (json.dumps(sorted(LIGHT_KINDS)),)).fetchall()
-    if not rows:
-        return []
-    lookup = alias_snapshot(con).get
-    formy: dict[str, str | None] = {}
-
-    wynik, widziane = [], set()
-    for r in rows:
-        fid = int(r["fid"])
-        if fid in widziane:                     # druga obecna kopia - klatka już opisana
-            continue
-        widziane.add(fid)
-        card = _to_text(r["card"])
-        if card is None:                        # pusta karta nie zeznaje (jak w przebiegu)
-            continue
-        ident, _ = resolve_name(lookup, card)
-        if ident is None or ident.canon != r["canon"]:
-            continue
-        if r["canon"] not in formy:
-            formy[r["canon"]] = forma_karty_object(con, r["canon"], lookup=lookup)
-        form = formy[r["canon"]]
-        if form is not None and card == form:
-            continue
-        if r["filetype"] == "raw":
-            skip = "plik RAW (DSLR) - Horreum go nie zapisuje"
-        elif r["osrc"] == "region":
-            skip = "obiekt z regionu (współrzędne), nie z karty"
-        else:
-            skip = object_card_gate(r, card=card, form=form, canon=r["canon"], lookup=lookup)
-        wynik.append({
-            "frame_id": fid, "location_id": r["lid"], "path": r["path"] or "",
-            "filetype": r["filetype"], "header_hash": r["header_hash"], "canon": r["canon"],
-            "card": card, "form": form, "value_type": r["vtype"], "comment": r["comment"],
-            "skip": skip})
-    return wynik
-
-
-def object_card_form_frame_ids(con):
-    """Klatki do ujednolicenia karty `OBJECT` - wiersze `object_card_form_rows` BEZ powodu
-    pominięcia (licznik i trim wiersza Porządków „Karta OBJECT w innej formie"). Zwraca set[int]."""
-    return {r["frame_id"] for r in object_card_form_rows(con) if r["skip"] is None}
+    """BRAMKA SUMY KONTROLNEJ FITS - powód albo None. Pisarz odmawia FITS z kartą `CHECKSUM`/
+    `DATASUM` na obu drogach (`writeback._odmowa_sumy`, kod `checksum_present`): zapis nagłówka
+    unieważniłby sumę. Read-model PRZENOSI powód rdzenia (`card_rules.bramka_sumy` - jedno zdanie
+    z kodem `fits_checksum` dla podglądu makra, edycji komórki, planu naprawy i bramek okien, AR-167),
+    okna mówią go przez `wb_worker.tekst_powodu`. Powierzchnie, które mówią to PRZED zapisem: bramki
+    karty `OBJECT` (`object_card_gate`) i podglądu „Napraw nagłówek…” (`RepairHeaderDialog`, AR-163 -
+    cel z `writeback_frame_targets`). `r` = wiersz z `filetype` i `n_sum` (liczba kart sumy klatki)."""
+    return card_rules.bramka_sumy(r["filetype"], r["n_sum"])
 
 
 # ============================================================ ZMIANA OBIEKTU (AR-17 krok 3, D-1011-5)
@@ -2672,7 +2567,7 @@ def object_change_rows(con, frame_ids, *, target=None):
         `region` dostaje kartę wyłącznie wtedy, gdy forma sama ją do obiektu sprowadzi - inaczej
         jedzie bez karty jak przed AR-177),
         `card_form` (forma, którą karta ma mieć: celu albo bieżącego kanonu), `card_skip` (powód
-        `object_card_gate` - liczony, gdy karta ma się zmienić; bramka ta sama co w ujednoliceniu;
+        `object_card_gate` - liczony, gdy karta ma się zmienić; ta sama bramka w obu trybach gestu;
         forma, która TEJ klatki sama nie utrzyma - `resolver.karta_wraca` ze współrzędnymi nagłówka
         i obiektem oryginału wariantu - to powód `region_outside`, AR-177);
       * stosy: `variant_of` (`(oryginał, wariant)` dla wersji stosu, `stack_variant`) i `stacks`
@@ -2850,26 +2745,34 @@ def file_object_mismatch_frame_ids(con):
     licznika i trimu gridu. Zwraca set[int] jak sąsiedzi z rodziny trimów (`grid._populacja_trimu`
     przecina je `set.intersection`).
 
-    KLATKA WCHODZI: light albo stos z obiektem, żywa (nie wycofana, nie zastąpiona), z DOKŁADNIE
-    jedną obecną kopią z `mtime` (tylko taką planer przeniesie), i spełnia co najmniej jedno:
+    KLATKA WCHODZI: light albo stos z obiektem, żywa (nie wycofana, nie zastąpiona), z obecną
+    kopią, i spełnia co najmniej jedno:
       * FOLDER: katalog, do którego planer przeniósłby plik (`paths.path_after_object_change` -
         `folder_form(kanon)` pod kategorią z rodzaju obiektu), różni się od bieżącego BEZ wielkości
-        liter (`R:` jej nie rozróżnia - sama pisownia nie jest rozjazdem). Ta sama funkcja co
-        planer, więc wiersz i „Uzgodnij” nie mogą się rozjechać co do folderu; kategoria wchodzi
-        razem z folderem (deep sky pod `_SOLAR` to też plik w nie swoim miejscu). Plik spoza
-        pozycji obiektu i kanon, którego `folder_form` nie przyjmie, nie wchodzą - gest nie ma
-        dokąd ich przenieść;
+        liter (`R:` jej nie rozróżnia - sama pisownia nie jest rozjazdem) - na KTÓREJKOLWIEK obecnej
+        kopii. Ta sama funkcja co planer, więc wiersz i „Uzgodnij” nie mogą się rozjechać co do
+        folderu; kategoria wchodzi razem z folderem (deep sky pod `_SOLAR` to też plik w nie swoim
+        miejscu). Plik spoza pozycji obiektu i kanon, którego `folder_form` nie przyjmie, nie
+        wchodzą - gest nie ma dokąd ich przenieść;
       * KARTA: format z kartą, karta `OBJECT` różna od formy karty kanonu (także jej brak) - i tylko
         gdy read-model gestu tę kartę zapisze: karta stosowalna (klatki regionu - gdy forma sama ją
         do obiektu sprowadzi, AR-177) i bramka karty przepuszcza (`object_card_gate`, ta sama co
         w planie). Karty, której gest nie zapisze, wiersz nie obiecuje.
+    Liczą się wyłącznie obecne kopie z `mtime` (tylko taką planer przeniesie); klatka bez żadnej
+    takiej kopii nie wchodzi. KLATKA Z KILKOMA OBECNYMI KOPIAMI (AR-157) wchodzi z rozjazdem
+    folderu albo karty, choć gest jej nie ruszy (jedna klatka, jeden folder obiektu) - do AR-157
+    wiersz odsiewał ją po cichu (`HAVING count(*) = 1`), a człowiek nie dowiadywał się o niej
+    nigdzie. „Uzgodnij” mówi o niej powodem planera (`many_copies`); bramka karty odmawia jej tym
+    samym kodem i to jest jedyna odmowa bramki, z którą klatka zostaje w wierszu. Kopie bez
+    `mtime` nie wprowadzają klatki także przy kilku kopiach - po zdjęciu duplikatu gest i tak by
+    jej nie ruszył (`no_mtime`), więc wiersz obiecywałby robotę bez drogi.
 
-    KOSZT (licznik Porządków liczy się na wątku okna): jeden SELECT po obecnych kopiach lightów
-    i stosów, który sam odsiewa klatki z więcej niż jedną obecną kopią (`GROUP BY` + `HAVING`)
-    i oddaje KROTKI zamiast `sqlite3.Row` (kursor z `row_factory = None`: przy ~14,5 tys. wierszy
-    `Row` to ~40 ms); cel folderu liczony RAZ na (katalog, kanon, rodzaje) - ~570 katalogów zamiast
-    ~14,5 tys. plików, bo nazwa pliku w nim nie gra; forma karty raz na kanon; bramka karty
-    wyłącznie dla kandydatów z rozjazdem karty (`object_change_rows`)."""
+    KOSZT (licznik Porządków liczy się na wątku okna): jeden SELECT po WSZYSTKICH obecnych kopiach
+    lightów i stosów, oddający KROTKI zamiast `sqlite3.Row` (kursor z `row_factory = None`: przy
+    ~14,5 tys. wierszy `Row` to ~40 ms), kopie zebrane per klatka w Pythonie; cel folderu liczony
+    RAZ na (katalog, kanon, rodzaje) - ~570 katalogów zamiast ~14,5 tys. plików, bo nazwa pliku
+    w nim nie gra; forma karty raz na kanon; bramka karty wyłącznie dla kandydatów z rozjazdem
+    karty (`object_change_rows`)."""
     kursor = con.cursor()
     kursor.row_factory = None
     rows = kursor.execute(
@@ -2879,17 +2782,14 @@ def file_object_mismatch_frame_ids(con):
         "JOIN location l ON l.frame_id = f.id AND l.present = 1 "
         "LEFT JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
         "WHERE f.kind IN (SELECT value FROM json_each(?)) "
-        "AND f.retired_at IS NULL AND f.superseded_by IS NULL "
-        "GROUP BY f.id HAVING count(*) = 1",
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL",
         (json.dumps(sorted(LIGHT_KINDS)),)).fetchall()
     root = library_root_from_db(con)
     lookup = alias_snapshot(con).get
     formy: dict[str, str | None] = {}
     rozjazd_folderu: dict[tuple, bool] = {}
-    wynik, kandydaci_karty = set(), []
-    for fid, kind, filetype, canon, object_kind, card, path, mtime in rows:
-        if mtime is None:
-            continue
+
+    def _rozjazd(path, canon, kind, object_kind):
         klucz = (path[:max(path.rfind("\\"), path.rfind("/"))], canon, kind, object_kind)
         if klucz not in rozjazd_folderu:
             try:
@@ -2897,7 +2797,18 @@ def file_object_mismatch_frame_ids(con):
             except ValueError:
                 cel = None
             rozjazd_folderu[klucz] = cel is not None and path_key(cel) != path_key(path)
-        if rozjazd_folderu[klucz]:
+        return rozjazd_folderu[klucz]
+
+    kopie: dict[int, list] = {}
+    for row in rows:
+        kopie.setdefault(row[0], []).append(row)
+    wynik, kandydaci_karty = set(), []
+    for fid, lista in kopie.items():
+        _, kind, filetype, canon, object_kind, card, _, _ = lista[0]
+        z_mtime = [r for r in lista if r[7] is not None]     # tylko taką kopię planer przeniesie
+        if not z_mtime:
+            continue
+        if any(_rozjazd(r[6], canon, kind, object_kind) for r in z_mtime):
             wynik.add(fid)
             continue
         if filetype in NO_OBJECT_CARD_FILETYPES:
@@ -2910,10 +2821,13 @@ def file_object_mismatch_frame_ids(con):
     if kandydaci_karty:
         kandydaci = set(kandydaci_karty)                # wiersze rosną o parę stosu - ta nie wchodzi
         # Karta stosowalna - inaczej `card_skip` jest None, bo bramki się nie liczy (klatka regionu,
-        # której forma nie utrzyma, jedzie bez karty i nie jest robotą karty, AR-177).
+        # której forma nie utrzyma, jedzie bez karty i nie jest robotą karty, AR-177). Klatka
+        # z kilkoma obecnymi kopiami zostaje z odmową `many_copies` (AR-157, wyżej).
         wynik |= {r["frame_id"] for r in object_change_rows(con, kandydaci_karty)
                   if r["frame_id"] in kandydaci and r["card_applicable"]
-                  and r["card_skip"] is None}
+                  and (r["card_skip"] is None
+                       or (r["n_present"] > 1
+                           and getattr(r["card_skip"], "code", None) == "many_copies"))}
     return wynik
 
 
@@ -3054,7 +2968,7 @@ def _lineage_reason_rows(con):
     """Integracje z ZAPISANYM powodem braku rodowodu + fakty, po których poznać zwietrzenie.
     Wąski literał pod `lineage_pending_frame_ids` — pełny opis obrazu daje `stack_lineage_head`.
     `inputs` liczy WYŁĄCZNIE wejścia niewykluczone, jak w głowie panelu; `excluded` - werdykty
-    „to nie weszło", z których `_czeka_na_reke` rozpoznaje stos, którego kandydatury człowiek już
+    „to nie weszło", z których `_reka_i_propozycja` rozpoznaje stos, którego kandydatury człowiek już
     osądził. Populacja akcyjna: bez wycofanych i bez ZASTĄPIONYCH - zastąpiony stos jest zapisem
     historii (wiersz Porządków „Zastąpione"), nie robotą.
     Zwraca: master_frame_id, unresolved_reason, object_now, utc_offset_min, inputs, excluded."""
@@ -3077,8 +2991,9 @@ okno zdegenerowane (po to propozycja istnieje), okno puste i okno, które myli s
 pliku (`stacks._plan`, gałąź (d)).
 
 ZBIÓR ROZSTRZYGA WYŁĄCZNIE O STOSACH BEZ WERDYKTU. Po werdyktach ręki każdy powód poza
-`no_object` przechodzi przez propozycję (`_reka_i_propozycja`) - także `telescope_mismatch`
-z pustą listą z kubełka wtedy wypada.
+`no_object` i `telescope_mismatch` przechodzi przez propozycję (`_reka_i_propozycja`). Karta
+teleskopu zostaje w kubełku także po werdyktach (AR-171): jej receptą jest naprawa karty, a ta od
+listy kandydatów nie zależy - pusta lista po odrzuceniach nie czyni karty poprawną.
 
 ZBIÓR ZAMKNIĘTY, nie „każdy powód z pustą listą": bez werdyktu poza nim zostają powody z WŁASNĄ
 receptą - nazwa obiektu (`no_object`), odniesienie czasu (`offset_unknown`), karta teleskopu
@@ -3097,9 +3012,10 @@ def _reka_i_propozycja(con, r):
     go liczyła, inaczej `None` - panel bierze z niego licznik klatek nowszych niż obraz także wtedy,
     gdy stos z kubełka wypadł (zdanie „dlaczego lista jest pusta" nie może zniknąć z trybem).
 
-    Powód zwietrzały - nie (czeka na przeliczenie, nie na rękę). Brak obiektu - tak (receptą jest
-    nadanie nazwy, nie lista). Bez żadnego werdyktu i z powodem, który ma WŁASNĄ receptę (odniesienie
-    czasu, karta teleskopu, nagłówek bez czasu) - tak: powód sam jest receptą. Bez werdyktu z powodem,
+    Powód zwietrzały - nie (czeka na przeliczenie, nie na rękę). Brak obiektu i karta teleskopu - tak,
+    także po werdyktach (receptą jest nadanie nazwy albo naprawa karty, nie lista - AR-171). Bez
+    żadnego werdyktu i z powodem, który ma WŁASNĄ receptę (odniesienie czasu, nagłówek bez czasu) -
+    tak: powód sam jest receptą. Bez werdyktu z powodem,
     którego receptą jest PROPOZYCJA (`_POWODY_RECEPTA_PROPOZYCJA`), i po werdyktach - tylko wtedy,
     gdy propozycja ma co dać: NIEOSĄDZONEGO kandydata (osądzonych propozycja nie zwraca) albo klatki
     czekające na zegar. Bez tego stos, z którego człowiek odrzucił ostatniego kandydata, zostawał
@@ -3110,8 +3026,8 @@ def _reka_i_propozycja(con, r):
     z `_POWODY_RECEPTA_PROPOZYCJA`; materiał okna idzie indeksem `frame(object_id)` (0043)."""
     if lineage_reason_stale(r):
         return False, None
-    if r["unresolved_reason"] == REASON_NO_OBJECT:
-        return True, None
+    if r["unresolved_reason"] in (REASON_NO_OBJECT, REASON_TELESCOPE):
+        return True, None             # recepta (nazwa obiektu / naprawa karty) nie zależy od listy
     if not r["excluded"] and r["unresolved_reason"] not in _POWODY_RECEPTA_PROPOZYCJA:
         return True, None
     # Klatki po zintegrowaniu obrazu (trzecia wartość, AR-150) nie są robotą dla ręki - nie ma czego
@@ -3121,9 +3037,33 @@ def _reka_i_propozycja(con, r):
     return raw_bez_zegara > 0 or any(n.frames for n in noce), propozycja
 
 
-def _czeka_na_reke(con, r):
-    """Sama decyzja `_reka_i_propozycja` (bool) - dla zbioru perspektywy."""
-    return _reka_i_propozycja(con, r)[0]
+class LineageHandSets(NamedTuple):
+    """Zbiory `lineage_hand_sets` - wołający czyta je po nazwie, nie po pozycji.
+
+    * `pending` - gest w panelu ma tu jeszcze co zrobić (perspektywa „Rodowód do potwierdzenia",
+      stan `pending`);
+    * `only_newer` - z kubełka wypadł, bo propozycja nie ma nic do dania poza klatkami zrobionymi po
+      zintegrowaniu obrazu (trzecia wartość propozycji > 0; przy `czeka` = fałsz lista jest pusta
+      i nie ma RAW-ów bez zegara z konstrukcji `_reka_i_propozycja`). Stan `only_newer` (AR-171):
+      przeliczenie rodowodu niczego tu nie zmieni, więc recepta „policz w Dostawie" byłaby fałszem."""
+    pending: set
+    only_newer: set
+
+
+def lineage_hand_sets(con):
+    """Dwa zbiory stosów z JEDNEGO przebiegu `_reka_i_propozycja` po populacji akcyjnej →
+    `LineageHandSets(pending, only_newer)`.
+
+    Jeden przebieg, bo propozycja jest najdroższym członem kubełka (AR-154: 36 ms na kopii pf4) - skład
+    zbioru bierze oba zbiory naraz (`grid_workers._sklad_zbioru`) zamiast liczyć propozycję dwa razy."""
+    zbiory = LineageHandSets(set(), set())
+    for r in _lineage_reason_rows(con):
+        czeka, propozycja = _reka_i_propozycja(con, r)
+        if czeka:
+            zbiory.pending.add(int(r["master_frame_id"]))
+        elif propozycja is not None and propozycja[2] > 0:
+            zbiory.only_newer.add(int(r["master_frame_id"]))
+    return zbiory
 
 
 def lineage_hand_state(con, frame_id):
@@ -3152,11 +3092,11 @@ def lineage_pending_frame_ids(con):
     drogi „Stosy", więc `kind = 'master_light'` byłby martwą literą udającą bramkę (ta sama figura,
     co `NO_OBJECT_CARD_FILETYPES` poza `nameless_stack_frames`).
 
-    Zbiór = stosy, nad którymi gest w panelu ma jeszcze co zrobić (`_czeka_na_reke`): stos
-    z odrzuconym ostatnim kandydatem do kubełka już nie należy.
+    Zbiór = stosy, nad którymi gest w panelu ma jeszcze co zrobić (`lineage_hand_sets().pending`):
+    stos z odrzuconym ostatnim kandydatem do kubełka już nie należy.
 
     Zwraca set[int]."""
-    return {int(r["master_frame_id"]) for r in _lineage_reason_rows(con) if _czeka_na_reke(con, r)}
+    return lineage_hand_sets(con).pending
 
 
 # ============================================================ WERSJE STOSÓW (perspektywa „Wersje stosów")
@@ -3823,15 +3763,100 @@ def stack_lineage_inputs(con, frame_id):
 
     Cel przez `MIN(id) … present = 1` jak w `nameless_frames` — panel pokazuje ścieżkę OBECNEJ
     kopii, a klatka bez obecnej kopii i tak zostaje w rodowodzie (tożsamość to `sha1_data`,
-    nie ścieżka). Zwraca: input_frame_id, asserted_by, excluded, date_obs, exptime, path."""
-    return con.execute(
-        "SELECT ii.input_frame_id, ii.asserted_by, ii.excluded, h.date_obs, h.exptime, "
-        "       (SELECT l.path FROM location l WHERE l.frame_id = ii.input_frame_id "
-        "         AND l.present = 1 ORDER BY l.id LIMIT 1) AS path "
-        "FROM integration_input ii JOIN integration i ON i.id = ii.integration_id "
-        "LEFT JOIN header h ON h.frame_id = ii.input_frame_id "
-        "WHERE i.master_frame_id = ? ORDER BY h.date_obs, ii.input_frame_id",
-        (frame_id,)).fetchall()
+    nie ścieżka).
+
+    DWA FAKTY O CZASIE WEJŚCIA (AR-153), oba z jednej reguły (`stacks.input_after_integration`):
+    `newer` - klatka powstała po zintegrowaniu obrazu, KAŻDE źródło, także wiersz odrzucony (panel
+    mówi przy nim, dlaczego); `rejectable` - `newer` i werdykt ręki (`_do_odrzucenia`): tylko taki
+    wiersz bierze gest „Odrzuć nowsze niż obraz". Zwraca listę dictów: input_frame_id, asserted_by,
+    excluded, date_obs, exptime, path, newer, rejectable."""
+    out = []
+    for r in con.execute(
+            "SELECT ii.input_frame_id, ii.asserted_by, ii.excluded, h.date_obs, h.exptime, "
+            "       f.filetype, i.creation_time, i.utc_offset_min, "
+            "       (SELECT l.path FROM location l WHERE l.frame_id = ii.input_frame_id "
+            "         AND l.present = 1 ORDER BY l.id LIMIT 1) AS path "
+            "FROM integration_input ii JOIN integration i ON i.id = ii.integration_id "
+            "LEFT JOIN frame f ON f.id = ii.input_frame_id "
+            "LEFT JOIN header h ON h.frame_id = ii.input_frame_id "
+            "WHERE i.master_frame_id = ? ORDER BY h.date_obs, ii.input_frame_id",
+            (frame_id,)):
+        nowsze = _wejscie_nowsze(r)
+        out.append({"input_frame_id": r["input_frame_id"], "asserted_by": r["asserted_by"],
+                    "excluded": r["excluded"], "date_obs": r["date_obs"], "exptime": r["exptime"],
+                    "path": r["path"], "newer": nowsze,
+                    "rejectable": _do_odrzucenia(r["asserted_by"], nowsze)})
+    return out
+
+
+# ============================================================ WEJŚCIA NOWSZE NIŻ OBRAZ (AR-153)
+# Rodowód ZAPISANY bywa sprzeczny z regułą AR-150: werdykty ręki sprzed tej reguły potwierdzały
+# klatki z nocy PO zapisie stosu (9 stosów NGC7635, 270 wejść na kopii pf4 - decyzja `D-1016-1`:
+# „pomyłka"). Reguła ma jednego właściciela (`stacks.input_after_integration`); tu mieszka zakres
+# gestu i zbiór wiersza Porządków, który do tego gestu prowadzi.
+
+def _wejscie_nowsze(r):
+    """FAKT: wejście z wiersza `r` (kolumny date_obs, filetype, creation_time, utc_offset_min) powstało
+    po zintegrowaniu swojego obrazu - każde źródło."""
+    return input_after_integration(r["date_obs"], r["filetype"], r["creation_time"],
+                                   r["utc_offset_min"])
+
+
+def _do_odrzucenia(asserted_by, nowsze):
+    """GEST: fakt `nowsze` przy werdykcie RĘKI - jedyny właściciel zakresu gestu „Odrzuć nowsze niż
+    obraz", wiersza Porządków i perspektywy (fakt i gest to dwa pojęcia).
+
+    TYLKO `user`, bo tylko tam fakt znaczy pomyłkę WERDYKTU (`D-1016-1`). Wejście nowsze niż obraz
+    ze źródła `window`/`history`/`harvest` znaczyłoby błąd ZEGARA (`date_obs` albo `creation_time`):
+    okno nagłówka kończy się przed zapisem stosu (290 z 290, min +168 min), historia pliku i wydanie
+    wymieniają klatki sprzed integracji. Receptą jest wtedy naprawa nagłówka, nie werdykt ręki - panel
+    mówi to zdaniem bez gestu. Populacja na kopii pf4: 0 z 10 781 takich wejść."""
+    return asserted_by == "user" and nowsze
+
+
+def lineage_newer_inputs(con):
+    """Wejścia do odrzucenia (`_do_odrzucenia`) per obraz → dict `master_frame_id →
+    tuple(input_frame_id)`. Populacja akcyjna jak w kubełku: wejścia niewykluczone, obraz bez
+    wycofania i zastąpienia.
+
+    SQL DAJE NADZBIÓR, NIE WERDYKT (wzór `stacks._window_candidates`): `julianday` odsiewa wejścia
+    sprzed zapisu stosu z marginesem sekundy (ułamki `date_obs`), a RAW - z pasem sufitu zegarów
+    świata (`repo.UTC_OFFSET_MAX_MIN`; RAW schodzi do UTC dopiero w regule). Decyduje reguła
+    w Pythonie. `IS NULL` po OBU stronach przepuszcza zapis, którego `julianday` nie czyta (`date_obs`
+    albo `creation_time`), a `header_dt` tak - reguła i tak go oceni; bez tego porównanie z NULL
+    wycinałoby wiersz z nadzbioru po cichu.
+
+    KOLEJNOŚĆ ZŁĄCZEŃ WYMUSZONA (`CROSS JOIN`) - i to jest pomiar, nie styl: `header.date_obs` stoi za
+    `raw_json`, więc każdy odczyt daty czyta strony przepełnienia, a planer przy zwykłym `JOIN`
+    zaczynał od skanu `header` (16 997 wierszy). Od `integration` przez indeks `integration_input`
+    czyta nagłówki wyłącznie wejść ręki: 13-49 ms zamiast 79-196 ms na kopii pf4 (2026-10-16)."""
+    out = {}
+    for r in con.execute(
+            "SELECT i.master_frame_id, i.creation_time, i.utc_offset_min, ii.input_frame_id, "
+            "       ii.asserted_by, h.date_obs, f.filetype "
+            "FROM integration i CROSS JOIN integration_input ii CROSS JOIN header h "
+            "CROSS JOIN frame f "
+            "WHERE ii.integration_id = i.id AND h.frame_id = ii.input_frame_id "
+            "  AND f.id = ii.input_frame_id "
+            "  AND ii.excluded = 0 AND ii.asserted_by = 'user' AND i.creation_time IS NOT NULL "
+            "  AND EXISTS (SELECT 1 FROM frame m WHERE m.id = i.master_frame_id "
+            "              AND m.retired_at IS NULL AND m.superseded_by IS NULL) "
+            "  AND (julianday(h.date_obs) IS NULL OR julianday(i.creation_time) IS NULL "
+            "       OR julianday(h.date_obs) >= julianday(i.creation_time) "
+            "          - CASE WHEN f.filetype = 'raw' THEN ? ELSE ? END) "
+            "ORDER BY i.master_frame_id, ii.input_frame_id",
+            (UTC_OFFSET_MAX_MIN / 1440.0, 1.0 / 86400)):
+        if _do_odrzucenia(r["asserted_by"], _wejscie_nowsze(r)):
+            out.setdefault(int(r["master_frame_id"]), []).append(int(r["input_frame_id"]))
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def lineage_newer_frame_ids(con):
+    """Zbiór perspektywy i wiersza Porządków „Rodowód z klatkami nowszymi niż obraz" - OBRAZY
+    z choć jednym wejściem do odrzucenia (`lineage_newer_inputs`). Liczy stosy, nie wejścia: lista pod
+    klikiem pokazuje obrazy, a gest działa na obrazie (D-PD-10 - liczba = długość listy). Stan, nie
+    dziennik: wejście odrzucone wypada, więc zbiór pustoszeje po geście sam. Zwraca set[int]."""
+    return set(lineage_newer_inputs(con))
 
 
 # ============================================================ STAN RODOWODU W TABELI (kolumna, facet, memo)
@@ -3839,7 +3864,8 @@ def stack_lineage_inputs(con, frame_id):
 # i memo stosów w Dostawie. Kolumna i facet czytają `stack_lineage_states` (stan per gotowy obraz),
 # memo - `stack_lineage_counts` (cztery rozłączne liczniki) z TEGO SAMEGO zapytania.
 
-LINEAGE_STATES = ("pending", "exact", "history", "mixed", "window", "rejected", "none", "uncounted")
+LINEAGE_STATES = ("pending", "exact", "history", "mixed", "window", "rejected", "only_newer", "none",
+                  "uncounted")
 """Stany rodowodu gotowego obrazu, w kolejności listwy i belek: NAJPIERW robota („do potwierdzenia"
 - jedyny stan, który czeka na gest), potem od najpewniejszego do braku.
 
@@ -3849,10 +3875,13 @@ LINEAGE_STATES = ("pending", "exact", "history", "mixed", "window", "rejected", 
 * `window` - wszystkie wejścia wyliczone z okna czasu, nikt ich nie potwierdził;
 * `pending` - bez wejść, z aktualnym powodem: czeka na gest w panelu (ten sam zbiór, co perspektywa
   „Rodowód do potwierdzenia" - `lineage_pending_frame_ids`);
-* `rejected` - człowiek odrzucił wszystkie kandydatury i powodu do gestu nie ma;
+* `rejected` - człowiek odrzucił wszystkie kandydatury i powodu do gestu nie ma (werdykt ręki
+  wygrywa z `only_newer`: jest faktem mocniejszym niż stan wyprowadzony z propozycji);
+* `only_newer` - bez wejść i bez werdyktu, a propozycja nie ma czego dać poza klatkami zrobionymi
+  po zintegrowaniu obrazu (drugi zbiór `lineage_hand_sets`, AR-171): ani gest, ani przeliczenie
+  rodowodu niczego tu nie zmieni - panel mówi licznik pominiętych;
 * `none` - policzony, bez wejść i bez sprawy do gestu (powód zwietrzały - czeka na przeliczenie -,
-  przebieg nie zostawił powodu albo propozycja nie ma czego dać: cały materiał powstał po
-  zintegrowaniu obrazu - panel mówi licznik pominiętych, AR-154);
+  przebieg nie zostawił powodu albo propozycja jest pusta z innej przyczyny);
 * `uncounted` - rodowodu tego obrazu nigdy nie liczono (brak wiersza `integration`).
 
 Klatka, która nie jest gotowym obrazem, stanu nie ma (n.d.) - kolumna jest pusta, facet jej nie liczy.
@@ -3877,17 +3906,20 @@ def _stany_rodowodu_wiersze(con):
         "WHERE f.kind = 'master_light' GROUP BY f.id").fetchall()
 
 
-def _stan_rodowodu(r, oczekuje):
+def _stan_rodowodu(r, oczekuje, tylko_nowsze=False):
     """Token `LINEAGE_STATES` z wiersza `_stany_rodowodu_wiersze` - agregacja jawna, nie min/max rangi:
     stos mieszany, wszystkie odrzucone i czekający na gest to trzy różne zdania, a skrajna ranga
-    zlewała je z sąsiadami („okno" przy częściowo potwierdzonym, „brak" przy odrzuconych)."""
+    zlewała je z sąsiadami („okno" przy częściowo potwierdzonym, „brak" przy odrzuconych).
+    `oczekuje`/`tylko_nowsze` - przynależność do zbiorów `lineage_hand_sets`."""
     if r["integration_id"] is None:
         return "uncounted"
     n = r["n_inputs"]
     if not n:
         if oczekuje:
             return "pending"
-        return "rejected" if r["n_excluded"] else "none"
+        if r["n_excluded"]:
+            return "rejected"
+        return "only_newer" if tylko_nowsze else "none"
     if r["n_window"] == n:
         return "window"
     if r["n_window"]:
@@ -3895,18 +3927,20 @@ def _stan_rodowodu(r, oczekuje):
     return "history" if r["n_history"] else "exact"
 
 
-def stack_lineage_states(con, oczekujace=None):
+def stack_lineage_states(con, zbiory=None):
     """Stan rodowodu KAŻDEGO gotowego obrazu (`kind = 'master_light'`) → dict `frame_id → token`
     z `LINEAGE_STATES`. Klatki innych rodzajów w słowniku nie ma (n.d.).
 
-    Koszt: jedno zapytanie po stosach archiwum (193 wiersze na kopii `pf4`) + zbiór perspektywy
-    „Rodowód do potwierdzenia" - liczone przy składzie zbioru, nie per wiersz. Zbiór kubełka liczy
-    propozycję rodowodu (AR-154), więc skład podaje go gotowym (`oczekujace` = wynik
-    `lineage_pending_frame_ids` TEJ SAMEJ migawki) - perspektywa kubełka bierze go też jako trim
-    i bez tego liczyłaby go dwa razy. `None` = policz tu."""
-    if oczekujace is None:
-        oczekujace = lineage_pending_frame_ids(con)
-    return {int(r["frame_id"]): _stan_rodowodu(r, int(r["frame_id"]) in oczekujace)
+    Koszt: jedno zapytanie po stosach archiwum (193 wiersze na kopii `pf4`) + zbiory kubełka
+    (`lineage_hand_sets`: „Rodowód do potwierdzenia" i stosy z samymi klatkami nowszymi niż obraz) -
+    liczone przy składzie zbioru, nie per wiersz. Zbiory liczą propozycję rodowodu (AR-154), więc
+    skład podaje je gotowe (`zbiory` = wynik `lineage_hand_sets` TEJ SAMEJ migawki) - perspektywa
+    kubełka bierze `pending` też jako trim i bez tego liczyłaby propozycję dwa razy.
+    `None` = policz tu."""
+    if zbiory is None:
+        zbiory = lineage_hand_sets(con)
+    return {int(r["frame_id"]): _stan_rodowodu(r, int(r["frame_id"]) in zbiory.pending,
+                                               int(r["frame_id"]) in zbiory.only_newer)
             for r in _stany_rodowodu_wiersze(con)}
 
 

@@ -563,11 +563,12 @@ CATALOG = {
         "en": "Writing to files is in progress - stopping after the current file. You can close "
               "the window once the write stops and shows its result."},
     "wb.cancelled_note": {"pl": " - przerwano na żądanie", "en": " - stopped on request"},
-    # Ogon cofnięcia przerwanego na żądanie (AR-160): część plików nie doszła do pętli, a „Cofnij”
-    # zostaje, bo ponowienie dokończy resztę (`wb_worker.ogon_cofniecia`).
+    # Ogon cofnięcia przerwanego na żądanie (AR-160, AR-176): część plików nie doszła do pętli,
+    # „Cofnij” zostaje - bez obietnicy wyniku, ponowienie rozstrzyga pliki (`wb_worker.ogon_cofniecia`).
+    # Ten wpis - wynik bez liczby (cofnięcie Nazw); z liczbą - `wb.undo_cancelled_check`.
     "wb.undo_cancelled": {
-        "pl": " · cofnięcie przerwano na żądanie - „{undo}” dokończy resztę plików",
-        "en": " · undo stopped on request - “{undo}” finishes the remaining files"},
+        "pl": " · cofnięcie przerwano na żądanie - „{undo}” ponowi próbę dla pozostałych plików",
+        "en": " · undo stopped on request - “{undo}” retries the remaining files"},
     # Zdanie wyniku przy pozycjach z RÓŻNYMI powodami (AR-162): pierwszy powód nie udaje wspólnego.
     # `n` >= 2 zawsze, więc bez odmiany („z 2 / 5 / 22 różnych powodów”).
     "wb.reasons_first": {"pl": "pierwszy z {n} różnych powodów: {detail}",
@@ -577,6 +578,25 @@ CATALOG = {
     "wb.reasons_tip": {"pl": " (pozostałe powody: najedź na zdanie)",
                        "en": " (other reasons: hover over this sentence)"},
     "wb.reason_line": {"pl": "{file}: {reason}", "en": "{file}: {reason}"},
+    # Surowy tekst błędu systemu w podpowiedzi okien zapisu (AR-168, `wb_worker.podpowiedz_systemu`)
+    # - zdanie mówi klasę i numer w języku UI, komunikat systemu jest w języku systemu.
+    "wb.os_detail_tip": {"pl": "Szczegół systemu: {detail}", "en": "System detail: {detail}"},
+    # Cofnięcie przerwane na żądanie (AR-176): ile nieprzetworzonych backupów nie ma trwałego dowodu
+    # zakończenia (`UndoResult.remaining`) - wymagają sprawdzenia ponowieniem; zero - bez obietnicy.
+    "wb.undo_cancelled_check": {
+        "pl": {"one": " · cofnięcie przerwano na żądanie - {n} nieprzetworzony plik wymaga "
+                      "sprawdzenia; „{undo}” ponowi próbę",
+               "few": " · cofnięcie przerwano na żądanie - {n} nieprzetworzone pliki wymagają "
+                      "sprawdzenia; „{undo}” ponowi próbę",
+               "many": " · cofnięcie przerwano na żądanie - {n} nieprzetworzonych plików wymaga "
+                       "sprawdzenia; „{undo}” ponowi próbę"},
+        "en": {"one": " · undo stopped on request - {n} unprocessed file needs checking; "
+                      "“{undo}” retries",
+               "other": " · undo stopped on request - {n} unprocessed files need checking; "
+                        "“{undo}” retries"}},
+    "wb.undo_cancelled_done": {
+        "pl": " · cofnięcie przerwano na żądanie - pozostałe pliki nie wymagają cofnięcia",
+        "en": " · undo stopped on request - the remaining files need no undo"},
     # Plik „już cofnięty” w wyniku cofnięcia - stan docelowy, nie blokada (AR-160).
     "wb.undo_already": {
         "pl": {"one": "{n} już cofnięty", "few": "{n} już cofnięte", "many": "{n} już cofniętych"},
@@ -1926,6 +1946,9 @@ CATALOG = {
     "grid.lineage.state.window": {"pl": "z okna czasu", "en": "from time window"},
     "grid.lineage.state.pending": {"pl": "do potwierdzenia", "en": "to confirm"},
     "grid.lineage.state.rejected": {"pl": "wszystkie odrzucone", "en": "all rejected"},
+    # AR-171: stos bez wejść, któremu propozycja zostawiła same klatki zrobione po jego zapisaniu.
+    "grid.lineage.state.only_newer": {"pl": "tylko klatki nowsze niż obraz",
+                                      "en": "only frames newer than the image"},
     "grid.lineage.state.none": {"pl": "brak", "en": "none"},
     "grid.lineage.state.uncounted": {"pl": "nie liczono", "en": "not computed"},
     "grid.lineage.state.nd": {"pl": "nie dotyczy (to nie gotowy obraz)",
@@ -1935,6 +1958,14 @@ CATALOG = {
               "przy wydaniu.",
         "en": "Every frame of this image is certain: pointed out by hand or matched by name "
               "at release.",
+    },
+    # AR-153: „dokładny" z werdyktem ręki na klatce zrobionej po zintegrowaniu obrazu - pewność
+    # deklarowana, a nie faktyczna; `{reject}` = nazwa przycisku panelu z katalogu.
+    "grid.lineage.tip.exact_newer": {
+        "pl": "Klatki potwierdzone ręką, ale część z nich powstała po zintegrowaniu obrazu i nie mogła "
+              "do niego wejść - panel „Rodowód” wskaże je, a „{reject}” je odrzuci.",
+        "en": "Frames confirmed by hand, but some were shot after the image was integrated and cannot "
+              "have gone in - the “Lineage” panel marks them and “{reject}” rejects them.",
     },
     "grid.lineage.tip.history": {
         "pl": "Plik sam zapisał, z czego powstał (historia obróbki). Panel „Rodowód” pokazuje listę.",
@@ -1961,6 +1992,16 @@ CATALOG = {
     "grid.lineage.tip.rejected": {
         "pl": "Odrzuciłeś wszystkie proponowane klatki - obraz nie ma rodowodu z Twojej decyzji.",
         "en": "You rejected every proposed frame - the image has no lineage by your decision.",
+    },
+    # AR-171: podpowiedź mówi, że przeliczenie NIC nie da - „policz w Dostawie" (stan „brak") było
+    # tu fałszywą receptą.
+    "grid.lineage.tip.only_newer": {
+        "pl": "Cały pasujący materiał w archiwum powstał po zintegrowaniu tego obrazu - nie ma czego "
+              "potwierdzić, a przeliczenie rodowodu w Dostawie tego nie zmieni. Panel „Rodowód” mówi, "
+              "ile takich klatek.",
+        "en": "All matching material in the archive was shot after this image was integrated - there "
+              "is nothing to confirm, and recomputing lineage in Intake will not change that. "
+              "The “Lineage” panel says how many such frames there are.",
     },
     "grid.lineage.tip.none": {
         "pl": "Obraz nie ma rodowodu i nie czeka na Twój gest - policz rodowód w Dostawie, "
@@ -1992,6 +2033,9 @@ CATALOG = {
     "perspective.dups": {"pl": "Duplikaty", "en": "Duplicates"},
     "perspective.vanished": {"pl": "Zniknięte", "en": "Vanished"},
     "perspective.lineage": {"pl": "Rodowód do potwierdzenia", "en": "Lineage to confirm"},
+    # AR-153: ten sam zbiór, co wiersz Porządków `tasks.lineage_newer` - jedna nazwa.
+    "perspective.lineage_newer": {"pl": "Rodowód z klatkami nowszymi niż obraz",
+                                  "en": "Lineage with frames newer than the image"},
     "perspective.superseded": {"pl": "Zastąpione", "en": "Superseded"},
     "perspective.retired": {"pl": "Wycofane", "en": "Retired"},
     "grid.criteria.only_retired": {"pl": "wycofane ręką", "en": "retired by hand"},
@@ -2628,6 +2672,44 @@ CATALOG = {
     "grid.lin.src.window": {"pl": "wynika z czasu", "en": "inferred from time"},
     "grid.lin.src.user": {"pl": "Twoja decyzja", "en": "your decision"},
     "grid.lin.src.excluded": {"pl": "odrzucone", "en": "rejected"},
+    # AR-153: klatka zrobiona po zintegrowaniu obrazu - znacznik w źródle wiersza wejścia.
+    "grid.lin.src.newer": {"pl": "nowsza niż obraz", "en": "newer than the image"},
+    "grid.lin.reject_newer": {"pl": "Odrzuć nowsze niż obraz", "en": "Reject newer than the image"},
+    # `{undo}` = nazwa recepty paska (`grid.lin.undo`) - jedno źródło napisu, który człowiek klika.
+    "grid.lin.reject_newer_tip": {
+        "pl": "Zapisz, że klatki potwierdzone ręką, a zrobione po zintegrowaniu obrazu, NIE weszły "
+              "w niego - pozostałe wejścia zostają. „{undo}” na pasku przywróci stan sprzed gestu.",
+        "en": "Record that the frames confirmed by hand but shot after the image was integrated did "
+              "NOT go into it - the other inputs stay. “{undo}” on the status bar restores the state "
+              "before.",
+    },
+    # Podpowiedź „Potwierdź zaznaczone", gdy zaznaczenie obejmuje klatkę nowszą niż obraz - przycisk
+    # zostaje czynny (werdykt należy do człowieka), zdanie mówi, co zapisze.
+    "grid.lin.confirm_tip_newer": {
+        "pl": "⚠ Zaznaczenie obejmuje klatkę zrobioną po zintegrowaniu obrazu - potwierdzenie zapisze, "
+              "że weszła w obraz, choć nie mogła",
+        "en": "⚠ The selection includes a frame shot after the image was integrated - confirming "
+              "records that it went into the image, although it cannot have",
+    },
+    # Liczba się odmienia (1 klatka, 2 klatki, 5 klatek, 12 klatek, 22 klatki) - zdanie stoi nad
+    # przyciskiem `grid.lin.reject_newer` i mówi, ile wejść ten gest weźmie.
+    "grid.lin.flag.newer": {
+        "pl": {"one": "⚠ {n} klatka na liście powstała po zintegrowaniu obrazu - nie mogła do niego "
+                      "wejść",
+               "few": "⚠ {n} klatki na liście powstały po zintegrowaniu obrazu - nie mogły do niego "
+                      "wejść",
+               "many": "⚠ {n} klatek na liście powstało po zintegrowaniu obrazu - nie mogło do niego "
+                       "wejść"},
+        "en": {"one": "⚠ {n} listed frame was shot after the image was integrated - it cannot have "
+                      "gone in",
+               "other": "⚠ {n} listed frames were shot after the image was integrated - they cannot "
+                        "have gone in"},
+    },
+    # To samo z pliku, okna albo wydania - zegar do sprawdzenia, nie werdykt (bez gestu).
+    "grid.lin.flag.newer_clock": {
+        "pl": "⚠ czas klatki późniejszy niż zapis obrazu - sprawdź zegar w nagłówku",
+        "en": "⚠ frame time later than the image was saved - check the clock in the header",
+    },
     # Zdania powitalne panelu opisują OBIE osie od C3: gotowy obraz mówi, z czego powstał, klatka
     # nieba — czym ją skalibrowano. Zdanie wymieniające tylko stosy kłamałoby o połowie panelu.
     "grid.lin.hint.none": {
@@ -3043,6 +3125,12 @@ CATALOG = {
     },
     # Bliźniak wariantu wyżej (AR-150): pasujący materiał JEST, ale cały powstał po zintegrowaniu
     # obrazu - bez liczby, bo liczbę niesie nota (`grid.lin.cand.after_integration`).
+    # AR-171: co dalej ze stosem, któremu propozycja zostawiła same klatki nowsze niż obraz - nic.
+    # Doklejane do noty po liczniku `grid.lin.cand.after_integration` (on mówi, ile i dlaczego).
+    "grid.lin.cand.only_newer": {
+        "pl": "Nie ma tu czego potwierdzić, a przeliczenie rodowodu w Dostawie tego nie zmieni.",
+        "en": "Nothing to confirm here, and recomputing lineage in Intake will not change that.",
+    },
     "grid.lin.reason.no_candidates_after_integration": {
         "pl": "Nie wiem, z czego powstał: pasujące klatki są w archiwum, ale wszystkie powstały "
               "dopiero po zintegrowaniu tego obrazu.",
@@ -3141,6 +3229,11 @@ CATALOG = {
     "grid.criteria.only_lineage": {
         "pl": "tylko rodowód do potwierdzenia",
         "en": "only lineage to confirm",
+    },
+    # AR-153: ten sam zbiór, co perspektywa `perspective.lineage_newer` i wiersz `tasks.lineage_newer`.
+    "grid.criteria.only_lineage_newer": {
+        "pl": "tylko rodowód z klatkami nowszymi niż obraz",
+        "en": "only lineage with frames newer than the image",
     },
     # D-V-9f: perspektywa zapisana NOWSZYM wydaniem niesie warunki, których ten build nie zna.
     # Pominięcie ich poszerza zbiór, więc pasek mówi to wprost i nazywa klucze - bez nazw nie
@@ -4908,6 +5001,19 @@ CATALOG = {
         "en": "Header differs from the confirmed folder"},
     # Nazwa perspektywy, którą wiersz otwiera (`perspective.lineage`) - jeden zbiór, jedna nazwa.
     "tasks.stacks_lineage": {"pl": "Rodowód do potwierdzenia", "en": "Lineage to confirm"},
+    # AR-153: nazwa perspektywy, którą wiersz otwiera (`perspective.lineage_newer`).
+    "tasks.lineage_newer": {"pl": "Rodowód z klatkami nowszymi niż obraz",
+                            "en": "Lineage with frames newer than the image"},
+    # Forma „etykieta: liczba" - bez odmiany liczebnika; nazwy gestu i recepty z katalogu
+    # (`grid.lin.reject_newer`, `grid.lin.undo`).
+    "tasks.lineage_newer_tip": {
+        "pl": "Wejścia potwierdzone ręką, zrobione po zintegrowaniu obrazu: {n}. W Zbiorach zaznacz "
+              "obraz i w panelu „Rodowód” kliknij „{reject}” - „{undo}” na pasku przywróci stan "
+              "sprzed gestu.",
+        "en": "Inputs confirmed by hand but shot after the image was integrated: {n}. In Collections "
+              "select the image and click “{reject}” in the “Lineage” panel - “{undo}” on the status "
+              "bar restores the state before.",
+    },
     "tasks.superseded_frames": {"pl": "Zastąpione (historia)", "en": "Superseded (history)"},
     "tasks.retired_frames": {"pl": "Wycofane (historia)", "en": "Retired (history)"},
     "tasks.retired_conflict_frames": {
@@ -5066,6 +5172,17 @@ CATALOG = {
     "note.clear": {"pl": "Usuń uwagi", "en": "Remove notes"},
     "note.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
+    # AR-157: JEDNA recepta od klatki z kilkoma obecnymi kopiami do jednej - podpowiedź wiersza
+    # „Duplikaty” i zdanie okna zmiany obiektu przy pominięciu `many_copies` (`objchg.many_copies_hint`).
+    # Nazwy przycisków i miejsc z katalogu (`tasks._PODPOWIEDZI_OSI`), nie z pamięci.
+    "tasks.dup_frames_tip": {
+        "pl": "Klatka z kilkoma obecnymi kopiami: w „{persp}” podpowiedź ścieżki wymienia każdą kopię "
+              "- zbędną usuń z dysku albo przenieś poza archiwum, potem {place} → „{check}” → "
+              "„{mark}” (pojawi się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie).",
+        "en": "A frame with several present copies: in “{persp}” the path tooltip lists every copy "
+              "- delete the extra one from disk or move it out of the archive, then {place} → "
+              "“{check}” → “{mark}” (it appears under the result once the check confirms the "
+              "copy is gone)."},
     # 0021: podzbiór „Duplikatów", stoi tuż pod nimi. Nazwa mówi o KLATKACH, bo liczba obok liczy
     # klatki (`queries.copy_conflict_frame_ids`) - „Kopie niezgodne ze sobą" obiecywało liczbę kopii.
     # To samo brzmienie niesie perspektywa i człon paska kryteriów.
@@ -5814,6 +5931,19 @@ CATALOG = {
               "the database: {obiekt} · unchanged: {bez_zmian} · skipped: {pominie}"},
     "objchg.rmdirs_tip": {"pl": "Puste po zmianie - zostaną usunięte:\n{dirs}",
                           "en": "Empty after the change - will be removed:\n{dirs}"},
+    # AR-157: zdanie pod pominięciami, gdy gest pominął klatkę z kilkoma obecnymi kopiami - `{recipe}`
+    # = podpowiedź wiersza Porządków „Duplikaty” (`tasks.dup_frames_tip`), jedna recepta.
+    "objchg.many_copies_hint": {
+        "pl": "Gest pomija klatki z kilkoma obecnymi kopiami (jedna klatka, jeden folder obiektu). "
+              "{recipe} Potem powtórz gest.",
+        "en": "The gesture skips frames with several present copies (one frame, one object folder). "
+              "{recipe} Then repeat the gesture."},
+    # AR-157: suma przewidywanych dróg zapisu kart planu (`object_change_dialog.sumy_drog`).
+    "objchg.routes": {
+        "pl": "Zapis kart OBJECT: w miejscu {inplace} · cały plik przepisany {rewrite} · "
+              "zależy od pliku {depends}",
+        "en": "OBJECT card writes: in place {inplace} · whole file rewritten {rewrite} · "
+              "depends on the file {depends}"},
     # Lista po biegu (zapis albo cofnięcie): co się stało z pozycją.
     "objchg.col.was": {"pl": "Było", "en": "Was"},
     "objchg.col.is": {"pl": "Jest", "en": "Is now"},
@@ -6203,11 +6333,11 @@ CATALOG = {
         "pl": "format RAW jest read-only (#2)",
         "en": "RAW format is read-only (#2)"},
     "objchg.item.header_hash_mismatch": {
-        "pl": "header_hash mismatch",
-        "en": "header_hash mismatch - the header changed since staging"},
+        "pl": "nagłówek pliku zmienił się od stagingu (header_hash niezgodny)",
+        "en": "the file header changed since staging (header_hash mismatch)"},
     "objchg.item.undo_header_changed": {
-        "pl": "header_hash mismatch",
-        "en": "header_hash mismatch - the header changed since the commit"},
+        "pl": "nagłówek pliku zmienił się od commitu (header_hash niezgodny)",
+        "en": "the file header changed since the commit (header_hash mismatch)"},
     "objchg.item.backup_not_saved": {
         "pl": "backup do cofnięcia NIE powstał, więc podmiany nie było - plik nietknięty: "
               "{detail}",
@@ -6842,6 +6972,25 @@ CATALOG = {
     "objchg.item.withheld_newer_header": {
         "pl": "zapis zastąpiony nowszym stanem pliku (inny nagłówek na dysku)",
         "en": "write superseded by a newer state of the file (a different header on disk)"},
+    # Błędy systemu klasą (AR-168, `writeback._blad_systemu`): fraza z numerem, surowy tekst systemu
+    # w podpowiedzi (`wb.os_detail_tip`); bramka sumy kontrolnej z faktów bazy (AR-167,
+    # `card_rules.BRAMKA_SUMY`); region sprzed commitu bez dowodu całego pliku (AR-169).
+    "objchg.item.os_denied": {"pl": "odmowa dostępu do pliku ({os_code})",
+                              "en": "access to the file denied ({os_code})"},
+    "objchg.item.os_missing": {"pl": "plik albo folder nie istnieje ({os_code})",
+                               "en": "the file or folder does not exist ({os_code})"},
+    "objchg.item.os_no_space": {"pl": "brak miejsca na dysku ({os_code})",
+                                "en": "not enough space on the disk ({os_code})"},
+    "objchg.item.os_share_lost": {"pl": "udział sieciowy albo dysk nie odpowiada ({os_code})",
+                                  "en": "the network share or disk is not responding ({os_code})"},
+    "objchg.item.fits_checksum": {"pl": "FITS z sumą kontrolną (CHECKSUM/DATASUM)",
+                                  "en": "FITS with a checksum (CHECKSUM/DATASUM)"},
+    "objchg.item.undo_region_unproven": {
+        "pl": "region nagłówka jest już stanem sprzed commitu, ale całego pliku nie da się "
+              "potwierdzić ({inner}) - przeskanuj plik; zmianę poza nagłówkiem rozstrzyga człowiek",
+        "en": "the header region is already the state from before the commit, but the whole file "
+              "cannot be confirmed ({inner}) - rescan the file; a change outside the header is for "
+              "a person to decide"},
     # Reguła formy folderu obiektu (`resolve.catalog.FOLDER_RULE_CODES`, AR-141) - szczegół
     # pominięcia `bad_target` w języku UI.
     "objchg.folder.empty": {"pl": "kanon pusty albo nie jest tekstem",
@@ -6939,8 +7088,7 @@ CATALOG = {
         "en": "joined designations - not every part points to this object"},
     "objchg.gate.card_not_text": {"pl": "karta OBJECT nietekstowa ({vtype})",
                                   "en": "non-text OBJECT card ({vtype})"},
-    "objchg.gate.fits_checksum": {"pl": "FITS z sumą kontrolną (CHECKSUM/DATASUM)",
-                                  "en": "FITS with a checksum (CHECKSUM/DATASUM)"},
+    # Bramka sumy kontrolnej mówi powodem rdzenia `objchg.item.fits_checksum` (AR-167).
     "objchg.skip.card_rule": {"pl": "karta OBJECT: {detail}", "en": "OBJECT card: {detail}"},
     # Szczegóły odmowy karty i katalogu jako fakty rdzenia (AR-138): reguła karty FITS 4.0, długości
     # komentarza przed i po układzie karty, rodzaj błędu systemu.

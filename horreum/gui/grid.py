@@ -58,7 +58,9 @@ from horreum.gui.note_dialog import NoteDialog
 from horreum.gui.object_change_dialog import ObjectChangeDialog
 from horreum.gui.projection_dialog import ObjectPickDialog, ProjectionDialog
 from horreum.resolve.frames import LIGHT_KINDS
-from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_wyniku_zapisu
+from horreum.gui.wb_worker import (
+    WritebackRunner, commit_do_cofniecia, podpowiedz_kart, podpowiedz_powodow, zdanie_wyniku_zapisu,
+)
 
 # FASADA: `grid` re-eksportuje nazwy modułów `grid_*`, po które sięga reszta pakietu i testy
 # (`tests/test_gui_grid_fasada.py` pilnuje, że każda czytana z zewnątrz nazwa tu jest).
@@ -280,6 +282,9 @@ class FramesView(QWidget):
         self._zbior_ogony = []      # ogony zleceń (`refresh(potem=…)`) czekające na przyłożenie zbioru
         self._zbior_bieg_gen = None  # generacja, którą liczy bieg w wątku (None: wynik już oddany)
         self._zbior_odlozony = None  # `(gen, wynik)` czekający na zamknięcie edytora komórki
+        # Generacja przeładowania NIE-NAWIGACYJNEGO, które oddaje zaznaczenie po przyłożeniu
+        # (`przeladuj_z_zaznaczeniem`, AR-172); każde inne zlecenie podbija generację i ją unieważnia.
+        self._przeladowanie_z_zaznaczeniem = None
         self._zbudowany = False     # koniec `__init__`: od tej chwili zmiana kolumn przeładowuje zbiór
         self._build_ui()
         # PRZED pierwszym zbudowaniem listy perspektyw: rejestr sprzed I-1 dowozi swoje widoki do
@@ -707,10 +712,13 @@ class FramesView(QWidget):
         self.filter_panel.set_keywords(self._all_keywords)
         self.macro_bar.set_keywords(self._all_keywords)
         if zmiana and self._zbudowany:
-            self._przeladuj_po_kolumnach()  # model tabeli niesie kolumny - bez tego zostałyby stare
+            self.przeladuj_z_zaznaczeniem()  # model tabeli niesie kolumny - bez tego zostałyby stare
 
-    def _przeladuj_po_kolumnach(self):
-        """Przeładowanie zbioru Z POWODU KOLUMN (wynik Pól) - zaznaczenie wraca po nim (AR-164).
+    def przeladuj_z_zaznaczeniem(self):
+        """Przeładowanie zbioru NIE-NAWIGACYJNE - zbiór ten sam, zmienia się jego widok albo dane:
+        wynik Pól, kolumny ręką, kolumna „Wersja", grupowanie po wersji, przebieg Dostawy, gest osi
+        obiektu z innego okna (AR-164, AR-172). Zaznaczenie, bieżąca komórka i wybór w panelu
+        rodowodu wracają po przyłożeniu.
 
         RESET MODELU ZOSTAJE I TO JEST ROZSTRZYGNIĘCIE, NIE ZANIECHANIE: kolumna-keyword niesie
         komórki z `cards_pivot` liczonego po CAŁYM zbiorze (skład w tle, AR-27) oraz własny kierunek
@@ -719,21 +727,36 @@ class FramesView(QWidget):
         wynik Pól 2,5-3,3 s po wejściu w Zbiory, a zaznaczenie zrobione w tym oknie znikało razem
         z panelem rodowodu („Zaznacz w tabeli…").
 
-        MIGAWKA JEDZIE OGONEM ZE ZNACZNIKIEM GENERACJI, nie zwykłym `potem`: ogony przechodzą na
-        nowsze zlecenia (`refresh`), a stara migawka nie ma prawa wrócić po zmianie filtra,
-        nawigacji czy geście - tamten zbiór ma własne zaznaczenie. Ogon sprawdza, że przyłożono
-        właśnie TO przeładowanie (`_po_kolumnach`). Gdy zbiór już jest w drodze (zlecenie z innej
-        przyczyny), migawki nie robimy: przyłożenie i tak zastąpi zbiór, a jego zaznaczenie
-        zdejmie reset z tamtego powodu."""
-        migawka = None if self._zbior_w_drodze() else self._migawka_zaznaczenia()
-        gen = self._zbior_gen + 1           # generacja TEGO przeładowania (`refresh` podbija ją pierwszą)
-        self.refresh(w_tle=True,
-                     potem=partial(self._po_kolumnach, gen, migawka) if migawka else None)
+        ZLECENIE NIESIE ZNACZNIK GENERACJI, MIGAWKĘ ROBI PRZYŁOŻENIE (`_zastosuj_zbior`). Migawka
+        z chwili zlecenia cofała wybór zrobiony w oknie przeładowania: tabela stoi wtedy w
+        `NoSelection`, ale combo nocy i lista panelu rodowodu działają. Nowsze zlecenie dowolnej INNEJ
+        przyczyny (nawigacja, filtr, gest) podbija generację - znacznik przestaje pasować, a tamten
+        zbiór ma własne zaznaczenie. Dwa przeładowania tej klasy z rzędu: drugie dziedziczy znacznik
+        pierwszego (drugi wynik Pól w trakcie składu po pierwszym, wynik Pól po Dostawie). Zbiór
+        w drodze z innej przyczyny - znacznika nie stawiamy: tamto przyłożenie i tak zdejmie
+        zaznaczenie albo odłoży cel gestu.
+
+        Znacznik stoi PRZED `refresh`: widok bez wątku (testy, `:memory:`) składa synchronicznie."""
+        if (not self._zbior_w_drodze()
+                or self._przeladowanie_z_zaznaczeniem == self._zbior_gen):
+            # generacja TEGO przeładowania (`refresh` podbija ją pierwszą)
+            self._przeladowanie_z_zaznaczeniem = self._zbior_gen + 1
+        self.refresh(w_tle=True)
+
+    def _stan_panelu(self):
+        """Wybór człowieka w panelu rodowodu jako argumenty `_refresh_lineage` - zaznaczone wiersze
+        listy, relacja osi kalibracji, noc trybu propozycji (AR-172); `{}` przy zamkniętym panelu."""
+        if not self._lineage_panel_open():
+            return {}
+        bar = self.lineage_bar
+        return {"select_frame_ids": bar.selected_frame_ids() or None,
+                "select_relation": bar.selected_relation(),
+                "select_night": bar.selected_night()}
 
     def _migawka_zaznaczenia(self):
         """Zaznaczenie tabeli po TOŻSAMOŚCI, nie po numerach (reset przenumerowuje wiersze, a nowe
         kolumny przesuwają numery kolumn): `(frame_id zaznaczonych, frame_id bieżącego wiersza,
-        znaczenie bieżącej kolumny, zaznaczone wiersze listy panelu rodowodu)` albo `None` bez
+        znaczenie bieżącej kolumny, stan panelu rodowodu - `_stan_panelu`)` albo `None` bez
         zaznaczenia. Bieżący wiersz i kolumnę trzymamy OSOBNO - nie musi to być pierwszy zaznaczony
         wiersz ani kolumna 0 (kotwica Shift i komórka, na której stoi klawiatura)."""
         wiersze = self._selected_data_rows()
@@ -746,22 +769,7 @@ class FramesView(QWidget):
             if isinstance(wiersz, dict) and "_group" not in wiersz:
                 biezacy = wiersz.get("frame_id")
             kolumna = self.model._sort_id_for(idx.column())
-        lista = self.lineage_bar.selected_frame_ids() if self._lineage_panel_open() else []
-        return [r["frame_id"] for r in wiersze], biezacy, kolumna, lista
-
-    def _po_kolumnach(self, gen, migawka):
-        """Ogon `_przeladuj_po_kolumnach`: zaznaczenie, bieżąca komórka i panel wracają - o ile
-        przyłożony zbiór jest zbiorem TEGO przeładowania. Nowsze zlecenie (dowolnej przyczyny)
-        podbiło generację: jego zbiór, jego zaznaczenie, migawka idzie do kosza."""
-        if gen != self._zbior_gen:
-            return
-        zaznaczone, biezacy, kolumna, lista = migawka
-        self._przywroc_zaznaczenie(zaznaczone, biezacy=biezacy, kolumna=kolumna)
-        # Przywrócenie ruszyło debounce panelu daty i rodowodu; panel przebudowany zaraz po resecie
-        # mówił „Zaznacz w tabeli…" - odświeżamy go od razu, z zaznaczeniem wierszy jego listy.
-        self._date_timer.stop()
-        self._refresh_date_echo()
-        self._refresh_lineage(select_frame_ids=lista or None)
+        return [r["frame_id"] for r in wiersze], biezacy, kolumna, self._stan_panelu()
 
     def _wypelnij_pola(self):
         """Lista Pól z OSTATNIEGO pokrycia i bieżących kolumn. Szum strukturalny na DÓŁ (stabilnie
@@ -1834,7 +1842,8 @@ class FramesView(QWidget):
         zbioru, a jego przyłożenie (`_zastosuj_zbior`, także w tle - zbiór bywa w drodze) odkłada
         `_cel_gestu` w zaznaczeniu i przewija do pierwszej klatki. Cel stawiamy TU, z recepty paska,
         a nie z chwili gestu: `_czlon_poza_widokiem` odkłada go jednorazowo, więc każde przeładowanie
-        między gestem a klikiem (inne zapytanie Znajdź, zmiana kolumn) go konsumowało - recepta
+        między gestem a klikiem (inne zapytanie Znajdź, zmiana kolumn - ta oddaje zaznaczenie z chwili
+        przyłożenia, AR-172, ale celu gestu nie przechowuje) go konsumowało - recepta
         „odsłonisz 43 klatki NGC3623" pokazywała wtedy cały zbiór bez zaznaczenia, a następny człon
         („Obiekt → Przywróć…") stał wygaszony. Pusty stan (`_CEL_WIDOK`) celu nie ma - odsłania widok."""
         rodzaj = self._rodzaj_recepty_powrotu(cel=cel)
@@ -2362,14 +2371,16 @@ class FramesView(QWidget):
         raz w osi stosów, raz w dołożonej osi kalibracji."""
         super().changeEvent(e)
         if e.type() == QEvent.PaletteChange:
-            self._refresh_lineage()          # warunkowe: przy zamkniętym panelu nie czyta bazy
+            # Warunkowe: przy zamkniętym panelu nie czyta bazy. Wybór w panelu (wiersze, noc,
+            # relacja) przeżywa przebudowę - zmiana skórki nie jest nawigacją (AR-172).
+            self._refresh_lineage(**self._stan_panelu())
 
     # ---- panel RODOWODU (I-2d) ----
     def _lineage_panel_open(self):
         return (not self.panel_stack.isHidden()
                 and self.panel_stack.currentWidget() is self.lineage_bar)
 
-    def _refresh_lineage(self, *, select_frame_ids=None, select_relation=None):
+    def _refresh_lineage(self, *, select_frame_ids=None, select_relation=None, select_night=None):
         """Wypełnij panel rodowodu z zaznaczenia. Warunek: DOKŁADNIE JEDNA zaznaczona klatka
         `master_light` — rodowód jest faktem o JEDNYM obrazie, a „rodowód zbioru" nie znaczy nic.
         Każdy inny stan dostaje ZDANIE, nie pustkę: user ma wiedzieć, czego brakuje do odpowiedzi
@@ -2378,6 +2389,8 @@ class FramesView(QWidget):
         `select_frame_ids` przywraca zaznaczenie PO odświeżeniu (werdykt ręki) — po klatkach,
         nie po indeksach, bo kolejność wierszy należy do zapytania, a nie do panelu.
         `select_relation` robi to samo na osi kalibracji (po geście ręki - relacja, nie indeks).
+        `select_night` przywraca noc trybu propozycji (AR-172) - PRZED wierszami, bo lista
+        pokazuje klatki wybranej nocy.
 
         Świadomie WARUNKOWE (jak `_refresh_date_echo`): przy zamkniętym panelu nie czytamy bazy."""
         if not self._lineage_panel_open():
@@ -2455,6 +2468,8 @@ class FramesView(QWidget):
                                      candidates=kandydaci, raw_unreferenced=raw_bez_zegara,
                                      after_integration=po_zintegrowaniu, candidate_paths=sciezki)
         self._lineage_frame_id = fid
+        if select_night is not None:
+            self.lineage_bar.select_night(select_night)
         if select_frame_ids:
             self.lineage_bar.select_frame_ids(select_frame_ids)
 
@@ -2465,9 +2480,14 @@ class FramesView(QWidget):
         a panel trzyma jego poprzednią wartość. Bez tego takt 3 zostawiał na ekranie zdanie
         „zapis nieaktualny" dokładnie po tym, jak sam ten zapis odświeżył (bramka pakietu, zarzut 7).
 
+        WYBÓR CZŁOWIEKA W PANELU ZOSTAJE (AR-172): wiersze listy, noc trybu propozycji, relacja osi
+        kalibracji. Gospodarz woła to zaraz po zleceniu przeładowania po przebiegu, jeszcze przed
+        przyłożeniem zbioru - panel przebudowany bez stanu wracał na noc mastera i domyślną relację,
+        a przyłożenie brało migawkę już z tego stanu.
+
         Cicho, gdy panel nie jest otwarty albo nic nie zaznaczono — `_refresh_lineage` sam
         rozstrzyga, czy ma co pokazać."""
-        self._refresh_lineage()
+        self._refresh_lineage(**self._stan_panelu())
 
     def _on_lineage_offset(self, minutes):
         """Wskazane odniesienie czasu → jedna klinga (`repo.set_integration_offset`), potem
@@ -2892,7 +2912,7 @@ class FramesView(QWidget):
 
     def _on_columns(self, cols):
         self._columns = cols
-        self.refresh(w_tle=True)
+        self.przeladuj_z_zaznaczeniem()     # kolumny ręką to widok zbioru, nie nawigacja (AR-172)
 
     def _perspektywa_obrazow(self):
         """Czy perspektywa jest jedną z tych, w których kolumna „Obrazy" ma treść (`_FLAGI_OBRAZOW`)."""
@@ -2980,8 +3000,9 @@ class FramesView(QWidget):
         # Grupa wersji jest pochodną liczoną w `_refresh` tylko wtedy, gdy ktoś o nią pyta
         # (`_potrzebne_wersje`) - wybór tej pozycji musi więc przeładować zbiór, inaczej każdy
         # wiersz wylądowałby w „(brak)". Pozostałe klucze model przegrupowuje sam, bez SQL.
+        # Zbiór ten sam - zaznaczenie wraca po przyłożeniu (AR-172).
         if self.combo_group.currentData() == _GRUPA_WERSJI:
-            self.refresh(w_tle=True)
+            self.przeladuj_z_zaznaczeniem()
             return
         self.model.set_group_by(self.combo_group.currentData())
 
@@ -3217,9 +3238,17 @@ class FramesView(QWidget):
             self._sync_zbioru_w_drodze()
             return
         if wynik is None:                    # skład w tle padł (`_on_zbior_failed`)
-            self.refresh()
+            self._ponow_synchronicznie()
             return
         self._przyloz(wynik)
+
+    def _ponow_synchronicznie(self):
+        """Drugie podejście do TEGO SAMEGO zlecenia na wątku GUI (skład w tle padł). Znacznik
+        przeładowania nie-nawigacyjnego przechodzi na generację ponowienia - to nie nowa przyczyna,
+        więc zaznaczenie wraca jak po udanym składzie (AR-172)."""
+        if self._przeladowanie_z_zaznaczeniem == self._zbior_gen:
+            self._przeladowanie_z_zaznaczeniem = self._zbior_gen + 1
+        self.refresh()
 
     @Slot(int, str)
     def _on_zbior_failed(self, gen, msg):
@@ -3239,7 +3268,7 @@ class FramesView(QWidget):
         if self._edytor_otwarty():
             self._zbior_odlozony = (gen, None)
             return
-        self.refresh()
+        self._ponow_synchronicznie()
 
     def _zastosuj_zbior(self, wynik):
         """Wynik `_sklad_zbioru` → model i każda powierzchnia, która czyta zbiór (wątek GUI)."""
@@ -3249,6 +3278,12 @@ class FramesView(QWidget):
         for menu in (*self._menu_tabeli.findChildren(QMenu), self._menu_tabeli):
             if menu.isVisible():
                 menu.hide()
+        # ZAZNACZENIE PRZEŻYWA PRZEŁADOWANIE NIE-NAWIGACYJNE (`przeladuj_z_zaznaczeniem`, AR-172):
+        # migawka ze STAREGO modelu tuż przed resetem, o ile przykładany zbiór jest zbiorem takiego
+        # zlecenia - każde inne zlecenie podbiło generację i znacznik nie pasuje (wynik przykładany
+        # tu jest zawsze generacji bieżącej: `_on_zbior_done`, `_przyloz_odlozony`, skład synchroniczny).
+        migawka = (self._migawka_zaznaczenia()
+                   if self._przeladowanie_z_zaznaczeniem == self._zbior_gen else None)
         base, pv, keywords = wynik["base"], wynik["pivot"], wynik["keywords"]
         base_ids = wynik["base_ids"]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5
@@ -3269,9 +3304,9 @@ class FramesView(QWidget):
         # JEDNORAZOWO, wzorem `_reveal_facet`: stan konsumuje PIERWSZY refresh po geście, także
         # gdy niczego nie odłożył. Bez wygaszania CEL GESTU wracałby przy dowolnym późniejszym
         # odświeżeniu - czyli tam, gdzie user o niego nie prosił (granica „cel gestu przeżywa GEST,
-        # nie każdy refresh", pinowana od R-S2b-3). Zaznaczenie przeżywa też przeładowanie z powodu
-        # KOLUMN z wyniku Pól - ale własną migawką z generacją (`_przeladuj_po_kolumnach`, AR-164),
-        # nie tym celem; zmiana kolumn ręką (`_on_columns`) zaznaczenie dalej zdejmuje.
+        # nie każdy refresh", pinowana od R-S2b-3). Zaznaczenie przeżywa też przeładowanie
+        # nie-nawigacyjne (wynik Pól, kolumny ręką, Dostawa - AR-164, AR-172) - ale własną migawką
+        # z generacją (wyżej), nie tym celem; cel gestu konsumuje każde przyłożenie.
         # Konsumpcja TU, odłożenie niżej - PO pokazaniu tabeli (FH-11).
         cel, self._cel_gestu = self._cel_gestu, []
         n = len(base)
@@ -3288,13 +3323,27 @@ class FramesView(QWidget):
         # CEL GESTU ODKŁADA SIĘ DOPIERO NA POKAZANEJ TABELI (FH-11). Odkładany przed `setVisible`
         # trafiał po recepcie z pustego widoku w tabelę UKRYTĄ, a `scrollTo` na ukrytym widoku
         # nic nie robi - zaznaczone klatki stały na dolnej krawędzi kadru albo pod nią.
-        if cel:
-            self._przywroc_zaznaczenie(cel)
+        # Migawka przeładowania tą samą drogą i w tym samym miejscu. Cel gestu BIJE migawkę, gdy
+        # odłożył choć jedną klatkę - to nowsza, jawna intencja (oba naraz: „Policz teraz” i koniec
+        # Dostawy). CEL BEZ KLATKI W ZBIORZE USTĘPUJE ZAZNACZENIU CZŁOWIEKA: migawka zostaje CAŁA -
+        # zaznaczenie, bieżąca komórka i wybór w panelu (`_przywroc_zaznaczenie` bez trafień zaznaczenia
+        # nie rusza). Pusty ekran zgubiłby wybór, którego AR-172 broni, a pokazanie go zamiast
+        # nieistniejącego celu nie mówi nieprawdy. Cel schodzi w obu przypadkach (konsumpcja wyżej).
+        panel = {}
+        if migawka is not None:
+            zaznaczone, biezacy, kolumna, panel = migawka
+            self._przywroc_zaznaczenie(zaznaczone, biezacy=biezacy, kolumna=kolumna)
+        if cel and self._przywroc_zaznaczenie(cel):
+            panel = {}                       # panel opisze klatki celu, wybór z migawki ich nie dotyczy
         self.sel_bar.set_clearable(self._zbior_zawezony())
         self._zastosuj_listwe(wynik["listwa"])               # listwa (F4)
         self._sync_zbioru_w_drodze()                         # akcje całego widoku i edycja - za zbiorem
+        # Odłożenie zaznaczenia ruszyło debounce panelu daty i rodowodu (`selectionChanged`), a oba
+        # odświeżają się tu, od razu - debounce przebudowałby panel 150 ms później BEZ wyboru
+        # z migawki (noc, relacja, wiersze listy).
+        self._date_timer.stop()
         self._refresh_date_echo()                           # panel daty odbija świeże widoczne (echo warunkowe)
-        self._refresh_lineage()                              # …i panel rodowodu, tak samo warunkowo
+        self._refresh_lineage(**panel)                       # …i panel rodowodu, tak samo warunkowo
         # Przeładowanie WYWOŁANE GESTEM w panelu rodowodu milczy (`_po_werdykcie`): raport „Grid: N
         # klatek" przykrywał zdanie gestu („Odrzucono 2") razem z sensem recepty „Cofnij werdykt".
         if self._cichy_raport_gen != self._zbior_gen:
@@ -3630,9 +3679,10 @@ class FramesView(QWidget):
 
     def _on_version_col(self, on):
         """„Kolumny ▾ → Wersja" w Znajdź. Przeładowanie, bo fakty grup wersji liczą się w składzie
-        tylko wtedy, gdy ktoś o nie pyta (`_potrzebne_wersje`)."""
+        tylko wtedy, gdy ktoś o nie pyta (`_potrzebne_wersje`). Zbiór ten sam - zaznaczenie wraca
+        po przyłożeniu (AR-172)."""
         self._wersja_w_znajdz = bool(on)
-        self.refresh(w_tle=True)
+        self.przeladuj_z_zaznaczeniem()
 
     def _uloz_belki_i_wersje(self):
         """Układ widoku po każdym resecie modelu (sygnał `modelReset`): belki grup i kolumna „Wersja".
@@ -4591,7 +4641,9 @@ class FramesView(QWidget):
             queries.writeback_frame_targets(self.con, [frame_id]), keyword, text,
             cards_fn=lambda lid: queries.location_cards(self.con, lid), comment=comment)
         if pv is None:
-            self.status_message.emit(i18n.t("grid.cell.refused", kw=keyword, reason=powod))
+            from horreum.gui.wb_worker import tekst_powodu   # reguła karty w języku UI (AR-167)
+            self.status_message.emit(i18n.t("grid.cell.refused", kw=keyword,
+                                            reason=tekst_powodu(powod)))
             return
         self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij"
         if self._run_id is None:
@@ -4644,6 +4696,8 @@ class FramesView(QWidget):
                 queries.writeback_frame_targets(self.con, [fid]), "FOCRATIO", f"{wartosc:g}",
                 cards_fn=lambda lid: queries.location_cards(self.con, lid))
             if pv is None:
+                from horreum.gui.wb_worker import tekst_powodu   # w języku UI (AR-167)
+                powod = tekst_powodu(powod)
                 odmowy[powod] = odmowy.get(powod, 0) + 1
                 continue
             if not wstawione:
@@ -4778,6 +4832,21 @@ class FramesView(QWidget):
         `noun_key` = klucz frazy głównej (`grid.wb.applied`/`grid.wb.renamed`) — DANE, nie string PL."""
         return zdanie_wyniku_zapisu(res, noun_key)       # jedno zdanie dla trzech powierzchni (Z11)
 
+    @staticmethod
+    def _wskazanie_powodow(res):
+        """`(wskazanie, podpowiedź)` zdania wyniku zapisu w szufladzie - jak w oknach kart (AR-176).
+        Przy RÓŻNYCH powodach zdanie mówi „pierwszy z N różnych powodów” i odsyła pod kursor
+        (`wb.reasons_tip`); podpowiedź niesie wiersze `podpowiedz_kart` (pozostałe powody, szczegół
+        systemu, spadek drogi zapisu). Wskazanie stoi wyłącznie w szufladzie - pasek statusu
+        podpowiedzi nie ma, więc odsyłałby donikąd."""
+        return (i18n.t("wb.reasons_tip") if podpowiedz_powodow(res) else ""), podpowiedz_kart(res)
+
+    def _podpowiedz_wyniku(self, podpowiedz):
+        """Podpowiedź wyniku szuflady = pełne zdanie (etykieta elidowana, `_ZdanieWyniku`) + wiersze
+        `podpowiedz`. Następny `setText` etykiety sam wraca do podpowiedzi równej zdaniu."""
+        if podpowiedz:
+            self.drawer.result.setToolTip(self.drawer.result.text() + "\n" + podpowiedz)
+
     def _on_commit(self):
         if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
             self._on_commit_rename()
@@ -4790,24 +4859,30 @@ class FramesView(QWidget):
         """Post-processing commitu makra (wątek główny). Anulowano → część 'pending' została w runie:
         run zostaje otwarty do dokończenia, bez „Cofnij" (zapisane siedzą w commits — undo po CLI)."""
         self.drawer.end_progress()
+        # Szuflada ze stanu PRZED zdaniem wyniku: przy oczekujących zmianach (zapis przerwany)
+        # `set_count` bez wyniku czyści go jak przy nowym stagingu - wołana po zdaniu zjadała
+        # „przerwano, N do dokończenia” w tej samej chwili, w której padło.
+        self._refresh_drawer()
         summary = self._commit_summary(res, "grid.wb.applied")
+        wskazanie, podpowiedz = self._wskazanie_powodow(res)
         remaining = self._pending_count()
         if remaining > 0:                                # przerwane anulowaniem
-            summary += i18n.t("grid.wb.interrupted", n=remaining)
-            self.drawer.set_count(remaining, result=summary)
+            ogon = i18n.t("grid.wb.interrupted", n=remaining)
+            self.drawer.set_count(remaining, result=summary + wskazanie + ogon)
         elif commit_do_cofniecia(res) is not None:       # także `failed` z kopią nagłówka (Z11)
-            summary += i18n.t("grid.wb.commit_id", id=res.commit_id)
+            ogon = i18n.t("grid.wb.commit_id", id=res.commit_id)
             self._last_commit_id = res.commit_id
-            self._install_undo(res.commit_id, summary, applied=len(res.applied))
+            self._install_undo(res.commit_id, summary + wskazanie + ogon, applied=len(res.applied))
             self._run_id = None                          # R#5: run domknięty commitem
         else:                                            # wszystko blocked/failed/skipped
-            self.drawer.set_count(0, result=summary)
+            ogon = ""
+            self.drawer.set_count(0, result=summary + wskazanie)
             self._run_id = None
+        self._podpowiedz_wyniku(podpowiedz)
         self.model.set_preview({})
         # Baza odświeżona - grid pokaże nowe wartości po składzie w tle; zdanie po przyłożeniu,
         # inaczej raport wczytania by je przykrył (AR-84).
-        self._przeladuj_po_gescie(i18n.t("grid.wb.status", summary=summary), poza=False)
-        self._refresh_drawer()
+        self._przeladuj_po_gescie(i18n.t("grid.wb.status", summary=summary + ogon), poza=False)
         # Karta w pliku to zeznanie klatki (`header`, `cards`), a z niego liczą się wiersze Porządków
         # („Nagłówek inny niż folder", kopie niezgodne…) - więc commit, który COKOLWIEK podmienił,
         # rusza plakietkę. Warunek to reguła „Cofnij" (plik zmieniony, także `failed` z kopią
@@ -4864,7 +4939,8 @@ class FramesView(QWidget):
         Zdanie i regułę „Cofnij zostaje” daje `wb_worker.ogon_cofniecia` - jedna dla trzech
         powierzchni (AR-160); zostaje też przy cofnięciu PRZERWANYM (`cancelled`): pętla rdzenia
         staje przed resztą backupów, więc commit nie jest w pełni cofnięty."""
-        from horreum.gui.wb_worker import ogon_cofniecia     # wspólny ogon cofnięcia (AR-160)
+        from horreum.gui.wb_worker import (ogon_cofniecia,   # wspólny ogon cofnięcia (AR-160)
+                                           podpowiedz_systemu)
         msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
         self.drawer.end_progress()
         if ponow:                                        # commit zostaje - „Cofnij" ponowi resztę
@@ -4877,6 +4953,9 @@ class FramesView(QWidget):
             self.drawer.set_count(0, result=msg)
         self._przeladuj_po_gescie(i18n.t("grid.wb.undo_status", msg=msg), poza=False)   # AR-84
         self._refresh_drawer()                           # honest: odbij pending drugiej klingi (wiz #3b)
+        systemu = podpowiedz_systemu(res)                # szczegół systemu cofnięcia (AR-168)
+        if systemu:
+            self.drawer.result.setToolTip(self.drawer.result.text() + "\n" + systemu)
         # Lustro commitu: zeznanie wróciło (patrz `_after_commit`). `failed` też rusza plakietkę -
         # cofnięcie w miejscu kończy się nim przy kopii izolowanej, a wtedy zmienia się wiersz
         # „Plik po przerwanym zapisie". Licz ze stanu, jak `_on_wb_failed`, zamiast zgadywać.
@@ -5014,28 +5093,31 @@ class FramesView(QWidget):
         """Post-processing commitu renamu (wątek główny). Anulowano → reszta nazw została 'pending':
         run zostaje otwarty do dokończenia, bez „Cofnij"."""
         self.drawer.end_progress()
+        self._refresh_drawer()                           # PRZED zdaniem wyniku - jak w `_after_commit`
         run_id = self._wb_target_id
         summary = self._commit_summary(res, "grid.wb.renamed")
+        wskazanie, podpowiedz = self._wskazanie_powodow(res)   # pozostałe powody (AR-176)
         remaining = self._rename_pending_count()
         if remaining > 0:                                # przerwane anulowaniem
-            summary += i18n.t("grid.wb.interrupted", n=remaining)
+            ogon = i18n.t("grid.wb.interrupted", n=remaining)
             self.drawer.set_count(remaining, label=i18n.t("grid.drawer.pending_rename", n=remaining),
-                                  result=summary)
+                                  result=summary + wskazanie + ogon)
         elif res.applied:                                # Cofnij TYLKO gdy coś zrobione (R2 #6)
-            summary += i18n.t("grid.wb.run_id", id=run_id)   # run_id w wyniku: undo po restarcie przez CLI (R2 #7)
+            ogon = i18n.t("grid.wb.run_id", id=run_id)   # run_id w wyniku: undo po restarcie przez CLI (R2 #7)
             self._undo_rename_run_id = run_id            # PRZECHWYĆ cel Cofnij przed re-stage (R2 #1)
             self._rename_run_committed = True
-            self._install_rename_undo(run_id, summary, applied=len(res.applied))
+            self._install_rename_undo(run_id, summary + wskazanie + ogon, applied=len(res.applied))
         else:                                            # wszystko blocked/failed → run zwolniony
+            ogon = ""
             self._rename_run_id = None
             self._rename_run_committed = False
-            self.drawer.set_count(0, result=summary)
+            self.drawer.set_count(0, result=summary + wskazanie)
+        self._podpowiedz_wyniku(podpowiedz)
         self.model.set_preview({})
         self._preview_owner = None
         # Baza odświeżona - grid pokaże nowe ścieżki po składzie w tle, zdanie po przyłożeniu (AR-84).
-        self._przeladuj_po_gescie(i18n.t("grid.rename.status_summary", summary=summary),
+        self._przeladuj_po_gescie(i18n.t("grid.rename.status_summary", summary=summary + ogon),
                                   poza=False)
-        self._refresh_drawer()
         if res.applied:                                  # ogon zapisu → plakietka (definicja sygnału)
             self.stan_porzadkow_changed.emit()
 
@@ -5065,7 +5147,8 @@ class FramesView(QWidget):
         przy każdym cofnięciu niedomkniętym (`UndoResult.complete`) - także PRZERWANYM
         (`undo_renames` przerywa przed resztą wierszy) i zablokowanym (`undo_renames` pomija wiersze
         już cofnięte, więc blokada znaczy plik, który NIE wrócił)."""
-        from horreum.gui.wb_worker import ogon_cofniecia     # wspólny ogon cofnięcia (AR-160)
+        from horreum.gui.wb_worker import (ogon_cofniecia,   # wspólny ogon cofnięcia (AR-160)
+                                           podpowiedz_systemu)
         msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
         self.drawer.end_progress()
         if ponow:                                        # przebieg zostaje - „Cofnij" ponowi resztę
@@ -5081,6 +5164,9 @@ class FramesView(QWidget):
             self.drawer.set_count(0, result=msg)
         self._przeladuj_po_gescie(i18n.t("grid.rename.undo_status", msg=msg), poza=False)  # AR-84
         self._refresh_drawer()
+        systemu = podpowiedz_systemu(res)                # szczegół systemu cofnięcia (AR-168)
+        if systemu:
+            self.drawer.result.setToolTip(self.drawer.result.text() + "\n" + systemu)
         if res.restored or res.failed:                   # lustro commitu renamu; błąd mógł przenieść plik
             self.stan_porzadkow_changed.emit()
 

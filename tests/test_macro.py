@@ -266,3 +266,52 @@ def test_manual_add_when_absent(tmp_path):
     cards = queries.frame_cards(con, a)
     res = macro.evaluate_manual_change(cards, "FOCALLEN", "600")
     assert res.ok and res.op == "add" and res.new_value == "600" and res.new_type == "int"
+
+
+# --- AR-166 / AR-167: bramka sumy kontrolnej w podglądzie - jedno zdanie rdzenia ---
+
+def test_podglad_makra_i_edycja_komorki_pomijaja_FITS_z_suma(tmp_path):
+    """AR-166: pisarz odmawia FITS z kartą `CHECKSUM`/`DATASUM`, więc podgląd makra i edycja komórki
+    pomijają taką klatkę z powodem rdzenia (`card_rules.BRAMKA_SUMY`, kod `fits_checksum`) - fakt
+    `n_sum` z prawdziwego `writeback_frame_targets`. XISF z taką kartą przechodzi (pisarz XISF sumy
+    FITS nie pilnuje). Falsyfikator: zdejmij bramkę z `run_macro` → klatka w `touched`."""
+    from horreum import card_rules
+    con = _con(tmp_path)
+    suma = _frame(con, sha1="sum1", cards=[_txt("TELESCOP", "RC8"), _txt("CHECKSUM", "abc"),
+                                          _txt("DATASUM", "1")])
+    xisf = _frame(con, sha1="sum2", filetype="xisf", cards=[_txt("TELESCOP", "RC8"),
+                                                          _txt("CHECKSUM", "abc")],
+                  locations=[{"path": "R:/sum2.xisf"}])
+    czysta = _frame(con, sha1="sum3", cards=[_txt("TELESCOP", "RC8")])
+    md = {"assign": {"keyword": "TELESCOP", "op": "set", "expr": "EQ6"}}
+    run = _run(con, md, [suma, xisf, czysta])
+    assert [t.location_id for t in run.touched] == [
+        queries.writeback_frame_targets(con, [f])[0]["location_id"] for f in (xisf, czysta)]
+    (s,) = run.skipped
+    assert s.frame_id == suma and s.reason is card_rules.BRAMKA_SUMY and s.reason.code == "fits_checksum"
+    pv, powod = macro.plan_manual_change(queries.writeback_frame_targets(con, [suma]), "TELESCOP",
+                                         "EQ6", cards_fn=partial(queries.location_cards, con))
+    assert pv is None and powod is card_rules.BRAMKA_SUMY
+
+
+def test_bramka_sum_jednym_zdaniem_rdzenia():
+    """AR-167: zdanie bramki sum stało w dwóch kopiach (`macro._bramka_celu`,
+    `queries.fits_checksum_gate`) - teraz obie bramki oddają TEN SAM powód rdzenia, a katalog ma jedno zdanie
+    (`objchg.item.fits_checksum`; klucz `objchg.gate.fits_checksum` nie istnieje). Falsyfikator:
+    literał zdania z powrotem w `_bramka_celu` → inny obiekt powodu."""
+    from horreum import card_rules
+    from horreum.gui.i18n_catalog import CATALOG
+    wiersz = {"filetype": "fits", "compressed": 0, "degen": 0, "header_hash": "h",
+              "unreadable_since": None, "n_sum": 1}
+    assert macro._bramka_celu(wiersz) is card_rules.BRAMKA_SUMY
+    assert queries.fits_checksum_gate(wiersz) is card_rules.BRAMKA_SUMY
+    assert queries.fits_checksum_gate({**wiersz, "filetype": "xisf"}) is None
+    assert macro._bramka_celu({**wiersz, "n_sum": 0}) is None
+    assert card_rules.BRAMKA_SUMY.code == "fits_checksum" and card_rules.BRAMKA_SUMY.params == ()
+    assert CATALOG["objchg.item.fits_checksum"] == {
+        "pl": "FITS z sumą kontrolną (CHECKSUM/DATASUM)",
+        "en": "FITS with a checksum (CHECKSUM/DATASUM)"}
+    assert CATALOG["objchg.item.fits_checksum"]["pl"] == str(card_rules.BRAMKA_SUMY)
+    assert "objchg.gate.fits_checksum" not in CATALOG               # jedna proza (O2)
+    assert not any(k.endswith(".fits_checksum") for k in CATALOG
+                   if k != "objchg.item.fits_checksum")

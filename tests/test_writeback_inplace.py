@@ -1,7 +1,8 @@
 """Testy ZAPISU W MIEJSCU (O5, 2026-09-26) - pisarz `writeback.write_changes_inplace` pod blokadą,
 dziennik operacji `inplace_op` (0022), `commit(inplace=True)`, undo w miejscu i atomowo, odzysk
-rozdartego nagłówka (`recover_torn`), izolacja lokacji od skanu, oraz plan ujednolicenia karty
-`OBJECT` (`queries.object_card_form_rows` + `macro.plan_object_card_form` + `repo.stage_pending_many`).
+rozdartego nagłówka (`recover_torn`), izolacja lokacji od skanu, oraz ujednolicenie karty `OBJECT`
+gestem „Uzgodnij” (`queries.object_change_rows` + `object_change.plan_object_change` +
+`writeback.commit_object_change`).
 
 Pliki FITS/XISF SYNTETYCZNE w `tmp_path` (bateria hermetyczna). Scenariusze P1 z recenzji astry
 (Z11 kontrprzykład przebudowy, Z12 prawdziwy stary backup tekstowy, Z13 przerwane undo XISF
@@ -22,7 +23,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from horreum import db, macro, repo, resolver, scan, writeback
+from horreum import db, object_change, repo, resolver, scan, writeback
 from horreum.gui import queries
 
 NOW = "2026-09-26T00:00:00+00:00"
@@ -167,7 +168,7 @@ def test_fits_zly_hash_blokuje_bez_zapisu_i_bez_dziennika(tmp_path):
     p = _fits(tmp_path / "b.fits")
     przed = p.read_bytes()
     res = writeback.write_changes_inplace(str(p), _op(), "deadbeef", journal=_NieWolno())
-    assert res.status == "blocked" and res.reason == "header_hash mismatch"
+    assert res.status == "blocked" and res.reason.code == "header_hash_mismatch"
     assert p.read_bytes() == przed and not res.in_place and res.backup_text is None
 
 
@@ -370,7 +371,7 @@ def test_xisf_zly_hash_blokuje(tmp_path):
     p = _xisf(tmp_path / "c.xisf")
     przed = p.read_bytes()
     res = writeback.write_changes_inplace(str(p), _op(), "nie-ten", journal=_NieWolno())
-    assert res.status == "blocked" and res.reason == "header_hash mismatch"
+    assert res.status == "blocked" and res.reason.code == "header_hash_mismatch"
     assert p.read_bytes() == przed
 
 
@@ -1719,38 +1720,59 @@ def test_skrypt_blokada_nie_rusza_cudzego_pliku_i_mierzy_inny_proces(tmp_path):
         k.blokada(r"R:\ASTRO_\LIGHTS")
 
 
-def test_skrypt_po_porownuje_z_planem(tmp_path):
-    """Z16: `po` przepuszcza WYŁĄCZNIE zmianę OBJECT na oczekiwaną formę z tym samym komentarzem."""
+def test_skrypt_po_porownuje_z_planem(tmp_path, monkeypatch):
+    """`po` przepuszcza WYŁĄCZNIE zmianę OBJECT na oczekiwaną formę z tym samym komentarzem.
+    AR-165: kopie i plik w jednym `tmp_path` (jeden wolumin, którego `przed` dla kopii odmawia) -
+    wolumin katalogu kopii zerowy; pomiar blokady w pustym katalogu testowym."""
     k = _skrypt()
+    monkeypatch.setattr(k, "_wolumin_katalogu", lambda katalog: 0)
     p = _fits(tmp_path / "pl.fits")
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps([{"plik": str(p), "object": "NGC 6992"}]), encoding="utf-8")
     kopie = tmp_path / "kopie"
-    k.przed(str(kopie), str(plan))
+    (tmp_path / "blokada").mkdir()
+    k.przed(str(kopie), str(plan), str(tmp_path / "blokada"))
     assert writeback.write_changes_inplace(str(p), _op(), _hash(p)).status == "applied"
-    assert k.po(str(kopie)) == 0
+    assert k.po(str(kopie), str(plan)) == 0                    # AR-165: plan = kotwica pozycji
     with fits.open(str(p), mode="update") as hdul:             # obca zmiana innej karty
         hdul[0].header["IMAGETYP"] = "Dark"
-    assert k.po(str(kopie)) == 1
+    assert k.po(str(kopie), str(plan)) == 1
 
 
-# ============================================================ PLAN UJEDNOLICENIA (predykat + silnik)
+# ============================================================ UJEDNOLICENIE KARTY `OBJECT` GESTEM „UZGODNIJ”
+# AR-157: martwa para planu ujednolicenia (O5) zniknęła - jej funkcję (jedna wersja karty na obiekt)
+# pełni gest „Uzgodnij” (`object_change.plan_object_change` z `target=None`), a testy niżej pinują
+# te same fakty na żywej drodze: predykat wiersza Porządków, bramki, podgląd, sumę dróg zapisu,
+# zapis w miejscu i idempotencję. Anulowanie w trakcie przebiegu pinuje
+# `test_object_change_write.py::test_anulowanie_przed_pozycja_zostawia_reszte_oczekujaca`.
+
+
+def _w_archiwum(tmp_path, rel):
+    """Ścieżka pliku na pozycji obiektu w drzewie `tmp_path/ASTRO_/LIGHTS` (katalogi założone) -
+    gest „Uzgodnij” pisze kartę i folder razem, więc plik musi stać w drzewie archiwum."""
+    path = tmp_path / "ASTRO_" / "LIGHTS" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _baza_planu(tmp_path):
     con = db.open_db(str(tmp_path / "h.db"))
     pliki = {
-        "veil": _fits(tmp_path / "veil.fits", obj="NGC6992", seed=1),
-        "m106": _fits(tmp_path / "m106.fits", obj="M 106", seed=2),
-        "gotowa": _fits(tmp_path / "gotowa.fits", obj="NGC 7000", seed=3),
-        "ksiezyc": _fits(tmp_path / "ksiezyc.fits", obj="ksiezyc", seed=4),
-        "obca": _fits(tmp_path / "obca.fits", obj="Mglawica Zdzinia", seed=5),
-        "xisf": _xisf(tmp_path / "stos.xisf", obj="'NGC6992'", payload=b"\x09" * 32),
-        "dwie": _fits(tmp_path / "dwie.fits", obj="NGC6960", seed=6),
+        "veil": _fits(_w_archiwum(tmp_path, r"NGC6992\cam\NGC6992_1.fits"), obj="NGC6992", seed=1),
+        "m106": _fits(_w_archiwum(tmp_path, r"NGC4258\cam\NGC4258_2.fits"), obj="M 106", seed=2),
+        "gotowa": _fits(_w_archiwum(tmp_path, r"NGC7000\cam\NGC7000_3.fits"), obj="NGC 7000",
+                        seed=3),
+        "ksiezyc": _fits(_w_archiwum(tmp_path, r"_SOLAR\Moon\cam\Moon_4.fits"), obj="ksiezyc",
+                         seed=4),
+        "obca": _fits(_w_archiwum(tmp_path, r"Inne\cam\obca_5.fits"), obj="Mglawica Zdzinia",
+                      seed=5),
+        "xisf": _xisf(_w_archiwum(tmp_path, r"NGC6992\cam\NGC6992_6.xisf"), obj="'NGC6992'",
+                      payload=b"\x09" * 32),
+        "dwie": _fits(_w_archiwum(tmp_path, r"NGC6960\cam\NGC6960_7.fits"), obj="NGC6960", seed=6),
     }
     for p in pliki.values():
         _scan_in(con, p)
-    kopia = tmp_path / "kopia" / "dwie.fits"                  # druga OBECNA kopia tej samej klatki
+    kopia = tmp_path / "kopia" / "NGC6960_7.fits"             # druga OBECNA kopia tej samej klatki
     kopia.parent.mkdir()
     kopia.write_bytes(pliki["dwie"].read_bytes())
     _scan_in(con, kopia)
@@ -1758,61 +1780,69 @@ def _baza_planu(tmp_path):
     return con, pliki
 
 
-def test_plan_predykat_bramki_i_podglad(tmp_path):
+def _uzgodnij(con, frame_ids):
+    """Plan gestu „Uzgodnij” (obiekt zostaje, plik dogania obiekt klatki) - ta sama droga co okno."""
+    rows = queries.object_change_rows(con, sorted(frame_ids), target=None)
+    return object_change.plan_object_change(
+        rows, target=None, library_root=resolver.library_root_from_db(con),
+        location_at=queries.location_lookup(con))
+
+
+def test_uzgodnij_predykat_bramki_i_podglad_ujednolicenia(tmp_path):
+    """Wiersz „Plik nie zgadza się z obiektem” liczy klatki z kartą w innej formie (także XISF)
+    i klatkę z dwiema kopiami; karta w formie i karta nierozpoznana (klatka bez obiektu) nie
+    wchodzą. Plan „Uzgodnij”: cztery podmiany karty bez ruchu pliku, a w pominięciach powody -
+    bez zmian, bez obiektu, wiele obecnych kopii. Suma dróg zapisu: 4 w miejscu."""
+    import collections
     con, pliki = _baza_planu(tmp_path)
-    rows = {r["path"]: r for r in queries.object_card_form_rows(con)}
+    fid = {k: _loc(con, p)["frame_id"] for k, p in pliki.items()}
+    assert queries.file_object_mismatch_frame_ids(con) == {
+        fid[k] for k in ("veil", "m106", "ksiezyc", "xisf", "dwie")}
 
-    assert str(pliki["gotowa"]) not in rows                    # już w formie
-    assert str(pliki["obca"]) not in rows                      # nierozpoznana - inne zeznanie
-    assert rows[str(pliki["m106"])]["form"] == "NGC 4258"
-    assert rows[str(pliki["ksiezyc"])]["form"] == "Moon"
-    assert rows[str(pliki["dwie"])]["skip"].startswith("wiele obecnych kopii")
-    assert queries.object_card_form_frame_ids(con) == {
-        r["frame_id"] for r in rows.values() if r["skip"] is None}
-
-    plan = macro.plan_object_card_form(rows.values(), run_id="U")
-    assert {(t.path, t.old_value, t.new_value) for t in plan.run.touched} == {
+    plan = _uzgodnij(con, fid.values())
+    assert {(it.old_path, it.card_old, it.card_new) for it in plan.items} == {
         (str(pliki["veil"]), "NGC6992", "NGC 6992"), (str(pliki["m106"]), "M 106", "NGC 4258"),
         (str(pliki["ksiezyc"]), "ksiezyc", "Moon"), (str(pliki["xisf"]), "NGC6992", "NGC 6992")}
-    assert plan.swaps[0] == ("NGC6992", "NGC 6992", 2)
-    assert (plan.in_place, plan.fallback) == (4, 0)
-    assert [s.reason for s in plan.run.skipped] == ["wiele obecnych kopii (2)"]
+    assert all(it.card_op == "set" and it.new_path is None for it in plan.items)
+    assert collections.Counter((it.card_old, it.card_new) for it in plan.items).most_common(1) == \
+        [(("NGC6992", "NGC 6992"), 2)]
+    assert {s.frame_id: s.code for s in plan.skipped} == {
+        fid["gotowa"]: object_change.SKIP_UNCHANGED, fid["obca"]: "no_object",
+        fid["dwie"]: "many_copies"}
+    assert next(s.reason for s in plan.skipped if s.code == "many_copies").startswith(
+        "wiele obecnych kopii (2)")
+    pytest.importorskip("PySide6")
+    from horreum.gui import object_change_dialog as ocd
+    assert ocd.sumy_drog(plan, ocd.drogi_kart(con, plan)) == {"inplace": 4, "rewrite": 0,
+                                                             "depends": 0}
     con.close()
 
 
-def test_plan_wykonanie_w_miejscu_i_idempotencja(tmp_path):
-    """Staging JEDNĄ transakcją + istniejący commit w trybie w miejscu; obiekty klatek bez zmian;
-    drugi plan (także po kolejnym przebiegu resolvera) jest pusty."""
+def test_uzgodnij_zapis_w_miejscu_i_idempotencja(tmp_path):
+    """Staging przebiegu i sterownik gestu: cztery karty w miejscu (ten sam plik - `st_ino`),
+    komentarz karty zostaje; obiekty klatek bez zmian po przebiegu resolvera; drugi plan na tych
+    samych klatkach jest pusty, a w wierszu zostaje wyłącznie klatka z dwiema kopiami."""
     con, pliki = _baza_planu(tmp_path)
     obiekty = dict(con.execute("SELECT id, object_id FROM frame").fetchall())
-    plan = macro.plan_object_card_form(queries.object_card_form_rows(con), run_id="U")
-    assert repo.stage_pending_many(con, run_id="U", previews=plan.run.touched) == 4
+    ids = queries.file_object_mismatch_frame_ids(con)
+    plan = _uzgodnij(con, ids)
+    assert len(plan.items) == 4
+    ino = {it.old_path: os.stat(it.old_path).st_ino for it in plan.items}
+    repo.stage_object_change(con, plan=plan, now=NOW)
 
     postep = []
-    res = writeback.commit(con, "U", now=NOW, inplace=True,
-                           progress=lambda d, t, p, s: postep.append((d, t, s)))
-    assert len(res.applied) == 4 and len(res.in_place) == 4 and not res.failed, res
+    res = writeback.commit_object_change(con, plan.run_id, now=NOW,
+                                         progress=lambda d, t, p, s: postep.append((d, t, s)))
+    assert len(res.applied) == 4 and not (res.blocked or res.failed), res
     assert postep[-1] == (4, 4, "applied")
+    assert {p: os.stat(p).st_ino for p in ino} == ino                 # w miejscu, bez podmiany
     assert fits.getheader(str(pliki["m106"]))["OBJECT"] == "NGC 4258"
     assert fits.getheader(str(pliki["m106"])).comments["OBJECT"] == KOMENTARZ
 
     resolver.run_resolver(con, NOW)
     assert dict(con.execute("SELECT id, object_id FROM frame").fetchall()) == obiekty
-    drugi = macro.plan_object_card_form(queries.object_card_form_rows(con))
-    assert not drugi.run.touched and not drugi.swaps
-    con.close()
-
-
-def test_plan_anulowanie_zostawia_reszte_pending(tmp_path):
-    con, _ = _baza_planu(tmp_path)
-    plan = macro.plan_object_card_form(queries.object_card_form_rows(con), run_id="U")
-    repo.stage_pending_many(con, run_id="U", previews=plan.run.touched)
-    licznik = iter(range(100))
-    res = writeback.commit(con, "U", now=NOW, inplace=True,
-                           should_cancel=lambda: next(licznik) >= 2)
-    assert res.cancelled and len(res.applied) == 2
-    statusy = [r["status"] for r in writeback.pending_for_run(con, "U")]
-    assert statusy.count("applied") == 2 and statusy.count("pending") == 2
+    assert queries.file_object_mismatch_frame_ids(con) == {_loc(con, pliki["dwie"])["frame_id"]}
+    assert not _uzgodnij(con, ids).items
     con.close()
 
 
@@ -1826,40 +1856,50 @@ def test_przewidywanie_drogi_zgodne_z_pisarzem(tmp_path):
     assert writeback.inplace_route("xisf", "OBJECT", "V" * 60, "str", None) is None
 
 
-def test_plan_komentarz_bez_miejsca_pomija_z_powodem_pisarza(tmp_path):
-    """AR-47: karta, której zastany komentarz nie przeżyje nowej formy, odmawia w OBU drogach
-    (w miejscu - spadek, atomowo - AR-7), więc plan ją POMIJA z powodem, który dałby zapis
-    atomowy, zamiast liczyć „spadek na drogę dotychczasową". Ta sama forma z krótkim komentarzem
-    wchodzi w miejscu.
-
-    Falsyfikator: zdejmij `comment_loss_route` z planu → klatka w `touched` i `fallback == 1`,
-    a commit da 'blocked'."""
-    p = _fits(tmp_path / "dlugi.fits", obj="M31", comment="k" * 47)
-    wiersz = {"skip": None, "frame_id": 1, "path": str(p), "location_id": 1, "card": "M31",
-              "form": "V" * 20, "header_hash": _hash(p), "filetype": "fits",
-              "value_type": "str", "comment": "k" * 47}
-    plan = macro.plan_object_card_form([wiersz], run_id="U")
-    assert not plan.run.touched and (plan.in_place, plan.fallback) == (0, 0)
-    (pominiety,) = plan.run.skipped
-    zapis = writeback.write_changes(str(p), _op("V" * 20), _hash(p))
-    assert zapis.status == "blocked" and pominiety.reason == zapis.reason
-
-    krotki = macro.plan_object_card_form([dict(wiersz, comment=KOMENTARZ[:10])], run_id="U")
-    assert len(krotki.run.touched) == 1 and krotki.in_place == 1
+def test_uzgodnij_komentarz_bez_miejsca_pomija_z_powodem_pisarza(tmp_path):
+    """AR-47 na żywej drodze: karta, której zastany komentarz nie przeżyje formy kanonu (długa forma
+    komety wypycha komentarz za rekord 80 znaków), odmawia w OBU drogach zapisu, więc „Uzgodnij”
+    POMIJA plik z powodem `card_comment` i długościami przed/po - tymi samymi, które liczy pisarz,
+    a pisarz na tym pliku odmawia. Ta sama forma przy krótkim komentarzu idzie w miejscu.
+    Falsyfikator: zdejmij przepowiednię komentarza z planera (`object_change._karta`) - plik
+    w pozycjach, a zapis 'blocked' dopiero po kliknięciu."""
+    kometa = "C/2023 A3 (Tsuchinshan-ATLAS)"
+    katalog = r"_COMETS\C2023A3_Tsuchinshan-ATLAS\cam"
+    con = db.open_db(str(tmp_path / "h.db"))
+    dlugi = _fits(_w_archiwum(tmp_path, rf"{katalog}\C2023A3_Tsuchinshan-ATLAS_1.fits"),
+                  obj="C/2023 A3", comment="k" * 47, seed=1)
+    krotki = _fits(_w_archiwum(tmp_path, rf"{katalog}\C2023A3_Tsuchinshan-ATLAS_2.fits"),
+                   obj="C/2023 A3", comment=KOMENTARZ[:10], seed=2)
+    for p in (dlugi, krotki):
+        _scan_in(con, p)
+    resolver.run_resolver(con, NOW)
+    fd, fk = _loc(con, dlugi)["frame_id"], _loc(con, krotki)["frame_id"]
+    plan = _uzgodnij(con, [fd, fk])
+    (it,) = plan.items
+    assert (it.frame_id, it.card_op, it.card_new, it.new_path) == (fk, "set", kometa, None)
+    (s,) = plan.skipped
+    strata = writeback.comment_loss_lengths("fits", "OBJECT", kometa, "k" * 47)
+    assert strata is not None and (s.frame_id, s.code, dict(s.params)) == (
+        fd, "card_comment", {"before": strata[0], "after": strata[1]})
+    assert writeback.write_changes(str(dlugi), _op(kometa), _hash(dlugi)).status == "blocked"
     assert writeback.comment_loss_route("xisf", "OBJECT", "V" * 60, "k" * 70) is None
+    con.close()
 
 
-def test_plan_bramki_formy_sklejki_typu_i_sumy(tmp_path):
-    """kimi Z1/Z2c/Z5 + astra Z5 w predykacie: kanon znany tylko z aliasu (forma nie wraca), sklejka
-    z członem wskazującym co innego, karta nietekstowa, FITS z CHECKSUM - każde pominięte z powodem;
-    sklejka, której OBA człony wskazują ten sam obiekt, wchodzi."""
+def test_uzgodnij_bramki_formy_sklejki_typu_i_sumy(tmp_path):
+    """Bramki karty na żywej drodze: kanon znany tylko z aliasu (forma nie wraca), sklejka z członem
+    wskazującym co innego, karta nietekstowa, FITS z CHECKSUM - każdy plik zostaje z powodem
+    bramki (karta i folder razem); sklejka, której OBA człony wskazują ten sam obiekt, idzie z kartą
+    w formie kanonu."""
     from horreum.resolve._text import norm_alnum
     con = db.open_db(str(tmp_path / "h.db"))
-    alias = _fits(tmp_path / "alias.fits", obj="Zupelnie Wymyslona 77", seed=11)
-    skl_zla = _fits(tmp_path / "skl_zla.fits", obj="NGC6992_Mglawica Zdzinia", seed=12)
-    skl_ok = _fits(tmp_path / "skl_ok.fits", obj="NGC4258_M 106", seed=13)
-    typ = _fits(tmp_path / "typ.fits", obj="NGC6888", seed=14)
-    suma = tmp_path / "suma.fits"
+    alias = _fits(_w_archiwum(tmp_path, r"ZW77\cam\alias.fits"), obj="Zupelnie Wymyslona 77",
+                  seed=11)
+    skl_zla = _fits(_w_archiwum(tmp_path, r"NGC6992\cam\skl_zla.fits"),
+                    obj="NGC6992_Mglawica Zdzinia", seed=12)
+    skl_ok = _fits(_w_archiwum(tmp_path, r"NGC4258\cam\skl_ok.fits"), obj="NGC4258_M 106", seed=13)
+    typ = _fits(_w_archiwum(tmp_path, r"NGC6888\cam\typ.fits"), obj="NGC6888", seed=14)
+    suma = _w_archiwum(tmp_path, r"NGC2403\cam\suma.fits")
     hdu = fits.PrimaryHDU(data=np.full((4, 4), 15, dtype=np.int16))
     hdu.header["IMAGETYP"] = "Light"
     hdu.header["OBJECT"] = "NGC2403"
@@ -1867,19 +1907,18 @@ def test_plan_bramki_formy_sklejki_typu_i_sumy(tmp_path):
     for p in (alias, skl_zla, skl_ok, typ, suma):
         _scan_in(con, p)
     resolver.run_resolver(con, NOW)
-    fid = _loc(con, alias)["frame_id"]
+    fid = {p: _loc(con, p)["frame_id"] for p in (alias, skl_zla, skl_ok, typ, suma)}
     repo.user_assign_object(con, alias_norm=norm_alnum("Zupelnie Wymyslona 77"), canon="ZW77",
-                            catalog=None, kind="own", frame_ids=[fid], now=NOW)
+                            catalog=None, kind="own", frame_ids=[fid[alias]], now=NOW)
     con.execute("UPDATE cards SET value_type = 'int' WHERE frame_id = ? AND keyword = 'OBJECT'",
-                (_loc(con, typ)["frame_id"],))                         # poza klingą: tylko test
+                (fid[typ],))                                         # poza klingą: tylko test
     con.commit()
-    rows = {r["path"]: r for r in queries.object_card_form_rows(con)}
-
-    assert rows[str(alias)]["skip"] == queries.SKIP_FORM_NOT_CANON
-    assert rows[str(skl_zla)]["skip"].startswith("sklejka oznaczeń")
-    assert rows[str(skl_ok)]["skip"] is None and rows[str(skl_ok)]["form"] == "NGC 4258"
-    assert rows[str(typ)]["skip"] == "karta OBJECT nietekstowa (int)"
-    assert rows[str(suma)]["skip"] == "FITS z sumą kontrolną (CHECKSUM/DATASUM)"
+    plan = _uzgodnij(con, fid.values())
+    assert [(it.frame_id, it.card_op, it.card_new) for it in plan.items] == [
+        (fid[skl_ok], "set", "NGC 4258")]
+    assert {s.frame_id: (s.code, dict(s.params).get("gate")) for s in plan.skipped} == {
+        fid[alias]: ("card_skip", "form_not_canon"), fid[skl_zla]: ("card_skip", "joined_names"),
+        fid[typ]: ("card_skip", "card_not_text"), fid[suma]: ("card_skip", "fits_checksum")}
     con.close()
 
 

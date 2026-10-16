@@ -276,7 +276,7 @@ def _karta(r, comment_loss_lengths):
     wtedy plik zostaje w całości (D-1011-5 Q2: przeniesienie i karta razem albo wcale; RAW i - przy
     „Uzgodnij” - klatka regionu, której forma regionu sama nie utrzyma (AR-177), karty nie mają, więc
     przenoszą się bez niej). Bramka bazy (`card_skip`, ta sama
-    co w ujednoliceniu karty) plus dwie przepowiednie pisarza: reguły karty FITS 4.0
+    dla „Zmień obiekt…” i „Uzgodnij”) plus dwie przepowiednie pisarza: reguły karty FITS 4.0
     (`card_rules.card_violation`) i utrata zastanego komentarza
     (`writeback.comment_loss_lengths`) - obie odmawiają w obu drogach zapisu, więc podgląd ma je
     pokazać, nie sterownik. Obie przepowiednie dają FAKTY (rodzaj naruszenia, długości), więc
@@ -431,7 +431,8 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
     spoza pozycji obiektu, kanon nie do postawienia jako folder, karta potrzebna a nie do zapisania
     (cały plik zostaje), kolizja celu we wsadzie, na dysku (`listdir` katalogu celu) albo w bazie
     (inna lokacja), wersja stosu w innym katalogu niż oryginał (oba), połowa pary stosu pominięta
-    (druga też), pozycja bez żadnej zmiany (kod `SKIP_UNCHANGED` - nie odmowa).
+    (druga też - chyba że pominięta połówka jest bez zmian, a druga zmienia wyłącznie kartę w miejscu),
+    pozycja bez żadnej zmiany (kod `SKIP_UNCHANGED` - nie odmowa).
 
     OSTRZEŻENIA (`ObjectChangeWarning`): przeniesienie rozdziela wejścia stosu między foldery
     (żniwa liczą siedzibę stosu z jednego folderu lightów, `harvest._light_tail`) - nie blokada,
@@ -444,8 +445,7 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
     policzone dla innego celu, cel w drzewie roboczym `_WBPP`/`_Review` (niemożliwy z konstrukcji
     reguły pozycji) → wyjątek, nie plan.
 
-    Importy `writeback` (astropy) i `scan` w ciele funkcji - jak `macro.plan_object_card_form`:
-    moduł planu importuje się bez nich."""
+    Importy `writeback` (astropy) i `scan` w ciele funkcji: moduł planu importuje się bez nich."""
     from . import writeback
     from .scan import EXCLUDED_DIR_NAMES
     if target is not None and target.card_form is None:
@@ -584,13 +584,21 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
             continue
         del cele[fid]
 
-    # 6. Para stosu razem albo wcale.
+    # 6. Para stosu razem albo wcale. Połówka BEZ ZMIAN (`SKIP_UNCHANGED`) nie jest odmową: druga,
+    #    która zmienia wyłącznie kartę (bez ruchu pliku, bez katalogów, bez zmiany obiektu), zostaje
+    #    w planie - żadna połówka nie rusza się z miejsca, więc para nie ma się jak rozejść (AR-157:
+    #    wariant `autocrop` z kartą w innej formie przy oryginale w formie). Każdy inny przypadek
+    #    zdejmuje drugą połówkę jak dotąd.
     for fid, r in wiersz.items():
         if r["variant_of"] is None:
             continue
         for jeden, drugi in ((fid, r["variant_of"][0]), (r["variant_of"][0], fid)):
             if jeden in pominiete and drugi in cele:
                 powod, kod, params = pominiete[jeden]
+                nowa, mkdirs = cele[drugi]
+                if (kod == SKIP_UNCHANGED and nowa is None and not mkdirs
+                        and not robocze[drugi]["object_change"]):
+                    continue
                 pominiete[drugi] = _Odmowa("pair", f"para stosu jedzie razem - druga połowa "
                                                    f"pominięta: {powod}", inner=powod,
                                            inner_code=kod, inner_params=params).wpis

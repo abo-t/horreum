@@ -119,7 +119,15 @@ ITEM_REASON_CODES = frozenset({
     "fb_card_too_long", "fb_compressed", "checksum_present", "fb_op_kind", "fb_not_text_card",
     "fb_card_present", "fb_card_count", "fb_value_not_text", "fb_card_records", "fb_continue",
     "fb_no_room", "free_records", "route_depends",
+    # --- błędy systemu klasą (AR-168, `writeback._blad_systemu`) i bramka sumy kontrolnej z faktów
+    # bazy (AR-167, `card_rules.BRAMKA_SUMY`); region sprzed commitu bez dowodu całego pliku (AR-169)
+    "os_denied", "os_missing", "os_no_space", "os_share_lost", "fits_checksum",
+    "undo_region_unproven",
 })
+
+# Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
+# mówi klasę i numer (`os_code`), komunikat systemu jest w języku systemu, nie UI.
+OS_REASON_CODES = frozenset({"os_denied", "os_missing", "os_no_space", "os_share_lost"})
 
 # Rodzaj wartości każdego parametru powodu (kontrakt kodeka i zdania okna; test AST pilnuje, że
 # rdzeń nie podaje parametru spoza tej listy): `text` = tekst (także powód zagnieżdżony, fragment
@@ -136,7 +144,9 @@ PARAM_KINDS = {
                      "card", "derived", "op", "value_type", "sha1", "mtime", "db_mtime",
                      "expected", "needed",
                      # czytnik XISF i reguły karty (AR-158)
-                     "attr", "attrs", "char", "name"), "text"),
+                     "attr", "attrs", "char", "name",
+                     # błąd systemu klasą (AR-168): „WinError 5” / „Errno 13”
+                     "os_code"), "text"),
     **dict.fromkeys(("n", "tries", "winerror", "op_id", "location", "object_id", "rename_id",
                      "commit_id", "before", "after", "free", "length", "limit"), "int"),
     **dict.fromkeys(("features", "paths", "sums"), "list"),

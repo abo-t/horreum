@@ -35,7 +35,7 @@ from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.wb_worker import (ogon_cofniecia, podpowiedz_kart, tekst_powodu,
                                    zdanie_commitu_kart)
-from horreum.gui.config_dialog import AssignConfigDialog
+from horreum.gui.config_dialog import AssignConfigDialog, dopasuj_wysokosc
 # Kontener strony zbiorów: stałe prezentacji są wartościami jego sygnału, a `_TRASY` (poziom modułu)
 # ich potrzebuje; import ciągnie grid (~30 ms przy imporcie okna, zmierzone 2026-10-09).
 from horreum.gui.flows.znajdz_view import PREZENTACJA_KLASYCZNA, PREZENTACJA_ZNAJDZ, ZnajdzView
@@ -906,17 +906,19 @@ def plan_kart_sciezki(con, canon, frame_ids):
         powod = i18n.t("path.card_skip.no_roundtrip", value=value, canon=canon)
     if powod is not None:
         return value, [], [(fid, "", powod) for fid in frame_ids]
-    # FITS Z SUMĄ KONTROLNĄ (AR-163) odpada PRZED silnikiem - bramka celu makra o sumie nie wie,
-    # a pisarz go odmówi; ta sama bramka co w „Napraw nagłówek…” (`queries.fits_checksum_gate`) i ta
-    # sama kolejność: najpierw bramki celu (`resolve_target`), potem suma.
+    # FITS Z SUMĄ KONTROLNĄ (AR-163) odpada PRZED silnikiem: makro też ją odsiewa (AR-166), ale jego
+    # pominięcie mówi zdaniem bez języka UI - tu powód rdzenia idzie przez `tekst_powodu`. Ta sama
+    # bramka co w „Napraw nagłówek…” (`queries.fits_checksum_gate`) i ta sama kolejność: najpierw
+    # bramki celu (`resolve_target`), potem suma.
     cele = {}
     for t in queries.writeback_frame_targets(con, list(frame_ids)):
         cele.setdefault(int(t["frame_id"]), []).append(t)
     z_suma = []
     for fid, wiersze in cele.items():
         cel, _ = macro_mod.resolve_target(wiersze)
-        if cel is not None and queries.fits_checksum_gate(cel) is not None:
-            z_suma.append((fid, cel["path"], i18n.t("objchg.gate.fits_checksum")))
+        suma = queries.fits_checksum_gate(cel) if cel is not None else None
+        if suma is not None:
+            z_suma.append((fid, cel["path"], tekst_powodu(suma)))
     ids_z_suma = {fid for fid, _, _ in z_suma}
     md = macro_mod.MacroDef(assign=macro_mod.Assign(
         keyword="OBJECT", op="add", expr=repr(value), value_type="str"))
@@ -1244,7 +1246,7 @@ class ConfirmPathObjectsDialog(QDialog):
         self._run_id = None                      # run domknięty commitem (R#5) - nie kasuj przy zamknięciu
         self.status.setText(self.status.text() + "\n" + summary)
         self._end_progress()
-        self._dopasuj_wysokosc()                 # zdanie bazy + zdanie plików
+        dopasuj_wysokosc(self)                   # zdanie bazy + zdanie plików (`config_dialog`)
         self.changed.emit()
 
     def _on_failed(self, op, msg):
@@ -1276,7 +1278,7 @@ class ConfirmPathObjectsDialog(QDialog):
     def _after_undo(self, op, res):
         """Ogon cofnięcia kart: zdanie i regułę „czy Cofnij zostaje” daje `ogon_cofniecia` - wspólny
         z „Napraw nagłówek…” i szufladą Zbiorów (AR-160). Cofnięcie z błędem albo przerwane zostawia
-        „Cofnij karty” przy TYM SAMYM commicie (ponowienie dokończy resztę), a „Zatwierdź” milczy -
+        „Cofnij karty” przy TYM SAMYM commicie (ponowienie sprawdzi pozostałe pliki), a „Zatwierdź” milczy -
         część kart stoi w plikach. Nota „pliki są bez karty” mówi tylko o cofnięciu domkniętym.
 
         STATUS = WYNIK BIEŻĄCEGO GESTU, jak w „Napraw nagłówek…”: doklejanie każdego
@@ -1291,24 +1293,13 @@ class ConfirmPathObjectsDialog(QDialog):
             self._commit_id = None
             self._domkniety = False
         self.status.setText(msg)
-        self.status.setToolTip("")
+        from horreum.gui.wb_worker import podpowiedz_systemu   # szczegół systemu cofnięcia (AR-168)
+        self.status.setToolTip(podpowiedz_systemu(res))
         self._end_progress()
-        self._dopasuj_wysokosc()
-
-    def _dopasuj_wysokosc(self):
-        """Okno ROŚNIE (tylko w górę) do wysokości, której treść potrzebuje przy bieżącej szerokości
-        (AR-160): status zawija zdanie wyniku z receptą, więc jego wysokość zależy od
-        szerokości (`heightForWidth`), a okno z rozmiaru otwarcia ucinało ostatni wiersz przy
-        rzędzie przycisków. Wzór `assign_dialog.AssignObjectDialog._dopasuj_wysokosc`; okno
-        niepokazane nie ma jeszcze szerokości."""
-        if not self.isVisible():
-            return
-        lay = self.layout()
-        lay.activate()
-        potrzeba = (lay.totalHeightForWidth(self.width()) if lay.hasHeightForWidth()
-                    else lay.totalSizeHint().height())
-        if potrzeba > self.height():
-            self.resize(self.width(), potrzeba)
+        # Okno rośnie do zawiniętego zdania z receptą (AR-160, wspólny pomocnik `config_dialog`),
+        # a cofnięcie to zapis - gospodarz odświeża kolejkę. Emisja stała dotąd w pomocniku
+        # wysokości, więc zapis emitował dwa razy, a cofnięcie przy oknie niepokazanym - wcale.
+        dopasuj_wysokosc(self)
         self.changed.emit()
 
     def _on_resolve(self):
@@ -1520,8 +1511,9 @@ class RepairHeaderDialog(QDialog):
         a reguła dwóch zgodnych świadków jest dla obu drzew ta sama.
 
         FITS Z SUMĄ KONTROLNĄ (AR-163) odpada TU, przed podglądem: pisarz go odmówi (`CHECKSUM`/
-        `DATASUM`), a bramka celu makra (`macro.resolve_target`) o sumie nie wie - podgląd liczył
-        taki plik do „Zapisz karty (N)”, a wynik mówił „2 zablokowane” bez folderu. Warunek ma
+        `DATASUM`); makro też by go pominęło (AR-166), ale tu pominięcie liczy się per folder grupy -
+        dawniej podgląd liczył taki plik do „Zapisz karty (N)”, a wynik mówił „2 zablokowane” bez
+        folderu. Warunek ma
         jednego właściciela (`queries.fits_checksum_gate`, ten sam co bramka karty „Zmień obiekt…”),
         fakt `n_sum` niesie cel z `writeback_frame_targets`. Pominięcie liczy się PER FOLDER grupy
         (`self._sumy`): folder bez pliku do zapisu mówi „cały folder”, mieszany - ile odpadło."""
@@ -1550,7 +1542,7 @@ class RepairHeaderDialog(QDialog):
             if suma is not None:
                 wpis = sumy.setdefault(folder, {
                     "label": self._etykieta_grupy(folder, target["path"], r["kind"], korzen),
-                    "n": 0, "reason": i18n.t(f"objchg.gate.{suma.code}", **dict(suma.params))})
+                    "n": 0, "reason": tekst_powodu(suma)})
                 wpis["n"] += 1
                 continue
             rodzaj[r["frame_id"]] = r["kind"]
@@ -1701,6 +1693,7 @@ class RepairHeaderDialog(QDialog):
 
     def _fail(self, msg):
         self.error.setText(msg)
+        dopasuj_wysokosc(self)                   # błąd też zawija (AR-176)
 
     # ---------------------------------------------------------------- takt 1+2: staging + commit
     def _on_save(self):
@@ -1793,6 +1786,10 @@ class RepairHeaderDialog(QDialog):
         self.resolve_btn.setEnabled(True)
         self._sync_preview()
         self.status.setText(summary)
+        # STATUS UCINAŁ SIĘ (AR-176, zmierzone natywnie): przy jednej grupie zdanie z trzema powodami
+        # dostawało 44 px przy potrzebnych 64 - okno nie rosło. Wysokość PRZED emisją `changed`
+        # (gospodarz odświeża po niej kolejkę).
+        dopasuj_wysokosc(self)
         self.changed.emit()
 
     def _on_failed(self, op, msg):
@@ -1835,7 +1832,10 @@ class RepairHeaderDialog(QDialog):
         self.resolve_btn.setEnabled(True)
         self._sync_preview()
         self.status.setText(msg)
-        self.status.setToolTip("")               # szczegół spadku mówił o zapisie, nie o cofnięciu
+        # Szczegół spadku mówił o zapisie - zostaje szczegół systemu cofnięcia (AR-168) albo nic.
+        from horreum.gui.wb_worker import podpowiedz_systemu
+        self.status.setToolTip(podpowiedz_systemu(res))
+        dopasuj_wysokosc(self)                   # zdanie z receptą zawija (AR-176), przed `changed`
         self.changed.emit()
 
     # ---------------------------------------------------------------- takt 3: delegacja do pipeline'u
@@ -4212,7 +4212,8 @@ class MainWindow(QMainWindow):
         przyjmij.object_axis_changed.connect(   # liczniki w tle (AR-84), jak po geście Zbiorów
             lambda: tasks.refresh_counts(w_tle=self._pola_poza_watkiem))
         przyjmij.object_axis_changed.connect(home.odswiez_teczki)
-        przyjmij.object_axis_changed.connect(lambda: grid.refresh(w_tle=True))
+        # Gest z raportu nie nawiguje w Zbiorach - zaznaczenie tam zostaje (AR-172).
+        przyjmij.object_axis_changed.connect(lambda: grid.przeladuj_z_zaznaczeniem())
 
         for widget in (home, znajdz, przyjmij, tasks, planner):      # kolejność = `STRONA_*`
             self.stack.addWidget(widget)
@@ -4282,12 +4283,10 @@ class MainWindow(QMainWindow):
                     self.grid_view._load_facets()
                     # Skład zbioru w wątku tła (AR-27: 1,4-1,5 s na żywej bazie stało tu w oknie);
                     # wraca od razu, tabela dostaje zbiór, gdy ten dojedzie. Zaznaczenie przeżywa
-                    # przebieg: reset modelu je zabierał, a zbiór jest ten sam - wraca po `frame_id`
-                    # ogonem składu (`_przywroc_zaznaczenie`, ta sama droga co cel gestu).
-                    zaznaczone = [r["frame_id"] for r in self.grid_view._selected_data_rows()]
-                    self.grid_view.refresh(w_tle=True, potem=(
-                        (lambda ids=zaznaczone: self.grid_view._przywroc_zaznaczenie(ids))
-                        if zaznaczone else None))
+                    # przebieg: reset modelu je zabierał, a zbiór jest ten sam. Przeładowanie
+                    # NIE-NAWIGACYJNE z generacją (AR-172): zmiana filtra przed końcem składu je
+                    # unieważnia - zwykły ogon przechodził na nowsze zlecenie i oddawał stare zaznaczenie.
+                    self.grid_view.przeladuj_z_zaznaczeniem()
                     # Liczniki zadań + badge ze świeżego stanu (F5) - w wątku tła (AR-84: 1,2-1,9 s
                     # stało tu w oknie na kopii pf4).
                     self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)
@@ -4666,7 +4665,7 @@ class MainWindow(QMainWindow):
         self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)   # liczniki w tle (AR-84)
         if self.home_view is not None:
             self.home_view.odswiez_teczki()
-        self.grid_view.refresh(w_tle=True)
+        self.grid_view.przeladuj_z_zaznaczeniem()        # gest nie nawiguje w Zbiorach (AR-172)
         self.grid_view.refresh_lineage_panel()
 
     def _on_tasks_counts(self, n):

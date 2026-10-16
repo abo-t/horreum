@@ -1010,6 +1010,12 @@ def test_recepta_odslaniania_oddaje_cel_w_zaznaczeniu_po_skladzie_w_tle(qapp, tm
     w tle, a po przyłożeniu cel stoi w zaznaczeniu z kadrem, a następny człon recepty jest czynny.
     Dawniej - cały zbiór, 0 zaznaczonych, „Obiekt → Przywróć…" wygaszone.
 
+    Zmiana kolumn jest przeładowaniem NIE-NAWIGACYJNYM (AR-172), a przy tym przyłożeniu czeka cel
+    gestu (klatki 1, 2 - już poza zbiorem). Cel bez klatki w zbiorze ustępuje zaznaczeniu człowieka:
+    wraca klik w klatkę 3 (migawka), a cel schodzi (jednorazowy). Cel w zbiorze bije migawkę -
+    `test_cel_gestu_bije_migawke_przeladowania`; cel wyrzucony filtrem po przebiegu Dostawy -
+    `test_cel_gestu_poza_zbiorem_po_dostawie_ustepuje_zaznaczeniu_czlowieka`.
+
     Falsyfikator: zdejmij odłożenie celu z `wykonaj_recepte_powrotu` → zaznaczenie puste."""
     view, con = _widok_w_tle(_baza_obiektu(tmp_path))
     try:
@@ -1022,9 +1028,13 @@ def test_recepta_odslaniania_oddaje_cel_w_zaznaczeniu_po_skladzie_w_tle(qapp, tm
         view.status_recipe.connect(recepty.append)
         view._on_object_clear()
         _czekaj_na_pola(view)
+        assert sorted(view._frame_ids) == [3] and _zaznaczone(view) == []
+        assert sorted(view._cel_gestu) == [1, 2], "cel czeka na najbliższe przyłożenie"
+        _klik_komorki(view, 3, 1)
         view._on_columns([])                               # przeładowanie między gestem a klikiem
         _czekaj_na_pola(view)
-        assert _zaznaczone(view) == [] and view._cel_gestu == []
+        assert _zaznaczone(view) == [3], "cel bez klatki w zbiorze ustępuje zaznaczeniu człowieka"
+        assert view._cel_gestu == [], "cel gestu skonsumowany przez to przyłożenie"
         odslon = recepty[-1].czlony[0]
         assert odslon.tekst.startswith("odsłonisz 2 klatki NGC6960"), odslon.tekst
         brama, wszedl = _brama_na_skladzie(monkeypatch)
@@ -1211,9 +1221,10 @@ def test_koniec_przebiegu_liczy_liczniki_w_tle_a_niewidoczna_os_czeka(qapp, tmp_
 
 def test_zaznaczenie_gridu_przezywa_przebieg_dostawy(qapp, tmp_path):
     """Koniec przebiegu Dostawy przeładowuje zbiór gridu w tle; zaznaczenie wraca po `frame_id`
-    ogonem składu (`_przywroc_zaznaczenie`), bo zbiór jest ten sam, a reset modelu je zabierał.
+    przy przyłożeniu (przeładowanie nie-nawigacyjne, `przeladuj_z_zaznaczeniem`, AR-172), bo zbiór
+    jest ten sam, a reset modelu je zabierał.
 
-    Falsyfikator: `refresh(w_tle=True)` bez `potem` w `_odswiez_widoki_po_przebiegu` → puste."""
+    Falsyfikator: gołe `refresh(w_tle=True)` w `_odswiez_widoki_po_przebiegu` → puste."""
     win = MainWindow(_baza_obiektu(tmp_path))
     try:
         grid = win.grid_view
@@ -1372,7 +1383,8 @@ def test_wynik_pol_zmienia_kolumny_a_zaznaczenie_biezaca_komorka_i_panel_zostaja
     w tabeli…". Po przeładowaniu z powodu KOLUMN wracają: zaznaczenie wielu wierszy, bieżący wiersz
     (nie pierwszy zaznaczony) i bieżąca kolumna po znaczeniu, panel rodowodu ze swoim zaznaczeniem.
 
-    Falsyfikator (= HEAD): `refresh(w_tle=True)` bez ogona w `_zastosuj_pola` → zaznaczenie puste."""
+    Falsyfikator: gołe `refresh(w_tle=True)` w `_zastosuj_pola` zamiast `przeladuj_z_zaznaczeniem`
+    → zaznaczenie puste."""
     view, con, brama, drugi = _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch)
     try:
         assert _zaznaczone(view) == [3, 10]
@@ -1397,12 +1409,13 @@ def test_wynik_pol_zmienia_kolumny_a_zaznaczenie_biezaca_komorka_i_panel_zostaja
 
 
 def test_zmiana_filtra_po_wyniku_pol_nie_przywraca_starego_zaznaczenia(qapp, tmp_path, monkeypatch):
-    """Ogon przywrócenia jedzie ze znacznikiem generacji, nie zwykłym `potem`: wynik Pól zleca
+    """Przywrócenie jedzie ze znacznikiem generacji, nie zwykłym `potem`: wynik Pól zleca
     przeładowanie (skład w drodze, brama), człowiek klika facet „light" - nowszy zbiór ma własne
-    zaznaczenie (puste po resecie), a migawka sprzed zmiany filtra NIE wraca, choć light 3 z niej
+    zaznaczenie (puste po resecie), a zaznaczenie sprzed zmiany filtra NIE wraca, choć light 3 z niego
     należy do nowego zbioru.
 
-    Falsyfikator: zdejmij porównanie generacji w `_po_kolumnach` → light 3 wraca zaznaczony."""
+    Falsyfikator: w `_zastosuj_zbior` zdejmij porównanie znacznika z generacją
+    (`_przeladowanie_z_zaznaczeniem is not None`) → light 3 wraca zaznaczony."""
     view, con, brama, _ = _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch)
     sklad, wszedl = _brama_na_skladzie(monkeypatch)
     try:
@@ -1427,3 +1440,417 @@ def test_zmiana_filtra_po_wyniku_pol_nie_przywraca_starego_zaznaczenia(qapp, tmp
         brama.set()
         sklad.set()
         _zamknij(view, con)
+
+
+# ---------- AR-172: jeden mechanizm zaznaczenia dla przeładowań nie-nawigacyjnych ----------
+# Wynik Pól, kolumny ręką, przebieg Dostawy, grupowanie po wersji, gest osi z innego okna: zbiór ten
+# sam, a reset modelu zdejmował zaznaczenie. Zlecenie niesie znacznik generacji, migawkę (zaznaczenie,
+# bieżąca komórka, wybór w panelu rodowodu) robi przyłożenie (`_zastosuj_zbior`). Kliki prawdziwe
+# (`QTest.mouseClick`/`keyClick` na widżecie); na HEAD każdy test z tego bloku padał na asercji
+# zaznaczenia albo panelu (sonda fazy 1).
+
+def _klik_przycisku(btn):
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(btn, Qt.LeftButton)
+    QApplication.processEvents()
+
+
+def _klik_pola(view, keyword):
+    """Prawdziwy klik we wskaźnik zaznaczenia wiersza `keyword` panelu Pól - ten sam prostokąt,
+    który sprawdza delegat (`SE_ItemViewItemCheckIndicator`)."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+    lst = view.fields.list
+    it = next(lst.item(i) for i in range(lst.count()) if lst.item(i).data(Qt.UserRole) == keyword)
+    lst.scrollToItem(it)
+    QApplication.processEvents()
+    opt = QStyleOptionViewItem()
+    lst.initViewItemOption(opt)
+    opt.rect = lst.visualItemRect(it)
+    opt.features |= QStyleOptionViewItem.HasCheckIndicator
+    wskaznik = lst.style().subElementRect(QStyle.SE_ItemViewItemCheckIndicator, opt, lst)
+    przed = it.checkState()
+    QTest.mouseClick(lst.viewport(), Qt.LeftButton, Qt.NoModifier, wskaznik.center())
+    QApplication.processEvents()
+    assert it.checkState() != przed, "klik nie przełączył pola"
+
+
+def _wybierz_w_combo(combo, dane):
+    """Prawdziwy wybór w liście rozwijanej: klik w combo otwiera listę, klik w pozycję `dane`."""
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(combo, Qt.LeftButton)
+    QApplication.processEvents()
+    lista = combo.view()
+    _czekaj(lista.isVisible, "lista combo się nie otworzyła")
+    # Lista combo ignoruje puszczenie przycisku tuż po otwarciu (to puszczenie kliku, który ją
+    # otworzył) - okno `doubleClickInterval` realnym czasem pętli, potem klik w pozycję.
+    koniec = time.monotonic() + QApplication.doubleClickInterval() / 1000 + 0.1
+    while time.monotonic() < koniec:
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.01)
+    idx = combo.model().index(combo.findData(dane), 0)
+    lista.scrollTo(idx)
+    QTest.mouseClick(lista.viewport(), Qt.LeftButton, Qt.NoModifier, lista.visualRect(idx).center())
+    QApplication.processEvents()
+    assert combo.currentData() == dane, combo.currentData()
+
+
+def _baza_kalibracji(tmp_path, *, rodowod=True):
+    """Light Ha z przepisem flatu, masterflat Ha (z przepisu) i OIII tej samej kamery - wzór fixture
+    `test_gui_kalibrator_reki.kcon` - plus karty dla Pól; oś przepisu i rodowód policzone, więc
+    panel lightu ma dwie relacje (dark - luka, flat - powiązany) i żadnej domyślnie zaznaczonej.
+    `rodowod=False` - rodowód niepoliczony: flat „nie policzono”, przy nim „Policz teraz”."""
+    from horreum.calibration import run_calibration
+    from horreum.lineage import run_lineage
+    path = str(tmp_path / "k.db")
+    con = db.open_db(path)
+    con.execute("INSERT INTO camera(id, model_canon, pixel_um, is_mono, created_at) "
+                "VALUES (1, 'ASI2600MM', 3.76, 1, ?)", (NOW,))
+    con.execute("INSERT INTO telescope(id, telescop_canon, status, created_at) "
+                "VALUES (1, 'A140R', 'proposed', ?)", (NOW,))
+    con.execute("INSERT INTO config(id, telescope_id, camera_id, label, status, created_at) "
+                "VALUES (1, 1, 1, 'A140R x ASI2600MM', 'proposed', ?)", (NOW,))
+    for fid, kind, filtr, data, sciezka in (
+            (1, "light", "Ha", "2024-06-01T22:00:00", r"X:\L\M31_Ha_0001.fits"),
+            (3, "master_flat", "Ha", "2024-05-30T20:00:00", r"X:\C\MF_Ha.xisf"),
+            (5, "master_flat", "OIII", "2024-05-01T20:00:00", r"X:\C\MF_OIII.xisf")):
+        con.execute("INSERT INTO frame(id, sha1_data, kind, filetype, camera_id, config_id, "
+                    "filter_canon, first_seen_at) VALUES (?, ?, ?, 'xisf', 1, 1, ?, ?)",
+                    (fid, f"s{fid}", kind, filtr, NOW))
+        con.execute("INSERT INTO header(frame_id, raw_json, date_obs, xbinning) "
+                    "VALUES (?, '{}', ?, 1)", (fid, data))
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                    (fid, sciezka))
+        for kw in ("OBJECT", "EXPTIME"):
+            con.execute("INSERT INTO cards (frame_id, keyword, idx, value_raw, value_type) "
+                        "VALUES (?, ?, 0, 'x', 'str')", (fid, kw))
+    con.commit()
+    run_calibration(con, now=NOW)
+    if rodowod:
+        run_lineage(con, now=NOW)
+    con.close()
+    return path
+
+
+def _widok_gospodarza_ze_stosem(tmp_path):
+    """Widok z wątkami tła po pierwszym wyniku Pól i jego składzie; kliki: stos 10, Ctrl-klik light 3
+    w kolumnie 2, „Rodowód” na pasku, wiersz 2 na liście panelu."""
+    con = db.connect(_baza_ze_stosem(tmp_path))
+    view = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
+    _czekaj_na_pola(view)
+    view.resize(1400, 800)
+    view.show()
+    _klik_komorki(view, 10, 1)
+    _klik_komorki(view, 3, 2, Qt.ControlModifier)
+    _klik_przycisku(view.sel_bar.btn_lineage)
+    _odczekaj_debounce()
+    _klik_listy_panelu(view.lineage_bar.items, 2)
+    assert _zaznaczone(view) == [3, 10] and view.lineage_bar.selected_frame_ids() == [2]
+    return view, con
+
+
+def test_dwa_wyniki_pol_z_rzedu_przy_zbiorze_w_drodze_zaznaczenie_zostaje(qapp, tmp_path,
+                                                                          monkeypatch):
+    """AR-172 (a): drugi wynik Pól zmienia kolumny, gdy skład po pierwszym jest jeszcze w drodze.
+    Dawniej drugie zlecenie (zbiór w drodze → bez migawki) podbijało generację i ogon pierwszego
+    milkł - zaznaczenie znikało. Teraz drugie dziedziczy znacznik pierwszego.
+
+    Falsyfikator: w `przeladuj_z_zaznaczeniem` sam warunek `not self._zbior_w_drodze()` (bez
+    dziedziczenia) → zaznaczenie puste."""
+    view, con, brama, _ = _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch)
+    sklad, wszedl = _brama_na_skladzie(monkeypatch)
+    try:
+        przed_biezaca = _biezaca(view)
+        brama.set()                                   # wynik Pól 1 → przeładowanie w drodze
+        _czekaj(wszedl.is_set, "przeładowanie po wyniku Pól 1 nie ruszyło")
+        _czekaj(lambda: view._pola_worker is None, "wynik Pól 1 nie dojechał")
+        assert view._zbior_w_drodze()
+        c2 = db.connect(view._db_path)                # Dostawa zdjęła GAIN ze wszystkich kart
+        c2.execute("DELETE FROM cards WHERE keyword = 'GAIN'")
+        c2.commit()
+        c2.close()
+        view._zamow_pola()                            # wynik Pól 2 - kolumna GAIN znika w drodze
+        _czekaj(lambda: view._pola_worker is None and view._pola_thread is None, "wynik Pól 2")
+        assert "GAIN" not in view._columns and view._zbior_w_drodze()
+        sklad.set()
+        _czekaj_na_pola(view)
+        _czekaj(lambda: not view._zbior_w_drodze(), "skład nie dojechał")
+        assert "GAIN" not in view.model._keywords
+        assert _zaznaczone(view) == [3, 10]
+        assert _biezaca(view) == przed_biezaca
+        _odczekaj_debounce()
+        assert view.lineage_bar.selected_frame_ids() == [2]
+    finally:
+        brama.set()
+        sklad.set()
+        _zamknij(view, con)
+
+
+def test_reczna_kolumna_w_polach_klikiem_zaznaczenie_zostaje(qapp, tmp_path):
+    """AR-172 (b): klik w pole kolumny w panelu Pól (`_on_columns`) przeładowywał zbiór gołym
+    `refresh` - zaznaczenie, bieżąca komórka i wiersz panelu rodowodu znikały.
+
+    Falsyfikator: `_on_columns` z gołym `refresh(w_tle=True)` → zaznaczenie puste."""
+    view, con = _widok_gospodarza_ze_stosem(tmp_path)
+    try:
+        przed_biezaca = _biezaca(view)
+        _klik_pola(view, "GAIN")
+        _czekaj(lambda: not view._zbior_w_drodze() and view._zbior_thread is None, "skład")
+        assert "GAIN" not in view.model._keywords, "kolumna zdjęta"
+        assert _zaznaczone(view) == [3, 10]
+        assert _biezaca(view) == przed_biezaca
+        _odczekaj_debounce()
+        assert view.lineage_bar.selected_frame_ids() == [2]
+    finally:
+        _zamknij(view, con)
+
+
+def test_noc_panelu_przezywa_wynik_pol(qapp, tmp_path, monkeypatch):
+    """AR-172 (c): panel w trybie propozycji wracał po przeładowaniu na noc mastera
+    (`_set_candidates` stawia pozycję 0), więc wiersz zaznaczony na innej nocy przepadał.
+
+    Falsyfikator: zdejmij `select_night` z `_refresh_lineage` → noc 2023-04-21, lista pusta."""
+    from PySide6.QtTest import QTest
+    from test_gui_grid import _seed_stos_z_kandydatami
+    brama = threading.Event()
+    _szpieg(monkeypatch, brama=brama)
+    path = _baza(tmp_path)
+    c = db.connect(path)
+    _seed_stos_z_kandydatami(c)                       # stos 10, noce 2023-04-21 (20, 21) i -25 (22)
+    c.close()
+    con = db.connect(path)
+    view = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
+    try:
+        _czekaj(lambda: view._zbior_thread is None and view._zbior_worker is None
+                and view._pola_worker is not None, "pierwszy skład zbioru nie dojechał")
+        view.resize(1400, 800)
+        view.show()
+        _klik_komorki(view, 10, 1)
+        _klik_przycisku(view.sel_bar.btn_lineage)
+        _odczekaj_debounce()
+        bar = view.lineage_bar
+        assert bar.combo_night.currentData() == "2023-04-21"
+        QTest.keyClick(bar.combo_night, Qt.Key_Down)
+        QApplication.processEvents()
+        assert bar.combo_night.currentData() == "2023-04-25"
+        _klik_listy_panelu(bar.items, 22)
+        brama.set()                                   # wynik Pól → przeładowanie z powodu kolumn
+        _czekaj_na_pola(view)
+        _odczekaj_debounce()
+        assert len(view.model._keywords) == 3, "wynik Pól przeładował zbiór"
+        assert _zaznaczone(view) == [10]
+        assert bar.combo_night.currentData() == "2023-04-25"
+        assert bar.selected_frame_ids() == [22]
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_relacja_kalibracji_przezywa_przebieg_dostawy(qapp, tmp_path):
+    """AR-172 (c) na drodze Dostawy: gospodarz po przebiegu woła `refresh_lineage_panel()` zaraz po
+    zleceniu przeładowania - panel przebudowany bez stanu tracił wybraną relację osi kalibracji
+    JESZCZE W TRAKCIE składu, a przyłożenie nie miało jej skąd wziąć.
+
+    Falsyfikator: `refresh_lineage_panel` bez `_stan_panelu()` → relacja `None`."""
+    win = MainWindow(_baza_kalibracji(tmp_path))
+    try:
+        grid = win.grid_view
+        _czekaj_na_pola(grid)
+        win.show_classic()
+        win.resize(1500, 950)
+        win.show()
+        QApplication.processEvents()
+        _klik_komorki(grid, 1, 1)
+        _klik_przycisku(grid.sel_bar.btn_lineage)
+        _odczekaj_debounce()
+        bar = grid.lineage_bar
+        assert bar.selected_relation() is None, "bez wyboru ręki - nic zaznaczone"
+        relacje = [r["relation"] for r in bar._relacje]
+        _klik_listy_panelu(bar.items, bar.items.item(relacje.index("flat")).data(Qt.UserRole))
+        assert bar.selected_relation() == "flat"
+        win._on_pipeline_running(True)
+        win._on_pipeline_running(False)
+        assert bar.selected_relation() == "flat", "w trakcie składu"
+        _czekaj(lambda: not grid._zbior_w_drodze() and grid._zbior_thread is None, "skład")
+        _czekaj_na_pola(grid)
+        _odczekaj_debounce()
+        assert _zaznaczone(grid) == [1]
+        assert bar.selected_relation() == "flat"
+    finally:
+        win.close()
+
+
+def test_dostawa_potem_zmiana_filtra_stare_zaznaczenie_nie_wraca(qapp, tmp_path, monkeypatch):
+    """AR-172 (d): ogon Dostawy był zwykłym `potem` - przechodził na nowsze zlecenie, więc po zmianie
+    filtra przed końcem składu stare zaznaczenie wracało na zbiorze, którego nikt o nie nie prosił.
+
+    Falsyfikator: w `_zastosuj_zbior` znacznik bez porównania z generacją → `[1, 2]`."""
+    from PySide6.QtTest import QTest
+    win = MainWindow(_baza_obiektu(tmp_path))
+    sklad = None
+    try:
+        grid = win.grid_view
+        _czekaj_na_pola(grid)
+        win.show_classic()
+        win.resize(1500, 950)
+        win.show()
+        QApplication.processEvents()
+        _klik_komorki(grid, 1, 1)
+        _klik_komorki(grid, 2, 1, Qt.ControlModifier)
+        assert _zaznaczone(grid) == [1, 2]
+        sklad, wszedl = _brama_na_skladzie(monkeypatch)
+        win._on_pipeline_running(True)
+        win._on_pipeline_running(False)
+        _czekaj(wszedl.is_set, "skład po Dostawie nie ruszył w tle")
+        assert grid._zbior_w_drodze()
+        lw = grid.facet_rail._lists["kind"]
+        it = next(lw.item(i) for i in range(lw.count())
+                  if lw.item(i).data(Qt.UserRole) and lw.item(i).data(Qt.UserRole)[1] == "light")
+        lw.scrollToItem(it)
+        QTest.mouseClick(lw.viewport(), Qt.LeftButton, Qt.NoModifier, lw.visualItemRect(it).center())
+        QApplication.processEvents()
+        sklad.set()
+        _czekaj(lambda: not grid._zbior_w_drodze() and grid._zbior_thread is None, "skład")
+        _czekaj_na_pola(grid)
+        assert sorted(grid._frame_ids) == [1, 2, 3], "zbiór nowego filtra"
+        assert _zaznaczone(grid) == []
+    finally:
+        if sklad is not None:
+            sklad.set()
+        win.close()
+
+
+def test_porazka_skladu_po_wyniku_pol_nie_gubi_zaznaczenia(qapp, tmp_path, monkeypatch):
+    """Skład w tle po wyniku Pól pada - ponowienie TEGO SAMEGO zlecenia na wątku GUI
+    (`_on_zbior_failed`) podbija generację; znacznik przechodzi na nią, więc zaznaczenie wraca jak
+    po udanym składzie (dawniej gubiła je i AR-164).
+
+    Falsyfikator: zdejmij przeniesienie znacznika z `_ponow_synchronicznie` → zaznaczenie puste."""
+    view, con, brama, _ = _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch)
+    glowny = threading.get_ident()
+    prawdziwe = queries.base_rows
+
+    def _pada_w_tle(c, ids):
+        if threading.get_ident() != glowny:
+            raise RuntimeError("awaria składu w tle")
+        return prawdziwe(c, ids)
+    monkeypatch.setattr(queries, "base_rows", _pada_w_tle)
+    try:
+        przed_biezaca = _biezaca(view)
+        brama.set()
+        _czekaj_na_pola(view)
+        _czekaj(lambda: not view._zbior_w_drodze(), "ponowienie nie przyłożyło zbioru")
+        assert view.model.columnCount() == len(grid_mod.BASE_COLS) + 3, "zbiór z kolumnami Pól"
+        assert _zaznaczone(view) == [3, 10]
+        assert _biezaca(view) == przed_biezaca
+    finally:
+        brama.set()
+        _zamknij(view, con)
+
+
+def test_cel_gestu_bije_migawke_przeladowania(qapp, tmp_path):
+    """Cel gestu (FC-2) i migawka przeładowania nie-nawigacyjnego przy tym samym przyłożeniu: cel
+    jest nowszą, jawną intencją - stoi w zaznaczeniu zamiast migawki i schodzi (jednorazowy).
+
+    Falsyfikator: odłóż migawkę PO celu w `_zastosuj_zbior` → zaznaczenie z migawki."""
+    view, con = _widok_gospodarza_ze_stosem(tmp_path)
+    try:
+        view._cel_gestu = [1]                         # cel gestu czeka na przyłożenie (wzór `:402`)
+        _klik_pola(view, "GAIN")
+        _czekaj(lambda: not view._zbior_w_drodze() and view._zbior_thread is None, "skład")
+        assert _zaznaczone(view) == [1] and view._cel_gestu == []
+    finally:
+        _zamknij(view, con)
+
+
+def test_grupowanie_po_wersji_klikiem_zaznaczenie_zostaje(qapp, tmp_path):
+    """Grupowanie „Wersja stosu” przeładowuje zbiór (grupy wersji liczy skład), ale zbioru nie
+    zmienia - to widok, nie nawigacja (AR-172, kontrakt „wszystkich” przeładowań nie-nawigacyjnych).
+
+    Falsyfikator: `_on_group` z gołym `refresh(w_tle=True)` → zaznaczenie puste."""
+    view, con = _widok_gospodarza_ze_stosem(tmp_path)
+    try:
+        przed_biezaca = _biezaca(view)
+        _wybierz_w_combo(view.combo_group, grid_mod._GRUPA_WERSJI)
+        _czekaj(lambda: not view._zbior_w_drodze() and view._zbior_thread is None, "skład")
+        assert any("_group" in r for r in view.model._rows), "belki grup wersji stoją"
+        assert _zaznaczone(view) == [3, 10]
+        assert _biezaca(view) == przed_biezaca
+    finally:
+        _zamknij(view, con)
+
+
+def test_gest_osi_z_raportu_dostawy_nie_zdejmuje_zaznaczenia_w_zbiorach(qapp, tmp_path):
+    """Gest osi obiektu z raportu Dostawy (`object_axis_changed`) przeładowuje grid - zbiór ten sam,
+    więc zaznaczenie w Zbiorach zostaje (AR-172).
+
+    Falsyfikator: podłączenie `grid.refresh(w_tle=True)` zamiast `przeladuj_z_zaznaczeniem` → puste."""
+    win = MainWindow(_baza_obiektu(tmp_path))
+    try:
+        grid = win.grid_view
+        _czekaj_na_pola(grid)
+        win.show_classic()
+        win.resize(1500, 950)
+        win.show()
+        QApplication.processEvents()
+        _klik_komorki(grid, 1, 1)
+        _klik_komorki(grid, 3, 1, Qt.ControlModifier)
+        win.przyjmij_view.object_axis_changed.emit()
+        _czekaj(lambda: not grid._zbior_w_drodze() and grid._zbior_thread is None, "skład")
+        _czekaj_na_pola(grid)
+        assert _zaznaczone(grid) == [1, 3]
+    finally:
+        win.close()
+
+
+def test_cel_gestu_poza_zbiorem_po_dostawie_ustepuje_zaznaczeniu_czlowieka(qapp, tmp_path):
+    """Cel gestu „Policz teraz” (light) i migawka przeładowania po przebiegu Dostawy przy tym samym
+    przyłożeniu, a przeliczenie wyrzuciło light z aktywnego filtra (facet „Ha”), master z migawki
+    został. Cel bez klatki w zbiorze ustępuje zaznaczeniu człowieka - migawka wraca CAŁA
+    (zaznaczony master, bieżąca komórka na nim), a cel schodzi. Pusty ekran zgubiłby wybór
+    człowieka, którego AR-172 broni.
+
+    Falsyfikator: rozstrzyganie samą obecnością celu (`if cel:` … `elif migawka`) → zaznaczenie puste."""
+    from PySide6.QtTest import QTest
+    path = _baza_kalibracji(tmp_path, rodowod=False)
+    win = MainWindow(path)
+    try:
+        grid = win.grid_view
+        _czekaj_na_pola(grid)
+        win.show_classic()
+        win.resize(1500, 950)
+        win.show()
+        QApplication.processEvents()
+        lw = grid.facet_rail._lists["filter"]
+        it = next(lw.item(i) for i in range(lw.count())
+                  if lw.item(i).data(Qt.UserRole) and lw.item(i).data(Qt.UserRole)[1] == "Ha")
+        lw.scrollToItem(it)
+        QTest.mouseClick(lw.viewport(), Qt.LeftButton, Qt.NoModifier, lw.visualItemRect(it).center())
+        _czekaj(lambda: not grid._zbior_w_drodze() and grid._zbior_thread is None, "skład facetu")
+        assert sorted(grid._frame_ids) == [1, 3], "facet Ha: light i master Ha"
+        _klik_komorki(grid, 1, 1)
+        _klik_komorki(grid, 3, 1, Qt.ControlModifier)
+        przed_biezaca = _biezaca(grid)
+        assert przed_biezaca[0] == 3, "bieżąca komórka na masterze (ostatni klik)"
+        _klik_przycisku(grid.sel_bar.btn_lineage)
+        _odczekaj_debounce()
+        bar = grid.lineage_bar
+        etapy = []
+        grid.run_stage_fn = lambda etap: etapy.append(etap) or None
+        assert not bar.btn_cal_count.isHidden(), "flat nieliczony - „Policz teraz” stoi"
+        _klik_przycisku(bar.btn_cal_count)
+        assert etapy == ["lineage"] and grid._cel_gestu == [1]
+        c2 = db.connect(path)                         # przebieg przepisał light na inny filtr
+        c2.execute("UPDATE frame SET filter_canon = 'OIII' WHERE id = 1")
+        c2.commit()
+        c2.close()
+        win._on_pipeline_running(True)
+        win._on_pipeline_running(False)
+        _czekaj(lambda: not grid._zbior_w_drodze() and grid._zbior_thread is None, "skład")
+        _czekaj_na_pola(grid)
+        assert sorted(grid._frame_ids) == [3], "light wypadł z filtra Ha"
+        assert _zaznaczone(grid) == [3], "cel bez klatki w zbiorze ustępuje zaznaczeniu człowieka"
+        assert _biezaca(grid) == przed_biezaca, "migawka cała - także bieżąca komórka"
+        assert grid._cel_gestu == []
+    finally:
+        win.close()

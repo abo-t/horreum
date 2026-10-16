@@ -103,6 +103,9 @@ def tekst_pominiecia(kod, params, powod):
     bramka, bramka_params = p.pop("gate", None), p.pop("gate_params", ())
     if bramka and f"objchg.gate.{bramka}" in CATALOG:      # szczegół bramki karty (AR-138)
         p["detail"] = i18n.t(f"objchg.gate.{bramka}", **dict(bramka_params))
+    elif bramka and f"objchg.item.{bramka}" in CATALOG:    # bramka z powodem rdzenia (AR-167)
+        from horreum.item_reasons import PowodPozycji
+        p["detail"] = tekst_powodu(PowodPozycji(p["detail"], bramka, **dict(bramka_params)))
     regula, regula_params = p.pop("rule", None), p.pop("rule_params", ())
     if regula and f"objchg.folder.{regula}" in CATALOG:   # reguła formy folderu (AR-141)
         p["detail"] = i18n.t(f"objchg.folder.{regula}", **dict(regula_params))
@@ -168,12 +171,72 @@ def drogi_dopisania(con, plan):
             for it in dopisania}
 
 
+def drogi_kart(con, plan):
+    """Przewidywana droga KAŻDEGO zapisu karty `OBJECT` w planie (AR-157) → `{location_id: None |
+    powód | _DROGA_NIEZNANA}` - nadzbiór `drogi_dopisania`, z którego bierze dopisania do FITS bez
+    zmian (AR-155). Reszta tą samą regułą pisarza (`writeback.inplace_route`): XISF (`set`
+    i `add`) - w miejscu w rezerwie nagłówka; podmiana karty FITS - z komentarzem karty z lustra
+    obecnej kopii (`queries.present_copy_card_mirror`), bo to on decyduje, czy karta zmieści się
+    w jednym rekordzie; lustro, które kopii nie opisuje → `_DROGA_NIEZNANA` („zależy od pliku”).
+    Znaczniki wierszy czytają drogę wyłącznie dla dopisań FITS (`_tekst_karty`), sumę - wszystkie
+    (`sumy_drog`). ZERO ZAPISU, zero dysku."""
+    from horreum import writeback          # lazy: astropy, jak w `drogi_dopisania`
+    drogi = drogi_dopisania(con, plan)
+    podmiany = [it for it in plan.items if it.card_op and it.location_id not in drogi]
+    if not podmiany:
+        return drogi
+    lustra = queries.present_copy_card_mirror(
+        con, [it.frame_id for it in podmiany if not it.old_path.lower().endswith(_XISF)])
+    for it in podmiany:
+        if it.old_path.lower().endswith(_XISF):
+            drogi[it.location_id] = writeback.inplace_route("xisf", "OBJECT", it.card_new, "str",
+                                                            None, op=it.card_op)
+            continue
+        lustro = lustra.get(it.frame_id)
+        if lustro is None:
+            drogi[it.location_id] = _DROGA_NIEZNANA
+            continue
+        komentarz = next((k[3] for k in lustro if k[0] == "OBJECT"), None)
+        drogi[it.location_id] = writeback.inplace_route("fits", "OBJECT", it.card_new, "str",
+                                                        komentarz, op=it.card_op)
+    return drogi
+
+
+def recepta_duplikatow():
+    """Recepta od klatki z kilkoma obecnymi kopiami do jednej (AR-157) - ten sam tekst, który niesie
+    podpowiedź wiersza Porządków „Duplikaty”: wpis `tasks._PODPOWIEDZI_OSI["dup_frames"]` (klucz
+    i nazwy przycisków z katalogu) złożony tą samą regułą co wiersz. Import leniwy: moduł Porządków
+    ciągnie widoki, a okno potrzebuje go dopiero przy pominięciu `many_copies`."""
+    from horreum.gui.tasks import _PODPOWIEDZI_OSI
+    klucz, nazwy = _PODPOWIEDZI_OSI["dup_frames"]
+    return i18n.t(klucz, **{k: i18n.t(v) for k, v in nazwy.items()})
+
+
+def sumy_drog(plan, drogi):
+    """Suma dróg zapisu kart planu (AR-157, podgląd „Uzgodnij” i „Zmień obiekt…”) → `{"inplace",
+    "rewrite", "depends"}`: `None` = w miejscu, `_DROGA_NIEZNANA` albo powód `route_depends` = zależy
+    od pliku, każdy inny powód pisarza (`fb_no_room`, `fb_card_too_long`, …) = cały plik przepisany.
+    Pozycja bez karty się nie liczy; pozycja z kartą bez prognozy - „zależy od pliku”."""
+    sumy = {"inplace": 0, "rewrite": 0, "depends": 0}
+    for it in plan.items:
+        if not it.card_op:
+            continue
+        droga = drogi.get(it.location_id, _DROGA_NIEZNANA)
+        if droga is None:
+            sumy["inplace"] += 1
+        elif droga is _DROGA_NIEZNANA or getattr(droga, "code", None) == "route_depends":
+            sumy["depends"] += 1
+        else:
+            sumy["rewrite"] += 1
+    return sumy
+
+
 class PlanWorker(QObject):
     """Plan gestu poza wątkiem okna (wzorzec `DryWorker`/`TeczkiWorker`). Otwiera WŁASNE połączenie
     po `db_path`; tryb inline (`db_path` pusty) dostaje żywe `con` wołającego i biegnie
     synchronicznie. Wynik niesie generację startu - okno odrzuca stale (plan sprzed cofnięcia)."""
 
-    done = Signal(int, object)          # (generacja, (plan, korzeń, drogi dopisania))
+    done = Signal(int, object)          # (generacja, (plan, korzeń, drogi zapisu kart))
     failed = Signal(int, str)           # (generacja, komunikat)
     finished = Signal()
 
@@ -199,7 +262,7 @@ class PlanWorker(QObject):
         con = db.connect(self._db_path) if own else self._con
         try:
             plan, korzen = policz_plan(con, self._frame_ids, target=self._target)
-            return plan, korzen, drogi_dopisania(con, plan)
+            return plan, korzen, drogi_kart(con, plan)
         finally:
             if own:
                 con.close()
@@ -598,10 +661,24 @@ class ObjectChangeDialog(QDialog):
         self.skipped_tree.itemCollapsed.connect(lambda _it: self._dopasuj_pominiecia())
         self.skipped_tree.setVisible(False)
         lay.addWidget(self.skipped_tree)
+        # Droga dla klatek z kilkoma obecnymi kopiami (AR-157): pod pominięciami, gdy któreś ma kod
+        # `many_copies` - ta sama recepta co podpowiedź wiersza „Duplikaty” (`recepta_duplikatow`).
+        self.copies_hint = QLabel("")
+        self.copies_hint.setWordWrap(True)
+        self.copies_hint.setProperty("role", "secondary")
+        self.copies_hint.setVisible(False)
+        lay.addWidget(self.copies_hint)
 
         self.counts = QLabel("")
         self.counts.setWordWrap(True)
         lay.addWidget(self.counts)
+        # Suma dróg zapisu kart planu (AR-157): ile w miejscu, ile pełnym przepisaniem pliku, ile
+        # zależy od pliku - przed kliknięciem, tak jak liczby; widoczna, gdy plan pisze karty.
+        self.routes = QLabel("")
+        self.routes.setWordWrap(True)
+        self.routes.setProperty("role", "secondary")
+        self.routes.setVisible(False)
+        lay.addWidget(self.routes)
         self.bar = QProgressBar()
         self.bar.setVisible(False)
         lay.addWidget(self.bar)
@@ -691,6 +768,8 @@ class ObjectChangeDialog(QDialog):
         # Faza planu w wierszu LICZB, nie w zdaniu wyniku: plan po cofnięciu liczy się, gdy zdanie
         # cofnięcia ma jeszcze stać - liczby i tak zastąpi wynik planu.
         self.counts.setText(i18n.t("objchg.planning"))
+        self.routes.setVisible(False)              # suma dróg należy do planu, który się liczy
+        self.copies_hint.setVisible(False)         # zdanie o kopiach też - mówi o pominięciach planu
         worker = PlanWorker(self._db_path, self._gen, frame_ids=self._frame_ids,
                             target=self._target,
                             con=None if (self._off_thread and self._db_path) else self.con)
@@ -811,9 +890,15 @@ class ObjectChangeDialog(QDialog):
         self.skipped_head.setVisible(bool(pominiete))
         self.skipped_tree.setVisible(bool(pominiete))
         self._dopasuj_pominiecia()
+        wiele_kopii = any(s.code == "many_copies" for s in pominiete)
+        self.copies_hint.setText(i18n.t("objchg.many_copies_hint", recipe=recepta_duplikatow())
+                                 if wiele_kopii else "")
+        self.copies_hint.setVisible(wiele_kopii)
         self.counts.setText(i18n.t("objchg.counts", **liczby_planu(plan)))
         self.counts.setToolTip(i18n.t("objchg.rmdirs_tip", dirs="\n".join(plan.rmdirs))
                                if plan.rmdirs else "")
+        self.routes.setText(i18n.t("objchg.routes", **sumy_drog(plan, self._drogi)))
+        self.routes.setVisible(any(it.card_op for it in plan.items))
         self.counts.setVisible(True)
 
     def _wczytaj_przebieg(self, przebieg):
@@ -857,6 +942,7 @@ class ObjectChangeDialog(QDialog):
             self._jest[it["location_id"]] = it["path"]
         self._dopasuj_karte()
         self.counts.setVisible(False)
+        self.routes.setVisible(False)          # przebieg z bazy mówi stan, nie prognozę
         self.status.setText(i18n.t("objchg.res.run", run_id=self._run_id).lstrip(" ·"))
         self._sync_akcji()
 
@@ -900,6 +986,7 @@ class ObjectChangeDialog(QDialog):
             w.setText(_COL_STATUS, status)
             w.setToolTip(_COL_STATUS, tip)
         self.counts.setVisible(False)
+        self.routes.setVisible(False)         # prognoza dróg też - drogę pliku mówi teraz jego status
         self.warnings.setVisible(False)       # ostrzeżenia planera mówią w czasie przyszłym, jak liczby
         self.card_note.setVisible(False)      # zdanie podglądu; drogę pliku mówi teraz jego status
         pominiete = sum(g.childCount() for g in (self.skipped_tree.topLevelItem(i)

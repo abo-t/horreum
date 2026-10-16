@@ -56,6 +56,12 @@ class LineageBar(QWidget):
     # (nazwa pliku w wierszu) - podaje je `set_lineage` razem z nocami.
     _odrzucone = ()
     _sciezki_kandydatow = {}
+    # Wejścia, które bierze gest „Odrzuć nowsze niż obraz" (AR-153): werdykt ręki na klatce zrobionej
+    # po zintegrowaniu obrazu, jeszcze nieodrzucony (`rejectable` z `queries.stack_lineage_inputs`).
+    _nowsze_ids = ()
+    # Wszystkie wiersze listy z klatką nowszą niż obraz (`newer`, każde źródło i werdykt) - przy nich
+    # „Potwierdź zaznaczone" ostrzega w podpowiedzi.
+    _nowsze_wszystkie = frozenset()
     # OŚ KALIBRACJI - gesty ręki (E4-5), zapis u gospodarza. Każdy sygnał niesie klatkę nieba, o którą
     # pyta panel: para (panel, cel zapisu) powstaje razem w `set_calibration`, więc zmiana zaznaczenia
     # gridu w trakcie gestu nie przekieruje zapisu na inną klatkę.
@@ -141,8 +147,17 @@ class LineageBar(QWidget):
         self.btn_reject = QPushButton(i18n.t("grid.lin.reject"))
         self.btn_reject.setToolTip(i18n.t("grid.lin.reject_tip"))
         self.btn_reject.clicked.connect(lambda: self._emit(True))
+        # GEST AR-153 (decyzja Zdzinia `D-1016-1`: werdykty ręki na klatkach nowszych niż obraz to
+        # pomyłka): odrzuca WYŁĄCZNIE takie wejścia, bez zaznaczania ich ręką na liście. Idzie tym
+        # samym sygnałem co „Odrzuć zaznaczone", więc zapis, przeładowanie i „Cofnij werdykt" na pasku
+        # robi gospodarz jedną drogą (`FramesView._on_lineage_judged`).
+        self.btn_reject_newer = QPushButton(i18n.t("grid.lin.reject_newer"))
+        self.btn_reject_newer.setToolTip(i18n.t("grid.lin.reject_newer_tip",
+                                                undo=i18n.t("grid.lin.undo")))
+        self.btn_reject_newer.clicked.connect(self._emit_newer)
         row.addWidget(self.btn_confirm)
         row.addWidget(self.btn_reject)
+        row.addWidget(self.btn_reject_newer)
         row.addStretch(1)
         lay.addWidget(self.action_row)
         # GEST ODNIESIENIA STOI POZA `action_row` I TO JEST ROZSTRZYGNIĘCIE, NIE UKŁAD: tamten
@@ -191,6 +206,9 @@ class LineageBar(QWidget):
         self._nights = ()
         self._raw_bez_odniesienia = raw_unreferenced
         self._po_zintegrowaniu = after_integration
+        self._nowsze_ids = [r["input_frame_id"] for r in inputs
+                            if r.get("rejectable") and not r["excluded"]]
+        self._nowsze_wszystkie = frozenset(r["input_frame_id"] for r in inputs if r.get("newer"))
         if head is None:
             # Brak materiału ZAWSZE mówi zdaniem — także w stanie startowym, zanim ktokolwiek
             # cokolwiek zaznaczył. Pusty panel bez wyjaśnienia czyta się jak awaria.
@@ -201,6 +219,7 @@ class LineageBar(QWidget):
             return
         powod = _lineage_reason_text(head)
         ostrz, info = _lineage_flags(head)
+        ostrz = " · ".join(x for x in (ostrz, _lineage_newer_warn(inputs)) if x)
         # OSTRZEŻENIE STAWIAMY OD RAZU, PRZED GAŁĘZIAMI — bo gałąź propozycji kończy się `return`
         # i pomijała ten zapis, więc panel nowego obrazu nosił ostrzeżenie POPRZEDNIEGO („⚠ obraz
         # zapisał inny teleskop niż jego klatki" o cudzym pliku). Zmierzone bramką pakietu 3a 0808;
@@ -218,6 +237,8 @@ class LineageBar(QWidget):
                 it.setToolTip(r["path"] or "")      # pełna ścieżka pod kursorem, gdy wiersz ją skraca
             if r["excluded"]:
                 it.setForeground(_COLORS["secondary_text"])
+            elif r.get("newer"):
+                it.setForeground(_COLORS["warn"])   # znacznik w tekście niesie to samo bez koloru
             self.items.addItem(it)
         if not head["inputs"] and powod:
             # NIE MA CZEGO POLICZYĆ ⇒ NIE LICZYMY. „Weszło 0 klatek · 0.0 h" o obrazie, który
@@ -245,7 +266,13 @@ class LineageBar(QWidget):
                     powod = i18n.t("grid.lin.reason.no_candidates_after_integration")
             self.head.setText(powod)
             self.note.set_full_text(info)
-            if candidates:
+            # PUSTA PROPOZYCJA NAD WŁASNYMI WERDYKTAMI NIE OTWIERA TRYBU NOCY: „archiwum nie ma ani
+            # jednej klatki" (pusta noc obrazu) byłoby fałszem - klatki są, tylko człowiek je odrzucił,
+            # a propozycja osądzonych nie zwraca. Panel zostaje przy liście werdyktów (do cofnięcia)
+            # i przy powodzie, który mówi receptę - tak stoi `telescope_mismatch` po werdyktach
+            # (AR-171: zostaje w kubełku, receptą jest naprawa karty, nie lista). Bez werdyktów pusta
+            # noc zostaje, jak dotąd: wtedy zdanie o pustym archiwum jest prawdą.
+            if candidates and (any(n.frames for n in candidates) or raw_unreferenced or not inputs):
                 self._odrzucone = [r for r in inputs if r["excluded"]]
                 self._sciezki_kandydatow = dict(candidate_paths or {})
                 self._set_candidates(candidates)
@@ -254,9 +281,16 @@ class LineageBar(QWidget):
             # do dania poza klatkami nowszymi niż obraz, z kubełka wypada i nocy nie otwiera - ale
             # zdanie, DLACZEGO lista jest pusta, nie znika razem z trybem (to samo zdanie, co nota
             # nocy w `_fill_night`).
+            # …I CO DALEJ (AR-171): nic - ani gest, ani przeliczenie rodowodu w Dostawie tego nie
+            # zmieni, a podpowiedź stanu „brak" wysyłała właśnie tam. Zdanie stoi WYŁĄCZNIE przy
+            # stanie „tylko klatki nowsze niż obraz": RAW-y czekające na zegar mają receptę (gest
+            # odniesienia), a lista własnych werdyktów (`inputs` tu = same odrzucone, stan „wszystkie
+            # odrzucone") ma drogę „Potwierdź" - nad nią „nie ma czego potwierdzić" byłoby fałszem.
             if after_integration:
                 self.note.set_full_text(" · ".join(x for x in (info, i18n.t_plural(
-                    "grid.lin.cand.after_integration", after_integration)) if x))
+                    "grid.lin.cand.after_integration", after_integration),
+                    "" if raw_unreferenced or inputs else i18n.t("grid.lin.cand.only_newer"))
+                    if x))
         elif head["used_rows"] is not None:
             # WERDYKT „N Z M" (podzbiór okna): nagłówek nie ma prawa mówić „weszły M" - weszło N,
             # tylko nie wiadomo które. Godziny skalowane do N (≈), bo wiersze listy to kandydaci okna.
@@ -409,6 +443,8 @@ class LineageBar(QWidget):
         self._nights = ()
         self._raw_bez_odniesienia = 0
         self._po_zintegrowaniu = 0
+        self._nowsze_ids = ()
+        self._nowsze_wszystkie = frozenset()
         self._relacje = list(relations)
         self._light_id = light_frame_id
         for r in relations:
@@ -595,6 +631,17 @@ class LineageBar(QWidget):
         ile = len(self.items.selectedItems())
         for b in (self.btn_confirm, self.btn_reject):
             b.setEnabled(ile > 0 and not self._busy)
+        # ZAZNACZENIE Z KLATKĄ NOWSZĄ NIŻ OBRAZ (AR-153): potwierdzenie zostaje czynne - werdykt należy
+        # do człowieka - ale podpowiedź mówi wprost, że zapisze wejście, które nie mogło się zdarzyć.
+        nowsze = bool(self._nowsze_wszystkie & set(self.selected_frame_ids()))
+        self.btn_confirm.setToolTip(i18n.t("grid.lin.confirm_tip_newer" if nowsze
+                                           else "grid.lin.confirm_tip"))
+        # „Odrzuć nowsze niż obraz" nie pyta o zaznaczenie - jego cel wyznacza fakt o wejściach.
+        # Stoi tylko tam, gdzie ma co odrzucić. Tryb propozycji i oś kalibracji mają `_nowsze_ids`
+        # puste z konstrukcji (propozycja zapala się wyłącznie przy zerze niewykluczonych wejść,
+        # `set_calibration` zeruje zbiór), więc osobny warunek na tryb byłby martwą literą.
+        self.btn_reject_newer.setVisible(bool(self._nowsze_ids))
+        self.btn_reject_newer.setEnabled(not self._busy)
         self._sync_calibration_buttons()      # ta sama bramka (zaznaczenie + etap w tle) dla osi kalibracji
 
     def selected_frame_ids(self):
@@ -608,10 +655,37 @@ class LineageBar(QWidget):
             it = self.items.item(i)
             it.setSelected(it.data(Qt.UserRole) in chciane)
 
+    # WYBÓR CZŁOWIEKA W PANELU PRZEŻYWA PRZEBUDOWĘ (AR-172): noc trybu propozycji i relacja osi
+    # kalibracji obok zaznaczonych wierszy - gospodarz bierze je przed przeładowaniem nie-nawigacyjnym
+    # i oddaje po nim (`FramesView._stan_panelu`). Bez nich panel wracał na noc mastera i domyślną relację.
+    def selected_night(self):
+        """Noc wybrana w trybie propozycji (data z combo) albo `None` poza tym trybem."""
+        return self.combo_night.currentData() if self._nights else None
+
+    def select_night(self, night):
+        """Przywróć noc trybu propozycji po przebudowie panelu - po DACIE nocy, nie po indeksie
+        (pozycja 0 to zawsze noc mastera, `_set_candidates`). Nocy, której już nie ma, nie zgadujemy:
+        panel zostaje na nocy mastera. Przełączenie idzie sygnałem combo - `_on_night` przerysowuje
+        listę z pamięci, bez bazy."""
+        i = self.combo_night.findData(night) if self._nights else -1
+        if i >= 0:
+            self.combo_night.setCurrentIndex(i)
+
+    def selected_relation(self):
+        """Relacja osi kalibracji z zaznaczonym wierszem (`dark`/`flat`) albo `None`."""
+        r = self._wybrana_relacja()
+        return None if r is None else r["relation"]
+
     def _emit(self, excluded):
         ids = self.selected_frame_ids()
         if ids:
             self.judged.emit(ids, excluded)
+
+    def _emit_newer(self):
+        """„Odrzuć nowsze niż obraz" (AR-153) → `judged(wejścia do odrzucenia, True)`. Pozostałe
+        wejścia - także werdykty ręki sprzed zapisu stosu - zostają nietknięte."""
+        if self._nowsze_ids and not self._busy:
+            self.judged.emit(list(self._nowsze_ids), True)
 
     def _zgas_katalog(self):
         """Lista wyczyszczona → wspólny katalog poprzedniej listy schodzi z ekranu."""
@@ -708,6 +782,11 @@ def _lineage_item_text(r, katalog=None):
     zrodlo = i18n.t(f"grid.lin.src.{r['asserted_by']}")
     if r["excluded"]:
         zrodlo = i18n.t("grid.lin.src.excluded")
+    # KLATKA NOWSZA NIŻ OBRAZ (AR-153) - fakt o wierszu, także odrzuconym (mówi, dlaczego odrzucono).
+    # W tekście, nie tylko kolorem: kolor nie dociera do każdego oka. `.get`, bo wiersz bywa składany
+    # poza read-modelem (testy, wiersze sprzed klucza).
+    if r.get("newer"):
+        zrodlo = f"{zrodlo} · {i18n.t('grid.lin.src.newer')}"
     sciezka = r["path"] or ""
     if katalog is not None and sciezka.startswith(katalog):
         sciezka = sciezka[len(katalog):]
@@ -1058,6 +1137,21 @@ def _lineage_flags(head):
     if head["excluded"]:
         info.append(i18n.t("grid.lin.flag.excluded", n=head["excluded"]))
     return " · ".join(ostrz), " · ".join(info)
+
+
+def _lineage_newer_warn(inputs):
+    """Ostrzeżenie o wejściach zrobionych po zintegrowaniu obrazu (AR-153) - DWA ZDANIA, BO DWIE
+    RECEPTY (fakt i gest to dwa pojęcia). Werdykt ręki na takiej klatce to pomyłka
+    (`D-1016-1`) - zdanie z liczbą i gestem „Odrzuć nowsze niż obraz" niżej. Takie wejście z pliku,
+    okna albo wydania znaczy, że zegar w nagłówku kłamie - zdanie bez gestu, bo werdykt ręki nie
+    naprawi zegara (populacja na kopii pf4: 0). Wiersze odrzucone milczą: ich sprawa jest zamknięta.
+    `inputs` = wiersze `queries.stack_lineage_inputs` (klucze `newer`, `rejectable`)."""
+    zywe = [r for r in inputs if r.get("newer") and not r["excluded"]]
+    reka = sum(1 for r in zywe if r.get("rejectable"))
+    czesci = [i18n.t_plural("grid.lin.flag.newer", reka)] if reka else []
+    if any(not r.get("rejectable") for r in zywe):
+        czesci.append(i18n.t("grid.lin.flag.newer_clock"))
+    return " · ".join(czesci)
 
 
 def _lineage_raw_note(head):

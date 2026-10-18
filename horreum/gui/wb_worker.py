@@ -62,6 +62,13 @@ def po_operacjach(con, op_ids, now, progress, should_cancel, krok):
     return InplaceGestureResult(wyniki)
 
 
+def _zapis_kart(con, run_id, now, progress, should_cancel):
+    """Zapis kart przebiegu W MIEJSCU ze spadkiem na drogę atomową z powodem - jedna operacja dla
+    szuflady Zbiorów i okien kart (AR-117, AR-161)."""
+    return writeback.commit(con, run_id, now=now, progress=progress, should_cancel=should_cancel,
+                            inplace=True)
+
+
 class WritebackWorker(QObject):
     """Wykonawca commitu/undo writebacku w wątku tła — bliźniak `PipelineWorker` (pipeline.py §4).
     Otwiera WŁASNE połączenie w SWOIM wątku (`db.connect`; sqlite `check_same_thread` — połączenia
@@ -90,10 +97,13 @@ class WritebackWorker(QObject):
     # i `undo_object_change` to JEDNA operacja gestu (przeniesienie + karta + baza per pozycja), bo
     # dwa starty uchwytu zwalniałyby między sobą mutex „zapis → Dostawa". Cel wszystkich trzech:
     # `run_id` przebiegu ze stagingu.
+    # SZUFLADA ZBIORÓW TEŻ PISZE W MIEJSCU (AR-161): `commit` (szuflada) i
+    # `commit_inplace` (okna kart, `app.py`) to JEDEN wołacz - przepisanie całego pliku zostaje wyłącznie
+    # spadkiem z powodem. Dwie nazwy jednej operacji do ujednolicenia (rejestr): `commit` niesie zdanie
+    # porażki szuflady (`grid.wb.op.commit`), `commit_inplace` - regułę zdania okien.
     _OPS = {
-        "commit":        lambda con, t, now, pr, sc: writeback.commit(con, t, now=now, progress=pr, should_cancel=sc),
-        "commit_inplace": lambda con, t, now, pr, sc: writeback.commit(
-            con, t, now=now, progress=pr, should_cancel=sc, inplace=True),
+        "commit":        _zapis_kart,
+        "commit_inplace": _zapis_kart,
         "object_change": lambda con, t, now, pr, sc: writeback.commit_object_change(
             con, t, now=now, progress=pr, should_cancel=sc),
         "undo_object_change": lambda con, t, now, pr, sc: writeback.undo_object_change(
@@ -469,11 +479,21 @@ class EtykietaBledu(QLabel):
     niego. Zmierzone natywnie: najszerszy segment ścieżki kopii archiwum (889 px przy ×1,6 w polu
     842 px) Qt łamie sam na `-`, więc dodatkowe miejsca wewnątrz segmentu nie są potrzebne.
 
+    TEKST ZWYKŁY, NIE `AutoText` (AR-235): zdanie niesie wartości z zewnątrz (nazwa pliku, obiekt
+    z nagłówka, tekst wyjątku), a Qt w `AutoText` bierze zdanie z pierwszym `<znacznik>` HTML za tekst
+    sformatowany i znacznik znika z ekranu - zmierzone natywnie: `(X:\\L\\<a>.fits)` w polu 247 px
+    zamiast 270 px, zaznaczenie całości puste. Formatowania nie niesie żaden tekst pól (katalog i18n:
+    zero wartości, które Qt uznałby za HTML), a łamanie ścieżki AR-221 jest to samo - zmierzone
+    natywnie: 12 konfiguracji pola (zawijanie, zaznaczalność, pasek, szuflada) × 3 szerokości,
+    piksele i wysokości identyczne w obu formatach.
+
     WSKAŹNIK SZCZEGÓŁU: przy niepustym szczególe glif `wb.detail_marker` w wcięciu przed zdaniem
     (malowany, nie w tekście - `text()` zostaje treścią) i szczegół jako opis dostępności; menu
-    prawego kliku kopiuje zdanie albo szczegół (pole błędu nie jest zaznaczalne, a w szczególe stoi
-    plik, który padł). Menu własne także na polu zaznaczalnym ze ścieżką (menu Qt kopiowałoby znak
-    łamania); poza tym menu domyślne pola."""
+    prawego kliku kopiuje zdanie albo szczegół (w szczególe stoi plik, który padł). MENU WŁASNE
+    MA TEŻ KAŻDE NIEPUSTE POLE NIEZAZNACZALNE (AR-243): takie pole nie ma ani zaznaczenia, ani fokusu
+    (Ctrl+C nie ma dokąd trafić), więc ścieżki ze zdania błędu bez szczegółu (plik zajęty, kod spoza
+    klas) nie dało się skopiować niczym (wizytacja natywna). Pole zaznaczalne dostaje menu
+    własne przy szczególe i przy ścieżce (menu Qt kopiowałoby znak łamania); poza tym menu Qt."""
 
     def __init__(self, text="", parent=None):
         super().__init__(parent)
@@ -482,6 +502,7 @@ class EtykietaBledu(QLabel):
         self._szczegol = ""
         self._wciecie = None            # wcięcie sprzed wskaźnika; None = wskaźnik zdjęty
         self._menu = None
+        self.setTextFormat(Qt.PlainText)    # zdanie z `<…>` nie jest HTML-em (AR-235)
         self.ustaw(text)
 
     def ustaw(self, zdanie, szczegol="", *, pelne=None):
@@ -570,16 +591,15 @@ class EtykietaBledu(QLabel):
             self._maluj_wskaznik(QPainter(self))
 
     def contextMenuEvent(self, event):
-        lamane = (_LAMANIE in super().text()
-                  and bool(self.textInteractionFlags() & Qt.TextSelectableByMouse))
-        if not self._szczegol and not lamane:
+        zaznaczalne = bool(self.textInteractionFlags() & Qt.TextSelectableByMouse)
+        if not (self._szczegol or _LAMANIE in super().text() or (self._zdanie and not zaznaczalne)):
             super().contextMenuEvent(event)
             return
         if self._menu is not None:
             self._menu.deleteLater()
         self._menu = QMenu(self)
         # Treść ZAMROŻONA przy otwarciu menu: pole bywa przepisane, zanim ręka kliknie pozycję (raport
-        # paska gaśnie po 5 s, `setText("")`) - kopia ma oddać to, co człowiek widział przy prawym kliku.
+        # paska gaśnie, `setText("")`) - kopia ma oddać to, co człowiek widział przy prawym kliku.
         zaznaczenie, zdanie, szczegol = self.selectedText(), self._pelne, self._szczegol
         schowek = QGuiApplication.clipboard()
         if zaznaczenie:
@@ -656,23 +676,54 @@ def podziel_powod_spadku(reason):
     return szczegol, (uwaga or None)
 
 
+def _spadek_w_powodzie(powod):
+    """Fragment spadku (`PowodPozycji` `inplace_fallback`) w drzewie powodu - sam powód, jego
+    parametry i uwagi - albo None."""
+    if not isinstance(powod, PowodPozycji):
+        return None
+    if powod.code == "inplace_fallback":
+        return powod
+    for _nazwa, wartosc in powod.params:
+        for w in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
+            znaleziony = _spadek_w_powodzie(w)
+            if znaleziony is not None:
+                return znaleziony
+    return None
+
+
+def _spadki(res):
+    """`(FileResult, fragment spadku)` każdego pliku, który rdzeń przepisał drogą atomową po odmowie
+    zapisu w miejscu - ORTOGONALNIE DO STATUSU (AR-161): `applied` (kod wyniku
+    `CODE_INPLACE_FALLBACK`, powód zaczyna się od spadku), wstrzymany i 'failed' po dokonanej
+    podmianie (uwaga drogi za powodem, `writeback._zapisz_lokacje`). 'blocked' - pliku nie
+    przepisano, więc nie liczy się nigdy. Kolejność: zapisane, wstrzymane, błędy."""
+    wynik = []
+    for fr in res.applied + _wstrzymane_poza_zapisanymi(res) + res.failed:
+        fragment = (fr.reason or None) if spadek_na_droge_atomowa(fr) \
+            else _spadek_w_powodzie(fr.reason)
+        if fragment is not None:
+            wynik.append((fr, fragment))
+    return wynik
+
+
 def zdanie_drogi_zapisu(res):
     """Człon o SPADKU na drogę atomową przy zapisie w miejscu (AR-117) albo `""`.
 
-    Okna kart piszą w miejscu (`commit_inplace`), bo pełne przepisanie pliku po SMB zrywa
+    Okna kart i szuflada Zbiorów (AR-161) piszą w miejscu, bo pełne przepisanie pliku po SMB zrywa
     dowiązania `_WBPP`. Plik, w którym zapis w miejscu się nie kwalifikuje (np. FITS bez zapasu
     nagłówka na dopisaną kartę), rdzeń zapisuje drogą atomową i znaczy kodem
-    (`spadek_na_droge_atomowa`). `applied` bez tego kodu to co innego (np. zapis potwierdzony
+    (`spadek_na_droge_atomowa`) albo - gdy wynik ma inny status (wstrzymany, błąd po podmianie) -
+    uwagą drogi w powodzie (`_spadki`). `applied` bez spadku to co innego (np. zapis potwierdzony
     z dysku po przerwanym commicie - nic nie przepisano). Droga zapisu jest szczegółem, dopóki
     wszystko poszło w miejscu, więc człon mówi wyłącznie o spadku: ile plików przepisano w całości
     i dlaczego - językiem człowieka (`wb.inplace_fallback`; szczegół rdzenia w podpowiedzi okna,
     `podpowiedz_spadku`) - oraz uwagi rdzenia dopisane za spadkiem (`podziel_powod_spadku`):
     liczba i pierwsza."""
-    spadek = [fr for fr in res.applied if spadek_na_droge_atomowa(fr)]
-    if not spadek:
+    spadki = _spadki(res)
+    if not spadki:
         return ""
-    czlon = i18n.t("wb.inplace_fallback", n=len(spadek))
-    uwagi = [u for u in (podziel_powod_spadku(fr.reason)[1] for fr in spadek) if u]
+    czlon = i18n.t("wb.inplace_fallback", n=len(spadki))
+    uwagi = [u for u in (podziel_powod_spadku(fragment)[1] for _fr, fragment in spadki) if u]
     if uwagi:
         czlon += i18n.t("objchg.res.notes", n=len(uwagi), note=czytelny_powod(uwagi[0]))
     return czlon
@@ -680,12 +731,12 @@ def zdanie_drogi_zapisu(res):
 
 def podpowiedz_spadku(res):
     """Podpowiedź zdania wyniku okna piszącego karty: szczegół rdzenia pierwszego spadku na drogę
-    atomową - zdanie mówi go językiem człowieka (`zdanie_drogi_zapisu`), więc szczegół nie ginie,
-    tylko schodzi pod kursor - albo `""`."""
-    spadek = next((fr for fr in res.applied if spadek_na_droge_atomowa(fr) and fr.reason), None)
-    if spadek is None:
+    atomową (każdy status, `_spadki`) - zdanie mówi go językiem człowieka (`zdanie_drogi_zapisu`),
+    więc szczegół nie ginie, tylko schodzi pod kursor - albo `""`."""
+    spadki = _spadki(res)
+    if not spadki:
         return ""
-    return i18n.t("objchg.st.detail_tip", detail=podziel_powod_spadku(spadek.reason)[0])
+    return i18n.t("objchg.st.detail_tip", detail=podziel_powod_spadku(spadki[0][1])[0])
 
 
 def status_pozycji(stan, powod, kod=None, *, z_bazy=False):

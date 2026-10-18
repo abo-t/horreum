@@ -1367,3 +1367,51 @@ def test_awaria_przyjecia_klasa_w_jezyku_UI_szczegol_w_podpowiedzi(strona, tmp_p
         assert strona.lbl_error.isHidden() and strona.lbl_error.szczegol() == ""
     finally:
         i18n.set_lang("pl")
+
+
+# --- AR-241: zdanie po przebiegu żniw niesie podsumowanie okna jako nośnik, nie `str(...)` ---
+
+from horreum.gui.wb_worker import ZdanieZeSzczegolem, szczegol_zdania, wiersz_systemu  # noqa: E402
+from horreum.item_reasons import blad_systemu  # noqa: E402
+
+
+@pytest.mark.parametrize("przebieg", ["failed", "cancelled", "refused", "ok"])
+def test_rodowod_ze_zniw_zdanie_po_przebiegu_niesie_szczegoly_podsumowania(qapp, tmp_path, ustawienia,
+                                                                         monkeypatch, przebieg):
+    """Podsumowanie okna żniw z niezapisanym zeznaniem i szczegółem systemu (nośnik
+    `ZdanieZeSzczegolem`, jak zostawia je prawdziwe okno) jedzie do zdania po przebiegu Dostawy
+    w każdej gałęzi: przerwany, odmówiony, z błędem i udany. Zdanie = instrukcja ratunku, przyczyna,
+    podsumowanie (udany: podsumowanie i rodowód); szczegół - wiersz awarii etapu PRZED wierszem
+    zeznania, każdy osobno. Falsyfikatory: `str(dlg.summary)` przy przekazaniu do
+    `_zapisz_rodowod_po_przebiegu`; `str(podsumowanie)` w złożeniu zdania; wiersz awarii bez
+    `failed_tip`; zamieniona kolejność przyczyny i podsumowania."""
+    i18n.set_lang("pl")
+    zeznanie = blad_systemu(OSError(None, "Komunikat systemu", r"X:\L\a.fits", 64))
+    zdanie_zniw = (i18n.t_plural("harvest.status_placed", 1, root=r"X:\ARCH")
+                   + " · " + i18n.t("harvest.manifest_error", err=i18n.t("objchg.item.os_share_lost",
+                                                                         os_code="WinError 64")))
+    szczegol_zniw = wiersz_systemu(zeznanie)
+    assert szczegol_zniw
+    _zniwa_ze_stosami(monkeypatch, [("a", [1])],
+                      podsumowanie=lambda: ZdanieZeSzczegolem(zdanie_zniw, szczegol_zniw))
+    wiersz = i18n.t("pipeline.stage_failed_line", stage="Grupowanie",
+                    msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+    tip_awarii = wiersz_systemu(blad_systemu(OSError(None, "Odmowa dostępu.", r"X:\L\b.fits", 5)))
+    pola = {"failed": {"failed": wiersz, "failed_tip": tip_awarii}, "cancelled": {"cancelled": "scan"},
+            "refused": {"refused": "źródło niedostępne"}, "ok": {}}[przebieg]
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        _szpieg_odswiezen(win)
+        win.pipeline_view.btn_harvest.click()
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu(**pola))
+        utrata = i18n.t("status.harvest_lineage_lost", n=1)
+        czlony = {"failed": [utrata, wiersz, zdanie_zniw], "cancelled": [utrata, zdanie_zniw],
+                  "refused": [utrata, "źródło niedostępne", zdanie_zniw],
+                  "ok": [zdanie_zniw, i18n.t_plural("status.harvest_lineage", 1)]}[przebieg]
+        szczegoly = [tip_awarii, szczegol_zniw] if przebieg == "failed" else [szczegol_zniw]
+        assert win._pelny_komunikat == " - ".join(czlony)
+        assert szczegol_zdania(win._pelny_komunikat).split("\n") == szczegoly
+        assert win.report_label.szczegol() == "\n".join(szczegoly)
+        assert win.statusBar().toolTip() == " - ".join(czlony) + "\n" + "\n".join(szczegoly)
+    finally:
+        win.close()

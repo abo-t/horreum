@@ -13,10 +13,13 @@ import math
 import os
 from typing import NamedTuple
 
-from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import (
+    QAbstractTableModel, QEvent, QItemSelection, QItemSelectionRange, QModelIndex, Qt, qVersion, Signal,
+)
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QFont, QRegion
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLineEdit, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QWidget,
+    QAbstractItemView, QApplication, QHBoxLayout, QLineEdit, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTableView, QWidget,
 )
 
 from horreum import naming, pivot as pivot_mod
@@ -1380,6 +1383,106 @@ class _EdycjaKomorki(QStyledItemDelegate):
         editor.setGeometry(r.x(), r.y(), max(r.width(), self._MIN_W), r.height())
 
 
+# Wersje Qt, dla których `_TabelaKlatek.selectionChanged` odtwarza treść `QTableView::selectionChanged`
+# (przeczytane źródło `qtableview.cpp`). Inna wersja = przeczytaj tę metodę od nowa, zanim dopiszesz.
+_QT_TABELI_KLATEK = ("6.9.2",)
+
+
+def _pierwszy_wybieralny(zaznaczenie):
+    """Indeks, który `QItemSelection::indexes()` oddałby na pozycji 0, albo `None` - ta sama kolejność
+    (zakresy po kolei, wiersz po wierszu, kolumna po kolumnie) i to samo sito (wybieralny i włączony:
+    belka grupy odpada), ale bez budowy listy WSZYSTKICH komórek. Koszt: zakresy plus komórki
+    pominięte przed pierwszą wybieralną (belki grup na początku zakresu)."""
+    for i in range(zaznaczenie.size()):
+        zakres = zaznaczenie.at(i)
+        if not zakres.isValid() or zakres.model() is None:
+            continue
+        model, rodzic = zakres.model(), zakres.parent()
+        for w in range(zakres.top(), zakres.bottom() + 1):
+            for k in range(zakres.left(), zakres.right() + 1):
+                idx = model.index(w, k, rodzic)
+                flagi = model.flags(idx)
+                if (flagi & Qt.ItemIsSelectable) and (flagi & Qt.ItemIsEnabled):
+                    return idx
+    return None
+
+
+class _TabelaKlatek(QTableView):
+    """Tabela Zbiorów: zdarzenia dostępności zmiany zaznaczenia liczone z ZAKRESÓW (AR-202).
+
+    `QTableView::selectionChanged` (Qt 6.9.2) przy aktywnej dostępności (klient UI Automation
+    w systemie - natywnie na Windows prawie zawsze) buduje `selected.indexes()`, czyli listę WSZYSTKICH
+    zaznaczonych komórek, każda z `flags()`, po to, żeby wziąć pozycję 0 i wysłać JEDNO zdarzenie
+    `SelectionAdd`; to samo dla `deselected` i `SelectionRemove`. Zmierzone natywnie na kopii pf4
+    (16 998 klatek × 15 kolumn): Ctrl+A 2,0-2,2 s, 256 902 wywołań `flags()`, i tyle samo każde
+    odtworzenie dużego zaznaczenia po sorcie, grupowaniu, podglądzie i nie-nawigacyjnym przeładowaniu
+    tego samego zbioru.
+
+    Tu ten sam indeks idzie z zakresów (`_pierwszy_wybieralny`), ten sam numer dziecka (wzór
+    `QTableViewPrivate::accessibleTable2Index`) i ta sama kolejność zdarzeń, a dalej bazowe
+    `QAbstractItemView.selectionChanged` - jedyna pozostała treść metody Qt. ZDARZEŃ NIE OKRAJAMY
+    (decyzja CEO, AR-202): prawdziwy klient UI Automation dostaje ten sam strumień zdarzeń i widzi ten
+    sam stan komórek, bo stan, liczbę i listę zaznaczonych Qt czyta wyłącznie z modelu zaznaczenia
+    widoku - który zostaje jedynym właścicielem zaznaczenia. Natywnie: Ctrl+A 149-403 ms (HEAD w tych
+    samych przebiegach 2,0-5,3 s), `flags()` 1 933 (malowanie kadru). Klient, który PYTA o całe
+    zaznaczenie, dalej płaci liczbę komórek - to koszt Qt (`QAccessibleTable::selectedCells`; po Ctrl+A
+    14-21 s i ~0,6 GB tak samo jak przed zmianą), z PySide6 nieosiągalny.
+
+    OBSZAR DO PRZEMALOWANIA PRZYCIĘTY DO KADRU (`visualRegionForSelection`). Przy belkach grup (spany)
+    i przesuniętej sekcji nagłówka (podgląd klingi, kolumna „Wersja”, a przesunięcie zostaje do końca
+    sesji) Qt liczy obszar zmiany zaznaczenia komórka po komórce (`visualRect` każdej), także daleko
+    poza kadrem. Zmierzone natywnie na kopii pf4 po podglądzie i „Grupuj wg”: Ctrl+A 512 887 wywołań
+    `rowCount` i 9,4 s na HEAD. Zakresy przycinamy do pasa widocznych wierszy przed bazą - obszar
+    w kadrze ten sam, a reszta i tak maluje się dopiero po przewinięciu.
+
+    Metoda Qt jest pomijana w całości, więc nowa treść `QTableView::selectionChanged` w innej wersji Qt
+    przepadłaby po cichu - stąd lista wersji przeczytanych (`_QT_TABELI_KLATEK`): przy innej wersji
+    tabela woła metodę Qt (wolniej, ale wiernie), a test pęka, żeby ktoś ją przeczytał od nowa."""
+
+    def _dziecko_dostepnosci(self, idx):
+        """Numer dziecka komórki w interfejsie dostępności tabeli - nagłówki liczą się jako wiersz
+        i kolumna, także ukryte (wzór `QTableViewPrivate::accessibleTable2Index`)."""
+        pionowy = 1 if self.verticalHeader() is not None else 0
+        poziomy = 1 if self.horizontalHeader() is not None else 0
+        return (idx.row() + poziomy) * (idx.model().columnCount() + pionowy) + idx.column() + pionowy
+
+    def visualRegionForSelection(self, selection):
+        """Obszar zaznaczenia w kadrze - zakresy przycięte do pasa widocznych wierszy, potem metoda Qt.
+        Wersja Qt spoza `_QT_TABELI_KLATEK` - metoda Qt na pełnym zaznaczeniu (bezpiecznik jak w
+        `selectionChanged`: Qt woła tę metodę wirtualnie z bazowego `selectionChanged`)."""
+        if qVersion() not in _QT_TABELI_KLATEK:
+            return super().visualRegionForSelection(selection)
+        gora = self.rowAt(0)
+        if gora < 0 or selection.isEmpty():
+            return QRegion()
+        dol = self.rowAt(self.viewport().height() - 1)
+        if dol < 0:
+            dol = self.model().rowCount() - 1
+        pas = QItemSelection()
+        for i in range(selection.size()):
+            zakres = selection.at(i)
+            if not zakres.isValid() or zakres.bottom() < gora or zakres.top() > dol:
+                continue
+            model, rodzic = zakres.model(), zakres.parent()
+            pas.append(QItemSelectionRange(model.index(max(zakres.top(), gora), zakres.left(), rodzic),
+                                           model.index(min(zakres.bottom(), dol), zakres.right(), rodzic)))
+        return super().visualRegionForSelection(pas)
+
+    def selectionChanged(self, selected, deselected):
+        if qVersion() not in _QT_TABELI_KLATEK:
+            super().selectionChanged(selected, deselected)
+            return
+        if QAccessible.isActive():
+            for zbior, rodzaj in ((selected, QAccessible.Event.SelectionAdd),
+                                  (deselected, QAccessible.Event.SelectionRemove)):
+                idx = _pierwszy_wybieralny(zbior)
+                if idx is not None:
+                    zdarzenie = QAccessibleEvent(self, rodzaj)
+                    zdarzenie.setChild(self._dziecko_dostepnosci(idx))
+                    QAccessible.updateAccessibility(zdarzenie)
+        QAbstractItemView.selectionChanged(self, selected, deselected)
+
+
 def elizja_w_srodku(table, col):
     """Kolumna `col` tabeli `table` elidowana W ŚRODKU - bez ruszania jej szerokości. Połowa
     `kolumna_z_tresci` dla kolumn, których szerokość ustala kto inny (sekcja `Stretch` w panelu
@@ -1485,8 +1588,6 @@ class GridTableModel(QAbstractTableModel):
         # Numery liczone od nich - keywordy, „Wersja" i podgląd idą za nimi w obu prezentacjach.
         self._base = BASE_COLS
         self._nowe_wiersze = False   # reset w toku przykłada NOWY zbiór (`set_data`) - AR-187
-        self._reset_podgladu = False  # reset w toku stawia albo zdejmuje podgląd klingi - AR-187
-        self._reset_zdejmuje = False  # …i czy go ZDEJMUJE (pusty podgląd) - AR-207
 
     def reset_tych_samych_wierszy(self):
         """Czy TRWAJĄCY reset modelu przebudowuje te same wiersze - sort z nagłówka, grupowanie,
@@ -1494,18 +1595,6 @@ class GridTableModel(QAbstractTableModel):
         trzyma przez taki reset zaznaczenie; nowy zbiór ma własną regułę (przeładowanie nawigacyjne
         je zdejmuje, nie-nawigacyjne oddaje migawką z chwili przyłożenia - AR-172)."""
         return not self._nowe_wiersze
-
-    def reset_podgladu(self):
-        """Czy TRWAJĄCY reset stawia albo zdejmuje podgląd klingi (`set_preview`). Podgląd wywołuje
-        gest, którego celem bywa zaznaczenie (nazwy, edycja komórki), więc widok odtwarza je przy
-        takim resecie bez progu kosztu - utrata zaznaczenia zmieniłaby cel następnego gestu."""
-        return self._reset_podgladu
-
-    def reset_zdejmuje_podglad(self):
-        """Czy TRWAJĄCY reset podglądu go ZDEJMUJE (kierunek `reset_podgladu`, AR-207). Stawianie
-        i podmiana podglądu odtwarzają zaznaczenie zawsze (zakres stagingu musi być prawdziwy);
-        zdjęcie podlega progowi kosztu, gdy zaznaczenie obejmuje cały widok - decyzja widoku."""
-        return self._reset_podgladu and self._reset_zdejmuje
 
     def set_base_columns(self, cols, *, version_col):
         """Przełącz zestaw kolumn bazowych (prezentacja) na TYCH SAMYCH wierszach - bez nowych
@@ -1532,19 +1621,15 @@ class GridTableModel(QAbstractTableModel):
         z 15, x=1300 przy viewporcie 1076 px; makro i edycja komórki: ~130 px na końcu), więc
         tego, co miał pokazać, nie było widać bez przewijania - ani obok starej wartości.
 
-        Zdjęcie podglądu, którego nie ma, nie resetuje modelu: reset zdjęcia podlega progowi
-        odtworzenia zaznaczenia, więc „Wyczyść podgląd” na pustym podglądzie zdejmowałby zaznaczenie
-        całego widoku bez niczego do zdjęcia (AR-207)."""
+        Zdjęcie podglądu, którego nie ma, nie resetuje modelu (AR-207): gest bez skutku nie przebudowuje
+        tabeli - reset to migawka i odtworzenie zaznaczenia, układ kolumn i przemalowanie całego kadru
+        za „Wyczyść podgląd”, który nie miał czego zdjąć."""
         if not preview and not self._preview:
             return
-        self._reset_podgladu, self._reset_zdejmuje = True, not preview
-        try:
-            self.beginResetModel()
-            self._preview = dict(preview or {})
-            self._preview_label = label if label is not None else i18n.t("grid.preview.macro")
-            self.endResetModel()
-        finally:
-            self._reset_podgladu = self._reset_zdejmuje = False
+        self.beginResetModel()
+        self._preview = dict(preview or {})
+        self._preview_label = label if label is not None else i18n.t("grid.preview.macro")
+        self.endResetModel()
 
     def _preview_active(self):
         return bool(self._preview)

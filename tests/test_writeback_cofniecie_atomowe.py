@@ -1270,3 +1270,132 @@ def test_clean_tylko_po_potwierdzonym_resyncu(tmp_path, monkeypatch, wynik):
     assert all(not os.path.exists(x) for x in _nazwy(s))
     assert _werdykt(con, s["id"]) == (None, [], None)
     con.close()
+
+
+# ============================================================ AR-231: przegląd śladów bez werdyktu
+
+
+def _slady_trzech_lokacji(tmp_path):
+    """Baza z trzema plikami po jednym commicie drogą atomową i ślad cofnięcia (bez werdyktu) przy każdym
+    backupie - nazwy K, Z, T śladu w katalogu pliku, żadna jeszcze na dysku. `(con, pliki, slady)`."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    pliki = []
+    for i in range(3):
+        (tmp_path / f"L{i}").mkdir()
+        pliki.append(_fits(tmp_path / f"L{i}" / "a.fits", seed=i))
+    for p in pliki:
+        _scan_in(con, p)
+    for lid, hh in con.execute("SELECT id, header_hash FROM location ORDER BY id").fetchall():
+        _stage(con, "R", lid, "NGC 7000", hh)
+    res = writeback.commit(con, "R", now=NOW)
+    assert len(res.applied) == 3, res
+    s = "a" * 40
+    slady = []
+    for b, p in zip(con.execute("SELECT id FROM header_backups ORDER BY location_id").fetchall(),
+                    pliki):
+        slady.append(repo.record_atomic_undo(
+            con, backup_id=b[0], result_sha1=s, result_size=1, result_hash=s, byte_exact=True,
+            source_sha1=s, source_size=1, displaced_path=str(p) + ".0000abcd.horreum-kopia",
+            prepared_path=str(p.parent / "tmp1.tmp"), now=NOW))
+    return con, pliki, slady
+
+
+def _odcisk_plikow(sciezki):
+    return {str(x): (_sha(x), os.stat(x).st_mtime_ns) if os.path.exists(x) else None for x in sciezki}
+
+
+def test_przeglad_sladow_wszystkie_lokacje_tylko_kept(tmp_path, monkeypatch):
+    """AR-231: przegląd śladów bez werdyktu WSZYSTKICH lokacji tym samym obserwatorem co bramka - plik
+    tymczasowy martwej próby jest na dysku → `kept` z trzema nazwami, zdarzenie i wiersz Porządków bez
+    dotyku lokacji; obok ścieżki nic → ślad BEZ werdyktu (`clean` pisze wyłącznie właściciel); „nie wiem”
+    → bez werdyktu. Pliki P/K/Z/T nietknięte (sha1 i `mtime`).
+    Falsyfikatory: przegląd zapisuje `clean` po trzech „nie ma”; przegląd jednej lokacji."""
+    con, pliki, slady = _slady_trzech_lokacji(tmp_path)
+    nazwy = [_nazwy(s) for s in _slady(con)]
+    with open(nazwy[0][2], "wb") as fh:                            # T martwej próby lokacji 0
+        fh.write(b"T" * 64)
+    niepewna = nazwy[2][0]                                         # K lokacji 2: „nie wiem”
+    prawdziwa = scan.path_gone
+    monkeypatch.setattr(scan, "path_gone", lambda x: None if x == niepewna else prawdziwa(x))
+    wszystkie = [*map(str, pliki), *(x for n in nazwy for x in n)]
+    przed = _odcisk_plikow(wszystkie)
+    wynik = writeback.przejrzyj_slady_cofniecia(con, now=NOW)
+    monkeypatch.undo()
+    assert wynik == writeback.PrzegladSladow(kept=(slady[0],), bez_werdyktu=(slady[1], slady[2])), wynik
+    assert _werdykt(con, slady[0]) == ("kept", list(nazwy[0]), NOW)
+    assert _werdykt(con, slady[1]) == (None, [], None) and _werdykt(con, slady[2]) == (None, [], None)
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'location.displaced_kept'"
+                       ).fetchone()[0] == 1
+    fid0 = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(pliki[0]),)).fetchone()[0]
+    assert queries.kept_copy_frame_ids(con) == {fid0}
+    assert _odcisk_plikow(wszystkie) == przed
+    con.close()
+
+
+def test_przeglad_liczy_z_wiersza_kanonicznego(tmp_path, monkeypatch):
+    """AR-231: między odczytem dysku a CAS przeglądu właściciel (drugie połączenie) zapisuje `clean` -
+    przegląd liczy werdykt z WIERSZA KANONICZNEGO (`clean`), nie z własnej propozycji; zdarzenia `kept`
+    nie ma. Falsyfikator: licznik z propozycji → ślad w `kept`."""
+    con, pliki, slady = _slady_trzech_lokacji(tmp_path)
+    with open(_nazwy(_slady(con)[0])[0], "wb") as fh:
+        fh.write(b"K" * 64)
+    prawdziwa = repo.settle_atomic_undo
+
+    def _wyprzedzony(con_, **kw):
+        if kw["undo_id"] == slady[0]:
+            drugie = db.connect(str(tmp_path / "h.db"))
+            prawdziwa(drugie, undo_id=kw["undo_id"], outcome="clean", kept_paths=(), now="2026-10-17")
+            drugie.close()
+        return prawdziwa(con_, **kw)
+    monkeypatch.setattr(repo, "settle_atomic_undo", _wyprzedzony)
+    wynik = writeback.przejrzyj_slady_cofniecia(con, now=NOW)
+    monkeypatch.undo()
+    assert wynik.clean == (slady[0],) and wynik.kept == (), wynik
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'location.displaced_kept'"
+                       ).fetchone()[0] == 0
+    con.close()
+
+
+def _prawdziwy_blad_zajetej_bazy(tmp_path):
+    """PRAWDZIWY `SQLITE_BUSY` (z `sqlite_errorcode`) - druga baza w `BEGIN EXCLUSIVE`, odczyt bez czekania.
+    Sztuczny `OperationalError("database is locked")` kodu nie niesie i klasy `db_busy` nie dostaje."""
+    p = str(tmp_path / "zajeta.db")
+    a = sqlite3.connect(p)
+    a.execute("CREATE TABLE t (x)")
+    a.commit()
+    a.execute("BEGIN EXCLUSIVE")
+    b = sqlite3.connect(p, timeout=0)
+    try:
+        b.execute("SELECT * FROM t").fetchall()
+    except sqlite3.OperationalError as exc:
+        return exc
+    finally:
+        b.close()
+        a.rollback()
+        a.close()
+    raise AssertionError("odczyt przy BEGIN EXCLUSIVE przeszedł - brak SQLITE_BUSY")
+
+
+def test_przeglad_awaria_jednego_sladu_nie_przerywa(tmp_path, monkeypatch):
+    """AR-231: zapis werdyktu jednego śladu pada (baza zablokowana) - ślad w `padly` z powodem klasy
+    (`undo_reconcile_failed`, szczegół `db_busy`), pozostałe rozstrzygnięte w tym samym przeglądzie.
+    Falsyfikator: przerwanie przeglądu przy pierwszej porażce."""
+    con, pliki, slady = _slady_trzech_lokacji(tmp_path)
+    for s in _slady(con):
+        with open(_nazwy(s)[0], "wb") as fh:
+            fh.write(b"K" * 64)
+    prawdziwa = repo.settle_atomic_undo
+    zajeta = _prawdziwy_blad_zajetej_bazy(tmp_path)
+
+    def _pada(con_, **kw):
+        if kw["undo_id"] == slady[0]:
+            raise zajeta
+        return prawdziwa(con_, **kw)
+    monkeypatch.setattr(repo, "settle_atomic_undo", _pada)
+    wynik = writeback.przejrzyj_slady_cofniecia(con, now=NOW)
+    monkeypatch.undo()
+    assert wynik.padly == (slady[0],) and wynik.kept == (slady[1], slady[2]), wynik
+    assert wynik.powod.code == "undo_reconcile_failed", wynik.powod
+    assert dict(wynik.powod.params)["detail"].code == "db_busy"
+    assert _werdykt(con, slady[0]) == (None, [], None)
+    con.close()

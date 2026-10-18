@@ -218,16 +218,24 @@ def is_under(path, root):
         return False
 
 
-def find_manifest(wbpp_dir, levels=_MANIFEST_LEVELS):
+def find_manifest(wbpp_dir, levels=_MANIFEST_LEVELS, *, errors_out=None):
     """Manifest wydania (`_PROJEKCJA.json`) w `wbpp_dir` albo do `levels` poziomów wyżej →
     `(korzeń, treść)`; brak → `(None, None)`. Pierwszy znaleziony wygrywa - najbliższe wydanie
-    jest tym, w którego drzewie WBPP pracowało. `read_manifest` jest tolerancyjny (brak pliku
-    i uszkodzony JSON to „nie wiem”), więc sonda nigdy tu nie pada."""
+    jest tym, w którego drzewie WBPP pracowało. Wyjątku nie ma (`read_manifest` jest tolerancyjny).
+
+    `errors_out` (lista, AR-234): manifest, który LEŻY, a nie da się go przeczytać (błąd systemu
+    klasą albo plik uszkodzony) - `(ścieżka manifestu, powód)` i KONIEC szukania z `(korzeń, None)`:
+    to manifest najbliższego wydania, a manifest wyżej należałby do innego drzewa. Bez listy szukanie
+    idzie wyżej jak dotąd, a plan bez świadka mówił stosom „brak manifestu wydania”."""
     d = os.path.abspath(wbpp_dir)
     for _ in range(levels + 1):
-        payload = projection.read_manifest(d)
+        bledy = []
+        payload = projection.read_manifest(d, errors_out=bledy)
         if payload is not None:
             return d, payload
+        if bledy and errors_out is not None:
+            errors_out.extend(bledy)
+            return d, None
         parent = os.path.dirname(d)
         if parent == d:
             break
@@ -384,6 +392,47 @@ def release_counts(row, fresh=None):
     return fresh
 
 
+def manifest_error_text(powod, path):
+    """Zdanie o manifeście wydania, który LEŻY, a nie da się go przeczytać (AR-234) - Qt-wolne,
+    jedno dla podglądu wyjścia (`HarvestDryWorker`) i podpowiedzi wiersza listy: plik uszkodzony
+    (`proj_manifest_damaged`) mówi pole, które padło, i radę; błąd systemu - klasę w języku UI
+    (surowy tekst systemu idzie do szczegółu, `wiersz_systemu`)."""
+    if getattr(powod, "code", None) == "proj_manifest_damaged":
+        return i18n.t("harvest.manifest_damaged", path=path, detail=dict(powod.params).get("detail"))
+    return i18n.t("harvest.manifest_unreadable", path=path, msg=tekst_powodu(powod))
+
+
+def release_manifest_state(row):
+    """Człon stanu wiersza o manifeście wydania (AR-234) - „manifest uszkodzony (JSON)” albo
+    „manifest nieczytelny: <klasa>” - albo `""`, gdy manifest przeczytano."""
+    powod = row.manifest_error
+    if powod is None:
+        return ""
+    if getattr(powod, "code", None) == "proj_manifest_damaged":
+        return i18n.t("harvest.rel.manifest_damaged", detail=dict(powod.params).get("detail"))
+    return i18n.t("harvest.rel.manifest_unreadable", msg=tekst_powodu(powod))
+
+
+def release_state_tip(row):
+    """Podpowiedź komórki stanu: wyjście WBPP wiersza, a przy manifeście nie do przeczytania - zdanie
+    o nim (`manifest_error_text`) i szczegół systemu (AR-234)."""
+    if row.manifest_error is None:
+        return row.out_dir
+    sciezka = os.path.join(row.object_root, projection.MANIFEST_NAME)
+    return "\n".join(w for w in (manifest_error_text(row.manifest_error, sciezka),
+                                 wiersz_systemu(row.manifest_error), row.out_dir) if w)
+
+
+def release_date_cell(row):
+    """`(tekst, podpowiedź)` komórki daty: data z manifestu (`release_date_text`), a data, którą
+    naprawa manifestu wzięła z drzewa (`ts_source` - czas założenia folderu zestawu, AR-240) - ze
+    znakiem przybliżenia i podpowiedzią, że to data pierwszego wydania zestawu."""
+    tekst = release_date_text(row.ts)
+    if tekst and row.ts_source == projection.TS_SOURCE_TREE:
+        return i18n.t("harvest.rel.date_tree", date=tekst), i18n.t("harvest.rel.date_tree_tip", ts=row.ts)
+    return tekst, row.ts
+
+
 def release_state_text(row, fresh=None):
     """Stan wiersza listy wydań: liczby (zera milczą), a bez żadnej - „czeka na WBPP”. Niewciągnięte
     z listy to „do sprawdzenia”: lista zna zeznania żniw, nie plan - kandydat bez rozstrzygającego
@@ -392,12 +441,14 @@ def release_state_text(row, fresh=None):
     wyników są „poprzednio wciągnięte” - nie są wynikami OSTATNIEGO wydania. Stosy bez rodowodu
     dokładnego w bazie (`row.lineage`, z listy - plan bazy o nie nie pyta) to „rodowód do zapisania”,
     a ścieżki, których lista nie przeczytała (`row.unreadable`, AR-222) - „nieprzeczytane”. Pod blokadą
-    podglądu (`SondaNiepelna`) stan mówi wyłącznie o niej - żadnej liczby, więc i żadnego „wciągnięte”."""
+    podglądu (`SondaNiepelna`) stan mówi wyłącznie o niej - żadnej liczby, więc i żadnego „wciągnięte”.
+    Manifest wydania nie do przeczytania (`row.manifest_error`, AR-234) stoi PIERWSZY w każdym stanie."""
+    manifest = [release_manifest_state(row)] if row.manifest_error is not None else []
     if isinstance(fresh, SondaNiepelna):
-        return (i18n.t("harvest.rel.unread", n=fresh.unreadable) if fresh.unreadable
-                else i18n.t("harvest.rel.probe_failed"))
+        return " · ".join(manifest + [i18n.t("harvest.rel.unread", n=fresh.unreadable) if fresh.unreadable
+                                      else i18n.t("harvest.rel.probe_failed")])
     pending, done, review = release_counts(row, fresh)
-    parts = [i18n.t("harvest.rel.waiting")] if row.awaiting_wbpp else []
+    parts = manifest + ([i18n.t("harvest.rel.waiting")] if row.awaiting_wbpp else [])
     if pending:
         parts.append(i18n.t("harvest.rel.pending", n=pending) if fresh is not None
                      else i18n.t("harvest.rel.unchecked", n=pending))
@@ -429,12 +480,14 @@ def is_harvested(row, fresh=None):
     przeglądu leżą tylko tam), coś wciągnięto, wyniki są wynikami OSTATNIEGO wydania, każdy stos
     z tego folderu ma w bazie rodowód dokładny (inaczej zbiór jego wejść leży tylko w zeznaniu żniw),
     a lista przeczytała cały folder - w katalogu nieprzeczytanym (AR-222) mogą leżeć pliki, których
-    archiwum nie ma. Ostatni podgląd tego `out` niepełny albo nieudany (`SondaNiepelna`) - nigdy."""
+    archiwum nie ma. Ostatni podgląd tego `out` niepełny albo nieudany (`SondaNiepelna`) - nigdy.
+    Manifest wydania nie do przeczytania (`manifest_error`, AR-234) - nigdy: plan bez świadka nie
+    rozpozna stosów tego wydania, a „ostatnie wydanie” nie ma daty."""
     if isinstance(fresh, SondaNiepelna):
         return False
     pending, done, review = release_counts(row, fresh)
     return (pending == 0 and review == 0 and done > 0 and not row.awaiting_wbpp and not row.lineage
-            and not row.unreadable)
+            and not row.unreadable and row.manifest_error is None)
 
 
 def needs_lineage(row, fresh=None):
@@ -547,7 +600,12 @@ class HarvestDryWorker(QObject):
             jest = False
         if not jest:
             return {"wbpp_dir": self._wbpp_dir, "missing": True}
-        manifest_root, manifest = find_manifest(self._wbpp_dir)
+        # Manifest najbliższego wydania, którego nie da się przeczytać (AR-234): sonda mówi to
+        # zdaniem z klasą, zamiast planu bez świadka, w którym stosy dostałyby „brak manifestu”.
+        bledy = []
+        manifest_root, manifest = find_manifest(self._wbpp_dir, errors_out=bledy)
+        if bledy:
+            return {"wbpp_dir": self._wbpp_dir, "missing": False, "manifest_error": bledy[0]}
         own = bool(self._db_path)
         con = db.connect(self._db_path) if own else self._con
         try:
@@ -1455,6 +1513,12 @@ class HarvestDialog(QDialog):
         if payload["missing"]:
             self._show_notice(i18n.t("harvest.missing_dir", path=wbpp_dir), "error")
             return
+        if payload.get("manifest_error") is not None:
+            # Manifest najbliższego wydania leży, a nie da się go przeczytać (AR-234): sonda padła -
+            # plan bez świadka mówiłby stosom „brak manifestu wydania” o pliku, który jest.
+            sciezka, powod = payload["manifest_error"]
+            self._on_dry_failed(gen, powod, zdanie=manifest_error_text(powod, sciezka))
+            return
         plan = payload["plan"]
         nieprzeczytane = plan.unreadable_dirs
         if nieprzeczytane and norm_path(nieprzeczytane[0][0]) == norm_path(wbpp_dir):
@@ -1517,11 +1581,12 @@ class HarvestDialog(QDialog):
         self._sync_stale()
 
     @Slot(int, object)
-    def _on_dry_failed(self, gen, msg):
+    def _on_dry_failed(self, gen, msg, zdanie=None):
         """Sonda padła: błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem (AR-184).
         Wiersz listy z tym wyjściem dostaje blokadę „podgląd nieudany” (AR-222): ani poprzedni podgląd,
         ani liczby listy nie mówią „wciągnięte”, dopóki pełny podgląd tego `out` się nie uda. Wyjście
-        zna worker sondy (żyje do sprzątnięcia wątku, także przy wywołaniu z `_on_dry_done`)."""
+        zna worker sondy (żyje do sprzątnięcia wątku, także przy wywołaniu z `_on_dry_done`).
+        `zdanie` - gotowe zdanie zamiast „Nie można: …” (manifest wydania nie do przeczytania, AR-234)."""
         self._set_probing(False)
         if self._closing:
             return
@@ -1535,7 +1600,7 @@ class HarvestDialog(QDialog):
             self._render_release_states()
         self._plan = None
         self._sync_buttons()
-        self._show_notice(i18n.t("harvest.dry_failed", msg=tekst_powodu(msg)), "error",
+        self._show_notice(zdanie or i18n.t("harvest.dry_failed", msg=tekst_powodu(msg)), "error",
                           wiersz_systemu(msg))
 
     def _show_notice(self, text, role=None, tip="", *, remember=True):
@@ -1703,8 +1768,8 @@ class HarvestDialog(QDialog):
             for i, row in enumerate(rows):
                 cells = {REL_OBJECT: (row.object_canon or os.path.basename(row.object_root), row.object_root),
                          REL_CARD: (row.root, row.root),
-                         REL_DATE: (release_date_text(row.ts), row.ts),
-                         REL_STATE: ("", row.out_dir)}
+                         REL_DATE: release_date_cell(row),
+                         REL_STATE: ("", release_state_tip(row))}
                 for col, (text, tip) in cells.items():
                     cell = QTableWidgetItem(str(text))
                     if tip:

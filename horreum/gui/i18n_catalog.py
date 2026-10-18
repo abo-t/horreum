@@ -556,6 +556,11 @@ CATALOG = {
               "„Zatwierdź” dopisze karty ponownie.",
         "en": " - frames stay named from the folder (in the database), files have no card; "
               "„Confirm” writes the cards again."},
+    # To samo zdanie na pasku PO ZAMKNIĘCIU okna (AR-236): przycisku „Zatwierdź” już nie ma, więc bez
+    # obietnicy - sam stan bazy i plików.
+    "path.cards_restored_closed_note": {
+        "pl": " - klatki zostają nazwane z folderu (w bazie), pliki są bez karty",
+        "en": " - frames stay named from the folder (in the database), files have no card"},
     # Straż zamknięcia okna w biegu zapisu do plików (C1, `WritebackRunner.refuse_close`).
     "wb.close_refused": {
         "pl": "Zapis do plików trwa - przerywam po bieżącym pliku. Okno zamkniesz, gdy zapis się "
@@ -603,6 +608,11 @@ CATALOG = {
     "wb.undo_cancelled_done": {
         "pl": " · cofnięcie przerwano na żądanie - pozostałe pliki nie wymagają cofnięcia",
         "en": " · undo stopped on request - the remaining files need no undo"},
+    # Droga ponowienia niedokończonego cofnięcia PO ZAMKNIĘCIU okna kart (AR-236): przycisku „Cofnij”
+    # już nie ma, a commit cofa polecenie CLI (`horreum header-fix --undo`, `writeback.undo`) - wpis
+    # wstawiany w miejsce etykiety przycisku w ogonie cofnięcia (`wb_worker.ogon_cofniecia`).
+    "wb.undo_cli": {"pl": "horreum header-fix \"{db}\" --undo {id}",
+                    "en": "horreum header-fix \"{db}\" --undo {id}"},
     # Plik „już cofnięty” w wyniku cofnięcia - stan docelowy, nie blokada (AR-160).
     "wb.undo_already": {
         "pl": {"one": "{n} już cofnięty", "few": "{n} już cofnięte", "many": "{n} już cofniętych"},
@@ -2788,29 +2798,6 @@ CATALOG = {
         "pl": "zaznaczony obraz: „{reject}” w panelu „{panel}”; wszystkie naraz: prawy klik → „{all}”",
         "en": "selected image: “{reject}” in the “{panel}” panel; all at once: right-click → “{all}”",
     },
-    # AR-187: przebudowa tabeli bez zmiany zbioru (sort, grupowanie, prezentacja, przeładowanie po
-    # zapisie, wynik Pól, Dostawa) zdjęła zaznaczenie za duże do odtworzenia
-    # (`grid._PROG_ODTWORZENIA_KOMOREK`). Dopełniacz po „zaznaczenie”: 1 klatki, 2 klatek.
-    "grid.sel.restore_too_big": {
-        "pl": {"one": "Zaznaczenie {n} klatki zdjęte przy przebudowie tabeli - za duże, żeby je "
-                      "odtworzyć; zaznacz je ponownie",
-               "few": "Zaznaczenie {n} klatek zdjęte przy przebudowie tabeli - za duże, żeby je "
-                      "odtworzyć; zaznacz je ponownie",
-               "many": "Zaznaczenie {n} klatek zdjęte przy przebudowie tabeli - za duże, żeby je "
-                       "odtworzyć; zaznacz je ponownie"},
-        "en": {"one": "Selection of {n} frame cleared when the table was rebuilt - too large to "
-                      "restore; select it again",
-               "other": "Selection of {n} frames cleared when the table was rebuilt - too large to "
-                        "restore; select them again"},
-    },
-    # Ten sam fakt członem zdania gestu (zapis i cofnięcie szuflady), które przykrywa zdanie przyłożenia.
-    "grid.sel.restore_too_big_tail": {
-        "pl": {"one": " · zaznaczenie {n} klatki zdjęte - za duże, żeby je odtworzyć",
-               "few": " · zaznaczenie {n} klatek zdjęte - za duże, żeby je odtworzyć",
-               "many": " · zaznaczenie {n} klatek zdjęte - za duże, żeby je odtworzyć"},
-        "en": {"one": " · selection of {n} frame cleared - too large to restore",
-               "other": " · selection of {n} frames cleared - too large to restore"},
-    },
     # Podpowiedź „Potwierdź zaznaczone", gdy zaznaczenie obejmuje klatkę nowszą niż obraz - przycisk
     # zostaje czynny (werdykt należy do człowieka), zdanie mówi, co zapisze.
     "grid.lin.confirm_tip_newer": {
@@ -4579,6 +4566,15 @@ CATALOG = {
         "pl": "Wydano na stół: {files} → {root}",
         "en": "Served to table: {files} → {root}",
     },
+    # Wydanie perspektywy przerwane błędem kroku (AR-245) - ślad na pasku po zamknięciu okna.
+    "proj.status_failed": {
+        "pl": "Wydanie na stół przerwane błędem: {msg} → {root}",
+        "en": "Serving to table stopped by an error: {msg} → {root}",
+    },
+    "proj.status_cancelled": {
+        "pl": "Przerwano wydanie na stół: {word} {n} z {total}, reszta nietknięta → {root}",
+        "en": "Serving to table stopped: {word} {n} of {total}, the rest untouched → {root}",
+    },
     # `{files}` zdań na pasek stanu: liczba odmieniona frazą („skopiowano 1 plik"), nie „1 skopiowano".
     "proj.files_copied": {
         "pl": {"one": "skopiowano {n} plik", "few": "skopiowano {n} pliki", "many": "skopiowano {n} plików"},
@@ -4648,6 +4644,10 @@ CATALOG = {
     # (AR-213): wydanie obiektu samo uruchamia świeżą sondę, a pod nagłówkiem staje jej werdykt -
     # oferta „Zapisz manifest” albo odmowa z radą.
     "proj.manifest_error_head": {"pl": "Błąd: {msg}\n\n", "en": "Error: {msg}\n\n"},
+    # Szczegół pod kursorem przy manifeście uszkodzonym (AR-234): plik do sprawdzenia albo usunięcia.
+    "proj.manifest_path_tip": {"pl": "Plik manifestu: {path}", "en": "Manifest file: {path}"},
+    # Szczegół odmowy zapisu nad drzewem niekompletnym: folder wydania, w którym brakuje plików.
+    "proj.manifest_folder_tip": {"pl": "Folder wydania: {dir}", "en": "Release folder: {dir}"},
     # Scalenie manifestu bez utraty (AR-213): id wcześniejszych wydań, których plików nie ma w drzewie.
     "proj.manifest_dropped": {
         "pl": "  manifest zapomniał klatek, których plików nie ma w drzewie: {n}",
@@ -4743,11 +4743,16 @@ CATALOG = {
         "en": "  the release manifest (_PROJEKCJA.json) is not in the folder - taking in WBPP results "
               "will not recognize this release; “Write manifest” writes it without linking files",
     },
+    # Zdanie neutralne (AR-245): zapis bywa samym zapominaniem id - ile dopisze, mówi `manifest_will_add`.
     "proj.obj.manifest_stale": {
-        "pl": "  manifest wydania (_PROJEKCJA.json) nie opisuje wszystkich plików w folderze - „Zapisz "
-              "manifest” dopisze brakujące bez linkowania plików",
-        "en": "  the release manifest (_PROJEKCJA.json) does not describe all files in the folder - "
-              "“Write manifest” adds the missing ones without linking files",
+        "pl": "  manifest wydania (_PROJEKCJA.json) nie opisuje drzewa w folderze tak, jak ono leży - "
+              "„Zapisz manifest” uaktualni go bez linkowania plików",
+        "en": "  the release manifest (_PROJEKCJA.json) does not describe the tree in the folder as it "
+              "lies - “Write manifest” updates it without linking files",
+    },
+    "proj.obj.manifest_will_add": {
+        "pl": "  zapis dopisze pozycje planu, których manifest nie wymienia: {n}",
+        "en": "  the write adds plan entries the manifest does not list: {n}",
     },
     # Czym manifest się różni, gdy listy id są zgodne (`ManifestRepair.roznice`): same nazwy plików
     # albo sam czas nagłówka (próba wydania z tej sesji okna, której manifest nie powstał).
@@ -4763,6 +4768,13 @@ CATALOG = {
         "en": "  the release manifest (_PROJEKCJA.json) carries the time of an earlier release - "
               "“Write manifest” writes the time of the attempt after which no manifest was written",
     },
+    # Manifest bez daty, a drzewo ją zna (AR-240, `ts_source: "tree"` - czas założenia folderu zestawu).
+    "proj.obj.manifest_stale_ts_tree": {
+        "pl": "  manifest wydania (_PROJEKCJA.json) nie ma daty wydania - „Zapisz manifest” dopisze datę "
+              "z drzewa bez linkowania plików",
+        "en": "  the release manifest (_PROJEKCJA.json) has no release date - “Write manifest” adds the "
+              "date from the tree without linking files",
+    },
     "proj.obj.manifest_will_keep": {
         "pl": "  zapis zachowa z wcześniejszych wydań: {kept}   zapomni (pliku nie ma w drzewie): "
               "{dropped}",
@@ -4775,6 +4787,28 @@ CATALOG = {
               "wydanie bez daty, na końcu listy, nigdy jako „czeka na WBPP”",
         "en": "  a manifest without a release date (no evidence of the time) - taking in WBPP results "
               "shows this release without a date, at the end of the list, never as “waiting for WBPP”",
+    },
+    # Data wydania z drzewa (AR-240): czas założenia folderu zestawu = pierwsze wydanie zestawu.
+    "proj.obj.manifest_ts_tree": {
+        "pl": "  data wydania z drzewa (orientacyjna): czas założenia folderu zestawu - przy zestawie "
+              "wydanym kilka razy to data pierwszego wydania; wciągnięcie wyników WBPP pokaże ją ze znakiem "
+              "≈ i nie powie z niej „czeka na WBPP”",
+        "en": "  release date from the tree (approximate): the time the set folder was created - for a set "
+              "released several times it is the date of the first release; taking in WBPP results shows it "
+              "with ≈ and never derives “waiting for WBPP” from it",
+    },
+    # Naprawa pisze to, co wydanie (AR-240): liczby zamiast odmowy.
+    "proj.obj.manifest_no_copy": {
+        "pl": "  klatki planu bez obecnej kopii: {n} - manifest wymieni je jak wydanie, ich plików "
+              "w drzewie nie ma",
+        "en": "  plan frames without a present copy: {n} - the manifest lists them as a release does, "
+              "their files are not in the tree",
+    },
+    "proj.obj.manifest_unproven_kept": {
+        "pl": "  id wcześniejszych wydań bez dowodu w drzewie (brak kopii, plik albo folder nieczytelny, "
+              "inny plik pod tą nazwą): {n} - zostają, jak przy wydaniu",
+        "en": "  ids of earlier releases without evidence in the tree (no copy, an unreadable file or "
+              "folder, a different file under that name): {n} - they stay, as on a release",
     },
     "proj.obj.manifest_only_sets": {
         "pl": "  manifest opisze tylko zestawy: {sets}; foldery obok zostaną bez zeznania: {other}",
@@ -4792,8 +4826,8 @@ CATALOG = {
     "proj.obj.writing_manifest": {"pl": "Zapisuję manifest wydania → {root}",
                                   "en": "Writing the release manifest → {root}"},
     # Zamknięcie okna w biegu zapisu manifestu: zapis jednego pliku jest nieprzerywalny.
-    "proj.obj.closing_after_manifest": {"pl": "zapisuję manifest - okno zamknie się po zapisie",
-                                        "en": "writing the manifest - the window closes afterwards"},
+    "proj.obj.closing_after_manifest": {"pl": "zapisuję manifest - okno zamknie się po zakończeniu zapisu",
+                                        "en": "writing the manifest - the window closes when the write ends"},
     "proj.obj.manifest_written": {"pl": "Zapisano manifest wydania", "en": "Release manifest written"},
     "proj.obj.manifest_current": {"pl": "Manifest już opisuje komplet w celu - nic do zapisu",
                                   "en": "The manifest already describes the complete target - "
@@ -4805,6 +4839,20 @@ CATALOG = {
     "proj.obj.status_manifest": {
         "pl": "Zapisano manifest wydania obiektu {canon} → {root}",
         "en": "Wrote the release manifest of object {canon} → {root}",
+    },
+    # Ślad na pasku po zamknięciu okna (AR-245): zapis manifestu i wydanie, które padły.
+    "proj.obj.status_manifest_failed": {
+        "pl": "Nie zapisano manifestu wydania obiektu {canon}: {msg} → {root}",
+        "en": "The release manifest of object {canon} was not written: {msg} → {root}",
+    },
+    "proj.obj.status_manifest_current": {
+        "pl": "Manifest wydania obiektu {canon} już opisuje komplet - nic do zapisu → {root}",
+        "en": "The release manifest of object {canon} already describes the complete target - nothing to "
+              "write → {root}",
+    },
+    "proj.obj.status_failed": {
+        "pl": "Wydanie obiektu {canon} przerwane błędem: {msg} → {root}",
+        "en": "Release of object {canon} stopped by an error: {msg} → {root}",
     },
     # Powody luki flatu (`lineage.raw_flats_for`) - mapa `projection_dialog._FLAT_GAP_KEYS`.
     "proj.obj.gap.incomplete_recipe": {
@@ -5224,6 +5272,28 @@ CATALOG = {
     "harvest.rel.unread": {"pl": "nieprzeczytane {n}", "en": "not read {n}"},
     # Stan wiersza, którego ostatni podgląd padł (AR-222) - blokada zdania „folder możesz skasować”.
     "harvest.rel.probe_failed": {"pl": "podgląd nieudany", "en": "preview failed"},
+    # Manifest wydania leży, a nie da się go przeczytać (AR-234): wiersz zostaje na liście z tym stanem.
+    "harvest.rel.manifest_unreadable": {"pl": "manifest nieczytelny: {msg}", "en": "manifest unreadable: {msg}"},
+    "harvest.rel.manifest_damaged": {"pl": "manifest uszkodzony ({detail})", "en": "manifest damaged ({detail})"},
+    # Data wydania z drzewa (AR-240, `ts_source: "tree"`): znak przybliżenia i podpowiedź.
+    "harvest.rel.date_tree": {"pl": "≈ {date}", "en": "≈ {date}"},
+    "harvest.rel.date_tree_tip": {
+        "pl": "data orientacyjna z drzewa wydania (założenie folderu zestawu) - przy zestawie wydanym kilka "
+              "razy to data pierwszego wydania; nie rozstrzyga „czeka na WBPP”: {ts}",
+        "en": "approximate date from the release tree (the set folder was created) - for a set released "
+              "several times it is the date of the first release; it does not decide “waiting for WBPP”: {ts}",
+    },
+    # Podgląd wyjścia, nad którym manifest najbliższego wydania leży, a nie da się go przeczytać (AR-234).
+    "harvest.manifest_unreadable": {
+        "pl": "Manifestu wydania nad wyjściem nie da się odczytać: {path} - {msg}",
+        "en": "The release manifest above the output cannot be read: {path} - {msg}",
+    },
+    "harvest.manifest_damaged": {
+        "pl": "Manifest wydania nad wyjściem jest uszkodzony ({detail}): {path} - sprawdź go albo usuń, "
+              "potem zapisz go od nowa w oknie wydania obiektu („Zapisz manifest”)",
+        "en": "The release manifest above the output is damaged ({detail}): {path} - check it or delete it, "
+              "then write it again in the object release window (“Write manifest”)",
+    },
     "harvest.rel.probing": {"pl": "Liczę wydania na kartach…", "en": "Counting the releases on the cards…"},
     "harvest.rel.failed": {"pl": "Lista wydań: {msg}", "en": "Release list: {msg}"},
     "harvest.rel.done_note": {
@@ -5267,6 +5337,14 @@ CATALOG = {
         "pl": "Liczniki Porządków się nie przeliczyły (lista mówi stan poprzedni): {msg}",
         "en": "Housekeeping counts could not be recomputed (the list shows the previous state): {msg}",
     },
+    # Przegląd śladów cofnięcia bez werdyktu przy montażu Porządków (AR-231): porażka mówi klasą błędu
+    # w wierszu pasywnym nad listą, przycisk ponawia przegląd (bez okna).
+    "tasks.traces_failed": {
+        "pl": "Sprawdzenie plików zostawionych obok ścieżki przez przerwane cofnięcia nie powiodło się: "
+              "{msg}",
+        "en": "Checking the files left next to the path by interrupted undos failed: {msg}",
+    },
+    "tasks.traces_retry": {"pl": "Ponów sprawdzenie", "en": "Retry the check"},
     "tasks.back": {"pl": "← Porządki", "en": "← Housekeeping"},
     "tasks.telescope_axis": {"pl": "Oś teleskopu", "en": "Telescope axis"},
     "tasks.observatory_axis": {"pl": "Oś obserwatorium", "en": "Observatory axis"},
@@ -7509,22 +7587,6 @@ CATALOG = {
               "zapisuje się wyłącznie nad kompletem - najpierw wydaj brakujące pozycje",
         "en": "the release tree is not complete - plan items without a file in the target: {n}; the "
               "manifest is written only over a complete tree - release the missing items first"},
-    "objchg.item.proj_manifest_skipped": {
-        "pl": "klatki planu bez obecnej kopii: {n} - ich miejsca w drzewie wydania nie da się "
-              "potwierdzić, więc manifest nie mógłby ich uczciwie wymienić; przywróć kopię i przeskanuj "
-              "albo wydaj obiekt ponownie z wiersza poleceń (horreum project --object … --apply)",
-        "en": "plan frames without a present copy: {n} - their place in the release tree cannot be "
-              "confirmed, so the manifest could not list them honestly; restore the copy and rescan, "
-              "or release the object again from the command line (horreum project --object … --apply)"},
-    "objchg.item.proj_manifest_unproven": {
-        "pl": "manifest wymienia klatki, których plików w drzewie wydania nie da się potwierdzić: {n} "
-              "(brak obecnej kopii, plik albo folder nieczytelny, inny plik pod tą nazwą) - zapis "
-              "zgubiłby je albo zmyślił; przywróć kopię i przeskanuj albo wydaj obiekt ponownie "
-              "z wiersza poleceń (horreum project --object … --apply)",
-        "en": "the manifest lists frames whose files in the release tree cannot be confirmed: {n} (no "
-              "present copy, an unreadable file or folder, a different file under that name) - writing "
-              "would lose them or make them up; restore the copy and rescan, or release the object "
-              "again from the command line (horreum project --object … --apply)"},
     "objchg.item.proj_manifest_damaged": {
         "pl": "manifest wydania (_PROJEKCJA.json) leży w folderze, ale nie jest poprawnym zeznaniem "
               "({detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "

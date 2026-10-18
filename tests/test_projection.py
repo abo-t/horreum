@@ -808,8 +808,9 @@ def test_dwa_obiekty_na_jedna_karte_celu_dwa_manifesty(obiekt, tmp_path):
 
 def test_manifest_obiektu_scala_zestawy_kolejnych_wydan(obiekt, tmp_path):
     """Wydanie TYLKO jednego zestawu nie kasuje proweniencji zestawu wydanego wcześniej - jego drzewo
-    dalej leży w korzeniu obiektu. Stary wpis zostaje ze SWOIM `ts`; obcy obiekt w tym korzeniu
-    (albo inny układ) jest nadpisywany jak dotąd."""
+    dalej leży w korzeniu obiektu. Stary wpis zostaje ze SWOIM `ts`. Zeznanie INNEGO obiektu w tym
+    korzeniu nie jest ani scalane, ani nadpisywane (AR-234): krok manifestu odmawia
+    `proj_manifest_foreign` (`object_id`), bajty starego manifestu bez zmian."""
     con, i = obiekt
     cel = str(tmp_path / "_WBPP" / "karta")
     pierwszy = projection.plan_object(con, 1, config_id=10)
@@ -830,12 +831,14 @@ def test_manifest_obiektu_scala_zestawy_kolejnych_wydan(obiekt, tmp_path):
         "la1.fits": i["la1"], "la2.fits": i["la2"], "la3.fits": i["la3"], "la4.fits": i["la4"]}
     assert payload["zestawy"]["RC8_ASI2600MM"]["names"] == {"lb1.fits": i["lb1"]}
 
-    # Obce zeznanie w tym korzeniu (inny obiekt) nie jest scalane - nadpisanie jak dla każdego układu.
+    # Obce zeznanie w tym korzeniu (inny obiekt) - odmowa, nie cichy nadpis.
     obcy = dict(payload, object_id=999, zestawy={"OBCY": {"lights": [1], "ts": "T0"}})
     with open(os.path.join(root, projection.MANIFEST_NAME), "w", encoding="utf-8") as fh:
         json.dump(obcy, fh)
-    projection.apply(drugi, root, do_apply=True, now="T3", manifest=projection.object_manifest(drugi))
-    assert list(_manifest(root)["zestawy"]) == ["RC8_ASI2600MM"]
+    przed = _bajty(root)
+    res = projection.apply(drugi, root, do_apply=True, now="T3", manifest=projection.object_manifest(drugi))
+    assert (res.error.code, dict(res.error.params)) == ("proj_manifest_foreign", {"detail": "object_id"})
+    assert _bajty(root) == przed
 
 
 def _drugie_wydanie_zestawu(con, tmp_path, i):
@@ -1384,14 +1387,15 @@ def _bajty(root):
         return fh.read()
 
 
-def test_repair_manifest_brak_zapisuje_tresc_bez_mutacji_drzewa(obiekt, tmp_path):
+def test_repair_manifest_brak_zapisuje_tresc_bez_mutacji_drzewa(obiekt, tmp_path, monkeypatch):
     """Manifest skasowany po wydaniu (zegar T1): sonda (`do_write=False`) mówi `would-write`/`missing`
     i niczego nie pisze; zapis zegarem T2 kładzie treść wydania - te same klucze, listy, mastery,
-    nazwy z drzewa - a czasu wydania bez dowodu NIE zmyśla: `ts` None, `repaired_at` T2. Drzewo
-    (ścieżki, i-węzły, rozmiary, czasy) bez zmian, `out` nie wraca, `.part` nie zostaje; z `ts=T1`
-    (czas nieudanej próby) - `ts` T1. Drugie wołanie: `current`. Falsyfikator: zapis z `ts=now`,
-    `makedirs` w naprawie."""
+    nazwy z drzewa - a czasu wydania bez dowodu NIE zmyśla: bez dowodu z drzewa (`_czas_z_drzewa`
+    None - nośnik bez czasu założenia, AR-240) `ts` None, `repaired_at` T2. Drzewo (ścieżki, i-węzły,
+    rozmiary, czasy) bez zmian, `out` nie wraca, `.part` nie zostaje; z `ts=T1` (czas nieudanej
+    próby) - `ts` T1. Drugie wołanie: `current`. Falsyfikator: zapis z `ts=now`, `makedirs` w naprawie."""
     import shutil
+    monkeypatch.setattr(projection, "_czas_z_drzewa", lambda *_a: None)
     con, _i = obiekt
     p, root = _wydany(con, tmp_path)
     stary = _manifest(root)
@@ -1447,48 +1451,55 @@ def test_repair_manifest_stary_zachowuje_ts_nadmiar_z_drzewa_i_nazwy(obiekt, tmp
 
 
 @pytest.mark.parametrize("przypadek", ["bez_kopii", "inny_plik_pod_nazwa"])
-def test_repair_manifest_nadmiar_niepewny_odmawia_bajty_nietkniete(obiekt, tmp_path, przypadek):
+def test_repair_manifest_nadmiar_niepewny_zostaje_jak_w_wydaniu(obiekt, tmp_path, przypadek):
     """Id wcześniejszego wydania bez dowodu w żadną stronę - klatka bez obecnej kopii (`la5`) albo
-    w roli leży INNY plik pod jej nazwą (kopia sprzed zapisu nagłówka) - to odmowa
-    `proj_manifest_unproven`, nie ciche zdjęcie; bajty manifestu bez zmian."""
+    w roli leży INNY plik pod jej nazwą (kopia sprzed zapisu nagłówka) - ZOSTAJE w manifeście, jak
+    w scaleniu wydania (AR-240: jedna polityka), a wynik niesie jego liczbę (`niepewne`), nie odmowę;
+    `kept` liczy wyłącznie id z dowodem. Falsyfikator: naprawa odrzucająca niepewne (dawne
+    `zachowaj_niepewne=False`)."""
     con, i = obiekt
     p, root = _wydany(con, tmp_path)
     stary = _manifest(root)
-    if przypadek == "bez_kopii":
-        stary["zestawy"]["RC8_ASI2600MM"]["flat_raw"] = [i["la5"]]
-    else:
-        stary["zestawy"]["RC8_ASI2600MM"]["flat_raw"] = [i["f1"]]
+    fid = i["la5"] if przypadek == "bez_kopii" else i["f1"]
+    stary["zestawy"]["RC8_ASI2600MM"]["flat_raw"] = [fid]
+    del stary["zestawy"]["RC8_ASI2600MM"]["names"]                 # zapis ma co dopisać
+    if przypadek != "bez_kopii":
         obcy = os.path.join(root, "RC8_ASI2600MM", "FLAT_RAW", "OIII", "f1.fits")
         os.makedirs(os.path.dirname(obcy))
         with open(obcy, "wb") as fh:
             fh.write(b"inna tresc")
     _zapisz(root, stary)
-    przed = _bajty(root)
+    sonda = _napraw(con, p, root)
+    assert (sonda.status, sonda.niepewne, sonda.kept, sonda.dropped) == ("would-write", 1, 0, 0), sonda
     wynik = _napraw(con, p, root, do_write=True)
-    assert (wynik.status, wynik.powod.code) == ("refused", "proj_manifest_unproven"), wynik
-    assert dict(wynik.powod.params) == {"n": 1} and _bajty(root) == przed
-    # Zapis trzyma własny `.part` od odczytu - odmowa po nim go zdejmuje.
+    assert (wynik.status, wynik.niepewne, wynik.kept) == ("written", 1, 0), wynik
+    assert _manifest(root)["zestawy"]["RC8_ASI2600MM"]["flat_raw"] == [fid]
     assert not os.path.exists(os.path.join(root, projection.MANIFEST_NAME + projection.PART_SUFFIX))
 
 
-def test_repair_manifest_skipped_i_niekomplet_odmowa_a_dobry_manifest_to_current(obiekt, tmp_path):
+def test_repair_manifest_skipped_pisze_jak_wydanie_niekomplet_odmowa(obiekt, tmp_path):
     """Plan z klatką bez obecnej kopii (A140R, `la5`): manifest, który leży po wydaniu, to `current`
-    (sonda nie straszy nad dobrym manifestem); skasowany - `proj_manifest_skipped` (`n`), nic nie
-    powstaje. Cel pozycji skasowany z drzewa - `proj_manifest_incomplete` (`n`), bajty bez zmian."""
-    con, _i = obiekt
+    (sonda nie straszy nad dobrym manifestem); skasowany - naprawa pisze TO, CO WYDANIE (AR-240):
+    listy zestawów (z `la5`) i nazwy jak w manifeście wydania tego samego planu, `bez_kopii` 1, bez
+    odmowy. Cel pozycji skasowany z drzewa - `proj_manifest_incomplete` (`n`), bajty bez zmian.
+    Falsyfikatory: odmowa przy `projection.skipped`; nazwy z drzewa liczone po `lights` z klatką bez
+    kopii (mapowanie niepełne - `names` znika, wydanie je ma)."""
+    con, i = obiekt
     p, root = _wydany(con, tmp_path, config_id=10)
+    wydanie = _manifest(root)
     assert p.skipped and _napraw(con, p, root).status == "current"
     os.remove(os.path.join(root, projection.MANIFEST_NAME))
     wynik = _napraw(con, p, root, do_write=True)
-    assert (wynik.status, wynik.powod.code, dict(wynik.powod.params)) == (
-        "refused", "proj_manifest_skipped", {"n": 1})
-    assert not os.path.exists(os.path.join(root, projection.MANIFEST_NAME))
+    assert (wynik.status, wynik.stan, wynik.bez_kopii, wynik.niepewne) == ("written", "missing", 1, 0)
+    naprawa = _manifest(root)["zestawy"]["A140R_ASI2600MM"]
+    assert i["la5"] in naprawa["lights"]
+    assert _bez_ts(_manifest(root)["zestawy"]) == _bez_ts(wydanie["zestawy"])
     p2, root2 = _wydany(con, tmp_path / "drugi")
     przed = _bajty(root2)
     os.remove(os.path.join(root2, "RC8_ASI2600MM", "LIGHT", "Ha", "lb1.fits"))
     wynik = _napraw(con, p2, root2, do_write=True)
     assert (wynik.status, wynik.powod.code, dict(wynik.powod.params)) == (
-        "refused", "proj_manifest_incomplete", {"n": 1})
+        "refused", "proj_manifest_incomplete", {"n": 1, "dir": root2})
     assert _bajty(root2) == przed
 
 
@@ -1529,7 +1540,10 @@ def test_repair_manifest_uszkodzony_obcy_zly_typ_odmowa(obiekt, tmp_path, bajty_
         _zapisz(root, stary)
     przed = _bajty(root)
     wynik = _napraw(con, p, root, do_write=True)
-    assert (wynik.status, wynik.powod.code, dict(wynik.powod.params)) == ("refused", kod, {"detail": pole})
+    # Uszkodzony niesie też ścieżkę manifestu (szczegół okna, AR-234) - zdanie bez zmian.
+    sciezka = {"path": os.path.join(root, projection.MANIFEST_NAME)} if kod == "proj_manifest_damaged" else {}
+    assert (wynik.status, wynik.powod.code, dict(wynik.powod.params)) == (
+        "refused", kod, {"detail": pole, **sciezka})
     assert "usuń ręcznie" in str(wynik.powod) and _bajty(root) == przed
 
 
@@ -1618,9 +1632,11 @@ def test_repair_manifest_cudzy_part_i_blad_zapisu(obiekt, tmp_path, monkeypatch)
 
 
 def test_repair_manifest_nazwy_tylko_przy_pelnym_mapowaniu(obiekt, tmp_path):
-    """Plik w `LIGHT`, który nie jest żadną klatką zestawu - mapowanie niepełne: `names` NIE powstają
-    (częściowe wyłączyłyby żniwom spadek na bazę), a manifest bez nich i z kompletnymi listami to
-    `current`. Bez obcego pliku - `names` z drzewa."""
+    """Plik w `LIGHT`, który nie jest żadną klatką zestawu - mapa z drzewa niepełna: naprawa bierze
+    regułę wydania (`_nazwy_scalone`) - nazwy PLANU (jego pliki leżą), bo lighty nie wychodzą poza plan;
+    ze starym lightem spoza planu bez nazw (niepewny, zostaje) częściowej mapy NIE pisze (wyłączyłaby
+    żniwom spadek na bazę) - manifest bez `names` z kompletnymi listami to `current`. Bez obcego pliku -
+    `names` z drzewa."""
     con, i = obiekt
     p, root = _wydany(con, tmp_path)
     stary = _manifest(root)
@@ -1629,8 +1645,15 @@ def test_repair_manifest_nazwy_tylko_przy_pelnym_mapowaniu(obiekt, tmp_path):
     obcy = os.path.join(root, "RC8_ASI2600MM", "LIGHT", "Ha", "obcy.fits")
     with open(obcy, "wb") as fh:
         fh.write(b"nie klatka")
+    sonda = _napraw(con, p, root)
+    assert (sonda.status, sonda.roznice) == ("would-write", ("names",))
+    assert sonda.payload["zestawy"]["RC8_ASI2600MM"]["names"] == {"lb1.fits": i["lb1"]}
+    stary["zestawy"]["RC8_ASI2600MM"]["lights"] = sorted([i["lb1"], i["la5"]])     # la5: bez kopii
+    _zapisz(root, stary)
     assert _napraw(con, p, root).status == "current"
     os.remove(obcy)
+    _zapisz(root, dict(stary, zestawy={**stary["zestawy"], "RC8_ASI2600MM": {
+        **stary["zestawy"]["RC8_ASI2600MM"], "lights": [i["lb1"]]}}))
     assert _napraw(con, p, root, do_write=True).status == "written"
     assert _manifest(root)["zestawy"]["RC8_ASI2600MM"]["names"] == {"lb1.fits": i["lb1"]}
 
@@ -1701,10 +1724,10 @@ def _id_zestawu(z):
 @pytest.mark.parametrize("stan", ["odmowa_dostepu", "skasowany"])
 def test_zestaw_spoza_planu_schodzi_tylko_z_dowodem_nieobecnosci(obiekt, tmp_path, monkeypatch, stan):
     """Manifest zna dwa zestawy, naprawa i wydanie dotyczą jednego (RC8). Folder drugiego (A140R)
-    nieczytelny (odmowa dostępu) - naprawa odmawia `proj_manifest_unproven` z liczbą jego id,
-    bajty bez zmian, a wydanie zostawia jego wpis bez zmian; folder skasowany (dowód nieobecności)
-    - naprawa i wydanie zdejmują wpis, a jego id liczą się w `dropped`. Falsyfikator:
-    `os.path.isdir` zamiast odczytu klasyfikującego (wpis znika bez śladu przy odmowie dostępu)."""
+    nieczytelny (odmowa dostępu) - naprawa i wydanie zostawiają jego wpis bez zmian (jedna polityka,
+    AR-240), naprawa liczy jego id w `niepewne`; folder skasowany (dowód nieobecności) - naprawa
+    i wydanie zdejmują wpis, a jego id liczą się w `dropped`. Falsyfikator: `os.path.isdir` zamiast
+    odczytu klasyfikującego (wpis znika bez śladu przy odmowie dostępu)."""
     import shutil
     con, _i = obiekt
     _pa, root = _wydany(con, tmp_path, config_id=10)
@@ -1730,9 +1753,9 @@ def test_zestaw_spoza_planu_schodzi_tylko_z_dowodem_nieobecnosci(obiekt, tmp_pat
         assert (wynik.status, wynik.dropped) == ("written", n_a)
         assert set(_manifest(root)["zestawy"]) == {"RC8_ASI2600MM"}
     else:
-        assert (wynik.status, wynik.powod.code, dict(wynik.powod.params)) == (
-            "refused", "proj_manifest_unproven", {"n": n_a})
-        assert _bajty(root) == przed
+        assert (wynik.status, wynik.niepewne, wynik.dropped) == ("written", n_a, 0), wynik
+        assert _manifest(root)["zestawy"]["A140R_ASI2600MM"] == stary["zestawy"]["A140R_ASI2600MM"]
+        assert _bajty(root) != przed                                   # RC8 dostał nazwy z drzewa
     _zapisz(root, stary)
     res = projection.apply(p, root, do_apply=True, now="T3", manifest=projection.object_manifest(p),
                            extra_sources=projection.manifest_sources(con, root))
@@ -1991,3 +2014,254 @@ def test_repair_manifest_cudzy_part_w_diagnozie(obiekt, tmp_path):
     _zapisz(root, stary)
     sonda = _napraw(con, p, root)
     assert (sonda.status, sonda.powod.code) == ("refused", "proj_manifest_busy")
+
+
+# ============================================================ AR-234 / AR-240 / AR-245: odczyt ścisły, naprawa jak wydanie
+
+def _open_pada(monkeypatch, sciezka, exc):
+    """`open` widziany przez `projection` rzuca `exc` dla `sciezka`; reszta jak zwykle (kształt
+    prawdziwej odmowy odczytu danych - `icacls /deny RD`: `os.stat` przechodzi, pada otwarcie)."""
+    import builtins
+    prawdziwy = builtins.open
+    klucz = os.path.normcase(str(sciezka))
+
+    def _open(p, *a, **kw):
+        if isinstance(p, (str, os.PathLike)) and os.path.normcase(os.fspath(p)) == klucz:
+            raise exc
+        return prawdziwy(p, *a, **kw)
+    monkeypatch.setattr(projection, "open", _open, raising=False)
+
+
+def _odmowa_odczytu(sciezka):
+    """Odmowa odczytu tak, jak ją daje `open` CRT: errno 13 BEZ `winerror` (zmierzone na prawdziwym ACL)."""
+    import errno
+    return PermissionError(errno.EACCES, "Permission denied", str(sciezka))
+
+
+def test_read_manifest_errors_out_tylko_dla_pliku_ktory_lezy(tmp_path, monkeypatch):
+    """AR-234: `read_manifest` z listą `errors_out` mówi o manifeście, który LEŻY, a nie da się go
+    przeczytać - odmowa (errno 13 po udanym `stat`) klasą `os_denied`, plik uszkodzony
+    `proj_manifest_damaged` z polem i ścieżką; brak pliku (ENOENT) to brak, nie błąd. Wynik zawsze
+    None, bez listy - jak dotąd. Falsyfikator: zgłoszenie bez filtra `os_missing` (brak = błąd)."""
+    import errno
+    root = tmp_path / "_WBPP" / "OBJECTS" / "X"
+    root.mkdir(parents=True)
+    sciezka = root / projection.MANIFEST_NAME
+    sciezka.write_bytes(b"{")
+    bledy = []
+    assert projection.read_manifest(str(root), errors_out=bledy) is None
+    assert [(p, w.code, dict(w.params)) for p, w in bledy] == [
+        (str(sciezka), "proj_manifest_damaged", {"detail": "JSON", "path": str(sciezka)})]
+    assert projection.read_manifest(str(root)) is None
+    with monkeypatch.context() as m:
+        _open_pada(m, sciezka, _odmowa_odczytu(sciezka))
+        bledy = []
+        assert projection.read_manifest(str(root), errors_out=bledy) is None
+        assert [(p, w.code) for p, w in bledy] == [(str(sciezka), "os_denied")]
+        _open_pada(m, sciezka, FileNotFoundError(errno.ENOENT, "No such file", str(sciezka)))
+        bledy = []
+        assert projection.read_manifest(str(root), errors_out=bledy) is None and bledy == []
+
+
+@pytest.mark.parametrize("stan", ["nieczytelny", "uszkodzony"])
+def test_krok_manifestu_wydania_nie_nadpisuje_starego_nieczytelnego_ani_uszkodzonego(
+        obiekt, tmp_path, monkeypatch, stan):
+    """AR-234 (pomiar na prawdziwym ACL: tolerancyjny odczyt brał „nie wiem” za „nie ma” i trzecie
+    wydanie RC8 zgubiło z manifestu zestaw A140R): stary manifest dwóch wydań, którego otwarcie pada
+    odmową (errno 13), daje krok `proj_manifest_failed` z klasą `os_denied`; uszkodzony (JSON) -
+    odmowę `proj_manifest_damaged` z polem i ścieżką. Pliki wydania leżą (liczby jak zwykle), bajty
+    starego manifestu przed = po, `.part` zdjęty. Falsyfikator: `_write_manifest` z tolerancyjnym
+    `read_manifest(root)` - manifest bez A140R."""
+    con, _i = obiekt
+    _wydany(con, tmp_path, config_id=10)
+    p, root = _wydany(con, tmp_path)
+    sciezka = os.path.join(root, projection.MANIFEST_NAME)
+    assert set(_manifest(root)["zestawy"]) == {"A140R_ASI2600MM", "RC8_ASI2600MM"}
+    if stan == "uszkodzony":
+        with open(sciezka, "wb") as fh:
+            fh.write(b'{"layout": "wbpp-obiekt", "zestawy"')
+    else:
+        _open_pada(monkeypatch, sciezka, _odmowa_odczytu(sciezka))
+    przed = _bajty(root) if stan == "uszkodzony" else open(sciezka, "rb").read()
+    res = projection.apply(p, root, do_apply=True, now="T3", manifest=projection.object_manifest(p),
+                           extra_sources=projection.manifest_sources(con, root))
+    assert res.counts == {"exists": len(p.items)}
+    if stan == "uszkodzony":
+        assert (res.error.code, dict(res.error.params)) == (
+            "proj_manifest_damaged", {"detail": "JSON", "path": sciezka})
+        assert _bajty(root) == przed
+    else:
+        inner = dict(res.error.params)["inner"]
+        assert (res.error.code, inner.code) == ("proj_manifest_failed", "os_denied")
+        monkeypatch.undo()
+        assert _bajty(root) == przed and set(_manifest(root)["zestawy"]) == {"A140R_ASI2600MM",
+                                                                            "RC8_ASI2600MM"}
+    assert not os.path.exists(sciezka + projection.PART_SUFFIX)
+
+
+def _wydanie_dwoch_zestawow_bez_manifestu(con, tmp_path):
+    """A140R (T1), potem cały obiekt (T2) do jednego korzenia - folder A140R starszy od reszty -
+    manifest skasowany → `(plan całego obiektu, korzeń)`."""
+    _wydany(con, tmp_path, config_id=10, now="T1")
+    p, root = _wydany(con, tmp_path, config_id=None, now="T2")
+    os.remove(os.path.join(root, projection.MANIFEST_NAME))
+    return p, root
+
+
+def test_naprawa_bierze_ts_z_drzewa_z_kluczem_zrodla(obiekt, tmp_path, monkeypatch):
+    """AR-240: naprawa bez czasu próby i bez starego `ts` bierze datę z DRZEWA - czas założenia
+    folderu zestawu (`st_birthtime`): nagłówek = późniejszy z folderów, wpis zestawu = czas SWOJEGO
+    folderu, `ts_source: "tree"`, `repaired_at` = chwila naprawy. Czas próby z sesji okna (`ts=`) -
+    bez `ts_source`, także gdy stary manifest go niósł; bez dowodu z drzewa - `ts` None jak przed
+    AR-240. Stary manifest bez daty nie dostaje taniego skrótu `current` - dostaje ofertę z datą.
+    Falsyfikatory: nagłówek `None` mimo dowodu; `ts_source` przeniesiony przy czasie z sesji; skrót
+    `_skrot_aktualny` nad manifestem bez daty. Właściwość z PRAWDZIWYCH folderów zestawów (nie z
+    katalogu roboczego); równe czasy dopuszczone - wybór najpóźniejszego sprawdza osobny test."""
+    con, _i = obiekt
+    p, root = _wydanie_dwoch_zestawow_bez_manifestu(con, tmp_path)
+    czasy = {s: projection._czas_z_drzewa(root, s) for s in p.info["zestawy"]}
+    if None in czasy.values():
+        pytest.skip("wolumen folderów zestawów bez czasu założenia (`st_birthtime`)")
+    assert czasy["A140R_ASI2600MM"] <= czasy["RC8_ASI2600MM"]
+    wynik = _napraw(con, p, root, now="T5", do_write=True)
+    nowy = _manifest(root)
+    assert wynik.status == "written", wynik
+    assert (nowy["ts"], nowy["ts_source"], nowy["repaired_at"]) == (
+        max(czasy.values()), projection.TS_SOURCE_TREE, "T5")
+    assert {s: z["ts"] for s, z in nowy["zestawy"].items()} == czasy
+    assert _napraw(con, p, root, now="T6").status == "current"
+    # Czas próby z sesji okna wygrywa i zdejmuje źródło daty starego manifestu.
+    z_proba = _napraw(con, p, root, now="T7", ts="T9", do_write=True)
+    assert z_proba.payload["ts"] == "T9" and "ts_source" not in z_proba.payload
+    assert "repaired_at" not in z_proba.payload
+    # Manifest bez daty (naprawa sprzed AR-240) - pełna droga, oferta daty z drzewa.
+    bez_daty = dict(_manifest(root), ts=None, repaired_at="T0")
+    bez_daty.pop("ts_source", None)
+    _zapisz(root, bez_daty)
+    sonda = _napraw(con, p, root, now="T8")
+    assert (sonda.status, sonda.roznice, sonda.payload["ts_source"]) == (
+        "would-write", ("ts",), projection.TS_SOURCE_TREE)
+    monkeypatch.setattr(projection, "_czas_z_drzewa", lambda *_a: None)
+    assert _napraw(con, p, root, now="T8").status == "current"
+    os.remove(os.path.join(root, projection.MANIFEST_NAME))
+    bez_dowodu = _napraw(con, p, root, now="T8", do_write=True).payload
+    assert (bez_dowodu["ts"], bez_dowodu["repaired_at"]) == (None, "T8") and "ts_source" not in bez_dowodu
+
+
+def test_werdykt_liczy_pary_dopisywane_osobno_od_zapominanych(obiekt, tmp_path):
+    """AR-245: `dodane` = pary (zestaw, lista, id), których stary manifest nie miał - stary bez
+    lightu planu daje 1; stary z surowym flatem, którego pliku nie ma (dowód nieobecności), daje
+    `dropped` 1 i `dodane` 0 - okno nie obieca wtedy dopisania. Falsyfikator: `dodane` zawsze 0."""
+    con, i = obiekt
+    p, root = _wydany(con, tmp_path)
+    stary = _manifest(root)
+    stary["zestawy"]["RC8_ASI2600MM"]["lights"] = []
+    _zapisz(root, stary)
+    sonda = _napraw(con, p, root)
+    assert (sonda.status, sonda.dodane, sonda.dropped) == ("would-write", 1, 0), sonda
+    stary = _manifest(root)
+    stary["zestawy"]["RC8_ASI2600MM"]["lights"] = [i["lb1"]]
+    stary["zestawy"]["RC8_ASI2600MM"]["flat_raw"] = [i["f2"]]
+    _zapisz(root, stary)
+    sonda = _napraw(con, p, root)
+    assert (sonda.status, sonda.dodane, sonda.dropped, sonda.roznice) == ("would-write", 0, 1, ("ids",))
+
+
+def test_naprawa_ts_z_drzewa_najpozniejszy_folder_na_kontrolowanych_czasach(obiekt, tmp_path, monkeypatch):
+    """AR-240: data z drzewa na kontrolowanych czasach założenia folderów (bez zależności od wolumenu):
+    nagłówek = NAJPÓŹNIEJSZY znany czas folderu zestawu planu, wpis zestawu = czas SWOJEGO folderu,
+    a zestaw bez czasu - nagłówka. Falsyfikator: najwcześniejszy zamiast najpóźniejszego."""
+    con, _i = obiekt
+    p, root = _wydanie_dwoch_zestawow_bez_manifestu(con, tmp_path)
+    czasy = {"A140R_ASI2600MM": "2026-01-03T00:00:00+00:00", "RC8_ASI2600MM": "2026-01-01T00:00:00+00:00"}
+    monkeypatch.setattr(projection, "_czas_z_drzewa", lambda _root, seg: czasy.get(seg))
+    payload = _napraw(con, p, root, now="T5").payload
+    assert (payload["ts"], payload["ts_source"]) == ("2026-01-03T00:00:00+00:00", projection.TS_SOURCE_TREE)
+    assert {s: z["ts"] for s, z in payload["zestawy"].items()} == {
+        s: czasy.get(s, "2026-01-03T00:00:00+00:00") for s in p.info["zestawy"]}
+
+
+def _manifest_dwoch_wydan(con, tmp_path):
+    """A140R, potem RC8 do jednego korzenia → `(plan RC8, korzeń)`; manifest zna oba zestawy."""
+    _wydany(con, tmp_path, config_id=10, now="T1")
+    return _wydany(con, tmp_path, now="T2")
+
+
+@pytest.mark.parametrize("przypadek, kod, pole", [
+    ("object_id_napisem", "proj_manifest_damaged", "object_id"),
+    ("zestaw_nie_slownik", "proj_manifest_damaged", "zestawy.A140R_ASI2600MM"),
+    ("lista_nie_id", "proj_manifest_damaged", "zestawy.A140R_ASI2600MM.lights"),
+    ("inny_obiekt", "proj_manifest_foreign", "object_id"),
+])
+def test_krok_manifestu_i_naprawa_jednym_walidatorem_starego_zeznania(obiekt, tmp_path, przypadek, kod, pole):
+    """AR-234: stary manifest - POPRAWNY JSON, ale zeznanie wydania obiektu ze złą strukturą (nagłówek,
+    zestaw, lista id) albo zeznanie INNEGO obiektu - krok manifestu wydania odmawia tym samym kodem
+    i polem co naprawa (`_odmowa_starego`), zamiast pominąć je w scaleniu i nadpisać: pliki wydania
+    leżą, bajty starego manifestu przed = po, własny `.part` zdjęty. Falsyfikator: scalenie
+    tolerancyjne (sam test „czy słownik”) - stary zestaw A140R znika z manifestu."""
+    con, _i = obiekt
+    p, root = _manifest_dwoch_wydan(con, tmp_path)
+    stary = _manifest(root)
+    if przypadek == "object_id_napisem":
+        stary["object_id"] = str(stary["object_id"])
+    elif przypadek == "zestaw_nie_slownik":
+        stary["zestawy"]["A140R_ASI2600MM"] = [1, 2]
+    elif przypadek == "lista_nie_id":
+        stary["zestawy"]["A140R_ASI2600MM"]["lights"] = "la1"
+    else:
+        stary["object_id"] = 999
+    _zapisz(root, stary)
+    przed = _bajty(root)
+    res = projection.apply(p, root, do_apply=True, now="T3", manifest=projection.object_manifest(p),
+                           extra_sources=projection.manifest_sources(con, root))
+    sciezka = {"path": os.path.join(root, projection.MANIFEST_NAME)} if kod == "proj_manifest_damaged" else {}
+    assert (res.error.code, dict(res.error.params)) == (kod, {"detail": pole, **sciezka})
+    assert res.counts == {"exists": len(p.items)} and _bajty(root) == przed
+    assert not os.path.exists(os.path.join(root, projection.MANIFEST_NAME + projection.PART_SUFFIX))
+    naprawa = _napraw(con, p, root, do_write=True)
+    assert (naprawa.status, naprawa.powod.code, dict(naprawa.powod.params)) == (
+        "refused", kod, {"detail": pole, **sciezka})
+    assert _bajty(root) == przed
+
+
+def test_krok_manifestu_nie_zastepuje_zeznania_obiektu_innym_ukladem(obiekt, tmp_path):
+    """AR-234: wydanie perspektywy (układ kolumnowy) do folderu wydania obiektu nie zastępuje jego
+    manifestu - odmowa `proj_manifest_foreign` (`layout`), stary plik bajt w bajt; stary manifest
+    układu kolumnowego zastępuje się jak dotąd. Falsyfikator: kontrola starego tylko w wydaniu obiektu."""
+    con, i = obiekt
+    _p, root = _wydany(con, tmp_path)
+    przed = _bajty(root)
+    kolumnowy = projection.plan(con, [i["la1"]], "po-obiektach")
+    res = projection.apply(kolumnowy, root, do_apply=True, now="T3", manifest={"perspektywa": "x"})
+    assert (res.error.code, dict(res.error.params)) == ("proj_manifest_foreign", {"detail": "layout"})
+    assert _bajty(root) == przed
+    root2 = str(tmp_path / "_WBPP" / "kolumny")
+    assert projection.apply(kolumnowy, root2, do_apply=True, now="T1").error is None
+    res = projection.apply(projection.plan(con, [i["la1"]], "wbpp-feed"), root2, do_apply=True, now="T2")
+    assert res.error is None and _manifest(root2)["layout"] == "wbpp-feed"
+
+
+def test_naprawa_zachowuje_nazwy_nowego_lightu_obok_niepewnego_jak_wydanie(obiekt, tmp_path):
+    """AR-240 (jedna reguła `names`): stary wpis RC8 zna light bez obecnej kopii (`la5` - niepewny,
+    zostaje) z jego nazwą, a plan dokłada `lb1`, którego plik leży; mapa z drzewa jest niepełna (brak
+    pliku `la5`). Naprawa i wydanie piszą TĘ SAMĄ mapę - sumę starej i planu - więc żniwa rozpoznają
+    obie nazwy. Falsyfikator: naprawa biorąca same stare nazwy (`lb1` znika z rozpoznania)."""
+    from horreum import harvest
+    con, i = obiekt
+    p, root = _wydany(con, tmp_path)
+    stary = _manifest(root)
+    stary["zestawy"]["RC8_ASI2600MM"].update(lights=[i["la5"]], names={"la5.fits": i["la5"]})
+    _zapisz(root, stary)
+    naprawa = _napraw(con, p, root, do_write=True)
+    assert (naprawa.status, naprawa.niepewne) == ("written", 1), naprawa
+    z_naprawy = _manifest(root)
+    _zapisz(root, stary)
+    projection.apply(p, root, do_apply=True, now="T3", manifest=projection.object_manifest(p),
+                     extra_sources=projection.manifest_sources(con, root))
+    z_wydania = _manifest(root)
+    oczekiwane = {"la5.fits": i["la5"], "lb1.fits": i["lb1"]}
+    assert z_naprawy["zestawy"]["RC8_ASI2600MM"]["names"] == z_wydania["zestawy"]["RC8_ASI2600MM"]["names"] \
+        == oczekiwane
+    indeks = harvest._names_index(harvest._object_witness(z_naprawy))
+    assert indeks.hits("lb1_c.xisf") == {("RC8_ASI2600MM", i["lb1"])}
+    assert indeks.hits("la5_c.xisf") == {("RC8_ASI2600MM", i["la5"])}

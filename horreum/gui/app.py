@@ -89,6 +89,9 @@ _PASEK_UDZIAL_RECEPTY = 0.45
 # 5-sekundowym, a raport bez wygasania (`ms=0`) trzymałoby z dala od świeżego stanu etapu dłużej,
 # niż ktoś czyta jedno zdanie.
 _PRIORYTET_GESTU_MS = 5000
+# Wartownik pominiętego `miejsce` w `MainWindow._flash` (AR-236): odróżnia „wołający nie podał
+# miejsca” (raport ze szczegółem wiąże się z bieżącą stroną) od świadomego `None` (bez wiązania).
+_BIEZACA_STRONA = object()
 # SUFIT KOLEJKI PRZEGLĄDU W WIERSZACH, nie w pikselach (W-3) — bo wiersz maluje delegat i jego
 # wysokość zależy od fontu i skalowania DPI. Lista dostawała 340 px ramki na 80 px treści (76 %
 # pustki), stojąc nad tabelą „Biblioteka", której tego pionu brakowało. Sufit jest potrzebny, bo
@@ -980,8 +983,11 @@ class ConfirmPathObjectsDialog(QDialog):
         self._items = []        # [{proposal, check, value, n_cards}]
         self.assigned = 0
         self._domkniety = False   # gest zapisał bazę i karty - drugi klik nie ma czego robić
-        self._runner = WritebackRunner(db_path if db_path is not None else queries.db_path_of(con),
-                                       now_fn=now_fn, parent=self)
+        self._db_path = db_path if db_path is not None else queries.db_path_of(con)
+        # (zdanie pola `status`, jego wariant dla paska po zamknięciu okna) - bez przycisków okna
+        # (AR-236, `ObjectAxisView._zdanie_okna_kart`); None = zdanie pola jest dobre i po zamknięciu
+        self.po_zamknieciu = None
+        self._runner = WritebackRunner(self._db_path, now_fn=now_fn, parent=self)
         self._runner.busy_changed.connect(self.busy_changed)
         # Koniec biegu przelicza „Zatwierdź”: ogon zapisu/cofnięcia przychodzi, gdy
         # uchwyt jest jeszcze zajęty (wątek sprząta się po `done`), więc przycisk liczony w ogonie
@@ -1292,6 +1298,10 @@ class ConfirmPathObjectsDialog(QDialog):
         wiersz z receptą przy rzędzie przycisków. Podpowiedź zapisu (spadek, powody) mówiła
         o zapisie, nie o cofnięciu - schodzi."""
         msg, ponow = ogon_cofniecia(res, i18n.t("path.undo_cards_btn"))
+        # Pasek po zamknięciu okna (AR-236): bez przycisków okna - niedokończone cofnięcie ponawia
+        # polecenie CLI tego commitu, cofnięcie domknięte mówi sam stan, bez obietnicy „Zatwierdź”.
+        zamkniete = (ogon_cofniecia(res, i18n.t("wb.undo_cli", db=self._db_path, id=self._commit_id))[0]
+                     if ponow else msg + i18n.t("path.cards_restored_closed_note"))
         if not ponow:
             msg += i18n.t("path.cards_restored_note")
             self.undo_btn.setVisible(False)
@@ -1300,6 +1310,7 @@ class ConfirmPathObjectsDialog(QDialog):
             self._domkniety = False
         from horreum.gui.wb_worker import podpowiedz_systemu   # szczegół systemu cofnięcia (AR-168)
         self.status.ustaw(msg, podpowiedz_systemu(res))
+        self.po_zamknieciu = (msg, zamkniete)
         self._end_progress()
         # Okno rośnie do zawiniętego zdania z receptą (AR-160, wspólny pomocnik `config_dialog`),
         # a cofnięcie to zapis - gospodarz odświeża kolejkę. Emisja stała dotąd w pomocniku
@@ -1536,6 +1547,8 @@ class RepairHeaderDialog(QDialog):
         self._run_id = None
         self._commit_id = None
         self._committed = False   # karty są w plikach → zapis milczy do cofnięcia
+        self._db_path = db_path
+        self.po_zamknieciu = None   # wariant zdania `status` po zamknięciu okna (jak w „Zatwierdź ze ścieżki…”)
         self._runner = WritebackRunner(db_path, now_fn=now_fn, parent=self)
         self._runner.busy_changed.connect(self.busy_changed)   # uchwyt zna OBA końce operacji
         # Koniec biegu przelicza „Zapisz karty”: ogon cofnięcia przychodzi, gdy uchwyt
@@ -1960,6 +1973,10 @@ class RepairHeaderDialog(QDialog):
         „Cofnij” przy tym samym commicie, a zapis milczy - karty części plików wciąż stoją."""
         self.bar.setVisible(False)
         msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
+        # Pasek po zamknięciu okna (AR-236): „Cofnij” już nie ma - niedokończone cofnięcie ponawia
+        # polecenie CLI tego commitu (ten sam ogon, polecenie w miejscu etykiety przycisku).
+        zamkniete = (ogon_cofniecia(res, i18n.t("wb.undo_cli", db=self._db_path, id=self._commit_id))[0]
+                     if ponow else msg)
         if not ponow:
             self.undo_btn.setVisible(False)      # commit ZUŻYTY - drugi undo nie ma czego cofać
             self.resolve_btn.setVisible(False)
@@ -1971,6 +1988,7 @@ class RepairHeaderDialog(QDialog):
         # Szczegół spadku mówił o zapisie - zostaje szczegół systemu cofnięcia (AR-168) albo nic.
         from horreum.gui.wb_worker import podpowiedz_systemu
         self.status.ustaw(msg, podpowiedz_systemu(res))
+        self.po_zamknieciu = (msg, zamkniete)
         dopasuj_wysokosc(self)                   # zdanie z receptą zawija (AR-176), przed `changed`
         self.changed.emit()
 
@@ -2052,6 +2070,7 @@ class ObjectAxisView(QWidget):
         # Otwarte okno piszące karty do plików: „Napraw nagłówek…" albo „Zatwierdź ze ścieżki…"
         # (modalne - poza zasięgiem `set_busy`, więc bieg pipeline'u przekazujemy mu wprost).
         self._repair_dlg = None
+        self._naprawa_zmienila = False        # okno naprawy zgłosiło koniec biegu (`changed`, AR-236)
         # Takt 3 (`Rozwiąż`) należy do Dostawy: gospodarz wstrzykuje wywołanie ISTNIEJĄCEJ,
         # bramkowanej drogi (`PipelineView.run_stage`). None = widok bez gospodarza (testy samego
         # widoku) → okno naprawy powie wprost, że taktu 3 nie ma stąd jak uruchomić.
@@ -3040,12 +3059,24 @@ class ObjectAxisView(QWidget):
         finally:
             self._repair_dlg = None
         if dlg.assigned:
-            # Zdania OBU pól okna RAZEM z ich szczegółami (AR-218): wynik zapisu stoi w `status`,
-            # awaria zapisu kart - w `error`; okno się zamknęło, więc plik, który padł, zostaje już
-            # tylko w podpowiedzi paska.
-            self.status_message.emit(zlacz_zdania(" - ", (
-                ZdanieZeSzczegolem(pole.text(), pole.szczegol()) for pole in (dlg.status, dlg.error))))
+            self.status_message.emit(self._zdanie_okna_kart(dlg))
             self.refresh(select_first=True)
+
+    @staticmethod
+    def _zdanie_okna_kart(dlg):
+        """Raport paska po zamknięciu okna piszącego karty („Zatwierdź ze ścieżki…”, „Napraw
+        nagłówek…”): zdania OBU pól okna RAZEM z ich szczegółami (AR-218) - wynik zapisu stoi
+        w `status`, awaria zapisu kart w `error`; okno się zamknęło, więc plik, który padł, zostaje
+        już tylko w podpowiedzi paska. Jedno złożenie dla obu okien (AR-236).
+
+        BEZ PRZYCISKÓW OKNA: zdanie `status` po cofnięciu mówi „„Cofnij” ponowi…” albo „„Zatwierdź”
+        dopisze…” - po zamknięciu takiego przycisku nie ma. Okno trzyma wtedy wariant dla paska
+        (`po_zamknieciu`: zdanie pola i wariant - polecenie CLI ponowienia commitu, sam stan); wariant
+        idzie tylko, gdy pole wciąż mówi to zdanie, z którym go złożono."""
+        okno, pasek = dlg.po_zamknieciu or (None, None)
+        status = pasek if okno is not None and okno == dlg.status.text() else dlg.status.text()
+        return zlacz_zdania(" - ", (ZdanieZeSzczegolem(status, dlg.status.szczegol()),
+                                    ZdanieZeSzczegolem(dlg.error.text(), dlg.error.szczegol())))
 
     def _on_confirm_path_changed(self):
         """Zapis w oknie potwierdzania → kolejka mówi świeżą prawdę JUŻ przy otwartym oknie
@@ -3179,7 +3210,12 @@ class ObjectAxisView(QWidget):
         DRUGA oś tego samego wyboru, nie kosmetyka wiersza. Bez członu `cleared` kliknięcie
         w „cofnięte ręką" otwierało okno z populacją NIETKNIĘTĄ: listą rozłączną z tą, którą user
         widział pod spodem, i to zapisem do PLIKÓW. Wybór po parze (populacja, źródło) trzyma
-        kontrakt „okno pokazuje dokładnie to, co licznik, na którym kliknąłeś"."""
+        kontrakt „okno pokazuje dokładnie to, co licznik, na którym kliknąłeś".
+
+        PO ZAMKNIĘCIU WYNIK IDZIE NA PASEK (AR-236), jak z „Zatwierdź ze ścieżki…”: zdania obu pól
+        okna ze szczegółami (`_zdanie_okna_kart`) - inaczej plik, który padł przy zapisie kart,
+        znikał razem z oknem. Tylko gdy w oknie skończył się bieg (zapis, cofnięcie albo jego błąd -
+        sygnał `changed`); walidacja grup i „Zamknij” bez biegu nie mówią nic."""
         tag, _ = self._selected_review()
         cofniete = tag in _CLEARED_TAGS
         czytaj = (queries.nameless_stack_frames
@@ -3194,15 +3230,20 @@ class ObjectAxisView(QWidget):
         dlg.changed.connect(self._on_repair_changed)
         dlg.busy_changed.connect(self.writeback_busy)   # mutex: gospodarz wygasi drugą powierzchnię
         self._repair_dlg = dlg
+        self._naprawa_zmienila = False
         try:
             dlg.exec()
         finally:
             self._repair_dlg = None
+        if self._naprawa_zmienila:
+            self.status_message.emit(self._zdanie_okna_kart(dlg))
 
     def _on_repair_changed(self):
         """Zapis/cofnięcie w oknie naprawy → kolejka mówi świeżą prawdę JUŻ po takcie 2 (dialog żyje
         w tym samym widoku). Oś obiektu i badge Porządków ruszą się dopiero po takcie 3 — to nie
-        rozjazd, tylko dwa różne fakty: karta jest w pliku, obiektu jeszcze nie ma."""
+        rozjazd, tylko dwa różne fakty: karta jest w pliku, obiektu jeszcze nie ma. Znacznik końca
+        biegu czyta `_on_repair` po zamknięciu okna (wynik na pasek, AR-236)."""
+        self._naprawa_zmienila = True
         self._load_review()
         self._sync_assign_enabled()
 
@@ -4013,8 +4054,8 @@ class MainWindow(QMainWindow):
         # POLE ZDANIA Z PROTOKOŁU OKIEN ZAPISU (AR-218, `EtykietaBledu`): raport ze szczegółem systemu
         # (`ZdanieZeSzczegolem`) dostaje glif wskaźnika, szczegół w podpowiedzi i menu „Kopiuj
         # zdanie / Kopiuj szczegół” - plik, który padł w zamkniętym oknie, zostaje pod kursorem.
+        # Tekst zwykły (nazwa pliku `<a>.fits` nie jest HTML-em) daje samo pole (AR-235).
         self.report_label = EtykietaBledu("")
-        self.report_label.setTextFormat(Qt.PlainText)
         self.report_label.setMinimumWidth(1)
         self.statusBar().addWidget(self.report_label)
         self.recipe_label = QToolButton()
@@ -5042,7 +5083,8 @@ class MainWindow(QMainWindow):
     def _flash_grid(self, msg):
         """Wynik gestu gridu: związany ze Zbiorami, więc gaśnie przy zmianie miejsca nawigacji
         (AR-34). Wynik wyemitowany, gdy user jest gdzie indziej (gest panelu rodowodu przełącza
-        widok na Dostawę), nie dostaje powiązania - nie ma z czym gasnąć, a zdanie ma paść."""
+        widok na Dostawę), nie dostaje powiązania (jawne `None`) - nie ma z czym gasnąć, a zdanie ma
+        paść; ze szczegółem (awaria zapisu) żyje wtedy do następnego raportu (AR-236, `_flash`)."""
         self._flash(msg, miejsce=STRONA_ZBIORY if self._strona() == STRONA_ZBIORY else None)
 
     def _flash_dostawy(self, msg):
@@ -5050,8 +5092,9 @@ class MainWindow(QMainWindow):
         z Dostawą, gdy pada przy niej, jak wynik gestu gridu (`_flash_grid`, AR-34): po wyjściu
         z Dostawy zdanie i jego szczegół (AR-218) schodzą z paska, a awaria zostaje w polu błędu
         Dostawy i na stronie Przyjmij. Wizytacja natywna zastała „Etap „Rozwiązywanie” nie powiódł
-        się.” nad Domem. Raport biegu w tle, gdy Dostawy nie widać, powiązania nie dostaje - nie ma
-        z czym gasnąć. Zdanie zwykłego końca etapu ma własny kanał (`_raport_etapu`)."""
+        się.” nad Domem. Raport biegu w tle, gdy Dostawy nie widać, powiązania nie dostaje (jawne
+        `None`) - nie ma z czym gasnąć; ze szczegółem żyje wtedy do następnego raportu (AR-236,
+        `_flash`). Zdanie zwykłego końca etapu ma własny kanał (`_raport_etapu`)."""
         self._flash(msg, miejsce=STRONA_DOSTAWA if self._strona() == STRONA_DOSTAWA else None)
 
     def _raport_wczytania_gridu(self, msg):
@@ -5081,7 +5124,9 @@ class MainWindow(QMainWindow):
 
         `wiaz` - czy raport pokazany OD RAZU ma gasnąć przy wyjściu z miejsca (AR-34). Oś stanowisk
         mówi tym samym kanałem także wyniki gestów, a te przeżywały zmianę widoku - zostają przy
-        tym. Odłożony raport pada przy wejściu zawsze związany: mówi już wyłącznie o tym ekranie.
+        tym (`wiaz=False` = jawne `None` w `_flash`); wynik ze szczegółem - wynik okien „Zatwierdź
+        ze ścieżki…” i „Napraw nagłówek…” po zamknięciu - żyje do następnego raportu (AR-236).
+        Odłożony raport pada przy wejściu zawsze związany: mówi już wyłącznie o tym ekranie.
         Nowszy raport zastępuje odłożony - liczy się ostatnie słowo widoku."""
         if self._strona() == miejsce:
             self._odlozone_raporty.pop(miejsce, None)
@@ -5099,12 +5144,14 @@ class MainWindow(QMainWindow):
         if self._strona() == STRONA_PLANER:
             self._flash(msg, miejsce=STRONA_PLANER)
 
-    def _flash(self, msg, ms=5000, miejsce=None, *, gest=True):
+    def _flash(self, msg, ms=5000, miejsce=_BIEZACA_STRONA, *, gest=True):
         """Raport na pasek — Z ELIZJĄ (FH-2). KAŻDY raport gasi receptę poprzedniego gestu.
 
         `miejsce` wiąże raport z miejscem nawigacji: wejście gdzie indziej (`_on_nav_changed`)
-        zdejmuje go z paska razem z receptą. Bez niego komunikat nie gaśnie przy przełączeniu
-        widoku (ani raport „Grid: N klatek…", ani `ms=0`).
+        zdejmuje go z paska razem z receptą. Jawne `None` - raport bez wiązania: nie gaśnie przy
+        przełączeniu widoku (ani raport „Grid: N klatek…", ani `ms=0`). Pominięte (`_BIEZACA_STRONA`)
+        - raport bez szczegółu jak przy `None`, raport ze szczegółem związany z bieżącą stroną
+        (AR-236, niżej).
 
         JEDYNE WEJŚCIE NA PASEK - i to jest wymóg, nie wygoda (bramka pakietu, zarzut zgodny
         u dwóch soczewek). Droga obok tej zostawiała receptę poprzedniego gestu nad zdemontowanymi
@@ -5126,7 +5173,22 @@ class MainWindow(QMainWindow):
         żniw, Dostawy, okna kart po zamknięciu) - podpowiedź paska niesie wtedy zdanie i szczegół,
         a pole raportu glif wskaźnika. Szczegół nie ma własnego pola: czyta się go z ŻYWEGO raportu
         (`szczegol_zdania(self._pelny_komunikat)`), więc znika razem z nim - następny raport,
-        wygaśnięcie (`_wygas_raport`), także wyjście z miejsca, z którym raport jest związany."""
+        wygaśnięcie (`_wygas_raport`), także wyjście z miejsca, z którym raport jest związany.
+
+        RAPORT ZE SZCZEGÓŁEM NIE GAŚNIE ZEGAREM (AR-236): w szczególe stoi plik, który padł, a 5 s
+        to za mało, żeby go przeczytać albo skopiować („Kopiuj szczegół”) - okno, z którego raport
+        przyszedł, bywa już zamknięte. Dlatego `ms=0` bez względu na to, co podał wołający, a raport
+        bez miejsca od wołającego wiąże się z bieżącą stroną. Gaśnie dwiema drogami: wyjście
+        z miejsca, z którym jest związany, i następny raport - także zdanie etapu Dostawy, które
+        nadeszło w oknie priorytetu: staje po jego końcu (`_wypusc_raport_etapu`, AR-97 bez zmian).
+        Jawne `None` od wołającego zostaje bez wiązania: wynik gestu osi (`_raport_miejsca` z
+        `wiaz=False`, w tym wynik okien „Zatwierdź ze ścieżki…” i „Napraw nagłówek…”) i raport z tła
+        spoza swojej strony (`_flash_grid`, `_flash_dostawy`) żyją wtedy do następnego raportu."""
+        szczegol = szczegol_zdania(msg)
+        if miejsce is _BIEZACA_STRONA:
+            miejsce = self._strona() if szczegol else None
+        if szczegol:
+            ms = 0
         self._ustaw_recepte("")
         self._pelny_komunikat = msg
         self._miejsce_komunikatu = miejsce

@@ -3,9 +3,9 @@ oknem Qt (offscreen), kliki prawdziwe.
 
 Pilnujemy: kolumna podglądu chowa się od razu po zapisie szuflady i nie wraca przy przyłożeniu ani
 przy sorcie w trakcie składu, a świeży podgląd nie jest schowany; uchwyt zapisu w biegu odpowiada
-`False` każdemu odbiorcy, a odbiorcy bez sygnatury odmawia `TypeError`; zdjęcie podglądu przy
-zaznaczeniu CAŁEGO widoku ponad progiem zdejmuje zaznaczenie ze zdaniem, a zaznaczenie części i
-stawianie podglądu zostawiają cel; licznik paska liczy klatki po obu stronach; etykieta celu panelu
+`False` każdemu odbiorcy, a odbiorcy bez sygnatury odmawia `TypeError`; zdjęcie i stawianie podglądu
+zostawiają zaznaczenie (całego widoku i części) - cel gestu się nie zmienia, a „Wyczyść podgląd” bez
+podglądu nie przebudowuje tabeli; licznik paska liczy klatki po obu stronach; etykieta celu panelu
 nazw i podpowiedź blokady stagingu w języku UI; cofnięcie uwag poza widokiem jednym członem recepty;
 cel na następny obraz po geście w perspektywie „Rodowód do potwierdzenia”."""
 import os
@@ -189,53 +189,48 @@ def test_uchwyt_odbiorca_bez_sygnatury_TypeError_a_poprawni_przechodza(qapp, tmp
     assert wyniki == ["wynik"] * 3
 
 
-# ============================================================ AR-207 - zdjęcie podglądu ponad progiem
+# ============================================================ AR-207 - zdjęcie podglądu zostawia cel
 
 
-def test_zdjecie_podgladu_calego_widoku_ponad_progiem_schodzi_ze_zdaniem(nazwy, monkeypatch):
+def test_zdjecie_podgladu_calego_widoku_zostawia_zaznaczenie_bez_czlonu(nazwy):
     """Ctrl+A, „Podgląd” nazw (stawianie - zaznaczenie wraca, cel gestu), „Wyczyść podgląd”: zdjęcie
-    przy zaznaczeniu CAŁEGO widoku ponad progiem nie odtwarza zaznaczenia (puste i pełne dają ten sam
-    cel), a zdanie gestu niesie człon o zdjęciu. Falsyfikatory: zdjęcie bez progu (zaznaczenie
-    wraca); zdanie gestu bez członu (zdanie progu nadpisane)."""
+    przy zaznaczeniu CAŁEGO widoku też je odtwarza (AR-202: bez progu kosztu), licznik je liczy,
+    a zdanie gestu to samo zdanie zdjęcia. Falsyfikator: reset zdjęcia bez odtworzenia (zaznaczenie
+    puste)."""
     view, _con = nazwy
     zdania = []
     view.status_message.connect(zdania.append)
     _klik_przycisku(view.sel_bar.btn_rename)
     QTest.keyClick(view.table, Qt.Key_A, Qt.ControlModifier)
     assert len(_zaznaczone(view)) == 3
-    monkeypatch.setattr(grid_mod, "_PROG_ODTWORZENIA_KOMOREK", 1)
     _klik_przycisku(view.rename_bar.btn_prev)
     assert view.model._preview_active() and len(_zaznaczone(view)) == 3
     _klik_przycisku(_przycisk(view.rename_bar, "grid.action.clear_preview"))
-    assert not view.model._preview_active() and _zaznaczone(view) == []
-    assert view.count_label.text() == i18n.t_plural("grid.frames", 3)
-    assert zdania[-1] == (i18n.t("grid.rename.preview_cleared")
-                          + i18n.t_plural("grid.sel.restore_too_big_tail", 3))
+    assert not view.model._preview_active() and len(_zaznaczone(view)) == 3
+    assert view.count_label.text().endswith(i18n.t_plural("grid.selected", 3))
+    assert zdania[-1] == i18n.t("grid.rename.preview_cleared")
 
 
-def test_staging_przy_calym_widoku_ponad_progiem_zostawia_zaznaczenie(nazwy, monkeypatch):
-    """„Do stagingu” nazw przy zaznaczeniu całego widoku ponad progiem: STAWIANIE podglądu odtwarza
-    zaznaczenie zawsze (zakres stagingu musi być prawdziwy) - wyjątek „cały widok” dotyczy wyłącznie
-    zdjęcia. Falsyfikator: warunek „cały widok” bez kierunku resetu."""
+def test_staging_przy_calym_widoku_zostawia_zaznaczenie(nazwy):
+    """„Do stagingu” nazw przy zaznaczeniu całego widoku: STAWIANIE podglądu odtwarza zaznaczenie
+    (zakres stagingu musi być prawdziwy). Falsyfikator: reset podglądu bez odtworzenia."""
     view, _con = nazwy
     _klik_przycisku(view.sel_bar.btn_rename)
     QTest.keyClick(view.table, Qt.Key_A, Qt.ControlModifier)
-    monkeypatch.setattr(grid_mod, "_PROG_ODTWORZENIA_KOMOREK", 1)
     _klik_przycisku(view.rename_bar.btn_stage)
     assert view.model._preview_active() and len(_zaznaczone(view)) == 3
 
 
-def test_zdjecie_podgladu_czesci_ponad_progiem_zostawia_cel_stagingu(nazwy, monkeypatch):
-    """Dwie z trzech klatek zaznaczone, próg poniżej ich komórek: „Podgląd” nazw, „Wyczyść podgląd”,
-    „Do stagingu” - zdjęcie podglądu zostawia zaznaczenie CZĘŚCI widoku, więc staging bierze te dwie,
-    nie cały widok. Falsyfikator: zdjęcie podglądu pod progiem bez warunku „cały widok”."""
+def test_zdjecie_podgladu_czesci_zostawia_cel_stagingu(nazwy):
+    """Dwie z trzech klatek zaznaczone: „Podgląd” nazw, „Wyczyść podgląd”, „Do stagingu” - zdjęcie
+    podglądu zostawia zaznaczenie CZĘŚCI widoku, więc staging bierze te dwie, nie cały widok.
+    Falsyfikator: zdjęcie podglądu bez odtworzenia zaznaczenia (staging bierze cały widok)."""
     from horreum import writeback as wb
     view, con = nazwy
     ids = [r["frame_id"] for r in view.model._rows if "_group" not in r]
     _klik_komorki(view, ids[0], 1)
     _klik_komorki(view, ids[2], 1, Qt.ControlModifier)
     cel = sorted([ids[0], ids[2]])
-    monkeypatch.setattr(grid_mod, "_PROG_ODTWORZENIA_KOMOREK", 1)
     _klik_przycisku(view.sel_bar.btn_rename)
     _klik_przycisku(view.rename_bar.btn_prev)
     _klik_przycisku(_przycisk(view.rename_bar, "grid.action.clear_preview"))
@@ -246,16 +241,19 @@ def test_zdjecie_podgladu_czesci_ponad_progiem_zostawia_cel_stagingu(nazwy, monk
     assert zakres == cel
 
 
-def test_wyczysc_bez_podgladu_zostawia_zaznaczenie_calego_widoku(nazwy, monkeypatch):
-    """Ctrl+A ponad progiem i „Wyczyść podgląd”, gdy podglądu nie ma: nie ma czego zdjąć, więc
-    zaznaczenie całego widoku zostaje (cel gestów na zaznaczeniu się nie zmienia). Falsyfikator:
-    `set_preview({})` resetujący model także przy pustym podglądzie."""
+def test_wyczysc_bez_podgladu_nie_przebudowuje_tabeli(nazwy):
+    """Ctrl+A i „Wyczyść podgląd”, gdy podglądu nie ma: nie ma czego zdjąć, więc model się nie
+    resetuje (zero `modelAboutToBeReset` - bez przebudowy, odtworzenia i przemalowania kadru),
+    a zaznaczenie całego widoku zostaje. Falsyfikator: `set_preview({})` resetujący model także przy
+    pustym podglądzie."""
     view, _con = nazwy
     _klik_przycisku(view.sel_bar.btn_rename)
     QTest.keyClick(view.table, Qt.Key_A, Qt.ControlModifier)
-    monkeypatch.setattr(grid_mod, "_PROG_ODTWORZENIA_KOMOREK", 1)
     assert not view.model._preview_active() and len(_zaznaczone(view)) == 3
+    resety = []
+    view.model.modelAboutToBeReset.connect(lambda: resety.append(1))
     _klik_przycisku(_przycisk(view.rename_bar, "grid.action.clear_preview"))
+    assert resety == []
     assert len(_zaznaczone(view)) == 3
 
 

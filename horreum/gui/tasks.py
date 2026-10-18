@@ -20,17 +20,24 @@ w podstronach piszą wstrzykniętym zegarem, asercja tożsamości `_now` w testa
 Świadomy cykl odświeżania: licznik NIE odświeża się na żywo w trakcie pracy w podstronie —
 `refresh_counts()` woła gospodarz przy montażu / po przebiegu Dostawy / na wejściu w Porządki,
 a sam widok przy powrocie „← Porządki" (user mógł nazwać teleskopy w podstronie). Po gestach
-Zbiorów gospodarz woła `refresh_counts(w_tle=True)` - stan liczy wątek tła (`_LicznikiWorker`)."""
-import sqlite3
+Zbiorów gospodarz woła `refresh_counts(w_tle=True)` - stan liczy wątek tła (`_LicznikiWorker`).
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+Przy montażu (start GUI, zmiana bazy) widok przegląda ślady cofnięcia bez werdyktu (AR-231,
+`writeback.przejrzyj_slady_cofniecia`) w wątku Pythona, na który zamknięcie nie czeka; resztka martwej
+próby trafia do wiersza „Kopie zostawione do oka” bez dotyku lokacji, porażka - do wiersza pasywnego
+z ponowieniem."""
+import queue
+import sqlite3
+import threading
+
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QStackedWidget, QVBoxLayout,
     QWidget,
 )
 
-from horreum import db, resolver, scan, supersede
+from horreum import db, repo, resolver, scan, supersede, writeback
 from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     _REVIEW_TAG, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
@@ -46,7 +53,7 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_F_RATIO_
 from horreum.gui.grid_model import PRESET_LINEAGE_NEWER, PRESET_XREF_RECONCILE
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
-from horreum.item_reasons import blad_systemu
+from horreum.item_reasons import blad_systemu, powod_bazy, powod_okna
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
 # wewnętrznego stacku (int), nazwa perspektywy Zbiorów (str — sygnał `open_collection`) albo None
@@ -358,6 +365,29 @@ class _LicznikiWorker(QObject):
             self.finished.emit()
 
 
+# Okres odczytu skrzynki przeglądu śladów (AR-231) w wątku GUI - wynik przychodzi raz na montaż.
+_PRZEGLAD_TAKT_MS = 250
+
+
+def _przeglad_slady(db_path, now, skrzynka, zeton):
+    """Przegląd śladów cofnięcia bez werdyktu (`writeback.przejrzyj_slady_cofniecia`, AR-231) w WĄTKU
+    PYTHONA: własne połączenie (`db.connect`), wynik albo powód porażki (`powod_okna` - klasa błędu
+    systemu albo bazy, błąd programu) do skrzynki z żetonem zlecenia. Nie dotyka obiektów Qt - widok czyta
+    skrzynkę timerem w wątku GUI. Wątek, nie `QThread`: zamknięcie okna i zmiana bazy NIE czekają na
+    przegląd (`stat` na zerwanym udziale potrafi wisieć), a `QThread` skasowany z widokiem w biegu to twardy
+    abort aplikacji."""
+    con = None
+    try:
+        con = db.connect(db_path)
+        wynik = writeback.przejrzyj_slady_cofniecia(con, now=now)
+    except Exception as exc:  # noqa: BLE001 - porażka idzie do widoku powodem, nie cicho
+        wynik = powod_okna(exc)
+    finally:
+        if con is not None:
+            con.close()
+    skrzynka.put((zeton, wynik))
+
+
 # Wiersz, którego podstrona ma kilka kubełków: klik ZAZNACZA właściwy, żeby lista klatek i gest
 # stały gotowe (klucz wiersza → tag kubełka kolejki przeglądu `ObjectAxisView`).
 _KUBELEK_PODSTRONY = {"config_review_frames": "config_review",
@@ -441,6 +471,14 @@ class TasksView(QWidget):
         # wejście w Porządki pomija rachunek, gdy baza się od niego nie zmieniła (`odswiez_przy_wejsciu`).
         self._odcisk_licznikow = None
         self._odcisk_biegu = None
+        # PRZEGLĄD ŚLADÓW COFNIĘCIA bez werdyktu (AR-231): wątek Pythona (`_przeglad_watek`, bez `join`
+        # przy zatrzymaniu), skrzynka wyniku i timer, który ją czyta w wątku GUI (`_przeglad_timer`).
+        # Wynik z żetonem innym niż bieżący (widok zatrzymany, ponowienie) idzie do kosza.
+        self._now_fn = now_fn
+        self._przeglad_zeton = 0
+        self._przeglad_watek = None
+        self._przeglad_timer = None
+        self._przeglad_skrzynka = queue.SimpleQueue()
         # pod-widoki osi z FORWARDOWANYM now_fn (F5R#2) — wystawione dla aliasów MainWindow
         self.axis_view = TelescopeAxisView(con, now_fn=now_fn)
         self.observatory_view = ObservatoryAxisView(con, now_fn=now_fn)
@@ -449,6 +487,22 @@ class TasksView(QWidget):
         # Oś teleskopu odświeża się od razu, bez ręcznego „Odśwież" (wizytacja N4).
         self.object_view.telescope_axis_changed.connect(self.axis_view.refresh)
         self._build_ui()
+        # Montaż = start GUI albo zmiana bazy: ślady bez werdyktu (jeden SELECT z indeksu częściowego)
+        # przegląda wątek tła; bez śladów - bez wątku i bez timera.
+        if self._db_path and self._sa_slady_do_przegladu():
+            self._przejrzyj_slady()
+
+    def _sa_slady_do_przegladu(self):
+        """Czy montaż ma zlecić przegląd śladów (AR-231). Błąd BAZY klasą (`powod_bazy`: zablokowana ponad
+        `busy_timeout`, niedostępna, uszkodzona) to „nie wiem, czy są ślady” → przegląd startuje i sam
+        zgłasza porażkę w wierszu pasywnym (to samo zapytanie na własnym połączeniu) - montaż nie pada.
+        Błąd spoza klas (np. operacja na zamkniętym połączeniu) to błąd programu - leci dalej (EXPECT)."""
+        try:
+            return bool(repo.unsettled_atomic_undos(self.con))
+        except sqlite3.Error as exc:
+            if powod_bazy(exc) is None:
+                raise
+            return True
 
     # ---------------------------------------------------------------- budowa UI
 
@@ -470,6 +524,20 @@ class TasksView(QWidget):
         self.blad_licznikow.setWordWrap(True)
         self.blad_licznikow.setVisible(False)
         lv.addWidget(self.blad_licznikow)
+        # Porażka przeglądu śladów cofnięcia (AR-231): wiersz PASYWNY - zdanie klasy błędu ze szczegółem
+        # pod kursorem i przycisk ponowienia, bez okna. Schowany do porażki; udany przegląd go chowa.
+        self.wiersz_sladow = QWidget()
+        wsl = QHBoxLayout(self.wiersz_sladow)
+        wsl.setContentsMargins(0, 0, 0, 0)
+        self.blad_sladow = EtykietaBledu("")
+        self.blad_sladow.setProperty("role", "error")
+        self.blad_sladow.setWordWrap(True)
+        wsl.addWidget(self.blad_sladow, 1)
+        self.ponow_slady = QPushButton(i18n.t("tasks.traces_retry"))
+        self.ponow_slady.clicked.connect(lambda: self._przejrzyj_slady())
+        wsl.addWidget(self.ponow_slady, 0, Qt.AlignTop)
+        self.wiersz_sladow.setVisible(False)
+        lv.addWidget(self.wiersz_sladow)
         self.tasks = QListWidget()
         # NoSelection: highlight selekcji Qt byłby drugim „zaznaczeniem" obok treści (wzorzec F4R2#3);
         # klik = WYŁĄCZNIE gest usera przez itemClicked (F4R#4 — nigdy selection-based).
@@ -675,7 +743,12 @@ class TasksView(QWidget):
         metodę po nazwie u każdej strony stosu): ZBIERZ wątek liczników, zanim rodzic go skasuje
         (`~QThread` w biegu to twardy abort). Generacja w górę, więc wynik, który zdążył wyjść
         z wątku, nie dotknie listy ani zamkniętego połączenia. Rachunek nie ma punktu przerwania -
-        `wait` czeka na jego koniec (wzór teczek Domu). Idempotentne."""
+        `wait` czeka na jego koniec (wzór teczek Domu). Idempotentne.
+
+        PRZEGLĄD ŚLADÓW (AR-231) NIE JEST ZBIERANY: żeton w górę i timer stop - czas stały, bez `join`.
+        Wątek Pythona kończy sam (zapisuje wyłącznie `kept` do bazy SWOJEGO połączenia - po zmianie bazy
+        starej, werdykt dalej prawdziwy dla jej śladu), wynik ze starym żetonem nie ma czytelnika."""
+        self._zatrzymaj_przeglad()
         self._liczniki_stop = True
         self._liczniki_ponow = False
         self._liczniki_gen += 1
@@ -687,6 +760,57 @@ class TasksView(QWidget):
         self._liczniki_thread.deleteLater()
         self._liczniki_worker = None
         self._liczniki_thread = None
+
+    # ---------------------------------------------------------------- przegląd śladów cofnięcia (AR-231)
+
+    def _przejrzyj_slady(self):
+        """Zlecenie przeglądu śladów cofnięcia bez werdyktu w wątku Pythona (`_przeglad_slady`) - przy
+        montażu (start GUI, zmiana bazy) i z przycisku ponowienia wiersza porażki, który gaśnie do wyniku.
+        Nowy żeton unieważnia wynik biegu wcześniejszego."""
+        self._przeglad_zeton += 1
+        self.ponow_slady.setEnabled(False)
+        self._przeglad_watek = threading.Thread(
+            target=_przeglad_slady, name="horreum-przeglad-sladow", daemon=True,
+            args=(self._db_path, self._now_fn(), self._przeglad_skrzynka, self._przeglad_zeton))
+        self._przeglad_watek.start()
+        if self._przeglad_timer is None:
+            self._przeglad_timer = QTimer(self)
+            self._przeglad_timer.timeout.connect(self._odbierz_przeglad)
+        self._przeglad_timer.start(_PRZEGLAD_TAKT_MS)
+
+    def _odbierz_przeglad(self):
+        """Takt timera w wątku GUI: wynik bieżącego żetonu ze skrzynki → widok. Porażka (wyjątek całego
+        przeglądu albo śladu - `PrzegladSladow.padly`) → wiersz pasywny ze zdaniem klasy błędu i aktywnym
+        ponowieniem; przegląd bez porażki chowa wiersz. Werdykt `kept` → rachunek liczników w tle
+        (wiersz „Kopie zostawione do oka” i plakietka)."""
+        while True:
+            try:
+                zeton, wynik = self._przeglad_skrzynka.get_nowait()
+            except queue.Empty:
+                return
+            if zeton != self._przeglad_zeton:
+                continue                           # bieg wyprzedzony ponowieniem - do kosza
+            self._przeglad_timer.stop()
+            self._przeglad_watek = None
+            powod = wynik.powod if isinstance(wynik, writeback.PrzegladSladow) else wynik
+            if powod is not None:
+                self.blad_sladow.ustaw(i18n.t("tasks.traces_failed", msg=tekst_powodu(powod)),
+                                       wiersz_systemu(powod))
+                self.wiersz_sladow.setVisible(True)
+            else:
+                self.blad_sladow.clear()
+                self.wiersz_sladow.setVisible(False)
+            self.ponow_slady.setEnabled(True)
+            if isinstance(wynik, writeback.PrzegladSladow) and wynik.kept:
+                self.refresh_counts(w_tle=True)
+            return
+
+    def _zatrzymaj_przeglad(self):
+        """Widok znika: wynik przeglądu w biegu traci czytelnika (żeton), timer stoi - bez czekania na
+        wątek (`zatrzymaj_pola`)."""
+        self._przeglad_zeton += 1
+        if self._przeglad_timer is not None:
+            self._przeglad_timer.stop()
 
     def _przyloz_liczniki(self, state, kandydaci):
         """Fakty `_stan_licznikow` → wiersze listy, podpowiedzi i badge (wątek GUI). Przyłożony

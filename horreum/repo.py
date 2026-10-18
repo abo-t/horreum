@@ -4703,11 +4703,16 @@ def mark_atomic_undo_synced(con, *, undo_id, now):
     return n == 1
 
 
-def unsettled_atomic_undos(con, location_id):
+def unsettled_atomic_undos(con, location_id=None):
     """Ślady cofnięć drogą atomową lokacji (backupy KAŻDEGO commitu tej lokacji) bez werdyktu plików obok
     ścieżki (0045, AR-127) - z `commit_id` backupu. Bez `ORDER BY`: indeks częściowy
     `idx_atomic_undo_unsettled` wybiera planista tylko wtedy (sonda 2026-10-18: 2,2 µs zamiast 193 µs przy
-    5000 śladach rozstrzygniętych); kolejność ustala wołający."""
+    5000 śladach rozstrzygniętych); kolejność ustala wołający. `location_id=None` - ślady WSZYSTKICH
+    lokacji (przegląd przy montażu Porządków, AR-231), ten sam warunek indeksu częściowego."""
+    if location_id is None:
+        return con.execute(
+            "SELECT au.*, hb.commit_id FROM atomic_undo au "
+            "JOIN header_backups hb ON hb.id = au.backup_id WHERE au.settled_at IS NULL").fetchall()
     return con.execute(
         "SELECT au.*, hb.commit_id FROM atomic_undo au JOIN header_backups hb ON hb.id = au.backup_id "
         "WHERE hb.location_id = ? AND au.settled_at IS NULL", (location_id,)).fetchall()

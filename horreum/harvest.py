@@ -1142,7 +1142,14 @@ class ReleaseRow:
 
     `unreadable` = ścieżki w `out_dir`, których lista NIE PRZECZYTAŁA (AR-222): katalogi spaceru
     `discover` i kandydaci, których `stat` padł inaczej niż „nie ma” (zerwany udział, odmowa). Liczby
-    nie obejmują tego, czego w nich nie widać, więc taki wiersz nie jest „wciągnięty”."""
+    nie obejmują tego, czego w nich nie widać, więc taki wiersz nie jest „wciągnięty”.
+
+    `manifest_error` = manifest wydania LEŻY, a nie da się go przeczytać (AR-234): błąd systemu klasą
+    (odmowa, zerwany udział - także po udanym `stat`) albo plik uszkodzony (`proj_manifest_damaged`) -
+    powód z `projection.read_manifest(errors_out=)`. Wiersz zostaje na liście (kanonu i daty wtedy nie
+    ma), a nie znika jak wydanie bez manifestu. `ts_source` - źródło daty z nagłówka manifestu
+    (`"tree"`: data ORIENTACYJNA z drzewa po naprawie manifestu, AR-240 - do pokazania i sortowania, nie
+    dowód czasu wydania: `awaiting_wbpp` jej nie bierze; `None`: data wydania)."""
     root: str
     object_root: str
     object_canon: str | None
@@ -1154,6 +1161,8 @@ class ReleaseRow:
     awaiting_wbpp: bool = False
     lineage: tuple = ()
     unreadable: tuple = ()
+    manifest_error: object = None
+    ts_source: str | None = None
 
 
 def _iso_timestamp(value):
@@ -1319,10 +1328,12 @@ def releases(roots, *, archive_root=None, con=None, errors_out=None):
     lokalnie (`_iso_timestamp`) - porównanie z `mtime` pliku jest wtedy poprawne tylko w strefie czasu,
     w której go zapisano.
 
-    `errors_out` (lista, AR-222): karty, których `OBJECTS`, katalogu wydania albo manifestu wydania nie
-    da się przeczytać - `(karta, powód klasą)`, raz na kartę (pierwszy błąd). Brak (`os_missing`) to
-    karta albo folder bez wydania, nie błąd; odmowa albo zerwanie udziału milczały dotąd jak brak, więc
-    lista bywała częściowa albo mówiła „Na kartach nie ma jeszcze wydań”."""
+    `errors_out` (lista, AR-222): karty, których `OBJECTS` albo katalogu wydania nie da się przeczytać -
+    `(karta, powód klasą)`, raz na kartę (pierwszy błąd). Brak (`os_missing`) to karta albo folder bez
+    wydania, nie błąd; odmowa albo zerwanie udziału milczały dotąd jak brak, więc lista bywała częściowa
+    albo mówiła „Na kartach nie ma jeszcze wydań”. Manifest wydania, który leży, a nie da się go
+    przeczytać (odmowa, zerwany udział także po udanym `stat`, plik uszkodzony) - WIERSZ z
+    `manifest_error` (AR-234): mówi o tym wydaniu, a nie o karcie, i nie znika z listy."""
     rows, widziane, zgloszone = [], set(), set()
 
     def _nieczytelna(root, exc):
@@ -1344,27 +1355,39 @@ def releases(roots, *, archive_root=None, con=None, errors_out=None):
             klucz = os.path.normcase(os.path.normpath(os.path.abspath(object_root)))
             if klucz in widziane:
                 continue
-            # `os.stat` z klasą katalogu wydania i jego manifestu, nie `os.path.isdir` ani sam
-            # tolerancyjny `projection.read_manifest` (AR-222): odmowa albo zerwany udział milczały
-            # jak brak, a lista bywała częściowa albo pusta („Na kartach nie ma jeszcze wydań”).
+            # `os.stat` z klasą katalogu wydania, nie `os.path.isdir` (AR-222): odmowa albo zerwany
+            # udział milczały jak brak, a lista bywała częściowa albo pusta („Na kartach nie ma
+            # jeszcze wydań”).
             try:
                 if not stat.S_ISDIR(os.stat(object_root).st_mode):
                     continue
-                os.stat(os.path.join(object_root, projection.MANIFEST_NAME))
             except OSError as exc:
                 _nieczytelna(root, exc)
                 continue
-            manifest = _object_witness(projection.read_manifest(object_root))
-            if manifest is None:
+            # Manifest ŚCIŚLE (AR-234): brak - folder bez wydania (milczenie); leży, a nie da się go
+            # przeczytać - wiersz z powodem, bo samo `os.stat` manifestu przechodziło przy odmowie
+            # odczytu danych, a tolerancyjny odczyt gubił wydanie z listy.
+            bledy = []
+            manifest = _object_witness(projection.read_manifest(object_root, errors_out=bledy))
+            if manifest is None and not bledy:
                 continue
             widziane.add(klucz)
+            manifest = manifest or {}
             out_dir = os.path.join(object_root, projection.OUTPUT_DIR)
+            zrodlo = manifest.get("ts_source")
+            # Data z drzewa (naprawa manifestu, AR-240) jest ORIENTACYJNA: czas założenia folderu
+            # odtworzonego albo skopiowanego drzewa bywa młodszy od wyników WBPP, więc nie świadczy
+            # o wydaniu nowszym od nich - „czeka na WBPP” liczy się wyłącznie z daty wydania.
+            dowod_wydania = (None if zrodlo == projection.TS_SOURCE_TREE
+                             else _iso_timestamp(manifest.get("ts")))
             pending, done, review, awaiting, lineage, unreadable = _release_state(
-                out_dir, _iso_timestamp(manifest.get("ts")), archive_root=archive_root, con=con)
+                out_dir, dowod_wydania, archive_root=archive_root, con=con)
             rows.append(ReleaseRow(root=str(root), object_root=object_root,
                                    object_canon=manifest.get("object_canon"), ts=manifest.get("ts"),
                                    out_dir=out_dir, pending=pending, done=done, review=review,
-                                   awaiting_wbpp=awaiting, lineage=lineage, unreadable=unreadable))
+                                   awaiting_wbpp=awaiting, lineage=lineage, unreadable=unreadable,
+                                   manifest_error=bledy[0][1] if bledy else None,
+                                   ts_source=zrodlo if isinstance(zrodlo, str) else None))
     rows.sort(key=lambda r: (_iso_timestamp(r.ts) is not None, _iso_timestamp(r.ts) or 0.0,
                              str(r.ts), r.object_root), reverse=True)
     return rows

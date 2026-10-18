@@ -143,3 +143,46 @@ def test_wejscie_nieczytelne_przy_otwarciu_nie_blokuje_raportu_a_kopii_odmawia(t
     with pytest.raises(raport.RaportOdmowa, match="inny plik"):
         r.kopia_dla_astap(znikniety)
     r.zamknij()
+
+
+class _Kernel32Awaria:
+    """`kernel32` przypięcia, który pada kodem Windows: `CreateFileW` (`nie_otworz`) albo
+    `GetFinalPathNameByHandleW` - kod przez `ctypes.set_last_error`, jak zostawia go prawdziwe API."""
+
+    def __init__(self, kod, *, nie_otworz):
+        self.kod, self.nie_otworz, self.zamkniete = kod, nie_otworz, []
+
+    def CreateFileW(self, *_a):
+        import ctypes
+        if self.nie_otworz:
+            ctypes.set_last_error(self.kod)
+            return ctypes.c_void_p(-1).value
+        return 4242
+
+    def GetFinalPathNameByHandleW(self, *_a):
+        import ctypes
+        ctypes.set_last_error(self.kod)
+        return 0
+
+    def CloseHandle(self, uchwyt):
+        self.zamkniete.append(uchwyt)
+
+
+@win_only
+@pytest.mark.parametrize("nie_otworz, kod, klasa", [(True, 5, PermissionError), (False, 2, FileNotFoundError)])
+def test_blad_przypiecia_niesie_sciezke_katalogu_i_klase(tmp_path, monkeypatch, nie_otworz, kod, klasa):
+    """AR-242: porażka przypięcia katalogu raportu niesie ŚCIEŻKĘ (wiersz CLI `streaks` drukuje
+    `exc.filename`) przy tej samej podklasie, `winerror` i klasie błędu systemu co `ctypes.WinError`."""
+    from horreum.item_reasons import powod_systemu
+    k32 = _Kernel32Awaria(kod, nie_otworz=nie_otworz)
+    monkeypatch.setattr(raport, "_kernel32", lambda: k32)
+    katalog = str(tmp_path / "raport")
+    os.mkdir(katalog)
+    with pytest.raises(klasa) as exc:
+        raport._przypnij(katalog, "dowiązanie")
+    import ctypes
+    wzor = ctypes.WinError(kod)
+    assert exc.value.filename == katalog
+    assert (exc.value.winerror, exc.value.errno) == (wzor.winerror, wzor.errno)
+    assert powod_systemu(exc.value).code == powod_systemu(wzor).code
+    assert k32.zamkniete == ([] if nie_otworz else [4242])

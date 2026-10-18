@@ -6546,10 +6546,10 @@ def test_szuflada_nazw_rozne_powody_w_podpowiedzi(rn_view):
 
 
 def test_szuflada_przerwany_zapis_zostawia_zdanie(rn_view, monkeypatch):
-    """Zapis przerwany po pierwszym pliku (prawdziwy `writeback.commit` z `should_cancel` po op
-    `commit`): zdanie „przerwano, N do dokończenia” zostaje w szufladzie. Dawniej `_refresh_drawer`
-    na końcu ogona wołał `set_count(N)` bez wyniku - czyszczenie jak przy nowym stagingu - i zdanie
-    znikało w chwili, w której padło (sonda fazy 1: zdanie `''`).
+    """Zapis przerwany po pierwszym pliku (prawdziwy `writeback.commit` w miejscu - jak op `commit`
+    szuflady, AR-161 - z `should_cancel`): zdanie „przerwano, N do dokończenia” zostaje w szufladzie.
+    Dawniej `_refresh_drawer` na końcu ogona wołał `set_count(N)` bez wyniku - czyszczenie jak przy
+    nowym stagingu - i zdanie znikało w chwili, w której padło (sonda fazy 1: zdanie `''`).
 
     Falsyfikator: `_refresh_drawer()` z powrotem PO zdaniu wyniku w `_after_commit` → zdanie puste."""
     from horreum.gui import i18n
@@ -6561,8 +6561,250 @@ def test_szuflada_przerwany_zapis_zostawia_zdanie(rn_view, monkeypatch):
     view.macro_bar._emit_stage()
     pytania = []
     monkeypatch.setitem(WritebackWorker._OPS, "commit", lambda c, t, now, pr, sc: writeback.commit(
-        c, t, now=now, progress=pr, should_cancel=lambda: pytania.append(1) or len(pytania) > 1))
+        c, t, now=now, progress=pr, should_cancel=lambda: pytania.append(1) or len(pytania) > 1,
+        inplace=True))
     view._on_commit()
     assert view._pending_count() == 1, "jeden plik czeka na dokończenie"
     tekst = view.drawer.result.text()
     assert tekst.endswith(i18n.t("grid.wb.interrupted", n=1)), repr(tekst)
+
+
+# ---------- szuflada Zbiorów pisze karty W MIEJSCU (AR-161) ----------
+
+def _stage_makra(view, keyword, wartosc):
+    view.macro_bar.asg_kw.setCurrentText(keyword)
+    view.macro_bar.asg_op.setCurrentIndex(0)            # set
+    view.macro_bar.asg_expr.setText(wartosc)
+    view.macro_bar._emit_stage()
+
+
+def _operacje(con):
+    return [tuple(r) for r in con.execute("SELECT kind, phase FROM inplace_op ORDER BY id")]
+
+
+def test_szuflada_zapisuje_w_miejscu_dowiazanie_twarde_widzi_karte(wb_view):
+    """AR-161: szuflada pisze kartę W MIEJSCU jak okna kart - dowiązanie twarde do pliku (wydanie
+    `_WBPP`) widzi nową kartę, plik ma ten sam węzeł, w dzienniku jedna zamknięta operacja zapisu,
+    a zdanie nie mówi o przepisaniu całego pliku. Dawniej op `commit` przepisywał plik przez plik
+    tymczasowy i dowiązanie zostawało przy starej treści.
+
+    Falsyfikator: `_OPS["commit"]` bez `inplace=True` → dowiązanie ze starą kartą, dziennik pusty."""
+    from astropy.io import fits
+    from horreum.gui import i18n
+    view, con, p = wb_view
+    link = p.with_name("wbpp_link.fits")
+    os.link(p, link)
+    wezel = os.stat(p).st_ino
+    _stage_makra(view, "TELESCOP", "EQ6")
+    view._on_commit()
+    assert fits.getheader(str(link))["TELESCOP"] == "EQ6", "dowiązanie widzi zapis"
+    assert os.stat(p).st_ino == os.stat(link).st_ino == wezel
+    assert _operacje(con) == [("commit", "synced")]
+    assert i18n.t("wb.inplace_fallback", n=1) not in view.drawer.result.text()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_szuflada_spadek_na_droge_atomowa_mowi_zdaniem_okien(qapp, tmp_path, lang):
+    """AR-161: karta, której nie da się wpisać w samym nagłówku (wartość liczbowa - układ karty
+    zostaje przy astropy), idzie drogą atomową z powodem, a szuflada i pasek mówią to TYM SAMYM
+    członem co okna kart (`zdanie_drogi_zapisu`, jedna reguła); szczegół spadku - powód odmowy zapisu
+    w miejscu (`fb_op_kind`) w języku UI - stoi w podpowiedzi.
+
+    Falsyfikatory: `_after_commit` bez członu drogi → zdanie bez „cały plik przepisany”; pusty
+    szczegół w `podpowiedz_spadku` → podpowiedź bez powodu odmowy."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    from horreum.gui import i18n
+    from horreum.gui.grid import FramesView
+    from horreum.gui.wb_worker import tekst_powodu, zdanie_drogi_zapisu
+    p = tmp_path / "f.fits"
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16))
+    hdu.header["TELESCOP"] = "RC8"
+    hdu.header["IMAGETYP"] = "Light"
+    hdu.header["FOCALLEN"] = 800
+    hdu.writeto(str(p))
+    con = db.open_db(str(tmp_path / "f.db"))
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    view = FramesView(con, now_fn=lambda: NOW)
+    view._writeback_async = False
+    i18n.set_lang(lang)
+    try:
+        wyniki = _wynik_przechwycony(view, "_after_commit")
+        komunikaty = []
+        view.status_message.connect(komunikaty.append)
+        _stage_makra(view, "FOCALLEN", "1000")
+        assert view._pending_count() == 1
+        view._on_commit()
+        (res,) = wyniki
+        assert str(fits.getheader(str(p))["FOCALLEN"]) == "1000"
+        droga = zdanie_drogi_zapisu(res)
+        assert droga == i18n.t("wb.inplace_fallback", n=1), droga
+        assert droga in view.drawer.result.text(), view.drawer.result.text()
+        (fr,) = res.applied
+        odmowa = dict(fr.reason.params)["detail"]          # powód odmowy zapisu w miejscu
+        assert fr.reason.code == "inplace_fallback" and odmowa.code == "fb_op_kind", fr.reason
+        szczegol = i18n.t("objchg.st.detail_tip", detail=tekst_powodu(odmowa))
+        assert "FOCALLEN" in szczegol and szczegol in view.drawer.result.toolTip(), \
+            view.drawer.result.toolTip()
+        assert any(droga in str(k) for k in komunikaty), komunikaty
+        assert _operacje(con) == []                         # spadek przed dziennikiem
+    finally:
+        i18n.set_lang("pl")
+        view.close()
+        con.close()
+
+
+def test_commit_szuflady_w_miejscu_cofa_szuflada_i_CLI(wb_view, capsys):
+    """AR-161: commit szuflady w miejscu cofa się TĄ SAMĄ drogą co commit okien kart - „Cofnij”
+    szuflady (`restore_inplace`, operacja `undo` w dzienniku) i `horreum header-fix --undo` z CLI
+    (prawdziwy rdzeń, osobne połączenie) - plik wraca bajt w bajt.
+
+    Falsyfikator: szuflada drogą atomową → dziennik bez operacji commitu i cofnięcia."""
+    from test_header_fix import _cli
+    view, con, p = wb_view
+    przed = p.read_bytes()
+    _stage_makra(view, "TELESCOP", "EQ6")
+    view._on_commit()
+    view._dispatch_undo()
+    assert p.read_bytes() == przed
+    assert _operacje(con) == [("commit", "synced"), ("undo", "synced")]
+    _stage_makra(view, "TELESCOP", "EQ7")
+    view._on_commit()
+    commit_id = view._undo_commit_id
+    assert p.read_bytes() != przed
+    kod, out = _cli(capsys, "header-fix", str(p.with_name("wb.db")), "--undo", str(commit_id))
+    assert kod == 0 and "przywrocone 1" in out, out
+    assert p.read_bytes() == przed
+    assert _operacje(con)[-2:] == [("commit", "synced"), ("undo", "synced")]
+
+
+def test_szuflada_zapis_rozdarty_widac_w_Porzadkach_z_droga_odzysku(wb_view, monkeypatch):
+    """AR-161: zapis szuflady w miejscu przerwany po zapisie (weryfikacja pada) - szuflada widzi go
+    jak okna kart: „Cofnij” zostaje (backup w commicie), zdanie niesie drogę odzysku
+    (`recover_torn`), kopia trafia do wiersza Porządków „Plik po przerwanym zapisie”, a plakietka
+    Porządków się odświeża.
+
+    Falsyfikator: szuflada drogą atomową → zapis bez dziennika, wiersza Porządków brak."""
+    view, con, p = wb_view
+    emisje = []
+    view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
+    wyniki = _wynik_przechwycony(view, "_after_commit")
+    _stage_makra(view, "TELESCOP", "EQ6")
+    prawdziwy = os.fsync
+
+    def _fsync(fd):
+        prawdziwy(fd)
+        raise OSError(64, "The specified network name is no longer available")
+    with monkeypatch.context() as m:
+        m.setattr(writeback.os, "fsync", _fsync)
+        view._on_commit()
+    (res,) = wyniki
+    (fr,) = res.failed
+    assert fr.reason.code == "backup_saved_in_isolated", fr.reason
+    fid = con.execute("SELECT frame_id FROM location").fetchone()[0]
+    assert queries.torn_write_frame_ids(con) == {fid}
+    assert view._undo_mode == "macro" and not view._undo_btn.isHidden()
+    assert "recover_torn(" in view.drawer.result.text(), view.drawer.result.text()
+    assert emisje
+
+
+def _plik_z_ogniskowa(path):
+    """FITS z kartą liczbową `FOCALLEN` - jej zmiana nie mieści się w zapisie w miejscu (`fb_op_kind`)."""
+    import numpy as np
+    from astropy.io import fits
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hdu = fits.PrimaryHDU(data=np.arange(16, dtype=np.int16).reshape(4, 4))
+    hdu.header["IMAGETYP"] = "Light"
+    hdu.header["OBJECT"] = "NGC6992"
+    hdu.header["FOCALLEN"] = 800
+    hdu.writeto(str(path))
+    return path
+
+
+def _spadek_po_podmianie(tmp_path, monkeypatch, stan):
+    """Prawdziwy `writeback.commit` w miejscu (op szuflady) ze spadkiem na drogę atomową, zakończony
+    statusem innym niż 'applied' po DOKONANEJ podmianie: `withheld` (głosem klatki mówi druga obecna
+    kopia, wzór `test_writeback_wstrzymane._scena`), `failed` (re-sync po podmianie pada) albo
+    `failed_weryfikacja` (odczyt pliku po podmianie pada - 'failed' z kopią nagłówka)."""
+    import shutil
+    from horreum import repo, scan
+    con = db.open_db(str(tmp_path / "s.db"))
+    L = _plik_z_ogniskowa(tmp_path / "A" / "a.fits")
+    scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary())
+    lok = con.execute("SELECT id, header_hash FROM location").fetchone()
+    repo.stage_pending(con, run_id="R", location_id=lok["id"], keyword="FOCALLEN", idx=0, op="set",
+                       old_value="800", new_value="1000", new_type="int", new_comment=None,
+                       expected_header_hash=lok["header_hash"])
+    if stan == "withheld":
+        M = tmp_path / "B" / "a.fits"
+        M.parent.mkdir(parents=True)
+        shutil.copyfile(L, M)                     # druga kopia klatki wjeżdża PO stagingu
+        scan.ingest_record(con, scan.scan_file(str(M)), volume="V", now=NOW,
+                           summary=scan.ScanSummary())
+        res = writeback.commit(con, "R", now=NOW, inplace=True)
+    else:
+        pada = lambda *a, **kw: (_ for _ in ()).throw(OSError(None, "x", None, 64))   # noqa: E731
+        with monkeypatch.context() as m:
+            if stan == "failed":
+                m.setattr(writeback.scan, "scan_file", pada)
+            else:
+                m.setattr(writeback, "_post_hash", pada)
+            res = writeback.commit(con, "R", now=NOW, inplace=True)
+    return con, L, res
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("stan", ["withheld", "failed", "failed_weryfikacja"])
+def test_spadek_na_droge_atomowa_liczy_sie_niezaleznie_od_statusu(wb_view, tmp_path, monkeypatch,
+                                                                   stan, lang):
+    """AR-161: spadek na drogę atomową to fakt o pliku, NIE o statusie - plik przepisany w całości
+    i zakończony zapisem wstrzymanym albo błędem po podmianie liczy się w członie drogi zdania
+    (`zdanie_drogi_zapisu`: szuflada i okna kart), a powód odmowy zapisu w miejscu (`fb_op_kind`)
+    stoi w podpowiedzi (`podpowiedz_spadku`). Prawdziwy rdzeń; dawniej człon liczył wyłącznie
+    `applied`, a przy 'failed' rdzeń gubił informację o drodze.
+
+    Falsyfikatory: człon liczy tylko `applied` → zdanie bez „cały plik przepisany”; rdzeń bez uwagi
+    drogi przy 'failed' po podmianie → to samo dla 'failed'."""
+    from astropy.io import fits
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import (podpowiedz_spadku, tekst_powodu, zdanie_commitu_kart,
+                                       zdanie_drogi_zapisu)
+    con, L, res = _spadek_po_podmianie(tmp_path, monkeypatch, stan)
+    try:
+        (fr,) = res.withheld if stan == "withheld" else res.failed
+        assert not res.applied and res.commit_id is not None, res
+        assert str(fits.getheader(str(L))["FOCALLEN"]) == "1000"        # plik PRZEPISANY
+        (uwaga,) = [n for n in dict(fr.reason.params)["notes"] if n.code == "inplace_fallback"]
+        odmowa = dict(uwaga.params)["detail"]
+        assert odmowa.code == "fb_op_kind", odmowa
+        i18n.set_lang(lang)
+        droga = zdanie_drogi_zapisu(res)
+        assert droga == i18n.t("wb.inplace_fallback", n=1), droga
+        assert droga in zdanie_commitu_kart(res, "grid.wb.applied", w_miejscu=True)[0]
+        assert podpowiedz_spadku(res) == i18n.t("objchg.st.detail_tip", detail=tekst_powodu(odmowa))
+        view, _con, _p = wb_view
+        view._after_commit("commit", res)                      # szuflada: to samo zdanie
+        assert droga in view.drawer.result.text(), view.drawer.result.text()
+    finally:
+        i18n.set_lang("pl")
+        con.close()
+
+
+def test_spadek_odmowiony_nie_jest_przepisanym_plikiem(tmp_path):
+    """Spadek, po którym droga atomowa ODMÓWIŁA (plik nietknięty, 'blocked'), nie liczy się w członie
+    drogi - przepisanego pliku nie ma. Falsyfikator: człon liczy też `blocked`."""
+    from horreum import repo, scan
+    from horreum.gui.wb_worker import podpowiedz_spadku, zdanie_drogi_zapisu
+    con = db.open_db(str(tmp_path / "b.db"))
+    L = _plik_z_ogniskowa(tmp_path / "a.fits")
+    scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary())
+    lok = con.execute("SELECT id FROM location").fetchone()
+    repo.stage_pending(con, run_id="R", location_id=lok["id"], keyword="FOCALLEN", idx=None,
+                       op="add", old_value=None, new_value="1000", new_type="int",
+                       new_comment=None, expected_header_hash=None)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    (fr,) = res.blocked
+    assert fr.reason.code == "macro_add_exists", fr.reason
+    assert zdanie_drogi_zapisu(res) == "" and podpowiedz_spadku(res) == ""
+    con.close()

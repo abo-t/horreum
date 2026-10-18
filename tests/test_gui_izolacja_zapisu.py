@@ -1210,10 +1210,10 @@ def test_szuflada_po_Przywroc_naglowek_oddaje_PRAWDZIWE_zdanie_commitu(qapp, tmp
                                                                        monkeypatch):
     """Podejrzenie z recenzji: po geście „Przywróć nagłówek sprzed zapisu" zmiana perspektywy
     oddaje szufladzie „Zatwierdzono…" przy „Cofnij" - czy to zdanie nie mówi o zapisie, który gest
-    właśnie cofnął? Nie mówi: commit szuflady idzie drogą ATOMOWĄ (`wb_worker` woła
-    `writeback.commit` bez `inplace`), więc nie ma operacji `inplace_op`, a operacja izolowana
-    pochodzi z INNEGO zapisu (zapis w miejscu poza gridem). Gest cofa tamten zapis do stanu po
-    commicie szuflady - zmiana commitu zostaje w pliku, a „Cofnij" dalej ją cofa.
+    właśnie cofnął? Nie mówi: commit szuflady pisze W MIEJSCU (AR-161) i jego operacja jest zamknięta
+    (`synced`), a operacja izolowana pochodzi z INNEGO zapisu (zapis w miejscu poza gridem). Gest cofa
+    tamten zapis do stanu po commicie szuflady - zmiana commitu zostaje w pliku, a „Cofnij" dalej ją
+    cofa.
 
     Falsyfikator: gdyby gest cofał zmianę commitu szuflady, nagłówek po geście miałby wartość
     sprzed commitu i pierwsza asercja o pliku padłaby."""
@@ -1222,8 +1222,8 @@ def test_szuflada_po_Przywroc_naglowek_oddaje_PRAWDZIWE_zdanie_commitu(qapp, tmp
     try:
         view._run_id = "R"
         view.refresh()
-        view._on_commit()                                     # commit szuflady - droga atomowa
-        assert _fazy(con) == [], "commit szuflady nie zostawia operacji w miejscu"
+        view._on_commit()                                     # commit szuflady - w miejscu
+        assert _fazy(con) == ["synced"], "operacja commitu szuflady zamknięta"
         zdanie_commitu = view.drawer.result.text()
         assert view._undo_mode == "macro" and not view._undo_btn.isHidden()
         assert fits.getheader(str(p))["OBJECT"] == "NGC 6992"
@@ -1241,7 +1241,7 @@ def test_szuflada_po_Przywroc_naglowek_oddaje_PRAWDZIWE_zdanie_commitu(qapp, tmp
         with monkeypatch.context() as m:
             m.setattr(writeback.os, "fsync", _fsync)
             writeback.commit(con, "R2", now=NOW, inplace=True)
-        assert _fazy(con) == ["unverified"]
+        assert _fazy(con) == ["synced", "unverified"]
         assert fits.getheader(str(p))["OBJECT"] == "NGC 6995"
 
         view.apply_perspective(grid_mod.PRESET_TORN_WRITE)

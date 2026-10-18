@@ -362,75 +362,67 @@ def test_ogon_przerwanego_cofniecia_mowi_reszte_z_rdzenia(jezyk, lang):
 
 # Zapadka powodów w zdaniach GUI (AR-167): parametr `reason=`/`reasons=` w `i18n.t`/`t_plural` idzie
 # przez `tekst_powodu`/`czytelny_powod` albo jest tekstem z katalogu. Znane wyjątki - jawnie,
-# z kategorią; nowy surowy przypadek = czerwień, naprawiony wyjątek schodzi z listy.
+# z kategorią; nowy surowy przypadek = czerwień, naprawiony wyjątek schodzi z listy. Klucz jak
+# w zapadkach AR-210 (AR-238): plik względem `horreum/gui` z podkatalogami, `Klasa.metoda`. Wartość:
+# (LICZBA wołań, kategoria) - zapadka liczy multizbiór, więc drugie takie samo wołanie w tej samej
+# metodzie nie chowa się za wyjątkiem pierwszego.
 _ZNANE_SUROWE = {
-    ("app.py", "_on_save", "reason", "err"): "`plan_kart_naprawy`/`_validate_object_value`: zdania "
-                                             "katalogu, reguła karty przez `tekst_powodu`",
-    ("app.py", "_sync_preview", "reason", "err"): "jak wyżej (`plan_kart_naprawy`)",
-    ("app.py", "_build_ui", "reason", "s['reason']"): "suma per folder - `tekst_powodu` przy "
-                                                     "`_split_rows`",
-    ("app.py", "_copy_reason", "reason", "diagnoza"): "diagnoza odczytu kopii (skan), nie zapis",
-    ("app.py", "zdanie_cofniecia_dopisania", "reason", "powod(wynik.refusal)"): "funkcja lokalna "
-                                                                                "- zdanie katalogu",
-    ("app.py", "_open_path", "reason", "str(exc) or type(exc).__name__"): "otwarcie bazy, nie zapis",
-    ("grid.py", "_on_fix_optics", "reasons",
+    ("app.py", "RepairHeaderDialog._on_save", "reason", "err"):
+        (1, "`plan_kart_naprawy`/`_validate_object_value`: zdania katalogu, reguła karty przez `tekst_powodu`"),
+    ("app.py", "RepairHeaderDialog._sync_preview", "reason", "err"): (1, "jak wyżej (`plan_kart_naprawy`)"),
+    ("app.py", "RepairHeaderDialog._build_ui", "reason", "s['reason']"):
+        (2, "suma per folder - `tekst_powodu` przy `_split_rows`"),
+    ("app.py", "_copy_reason", "reason", "diagnoza"): (3, "diagnoza odczytu kopii (skan), nie zapis"),
+    ("app.py", "zdanie_cofniecia_dopisania", "reason", "powod(wynik.refusal)"):
+        (2, "funkcja lokalna - zdanie katalogu"),
+    ("app.py", "MainWindow._open_path", "reason", "str(exc) or type(exc).__name__"):
+        (1, "otwarcie bazy, nie zapis"),
+    ("grid.py", "FramesView._on_fix_optics", "reasons",
      "'; '.join((f'{p} ({n})' for p, n in sorted(odmowy.items(), key=lambda pn: -pn[1])))"):
-        "klucze odmów przez `tekst_powodu`/katalog wyżej",
-    ("grid.py", "_policz_rodowod_kalibracji", "reason", "powod"): "zdanie etapu (katalog)",
-    ("grid.py", "_on_lineage_offset", "reason", "powod"): "zdanie etapu (katalog)",
-    ("pipeline.py", "_review_line", "reasons", "powody"): "zdania katalogu",
-    ("pipeline.py", "_format_presence", "reason", "powod"): "zdania katalogu",
-    ("pipeline.py", "_on_source_unreachable", "reason", "powod"): "zdanie katalogu",
-    ("planner_model.py", "header_notes", "reason", "rig.reason"): "planer, nie zapis",
+        (1, "klucze odmów przez `tekst_powodu`/katalog wyżej"),
+    ("grid.py", "FramesView._policz_rodowod_kalibracji", "reason", "powod"): (1, "zdanie etapu (katalog)"),
+    ("grid.py", "FramesView._on_lineage_offset", "reason", "powod"): (1, "zdanie etapu (katalog)"),
+    ("pipeline.py", "_review_line", "reasons", "powody"): (1, "zdania katalogu"),
+    ("pipeline.py", "PipelineView._format_presence", "reason", "powod"): (1, "zdania katalogu"),
+    ("pipeline.py", "PipelineView._on_source_unreachable", "reason", "powod"): (1, "zdanie katalogu"),
+    ("planner_model.py", "header_notes", "reason", "rig.reason"): (1, "planer, nie zapis"),
+    ("flows/przyjmij.py", "PrzyjmijView._render", "reason", "zapis['refused']"):
+        (1, "zdanie katalogu - `PipelineView.last_run['refused']` piszą wyłącznie "
+            "`pipeline.source.unreachable` i `pipeline.guard.mixed` (`powod_mieszania`)"),
 }
 _OPAKOWANIA = {"tekst_powodu", "czytelny_powod"}
 
 
-def _surowe_powody_gui():
-    """`{(plik, funkcja, parametr, wyrażenie)}` parametrów `reason`/`reasons` w `i18n.t`/`t_plural`
-    modułów `horreum/gui`, których wyrażenie nie jest opakowaniem powodu ani wywołaniem katalogu."""
-    import ast
-    from pathlib import Path
-    import horreum.gui as gui
-    wynik = set()
-    for plik in sorted(Path(gui.__file__).parent.glob("*.py")):
-        drzewo = ast.parse(plik.read_text(encoding="utf-8"))
-        rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+def _licznosci(znane):
+    """Multizbiór wyjątków zapadki z listy `{klucz: (liczba, kategoria)}`."""
+    from collections import Counter
+    return Counter({klucz: liczba for klucz, (liczba, _kategoria) in znane.items()})
 
-        def _funkcja(w):
-            while w in rodzic:
-                w = rodzic[w]
-                if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return w.name
-            return None
-        for w in ast.walk(drzewo):
-            if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Attribute)
-                    and w.func.attr in ("t", "t_plural") and isinstance(w.func.value, ast.Name)
-                    and w.func.value.id == "i18n"):
-                continue
-            for k in w.keywords:
-                if k.arg not in ("reason", "reasons"):
-                    continue
-                v = k.value
-                if isinstance(v, ast.Call):
-                    nazwa = v.func.attr if isinstance(v.func, ast.Attribute) else getattr(
-                        v.func, "id", None)
-                    if nazwa in _OPAKOWANIA or nazwa in ("t", "t_plural"):
-                        continue
-                wynik.add((plik.name, _funkcja(w), k.arg, ast.unparse(v)))
-    return wynik
+
+def _surowe_powody_gui():
+    """Multizbiór (`Counter`) `(plik, funkcja, parametr, wyrażenie)` parametrów `reason`/`reasons`
+    w `i18n.t`/`t_plural` modułów `horreum/gui` z podkatalogami, których wyrażenie nie jest
+    opakowaniem powodu ani wywołaniem katalogu - wspólny skan wołań zdań GUI
+    (`test_gui_bledy_systemu._wolania_zdan_gui`, AR-238: z `glob("*.py")` strona Przyjmij i Znajdź
+    w `flows/` były poza zapadką). Liczność, nie zbiór: drugie identyczne wołanie to nowe miejsce."""
+    import ast
+    from collections import Counter
+    from test_gui_bledy_systemu import _wolania_zdan_gui
+    return Counter((plik, nazwa, arg, ast.unparse(v)) for plik, nazwa, arg, v, opakowana, _w
+                   in _wolania_zdan_gui() if arg in ("reason", "reasons") and not opakowana)
 
 
 def test_zapadka_powodow_w_zdaniach_GUI():
     """AR-167 (zapadka): każdy parametr `reason=`/`reasons=` zdania GUI mówi przez `tekst_powodu`/
-    `czytelny_powod` albo zdaniem katalogu - wyjątki z listy `_ZNANE_SUROWE` z kategorią. Nowe surowe
-    miejsce = czerwień (powód z kodem mówiłby po polsku w UI EN), naprawiony wyjątek musi zejść
-    z listy. Falsyfikator: `grid._on_cell_edit` z `reason=powod` → nowy wpis spoza listy."""
-    znalezione = _surowe_powody_gui()
-    nowe = znalezione - set(_ZNANE_SUROWE)
-    stare = set(_ZNANE_SUROWE) - znalezione
-    assert not nowe, f"surowy powód w zdaniu GUI: {sorted(nowe)}"
-    assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"
+    `czytelny_powod` albo zdaniem katalogu - wyjątki z listy `_ZNANE_SUROWE` z kategorią i liczbą
+    wołań. Nowe surowe miejsce (także drugie takie samo wołanie w metodzie z wyjątkiem) = czerwień
+    (powód z kodem mówiłby po polsku w UI EN), naprawiony wyjątek musi zejść z listy. Falsyfikatory:
+    `grid._on_cell_edit` z `reason=powod` → nowy wpis spoza listy; drugie `i18n.t(...,
+    reason=zapis["refused"])` w `PrzyjmijView._render` → liczność ponad listę."""
+    znalezione, znane = _surowe_powody_gui(), _licznosci(_ZNANE_SUROWE)
+    nowe, stare = znalezione - znane, znane - znalezione
+    assert not nowe, f"surowy powód w zdaniu GUI: {sorted(nowe.items())}"
+    assert not stare, f"wyjątek już naprawiony - zdejmij z listy (albo zmniejsz liczbę): {sorted(stare.items())}"
 
 
 def _cofniecie_z_odmowa_dostepu():
@@ -656,16 +648,18 @@ def test_pusta_komorka_karty_mowi_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
 # pod inną nazwą przejdzie, więc to alarm, nie dowód; kompletność czterech ujść okien kart pinują
 # testy zachowania wyżej. f-string będący KLUCZEM katalogu (pierwszy argument `i18n.t`) - poza.
 _ZNANE_FSTRINGI = {
-    ("grid_lineage.py", "_calibration_item_text", "powod"): "zdanie katalogu (`grid.lin.cal.gap.*`)",
+    ("grid_lineage.py", "_calibration_item_text", "powod"): (1, "zdanie katalogu (`grid.lin.cal.gap.*`)"),
 }
 
 
 def _fstringi_z_powodem_gui():
-    """`{(plik, funkcja, wyrażenie pola)}` f-stringów `horreum/gui/*.py` z polem-powodem bez
-    opakowania (`tekst_powodu`, `czytelny_powod`, `i18n.t`/`t_plural`)."""
+    """Multizbiór (`Counter`) `(plik, funkcja, wyrażenie pola)` f-stringów modułów `horreum/gui`
+    z podkatalogami z polem-powodem bez opakowania (`tekst_powodu`, `czytelny_powod`,
+    `i18n.t`/`t_plural`). Przejście plików i klucz miejsca wspólne z zapadkami wołań zdań
+    (`test_gui_bledy_systemu._moduly_gui`, AR-238); liczność jak w zapadce AR-167."""
     import ast
-    from pathlib import Path
-    import horreum.gui as gui
+    from collections import Counter
+    from test_gui_bledy_systemu import _moduly_gui, _nazwa_kwalifikowana
 
     def _powod(v):
         if isinstance(v, ast.Name):
@@ -678,19 +672,10 @@ def _fstringi_z_powodem_gui():
                 return "reason" in k or "powod" in k
             return k == 1 and any(s in ast.unparse(v.value).lower() for s in ("skip", "pomin"))
         return False
-    wynik = set()
-    for plik in sorted(Path(gui.__file__).parent.glob("*.py")):
-        drzewo = ast.parse(plik.read_text(encoding="utf-8"))
-        rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+    wynik = Counter()
+    for plik, drzewo, rodzic, przodkowie in _moduly_gui():
 
-        def _funkcja(w):
-            while w in rodzic:
-                w = rodzic[w]
-                if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return w.name
-            return None
-
-        def _klucz_katalogu(w):
+        def _klucz_katalogu(w, rodzic=rodzic):
             r = rodzic.get(w)
             return (isinstance(r, ast.Call) and isinstance(r.func, ast.Attribute)
                     and r.func.attr in ("t", "t_plural") and bool(r.args) and r.args[0] is w)
@@ -707,20 +692,19 @@ def _fstringi_z_powodem_gui():
                     if nazwa in _OPAKOWANIA or nazwa in ("t", "t_plural"):
                         continue
                 if _powod(v):
-                    wynik.add((plik.name, _funkcja(w), ast.unparse(v)))
+                    wynik[(plik, _nazwa_kwalifikowana(przodkowie, w), ast.unparse(v))] += 1
     return wynik
 
 
 def test_zapadka_powodow_w_fstringach_GUI():
     """AR-181 (zapadka pomocnicza): f-string w `gui/` z polem-powodem bez opakowania = czerwień
     (lista pominiętych „Napraw nagłówek…” składała tak zdanie PL w UI EN); wyjątki z listy
-    `_ZNANE_FSTRINGI` z kategorią, naprawiony schodzi z listy. Falsyfikator: element listy
+    `_ZNANE_FSTRINGI` z kategorią i liczbą, naprawiony schodzi z listy. Falsyfikator: element listy
     pominiętych z powrotem jako `f"{…} - {reason}"` → nowy wpis spoza listy."""
-    znalezione = _fstringi_z_powodem_gui()
-    nowe = znalezione - set(_ZNANE_FSTRINGI)
-    stare = set(_ZNANE_FSTRINGI) - znalezione
-    assert not nowe, f"surowy powód w f-stringu GUI: {sorted(nowe)}"
-    assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"
+    znalezione, znane = _fstringi_z_powodem_gui(), _licznosci(_ZNANE_FSTRINGI)
+    nowe, stare = znalezione - znane, znane - znalezione
+    assert not nowe, f"surowy powód w f-stringu GUI: {sorted(nowe.items())}"
+    assert not stare, f"wyjątek już naprawiony - zdejmij z listy (albo zmniejsz liczbę): {sorted(stare.items())}"
 
 
 # ============================ AR-193, AR-194: podgląd nazw i błąd definicji makra w języku UI

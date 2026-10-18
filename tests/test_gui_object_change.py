@@ -955,8 +955,10 @@ def test_OPS_prowadza_gest_i_karte_w_miejscu_do_rdzenia(monkeypatch):
                         lambda con, t, **k: wolania.append(("undo_object_change", t)))
     for op in ("commit_inplace", "object_change", "undo_object_change", "commit"):
         WritebackWorker._OPS[op](None, "r1", NOW, lambda *a: None, lambda: False)
+    # Szuflada Zbiorów (`commit`) też pisze w miejscu (AR-161) - ten sam wołacz co okna kart.
     assert wolania == [("commit", "r1", True), ("object_change", "r1"),
-                       ("undo_object_change", "r1"), ("commit", "r1", None)]
+                       ("undo_object_change", "r1"), ("commit", "r1", True)]
+    assert WritebackWorker._OPS["commit"] is WritebackWorker._OPS["commit_inplace"]
 
 
 def test_zdanie_drogi_zapisu_mowi_TYLKO_o_spadku_na_atomowa():
@@ -3693,7 +3695,10 @@ def test_staging_niespojny_plan_mowi_w_jezyku_UI_a_inwariant_w_szczegole(qapp, c
         szczegol = i18n.t("objchg.st.detail_tip",
                           detail="ValueError: frame:1: CAS ręki to trójca (object_id, object_source, "
                                  "object_cleared_id)")
-        assert dlg.error.toolTip() == zdanie + "\n" + szczegol, dlg.error.toolTip()
+        # + miejsce w kodzie (AR-237): linia klingi, która odmówiła
+        import re
+        assert re.fullmatch(re.escape(zdanie + "\n" + szczegol + " @ horreum/repo.py:") + r"\d+",
+                            dlg.error.toolTip()), dlg.error.toolTip()
         if lang == "en":
             assert not set(zdanie) & _POLSKIE_LITERY, zdanie
         assert con.execute("SELECT COUNT(*) FROM object_change_run").fetchone()[0] == 0
@@ -3729,7 +3734,9 @@ def test_plan_zmiany_obiektu_EXPECT_rdzenia_zdanie_w_jezyku_UI(qapp, con, monkey
         assert type(exc) is ValueError and "999" in str(exc), exc
         zdanie = i18n.t("objchg.err.plan", msg=i18n.t("objchg.item.prog_error"))
         assert dlg.error.text() == zdanie, dlg.error.text()
-        assert dlg.error.szczegol() == i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
+        import re                                        # + miejsce w kodzie (AR-237)
+        assert re.fullmatch(re.escape(i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
+                                      + " @ horreum/gui/queries.py:") + r"\d+", dlg.error.szczegol())
         if lang == "en":
             assert not set(zdanie) & _POLSKIE_LITERY, zdanie
         dlg.reject()
@@ -3755,7 +3762,9 @@ def test_plan_zmiany_obiektu_wyjatek_z_callbacku_kolizji_mowi_bledem_programu(qa
         assert type(exc) is KeyError, exc
         zdanie = i18n.t("objchg.err.plan", msg=i18n.t("objchg.item.prog_error"))
         assert dlg.error.text() == zdanie, dlg.error.text()
-        assert dlg.error.szczegol() == i18n.t("objchg.st.detail_tip", detail="KeyError: 'kolizja'")
+        import re                                        # + miejsce w kodzie (AR-237)
+        assert re.fullmatch(re.escape(i18n.t("objchg.st.detail_tip", detail="KeyError: 'kolizja'")
+                                      + " @ horreum/object_change.py:") + r"\d+", dlg.error.szczegol())
         if lang == "en":
             assert not set(zdanie) & _POLSKIE_LITERY, zdanie
         dlg.reject()
@@ -3778,8 +3787,10 @@ def test_staging_blad_programu_spoza_inwariantu_nie_ucieka_ze_slotu(qapp, con, r
         _klik_akcji(dlg)
         zdanie = dlg.error.text()
         assert zdanie == i18n.t("objchg.err.stage", msg=i18n.t("objchg.item.prog_error")), zdanie
-        assert dlg.error.szczegol() == i18n.t("objchg.st.detail_tip",
-                                              detail="TypeError: zły argument stagingu")
+        import re                                        # + miejsce w kodzie (AR-237)
+        assert re.fullmatch(re.escape(i18n.t("objchg.st.detail_tip", detail="TypeError: zły argument stagingu")
+                                      + " @ horreum/gui/object_change_dialog.py:") + r"\d+",
+                            dlg.error.szczegol())
         if lang == "en":
             assert not set(zdanie) & _POLSKIE_LITERY, zdanie
         assert rdzen.commity == [] and dlg.action_btn.isEnabled()

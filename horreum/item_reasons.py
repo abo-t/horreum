@@ -36,7 +36,9 @@ pyta oba, więc workery odczytu GUI (Dom, Porządki, planer, Pola) mówią klas�
 
 import errno
 import json
+import os
 import sqlite3
+import traceback
 
 # Kody powodów pozycji - każdy ma zdanie `objchg.item.<kod>` w katalogu okna (PL+EN, test AST), PL
 # znak w znak jak zdanie rdzenia. Część kodów nazywa FRAGMENT zdania nadrzędnego (`copies`, `lead_*`),
@@ -170,7 +172,7 @@ ITEM_REASON_CODES = frozenset({
     # --- naprawa manifestu wydania obiektu (AR-213, `projection.repair_manifest`): odmowy zapisu
     # manifestu nad drzewem, które już leży w celu, i błąd odczytu starego manifestu; `busy` mówi
     # też krok manifestu wydania (wspólny protokół `.part`)
-    "proj_manifest_incomplete", "proj_manifest_skipped", "proj_manifest_unproven",
+    "proj_manifest_incomplete",
     "proj_manifest_damaged", "proj_manifest_foreign", "proj_manifest_changed", "proj_manifest_busy",
     "proj_manifest_unreadable",
 })
@@ -405,8 +407,64 @@ _OS_ERRNO = {errno.EACCES: "denied", errno.EPERM: "denied", errno.ENOENT: "missi
 def _surowy(exc):
     """Surowy tekst wyjątku `Typ: opis` - JEDYNE złożenie (meta-test `tests/test_powody_pisarza.py`):
     `detail` obu klas (`powod_systemu`, `powod_bazy`), tekst spoza klas w `blad_systemu` i `detail`
-    błędu programu w `powod_okna`."""
+    błędu programu w `powod_okna` (tam z miejscem w kodzie, `_miejsce_w_kodzie`)."""
     return f"{type(exc).__name__}: {exc}"
+
+
+_PAKIET = os.path.dirname(os.path.abspath(__file__))     # katalog pakietu `horreum`
+
+
+def _w_pakiecie(sciezka):
+    """Plik ramki śladu jako `horreum/<ścieżka>.py` (ukośnik `/`) albo None - plik spoza pakietu.
+    Dwie formy: ścieżka absolutna pod katalogiem pakietu (uruchomienie ze źródeł) i względna od
+    `horreum` (exe PyInstallera: `co_filename` = `horreum\\gui\\planner.py`, zmierzone w PYZ wydania).
+    Ścieżka absolutna nie wychodzi nigdy - repo jest publiczne, a ścieżka maszyny budującej albo
+    profilu użytkownika nie ma czego szukać w UI. Forma względna ma zostać POD `horreum`: człon pusty,
+    `.`, `..` albo z dwukropkiem (dysk, `C:`) ją odrzuca - `horreum/../obcy.py` i `horreum/C:/Users/…`
+    to nie plik pakietu."""
+    if os.path.isabs(sciezka):
+        try:
+            wzgledna = os.path.relpath(sciezka, _PAKIET)
+        except ValueError:                  # inny dysk niż pakiet
+            return None
+        if wzgledna == os.pardir or wzgledna.startswith(os.pardir + os.sep):
+            return None
+        return "horreum/" + wzgledna.replace(os.sep, "/")
+    czlony = sciezka.replace("\\", "/").split("/")
+    if (len(czlony) < 2 or czlony[0] != "horreum"
+            or any(c in ("", os.curdir, os.pardir) or ":" in c for c in czlony)):
+        return None
+    return "/".join(czlony)
+
+
+def _miejsce_w_kodzie(exc):
+    """Miejsce błędu programu w kodzie (AR-237): `horreum/<plik>.py:<linia>` NAJGŁĘBSZEJ ramki śladu,
+    która leży w pakiecie, albo None (wyjątek bez śladu - utworzony, nie rzucony, albo ślad świadomie
+    ucięty w drodze z wątku tła - i ślad bez ramki pakietu). Ostatnia ramka śladu bez filtra pakietu
+    to przy wyjątku biblioteki jej plik ze ścieżką instalacji Pythona (zmierzone:
+    `…\\Lib\\json\\decoder.py:361` z profilem użytkownika) - ani nasz kod, ani tekst do UI; najgłębsza
+    ramka pakietu to linia `horreum`, która wywołała bibliotekę.
+
+    ŁAŃCUCH WYJĄTKÓW: miejsce bierzemy z PRZYCZYNY ŹRÓDŁOWEJ - `__cause__` (`raise … from`), a bez
+    niego `__context__` (wyjątek w handlerze), chyba że kontekst jest wyciszony (`from None`) - bo
+    opakowanie mówi, gdzie błąd przepakowano, a nie, gdzie powstał; wyjątek zewnętrzny bywa też bez
+    własnego śladu (utworzony z przyczyną, nie rzucony). Przyczyna bez ramki pakietu (rzucona
+    i opakowana poza nim) oddaje głos kolejnemu ogniwu ku zewnętrznemu. Cykl w łańcuchu przerywa
+    zbiór odwiedzonych."""
+    lancuch, odwiedzone = [], set()
+    ogniwo = exc
+    while ogniwo is not None and id(ogniwo) not in odwiedzone:
+        odwiedzone.add(id(ogniwo))
+        lancuch.append(ogniwo)
+        ogniwo = (ogniwo.__cause__ if ogniwo.__cause__ is not None
+                  else None if ogniwo.__suppress_context__ else ogniwo.__context__)
+    for ogniwo in reversed(lancuch):                 # od przyczyny źródłowej ku zewnętrznemu
+        tb = ogniwo.__traceback__
+        for ramka in reversed(traceback.extract_tb(tb) if tb is not None else []):
+            plik = _w_pakiecie(ramka.filename)
+            if plik is not None:
+                return f"{plik}:{ramka.lineno}"
+    return None
 
 
 def powod_systemu(exc):
@@ -505,14 +563,22 @@ def powod_okna(exc):
     `KeyError`) - błąd programu `prog_error` z surowym tekstem `Typ: opis` w `detail` (szczegół pod
     kursorem, nie w zdaniu). Użycie API bazy wbrew kontraktowi (`ProgrammingError` - np. operacja
     na zamkniętym połączeniu, `InterfaceError`) to też EXPECT, nie stan bazy: błąd programu, nie
-    surowy angielski tekst SQLite w zdaniu."""
+    surowy angielski tekst SQLite w zdaniu.
+
+    MIEJSCE W KODZIE (AR-237): `detail` błędu programu kończy się ` @ horreum/<plik>.py:<linia>`
+    (`_miejsce_w_kodzie`), gdy ślad je zna - samo `KeyError: 'x'` nie mówi, gdzie szukać, a pakiet
+    nie ma logów. Wołający liczą powód w handlerze `except` (także w wątku tła), więc ślad jest pełny,
+    a do okna jedzie gotowy tekst. Klasy systemu i bazy miejsca nie dostają: ich `detail` idzie
+    też do bazy i do zeznań (`proza_z_diagnoza`)."""
     powod = getattr(exc, "powod", None)
     if powod:
         return powod
     if (isinstance(exc, (OSError, sqlite3.Error))
             and not isinstance(exc, (sqlite3.ProgrammingError, sqlite3.InterfaceError))):
         return blad_systemu(exc)
-    return PowodPozycji("błąd programu - szczegół w podpowiedzi", "prog_error", detail=_surowy(exc))
+    miejsce = _miejsce_w_kodzie(exc)
+    detail = _surowy(exc) + (f" @ {miejsce}" if miejsce else "")
+    return PowodPozycji("błąd programu - szczegół w podpowiedzi", "prog_error", detail=detail)
 
 
 def szczegoly_systemu(powod) -> list[str]:

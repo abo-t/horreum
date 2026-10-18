@@ -1256,8 +1256,8 @@ def _wydanie_obiektu(work, obiekt, *, ts, zestawy=None, con=None):
     root.mkdir(parents=True)
     if zestawy is None and con is not None:
         zestawy = {SEG: {"flat_raw": _flats_ids(con, "CLS") + _flats_ids(con, "Ha")}}
-    manifest = {"layout": projection.OBJECT_LAYOUT, "object_canon": obiekt, "root": str(root), "ts": ts,
-                "zestawy": zestawy or {}}
+    manifest = {"layout": projection.OBJECT_LAYOUT, "object_id": 1, "object_canon": obiekt, "root": str(root),
+                "ts": ts, "zestawy": zestawy or {}}
     (root / projection.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
     return root
 
@@ -3359,4 +3359,101 @@ def test_lista_wydan_po_naprawie_manifestu_bez_daty_i_bez_czeka_na_wbpp(tmp_path
     [row] = harvest.releases([karta])
     assert release_date_text(row.ts) == ""
     assert release_state_text(row) == "do sprawdzenia 1"
+    con.close()
+
+
+# ============================================================ AR-234 / AR-240: manifest nie do przeczytania, data z drzewa
+
+def _odmowa_odczytu(sciezka):
+    import errno
+    return PermissionError(errno.EACCES, "Permission denied", str(sciezka))
+
+
+@pytest.fixture
+def jezyk_okna():
+    yield i18n.set_lang
+    i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wiersz_manifestu_nieczytelnego_i_uszkodzonego_stan_podpowiedz_i_data_z_drzewa(jezyk_okna, tmp_path,
+                                                                                    monkeypatch, lang):
+    """AR-234 (Qt-wolne funkcje stanu wiersza listy): manifest bez prawa odczytu - stan zaczyna się od
+    „manifest nieczytelny: <klasa>”, uszkodzony - „manifest uszkodzony (JSON)”; podpowiedź komórki niesie
+    zdanie o manifeście ze ścieżką i szczegół systemu; taki wiersz NIGDY nie jest „wciągnięty”. AR-240:
+    data z drzewa (`ts_source`) ma znak przybliżenia i podpowiedź, data wydania - bez zmian. EN bez
+    polskich znaków. Falsyfikatory: `is_harvested` bez `manifest_error`; stan bez członu manifestu."""
+    import dataclasses
+    from test_harvest import _open_pada_dla, _wydanie_na_dysku, _wynik_wbpp
+    from horreum.gui.harvest_dialog import manifest_error_text, release_date_cell, release_state_tip
+    from horreum.gui.wb_worker import wiersz_systemu
+    jezyk_okna(lang)
+    zamkniety = _wydanie_na_dysku(tmp_path, "ZAMKNIETY")
+    _wynik_wbpp(zamkniety, "masterFlat_A.xisf")
+    zly = _wydanie_na_dysku(tmp_path, "ZLY")
+    (zly / projection.MANIFEST_NAME).write_bytes(b"{")
+    sciezka = zamkniety / projection.MANIFEST_NAME
+    _open_pada_dla(monkeypatch, {sciezka: _odmowa_odczytu(sciezka)})
+    rows = {os.path.basename(r.object_root): r for r in harvest.releases([str(tmp_path / "_WBPP")])}
+    z, u = rows["ZAMKNIETY"], rows["ZLY"]
+    klasa = i18n.t("objchg.item.os_denied", os_code="Errno 13")
+    assert release_state_text(z).startswith(i18n.t("harvest.rel.manifest_unreadable", msg=klasa)), z
+    assert release_state_text(u) == i18n.t("harvest.rel.manifest_damaged", detail="JSON")
+    tip = release_state_tip(z)
+    assert manifest_error_text(z.manifest_error, str(sciezka)) in tip and wiersz_systemu(z.manifest_error) in tip
+    assert i18n.t("harvest.manifest_damaged", path=str(zly / projection.MANIFEST_NAME), detail="JSON") in \
+        release_state_tip(u)
+    wciagniety = dataclasses.replace(z, pending=0, done=3)
+    assert not is_harvested(wciagniety) and is_harvested(dataclasses.replace(wciagniety, manifest_error=None))
+    drzewo = dataclasses.replace(rows["ZLY"], ts="2026-10-09T14:57:23+00:00",
+                                 ts_source=projection.TS_SOURCE_TREE, manifest_error=None)
+    tekst, podpowiedz = release_date_cell(drzewo)
+    assert tekst == i18n.t("harvest.rel.date_tree", date=release_date_text(drzewo.ts))
+    assert podpowiedz == i18n.t("harvest.rel.date_tree_tip", ts=drzewo.ts)
+    assert release_date_cell(dataclasses.replace(drzewo, ts_source=None)) == (
+        release_date_text(drzewo.ts), drzewo.ts)
+    if lang == "en":
+        for w in (release_state_text(z), release_state_text(u), tekst, podpowiedz):
+            assert not set(w) & set("„ąćęłńóśźż"), w
+
+
+def test_find_manifest_zatrzymuje_sie_na_nieczytelnym_najblizszym(tmp_path, monkeypatch):
+    """AR-234: manifest najbliższego wydania, którego nie da się przeczytać, KOŃCZY szukanie
+    z powodem w `errors_out` - manifest poziom wyżej należy do innego drzewa i nie może świadczyć;
+    bez listy szukanie idzie wyżej jak dotąd. Falsyfikator: szukanie dalej mimo błędu."""
+    from test_harvest import _open_pada_dla
+    wyzej = tmp_path / "karta"
+    wydanie = wyzej / "OBJECTS" / "X"
+    out = wydanie / "out"
+    out.mkdir(parents=True)
+    (wyzej / projection.MANIFEST_NAME).write_text(json.dumps({"layout": "po-obiektach"}), encoding="utf-8")
+    (wydanie / projection.MANIFEST_NAME).write_text(json.dumps({"layout": "wbpp-obiekt"}), encoding="utf-8")
+    sciezka = wydanie / projection.MANIFEST_NAME
+    _open_pada_dla(monkeypatch, {sciezka: _odmowa_odczytu(sciezka)})
+    bledy = []
+    assert find_manifest(str(out), errors_out=bledy) == (str(wydanie), None)
+    assert [(p, w.code) for p, w in bledy] == [(str(sciezka), "os_denied")]
+    assert find_manifest(str(out)) == (str(wyzej), {"layout": "po-obiektach"})
+
+
+def test_podglad_wyjscia_pod_manifestem_nieczytelnym_mowi_klase_zamiast_planu(qapp, tmp_path, ustawienia,
+                                                                            monkeypatch):
+    """AR-234: podgląd wyjścia WBPP, nad którym manifest wydania leży, a nie da się go przeczytać -
+    sonda pada zdaniem o manifeście ze ścieżką i klasą w roli błędu (szczegół systemu pod kursorem),
+    bez planu („Wciągnij” wygaszone); wcześniej plan bez świadka mówił stosom „brak manifestu”.
+    Falsyfikator: `HarvestDryWorker` z `find_manifest` bez `errors_out`."""
+    from test_harvest import _open_pada_dla, _wydanie_na_dysku
+    con, _profile, _flats = _baza(tmp_path)
+    wydanie = _wydanie_na_dysku(tmp_path, "ZAMKNIETY")
+    out = _wyjscie(wydanie, {"masterFlat_A.xisf": b"A"}, sub=("out", "master"))
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    sciezka = wydanie / projection.MANIFEST_NAME
+    _open_pada_dla(monkeypatch, {sciezka: _odmowa_odczytu(sciezka)})
+    ustawienia.setValue("harvest/last_output", str(out))
+    dlg = _dlg(con, tmp_path / "ARCH")
+    klasa = i18n.t("objchg.item.os_denied", os_code="Errno 13")
+    assert dlg.notice.text() == i18n.t("harvest.manifest_unreadable", path=str(sciezka), msg=klasa)
+    assert dlg.notice.property("role") == "error" and "Errno 13" in dlg.notice.toolTip()
+    assert dlg._plan is None and not dlg.btn_apply.isEnabled()
+    dlg.reject()
     con.close()

@@ -174,6 +174,14 @@ def _bez_przedrostka(path):
     return path[4:] if path.startswith("\\\\?\\") else path
 
 
+def _blad_windows(err, path):
+    """Błąd wywołania Windows jako `OSError` z kodem i ŚCIEŻKĄ katalogu (AR-242): `ctypes.WinError(err)`
+    nie niesie nazwy, a wiersz CLI `streaks` drukuje `exc.filename`. Podklasa i `errno` z `winerror`
+    jak u `ctypes.WinError` - wzór `scan.canonize_root` (AR-212), `writeback._blad_windows`."""
+    import ctypes
+    return OSError(None, ctypes.FormatError(err).rstrip(" .\r\n"), path, err)
+
+
 def _przypnij(path, powod):
     """Przypięcie katalogu `path` (AR-51) → `(uchwyt, ścieżka końcowa)`; dowiązanie albo junction =
     `RaportOdmowa(powod)` bez uchwytu.
@@ -194,13 +202,13 @@ def _przypnij(path, powod):
     uchwyt = k32.CreateFileW(path, list_directory, share_read_write, None, open_existing,
                              backup_semantics | open_reparse_point, None)
     if uchwyt in (None, ctypes.c_void_p(-1).value):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _blad_windows(ctypes.get_last_error(), path)
     try:
         if _dowiazanie(path):
             raise RaportOdmowa(powod)
         buf = ctypes.create_unicode_buffer(32768)
         if not k32.GetFinalPathNameByHandleW(uchwyt, buf, len(buf), 0):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _blad_windows(ctypes.get_last_error(), path)
     except BaseException:
         k32.CloseHandle(uchwyt)
         raise

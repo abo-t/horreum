@@ -336,8 +336,9 @@ def test_okno_sciezki_po_zamknieciu_zdanie_i_awaria_kart_na_pasku(sciezka_karty,
 
 
 def test_szczegol_zyje_tyle_co_zdanie_przy_zmianie_miejsca(qapp, tmp_path, pola_inline):
-    """Raport Zbiorów ze szczegółem gaśnie przy wejściu na Dom razem z podpowiedzią; raport bez
-    miejsca zostaje ze szczegółem. Falsyfikator: szczegół zdejmowany osobno od zdania."""
+    """Raport Zbiorów ze szczegółem gaśnie przy wejściu na Dom razem z podpowiedzią; raport ze
+    szczegółem, któremu wołający nie podał miejsca, wiąże się z bieżącą stroną (AR-236) - gaśnie przy
+    wejściu w Zbiory razem ze szczegółem. Falsyfikator: szczegół zdejmowany osobno od zdania."""
     path, con, _pliki = _baza_z_plikami(tmp_path, 1)
     con.close()
     win = MainWindow(str(path))
@@ -351,8 +352,9 @@ def test_szczegol_zyje_tyle_co_zdanie_przy_zmianie_miejsca(qapp, tmp_path, pola_
         assert win.report_label.text() == "" and win.report_label.szczegol() == ""
         assert win.statusBar().toolTip() == ""
         win._flash(ZdanieZeSzczegolem("bez miejsca", _tip()))
-        win._show_view(NAV_ZBIORY)
         assert win.report_label.text() == "bez miejsca" and win.report_label.szczegol() == _tip()
+        win._show_view(NAV_ZBIORY)
+        assert win.report_label.text() == "" and win.report_label.szczegol() == ""
     finally:
         win.close()
 
@@ -1010,3 +1012,510 @@ def test_okno_sciezki_udane_ponowienie_nie_niesie_starej_awarii(sciezka_karty, m
     dlg = okna[-1]
     assert dlg.error.text() == "" and dlg.error.szczegol() == ""
     assert zdania[-1] == dlg.status.text() and _tip() not in szczegol_zdania(zdania[-1])
+
+
+# ============================================================ AR-235, AR-243 - pole zdania: tekst zwykły, menu
+
+import re  # noqa: E402
+
+from PySide6.QtCore import QPoint  # noqa: E402
+
+from horreum.gui.app import NAV_PORZADKI  # noqa: E402
+
+from test_gui_app_object import NOW_PD, _nameless_tree, _select_review_tag, repair  # noqa: E402,F401
+
+_ZNACZNIK = r"BŁĄD: plik zajęty przez inny program (X:\L\<a>.fits)"
+
+
+def _prawy_klik(pole, punkt=None):
+    """PRAWDZIWY prawy klik: zdarzenie myszy przez okno najwyższego poziomu (`QWindow`), jak od
+    systemu - Qt sam składa z niego `QContextMenuEvent`. `QTest.mouseClick` na widżecie doręcza
+    samą mysz i menu kontekstowego nie budzi (zmierzone: 0 zdarzeń na `windows` i `offscreen`).
+    Pozycja w oknie przez współrzędne ekranu (`mapToGlobal` → `mapFromGlobal` uchwytu okna)."""
+    punkt = punkt or QPoint(5, pole.height() // 2)
+    uchwyt = pole.window().windowHandle()
+    QTest.mouseClick(uchwyt, Qt.RightButton, Qt.NoModifier, uchwyt.mapFromGlobal(pole.mapToGlobal(punkt)))
+    QApplication.processEvents()
+
+
+def _menu_otwarte_na(pole):
+    """Akcje menu własnego, które prawy klik otworzył NA TYM polu (aktywne menu wyskakujące)."""
+    assert pole._menu is not None and QApplication.activePopupWidget() is pole._menu, pole
+    return {a.text(): a for a in pole._menu.actions()}
+
+
+def test_pole_zdania_tekst_zwykly_nazwa_w_ksztalcie_znacznika(qapp):
+    """AR-235: zdanie z nazwą pliku w kształcie znacznika HTML (`<a>.fits`) - pole pokazuje je
+    całe: zaznaczenie całości to całe zdanie, render pola bez zawijania nie węższy od zdania. Klasa
+    i podklasa szuflady (`_ZdanieWyniku`) w formacie tekstu zwykłego. Falsyfikator: `AutoText`
+    (domyślny `QLabel`) - Qt bierze `<a>` za znacznik: zaznaczenie puste, render krótszy o `<a>`
+    (zmierzone natywnie: 247 px zamiast 270 px)."""
+    from horreum.gui.grid_selection import _ZdanieWyniku
+    assert EtykietaBledu("").textFormat() == Qt.PlainText == _ZdanieWyniku("").textFormat()
+    pole = EtykietaBledu("")
+    pole.setWordWrap(True)
+    pole.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    pole.resize(900, 60)
+    pole.show()
+    pasek = EtykietaBledu("")
+    try:
+        pole.ustaw(_ZNACZNIK)
+        pole.setSelection(0, len(QLabel.text(pole)))
+        assert pole.selectedText() == _ZNACZNIK
+        pasek.ustaw(_ZNACZNIK)
+        assert pasek.sizeHint().width() >= pasek.fontMetrics().horizontalAdvance(_ZNACZNIK)
+    finally:
+        pole.close()
+
+
+def test_pole_bledu_okna_zapisu_bez_szczegolu_prawy_klik_kopiuje_sciezke(repair, monkeypatch):
+    """AR-243 (wizytacja natywna): prawdziwe okno „Napraw nagłówek…”, klik „Zapisz karty”,
+    plik zajęty przez inny program (kod 32 - poza klasami, więc BEZ szczegółu, a ścieżka w zdaniu):
+    pole błędu jest niezaznaczalne, a prawdziwy prawy klik otwiera na nim menu „Kopiuj zdanie”,
+    które kopiuje zdanie ze ścieżką bez znaku łamania. Falsyfikator: menu własne tylko na polu
+    zaznaczalnym (warunek sprzed AR-243) - prawy klik bez menu, ścieżki nie ma czym skopiować."""
+    _v, _con, _files, _open = repair
+
+    def _zajety(*_a, **_k):
+        raise OSError(None, "Proces nie może uzyskać dostępu do pliku.", r"X:\L\a.fits", 32)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _zajety)
+    dlg = _open()
+    dlg.show()
+    try:
+        QTest.mouseClick(dlg.save_btn, Qt.LeftButton)
+        assert r"X:\L\a.fits" in dlg.error.text() and dlg.error.szczegol() == ""
+        assert not dlg.error.textInteractionFlags() & Qt.TextSelectableByMouse
+        assert _LAMANIE in QLabel.text(dlg.error)
+        _prawy_klik(dlg.error)
+        pozycje = _menu_otwarte_na(dlg.error)
+        assert list(pozycje) == [i18n.t("wb.copy_sentence")]
+        QGuiApplication.clipboard().setText("")
+        pozycje[i18n.t("wb.copy_sentence")].trigger()
+        assert QGuiApplication.clipboard().text() == dlg.error.text()
+        dlg.error._menu.hide()
+    finally:
+        dlg.reject()
+
+
+def test_raport_paska_bez_sciezki_i_szczegolu_prawy_klik_kopiuje_cale_zdanie(qapp):
+    """AR-243, wariant szeroki: KAŻDE niepuste pole niezaznaczalne ma „Kopiuj zdanie” - także raport
+    paska gospodarza bez ścieżki i bez szczegółu, ucięty elizją do zapasu paska: kopia to PEŁNE
+    zdanie. Pole puste menu własnego nie dostaje. Falsyfikator: menu własne tylko przy ścieżce albo
+    szczególe (wariant wąski) - raport bez obu zostaje bez drogi do schowka."""
+    win = MainWindow()
+    try:
+        win.resize(700, 400)
+        win.show()
+        QApplication.processEvents()
+        dlugie = "Wciągnięto 3 mastery z wyjścia WBPP; " * 8
+        win._flash(dlugie)
+        assert win.report_label.text().endswith("…") and _LAMANIE not in QLabel.text(win.report_label)
+        _prawy_klik(win.report_label)
+        pozycje = _menu_otwarte_na(win.report_label)
+        assert list(pozycje) == [i18n.t("wb.copy_sentence")]
+        pozycje[i18n.t("wb.copy_sentence")].trigger()
+        assert QGuiApplication.clipboard().text() == dlugie
+        win.report_label._menu.hide()
+        menu = win.report_label._menu
+        win._wygas_raport()
+        _prawy_klik(win.report_label)
+        assert win.report_label._menu is menu                        # puste pole - nowe menu nie powstaje
+    finally:
+        win.close()
+
+
+# ============================================================ AR-236 - raport ze szczegółem bez wygasania
+
+
+def _czekaj_ms(ms):
+    """Prawdziwy zegar: pętla zdarzeń przez `ms` milisekund (`processEvents` + `sleep`)."""
+    koniec = time.monotonic() + ms / 1000
+    while time.monotonic() < koniec:
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.005)
+
+
+def _okno_na_zbiorach(tmp_path):
+    path, con, _pliki = _baza_z_plikami(tmp_path, 1)
+    con.close()
+    win = MainWindow(str(path))
+    win.show()
+    win._show_view(NAV_ZBIORY)
+    _czekaj(lambda: not win.grid_view._zbior_w_drodze() and win.grid_view._frame_ids, "zbiór startu")
+    QApplication.processEvents()
+    return win
+
+
+def test_raport_ze_szczegolem_nie_gasnie_zegarem_i_gasnie_z_miejscem(qapp, tmp_path, pola_inline):
+    """AR-236, prawdziwy zegar (czas życia skrócony do 50 ms): raport ze szczegółem stoi po 300 ms
+    i jest związany z bieżącą stroną, zdanie bez szczegółu gaśnie zegarem jak dawniej; raport ze
+    szczegółem bez miejsca od wołającego gaśnie przy wejściu na Dom; raport z tła z JAWNYM brakiem
+    wiązania (`_flash_dostawy` poza Dostawą) przeżywa nawigację i zegar - gaśnie dopiero następny
+    raport. Falsyfikatory: `ms` raportu ze szczegółem bez zmiany (gaśnie po 50 ms); pominięte miejsce
+    bez wiązania (przeżywa wejście na Dom); jawne `None` wiązane z bieżącą stroną (gaśnie z nią)."""
+    win = _okno_na_zbiorach(tmp_path)
+    try:
+        win._flash(ZdanieZeSzczegolem("awaria zapisu", _tip()), ms=50)
+        _czekaj_ms(300)
+        assert win.report_label.text() == "awaria zapisu" and win.report_label.szczegol() == _tip()
+        assert win._miejsce_komunikatu == STRONA_ZBIORY and not win._zegar_raportu.isActive()
+        win._flash("zdanie bez szczegółu", ms=50)
+        _czekaj(lambda: win.report_label.text() == "", "zdanie bez szczegółu gaśnie zegarem", s=5)
+        win._flash(ZdanieZeSzczegolem("bez miejsca", _tip()))
+        win._show_view(NAV_DOM)
+        assert win.report_label.text() == "" and win.report_label.szczegol() == ""
+        assert win.statusBar().toolTip() == ""
+        win._flash_dostawy(ZdanieZeSzczegolem("awaria etapu z tła", _tip()))
+        assert win._miejsce_komunikatu is None and not win._zegar_raportu.isActive()
+        win._show_view(NAV_ZBIORY)
+        _czekaj_ms(100)
+        assert win.report_label.text() == "awaria etapu z tła" and win.report_label.szczegol() == _tip()
+        win._flash("następny raport")
+        assert win.report_label.szczegol() == ""
+    finally:
+        win.close()
+
+
+def test_raport_ze_szczegolem_ustepuje_zdaniu_etapu_po_oknie_priorytetu(qapp, tmp_path, pola_inline):
+    """AR-236 × AR-97: zdanie etapu Dostawy, które nadeszło w oknie priorytetu raportu ze szczegółem,
+    czeka do końca okna i wtedy zastępuje raport (okno skrócone do 100 ms, prawdziwy zegar) - raport
+    ze szczegółem nie wstrzymuje stanu etapu dłużej niż raport zwykły. Falsyfikator: zdanie etapu
+    czekające do zgaśnięcia raportu ze szczegółem (zmiana AR-97 bez decyzji)."""
+    win = _okno_na_zbiorach(tmp_path)
+    try:
+        win._zegar_priorytetu.setInterval(100)
+        win._flash(ZdanieZeSzczegolem("awaria zapisu", _tip()))
+        win._raport_etapu("Grupowanie: gotowe.")
+        assert win.report_label.text() == "awaria zapisu"
+        _czekaj(lambda: win.report_label.text() == "Grupowanie: gotowe.", "zdanie etapu po oknie", s=5)
+        assert win.report_label.szczegol() == "" and win.statusBar().toolTip() == "Grupowanie: gotowe."
+    finally:
+        win.close()
+
+
+def _naprawa_reka_testu(monkeypatch, akcja):
+    """`RepairHeaderDialog.exec` prowadzony ręką testu: zapis inline, `akcja(dlg)` (prawdziwe kliki),
+    zamknięcie. Zwraca listę otwartych okien."""
+    from horreum.gui import app as app_mod
+    okna = []
+
+    def _exec(dlg):
+        okna.append(dlg)
+        dlg._runner.async_ok = False
+        dlg.show()
+        akcja(dlg)
+        return QDialog.Rejected
+    monkeypatch.setattr(app_mod.RepairHeaderDialog, "exec", _exec)
+    return okna
+
+
+def _odmowa_zapisu(*_a, **_k):
+    raise OSError(None, "Odmowa dostępu.", r"X:\L\a.fits", 5)
+
+
+def test_okno_naprawy_po_zamknieciu_wynik_na_pasku(repair, monkeypatch):
+    """AR-236: prawdziwy klik „Napraw nagłówek…” na kubełku bezimiennych i klik „Zapisz karty”:
+    zapis pada `OSError` 5 - po zamknięciu okna widok osi emituje zdanie pola błędu ze szczegółem
+    (plik, który padł); okno zamknięte bez biegu nie mówi nic; udany zapis - zdanie wyniku.
+    Falsyfikatory: `_on_repair` bez emisji; emisja bez warunku biegu; zdanie bez nośnika szczegółu."""
+    v, _con, _files, _open = repair
+    v.resize(1200, 800)
+    v.show()
+    zdania = _komunikaty(v)
+    blad = i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _odmowa_zapisu)
+    okna = _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
+    _select_review_tag(v, "nameless")
+    QTest.mouseClick(v.repair_btn, Qt.LeftButton)
+    assert okna and zdania[-1] == blad and szczegol_zdania(zdania[-1]) == _tip()
+    ile = len(zdania)
+    _naprawa_reka_testu(monkeypatch, lambda dlg: None)
+    _select_review_tag(v, "nameless")
+    QTest.mouseClick(v.repair_btn, Qt.LeftButton)
+    assert len(zdania) == ile                                        # bez biegu - cisza
+    monkeypatch.undo()
+    okna = _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
+    zdania.clear()
+    _select_review_tag(v, "nameless")
+    QTest.mouseClick(v.repair_btn, Qt.LeftButton)
+    assert zdania == [okna[-1].status.text()] and "commit" in zdania[0]
+    assert szczegol_zdania(zdania[0]) == ""
+
+
+def test_wynik_okna_naprawy_na_pasku_przezywa_nawigacje_i_zegar(qapp, tmp_path, monkeypatch, pola_inline):
+    """AR-236, gospodarz: wynik „Napraw nagłówek…” z awarią zapisu idzie drogą wyniku gestu osi
+    (`_raport_miejsca(wiaz=False)` - jak „Zatwierdź ze ścieżki…”): stoi na pasku ze szczegółem, bez
+    zegara i bez wiązania - przejście na Dom go nie zdejmuje, zdejmuje go następny raport.
+    Falsyfikatory: wiązanie jawnego `None` z bieżącą stroną (gaśnie przy przejściu); zegar 5 s."""
+    path = tmp_path / "naprawa.db"
+    con = db.open_db(str(path))
+    for p in _nameless_tree(tmp_path):
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
+                           summary=scan.ScanSummary())
+    con.close()
+    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _odmowa_zapisu)
+    _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
+    win = MainWindow(str(path))
+    try:
+        win.resize(1400, 900)
+        win.show()
+        win._show_view(NAV_PORZADKI)
+        from horreum.gui import tasks as tasks_mod
+        win.tasks_view.pages.setCurrentIndex(tasks_mod._PAGE_OBJECTS)
+        os_ = win.object_view
+        os_.refresh()
+        QApplication.processEvents()
+        _select_review_tag(os_, "nameless")
+        QTest.mouseClick(os_.repair_btn, Qt.LeftButton)
+        blad = i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+        assert win._pelny_komunikat == blad and win.report_label.szczegol() == _tip()
+        assert win._miejsce_komunikatu is None and not win._zegar_raportu.isActive()
+        win._show_view(NAV_DOM)
+        QApplication.processEvents()
+        assert win.report_label.text() == blad and win.report_label.szczegol() == _tip()
+        assert win.statusBar().toolTip() == blad + "\n" + _tip()
+        win._flash("następny raport")
+        assert win.report_label.szczegol() == ""
+    finally:
+        win.close()
+
+
+# ============================================================ AR-237 - miejsce w kodzie błędu programu
+
+_DYSK = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def _miejsce(detail):
+    """`(plik, linia)` z końcówki ` @ horreum/<plik>.py:<linia>` szczegółu albo None."""
+    m = re.search(r" @ (horreum/[\w/]+\.py):(\d+)$", detail)
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def _linia_pakietu(plik, nr):
+    import horreum
+    return (pathlib.Path(horreum.__file__).parent.parent / plik).read_text(encoding="utf-8").splitlines()[nr - 1]
+
+
+def test_blad_programu_miejsce_w_kodzie_z_najglebszej_ramki_pakietu(qapp, tmp_path, monkeypatch):
+    """AR-237: prawdziwy błąd biblioteki (`json` na uszkodzonym assecie planera) wołanej z kodu
+    pakietu - szczegół techniczny kończy się miejscem w `horreum` (linia `targets.py`, która wołała
+    `json.loads`), względnym, z ukośnikiem `/`; zdanie bez zmian. Falsyfikatory: ostatnia ramka śladu
+    bez filtra pakietu (`[-1]` - plik `json` ze ścieżką instalacji Pythona); ścieżka absolutna."""
+    from horreum import targets
+    zly = tmp_path / "targets_zly.json"
+    zly.write_text("{", encoding="utf-8")
+    monkeypatch.setattr(targets, "_asset_file", lambda layer: zly)
+    try:
+        targets.load_targets()
+    except ValueError as exc:
+        wyjatek = exc
+    else:
+        raise AssertionError("uszkodzony asset nie rzucił")
+    powod = powod_okna(wyjatek)
+    detail = dict(powod.params)["detail"]
+    assert str(powod) == CATALOG["objchg.item.prog_error"]["pl"]
+    assert detail.startswith(f"{type(wyjatek).__name__}: {wyjatek} @ ")
+    plik, nr = _miejsce(detail)
+    assert plik == "horreum/targets.py" and "json.loads" in _linia_pakietu(plik, nr)
+    assert not _DYSK.search(detail) and "\\" not in detail.rsplit(" @ ", 1)[1]
+
+
+def _rzut_z_pliku(nazwa):
+    """Wyjątek rzucony z kodu skompilowanego pod nazwą pliku `nazwa` (ramka śladu z tą nazwą)."""
+    przestrzen = {}
+    exec(compile("def f():\n    raise KeyError('x')\n", nazwa, "exec"), przestrzen)
+    try:
+        przestrzen["f"]()
+    except KeyError as exc:
+        return exc
+    raise AssertionError(nazwa)
+
+
+def test_blad_programu_miejsce_z_ramki_exe_i_spoza_pakietu():
+    """AR-237: ramka w formie exe PyInstallera (`co_filename` względny od pakietu,
+    `horreum\\gui\\…` - zmierzone w PYZ wydania) daje miejsce `horreum/gui/zamrozony.py:2`; ramka
+    spoza katalogu pakietu (ten sam dysk, segment `horreum` w ścieżce), z innego dysku i forma
+    względna, która wychodzi spod `horreum` (`..`, człon z dyskiem, oba ukośniki) - szczegół bez
+    miejsca, nigdy ścieżka absolutna. Falsyfikatory: bez gałęzi ścieżki względnej (exe bez
+    miejsca); dopasowanie po segmencie `horreum` zamiast po katalogu pakietu; forma względna
+    sprawdzana tylko pierwszym członem (`horreum/../obcy.py` przechodzi)."""
+    import horreum
+    detail = dict(powod_okna(_rzut_z_pliku("horreum\\gui\\zamrozony.py")).params)["detail"]
+    assert _miejsce(detail) == ("horreum/gui/zamrozony.py", 2), detail
+    obok = str(pathlib.Path(horreum.__file__).resolve().parent.parent / "obcy" / "horreum" / "x.py")
+    for nazwa in (obok, r"X:\inne\horreum\gui\obcy.py", "horreum/../obcy.py", "horreum\\..\\obcy.py",
+                  "horreum/C:/Users/x.py", "horreum\\C:\\Users\\x.py", "horreum/./gui/x.py", "horreum"):
+        detail = dict(powod_okna(_rzut_z_pliku(nazwa)).params)["detail"]
+        assert detail == "KeyError: 'x'", (nazwa, detail)
+
+
+# Moduł pakietu w formie exe (nazwa pliku względna od `horreum`) z łańcuchami wyjątków; numery linii
+# to część testu: 2 = źródło (`wewn`), 7/12/17 = przepakowanie w handlerze, 19 = przepakowanie cudzej
+# przyczyny.
+_LANCUCH = ("def wewn():\n"
+            "    raise KeyError('x')\n"
+            "def jawny():\n"
+            "    try:\n"
+            "        wewn()\n"
+            "    except KeyError as e:\n"
+            "        raise ValueError('y') from e\n"
+            "def niejawny():\n"
+            "    try:\n"
+            "        wewn()\n"
+            "    except KeyError:\n"
+            "        raise ValueError('y')\n"
+            "def wyciszony():\n"
+            "    try:\n"
+            "        wewn()\n"
+            "    except KeyError:\n"
+            "        raise ValueError('y') from None\n"
+            "def przepakuj(e):\n"
+            "    raise ValueError('y') from e\n")
+
+
+def _rzucony(f, *args):
+    try:
+        f(*args)
+    except Exception as exc:                       # noqa: BLE001 - test zbiera dowolny wyjątek
+        return exc
+    raise AssertionError(f)
+
+
+def test_blad_programu_miejsce_z_przyczyny_zrodlowej_lancucha():
+    """AR-237, łańcuch wyjątków: miejsce w kodzie to źródło błędu, nie przepakowanie - jawny łańcuch
+    (`raise … from e`) i niejawny (wyjątek w handlerze) wskazują linię `wewn`, wyjątek zewnętrzny
+    UTWORZONY z przyczyną (bez własnego śladu) też; kontekst wyciszony (`from None`) - linia
+    przepakowania; przyczyna bez ramki pakietu (rzucona poza nim) - linia ogniwa zewnętrznego; cykl
+    w łańcuchu nie wiesza reguły. Falsyfikatory: sam ślad wyjątku zewnętrznego (7, 12, brak miejsca);
+    kontekst wyciszony brany mimo `from None` (2 zamiast 17); bez powrotu do ogniwa zewnętrznego
+    (brak miejsca zamiast 19)."""
+    ns = {}
+    exec(compile(_LANCUCH, "horreum\\gui\\lancuch.py", "exec"), ns)
+
+    def _linia(exc):
+        detail = dict(powod_okna(exc).params)["detail"]
+        assert detail.startswith(f"{type(exc).__name__}: {exc}"), detail
+        return _miejsce(detail)
+    zrodlo = ("horreum/gui/lancuch.py", 2)
+    assert _linia(_rzucony(ns["jawny"])) == zrodlo
+    assert _linia(_rzucony(ns["niejawny"])) == zrodlo
+    zewnetrzny = ValueError("y")
+    zewnetrzny.__cause__ = _rzucony(ns["wewn"])
+    assert zewnetrzny.__traceback__ is None and _linia(zewnetrzny) == zrodlo
+    assert _linia(_rzucony(ns["wyciszony"])) == ("horreum/gui/lancuch.py", 17)
+    obca = _rzucony(lambda: {}["z"])
+    assert _linia(_rzucony(ns["przepakuj"], obca)) == ("horreum/gui/lancuch.py", 19)
+    a, b = ValueError("a"), KeyError("b")
+    a.__context__, b.__context__ = b, a
+    assert _linia(a) is None
+
+
+def test_blad_programu_z_watku_tla_niesie_miejsce_w_kodzie(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-237: rachunek planera w PRAWDZIWYM wątku tła pada błędem programu - szczegół pod
+    nagłówkiem nocy niesie miejsce w kodzie pakietu (linia planera, która wołała rdzeń): powód liczy
+    się w handlerze wątku, więc ślad jest pełny, a do okna jedzie gotowy tekst. Falsyfikator:
+    `detail` bez miejsca."""
+    from horreum import targets
+    from horreum.gui.planner import PlannerView
+    from test_gui_planner import _seed
+    path = str(tmp_path / "planer_watek.db")
+    con = _seed(path)
+
+    def _rdzen_pada(*_a, **_k):
+        raise KeyError("lights")
+    monkeypatch.setattr(targets, "plan", _rdzen_pada)
+    v = PlannerView(con, db_path=path)
+    try:
+        v.replan()
+        assert v._thread is not None                                  # bieg w wątku tła
+        _czekaj(lambda: v._thread is None and v.night_label.szczegol(), "błąd rachunku z wątku")
+        glowa = i18n.t("objchg.st.detail_tip", detail="KeyError: 'lights'")
+        assert v.night_label.szczegol().startswith(glowa + " @ ")
+        plik, nr = _miejsce(v.night_label.szczegol())
+        assert plik == "horreum/gui/planner.py" and "targets.plan(" in _linia_pakietu(plik, nr)
+    finally:
+        _czekaj(lambda: v._thread is None, "wątek planera")
+        v.close()
+        con.close()
+
+
+# ============================================================ AR-236 - pasek po zamknięciu okna bez martwych przycisków
+
+
+def _tylko_do_odczytu(pliki, tak):
+    for p in pliki:
+        os.chmod(p, stat.S_IREAD if tak else stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_naprawa_cofniecie_niedokonczone_pasek_po_zamknieciu_bez_przycisku_cofnij(repair, monkeypatch):
+    """AR-236: „Napraw nagłówek…” - prawdziwy zapis kart, pliki tylko do odczytu, prawdziwy klik
+    „Cofnij”: cofnięcie niedokończone, okno mówi „„Cofnij” ponowi…”. Po zamknięciu okna przycisku
+    nie ma - zdanie paska to ten sam ogon z poleceniem CLI ponowienia tego commitu w miejscu etykiety
+    przycisku. Falsyfikatory: pasek ze zdaniem pola okna (obietnica martwego „Cofnij”); wariant bez
+    numeru commitu."""
+    v, con, files, _open = repair
+    v.resize(1200, 800)
+    v.show()
+    zdania = _komunikaty(v)
+    cofnij = "„" + i18n.t("grid.action.undo") + "”"
+
+    def _zapis_i_cofniecie(dlg):
+        QTest.mouseClick(dlg.save_btn, Qt.LeftButton)
+        assert dlg._commit_id is not None
+        _tylko_do_odczytu(files, True)
+        try:
+            QTest.mouseClick(dlg.undo_btn, Qt.LeftButton)
+        finally:
+            _tylko_do_odczytu(files, False)
+    okna = _naprawa_reka_testu(monkeypatch, _zapis_i_cofniecie)
+    _select_review_tag(v, "nameless")
+    QTest.mouseClick(v.repair_btn, Qt.LeftButton)
+    dlg = okna[-1]
+    assert cofnij in dlg.status.text() and not dlg.undo_btn.isHidden()      # okno: „Cofnij” zostaje
+    polecenie = i18n.t("wb.undo_cli", db=queries.db_path_of(con), id=dlg._commit_id)
+    assert zdania[-1] == dlg.status.text().replace(cofnij, f"„{polecenie}”")
+    assert cofnij not in zdania[-1] and f"--undo {dlg._commit_id}" in zdania[-1]
+
+
+@pytest.mark.parametrize("niedokonczone", [True, False])
+def test_sciezka_cofniecie_kart_pasek_po_zamknieciu_bez_martwych_przyciskow(sciezka_karty, monkeypatch,
+                                                                            niedokonczone):
+    """AR-236: „Zatwierdź ze ścieżki…” - prawdziwe zatwierdzenie z kartą w pliku, potem „Cofnij karty”:
+    plik tylko do odczytu - cofnięcie niedokończone, pasek po zamknięciu mówi polecenie CLI zamiast
+    „Cofnij karty”; cofnięcie domknięte - okno mówi „„Zatwierdź” dopisze karty ponownie”, pasek sam
+    stan, bez obietnicy przycisku. Falsyfikator: pasek ze zdaniem pola okna."""
+    from horreum.gui import app as app_mod
+    v, con, pliki, _fid = sciezka_karty
+    okna = []
+
+    def _exec(dlg):
+        okna.append(dlg)
+        dlg._runner.async_ok = False
+        dlg.show()
+        QTest.mouseClick(dlg.confirm_btn, Qt.LeftButton)
+        assert dlg._commit_id is not None
+        _tylko_do_odczytu([pliki["zapis"]], niedokonczone)
+        try:
+            QTest.mouseClick(dlg.undo_btn, Qt.LeftButton)
+        finally:
+            _tylko_do_odczytu([pliki["zapis"]], False)
+        return QDialog.Accepted
+    monkeypatch.setattr(app_mod.ConfirmPathObjectsDialog, "exec", _exec)
+    v.resize(1200, 800)
+    v.show()
+    wiersz = next(r for r in range(v.review.count())
+                  if v.review.item(r).data(app_mod._REVIEW_PAYLOAD) == app_mod.PATH_STACKS_PAYLOAD)
+    v.review.setCurrentRow(wiersz)
+    zdania = _komunikaty(v)
+    QTest.mouseClick(v.confirm_path_btn, Qt.LeftButton)
+    dlg = okna[-1]
+    if niedokonczone:
+        przycisk = "„" + i18n.t("path.undo_cards_btn") + "”"
+        assert przycisk in dlg.status.text()
+        polecenie = i18n.t("wb.undo_cli", db=queries.db_path_of(con), id=dlg._commit_id)
+        assert zdania[-1] == dlg.status.text().replace(przycisk, f"„{polecenie}”")
+    else:
+        nota_okna = i18n.t("path.cards_restored_note")
+        assert dlg.status.text().endswith(nota_okna)
+        assert zdania[-1] == dlg.status.text().replace(nota_okna, i18n.t("path.cards_restored_closed_note"))
+        assert nota_okna not in zdania[-1]

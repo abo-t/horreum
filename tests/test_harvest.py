@@ -819,7 +819,7 @@ def _wydanie(tmp_path, zestawy, *, object_canon="IC1795"):
         z[seg] = {"lights": list(ids)}
         if names is not None:
             z[seg]["names"] = dict(zip(names, ids))
-    return {"layout": projection.OBJECT_LAYOUT, "object_canon": object_canon,
+    return {"layout": projection.OBJECT_LAYOUT, "object_id": 1, "object_canon": object_canon,
             "root": str(tmp_path / "_WBPP" / "OBJECTS" / object_canon), "zestawy": z}
 
 
@@ -1164,9 +1164,9 @@ def _sesja_dwoch_wydan(tmp_path):
     w wydaniu IC1795: grupa IC1795 skalibrowana flatem z wydania Cr464, grupa Cr464 darkiem IC1795."""
     obj = tmp_path / "_WBPP" / "OBJECTS"
     ic_seg, cr_seg = "A140R_ASI2600MM", ZESTAW
-    ic = {"layout": projection.OBJECT_LAYOUT, "object_canon": "IC1795", "root": str(obj / "IC1795"),
+    ic = {"layout": projection.OBJECT_LAYOUT, "object_id": 1, "object_canon": "IC1795", "root": str(obj / "IC1795"),
           "zestawy": {ic_seg: {"lights": [1, 2], "names": {"IC1795_H_0000.fits": 1, "IC1795_H_0001.fits": 2}}}}
-    cr = {"layout": projection.OBJECT_LAYOUT, "object_canon": "Cr464", "root": str(obj / "Cr464"),
+    cr = {"layout": projection.OBJECT_LAYOUT, "object_id": 2, "object_canon": "Cr464", "root": str(obj / "Cr464"),
           "zestawy": {cr_seg: {"lights": [7], "names": {"Cr464_B_0000.fits": 7}}}}
     out = obj / "IC1795" / "out"
     flat_cr = (obj / "Cr464" / cr_seg / "MASTER" / "flat" / "masterFlat_B.xisf").as_posix()
@@ -1435,8 +1435,10 @@ def _wydanie_na_dysku(tmp_path, obiekt="IC1795", *, ts="2026-10-09T10:00:00+00:0
                       layout=projection.OBJECT_LAYOUT):
     root = tmp_path / karta / projection.OBJECT_NAMESPACE / obiekt
     root.mkdir(parents=True)
+    # Nagłówek jak manifest wydania (`object_id`, `root`) - żniwa walidują strukturę zeznania (AR-234).
     (root / projection.MANIFEST_NAME).write_text(json.dumps(
-        {"layout": layout, "object_canon": obiekt, "ts": ts, "zestawy": {}}), encoding="utf-8")
+        {"layout": layout, "object_id": 1, "object_canon": obiekt, "root": str(root), "ts": ts,
+         "zestawy": {}}), encoding="utf-8")
     return root
 
 
@@ -1819,13 +1821,29 @@ def test_releases_karta_z_objects_nieczytelnym_mowi_o_sobie(tmp_path, monkeypatc
     assert [(k, w.code) for k, w in bledy] == [(str(karta), "os_denied")]
 
 
-def test_releases_katalog_i_manifest_wydania_nieczytelne_mowia_o_karcie(tmp_path, monkeypatch):
-    """AR-222 (`releases`, po udanym `listdir(OBJECTS)`): katalog wydania z odmową (5) i manifest
-    wydania na zerwanym udziale (53) nie milczą jak brak - karta z powodem klasą w `errors_out`, raz
-    na kartę (drugi błąd tej samej karty nie dubluje wpisu); wydanie czytelne obok zostaje na liście,
-    folder bez manifestu dalej milczy. Falsyfikatory: `os.path.isdir` katalogu wydania - K1 bez wpisu;
-    bez `os.stat` manifestu - wydanie C wraca na listę (otwarcie pliku przechodzi), K2 bez wpisu;
-    bez „raz na kartę” - K1 dwa razy."""
+def _open_pada_dla(monkeypatch, bledy):
+    """`open` widziany przez `projection` (odczyt manifestu) rzuca `bledy[ścieżka]` (bez wielkości
+    liter); reszta jak zwykle. Kształt jak prawdziwa odmowa odczytu danych pliku (`icacls /deny RD`):
+    `os.stat` przechodzi, pada dopiero otwarcie."""
+    import builtins
+    prawdziwy = builtins.open
+    bledy = {os.path.normcase(str(k)): v for k, v in bledy.items()}
+
+    def _open(p, *a, **kw):
+        exc = bledy.get(os.path.normcase(os.fspath(p))) if isinstance(p, (str, os.PathLike)) else None
+        if exc is not None:
+            raise exc
+        return prawdziwy(p, *a, **kw)
+    monkeypatch.setattr(projection, "open", _open, raising=False)
+
+
+def test_releases_katalog_wydania_mowi_o_karcie_a_manifest_o_wydaniu(tmp_path, monkeypatch):
+    """AR-222 + AR-234 (`releases`, po udanym `listdir(OBJECTS)`): katalog wydania z odmową (5) - karta
+    z powodem klasą w `errors_out`, raz na kartę; manifest, który leży, a jego otwarcie pada zerwanym
+    udziałem (53) - WIERSZ wydania z `manifest_error` klasą (bez kanonu i daty), nie karta i nie
+    milczenie; wydanie czytelne obok zostaje, folder bez manifestu dalej milczy. Falsyfikatory:
+    `os.path.isdir` katalogu wydania - K1 bez wpisu; `releases` z tolerancyjnym `read_manifest` -
+    wydania E i C znikają z listy bez słowa."""
     a = _wydanie_na_dysku(tmp_path, "A", karta="K1")
     _wydanie_na_dysku(tmp_path, "B", karta="K1")
     e = _wydanie_na_dysku(tmp_path, "E", karta="K1")
@@ -1834,13 +1852,16 @@ def test_releases_katalog_i_manifest_wydania_nieczytelne_mowia_o_karcie(tmp_path
     odmowa = PermissionError(None, "Odmowa dostępu", str(a), 5)
     _bez_winerror(odmowa, 5)
     zerwany = lambda p: OSError(None, "Nie można odnaleźć ścieżki sieciowej", str(p), 53)  # noqa: E731
-    _pada_dla(monkeypatch, "stat", {a: odmowa, e / projection.MANIFEST_NAME: zerwany(e),
-                                    c / projection.MANIFEST_NAME: zerwany(c)})
+    _pada_dla(monkeypatch, "stat", {a: odmowa})
+    _open_pada_dla(monkeypatch, {e / projection.MANIFEST_NAME: zerwany(e),
+                                 c / projection.MANIFEST_NAME: zerwany(c)})
     bledy = []
     rows = harvest.releases([str(tmp_path / "K1"), str(tmp_path / "K2")], errors_out=bledy)
-    assert [r.object_canon for r in rows] == ["B"]
-    assert [(k, w.code) for k, w in bledy] == [(str(tmp_path / "K1"), "os_denied"),
-                                               (str(tmp_path / "K2"), "os_share_lost")]
+    assert [(os.path.basename(r.object_root), r.object_canon, r.ts,
+             getattr(r.manifest_error, "code", None)) for r in rows] == [
+        ("B", "B", "2026-10-09T10:00:00+00:00", None), ("C", None, None, "os_share_lost"),
+        ("E", None, None, "os_share_lost")]
+    assert [(k, w.code) for k, w in bledy] == [(str(tmp_path / "K1"), "os_denied")]
 
 
 # ============================================================ AR-213: żniwa po naprawie manifestu wydania
@@ -1848,7 +1869,8 @@ def test_releases_katalog_i_manifest_wydania_nieczytelne_mowia_o_karcie(tmp_path
 def _wydanie_po_naprawie_bez_czasu(tmp_path):
     """PRAWDZIWE wydanie obiektu NGC 6992 (RC8: light `lb1` z master flatem) zegarem `NOW`, manifest
     skasowany, wyjście WBPP z jednym kandydatem żniw zapisanym PO wydaniu, naprawa bez dowodu czasu
-    (`ts` None) → `(con, plan, root, karta, ids, stary manifest)`."""
+    (`ts` None - także bez daty z drzewa: `_czas_z_drzewa` None na czas naprawy, AR-240) →
+    `(con, plan, root, karta, ids, stary manifest)`."""
     from test_projection import _klatka, _osie, _stan
     con = db.open_db(str(tmp_path / "zn.db"))
     _osie(con)
@@ -1869,8 +1891,10 @@ def _wydanie_po_naprawie_bez_czasu(tmp_path):
     with open(wynik_wbpp, "wb") as fh:
         fh.write(b"A")
     assert harvest.releases([karta]) == []                    # bez manifestu wydania nie ma na liście
-    wynik = projection.repair_manifest(con, p, root, copy=False, now="2026-10-11T00:00:00+00:00",
-                                       manifest=projection.object_manifest(p), do_write=True)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(projection, "_czas_z_drzewa", lambda *_a: None)
+        wynik = projection.repair_manifest(con, p, root, copy=False, now="2026-10-11T00:00:00+00:00",
+                                           manifest=projection.object_manifest(p), do_write=True)
     assert wynik.status == "written"
     return con, p, root, karta, ids, stary
 
@@ -1906,3 +1930,82 @@ def test_zniwa_widza_wydanie_po_naprawie_manifestu(tmp_path):
     assert harvest._names_index(harvest._object_witness(manifest)).hits("lb1_c.xisf") == {(seg, lb1)}
     assert harvest._release(manifest, [f1]) == ("NGC 6992", seg)
     con.close()
+
+
+# ============================================================ AR-234 / AR-240: lista wydań - manifest ścisły, data z drzewa
+
+def test_releases_manifest_uszkodzony_i_bez_prawa_odczytu_to_wiersz_z_powodem(tmp_path, monkeypatch):
+    """AR-234: manifest, który LEŻY, a nie da się go przeczytać, nie znika z listy jak brak - odmowa
+    odczytu po udanym `stat` (errno 13 bez `winerror`, kształt z prawdziwego ACL) daje wiersz
+    z `manifest_error` klasą `os_denied`, uszkodzony JSON - wiersz z `proj_manifest_damaged`; oba bez
+    kanonu i daty, z liczbami wyjścia; karta bez wpisu w `errors_out`, wydanie czytelne obok jak
+    dotąd. Falsyfikator: `releases` z `read_manifest` bez `errors_out` (wiersze znikają)."""
+    import errno
+    _wydanie_na_dysku(tmp_path, "OK")
+    zly = _wydanie_na_dysku(tmp_path, "ZLY")
+    (zly / projection.MANIFEST_NAME).write_bytes(b"{")
+    zamkniety = _wydanie_na_dysku(tmp_path, "ZAMKNIETY")
+    _wynik_wbpp(zamkniety, "masterFlat_A.xisf")
+    sciezka = zamkniety / projection.MANIFEST_NAME
+    _open_pada_dla(monkeypatch, {sciezka: PermissionError(errno.EACCES, "Permission denied", str(sciezka))})
+    bledy = []
+    rows = harvest.releases([str(tmp_path / "_WBPP")], errors_out=bledy)
+    po_nazwie = {os.path.basename(r.object_root): r for r in rows}
+    assert set(po_nazwie) == {"OK", "ZLY", "ZAMKNIETY"} and bledy == []
+    assert po_nazwie["OK"].manifest_error is None and po_nazwie["OK"].object_canon == "OK"
+    z = po_nazwie["ZAMKNIETY"]
+    assert (z.object_canon, z.ts, z.manifest_error.code, z.pending) == (None, None, "os_denied", 1)
+    u = po_nazwie["ZLY"].manifest_error
+    assert (u.code, dict(u.params)) == ("proj_manifest_damaged",
+                                        {"detail": "JSON", "path": str(zly / projection.MANIFEST_NAME)})
+
+
+def test_zniwa_czytaja_date_z_drzewa_jako_orientacyjna(tmp_path):
+    """AR-240: manifest naprawiony z datą z drzewa (`ts_source: "tree"`) - wiersz niesie `ts` i jego
+    źródło i sortuje się po dacie, ale data z drzewa NIE jest dowodem czasu wydania: wynik WBPP starszy
+    od niej nie daje „czeka na WBPP” (stan nieznany, jak przy `ts: None`); manifest bez klucza
+    (wydanie) czyta się jak dotąd (`ts_source` None). Falsyfikator: `awaiting_wbpp` z daty z drzewa."""
+    drzewo = _wydanie_na_dysku(tmp_path, "Z_DRZEWA", ts="2026-10-12T10:00:00+00:00")
+    m = json.loads((drzewo / projection.MANIFEST_NAME).read_text(encoding="utf-8"))
+    (drzewo / projection.MANIFEST_NAME).write_text(json.dumps(
+        {**m, "ts_source": projection.TS_SOURCE_TREE, "repaired_at": "2026-10-13T00:00:00+00:00"}),
+        encoding="utf-8")
+    _wynik_wbpp(drzewo, "masterFlat_A.xisf")                     # wynik WBPP starszy od daty z drzewa
+    _wydanie_na_dysku(tmp_path, "WYDANE", ts="2026-10-09T10:00:00+00:00")
+    rows = harvest.releases([str(tmp_path / "_WBPP")])
+    assert [(r.object_canon, r.ts, r.ts_source) for r in rows] == [
+        ("Z_DRZEWA", "2026-10-12T10:00:00+00:00", projection.TS_SOURCE_TREE),
+        ("WYDANE", "2026-10-09T10:00:00+00:00", None)]
+    assert not rows[0].awaiting_wbpp and rows[0].pending == 1
+
+
+def test_odtworzone_drzewo_mlodsze_od_wynikow_nie_czeka_na_wbpp(tmp_path):
+    """AR-240: PRAWDZIWE wydanie, manifest skasowany, wynik WBPP z czasem sprzed folderów drzewa (drzewo
+    odtworzone albo skopiowane - foldery młodsze od wyników), naprawa bierze datę z drzewa - lista
+    wydań pokazuje ją (`ts_source` "tree"), ale NIE mówi „czeka na WBPP”: wyniki powstały po
+    prawdziwym wydaniu. Falsyfikator: `awaiting_wbpp` liczone z daty z drzewa."""
+    con, p, root, karta, _ids, stary = _wydanie_po_naprawie_bez_czasu(tmp_path)
+    os.remove(os.path.join(root, projection.MANIFEST_NAME))
+    if projection._czas_z_drzewa(root, "RC8_ASI2600MM") is None:
+        pytest.skip("wolumen folderów zestawów bez czasu założenia (`st_birthtime`)")
+    wynik = os.path.join(root, projection.OUTPUT_DIR, "master", "masterFlat_A.xisf")
+    os.utime(wynik, (PRZED, PRZED))                              # wynik starszy od folderów drzewa
+    naprawa = projection.repair_manifest(con, p, root, copy=False, now="2026-10-12T00:00:00+00:00",
+                                         manifest=projection.object_manifest(p), do_write=True)
+    assert naprawa.payload["ts_source"] == projection.TS_SOURCE_TREE
+    [row] = harvest.releases([karta])
+    assert (row.ts_source, row.awaiting_wbpp, row.pending) == (projection.TS_SOURCE_TREE, False, 1)
+    assert row.ts == naprawa.payload["ts"]
+    con.close()
+
+
+def test_releases_manifest_z_polem_zlego_typu_to_wiersz_uszkodzony(tmp_path):
+    """AR-234: manifest obiektu - poprawny JSON z polem złego typu (`"ts": 5`) - żniwa uznają go za
+    uszkodzony TYM SAMYM walidatorem co okno wydania (`_odmowa_starego`): wiersz z `manifest_error`
+    `proj_manifest_damaged` (`detail` "ts"), nigdy wiersz wciągnięty nad zeznaniem, którego naprawa
+    by nie przyjęła. Falsyfikator: `read_manifest(errors_out=)` bez walidacji struktury."""
+    root = _wydanie_na_dysku(tmp_path, "ZLY_TYP")
+    m = json.loads((root / projection.MANIFEST_NAME).read_text(encoding="utf-8"))
+    (root / projection.MANIFEST_NAME).write_text(json.dumps(dict(m, ts=5)), encoding="utf-8")
+    [row] = harvest.releases([str(tmp_path / "_WBPP")])
+    assert (row.manifest_error.code, dict(row.manifest_error.params)["detail"]) == ("proj_manifest_damaged", "ts")

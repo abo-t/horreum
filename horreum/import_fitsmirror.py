@@ -11,7 +11,8 @@ Przebieg (`run_import`):
      `canonize_root` (guard UNC, forma literowa — §0); `volume_serial(root)` ustalony (None →
      abort, brama przyrostowa przyszłych skanów musi trafiać); ZBIORY ścieżek: każdy plik dawcy
      osiągalny `os.stat` MUSI być w pełnym listingu `iter_headers` (rozjazd = zatrucie tożsamości:
-     casing/wykluczenia → przyszły skan zdublowałby lokacje — abort); braki (stat nieudany) →
+     casing/wykluczenia → przyszły skan zdublowałby lokacje - abort; ścieżki pod katalogiem, którego
+     listing nie przeczytał - abort z klasą błędu, AR-233); braki (stat nieudany) →
      `skipped` §4.3, chyba że plik przeniosła ta instalacja Horreum - wtedy stoi pod ścieżką
      z mapy relokacji żywej bazy (`read_relocations`, AR-130) i liczy się jako osiągalny;
      nadwyżka listingu = nowe pliki (XISF ~331 - domyka PF-4, tylko raport).
@@ -175,7 +176,7 @@ def _assert_donor_complete(donor):
     Wiersz 'unreadable' albo bez obliczalnej tożsamości (sha1_data NULL bez degeneracji
     z sha1_file) nie ma czego zaimportować → abort z listą (decyzja przy dawcy, nie tu).
 
-    `sha1_file IS NULL` = TWARDY brak (Z4): plik czytelny ZAWSZE ma odcisk całości, więc NULL
+    `sha1_file IS NULL` = TWARDY brak: plik czytelny ZAWSZE ma odcisk całości, więc NULL
     znaczy „nieodczytany", a `location.file_sha1` NULL rozbraja marker nieczytelności (#13 —
     gałąź podmiany z degeneratem ominęłaby oznaczenie kopii). Wiersz z `sha1_data` OK ale
     `sha1_file NULL` jest sam w sobie sprzeczny (odcisku danych nie policzysz bez odczytu pliku)
@@ -363,6 +364,41 @@ def _mtime_iso_from_epoch(mtime_epoch):
     return _mtime_iso(_St)
 
 
+def _klucz_porownania(sciezka):
+    """Ścieżka do porównania prefiksem: bez wielkości liter (NTFS) i z jednym separatorem - ścieżki
+    dawcy bywają zapisane z `/`, a listing skanu składa je z `os.sep` (AR-233)."""
+    return os.path.normcase(str(sciezka)).replace("\\", "/").rstrip("/")
+
+
+def _pod_katalogiem(sciezka, katalog):
+    """Czy `sciezka` leży w `katalog` (leksykalnie, bez dotykania dysku)."""
+    k = _klucz_porownania(katalog)
+    return bool(k) and _klucz_porownania(sciezka).startswith(k + "/")
+
+
+def _klasa_katalogu(sciezka):
+    """Klasa błędu katalogu, którego listing skanu nie przeczytał (AR-233) - ponowna próba listingu
+    (`os.scandir` pada w konstruktorze), bo `scan.iter_headers` oddaje w `errors_out` samą ścieżkę.
+    Klasa od właściciela z surowym tekstem (`proza_z_diagnoza`, wzór AR-212); katalog czytelny przy
+    ponownej próbie to błąd przejściowy - zdanie mówi to wprost."""
+    try:
+        with os.scandir(sciezka):
+            pass
+    except OSError as exc:
+        return proza_z_diagnoza(blad_systemu(exc, z_typem=False))
+    return "czytelny przy ponownej probie (blad przejsciowy)"
+
+
+def _opis_nieprzeczytanych(katalogi):
+    """Człon zdania o katalogach nieprzeczytanych przez listing: liczba, pierwszy i jego klasa
+    (`_klasa_katalogu`). Wpis walkera bez ścieżki (`scan._iter_suffixes` wkłada wtedy tekst
+    wyjątku) nie idzie do ponownej próby - zdanie niesie go bez klasy."""
+    wpis = str(katalogi[0])
+    if not os.path.isabs(wpis):
+        return f"{len(katalogi)} katalogow; pierwszy zgloszony bez sciezki: {wpis}"
+    return f"{len(katalogi)} katalogow; pierwszy: {wpis} - {_klasa_katalogu(wpis)}"
+
+
 def preflight(donor, *, rng_seed=None, repaired_paths=None, relocations=None):
     """Pre-flight §4.1 (twarde, EXPECT; zero zapisu). Zwraca `Preflight` z materiałem pętli
     (stats, missing→skipped, relocated, recompute) albo rzuca `ImportAbort`.
@@ -438,15 +474,42 @@ def preflight(donor, *, rng_seed=None, repaired_paths=None, relocations=None):
     # zbiory ścieżek (R2#1/R3-a3): stat-OK ⊆ pełny listing — rozjazd zatruwa tożsamość
     # (casing/wykluczenia → przyszły skan dubluje lokacje przy tym samym serialu) → abort.
     # Porównujemy ścieżki FIZYCZNE: plik przeniesiony stoi w listingu pod ścieżką obecną.
+    # Katalog, którego listing NIE PRZECZYTAŁ (AR-233: odmowa, zerwany udział - `stat` plików pod nim
+    # przechodzi), daje ścieżki poza listingiem z innej przyczyny niż casing: abort mówi ją klasą.
     fizyczne = {pf.relocated.get(p, p) for p in pf.stats}
-    listing = set(map(str, iter_headers(root)))
+    nieprzeczytane = []
+    listing = set(map(str, iter_headers(root, errors_out=nieprzeczytane)))
     unlisted = sorted(fizyczne - listing)
+    pod_bledem = [p for p in unlisted if any(_pod_katalogiem(p, k) for k in nieprzeczytane)]
+    if pod_bledem:
+        reszta = len(unlisted) - len(pod_bledem)
+        raise ImportAbort(
+            f"{len(pod_bledem)} sciezek dawcy osiagalnych na dysku lezy w katalogach, ktorych listing "
+            f"skanu nie przeczytal ({_opis_nieprzeczytanych(nieprzeczytane)}) - tozsamosci tych sciezek "
+            f"nie da sie sprawdzic; przywroc dostep (uprawnienia, udzial) i powtorz import"
+            + (f"; poza nimi {reszta} sciezek poza listingiem bez bledu odczytu (casing albo katalog "
+               f"wykluczony _WBPP/_Review)" if reszta else "")
+            + f". Probka: {'; '.join(pod_bledem[:10])}")
+    bez_sciezki = [str(k) for k in nieprzeczytane if not os.path.isabs(str(k))]
+    if unlisted and bez_sciezki:
+        # Walker zgłosił błąd odczytu bez ścieżki (`scan._iter_suffixes` wkłada wtedy tekst wyjątku):
+        # listing jest niepełny, a którego katalogu dotyczy - nie wiadomo, więc przyczyny niezlistowanych
+        # ścieżek nie przypisujemy ani katalogowi, ani casingowi.
+        raise ImportAbort(
+            f"{len(unlisted)} sciezek dawcy osiagalnych na dysku NIE MA w listingu skanu, a listing byl "
+            f"niepelny - blad odczytu katalogu bez sciezki ({bez_sciezki[0]}); przyczyny nie da sie "
+            f"przypisac - usun przyczyne bledu odczytu i powtorz import. Probka: {'; '.join(unlisted[:10])}")
     if unlisted:
         sample = "; ".join(unlisted[:10])
         raise ImportAbort(
             f"{len(unlisted)} sciezek dawcy osiagalnych na dysku NIE MA w listingu skanu "
-            f"(casing albo katalog wykluczony _WBPP/_Review) — przyszly skan zdublowalby "
+            f"(casing albo katalog wykluczony _WBPP/_Review) - przyszly skan zdublowalby "
             f"lokacje; wyjasnij zanim import ruszy. Probka: {sample}")
+    if nieprzeczytane:
+        # Bez ścieżek dawcy pod nimi (katalog systemowy pod korzeniem dysku, cudzy katalog) import
+        # rusza jak dotąd - ale nadwyżka nie widzi plików w tych katalogach.
+        pf.notes.append(f"{len(nieprzeczytane)} katalogow pod korzeniem dawcy nieprzeczytanych przez "
+                        f"listing ({_opis_nieprzeczytanych(nieprzeczytane)}) - nadwyzka moze byc niepelna")
     surplus = sorted(listing - fizyczne - set(pf.missing))
     pf.surplus = len(surplus)
     pf.surplus_sample = surplus[:10]

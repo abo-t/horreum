@@ -75,7 +75,7 @@ from .card_rules import FITS_RECORD as _FITS_RECORD
 from .resolve.paths import path_key   # ścieżka FIZYCZNA (bez wielkości liter) - jak planer i straż
 from .object_change import ZdanieRdzenia   # ostrzeżenie gestu z kodem dla okna (AR-138)
 from .item_reasons import (ITEM_REASON_CODES,   # powód z kodem (AR-141, AR-148)
-                           PowodPozycji, dopisz_z_koperta, powod_wyjatku, z_bazy)
+                           OdmowaZPowodem, PowodPozycji, dopisz_z_koperta, powod_wyjatku, z_bazy)
 # Błędy systemu klasą - właściciel `item_reasons` (AR-168, AR-184); nazwy modułu zostają dla miejsc pisarza.
 from .item_reasons import (blad_systemu as _blad_systemu, proza_z_diagnoza as _proza_z_diagnoza,
                            szczegoly_systemu as _szczegoly_systemu)
@@ -305,9 +305,19 @@ def _rozjazd_odcisku(sciezka: str, odcisk: _Odcisk, *, z_mtime: bool = True) -> 
         if not zgodne]
 
 
+def _blad_windows(err: int, path: str) -> OSError:
+    """Błąd wywołania Windows (`GetLastError`) jako `OSError` z kodem i ŚCIEŻKĄ pliku (AR-242) - wzór
+    `scan.canonize_root` (AR-212). `ctypes.WinError(err)` dawało `[WinError 5] Odmowa dostępu.` bez
+    nazwy pliku, więc przy wsadzie szczegół nie mówił, który plik padł. Podklasę i `errno` CPython
+    wylicza z `winerror` tak samo jak dla `ctypes.WinError` (klasa `powod_systemu` bez zmian); tekst
+    systemu bez kropki końcowej, jak w wyjątkach CPythona, za nim `: 'ścieżka'`."""
+    return OSError(None, ctypes.FormatError(err).rstrip(" .\r\n"), path, err)
+
+
 def _replace_file_w(path: str, tmp: str, kopia: str) -> None:
     """`ReplaceFileW(path, tmp, kopia)` - plik `path` pod nazwę `kopia`, `tmp` pod `path`. Porażka →
-    `OSError` z `winerror`. Poza Windows → `OSError` (podmiana z backupem niedostępna)."""
+    `OSError` z `winerror` i ścieżką `path` (`_blad_windows`; kopia i plik tymczasowy stoją w zdaniach
+    powodów podmiany). Poza Windows → `OSError` (podmiana z backupem niedostępna)."""
     if sys.platform != "win32":
         raise OSError("podmiana z pełnym backupem wymaga Windows (ReplaceFileW)")
     from ctypes import wintypes
@@ -316,7 +326,7 @@ def _replace_file_w(path: str, tmp: str, kopia: str) -> None:
     k32.ReplaceFileW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
                                  wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p)
     if not k32.ReplaceFileW(path, tmp, kopia, _REPLACEFILE_FLAGS, None, None):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _blad_windows(ctypes.get_last_error(), path)
 
 
 class _PodmianaOdbita(Exception):
@@ -775,10 +785,13 @@ def _set_nth(hdr, keyword: str, n: int, value, comment: str | None) -> None:
 def _apply_op(hdr, op: WriteOp) -> None:
     value = _coerce(op.value, op.value_type)
     if op.op == "add":
-        # Jawne dodanie BRAKUJACEGO keyworda (astropy dopisuje na koniec). Obrona przed wyscigiem:
-        # gdy keyword juz jest, `add` nie nadpisuje cicho (to robi `set`).
+        # Jawne dodanie BRAKUJACEGO keyworda (astropy dopisuje na koniec). Gdy keyword juz jest, `add`
+        # nie nadpisuje cicho (to robi `set`) - odmowa z kodem bliźniaczym podglądu makra
+        # (`macro_add_exists`, AR-232), plik nietknięty. W produkcie ten stan zatrzymuje wcześniej
+        # kotwica `header_hash` stagingu (nowa karta zmienia nagłówek); tu dochodzi wołający bez kotwicy.
         if _count_keyword(hdr, op.keyword) > 0:
-            raise ValueError(f"add: keyword '{op.keyword}' juz istnieje (uzyj set)")
+            raise OdmowaZPowodem(PowodPozycji(f"karta '{op.keyword}' już istnieje (użyj set)",
+                                              "macro_add_exists", keyword=op.keyword))
         hdr[op.keyword] = (value, op.comment) if op.comment is not None else value
         return
     if op.op == "set":
@@ -943,8 +956,14 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
                 info = hdul.fileinfo(index)
                 start, data_start = info["hdrLoc"], info["datLoc"]
                 komentarze = _fits_comments_before(hdr, ops)
-                for op in ops:
-                    _apply_op(hdr, op)
+                # Odmowa łaty (`add` na karcie, która już jest, AR-232) - przed plikiem tymczasowym,
+                # jak bramki wyżej. Wąsko wokół `_apply_op`: odmowa z kodem dalej w `try` (np. z klingi
+                # po podmianie) nie może udawać pliku nietkniętego.
+                try:
+                    for op in ops:
+                        _apply_op(hdr, op)
+                except OdmowaZPowodem as exc:
+                    return WriteResult("blocked", exc.powod, None)
                 powod = _fits_comment_loss(hdr, komentarze)      # AR-7: przed plikiem tymczasowym
                 if powod is not None:
                     return WriteResult("blocked", powod, None)
@@ -1932,7 +1951,8 @@ def _exclusive(path: str):
     Niezmierzone: drugi komputer. Drogi atomowe (`write_changes`, `write_xisf_changes`,
     `write_full_header`) trzymają ją przez odczyt i przygotowanie pliku tymczasowego (AR-18).
     Błąd współdzielenia/blokady przy otwarciu → ponów z przerwami `_LOCK_RETRY_DELAYS`, potem
-    `OSError` (zapis się nie zaczął). Poza Windows → `OSError` (zapis w miejscu niedostępny).
+    `OSError` z kodem i ścieżką pliku (`_blad_windows`, AR-242; zapis się nie zaczął). Poza Windows →
+    `OSError` (zapis w miejscu niedostępny).
 
     WŁASNOŚĆ DESKRYPTORA (astra Z14): deskryptor CRT należy do tej funkcji i jest zamykany dokładnie
     raz w zewnętrznym `finally`; obiekt pliku dostaje go z `closefd=False`, więc wyjątek przy jego
@@ -1954,7 +1974,7 @@ def _exclusive(path: str):
             break
         err = ctypes.get_last_error()
         if err not in _LOCK_TRANSIENT or pauza is None:
-            raise ctypes.WinError(err)
+            raise _blad_windows(err, path)
         time.sleep(pauza)
     try:
         fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
@@ -3748,6 +3768,10 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         w_toku = any(z["id"] == backup_pliku[0]
                      for z in repo.pending_header_backups(con, location_id))
         status = "failed" if w_toku else "blocked"
+        if w_toku:
+            # Podmiana zaszła - spadek na drogę atomową jest faktem o pliku niezależnie od statusu
+            # (AR-161): uwaga drogi idzie za powodem, jak przy zapisie wstrzymanym.
+            reason = _dopisz(reason, droga)
         _mark(rows, status, reason)
         return _ZapisLokacji(FileResult(location_id, path, status, reason), dotknieto=w_toku)
     if res.backup_text is None:       # zapisu nie było: odmowa albo awaria przed plikiem
@@ -3780,9 +3804,11 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
                 "backup_saved_in_isolated", inner=res.reason, commit_id=stan.commit_id,
                 way=_droga_przywroc(dziennik.op_id))
         else:
-            reason = PowodPozycji(f"{res.reason}; backup do cofnięcia zapisany w commicie "
-                                  f"{stan.commit_id}", "backup_saved_in", inner=res.reason,
-                                  commit_id=stan.commit_id)
+            # Droga atomowa: plik PODMIENIONY - spadek z zapisu w miejscu (AR-161) idzie uwagą za
+            # powodem, żeby zdanie okna policzyło przepisany plik także przy 'failed'.
+            reason = _dopisz(PowodPozycji(f"{res.reason}; backup do cofnięcia zapisany w commicie "
+                                          f"{stan.commit_id}", "backup_saved_in", inner=res.reason,
+                                          commit_id=stan.commit_id), droga)
         _mark(rows, "failed", reason)
         return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
     if res.in_place:
@@ -3869,9 +3895,9 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         niezgodne = PowodPozycji(f"plik ZMIENIONY, ale re-sync padł - {blad}", "resync_failed",
                                  detail=blad)
     if niezgodne is not None:
-        reason = PowodPozycji(f"{niezgodne}; backup do cofnięcia zapisany w commicie "
-                              f"{stan.commit_id}", "backup_saved_in", inner=niezgodne,
-                              commit_id=stan.commit_id)
+        reason = _dopisz(PowodPozycji(f"{niezgodne}; backup do cofnięcia zapisany w commicie "
+                                      f"{stan.commit_id}", "backup_saved_in", inner=niezgodne,
+                                      commit_id=stan.commit_id), droga)    # spadek (AR-161)
         _mark(rows, "failed", reason)
         return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
     if wstrzymanie:
@@ -4618,6 +4644,12 @@ def _slad_pary(con, backup_id, sha1, naglowek):
 # obejmuje `ReplaceFileW` i powrót, ale nie okna śladu → straży i straży → usunięcia kopii, więc tej
 # reguły nie zastępuje. Stan „nie wiem” (`scan.path_gone` → `None`: brak uprawnień, zerwany udział) nigdy
 # nie jest brakiem.
+#
+# PRZEGLĄD (AR-231): ślady bez werdyktu, do których nikt nie wraca (lokacja bez kolejnego zapisu ani
+# cofnięcia), przegląda `przejrzyj_slady_cofniecia` - TEN SAM obserwator co bramka (`_rozstrzygnij_slad`),
+# więc też wyłącznie `kept`. Resztka martwej próby trafia do Porządków bez dotyku lokacji; ślad bez resztek
+# zostaje bez werdyktu, bo `clean` z trzech `stat` obserwatora nie ma dowodu (nazwy K i T nie są
+# rezerwowane - mogą wrócić w innej próbie).
 
 
 def _nazwy_sladu(displaced_path: str, prepared_path: str) -> tuple[str, str, str]:
@@ -4633,30 +4665,81 @@ def _rekoncyliuj_slady(con, loc, *, now) -> PowodPozycji | None:
     nazwami (CAS; werdykt kanoniczny rozstrzyga powód) i jednorazowa blokada z powodem; same „nie ma”
     albo „nie wiem” → bez werdyktu i bez blokady (`clean` pisze wyłącznie właściciel - sekcja wyżej).
     Pliki NIGDY nie są ruszane. Porażka (baza, wyjątek odczytu) → powód z klasą błędu i blokada do
-    ponowienia, ślad bez werdyktu. Zwraca pierwszy powód po przejściu wszystkich śladów albo `None`."""
+    ponowienia, ślad bez werdyktu. Zwraca pierwszy powód po przejściu wszystkich śladów albo `None`.
+    Jeden ślad rozstrzyga `_rozstrzygnij_slad` - ten sam co przegląd (AR-231)."""
     powod = None
     for s in sorted(repo.unsettled_atomic_undos(con, loc["id"]), key=lambda r: r["id"]):
-        cid = s["commit_id"]
-        nazwy = _nazwy_sladu(s["displaced_path"], s["prepared_path"])
-        try:
-            stan = {x: scan.path_gone(x) for x in nazwy}
-            if not any(v is False for v in stan.values()):
-                continue
-            kanon = repo.settle_atomic_undo(con, undo_id=s["id"], outcome="kept", kept_paths=nazwy,
-                                            now=now)
-        except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
-            blad = _blad_systemu(exc)
-            powod = powod or PowodPozycji(
-                f"rozstrzygnięcie plików obok ścieżki po cofnięciu commitu {cid} padło ({blad}) - "
-                f"ponów operację", "undo_reconcile_failed", commit_id=cid, detail=blad)
-            continue
-        if kanon["outcome"] == "kept" and powod is None:
-            widoczne = [x for x, v in stan.items() if v is not True]
-            powod = PowodPozycji(
-                f"przerwane cofnięcie commitu {cid} zostawiło obok ścieżki pliki - zostają do oka "
-                f"w Porządkach: {', '.join(widoczne)}", "undo_cut_kept", commit_id=cid,
-                paths=widoczne)
+        werdykt = _rozstrzygnij_slad(con, s, now=now)
+        if werdykt.wynik == "padl":
+            powod = powod or werdykt.powod
+        elif werdykt.wynik == "kept" and powod is None:
+            powod = werdykt.powod
     return powod
+
+
+@dataclasses.dataclass(frozen=True)
+class _WerdyktSladu:
+    """Rozstrzygnięcie JEDNEGO śladu przez obserwatora (`_rozstrzygnij_slad`): `wynik` = werdykt
+    z WIERSZA KANONICZNEGO klingi (`kept`, `clean` - przegrany CAS bierze werdykt zwycięzcy), `bez_werdyktu`
+    (same „nie ma” albo „nie wiem”) albo `padl` (baza, wyjątek odczytu); `powod` - zdanie blokady bramki
+    (`undo_cut_kept` przy kanonicznym `kept`, `undo_reconcile_failed` przy porażce) albo None."""
+    wynik: str
+    powod: PowodPozycji | None = None
+
+
+def _rozstrzygnij_slad(con, s, *, now) -> _WerdyktSladu:
+    """OBSERWATOR JEDNEGO ŚLADU (wiersz `repo.unsettled_atomic_undos`): któraś nazwa śladu JEST na dysku
+    → `kept` z trzema nazwami (CAS), inaczej bez werdyktu (`clean` pisze wyłącznie właściciel - sekcja
+    wyżej). Wspólny dla bramki lokacji (`_rekoncyliuj_slady`) i przeglądu (`przejrzyj_slady_cofniecia`)."""
+    cid = s["commit_id"]
+    nazwy = _nazwy_sladu(s["displaced_path"], s["prepared_path"])
+    try:
+        stan = {x: scan.path_gone(x) for x in nazwy}
+        if not any(v is False for v in stan.values()):
+            return _WerdyktSladu("bez_werdyktu")
+        kanon = repo.settle_atomic_undo(con, undo_id=s["id"], outcome="kept", kept_paths=nazwy,
+                                        now=now)
+    except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
+        blad = _blad_systemu(exc)
+        return _WerdyktSladu("padl", PowodPozycji(
+            f"rozstrzygnięcie plików obok ścieżki po cofnięciu commitu {cid} padło ({blad}) - "
+            f"ponów operację", "undo_reconcile_failed", commit_id=cid, detail=blad))
+    if kanon["outcome"] != "kept":
+        return _WerdyktSladu(kanon["outcome"])
+    widoczne = [x for x, v in stan.items() if v is not True]
+    return _WerdyktSladu("kept", PowodPozycji(
+        f"przerwane cofnięcie commitu {cid} zostawiło obok ścieżki pliki - zostają do oka "
+        f"w Porządkach: {', '.join(widoczne)}", "undo_cut_kept", commit_id=cid, paths=widoczne))
+
+
+@dataclasses.dataclass(frozen=True)
+class PrzegladSladow:
+    """Wynik przeglądu śladów cofnięcia bez werdyktu (`przejrzyj_slady_cofniecia`, AR-231): id śladów wg
+    werdyktu z WIERSZA KANONICZNEGO - `kept` (obok ścieżki widziano plik: wiersz Porządków), `clean`
+    (przegrany CAS - właściciel zdążył), `bez_werdyktu` (same „nie ma” albo „nie wiem”), `padly` (porażka
+    bazy albo odczytu) - i powód pierwszej porażki albo None."""
+    kept: tuple = ()
+    clean: tuple = ()
+    bez_werdyktu: tuple = ()
+    padly: tuple = ()
+    powod: PowodPozycji | None = None
+
+
+def przejrzyj_slady_cofniecia(con, *, now) -> PrzegladSladow:
+    """PRZEGLĄD ŚLADÓW COFNIĘCIA bez werdyktu WSZYSTKICH lokacji (AR-231) - od najstarszego, ten sam
+    obserwator co bramka (`_rozstrzygnij_slad`): resztka martwej próby dostaje `kept` i wiersz Porządków
+    bez dotyku lokacji; ślad bez resztek zostaje bez werdyktu (`clean` wyłącznie właściciel). Porażka
+    jednego śladu nie przerywa przeglądu. Pliki NIGDY nie są ruszane. Wyjątek odczytu listy śladów (baza)
+    leci do wołającego."""
+    wyniki = {"kept": [], "clean": [], "bez_werdyktu": [], "padl": []}
+    powod = None
+    for s in sorted(repo.unsettled_atomic_undos(con), key=lambda r: r["id"]):
+        werdykt = _rozstrzygnij_slad(con, s, now=now)
+        wyniki[werdykt.wynik].append(s["id"])
+        if werdykt.wynik == "padl" and powod is None:
+            powod = werdykt.powod
+    return PrzegladSladow(tuple(wyniki["kept"]), tuple(wyniki["clean"]),
+                          tuple(wyniki["bez_werdyktu"]), tuple(wyniki["padl"]), powod)
 
 
 def _werdykt_wlasciciela(con, undo_id, nazwy, *, commit_id, now,

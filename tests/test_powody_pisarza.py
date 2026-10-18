@@ -689,20 +689,24 @@ def test_FITS_z_suma_odmowa_na_OBU_drogach_tym_samym_powodem(tmp_path):
     assert p.read_bytes() == przed and _sumy_zgodne(p)
 
 
-def test_szuflada_commit_FITS_z_suma_blokuje_bez_commit_id(tmp_path):
-    """AR-166: op szuflady Zbiorów (`commit` bez `inplace`, AR-161) na FITS z sumą - 'blocked', commit
-    bez `commit_id` (nic nie podmieniono), wpis stagingu niesie kod i nazwy kart (trójka 0042)."""
+@pytest.mark.parametrize("inplace", [True, False], ids=["szuflada_w_miejscu", "droga_atomowa"])
+def test_szuflada_commit_FITS_z_suma_blokuje_bez_commit_id(tmp_path, inplace):
+    """AR-166: op szuflady Zbiorów - zapis W MIEJSCU od AR-161 (`commit` = `commit_inplace`) - i droga
+    atomowa rdzenia na FITS z sumą: 'blocked', commit bez `commit_id` (nic nie podmieniono), bez
+    operacji w dzienniku zapisu w miejscu (odmowa przed dziennikiem), wpis stagingu niesie kod i nazwy
+    kart (trójka 0042)."""
     from test_writeback_inplace import _baza_z_plikiem
     p = _fits_z_suma(tmp_path / "s.fits")
     przed = p.read_bytes()
     con, _ = _baza_z_plikiem(tmp_path, p)
-    res = writeback.commit(con, "R", now=NOW)
+    res = writeback.commit(con, "R", now=NOW, inplace=inplace)
     (fr,) = res.blocked
     assert not res.applied and res.commit_id is None and fr.reason.code == "checksum_present"
     (w,) = con.execute("SELECT status, reason_code, reason_args FROM pending_changes "
                        "WHERE run_id = 'R'")
     assert (w[0], w[1]) == ("blocked", "checksum_present")
     assert json.loads(w[2])["sums"] == ["CHECKSUM", "DATASUM"]
+    assert con.execute("SELECT count(*) FROM inplace_op").fetchone()[0] == 0
     assert p.read_bytes() == przed and _sumy_zgodne(p)
     con.close()
 
@@ -1288,3 +1292,146 @@ def test_powod_okna_odmowa_system_baza_i_blad_programu(tmp_path):
         assert dict(powod.params) == {"detail": f"{type(exc).__name__}: {exc}"}
     assert "prog_error" in ITEM_REASON_CODES
     assert "prog_error" not in item_reasons.SYSTEM_REASON_CODES
+
+
+# ============================================================ AR-232: odmowa łaty `add` z kodem podglądu
+
+
+def test_pisarz_add_na_istniejacej_karcie_odmawia_kodem_podgladu(tmp_path):
+    """AR-232: `add` karty, która już jest (wołający bez kotwicy stagingu) - 'blocked' z kodem
+    bliźniaczym podglądu makra (`macro_add_exists`), zdanie PL = wpis katalogu, w oknie PL i EN; plik
+    bajt w bajt, bez pliku tymczasowego obok. Dawniej 'failed' z prozą ASCII `ValueError: add: keyword
+    … juz istnieje (uzyj set)`, choć plik był nietknięty.
+
+    Falsyfikator: `_apply_op` z gołym `ValueError` albo `write_changes` bez wąskiego
+    `except OdmowaZPowodem` → 'failed' z tekstem wyjątku."""
+    pytest.importorskip("PySide6")
+    from test_writeback_inplace import _fits
+    p = _fits(tmp_path / "a.fits")
+    przed = p.read_bytes()
+    res = writeback.write_changes(str(p), [writeback.WriteOp("OBJECT", "add", "NGC 6992", "str")],
+                                  None)
+    assert res.status == "blocked" and res.backup_text is None, res
+    assert res.reason.code == "macro_add_exists" and dict(res.reason.params) == {"keyword": "OBJECT"}
+    assert str(res.reason) == CATALOG["objchg.item.macro_add_exists"]["pl"].format(keyword="OBJECT")
+    _okno(res.reason)
+    assert p.read_bytes() == przed and sorted(x.name for x in tmp_path.iterdir()) == ["a.fits"]
+
+
+def test_commit_bez_kotwicy_add_na_istniejacej_karcie_blokuje_z_kodem_w_bazie(tmp_path):
+    """AR-232 przez `commit` w miejscu (op szuflady i okien, AR-161) przy stagingu BEZ kotwicy
+    `header_hash`: plan w miejscu oddaje spadek (`fb_card_present`), droga atomowa odmawia - wpis
+    stagingu 'blocked' z kodem `macro_add_exists`, bez `commit_id`, bez operacji w dzienniku, plik
+    nietknięty. Falsyfikator: odmowa jako wyjątek łapany szeroko → wpis 'failed' bez kodu."""
+    from test_writeback_inplace import _fits, _loc, _scan_in
+    p = _fits(tmp_path / "a.fits")
+    przed = p.read_bytes()
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    repo.stage_pending(con, run_id="R", location_id=_loc(con, p)["id"], keyword="OBJECT", idx=None,
+                       op="add", old_value=None, new_value="NGC 6992", new_type="str",
+                       new_comment=None, expected_header_hash=None)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    (fr,) = res.blocked
+    assert res.commit_id is None and fr.reason.code == "macro_add_exists", fr.reason
+    (w,) = con.execute("SELECT status, reason_code FROM pending_changes WHERE run_id = 'R'")
+    assert tuple(w) == ("blocked", "macro_add_exists")
+    assert con.execute("SELECT count(*) FROM inplace_op").fetchone()[0] == 0
+    assert p.read_bytes() == przed
+    con.close()
+
+
+@pytest.mark.parametrize("inplace", [True, False], ids=["w_miejscu", "atomowo"])
+def test_wyscig_karty_po_stagingu_lapie_kotwica_naglowka(tmp_path, inplace):
+    """AR-232: karta dopisana przez innego pisarza MIĘDZY stagingiem `add` a zapisem - obie drogi
+    odmawiają kotwicą stagingu (`header_hash_mismatch`, sha1 całego nagłówka) jeszcze przed łatą,
+    więc odmowa `macro_add_exists` pisarza dotyczy wyłącznie wołającego bez kotwicy; plik zostaje
+    w wersji tamtego pisarza. Falsyfikator: kontrola `header_hash` zdjęta → odmowa łaty zamiast
+    kotwicy."""
+    from astropy.io import fits
+    from test_writeback_inplace import _fits, _loc, _scan_in
+    p = _fits(tmp_path / "a.fits")
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    loc = _loc(con, p)
+    repo.stage_pending(con, run_id="R", location_id=loc["id"], keyword="OBJNAME", idx=None,
+                       op="add", old_value=None, new_value="NGC 6992", new_type="str",
+                       new_comment=None, expected_header_hash=loc["header_hash"])
+    fits.setval(str(p), "OBJNAME", value="cudzy")
+    po_cudzym = p.read_bytes()
+    (fr,) = writeback.commit(con, "R", now=NOW, inplace=inplace).blocked
+    assert fr.reason.code == "header_hash_mismatch", fr.reason
+    assert p.read_bytes() == po_cudzym
+    con.close()
+
+
+# ============================================================ AR-242: błąd Windows ze ścieżką pliku
+
+
+@pytest.mark.parametrize("err", [5, 2, 3, 32, 64, 1177])
+def test_blad_windows_ta_sama_klasa_co_ctypes_i_ze_sciezka(err):
+    """AR-242: `_blad_windows` daje tę samą podklasę, `errno`, `winerror` i klasę błędu systemu co
+    `ctypes.WinError` - a do tego ścieżkę (`filename`) i tekst systemu bez kropki końcowej.
+    Falsyfikator: `OSError` bez czwartego argumentu (`winerror`) → inna podklasa i klasa."""
+    import ctypes
+    from horreum.item_reasons import powod_systemu
+    sciezka = r"X:\L\a.fits"
+    stary, nowy = ctypes.WinError(err), writeback._blad_windows(err, sciezka)
+    assert (type(nowy), nowy.errno, nowy.winerror) == (type(stary), stary.errno, stary.winerror)
+    assert getattr(powod_systemu(nowy), "code", None) == getattr(powod_systemu(stary), "code", None)
+    assert nowy.filename == sciezka and not nowy.strerror.endswith(".")
+    assert str(nowy).endswith(f": {sciezka!r}"), str(nowy)
+
+
+def test_odmowa_blokady_niesie_nazwe_pliku_na_obu_drogach_i_w_bazie(tmp_path):
+    """AR-242: prawdziwy plik tylko do odczytu - blokada pliku
+    (`_exclusive`) odmawia `PermissionError` z kodem 5 i ŚCIEŻKĄ; obie drogi zapisu i commit przez
+    bazę mówią klasą `os_denied`, a surowy szczegół (wynik i `reason_args` w bazie) niesie nazwę
+    pliku. Dawniej `[WinError 5] Odmowa dostępu.` bez ścieżki.
+    Falsyfikator: `_exclusive` z `ctypes.WinError(err)`."""
+    import os
+    import stat
+    from test_writeback_inplace import _baza_z_plikiem, _fits
+    p = _fits(tmp_path / "ro.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    os.chmod(p, stat.S_IREAD)
+    try:
+        with pytest.raises(PermissionError) as blad:
+            with writeback._exclusive(str(p)):
+                pass
+        assert blad.value.winerror == 5 and blad.value.filename == str(p)
+        op = [writeback.WriteOp("OBJECT", "set", "NGC 6992", "str", idx=0)]
+        for res in (writeback.write_changes(str(p), op, None),
+                    writeback.write_changes_inplace(str(p), op, None)):
+            assert res.status == "failed" and res.reason.code == "os_denied", res
+            assert repr(str(p)) in dict(res.reason.params)["detail"], res.reason.params
+        (fr,) = writeback.commit(con, "R", now=NOW, inplace=True).failed
+        assert fr.reason.code == "os_denied"
+        (w,) = con.execute("SELECT reason_args FROM pending_changes WHERE run_id = 'R'")
+        assert repr(str(p)) in json.loads(w[0])["detail"]
+    finally:
+        os.chmod(p, stat.S_IREAD | stat.S_IWRITE)
+        con.close()
+
+
+def test_blad_podmiany_systemowej_niesie_sciezke(tmp_path):
+    """AR-242: `ReplaceFileW` bez pliku zastępującego - `FileNotFoundError` z kodem 2 i ścieżką pliku
+    archiwum (`filename`), plik nietknięty, kopia nie powstaje.
+    Falsyfikator: `_replace_file_w` z `ctypes.WinError` → `filename` None."""
+    p = tmp_path / "p.fits"
+    p.write_bytes(b"P" * 2880)
+    kopia = tmp_path / "p.fits.k.horreum-kopia"
+    with pytest.raises(FileNotFoundError) as blad:
+        writeback._replace_file_w(str(p), str(tmp_path / "brak.tmp"), str(kopia))
+    assert blad.value.winerror == 2 and blad.value.filename == str(p)
+    assert p.read_bytes() == b"P" * 2880 and not kopia.exists()
+
+
+def test_szczegol_odmowy_w_oknie_niesie_sciezke_bez_repr():
+    """AR-242: wiersz „Szczegół systemu” okna (`wiersz_systemu`) pokazuje plik, który padł - ścieżką
+    bez podwojonych ukośników zapisu `repr`. Falsyfikator: błąd bez ścieżki → wiersz bez pliku."""
+    pytest.importorskip("PySide6")
+    from horreum.gui.wb_worker import wiersz_systemu
+    sciezka = r"X:\L\a.fits"
+    wiersz = wiersz_systemu(writeback._blad_systemu(writeback._blad_windows(5, sciezka)))
+    assert f"'{sciezka}'" in wiersz and "\\\\" not in wiersz, wiersz

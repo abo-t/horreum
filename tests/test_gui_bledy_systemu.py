@@ -8,6 +8,7 @@ zdejmuje (pole błędu `EtykietaBledu`, raport wydania, notki żniw) - szczegó�
 innym zdaniem. Szuflada Zbiorów nie gubi zdania błędu przy oczekujących zmianach. Ścieżki
 syntetyczne (`X:\\L\\…`) i pliki w `tmp_path`; QSettings izolowane (conftest)."""
 import os
+import re
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")   # przed importem Qt (klasa AR-170)
 
@@ -617,30 +618,46 @@ _ZNANE_SUROWE_MSG = {
 }
 
 
-def _wolania_zdan_gui():
-    """Każdy parametr wołania `i18n.t`/`t_plural` w modułach `horreum/gui` RAZEM z podkatalogami
-    (`flows/`): `(plik, nazwa funkcji, parametr, węzeł wartości, opakowana?, nazwy z except)`. Plik
-    względem `horreum/gui` (`flows/przyjmij.py`), nazwa funkcji kwalifikowana łańcuchem klas i funkcji
-    nad wołaniem (`TelescopeAxisView._on_item_changed`) - metody o tej samej nazwie w dwóch klasach to
-    dwa klucze, nie jeden. Opakowana = wołanie `tekst_powodu`/`czytelny_powod`/`t`/`t_plural`. Nazwy
-    z except = nazwy związane przez `except ... as <nazwa>` w najbliższej obejmującej funkcji."""
+def _moduly_gui():
+    """JEDNO przejście modułów `horreum/gui` RAZEM z podkatalogami (`flows/`) dla zapadek zdań GUI
+    (AR-167, AR-181, AR-210 - AR-238: zapadki z `glob("*.py")` nie widziały `flows/`):
+    `(plik, drzewo, rodzic, przodkowie)`. Plik względem `horreum/gui` (`flows/przyjmij.py`),
+    `rodzic` - mapa węzeł → rodzic, `przodkowie(w)` - obejmujące funkcje i klasy od najbliższej.
+    Klucz miejsca zapadek = nazwa kwalifikowana łańcuchem klas i funkcji (`_nazwa_kwalifikowana`)."""
     import ast
     from pathlib import Path
     import horreum.gui as gui
-    opakowania = {"tekst_powodu", "czytelny_powod", "t", "t_plural"}
     korzen = Path(gui.__file__).parent
     for plik in sorted(korzen.rglob("*.py")):
         drzewo = ast.parse(plik.read_text(encoding="utf-8"))
         rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
 
-        def _przodkowie(w):
+        def _przodkowie(w, rodzic=rodzic):
             while w in rodzic:
                 w = rodzic[w]
                 if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     yield w
+        yield plik.relative_to(korzen).as_posix(), drzewo, rodzic, _przodkowie
 
-        def _funkcja(w):
-            return next((p for p in _przodkowie(w) if not isinstance(p, ast.ClassDef)), None)
+
+def _nazwa_kwalifikowana(przodkowie, w):
+    """Łańcuch klas i funkcji nad węzłem (`TelescopeAxisView._on_item_changed`) albo None - metody
+    o tej samej nazwie w dwóch klasach to dwa klucze, nie jeden."""
+    return ".".join(reversed([p.name for p in przodkowie(w)])) or None
+
+
+def _wolania_zdan_gui():
+    """Każdy parametr wołania `i18n.t`/`t_plural` w modułach `horreum/gui` RAZEM z podkatalogami
+    (`_moduly_gui`): `(plik, nazwa funkcji, parametr, węzeł wartości, opakowana?, nazwy z except)`.
+    Nazwa funkcji kwalifikowana (`_nazwa_kwalifikowana`). Opakowana = wołanie `tekst_powodu`/
+    `czytelny_powod`/`t`/`t_plural`. Nazwy z except = nazwy związane przez `except ... as <nazwa>`
+    w najbliższej obejmującej funkcji."""
+    import ast
+    opakowania = {"tekst_powodu", "czytelny_powod", "t", "t_plural"}
+    for plik, drzewo, _rodzic, przodkowie in _moduly_gui():
+
+        def _funkcja(w, przodkowie=przodkowie):
+            return next((p for p in przodkowie(w) if not isinstance(p, ast.ClassDef)), None)
         z_wyjatku = {}
         for h in ast.walk(drzewo):
             if isinstance(h, ast.ExceptHandler) and h.name:
@@ -650,13 +667,12 @@ def _wolania_zdan_gui():
                     and w.func.attr in ("t", "t_plural") and isinstance(w.func.value, ast.Name)
                     and w.func.value.id == "i18n"):
                 continue
-            nazwa = ".".join(reversed([p.name for p in _przodkowie(w)])) or None
+            nazwa = _nazwa_kwalifikowana(przodkowie, w)
             for k in w.keywords:
                 v = k.value
                 opakowana = isinstance(v, ast.Call) and (
                     v.func.attr if isinstance(v.func, ast.Attribute) else getattr(v.func, "id", None)) in opakowania
-                yield (plik.relative_to(korzen).as_posix(), nazwa, k.arg, v, opakowana,
-                       z_wyjatku.get(_funkcja(w), set()))
+                yield plik, nazwa, k.arg, v, opakowana, z_wyjatku.get(_funkcja(w), set())
 
 
 def test_zapadka_msg_err_e_w_zdaniach_GUI():
@@ -689,8 +705,8 @@ def test_zapadka_tekstu_wyjatku_po_pochodzeniu_w_zdaniach_GUI():
     WPROST nazwy związanej przez `except ... as <nazwa>` tej funkcji (`e`, `str(e)`, `exc.found`), mówi
     przez `tekst_powodu`/`czytelny_powod` albo zdaniem katalogu - nazwa parametru spoza krotek nie chowa
     surowego tekstu wyjątku. Wyjątki: listy obu zapadek po nazwie (te same miejsca, kategoria tam; klucz
-    zapadki AR-167 nie zna klasy - porównanie po samej metodzie) i `_ZNANE_Z_WYJATKU` (wartość nie jest
-    tekstem); wpis własnej listy, którego już nie ma, schodzi z niej.
+    wszystkich trzech zapadek ten sam - plik względem `horreum/gui`, `Klasa.metoda`, AR-238) i
+    `_ZNANE_Z_WYJATKU` (wartość nie jest tekstem); wpis własnej listy, którego już nie ma, schodzi z niej.
 
     Granice skanu (świadome): (1) wyłącznie parametry wołań `i18n.t`/`t_plural` - funkcje-zdania spoza
     katalogu (np. `_set_summary(error=…)` okna żniw) i ujścia bez katalogu (`QMessageBox.warning(...,
@@ -701,9 +717,7 @@ def test_zapadka_tekstu_wyjatku_po_pochodzeniu_w_zdaniach_GUI():
     from test_gui_powody_pisarza import _ZNANE_SUROWE
     znalezione = {(plik, nazwa, arg, ast.unparse(v)) for plik, nazwa, arg, v, opakowana, wyj in _wolania_zdan_gui()
                   if not opakowana and {n.id for n in ast.walk(v) if isinstance(n, ast.Name)} & wyj}
-    znane_ar167 = set(_ZNANE_SUROWE)
-    nowe = {z for z in znalezione - set(_ZNANE_SUROWE_MSG) - set(_ZNANE_Z_WYJATKU)
-            if (z[0], (z[1] or "").rsplit(".", 1)[-1], z[2], z[3]) not in znane_ar167}
+    nowe = znalezione - set(_ZNANE_SUROWE_MSG) - set(_ZNANE_Z_WYJATKU) - set(_ZNANE_SUROWE)
     stare = set(_ZNANE_Z_WYJATKU) - znalezione
     assert not nowe, f"surowy tekst wyjątku w zdaniu GUI: {sorted(nowe)}"
     assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"
@@ -846,6 +860,10 @@ def _okno_zmiany(tmp_path, monkeypatch, _ustawienia, rzut):
 
 _OKNA_WORKEROW = {"planer": _okno_planera, "sonda": _okno_sondy, "wydanie": _okno_wydania,
                   "manifest": _okno_manifestu, "zmiana": _okno_zmiany}
+# Plik pakietu, którego linia woła rdzeń podmieniony w oknie - miejsce w kodzie szczegółu (AR-237).
+_MIEJSCE_WORKERA = {"planer": "gui/planner.py", "sonda": "gui/projection_dialog.py",
+                    "wydanie": "gui/projection_dialog.py", "manifest": "gui/projection_dialog.py",
+                    "zmiana": "gui/object_change_dialog.py"}
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
@@ -885,4 +903,6 @@ def test_cztery_workery_blad_programu_szczegol_techniczny_z_typem(qapp, tmp_path
     (zdanie, szczegol), glowa = _OKNA_WORKEROW[okno](tmp_path, monkeypatch, ustawienia,
                                                       lambda: _rzut(rodzaj, tmp_path))
     assert zdanie.startswith(glowa(i18n.t("objchg.item.prog_error"))), zdanie
-    assert szczegol == _szczegol_programu(rodzaj, tmp_path), szczegol
+    # Miejsce w kodzie (AR-237): linia pakietu, która wołała podmieniony rdzeń okna.
+    assert re.fullmatch(re.escape(_szczegol_programu(rodzaj, tmp_path))
+                        + rf" @ horreum/{re.escape(_MIEJSCE_WORKERA[okno])}:\d+", szczegol), szczegol

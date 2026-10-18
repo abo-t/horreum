@@ -362,3 +362,24 @@ def test_cli_project_apply_scala_manifest_bez_utraty_kod_0_i_1(tmp_path, capsys,
     monkeypatch.setattr(projection, "_write_manifest", _pada)
     assert cli.main(["project", str(dbp), "--root", str(root), "--object", "IC1795", "--apply"]) == 1
     assert (obj_root / projection.MANIFEST_NAME).read_bytes() == przed
+
+
+# ============================================================ AR-234: manifest obiektu nie do zastąpienia innym układem
+
+def test_cli_project_perspektywa_do_folderu_obiektu_nie_zastepuje_jego_manifestu(tmp_path, capsys):
+    """`project --root <folder wydania obiektu> --apply` BEZ `--object` (układ kolumnowy): krok manifestu
+    odmawia `proj_manifest_foreign` (`layout`) - zeznanie wydania obiektu zostaje bajt w bajt, kod 1,
+    wiersz błędu z prozą odmowy, wydruk koduje się w cp1250, bez śladu stosu. Falsyfikator: kontrola
+    starego manifestu tylko w wydaniu obiektu (dawniej `os.replace` zastępował zeznanie obiektu)."""
+    dbp = _seed_obiekt(tmp_path)
+    root = tmp_path / "_WBPP" / "karta"
+    assert cli.main(["project", str(dbp), "--root", str(root), "--object", "IC1795", "--apply"]) == 0
+    obj_root = root / "OBJECTS" / "IC1795"
+    przed = (obj_root / projection.MANIFEST_NAME).read_bytes()
+    capsys.readouterr()
+    assert cli.main(["project", str(dbp), "--root", str(obj_root), "--apply"]) == 1
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    assert "Horreum project: blad -- manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania " \
+           "(sprzeczne pole: layout)" in out
+    assert "Traceback" not in out and (obj_root / projection.MANIFEST_NAME).read_bytes() == przed

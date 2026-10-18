@@ -924,9 +924,12 @@ def test_planer_blad_programu_rdzenia_zdanie_w_jezyku_UI_szczegol_techniczny(vie
         (exc,) = wyjatki
         assert type(exc) is ValueError and "X1" in str(exc), exc       # rdzeń, nie atrapa
         zdanie = i18n.t("objchg.item.prog_error")
-        szczegol = i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
-        assert view.night_label.text() == zdanie and view.night_label.szczegol() == szczegol
-        assert pasek[-1] == zdanie and szczegol_zdania(pasek[-1]) == szczegol
+        # + miejsce w kodzie (AR-237): linia rdzenia, która odrzuciła rekord assetu
+        import re
+        wzor = re.escape(i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
+                         + " @ horreum/targets.py:") + r"\d+"
+        assert view.night_label.text() == zdanie and re.fullmatch(wzor, view.night_label.szczegol())
+        assert pasek[-1] == zdanie and re.fullmatch(wzor, szczegol_zdania(pasek[-1]))
         assert view.model.rowCount() == 0 and not view.bez_stanowiska
         if lang == "en":
             assert not set(zdanie) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), zdanie

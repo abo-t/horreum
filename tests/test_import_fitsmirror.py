@@ -904,3 +904,118 @@ def test_import_korzen_dawcy_niedostepny_abort_z_klasa(tmp_path, capsys):
     out.encode("cp1250")
     assert "korzen dawcy niedostepny: plik albo folder nie istnieje (WinError 2)" in out
     assert "Traceback" not in out
+
+
+# ============================================================ AR-233: katalog dawcy, którego listing nie przeczytał
+
+def _scandir_pada(monkeypatch, katalog, exc, *, razy=None):
+    """`os.scandir(katalog)` rzuca `exc` (bez wielkości liter) - `razy` pierwszych wołań albo zawsze;
+    reszta jak zwykle. `os.walk` listingu skanu bierze podmieniony `scandir` (zmierzone sondą), tak
+    samo ponowna próba klasy w `import_fitsmirror`. Kształt jak prawdziwa odmowa listingu
+    (`icacls /deny RD` na katalogu): `os.stat` plików pod nim przechodzi."""
+    prawdziwy = os.scandir
+    klucz = os.path.normcase(str(katalog))
+    licznik = [0]
+
+    def _scandir(p="."):
+        if os.path.normcase(os.fspath(p)) == klucz and (razy is None or licznik[0] < razy):
+            licznik[0] += 1
+            raise exc
+        return prawdziwy(p)
+    monkeypatch.setattr(os, "scandir", _scandir)
+
+
+def _odmowa_listingu(katalog):
+    exc = PermissionError(None, "Odmowa dostępu", str(katalog), 5)
+    if getattr(exc, "winerror", None) != 5:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    return exc
+
+
+def test_katalog_dawcy_nieprzeczytany_abort_z_klasa_nie_casing(tmp_path, monkeypatch, capsys):
+    """AR-233 (pomiar na prawdziwym ACL: `os.stat` plików pod katalogiem bez prawa listingu przechodzi,
+    a abort mówił „casing albo katalog wykluczony”): ścieżki dawcy pod katalogiem, którego listing
+    skanu nie przeczytał, to `ImportAbort` z ich liczbą, katalogiem i klasą błędu z ponownej próby
+    listingu - bez fałszywej przyczyny; zero zapisu; CLI drukuje wiersz ABORT (cp1250) z kodem 1.
+    Falsyfikatory: `iter_headers(root)` bez `errors_out` (stare zdanie); klasa bez ponownej próby."""
+    from horreum import cli
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    lights = tmp_path / "astro" / "LIGHTS"
+    _scandir_pada(monkeypatch, lights, _odmowa_listingu(lights))
+    donor = open_donor(str(donor_path))
+    try:
+        with pytest.raises(ImportAbort) as abort:
+            preflight(donor, rng_seed=1)
+    finally:
+        donor.close()
+    tekst = str(abort.value)
+    assert tekst.startswith("3 sciezek dawcy osiagalnych na dysku lezy w katalogach, ktorych listing "
+                            "skanu nie przeczytal (1 katalogow; pierwszy: "), tekst
+    assert f"{lights} - odmowa dostępu do pliku (WinError 5) - PermissionError: [WinError 5]" in tekst
+    assert "casing" not in tekst and abort.value.summary is None
+    assert cli.main(["import-fitsmirror", str(donor_path), str(tmp_path / "horreum.db")]) == 1
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    assert "listing skanu nie przeczytal" in out and "Traceback" not in out
+    con = db.open_db(str(tmp_path / "horreum.db"))
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 0             # zero zapisu
+    con.close()
+
+
+def test_katalog_bez_plikow_dawcy_nieprzeczytany_to_nota_nie_abort(tmp_path, monkeypatch):
+    """AR-233: katalog pod korzeniem dawcy bez prawa listingu, w którym nie leży żaden plik dawcy
+    (katalog systemowy, cudzy) - import rusza jak dotąd, a pre-flight mówi notą, że nadwyżka może
+    być niepełna (z klasą). Falsyfikator: abort przy każdym katalogu nieprzeczytanym."""
+    donor_path, _files = _mk_donor(tmp_path, SPECS)
+    obcy = tmp_path / "astro" / "OBCY"
+    obcy.mkdir()
+    _scandir_pada(monkeypatch, obcy, _odmowa_listingu(obcy))
+    s = _import(tmp_path, donor_path)
+    assert s.gate_failures == [] and s.imported == len(SPECS)
+    [nota] = [n for n in s.preflight.notes if "nieprzeczytanych" in n]
+    assert nota.startswith(f"1 katalogow pod korzeniem dawcy nieprzeczytanych przez listing (1 katalogow; "
+                           f"pierwszy: {obcy} - odmowa dostępu do pliku (WinError 5)"), nota
+    assert nota.endswith("- nadwyzka moze byc niepelna")
+
+
+def test_katalog_nieprzeczytany_czytelny_przy_ponownej_probie_i_wpis_bez_sciezki(tmp_path, monkeypatch):
+    """AR-233: listing nie przeczytał katalogu, ponowna próba czyta (błąd przejściowy) - zdanie mówi
+    to wprost zamiast klasy; wpis walkera bez ścieżki (`scan._iter_suffixes` wkłada tekst wyjątku,
+    gdy nie ma `filename`) nie idzie do ponownej próby. Ścieżka dawcy z `/` leży pod katalogiem
+    z `\\` (porównanie bez wielkości liter, po obu separatorach)."""
+    from horreum import import_fitsmirror as imp
+    donor_path, _files = _mk_donor(tmp_path, SPECS)
+    lights = tmp_path / "astro" / "LIGHTS"
+    _scandir_pada(monkeypatch, lights, _odmowa_listingu(lights), razy=1)
+    donor = open_donor(str(donor_path))
+    try:
+        with pytest.raises(ImportAbort, match="czytelny przy ponownej probie"):
+            preflight(donor, rng_seed=1)
+    finally:
+        donor.close()
+    assert imp._opis_nieprzeczytanych(["[WinError 5] Odmowa dostępu"]) == (
+        "1 katalogow; pierwszy zgloszony bez sciezki: [WinError 5] Odmowa dostępu")
+    assert imp._pod_katalogiem("X:/ASTRO/lights/a.fits", r"X:\Astro\LIGHTS")
+    assert not imp._pod_katalogiem(r"X:\ASTRO\LIGHTS2\a.fits", r"X:\ASTRO\LIGHTS")
+
+
+def test_blad_listingu_bez_sciezki_to_listing_niepelny_nie_casing(tmp_path, monkeypatch):
+    """AR-233: listing nie przeczytał katalogu, a walker zgłosił błąd BEZ ścieżki (wyjątek bez
+    `filename` - `scan._iter_suffixes` wkłada wtedy tekst wyjątku): cała droga `preflight` kończy się
+    abortem „listing niepełny, przyczyny nie da się przypisać” z tekstem błędu, nigdy „casing albo
+    katalog wykluczony”. Falsyfikator: gałąź casing dla niezlistowanych przy błędzie bez ścieżki."""
+    import errno
+    donor_path, _files = _mk_donor(tmp_path, SPECS)
+    lights = tmp_path / "astro" / "LIGHTS"
+    _scandir_pada(monkeypatch, lights, PermissionError(errno.EACCES, "Permission denied"))
+    donor = open_donor(str(donor_path))
+    try:
+        with pytest.raises(ImportAbort) as abort:
+            preflight(donor, rng_seed=1)
+    finally:
+        donor.close()
+    tekst = str(abort.value)
+    assert tekst.startswith("3 sciezek dawcy osiagalnych na dysku NIE MA w listingu skanu, a listing byl "
+                            "niepelny - blad odczytu katalogu bez sciezki ([Errno 13] Permission denied); "
+                            "przyczyny nie da sie przypisac"), tekst
+    assert "casing" not in tekst

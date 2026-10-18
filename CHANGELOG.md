@@ -6,6 +6,50 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.18.0] - 2026-10-18
+
+Wydanie o **zaznaczeniu bez czekania i zapisie, który niczego nie gubi po cichu**. Gdy w systemie działa klient
+dostępności (czytnik ekranu albo inny program korzystający z UI Automation), Ctrl+A na całym archiwum trwał kilka
+sekund - teraz ułamek sekundy, a zaznaczenie przeżywa sortowanie, grupowanie i podgląd przy każdej wielkości.
+Szuflada zmian w Zbiorach zapisuje karty nagłówka w miejscu, jak okna kart. Manifest wydania obiektu -
+nieczytelny, uszkodzony albo należący do innego wydania - nigdy nie jest nadpisany po cichu. **Schemat bazy bez
+zmian (45):** bazę otwartą w tej wersji dalej otworzy 0.17.0.
+
+### Dodane
+
+- **Przegląd śladów cofnięcia w Porządkach:** ślady cofnięcia zapisu bez werdyktu sprawdzają się w tle przy
+  otwarciu Porządków - okno nie czeka, a zamknięcie i zmiana bazy nie blokują; przy awarii sprawdzenia wiersz
+  ma przycisk „Ponów sprawdzenie”.
+- **„Kopiuj zdanie”** w menu prawego kliku na każdym polu z komunikatem.
+- Szczegół błędu programu kończy się miejscem w kodzie (`@ horreum/<plik>.py:<linia>`), bez ścieżek z dysku.
+
+### Zmienione
+
+- **Zaznaczenie w Zbiorach** przy aktywnym kliencie dostępności (archiwum ~17 000 klatek): Ctrl+A ~2,5 s → ~0,2 s,
+  klik przy pełnym zaznaczeniu ~2,5 s → ~0,1 s, podgląd zmian ~2,5-3 s → ~0,3 s. Zaznaczenie przeżywa sort,
+  grupowanie, podgląd i przeładowanie tego samego zbioru przy każdej wielkości; zdanie „zaznaczenie zdjęte”
+  znika. Czytnik ekranu dostaje te same zdarzenia co dotąd.
+- **Szuflada zmian zapisuje karty w miejscu**, jak okna kart; gdy plik trzeba przepisać w całości, zdanie wyniku
+  to mówi. Klatki wydane dowiązaniem do folderu roboczego WBPP widzą poprawkę.
+- **Manifest wydania nigdy nie jest nadpisany po cichu:** gdy jest nieczytelny, uszkodzony albo należy do innego
+  wydania, wydanie (także z wiersza poleceń) i naprawa manifestu odmawiają z powodem; wydanie z takim manifestem
+  zostaje na liście żniw ze stanem i bez podpowiedzi, że folder można skasować.
+- **Naprawa manifestu** stosuje te same reguły co wydanie; gdy czas wydania jest nieznany, bierze go z czasu
+  założenia folderu zestawu i oznacza „≈” - data jest orientacyjna i nie rozstrzyga stanu „czeka na WBPP”.
+- **Okno wydania:** Esc zamyka okno także w czasie zapisu manifestu; oferta zapisu podaje liczbę dopisywanych
+  plików.
+- **Pasek stanu:** raport ze szczegółem błędu nie gaśnie po kilku sekundach i zostaje przy swoim ekranie; wynik
+  „Napraw nagłówek…” i „Zatwierdź ze ścieżki…” zostaje na pasku po zamknięciu okna razem z poleceniem cofnięcia
+  (`horreum header-fix "<baza>" --undo <commit>`).
+- Dopisanie karty makrem (`add`) w pliku, który już ma tę kartę, odmawia z powodem („użyj set”).
+- Błędy Windows przy zapisie kart i przy zapisie raportu podają ścieżkę pliku.
+- Import z fitsmirror przy nieprzeczytanym katalogu mówi, czego nie przeczytał, zamiast podejrzewać wielkość
+  liter albo katalog wykluczony.
+
+### Naprawione
+
+- Pole komunikatu pokazuje wartości w kształcie znaczników HTML dosłownie.
+
 ## [0.17.0] - 2026-10-18
 
 Wydanie o **zerwanym udziale, który znaczy „nie wiem”, i cofnięciu, które zostawia pliki do oka**. Gdy dysk
@@ -1520,7 +1564,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.17.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/abo-t/horreum/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/abo-t/horreum/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/abo-t/horreum/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/abo-t/horreum/compare/v0.14.0...v0.15.0

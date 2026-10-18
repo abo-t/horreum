@@ -460,9 +460,15 @@ def _main(argv=None):
         from .scan import scan_tree                      # lazy: nie ładuj astropy dla init/--version
         now = datetime.now(timezone.utc).isoformat()
         con = db.open_db(args.db)
-        summary = scan_tree(con, args.root, volume=args.volume,
-                            drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now,
-                            reread_raw=args.reread_raw)
+        try:
+            summary = scan_tree(con, args.root, volume=args.volume,
+                                drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now,
+                                reread_raw=args.reread_raw)
+        except (ValueError, OSError) as exc:            # korzeń UNC albo niedostępny (`canonize_root`)
+            con.close()
+            # Klasą z kodu systemu (AR-212) zamiast śladu stosu; kod 1 - przebieg nie wydał wyniku.
+            print(f"Horreum scan: blad -- {proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
+            return 1
         con.close()
         print(f"Horreum scan {args.root} -> {args.db}: {summary}")   # ASCII: konsola Windows = cp1250
         if summary.unreadable_dirs:
@@ -487,8 +493,13 @@ def _main(argv=None):
         from .scan import scan_stacks                    # lazy: nie ładuj astropy dla init/--version
         now = datetime.now(timezone.utc).isoformat()
         con = db.open_db(args.db)
-        s = scan_stacks(con, args.root, volume=args.volume,
-                        drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now)
+        try:
+            s = scan_stacks(con, args.root, volume=args.volume,
+                            drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now)
+        except (ValueError, OSError) as exc:            # korzeń UNC albo niedostępny (`canonize_root`)
+            con.close()
+            print(f"Horreum stacks: blad -- {proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
+            return 1
         con.close()
         print(_format_stacks(args.root, args.db, s, limit=args.limit))   # ASCII (cp1250)
         # Odmowa NIE jest błędem drogi (plik po prostu nie jest stackiem), ale kod wyjścia ma ją
@@ -687,6 +698,9 @@ def _main(argv=None):
             proj = projection.plan_object(con, found, config_id=args.zestaw, **okno)
             manifest = projection.object_manifest(proj)
             root = projection.object_root(args.root, proj)    # <cel>/OBJECTS/<obiekt>: manifest per obiekt
+            # Świadkowie scalenia manifestu bez utraty (AR-213): id starego manifestu, którego pliku
+            # dowodnie nie ma w drzewie, schodzi z manifestu; niepewne zostają.
+            extra = projection.manifest_sources(con, root) if args.apply else None
             print(_format_object(proj.info))                  # liczby wydania PRZED raportem linków
         else:
             tree = _load_filter_tree(args.filter_json)         # ścieżka pliku LUB inline JSON (SPOT z gridem)
@@ -697,13 +711,15 @@ def _main(argv=None):
             proj = projection.plan(con, sorted(frame_ids), args.layout or "po-obiektach")
             manifest = {"perspektywa": args.filter_json or "cala-baza", "filter_tree": tree}
             root = args.root
+            extra = None
 
         def heartbeat(done, total, _dst, _status):            # puls co 100 (link na NAS wolniejszy, R1 #10)
             if done % 100 == 0 or done == total:
                 print(f"  projekcja: {done}/{total}")
         try:
             res = projection.apply(proj, root, do_apply=args.apply, copy=args.copy, now=now,
-                                   manifest=manifest, progress=heartbeat if args.apply else None)
+                                   manifest=manifest, extra_sources=extra,
+                                   progress=heartbeat if args.apply else None)
         except projection.ProjectionAbort as exc:
             con.close()
             print(f"Horreum project: ABORT -- {exc}")         # sonda pierwszego linku padla (SMB kopia?)
@@ -728,10 +744,11 @@ def _main(argv=None):
         try:
             s = presence.check(con, args.root, volume=args.volume, apply=args.apply,
                                force=args.force, now=now)
-        except (ValueError, FileNotFoundError) as exc:    # root UNC / nieistniejacy (EXPECT)
+        except (ValueError, OSError) as exc:    # root UNC / nieistniejacy / niedostepny (EXPECT)
             con.close()
-            # Odmowa korzenia (`canonize_root`) mówi zdaniem rdzenia jak dotąd; plik z kodem
-            # systemu (zerwany udział: 53/67 to `FileNotFoundError`) - klasą (AR-198).
+            # Odmowa korzenia UNC (`canonize_root`, `ValueError`) mówi zdaniem rdzenia jak dotąd;
+            # korzeń niedostępny - klasą z kodu systemu (AR-198, AR-212: 53/67 to
+            # `FileNotFoundError`, 5 i 21 - `PermissionError`, więc handler łapie `OSError`).
             print(f"Horreum presence: blad -- {proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
             return 1
         # OGON ZAPISU (AR-5-CLI): zdjęta obecność to chwila, w której klatka zaczyna mówić głosem
@@ -1060,6 +1077,10 @@ def _format_presence(db_path, s, *, apply, limit):
     lines.append(f"  kandydaci: {s.candidates}; {potwierdzone}")
     if s.undecided:
         lines.append(f"  NIEROZSTRZYGNIETE: {s.undecided} (stat bez odpowiedzi -- zero zapisu)")
+        for p in s.undecided_paths[:limit]:            # które kopie sprawdzić (AR-211)
+            lines.append(f"    {p}")
+        if len(s.undecided_paths) > limit:
+            lines.append(f"    ... (+{len(s.undecided_paths) - limit} wiecej; zwieksz --limit)")
     if s.resurfaced:
         lines.append(f"  WYNURZONE: {s.resurfaced} -- kandydat jednak istnieje. Najczesciej dryf "
                      f"wielkosci liter DB<->dysk; przyszly skan zminuje DRUGA lokacje na ten sam plik:")
@@ -1258,6 +1279,8 @@ def _format_project(root, res, proj, *, limit):
             f"  zlinkowano: {c.get('linked',0)}; istnialo: {c.get('exists',0)}; "
             f"konflikty: {c.get('conflict',0)}; verify_bad: {c.get('verify_bad',0)}; "
             f"bledy: {c.get('error',0)}; pominieto: {c.get('skipped',0)}{niezweryfikowane}")
+        if res.dropped:
+            lines.append(f"  manifest: zapomniane klatki, ktorych plikow nie ma w drzewie: {res.dropped}")
         if res.error is not None or res.cancelled:
             ruszone = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error", "verify_bad",
                                                 "unverified"))
@@ -2295,11 +2318,17 @@ def _cmd_header_fix(args):
             lines = [f"Horreum header-fix {args.db} (UNDO commit {args.undo}): przywrocone "
                      f"{len(res.restored)} (bez powrotu zeznania {len(res.withheld)}), "
                      f"zablokowane {len(zablokowane)}, nieudane {len(res.failed)}"]
-            if res.already:
-                # Zdanie neutralne (AR-182): „już cofnięte” bywa wynikiem własnego cofnięcia, w którym
-                # zmiana poza nagłówkiem od commitu została - nie zawsze stanem sprzed commitu.
-                lines.append(f"  juz cofniete {len(res.already)} - wynik cofniecia jest juz na "
-                             f"dysku i w bazie, nie ma czego cofac")
+            # Zdanie neutralne (AR-182): „już cofnięte” bywa wynikiem własnego cofnięcia, w którym
+            # zmiana poza nagłówkiem od commitu została - nie zawsze stanem sprzed commitu. Backup
+            # tekstowy przyjęty skanem (AR-229) ma osobny wiersz: reszty pliku nikt nie sprawdził.
+            tekstowe = [fr for fr in res.already
+                        if getattr(fr.reason, "code", None) == "undo_already_text"]
+            if len(res.already) > len(tekstowe):
+                lines.append(f"  juz cofniete {len(res.already) - len(tekstowe)} - wynik cofniecia "
+                             f"jest juz na dysku i w bazie, nie ma czego cofac")
+            if tekstowe:
+                lines.append(f"  juz cofniete {len(tekstowe)} - naglowek i baza opisuja stan sprzed "
+                             f"commitu; reszty pliku backup tekstowy nie pozwala sprawdzic")
             lines += [f"    {fr.status}: {fr.path} - {fr.reason}"
                       for fr in (res.withheld + zablokowane + res.failed)[:args.limit]]
             if res.restored:

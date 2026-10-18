@@ -68,10 +68,11 @@ _ALLOWED_NODES = (
 
 
 class ExprError(Exception):
-    """Wyrazenie odrzucone przy kompilacji (niedozwolony element / skladnia). `powod` = to samo
-    zdanie jako `item_reasons.PowodPozycji` z kodem `expr_*` (AR-194) - okno mowi je w jezyku UI
-    (`gui.wb_worker.tekst_powodu`), a `str(exc)` zostaje dotychczasowym zdaniem PL (ASCII).
-    Baza `Exception` bez zmiany: wolajacy lapia `ExprError` wprost, nie jako `ValueError`."""
+    """Wyrażenie odrzucone przy kompilacji (niedozwolony element / składnia). `powod` = to samo
+    zdanie jako `item_reasons.PowodPozycji` z kodem `expr_*` (AR-194) - okno mówi je w języku UI
+    (`gui.wb_worker.tekst_powodu`), a `str(exc)` to to samo zdanie PL, z polskimi znakami (AR-228:
+    dawne zdania ASCII z czasów druku CLI mówiły w polskim UI bez ogonków; cp1250 i cp852 je mieszczą).
+    Baza `Exception` bez zmiany: wołający łapią `ExprError` wprost, nie jako `ValueError`."""
 
     def __init__(self, powod: PowodPozycji) -> None:
         super().__init__(str(powod))
@@ -111,25 +112,25 @@ def _validate(tree: ast.Expression) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant):
             if not isinstance(node.value, (int, float, str, bool)):
-                raise ExprError(PowodPozycji(f"niedozwolona stala: {repr(node.value)}",
+                raise ExprError(PowodPozycji(f"niedozwolona stała: {repr(node.value)}",
                                              "expr_bad_const", value=repr(node.value)))
         elif isinstance(node, ast.Name):
             if not isinstance(node.ctx, ast.Load):
                 # Straz: `ast.walk` odwiedza `NamedExpr`/komprehensje przed ich `Name(Store)`, wiec
                 # z tekstu wyrazenia odrzuca je galaz elementu - ta zostaje na wypadek szerszej listy.
-                raise ExprError(PowodPozycji("przypisanie w wyrazeniu niedozwolone", "expr_store"))
+                raise ExprError(PowodPozycji("przypisanie w wyrażeniu niedozwolone", "expr_store"))
             if node.id not in _ALLOWED_FUNCS:  # nazwa funkcji to nie zmienna z env
                 names.add(node.id)
         elif isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCS:
-                raise ExprError(PowodPozycji("dozwolone tylko wywolania z bialej listy funkcji",
+                raise ExprError(PowodPozycji("dozwolone tylko wywołania z białej listy funkcji",
                                              "expr_call_not_allowed"))
             if node.keywords:
                 raise ExprError(PowodPozycji("argumenty nazwane niedozwolone", "expr_kwargs"))
             if any(isinstance(a, ast.Starred) for a in node.args):
-                raise ExprError(PowodPozycji("rozpakowanie argumentow niedozwolone", "expr_starred"))
+                raise ExprError(PowodPozycji("rozpakowanie argumentów niedozwolone", "expr_starred"))
         elif not isinstance(node, _ALLOWED_NODES):
-            raise ExprError(PowodPozycji(f"niedozwolony element wyrazenia: {type(node).__name__}",
+            raise ExprError(PowodPozycji(f"niedozwolony element wyrażenia: {type(node).__name__}",
                                          "expr_bad_node", name=type(node).__name__))
     return names
 
@@ -137,12 +138,12 @@ def _validate(tree: ast.Expression) -> set[str]:
 def compile_expr(text: str) -> Expr:
     """Parsuje i waliduje wyrazenie. Rzuca `ExprError` dla niedozwolonej skladni/wezla."""
     if not isinstance(text, str) or not text.strip():
-        raise ExprError(PowodPozycji("puste wyrazenie", "expr_empty"))
+        raise ExprError(PowodPozycji("puste wyrażenie", "expr_empty"))
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
         # Tekst `SyntaxError` (jezyk Pythona) jedzie parametrem - jawna granica, jak tekst systemu.
-        raise ExprError(PowodPozycji(f"blad skladni: {str(exc)}", "expr_syntax",
+        raise ExprError(PowodPozycji(f"błąd składni: {str(exc)}", "expr_syntax",
                                      detail=str(exc))) from exc
     names = _validate(tree)
     return Expr(text=text, node=tree, names=frozenset(names))
@@ -163,7 +164,7 @@ def _eval(node: ast.AST, env: dict[str, object]) -> object:
     if isinstance(node, ast.Call):
         func = _ALLOWED_FUNCS[node.func.id]  # type: ignore[attr-defined]  # walidacja gwarantuje Name
         return func(*[_eval(a, env) for a in node.args])
-    raise ExprError(PowodPozycji(f"niedozwolony element wyrazenia: {type(node).__name__}",
+    raise ExprError(PowodPozycji(f"niedozwolony element wyrażenia: {type(node).__name__}",
                                  "expr_bad_node", name=type(node).__name__))
 
 

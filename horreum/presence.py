@@ -23,7 +23,8 @@ MECHANIKA (D-V — brief `PLAN_p5_znikniecia.md`):
       → zakres = lokacje (volume, prefiks root, rozszerzenie nagłówkonośne, present=1)
       → kandydaci = zakres \ przejście, minus poddrzewa odcięte i NIEPRZECZYTANE
       → HAMULEC (przed potwierdzeniami — nie płacimy 15 tys. `stat` po to, żeby przerwać)
-      → potwierdzenie per plik (`scan.path_gone`: ENOENT/ENOTDIR = nie ma, reszta = nie wiem)
+      → potwierdzenie per plik (`scan.path_gone`: klasa „nie ma” 2/3 albo ENOTDIR = nie ma, reszta -
+        także zerwany udział 53/67, który CPython podaje jako `FileNotFoundError` - nie wiem)
       → DRY: raport | apply: repo.mark_location_vanished(...) w jednym `run_id`
 
 DLACZEGO PRZEJŚCIE, A NIE `stat` PO WIERSZACH BAZY (pomiar 2026-07-22 na `R:\ASTRO_`, 15 890
@@ -38,7 +39,8 @@ TRZY RZECZY, KTÓRE NIE SĄ ZNIKNIĘCIEM (każda ma własny kubełek, żaden nie
   - kandydat, który JEDNAK istnieje → `resurfaced`: to zwykle dryf wielkości liter DB↔dysk,
     a nie wyścig — i wtedy przyszły skan ZMINTUJE DRUGĄ lokację na ten sam plik (import traktuje
     ten stan jako twardy abort, `import_fitsmirror.py:271-278`). Raport wypisuje pełną listę;
-  - `stat` bez rozstrzygnięcia (brak uprawnień, zerwany SMB) → `undecided`.
+  - `stat` bez rozstrzygnięcia (brak uprawnień, zerwany SMB - także WinError 53/67, AR-211) →
+    `undecided`; raport wypisuje listę (`undecided_paths`), żeby było wiadomo, które kopie sprawdzić.
 """
 import os
 import uuid
@@ -74,7 +76,8 @@ class PresenceSummary:
     confirmed_gone: int = 0        # potwierdzone: system mówi „nie ma"
     resurfaced: int = 0            # kandydat JEDNAK istnieje (dryf casingu / wyścig)
     resurfaced_paths: list = field(default_factory=list)
-    undecided: int = 0             # stat bez rozstrzygnięcia — raport, ZERO zapisu
+    undecided: int = 0             # stat bez rozstrzygnięcia - raport, ZERO zapisu
+    undecided_paths: list = field(default_factory=list)  # ich ścieżki (raport, AR-211)
     drifted: int = 0               # ścieżka zmieniona między planem a zapisem (rename) — pominięte
     frames_without_copy: int = 0   # KLATKI bez ani jednej obecnej kopii PO zapisie (≠ liczba kopii!)
     vanished: int = 0              # realnie oznaczone (0 przy DRY)
@@ -267,6 +270,7 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
             summary.resurfaced_paths.append(path)
         else:
             summary.undecided += 1
+            summary.undecided_paths.append(path)
         if progress is not None:
             progress(done, len(candidates), path, summary)
     summary.confirmed_gone = len(gone)

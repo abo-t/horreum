@@ -27,7 +27,7 @@ import string
 import threading
 
 from PySide6.QtCore import QObject, QRect, QSize, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QGuiApplication, QPainter
+from PySide6.QtGui import QGuiApplication, QKeySequence, QPainter
 from PySide6.QtWidgets import QLabel, QMenu
 
 from horreum import db, lead_copy, writeback
@@ -386,7 +386,15 @@ def wiersz_systemu(powod):
     """Wiersz podpowiedzi „Szczegół systemu: …” powodu z błędem systemu klasą (`szczegol_systemu`)
     albo `""` - jeden dla wyniku zapisu, awarii całej operacji (AR-185), kopii wiodącej i okien
     wydania, żniw i zmiany obiektu (AR-184). Powód bez klasy (tekst systemu, wyjątek spoza klas) nie
-    dostaje wymyślonego szczegółu."""
+    dostaje wymyślonego szczegółu.
+
+    Błąd PROGRAMU z kodem (`prog_error`, `item_reasons.powod_okna`) to nie błąd systemu (nie stoi
+    w `SYSTEM_REASON_CODES`), ale jego zdanie odsyła pod kursor - wiersz „Szczegół techniczny: …”
+    z surowym `Typ: opis` z parametru `detail`. TOTALNE jak `_surowy_systemu`: powód odtworzony
+    z bazy kodekiem może nie mieć `detail` tekstem - wtedy `""`, nie wyjątek w oknie."""
+    if isinstance(powod, PowodPozycji) and powod.code == "prog_error":
+        detail = dict(powod.params).get("detail")
+        return i18n.t("objchg.st.detail_tip", detail=detail) if isinstance(detail, str) and detail else ""
     return wiersz_szczegolu(_surowy_systemu(powod))
 
 
@@ -398,6 +406,44 @@ def podpowiedz_systemu(res):
         if wiersz:
             return wiersz
     return ""
+
+
+# Miejsce łamania wiersza po `\` w tekście MALOWANYM pola zdania (AR-221): U+200B, niewidoczny
+# (zmierzone natywnie: piksele wiersza z nim i bez - identyczne) i dla Qt miejsce łamania.
+_LAMANIE = "\N{ZERO WIDTH SPACE}"
+
+
+class ZdanieZeSzczegolem(str):
+    """Zdanie raportu dla paska gospodarza RAZEM ze szczegółem (AR-218): `str` = zdanie (odbiorcy
+    sygnału, testy i log widzą je znak w znak - wzorzec `grid_model.Recepta`, `PowodPozycji`),
+    `szczegol` = wiersze szczegółu (`wiersz_systemu`, `podpowiedz_*`) albo `""`. Do AR-218 zdanie
+    paska po awarii mówiło klasę, a surowy tekst systemu zostawał w polu okna, które się zamknęło,
+    albo w szufladzie.
+
+    Nośnik jedzie sygnałem `Signal(object)`: `Signal(str)` zamienia podklasę na goły `str` i szczegół
+    przepada po cichu (zmierzone, PySide6 6.9.2). Para dwóch argumentów (`Signal(str, str)`) odpadła,
+    bo odbiorca `list.append` dostaje wtedy `TypeError` wypisany na stderr i nie dostaje zdania.
+    Konkatenacja zwraca goły `str` - zdania ze szczegółem składa `zlacz_zdania`."""
+
+    def __new__(cls, zdanie, szczegol=""):
+        self = super().__new__(cls, zdanie)
+        self.szczegol = szczegol or ""
+        return self
+
+
+def szczegol_zdania(msg):
+    """Szczegół zdania raportu (`ZdanieZeSzczegolem.szczegol`) albo `""` dla zwykłego `str` - jeden
+    czytelnik nośnika."""
+    return msg.szczegol if isinstance(msg, ZdanieZeSzczegolem) else ""
+
+
+def zlacz_zdania(sep, zdania):
+    """Zdania złączone separatorem, ze szczegółami wszystkich, które je niosą (wiersz pod wierszem)
+    - `" - ".join(...)` zgubiłby szczegół. Puste zdania odpadają. Wejście bywa generatorem, więc
+    materializowane RAZ, zanim zdania i szczegóły zostaną z niego odczytane."""
+    elementy = tuple(z for z in zdania if z)
+    return ZdanieZeSzczegolem(sep.join(elementy),
+                              "\n".join(s for s in map(szczegol_zdania, elementy) if s))
 
 
 class EtykietaBledu(QLabel):
@@ -412,32 +458,53 @@ class EtykietaBledu(QLabel):
     nie woła pythonowego `setText` (zmierzone, PySide6 6.9) - stąd nadpisane oba.
 
     `text()` = samo zdanie (wołający czytają je jako treść), podpowiedź = zdanie + wiersze szczegółu.
-    MINIMUM SZEROKOŚCI 0 (wzorzec `_ZdanieWyniku`): zawijanie łamie wiersz tylko na spacjach, więc
-    ścieżka w zdaniu (plik zajęty 32/33, kod spoza klas) była jednym słowem, a minimum pola - jej
-    szerokością; zmierzone natywnie: okno „Napraw nagłówek…” 596 → 829 px po awarii (×1,6: 864 →
-    1299 px). Pole bierze szerokość od okna, ucięty koniec ścieżki stoi w podpowiedzi.
+    MINIMUM SZEROKOŚCI 0 (wzorzec `_ZdanieWyniku`): zdanie ze ścieżką (plik zajęty 32/33, kod spoza
+    klas) dyktowało minimum pola swoją szerokością; zmierzone natywnie: okno „Napraw nagłówek…”
+    596 → 829 px po awarii (×1,6: 864 → 1299 px). Pole bierze szerokość od okna.
+
+    ŚCIEŻKA ŁAMIE SIĘ W MALOWANIU (AR-221): zawijanie Qt łamie wiersz na spacjach i po `/`, a po `\\`
+    nie - ścieżka Windows była jednym słowem uciętym na prawej krawędzi pola. Tekst MALOWANY (wewnętrzny
+    tekst `QLabel`, z którego Qt liczy też `heightForWidth`) ma po każdym `\\` niewidoczne miejsce
+    łamania U+200B; `text()`, podpowiedź, nazwa dostępności i schowek (Ctrl+C, menu) - zdanie bez
+    niego. Zmierzone natywnie: najszerszy segment ścieżki kopii archiwum (889 px przy ×1,6 w polu
+    842 px) Qt łamie sam na `-`, więc dodatkowe miejsca wewnątrz segmentu nie są potrzebne.
 
     WSKAŹNIK SZCZEGÓŁU: przy niepustym szczególe glif `wb.detail_marker` w wcięciu przed zdaniem
     (malowany, nie w tekście - `text()` zostaje treścią) i szczegół jako opis dostępności; menu
     prawego kliku kopiuje zdanie albo szczegół (pole błędu nie jest zaznaczalne, a w szczególe stoi
-    plik, który padł). Bez szczegółu - menu domyślne pola (zaznaczalne notki żniw kopiują jak dotąd)."""
+    plik, który padł). Menu własne także na polu zaznaczalnym ze ścieżką (menu Qt kopiowałoby znak
+    łamania); poza tym menu domyślne pola."""
 
     def __init__(self, text="", parent=None):
         super().__init__(parent)
+        self._zdanie = ""
+        self._pelne = ""                # pełne zdanie, gdy pole pokazuje skrót (`ustaw(pelne=)`)
         self._szczegol = ""
         self._wciecie = None            # wcięcie sprzed wskaźnika; None = wskaźnik zdjęty
         self._menu = None
         self.ustaw(text)
 
-    def ustaw(self, zdanie, szczegol=""):
+    def ustaw(self, zdanie, szczegol="", *, pelne=None):
         """Zdanie i jego szczegół (wiersze `wiersz_systemu`/`podpowiedz_*`) - razem albo wcale:
-        szczegół bez zdania nie ma do czego należeć."""
+        szczegół bez zdania nie ma do czego należeć. `pelne` - pełne zdanie, gdy pole pokazuje skrót
+        (raport paska gospodarza przycięty do zapasu paska, AR-218): podpowiedź i „Kopiuj zdanie”
+        biorą pełne, `text()` - to, co pole pokazuje."""
         zdanie = zdanie or ""
+        self._zdanie = zdanie
+        self._pelne = (pelne or zdanie) if zdanie else ""
         self._szczegol = (szczegol or "") if zdanie else ""
-        super().setText(zdanie)
-        self.setToolTip("\n".join(p for p in (zdanie, self._szczegol) if p))
+        super().setText(zdanie.replace("\\", "\\" + _LAMANIE))
+        self.setToolTip("\n".join(p for p in (self._pelne, self._szczegol) if p))
+        self.setAccessibleName(self._pelne)
         self.setAccessibleDescription(self._szczegol)
         self._sync_wskaznika()
+
+    def text(self):
+        """Zdanie bez miejsc łamania tekstu malowanego (AR-221)."""
+        return self._zdanie
+
+    def selectedText(self):
+        return super().selectedText().replace(_LAMANIE, "")
 
     def szczegol(self):
         """Szczegół BIEŻĄCEGO zdania albo `""`."""
@@ -448,6 +515,14 @@ class EtykietaBledu(QLabel):
 
     def clear(self):
         self.ustaw("")
+
+    def keyPressEvent(self, event):
+        # Ctrl+C na polu zaznaczalnym: kontrolka Qt skopiowałaby zaznaczenie z miejscami łamania.
+        if event.matches(QKeySequence.Copy) and self.hasSelectedText():
+            QGuiApplication.clipboard().setText(self.selectedText())
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def minimumSizeHint(self):
         return QSize(0, super().minimumSizeHint().height())
@@ -481,7 +556,7 @@ class EtykietaBledu(QLabel):
         gora = r.top()
         if pion & Qt.AlignVCenter:
             flagi = int(self.alignment()) | (Qt.TextWordWrap.value if self.wordWrap() else 0)
-            blok = fm.boundingRect(self._prostokat_tekstu(), flagi, self.text())
+            blok = fm.boundingRect(self._prostokat_tekstu(), flagi, super().text())   # malowany
             gora = r.top() + max(0, (r.height() - blok.height()) // 2)
         elif pion & Qt.AlignBottom:
             gora = r.bottom() - fm.height()
@@ -495,19 +570,23 @@ class EtykietaBledu(QLabel):
             self._maluj_wskaznik(QPainter(self))
 
     def contextMenuEvent(self, event):
-        if not self._szczegol:
+        lamane = (_LAMANIE in super().text()
+                  and bool(self.textInteractionFlags() & Qt.TextSelectableByMouse))
+        if not self._szczegol and not lamane:
             super().contextMenuEvent(event)
             return
         if self._menu is not None:
             self._menu.deleteLater()
         self._menu = QMenu(self)
-        if self.hasSelectedText():
-            self._menu.addAction(i18n.t("wb.copy_selection"),
-                                 lambda: QGuiApplication.clipboard().setText(self.selectedText()))
-        self._menu.addAction(i18n.t("wb.copy_sentence"),
-                             lambda: QGuiApplication.clipboard().setText(self.text()))
-        self._menu.addAction(i18n.t("wb.copy_detail"),
-                             lambda: QGuiApplication.clipboard().setText(self._szczegol))
+        # Treść ZAMROŻONA przy otwarciu menu: pole bywa przepisane, zanim ręka kliknie pozycję (raport
+        # paska gaśnie po 5 s, `setText("")`) - kopia ma oddać to, co człowiek widział przy prawym kliku.
+        zaznaczenie, zdanie, szczegol = self.selectedText(), self._pelne, self._szczegol
+        schowek = QGuiApplication.clipboard()
+        if zaznaczenie:
+            self._menu.addAction(i18n.t("wb.copy_selection"), lambda: schowek.setText(zaznaczenie))
+        self._menu.addAction(i18n.t("wb.copy_sentence"), lambda: schowek.setText(zdanie))
+        if szczegol:
+            self._menu.addAction(i18n.t("wb.copy_detail"), lambda: schowek.setText(szczegol))
         self._menu.popup(event.globalPos())
         event.accept()
 

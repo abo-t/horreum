@@ -1003,7 +1003,9 @@ def test_zeznanie_niezapisane_to_ostrzezenie_nie_blad_kopii(qapp, tmp_path, usta
     assert dlg.notice.text() == "Kopie leżą w archiwum, ale zeznania żniw nie zapisano: OSError: dysk pełny"
     assert dlg.notice.property("role") == "warn"
     assert dlg.head_label.text().startswith("Wciągnięto 1 · ")
-    assert dlg.summary == f"Wciągnięto 1 plik do archiwum → {_cel(archive).parent}"
+    # Zdanie paska mówi i o zeznaniu (AR-218) - po zamknięciu okna notki już nie ma.
+    assert dlg.summary == (f"Wciągnięto 1 plik do archiwum → {_cel(archive).parent} · "
+                           "Kopie leżą w archiwum, ale zeznania żniw nie zapisano: OSError: dysk pełny")
     assert dlg.btn_apply.text() == "Wciągnięto" and dlg.btn_accept.isEnabled()
     con.close()
 
@@ -2393,7 +2395,14 @@ def test_lista_wydan_dluga_karta_elidowana_a_stan_caly(qapp, tmp_path, ustawieni
     środkiem, komórka „Stan” zostaje cała, wiersz bez przewijania w bok. Pełna ścieżka w treści
     komórki i pod kursorem.
 
-    Falsyfikator: karta za treścią (`ResizeToContents`) - suma kolumn większa od kadru, stan ucięty."""
+    AR-224: kadr z TREŚCI, nie z długości katalogu tymczasowego - przy krótkim `--basetemp` karta
+    mieściła się w oknie 980 px (natywnie `734 < 734` fałszywe) i test nic nie mierzył. Okno zwężone
+    tak, że na kartę zostaje połowa jej treści (jak `test_lista_wydan_maly_font_stan_nie_wystaje_poza_kadr`),
+    a gdy minimum okna na to nie pozwala - tyle, ile zostaje w kadrze okna na minimum, w granicach
+    `minimumSectionSize + 1 .. treść karty - 1` (szerszy wiersz okna nie robi z testu fałszywej czerwieni).
+
+    Falsyfikatory: karta za treścią (`ResizeToContents`) albo `_fit_rel_columns` z szerokością treści
+    karty - suma kolumn większa od kadru, stan ucięty; `ElideNone` - karta bez elizji środkiem."""
     con, _profile, _flats = _baza(tmp_path)
     work = tmp_path.joinpath("MC_76ED_2023-08_Bulgaria", "Veil_2023-08-22_76ED_2600C_0300s_Bulgaria",
                              "WBPP2", "_WBPP")
@@ -2401,14 +2410,32 @@ def test_lista_wydan_dluga_karta_elidowana_a_stan_caly(qapp, tmp_path, ustawieni
     _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
     dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work))
     dlg.show()
-    QTest.qWait(30)
-    t = dlg.rel_table
+    _pompuj(50)
+    t, rh = dlg.rel_table, dlg.rel_table.horizontalHeader()
     karta = t.item(0, hd_mod.REL_CARD)
     assert karta.text() == str(work) and karta.toolTip() == str(work)
     assert _stan(dlg, 0) == "do wciągnięcia 1"
+
+    def tresc(c):
+        return max(t.sizeHintForColumn(c), rh.sectionSizeHint(c))
+    inne = tresc(hd_mod.REL_OBJECT) + tresc(hd_mod.REL_DATE) + max(tresc(REL_STATE), rh.defaultSectionSize())
+    szerokosc = dlg.width()
+    dlg.resize(1, dlg.height())                                  # okno na swoim minimum szerokości
+    _pompuj(50)
+    na_minimum = t.viewport().width() - inne                     # najwęższa karta, na którą okno pozwala
+    dlg.resize(szerokosc, dlg.height())
+    _pompuj(50)
+    karta_w = min(max(tresc(hd_mod.REL_CARD) // 2, na_minimum, rh.minimumSectionSize() + 1),
+                  tresc(hd_mod.REL_CARD) - 1)
+    kadr = inne + karta_w
+    dlg.resize(dlg.width() + kadr - t.viewport().width(), dlg.height())
+    _pompuj(50)
+    assert t.viewport().width() == kadr, "okno nie dało się zwęzić - test niczego by nie pokazał"
+    assert t.textElideMode() == Qt.ElideMiddle
     assert t.columnWidth(hd_mod.REL_CARD) < t.sizeHintForColumn(hd_mod.REL_CARD)       # karta elidowana
     assert t.columnWidth(REL_STATE) >= t.sizeHintForColumn(REL_STATE)                   # stan cały
     assert sum(t.columnWidth(c) for c in range(t.columnCount())) <= t.viewport().width()
+    assert not t.horizontalScrollBar().isVisible()
     con.close()
 
 
@@ -2929,3 +2956,407 @@ def test_wyjscie_blad_bez_klasy_idzie_porazka_tekstem_systemu(qapp, tmp_path, pr
         assert msg.startswith("OSError: [WinError 123]") and getattr(msg, "code", None) is None, msg
     else:
         assert msg.startswith("ValueError: "), msg
+
+
+# ---------------------------------------------------------------- AR-225: rezerwa zdania wiersza wydania
+
+_ZDANIA_WIERSZA = ("harvest.rel.done_note", "harvest.rel.review_note", "harvest.rel.lineage_note")
+
+
+def _wysokosc_zdania(tekst, font, szerokosc):
+    """Wysokość zdania przy szerokości - NIEZALEŻNA etykieta-miara (zawijanie, font etykiety okna)."""
+    from PySide6.QtWidgets import QLabel
+    miara = QLabel(tekst)
+    miara.setWordWrap(True)
+    miara.setFont(font)
+    return miara.heightForWidth(szerokosc)
+
+
+@pytest.mark.parametrize("jezyk_budowy", ["pl", "en"])
+def test_zdanie_wiersza_wydania_rezerwuje_najwyzsze_z_trzech_zdan(qapp, tmp_path, ustawienia, jezyk_budowy):
+    """AR-225: wysokość dla szerokości zdania pod listą wydań = najwyższe z trzech zdań wiersza
+    („folder możesz skasować”, „najpierw rozstrzygnij”, „rodowód dokładny”) i zdania, które etykieta
+    pokazuje, tekst u góry etykiety. Szerokości z treści (`horizontalAdvance` zdania + 8 px): przy
+    szerokości zdania przeglądu ono mieści się w wierszu, a zdanie o kasowaniu nie; przy szerokości
+    zdania o kasowaniu - zdanie o rodowodzie nie. Zmiana języka po budowie pinuje METODĘ liczenia
+    (zdania w języku chwili liczenia), nie układ okna - produkt buduje okno żniw przy każdym otwarciu.
+
+    Falsyfikatory: `heightForWidth` bez przeglądu trzech zdań (sama etykieta), miara bez zawijania,
+    tekst wyśrodkowany w pionie, zdania miar z chwili budowy."""
+    i18n.set_lang(jezyk_budowy)
+    con, _profile, _flats = _baza(tmp_path)
+    karta = tmp_path / "_WBPP"
+    karta.mkdir()
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(karta))
+    dlg.show()
+    _pompuj(30)
+    lab = dlg.rel_done_note
+    assert lab.alignment() & Qt.AlignTop
+    budowy = [i18n.t(k) for k in _ZDANIA_WIERSZA]
+
+    def rezerwa(w, zdania):
+        return max(_wysokosc_zdania(z, lab.font(), w) for z in zdania)
+    for lang in ("pl", "en"):
+        i18n.set_lang(lang)
+        lab.setText(i18n.t("harvest.rel.done_note"))          # wiersz mówi w języku bieżącym (`_sync_release_note`)
+        zdania = [i18n.t(k) for k in _ZDANIA_WIERSZA]
+        przeglad, kasowanie = i18n.t("harvest.rel.review_note"), i18n.t("harvest.rel.done_note")
+        for wzor, nizsze, wyzsze in ((przeglad, "harvest.rel.review_note", "harvest.rel.done_note"),
+                                     (kasowanie, "harvest.rel.done_note", "harvest.rel.lineage_note")):
+            w = lab.fontMetrics().horizontalAdvance(wzor) + 8
+            wys = {k: _wysokosc_zdania(i18n.t(k), lab.font(), w) for k in (nizsze, wyzsze)}
+            assert wys[nizsze] < wys[wyzsze], (lang, w, wys, "zdania równe - test niczego by nie pokazał")
+            assert lab.heightForWidth(w) == rezerwa(w, zdania), (lang, w, lab.heightForWidth(w))
+        if lang != jezyk_budowy:
+            # szerokości, przy których rezerwa ze zdań języka budowy dałaby inną wysokość niż bieżąca
+            rozne = [w for w in range(200, 1600, 10) if rezerwa(w, zdania) != rezerwa(w, budowy + zdania[:1])]
+            assert rozne, "rezerwy obu języków równe przy każdej szerokości - test niczego by nie pokazał"
+            assert [lab.heightForWidth(w) for w in rozne[:5]] == [rezerwa(w, zdania) for w in rozne[:5]]
+    con.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_rezerwa_zdania_wiersza_idzie_za_fontem_etykiety_przy_arkuszu_aplikacji(qapp, tmp_path, ustawienia):
+    """AR-225: przy arkuszu stylu na aplikacji (motyw) `setFont` etykiety nie schodzi do jej dzieci -
+    miary rezerwy dostają font etykiety przy każdym liczeniu. Etykieta z fontem ×1,5 względem
+    aplikacji: rezerwa = najwyższe z trzech zdań liczone fontem ETYKIETY przy szerokości zdania
+    o kasowaniu (warunek wstępny: fontem aplikacji wyszłoby inaczej).
+
+    Falsyfikator: miary bez `setFont(self.font())` - rezerwa liczona fontem aplikacji."""
+    from PySide6.QtGui import QFont
+    QApplication.instance().setStyleSheet("QToolTip { }")
+    con, _profile, _flats = _baza(tmp_path)
+    karta = tmp_path / "_WBPP"
+    karta.mkdir()
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(karta))
+    dlg.show()
+    _pompuj(30)
+    lab = dlg.rel_done_note
+    duzy = QFont(lab.font())
+    duzy.setPointSizeF(duzy.pointSizeF() * 1.5)
+    lab.setFont(duzy)
+    zdania = [i18n.t(k) for k in _ZDANIA_WIERSZA]
+    w = lab.fontMetrics().horizontalAdvance(i18n.t("harvest.rel.done_note")) + 8
+    etykiety = max(_wysokosc_zdania(z, lab.font(), w) for z in zdania)
+    aplikacji = max(_wysokosc_zdania(z, QApplication.font(), w) for z in zdania)
+    assert etykiety != aplikacji, (etykiety, aplikacji, "test niczego by nie pokazał")
+    assert lab.heightForWidth(w) == etykiety, (lab.heightForWidth(w), etykiety, aplikacji)
+    con.close()
+
+
+@pytest.mark.parametrize("stan, lang, skala", [
+    pytest.param("przeglad", "pl", 1.0, id="przeglad_pl_x1"),
+    pytest.param("przeglad", "en", 1.0, id="przeglad_en_x1"),
+    pytest.param("przeglad", "pl", 1.6, id="przeglad_pl_x1_6", marks=pytest.mark.zmienia_motyw),
+    pytest.param("przeglad", "en", 1.6, id="przeglad_en_x1_6", marks=pytest.mark.zmienia_motyw),
+    pytest.param("rodowod", "pl", 1.0, id="rodowod_pl_x1"),
+    pytest.param("rodowod", "en", 1.0, id="rodowod_en_x1"),
+])
+def test_lista_wydan_z_tla_zdanie_wiersza_nie_przesuwa_pola(qapp, tmp_path, ustawienia, monkeypatch, stan,
+                                                            lang, skala):
+    """AR-225: lista wydań dochodzi z tła (prawdziwy `QThread`, bramka listy) i zaznacza wiersz, którego
+    zdanie ma inną wysokość niż zdanie z konstrukcji: „najpierw rozstrzygnij” (krótsze - dawniej pole,
+    „Wskaż…” i „Zmień…” podjeżdżały w górę: natywnie ×1,6 -18 px) albo „rodowód dokładny” (dłuższe -
+    spychało w dół). Okno zwężone z TREŚCI tak, żeby wysokość wiersza naprawdę się różniła (zdanie
+    przeglądu: etykieta 0,9 szerokości zdania o kasowaniu; zdanie o rodowodzie: szerokość zdania
+    o kasowaniu + 8 px), warunek wstępny liczony niezależną miarą z wysokością przycisku „Otwórz”.
+    Pole, „Wskaż…” i „Zmień…” stoją na ekranie tam, gdzie przed listą; „Otwórz” (stan przeglądu) stoi
+    górą przy zdaniu.
+
+    Falsyfikatory: zdanie wiersza zwykłym `QLabel` (rezerwa zdania z konstrukcji) - pozycje się
+    zmieniają; „Otwórz” bez `AlignTop` - przycisk w środku wiersza wyższego od niego."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QFont
+    i18n.set_lang(lang)
+    if skala != 1.0:
+        font = QFont(QApplication.font())
+        font.setPointSizeF(font.pointSizeF() * skala)
+        QApplication.setFont(font)
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    if stan == "przeglad":
+        work = tmp_path / "_WBPP"
+        _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con), {"masterDark_A.xisf": b"D"})
+        _czytnik(monkeypatch, {"masterDark_A.xisf": {"kind": "master_dark"}})
+        klucz = "harvest.rel.review_note"
+    else:
+        work, _root, _out, _ids, zeznania = _wydanie_ic1795(tmp_path, con, archive)
+        _czytnik(monkeypatch, zeznania)
+        _pulpit(monkeypatch)
+        przed_dostawa = _dlg(con, archive, work_root=str(work))
+        przed_dostawa._on_apply()
+        przed_dostawa.reject()
+        _dostawa_po_zwyklym_zamknij(con, archive)
+        klucz = "harvest.rel.lineage_note"
+    gate, entered = _wolna_lista(monkeypatch)
+    dlg = _dlg(con, archive, work_root=str(work), off_thread=True)
+    dlg.show()
+    assert entered.wait(10)
+    _pompuj(50)
+    lab = dlg.rel_done_note
+    kasowanie = lab.fontMetrics().horizontalAdvance(i18n.t("harvest.rel.done_note"))
+    w = int(0.9 * kasowanie) if stan == "przeglad" else kasowanie + 8
+    dlg.resize(dlg.width() + w - lab.width(), dlg.height())
+    _pompuj(50)
+    assert lab.width() == w, (lab.width(), w, "okno nie dało się zwęzić - test niczego by nie pokazał")
+    przycisk = dlg.btn_open_release.sizeHint().height()
+    wiersz = {k: max(_wysokosc_zdania(i18n.t(k), lab.font(), w), przycisk)
+              for k in ("harvest.rel.done_note", klucz)}
+    assert wiersz[klucz] != wiersz["harvest.rel.done_note"], (wiersz, "test niczego by nie pokazał")
+
+    def na_ekranie():
+        # okno rośnie pod tabelę W LEWO (AR-201) - lewa krawędź pola idzie z nim; liczy się y pola
+        # i obie współrzędne przycisków przy prawej krawędzi (jak `test_miejsce_listy_zarezerwowane…`)
+        p = {x: x.mapToGlobal(QPoint(0, 0)) for x in (dlg.edit_output, dlg.btn_pick, dlg.btn_archive)}
+        return (p[dlg.edit_output].y(), (p[dlg.btn_pick].x(), p[dlg.btn_pick].y()),
+                (p[dlg.btn_archive].x(), p[dlg.btn_archive].y()))
+    przed = na_ekranie()
+    gate.set()
+    assert _czekaj_az(lambda: dlg._rel_thread is None and dlg._dry_thread is None and not lab.isHidden())
+    _pompuj(100)
+    assert lab.text() == i18n.t(klucz), lab.text()
+    assert na_ekranie() == przed, (przed, na_ekranie())
+    if stan == "przeglad":                         # „Otwórz” stoi przy zdaniu, nie w środku wyższego wiersza
+        assert not dlg.btn_open_release.isHidden()
+        assert dlg.btn_open_release.mapToGlobal(QPoint(0, 0)).y() == lab.mapToGlobal(QPoint(0, 0)).y()
+    con.close()
+
+
+# ---------------------------------------------------------------- zerwany udział i odmowa w żniwach (AR-222)
+
+
+def _odmowa_listingu(sciezka):
+    exc = PermissionError(None, "Odmowa dostępu", str(sciezka), 5)
+    if getattr(exc, "winerror", None) != 5:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    return exc
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wyjscie_bez_listingu_mowi_klasa_jak_blad_stat(qapp, tmp_path, ustawienia, monkeypatch, lang):
+    """AR-222: wyjście, którego `stat` przechodzi, a listing nie (odmowa 5 - zmierzone na
+    `C:\\System Volume Information`), dawało pusty plan i „Brak masterów i stosów”. Teraz zdanie
+    błędu sondy klasą w języku UI jak przy błędzie `stat` (AR-199), szczegół systemu w podpowiedzi,
+    plan znika, „Wciągnij” zgaszony, pamięć pola nie bierze ścieżki. Falsyfikator: bez gałęzi
+    w `_on_dry_done` - zdanie planu niepełnego i ścieżka w pamięci pola."""
+    from test_harvest import _pada_dla
+    from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu
+    from horreum.item_reasons import blad_systemu
+    i18n.set_lang(lang)
+    con, _profile, _flats = _baza(tmp_path)
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    exc = _odmowa_listingu(out)
+    _pada_dla(monkeypatch, "scandir", {out: exc})
+    dlg = _dlg(con, tmp_path / "ARCH")
+    dlg._set_output(str(out))
+    powod = blad_systemu(exc)
+    assert dlg.notice.text() == i18n.t("harvest.dry_failed", msg=tekst_powodu(powod)), dlg.notice.text()
+    assert dlg.notice.property("role") == "error" and wiersz_systemu(powod) in dlg.notice.toolTip()
+    assert dlg._plan is None and not dlg.btn_apply.isEnabled() and dlg.table.rowCount() == 0
+    assert str(ustawienia.value("harvest/last_output", "") or "") == ""
+    if lang == "en":
+        assert not _PL_LITERY.search(dlg.notice.text()), dlg.notice.text()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_plan_niepelny_mowi_ktore_katalogi_i_nie_liczy_wiersza(qapp, tmp_path, ustawienia, monkeypatch, lang):
+    """AR-222: podkatalog wyjścia bez listingu - pozycje części czytelnej w tabeli, zdanie „Plan
+    niepełny: 1 katalog wyjścia nieprzeczytany - stare” w roli ostrzeżenia ze szczegółem systemu;
+    liczby planu nie trafiają do wiersza listy (`_fresh`: zera planu częściowego odsłoniłyby „folder
+    możesz skasować”). Pusto w części czytelnej - to samo zdanie, nie „Brak masterów i stosów”.
+    Falsyfikatory: `_show_notice` bez zdania planu niepełnego; `_fresh` z planu częściowego."""
+    from test_harvest import _pada_dla
+    from horreum.gui.harvest_dialog import norm_path
+    from horreum.gui.wb_worker import wiersz_systemu
+    from horreum.item_reasons import blad_systemu
+    i18n.set_lang(lang)
+    con, _profile, _flats = _baza(tmp_path)
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    (out / "stare").mkdir()
+    pusty = _wyjscie(tmp_path, {}, sub=("WBPP2", "master"))
+    (pusty / "stare").mkdir()
+    exc = _odmowa_listingu(out / "stare")
+    _pada_dla(monkeypatch, "scandir", {out / "stare": exc, pusty / "stare": _odmowa_listingu(pusty / "stare")})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, tmp_path / "ARCH")
+    dlg._set_output(str(out))
+    zdanie = i18n.t_plural("harvest.unread_dirs", 1, paths="stare")
+    assert dlg.table.rowCount() == 1 and dlg._plan is not None
+    assert dlg.notice.text() == zdanie and dlg.notice.property("role") == "warn", dlg.notice.text()
+    assert wiersz_systemu(blad_systemu(exc)) in dlg.notice.toolTip()
+    assert norm_path(str(out)) not in dlg._fresh
+    dlg._set_output(str(pusty))
+    assert dlg.table.rowCount() == 0 and dlg.notice.text() == zdanie, dlg.notice.text()
+    assert dlg.notice.property("role") == "warn"
+    if lang == "en":
+        assert not _PL_LITERY.search(zdanie), zdanie
+    con.close()
+
+
+def test_plan_niepelny_przy_wydaniu_mowi_oba_zdania(qapp, tmp_path, ustawienia, monkeypatch):
+    """Plan niepełny w drzewie wydania obiektu: najpierw zdanie planu niepełnego, potem zdanie
+    o manifeście wydania - jedno pole, rola ostrzeżenia (AR-222)."""
+    from test_harvest import _pada_dla
+    con, _profile, flats = _baza(tmp_path)
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    (out / "stare").mkdir()
+    manifest = {"layout": projection.OBJECT_LAYOUT, "root": str(out.parent), "object_id": 1,
+                "object_canon": "Cr464",
+                "zestawy": {SEG: {"flat_raw": [flats[_flat_name(i, "CLS")] for i in range(3)]}}}
+    (out.parent / projection.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+    _pada_dla(monkeypatch, "scandir", {out / "stare": _odmowa_listingu(out / "stare")})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, tmp_path / "ARCH")
+    dlg._set_output(str(out))
+    assert dlg.notice.text() == (i18n.t_plural("harvest.unread_dirs", 1, paths="stare") + " "
+                                 + f"Wydanie Horreum (manifest _PROJEKCJA.json): {out.parent}"), dlg.notice.text()
+    assert dlg.notice.property("role") == "warn"
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_karta_na_zerwanym_udziale_mowi_klasa_nie_brak(qapp, tmp_path, ustawienia, monkeypatch, lang):
+    """AR-222: karta na zerwanym udziale (53 - CPython daje `FileNotFoundError`) mówiła „Folder karty
+    nie istnieje … podłącz dysk”. Teraz zdanie karty niedostępnej z klasą w języku UI, szczegół
+    systemu w podpowiedzi, rola ostrzeżenia; obok karty brakującej - oba zdania; karta, której
+    `OBJECTS` nie da się przeczytać (odmowa 5), mówi tym samym zdaniem, nie „Na kartach nie ma jeszcze
+    wydań”. Falsyfikatory: `missing_roots` na `os.path.isdir`; `_zdanie_listy` bez kart nieczytelnych;
+    worker bez `errors_out` listy wydań."""
+    from test_harvest import _pada_dla
+    from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu
+    from horreum.item_reasons import blad_systemu
+    i18n.set_lang(lang)
+    con, _profile, _flats = _baza(tmp_path)
+    karta = tmp_path / "Q" / "_WBPP"
+    exc = OSError(None, "Nie można odnaleźć ścieżki sieciowej", str(karta), 53)
+    if getattr(exc, "winerror", None) != 53:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    _pada_dla(monkeypatch, "stat", {karta: exc})
+    powod = blad_systemu(exc)
+    zdanie = i18n.t("harvest.rel.unreachable_one", path=str(karta), msg=tekst_powodu(powod))
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(karta))
+    dlg.show()
+    QTest.qWait(30)
+    assert dlg.rel_notice.text() == zdanie, dlg.rel_notice.text()
+    assert dlg.rel_notice.property("role") == "warn" and wiersz_systemu(powod) in dlg.rel_notice.toolTip()
+    if lang == "en":
+        assert not _PL_LITERY.search(zdanie), zdanie
+    brak = tmp_path / "F" / "_WBPP"
+    dlg2 = _dlg(con, tmp_path / "ARCH", work_root=str(brak), release_roots=[str(karta)])
+    dlg2.show()
+    QTest.qWait(30)
+    assert dlg2.rel_notice.text() == i18n.t("harvest.rel.missing_one", path=str(brak)) + " " + zdanie
+    jest = tmp_path / "G" / "_WBPP"
+    (jest / projection.OBJECT_NAMESPACE).mkdir(parents=True)
+    odmowa = _odmowa_listingu(jest / projection.OBJECT_NAMESPACE)
+    _pada_dla(monkeypatch, "listdir", {jest / projection.OBJECT_NAMESPACE: odmowa})
+    dlg3 = _dlg(con, tmp_path / "ARCH", work_root=str(jest))
+    dlg3.show()
+    QTest.qWait(30)
+    assert dlg3.rel_notice.text() == i18n.t("harvest.rel.unreachable_one", path=str(jest),
+                                            msg=tekst_powodu(blad_systemu(odmowa))), dlg3.rel_notice.text()
+    con.close()
+
+
+def test_odmiana_zdan_planu_niepelnego_i_kart():
+    """Formy mnogie nowych zdań (AR-222): PL 1/2/5/12/22, EN 1/2."""
+    pl = {1: ("katalog wyjścia nieprzeczytany", "folder karty niedostępny"),
+          2: ("katalogi wyjścia nieprzeczytane", "foldery kart niedostępne"),
+          5: ("katalogów wyjścia nieprzeczytanych", "folderów kart niedostępnych"),
+          12: ("katalogów wyjścia nieprzeczytanych", "folderów kart niedostępnych"),
+          22: ("katalogi wyjścia nieprzeczytane", "foldery kart niedostępne")}
+    for n, (plan_, karty) in pl.items():
+        assert i18n.t_plural("harvest.unread_dirs", n, paths="x") == f"Plan niepełny: {n} {plan_} - x."
+        assert i18n.t_plural("harvest.rel.unreachable_many", n, paths="x") == f"{n} {karty}: x"
+    i18n.set_lang("en")
+    # Kropka kończy zdanie - przy wydaniu stoi za nim zdanie manifestu, a ścieżka bez kropki zlewała się
+    # z nim w jeden ciąg („master\stare Wydanie Horreum…”).
+    assert i18n.t_plural("harvest.unread_dirs", 1, paths="x") == "Incomplete plan: 1 output folder not read - x."
+    assert i18n.t_plural("harvest.unread_dirs", 2, paths="x") == "Incomplete plan: 2 output folders not read - x."
+    assert i18n.t_plural("harvest.rel.unreachable_many", 1, paths="x") == "1 card folder is unreachable: x"
+    assert i18n.t_plural("harvest.rel.unreachable_many", 2, paths="x") == "2 card folders are unreachable: x"
+
+
+def test_wiersz_z_nieprzeczytanym_nie_jest_wciagniety():
+    """AR-222: wiersz listy, którego lista nie przeczytała w całości (`unreadable`), nie jest
+    „wciągnięty” także przy niczym do wciągnięcia - zdanie „folder możesz skasować” nie staje; stan
+    mówi „nieprzeczytane N”. Falsyfikator: `is_harvested` bez `not row.unreadable`."""
+    import dataclasses
+    row = harvest.ReleaseRow("K", "K/OBJECTS/X", "X", None, "K/OBJECTS/X/out", 0, 3, 0,
+                             unreadable=("K/OBJECTS/X/out/a", "K/OBJECTS/X/out/b"))
+    assert not is_harvested(row) and not is_harvested(row, fresh=(0, 3, 0))
+    assert release_state_text(row) == "wciągnięte 3 · nieprzeczytane 2"
+    assert is_harvested(dataclasses.replace(row, unreadable=()))
+
+
+def _wciagniete(tmp_path, monkeypatch):
+    """Okno, w którym wiersz wydania i jego świeży podgląd mówią „wciągnięte 1”, a pod listą stoi
+    zdanie „Folder wydania możesz skasować” - punkt wyjścia testów blokady (AR-222)."""
+    con, _profile, _flats = _baza(tmp_path)
+    work = tmp_path / "_WBPP"
+    out = _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con),
+                  {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work))
+    dlg._on_apply()
+    dlg._set_output(str(out))                    # pełny podgląd po biegu - świeże liczby wiersza
+    assert hd_mod.norm_path(str(out)) in dlg._fresh
+    assert _stan(dlg, 0) == "wciągnięte 1" and _kasowanie_widac(dlg)
+    return con, dlg, out
+
+
+def _kasowanie_widac(dlg):
+    return not dlg.rel_done_note.isHidden() and dlg.rel_done_note.text() == i18n.t("harvest.rel.done_note")
+
+
+def test_podglad_niepelny_blokuje_wciagniete_do_pelnego(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-222: wiersz i świeży podgląd mówią „wciągnięte”, a kolejny podgląd tego wyjścia nie czyta
+    podkatalogu (odmowa 5) - stan wiersza mówi „nieprzeczytane 1”, nie „wciągnięte”, zdanie „Folder
+    wydania możesz skasować” znika: ani liczby listy, ani stary podgląd go nie odsłaniają. Pełny
+    podgląd zdejmuje blokadę. Falsyfikatory: `is_harvested` bez blokady; `_on_dry_done` bez blokady
+    (same liczby listy); pełny podgląd bez zdjęcia blokady."""
+    from test_harvest import _pada_dla
+    con, dlg, out = _wciagniete(tmp_path, monkeypatch)
+    stare = out / "master" / "stare"
+    stare.mkdir()
+    with monkeypatch.context() as m:
+        _pada_dla(m, "scandir", {stare: _odmowa_listingu(stare)})
+        dlg._set_output(str(out))
+        assert _stan(dlg, 0) == "nieprzeczytane 1" and not _kasowanie_widac(dlg), _stan(dlg, 0)
+    dlg._set_output(str(out))
+    assert _stan(dlg, 0) == "wciągnięte 1" and _kasowanie_widac(dlg)
+    con.close()
+
+
+def test_podglad_nieudany_blokuje_wciagniete_do_pelnego(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-222: podgląd tego samego wyjścia pada - listing samego wyjścia (odmowa 5, droga przez
+    `_on_dry_done`) albo `stat` wyjścia (zerwany udział 53, wyjątek workera). Stan wiersza mówi
+    „podgląd nieudany”, nie „wciągnięte”, zdanie o kasowaniu znika; pełny podgląd zdejmuje blokadę.
+    Falsyfikator: `_on_dry_failed` bez unieważnienia - stary podgląd dalej mówi „wciągnięte 1”."""
+    from test_harvest import _pada_dla
+    con, dlg, out = _wciagniete(tmp_path, monkeypatch)
+    zerwany = OSError(None, "Nie można odnaleźć ścieżki sieciowej", str(out), 53)
+    for nazwa, exc in (("scandir", _odmowa_listingu(out)), ("stat", zerwany)):
+        with monkeypatch.context() as m:
+            _pada_dla(m, nazwa, {out: exc})
+            dlg._set_output(str(out))
+            assert dlg._plan is None and dlg.notice.property("role") == "error", nazwa
+            assert _stan(dlg, 0) == "podgląd nieudany" and not _kasowanie_widac(dlg), (nazwa, _stan(dlg, 0))
+        dlg._set_output(str(out))
+        assert _stan(dlg, 0) == "wciągnięte 1" and _kasowanie_widac(dlg), nazwa
+    con.close()
+
+
+# ============================================================ AR-213: lista wydań po naprawie manifestu
+
+def test_lista_wydan_po_naprawie_manifestu_bez_daty_i_bez_czeka_na_wbpp(tmp_path):
+    """Wiersz listy wydań okna żniw z manifestu naprawionego bez dowodu czasu (`ts` None,
+    `repaired_at`): data wydania pusta, a stan mówi kandydata „do sprawdzenia”, nie „czeka na
+    WBPP” - chwila naprawy jako data wydania kłamałaby, że wyniki WBPP są starsze od wydania."""
+    from test_harvest import _wydanie_po_naprawie_bez_czasu
+    con, _p, _root, karta, _ids, _stary = _wydanie_po_naprawie_bez_czasu(tmp_path)
+    [row] = harvest.releases([karta])
+    assert release_date_text(row.ts) == ""
+    assert release_state_text(row) == "do sprawdzenia 1"
+    con.close()

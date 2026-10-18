@@ -123,3 +123,72 @@ def test_undo_po_zmianie_od_commitu_ponowienie_mowi_neutralnie(tmp_path, capsys)
     assert "\n  juz cofniete 1 - wynik cofniecia jest juz na dysku i w bazie" in out, out
     assert "stan sprzed commitu" not in out, out
     out.encode("cp1250")
+
+
+def test_undo_backupu_tekstowego_przyjetego_skanem_mowi_granice(tmp_path, capsys):
+    """AR-229: commit sprzed kopert (backup tekstowy) cofnięty raz, potem wynik zmieniony poza
+    nagłówkiem i przyjęty skanem - `--undo` kończy się kodem 0, a wiersz „już cofnięte” mówi granicę:
+    nagłówek i baza opisują stan sprzed commitu, reszty pliku backup tekstowy nie pozwala sprawdzić;
+    ASCII pod cp1250. Bez skanu - kod 1 i wiersz odmowy z receptą skanu. Falsyfikator: wspólny wiersz
+    „wynik cofniecia jest juz na dysku” dla tego kodu."""
+    import os
+    from horreum import db, writeback
+    from test_powody_pisarza import _fits_dwa_hdu
+    from test_writeback_inplace import NOW, _scan_in, _stary_commit
+    p = _fits_dwa_hdu(tmp_path / "s.fits")
+    dbp = str(tmp_path / "h.db")
+    con = db.open_db(dbp)
+    _scan_in(con, p)
+    cid = _stary_commit(con, p, "NGC 6992")
+    assert writeback.undo(con, cid, now=NOW).complete
+    st = os.stat(p)
+    dane = bytearray(p.read_bytes())
+    i = dane.index(b"NOTE    = '") + 11
+    dane[i] ^= 0x03
+    p.write_bytes(bytes(dane))
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    con.close()
+    kod, out = _cli(capsys, "header-fix", dbp, "--undo", str(cid))
+    assert kod == 1 and "blocked: " in out and "przeskanuj plik" in out, out
+    out.encode("cp1250")
+    con = db.open_db(dbp)
+    _scan_in(con, p)
+    con.close()
+    kod, out = _cli(capsys, "header-fix", dbp, "--undo", str(cid))
+    assert kod == 0, out
+    assert out.splitlines()[1:] == ["  juz cofniete 1 - naglowek i baza opisuja stan sprzed commitu; "
+                                    "reszty pliku backup tekstowy nie pozwala sprawdzic"], out
+    out.encode("cp1250")
+
+
+def test_undo_po_smierci_w_oknie_podmiany_mowi_pliki_do_oka(tmp_path, capsys, monkeypatch):
+    """AR-127: cofnięcie zginęło po podmianie (kopia wyparta została obok ścieżki) - `--undo` raz
+    blokuje lokację wierszem ze zdaniem o plikach zostawionych do oka w Porządkach i kodem 1, drugie
+    `--undo` dokańcza cofnięcie z kodem 0. Kodowalność zdania pod cp1250 sprawdza test zdań na
+    ścieżkach kontrolowanych (`test_writeback_cofniecie_atomowe`), nie ten przebieg - ścieżki `tmp_path`
+    zależą od profilu użytkownika."""
+    import pytest
+    from horreum import writeback
+    from test_powody_pisarza import _fits_dwa_hdu
+    from test_writeback_inplace import NOW, _baza_z_plikiem
+
+    class _Smierc(BaseException):
+        pass
+    p = _fits_dwa_hdu(tmp_path / "d.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW)
+
+    def _smierc(*a, **kw):
+        raise _Smierc()
+    monkeypatch.setattr(writeback, "_rozjazd_odcisku", _smierc)
+    with pytest.raises(_Smierc):
+        writeback.undo(con, res.commit_id, now=NOW)
+    monkeypatch.undo()
+    con.close()
+    dbp = str(tmp_path / "h.db")
+    kod, out = _cli(capsys, "header-fix", dbp, "--undo", str(res.commit_id))
+    zablokowane = [w for w in out.splitlines() if w.startswith("    blocked: ")]
+    assert kod == 1 and len(zablokowane) == 1, out
+    assert "zostawiło obok ścieżki pliki - zostają do oka w Porządkach: " in zablokowane[0], out
+    kod, out = _cli(capsys, "header-fix", dbp, "--undo", str(res.commit_id))
+    assert kod == 0 and "przywrocone 1" in out, out

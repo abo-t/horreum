@@ -161,6 +161,18 @@ ITEM_REASON_CODES = frozenset({
     # `writeback._cofnij_lokacje`, `write_full_header`)
     "undo_already_own", "undo_already_text", "undo_outside_changed", "undo_record_not_saved",
     "undo_own_unproven",
+    # --- błąd programu w oknie (AR-209, AR-214, `powod_okna` niżej): EXPECT rdzenia na drodze okna
+    # wydania, planera albo zmiany obiektu - surowy tekst `Typ: opis` w `detail`, nie w zdaniu
+    "prog_error",
+    # --- pliki obok ścieżki po przerwanym cofnięciu atomowym (AR-127, 0045,
+    # `writeback._rekoncyliuj_slady`, `writeback._werdykt_wlasciciela`)
+    "undo_cut_kept", "undo_files_kept", "undo_files_unknown", "undo_reconcile_failed",
+    # --- naprawa manifestu wydania obiektu (AR-213, `projection.repair_manifest`): odmowy zapisu
+    # manifestu nad drzewem, które już leży w celu, i błąd odczytu starego manifestu; `busy` mówi
+    # też krok manifestu wydania (wspólny protokół `.part`)
+    "proj_manifest_incomplete", "proj_manifest_skipped", "proj_manifest_unproven",
+    "proj_manifest_damaged", "proj_manifest_foreign", "proj_manifest_changed", "proj_manifest_busy",
+    "proj_manifest_unreadable",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
@@ -392,7 +404,8 @@ _OS_ERRNO = {errno.EACCES: "denied", errno.EPERM: "denied", errno.ENOENT: "missi
 
 def _surowy(exc):
     """Surowy tekst wyjątku `Typ: opis` - JEDYNE złożenie (meta-test `tests/test_powody_pisarza.py`):
-    `detail` obu klas (`powod_systemu`, `powod_bazy`) i tekst spoza klas w `blad_systemu`."""
+    `detail` obu klas (`powod_systemu`, `powod_bazy`), tekst spoza klas w `blad_systemu` i `detail`
+    błędu programu w `powod_okna`."""
     return f"{type(exc).__name__}: {exc}"
 
 
@@ -482,6 +495,24 @@ def blad_systemu(exc, *, z_typem=True):
     if powod is not None:
         return powod
     return _surowy(exc) if z_typem else str(exc)
+
+
+def powod_okna(exc):
+    """Powód wyjątku drogi okna (wątek tła albo gest) - JEDNA reguła dla okien wydania, planera i
+    zmiany obiektu (AR-209, AR-214): odmowa z powodem (`OdmowaZPowodem.powod`, `ProjectionAbort.powod`)
+    → ten powód; błąd systemu albo bazy (`OSError`, `sqlite3.Error`) → klasa albo tekst systemu
+    (`blad_systemu`); każdy inny wyjątek to EXPECT rdzenia (goły `ValueError`, `AssertionError`,
+    `KeyError`) - błąd programu `prog_error` z surowym tekstem `Typ: opis` w `detail` (szczegół pod
+    kursorem, nie w zdaniu). Użycie API bazy wbrew kontraktowi (`ProgrammingError` - np. operacja
+    na zamkniętym połączeniu, `InterfaceError`) to też EXPECT, nie stan bazy: błąd programu, nie
+    surowy angielski tekst SQLite w zdaniu."""
+    powod = getattr(exc, "powod", None)
+    if powod:
+        return powod
+    if (isinstance(exc, (OSError, sqlite3.Error))
+            and not isinstance(exc, (sqlite3.ProgrammingError, sqlite3.InterfaceError))):
+        return blad_systemu(exc)
+    return PowodPozycji("błąd programu - szczegół w podpowiedzi", "prog_error", detail=_surowy(exc))
 
 
 def szczegoly_systemu(powod) -> list[str]:

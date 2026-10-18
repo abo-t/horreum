@@ -2931,7 +2931,7 @@ def test_okno_mowi_PRZED_kliknieciem_ile_kart_i_dlaczego_reszta_bez(sciezka_kart
         assert stos["value"] == "NGC 7635" and stos["n_cards"] == 1     # forma nagłówka, 1 z 3
         powody = [dlg.cards_skipped.item(i).text() for i in range(dlg.cards_skipped.count())]
         assert len(powody) == 3, powody
-        assert any("juz istnieje" in p for p in powody)                  # pusta karta: nie nadpisujemy
+        assert any("już istnieje" in p for p in powody)                  # pusta karta: nie nadpisujemy
         assert any("wiele obecnych kopii" in p for p in powody)
         assert any("RAW" in p for p in powody)
         assert "zapisane w plikach" not in dlg.status.text()        # zero zapisu przed klikiem

@@ -917,11 +917,23 @@ CATALOG = {
         "pl": "Zaznacz kubełek klatek bez nazwy w nagłówku — ta akcja pisze do PLIKÓW.",
         "en": "Select a bucket of frames with no name in the header — this action writes to FILES."},
     "repair.title": {"pl": "Napraw nagłówek — karta OBJECT", "en": "Repair header — OBJECT card"},
+    # Wpis mnogi po liczbie klatek, `{groups}` = `repair.head_groups` (też mnogi): było „1 klatek
+    # w 1 folderach”.
     "repair.head": {
-        "pl": "{frames} klatek w {groups} folderach. Nazwa trafi do PLIKU (karta OBJECT); "
-              "obiekt w bazie wypełni potem zwykły etap „Rozwiąż”.",
-        "en": "{frames} frames in {groups} folders. The name goes into the FILE (OBJECT card); "
-              "the object in the database is filled later by the regular „Resolve” stage.",
+        "pl": {"one": "{n} klatka {groups}. Nazwa trafi do PLIKU (karta OBJECT); "
+                      "obiekt w bazie wypełni potem zwykły etap „Rozwiąż”.",
+               "few": "{n} klatki {groups}. Nazwa trafi do PLIKU (karta OBJECT); "
+                      "obiekt w bazie wypełni potem zwykły etap „Rozwiąż”.",
+               "many": "{n} klatek {groups}. Nazwa trafi do PLIKU (karta OBJECT); "
+                       "obiekt w bazie wypełni potem zwykły etap „Rozwiąż”."},
+        "en": {"one": "{n} frame {groups}. The name goes into the FILE (OBJECT card); "
+                      "the object in the database is filled later by the regular “Resolve” stage.",
+               "other": "{n} frames {groups}. The name goes into the FILE (OBJECT card); "
+                        "the object in the database is filled later by the regular “Resolve” stage."},
+    },
+    "repair.head_groups": {
+        "pl": {"one": "w {n} folderze", "few": "w {n} folderach", "many": "w {n} folderach"},
+        "en": {"one": "in {n} folder", "other": "in {n} folders"},
     },
     # Grupa „Napraw nagłówek…”: etykieta od folderu obiektu (`RepairHeaderDialog._etykieta_grupy`),
     # liczba odmieniona.
@@ -2319,9 +2331,13 @@ CATALOG = {
         "pl": "Makro: najpierw zatwierdź/odrzuć staging nazw",
         "en": "Macro: first commit/discard the name staging",
     },
+    # Wpis mnogi (AR-226): było „1 zmian” - `t_plural` po liczbie zmian w stagingu.
     "grid.macro.staged": {
-        "pl": "Do stagingu: {t} zmian, {s} pominięto",
-        "en": "To staging: {t} changes, {s} skipped",
+        "pl": {"one": "Do stagingu: {n} zmiana, {s} pominięto",
+               "few": "Do stagingu: {n} zmiany, {s} pominięto",
+               "many": "Do stagingu: {n} zmian, {s} pominięto"},
+        "en": {"one": "To staging: {n} change, {s} skipped",
+               "other": "To staging: {n} changes, {s} skipped"},
     },
     # AR-61: edycja JEDNEJ komórki keyworda - ta sama klinga i szuflada co makro. Pole komentarza
     # edytora bierze brzmienie z `grid.macro.comment_ph`/`comment_tip` (to samo znaczenie).
@@ -3373,7 +3389,9 @@ CATALOG = {
     "grid.wb.applied": {
         "pl": {"one": "{n} zapisany", "few": "{n} zapisane", "many": "{n} zapisanych"},
         "en": {"one": "{n} applied", "other": "{n} applied"}},
-    "grid.wb.renamed": {"pl": "{n} przemianowanych", "en": "{n} renamed"},
+    "grid.wb.renamed": {
+        "pl": {"one": "{n} przemianowany", "few": "{n} przemianowane", "many": "{n} przemianowanych"},
+        "en": {"one": "{n} renamed", "other": "{n} renamed"}},
     "grid.wb.restored": {
         "pl": {"one": "{n} przywrócony", "few": "{n} przywrócone", "many": "{n} przywróconych"},
         "en": {"one": "{n} restored", "other": "{n} restored"}},
@@ -3404,9 +3422,9 @@ CATALOG = {
     "grid.wb.skipped": {
         "pl": {"one": "{n} pominięty", "few": "{n} pominięte", "many": "{n} pominiętych"},
         "en": {"one": "{n} skipped", "other": "{n} skipped"}},
-    "grid.wb.detail_sep": {"pl": " — {detail}", "en": " — {detail}"},
+    "grid.wb.detail_sep": {"pl": " - {detail}", "en": " - {detail}"},
     "grid.wb.interrupted": {
-        "pl": " — przerwano, {n} do dokończenia", "en": " — interrupted, {n} to finish",
+        "pl": " - przerwano, {n} do dokończenia", "en": " - interrupted, {n} to finish",
     },
     "grid.wb.commit_id": {"pl": "  (commit {id})", "en": "  (commit {id})"},
     "grid.wb.run_id": {"pl": "  (run {id})", "en": "  (run {id})"},
@@ -3434,9 +3452,17 @@ CATALOG = {
     "grid.wb.op.release_inplace": {"pl": "Zwolnienie pliku do skanu nie powiodło się: {msg}",
                                    "en": "Releasing the file to the scan failed: {msg}"},
     "grid.wb.cancelling": {"pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)"},
-    "grid.wb.status": {"pl": "Writeback: {summary}", "en": "Writeback: {summary}"},
-    "grid.wb.undo_status": {"pl": "Undo: {msg}", "en": "Undo: {msg}"},
-    "grid.wb.rejected": {"pl": "Odrzucono {n} zmian", "en": "Discarded {n} changes"},
+    # Zdanie paska po zapisie i cofnięciu w szufladzie (AR-227): podmiot jak w zdaniu porażki
+    # (`grid.wb.op.<op>`) i „zakończony” - zamiast żargonu „Writeback:”/„Undo:”. Czas przeszły
+    # („Zapisano…”) kłamałby przy „0 zapisanych” i przy przerwaniu; „zakończony” mówi o biegu.
+    "grid.wb.status": {"pl": "Zapis zmian do plików zakończony: {summary}",
+                       "en": "Writing the changes to files finished: {summary}"},
+    "grid.wb.undo_status": {"pl": "Cofnięcie zapisu zakończone: {msg}",
+                            "en": "Undoing the write finished: {msg}"},
+    # Wpis mnogi (AR-226): było „Odrzucono 1 zmian”.
+    "grid.wb.rejected": {
+        "pl": {"one": "Odrzucono {n} zmianę", "few": "Odrzucono {n} zmiany", "many": "Odrzucono {n} zmian"},
+        "en": {"one": "Discarded {n} change", "other": "Discarded {n} changes"}},
     "grid.rename.staging_busy_tip": {
         "pl": {"one": "staging nazw w toku ({n} zmiana)", "few": "staging nazw w toku ({n} zmiany)",
                "many": "staging nazw w toku ({n} zmian)"},
@@ -3453,22 +3479,28 @@ CATALOG = {
     # Etykieta celu panelu nazw (AR-205: był literał „Cel:” także w UI EN); `what` = „N zaznaczonych”
     # albo „N widocznych” (`grid.selected` / `grid.visible`).
     "grid.rename.target": {"pl": "Cel: {what}", "en": "Target: {what}"},
+    # Odmowy panelu nazw (AR-227): przedrostek to nazwa panelu, jak „Makro:” w bliźniakach makra,
+    # nie żargon „Rename:”; błąd wzoru - jak „Błąd makra:”.
     "grid.rename.no_count": {
-        "pl": "Rename: brak klatek do policzenia", "en": "Rename: no frames to count",
+        "pl": "Nazwy plików: brak klatek do policzenia", "en": "File names: no frames to count",
     },
-    "grid.rename.error": {"pl": "Rename: {e}", "en": "Rename: {e}"},
+    "grid.rename.error": {"pl": "Błąd wzoru nazwy: {e}", "en": "Name pattern error: {e}"},
     "grid.rename.preview_result": {
         "pl": "Podgląd nazw: {t} do zmiany, {s} pominięto (cel: {target})",
         "en": "Name preview: {t} to change, {s} skipped (target: {target})",
     },
-    "grid.rename.no_frames": {"pl": "Rename: brak klatek", "en": "Rename: no frames"},
+    "grid.rename.no_frames": {"pl": "Nazwy plików: brak klatek", "en": "File names: no frames"},
     "grid.rename.staging_busy": {
-        "pl": "Rename: najpierw zatwierdź/odrzuć staging makra",
-        "en": "Rename: first commit/discard the macro staging",
+        "pl": "Nazwy plików: najpierw zatwierdź/odrzuć staging makra",
+        "en": "File names: first commit/discard the macro staging",
     },
+    # Wpis mnogi (AR-226): było „1 zmian”.
     "grid.rename.staged": {
-        "pl": "Do stagingu nazw: {t} zmian, {s} pominięto (cel: {target})",
-        "en": "To name staging: {t} changes, {s} skipped (target: {target})",
+        "pl": {"one": "Do stagingu nazw: {n} zmiana, {s} pominięto (cel: {target})",
+               "few": "Do stagingu nazw: {n} zmiany, {s} pominięto (cel: {target})",
+               "many": "Do stagingu nazw: {n} zmian, {s} pominięto (cel: {target})"},
+        "en": {"one": "To name staging: {n} change, {s} skipped (target: {target})",
+               "other": "To name staging: {n} changes, {s} skipped (target: {target})"},
     },
     "grid.rename.preview_cleared": {"pl": "Podgląd nazw wyczyszczony", "en": "Name preview cleared"},
     # AR-72: po zdjęciu podglądu nazw kolumna wraca do kart czekających w szufladzie
@@ -3476,7 +3508,8 @@ CATALOG = {
         "pl": "Podgląd nazw wyczyszczony - wrócił podgląd zmian czekających w szufladzie",
         "en": "Name preview cleared - the changes waiting in the drawer are previewed again",
     },
-    "grid.rename.status_summary": {"pl": "Rename: {summary}", "en": "Rename: {summary}"},
+    "grid.rename.status_summary": {"pl": "Zmiana nazw plików zakończona: {summary}",   # AR-227
+                                   "en": "Renaming the files finished: {summary}"},
     # Recepta przy nieudanym cofnięciu - wspólna dla obu kling szuflady (makro i rename, AR-31 (2)):
     # commit albo przebieg zostaje przy „Cofnij" (wiersze nieudane czekają), więc drugi klik
     # ponawia dokładnie je - reszta jest już cofnięta.
@@ -3484,9 +3517,13 @@ CATALOG = {
         "pl": " · „{undo}” ponowi pliki, których cofnięcie się nie udało",
         "en": " · “{undo}” retries the files whose undo failed",
     },
-    "grid.rename.undo_status": {"pl": "Undo nazw: {msg}", "en": "Undo names: {msg}"},
+    "grid.rename.undo_status": {"pl": "Cofnięcie zmiany nazw zakończone: {msg}",   # AR-227
+                                "en": "Undoing the renames finished: {msg}"},
+    # Wpis mnogi (AR-226): było „Odrzucono 1 zmian nazw”.
     "grid.rename.rejected": {
-        "pl": "Odrzucono {n} zmian nazw", "en": "Discarded {n} name changes",
+        "pl": {"one": "Odrzucono {n} zmianę nazwy", "few": "Odrzucono {n} zmiany nazw",
+               "many": "Odrzucono {n} zmian nazw"},
+        "en": {"one": "Discarded {n} name change", "other": "Discarded {n} name changes"},
     },
 
     # --- Znajdź (flows/znajdz_view.py + prezentacja „znajdz" w grid.py) i Uwagi w gridzie ---
@@ -4607,9 +4644,15 @@ CATALOG = {
         "pl": "  nietknięte: {n} (plan zostaje - wznów przez „Odśwież podgląd”)",
         "en": "  untouched: {n} (the plan stays - resume via “Refresh preview”)",
     },
-    # Nagłówek raportu, gdy pliki wydania leżą, a manifestu nie zapisano (AR-197): bez rady
-    # „Odśwież podgląd” - sonda zobaczy komplet, a ponowienie z okna niczego nie dopisze.
+    # Nagłówek raportu, gdy pliki wydania leżą, a manifestu nie zapisano (AR-197). Bez przepowiedni
+    # (AR-213): wydanie obiektu samo uruchamia świeżą sondę, a pod nagłówkiem staje jej werdykt -
+    # oferta „Zapisz manifest” albo odmowa z radą.
     "proj.manifest_error_head": {"pl": "Błąd: {msg}\n\n", "en": "Error: {msg}\n\n"},
+    # Scalenie manifestu bez utraty (AR-213): id wcześniejszych wydań, których plików nie ma w drzewie.
+    "proj.manifest_dropped": {
+        "pl": "  manifest zapomniał klatek, których plików nie ma w drzewie: {n}",
+        "en": "  the manifest dropped frames whose files are not in the tree: {n}",
+    },
     # Pozycja z linkiem utworzonym, którego sonda pierwszego linku nie przeczytała (AR-197).
     "proj.unverified": {
         "pl": "  niezweryfikowane (link utworzony, sonda nie przeczytała plików): {n}",
@@ -4691,6 +4734,77 @@ CATALOG = {
     "proj.obj.status_cancelled": {
         "pl": "Przerwano wydanie obiektu {canon}: {word} {n} z {total}, reszta nietknięta → {root}",
         "en": "Release of object {canon} stopped: {word} {n} of {total}, the rest untouched → {root}",
+    },
+    # Naprawa manifestu wydania (AR-213, `projection.repair_manifest`): sonda wskazuje lukę, drugie
+    # kliknięcie zapisuje manifest bez linkowania plików.
+    "proj.obj.manifest_missing": {
+        "pl": "  manifest wydania (_PROJEKCJA.json) nie leży w folderze - wciągnięcie wyników WBPP nie "
+              "rozpozna tego wydania; „Zapisz manifest” zapisze go bez linkowania plików",
+        "en": "  the release manifest (_PROJEKCJA.json) is not in the folder - taking in WBPP results "
+              "will not recognize this release; “Write manifest” writes it without linking files",
+    },
+    "proj.obj.manifest_stale": {
+        "pl": "  manifest wydania (_PROJEKCJA.json) nie opisuje wszystkich plików w folderze - „Zapisz "
+              "manifest” dopisze brakujące bez linkowania plików",
+        "en": "  the release manifest (_PROJEKCJA.json) does not describe all files in the folder - "
+              "“Write manifest” adds the missing ones without linking files",
+    },
+    # Czym manifest się różni, gdy listy id są zgodne (`ManifestRepair.roznice`): same nazwy plików
+    # albo sam czas nagłówka (próba wydania z tej sesji okna, której manifest nie powstał).
+    "proj.obj.manifest_stale_names": {
+        "pl": "  manifest wydania (_PROJEKCJA.json) nie zna wszystkich nazw plików, pod którymi WBPP "
+              "dostał lighty - „Zapisz manifest” dopisze je z drzewa bez linkowania plików",
+        "en": "  the release manifest (_PROJEKCJA.json) does not know all file names WBPP got the lights "
+              "under - “Write manifest” adds them from the tree without linking files",
+    },
+    "proj.obj.manifest_stale_ts": {
+        "pl": "  manifest wydania (_PROJEKCJA.json) niesie czas wcześniejszego wydania - „Zapisz "
+              "manifest” zapisze czas próby, po której manifest nie powstał",
+        "en": "  the release manifest (_PROJEKCJA.json) carries the time of an earlier release - "
+              "“Write manifest” writes the time of the attempt after which no manifest was written",
+    },
+    "proj.obj.manifest_will_keep": {
+        "pl": "  zapis zachowa z wcześniejszych wydań: {kept}   zapomni (pliku nie ma w drzewie): "
+              "{dropped}",
+        "en": "  the write keeps from earlier releases: {kept}   drops (no file in the tree): {dropped}",
+    },
+    # Manifest bez daty wydania (`ts: null` + `repaired_at`): żniwa pokazują takie wydanie bez daty,
+    # na końcu listy, i nigdy nie mówią o nim „czeka na WBPP” (`harvest._release_state`).
+    "proj.obj.manifest_no_ts": {
+        "pl": "  manifest bez daty wydania (brak dowodu czasu) - wciągnięcie wyników WBPP pokaże to "
+              "wydanie bez daty, na końcu listy, nigdy jako „czeka na WBPP”",
+        "en": "  a manifest without a release date (no evidence of the time) - taking in WBPP results "
+              "shows this release without a date, at the end of the list, never as “waiting for WBPP”",
+    },
+    "proj.obj.manifest_only_sets": {
+        "pl": "  manifest opisze tylko zestawy: {sets}; foldery obok zostaną bez zeznania: {other}",
+        "en": "  the manifest describes only the sets: {sets}; the folders next to them stay without "
+              "a record: {other}",
+    },
+    "proj.obj.manifest_refused": {
+        "pl": "  manifestu nie da się zapisać: {msg}",
+        "en": "  the manifest cannot be written: {msg}",
+    },
+    "proj.obj.manifest_error": {"pl": "Nie zapisano manifestu: {msg}\n\n",
+                                "en": "The manifest was not written: {msg}\n\n"},
+    "proj.obj.btn_write_manifest": {"pl": "Zapisz manifest", "en": "Write manifest"},
+    "proj.obj.btn_manifest_written": {"pl": "Manifest zapisany ✓", "en": "Manifest written ✓"},
+    "proj.obj.writing_manifest": {"pl": "Zapisuję manifest wydania → {root}",
+                                  "en": "Writing the release manifest → {root}"},
+    # Zamknięcie okna w biegu zapisu manifestu: zapis jednego pliku jest nieprzerywalny.
+    "proj.obj.closing_after_manifest": {"pl": "zapisuję manifest - okno zamknie się po zapisie",
+                                        "en": "writing the manifest - the window closes afterwards"},
+    "proj.obj.manifest_written": {"pl": "Zapisano manifest wydania", "en": "Release manifest written"},
+    "proj.obj.manifest_current": {"pl": "Manifest już opisuje komplet w celu - nic do zapisu",
+                                  "en": "The manifest already describes the complete target - "
+                                        "nothing to write"},
+    "proj.obj.manifest_kept": {
+        "pl": "  zachowane z wcześniejszych wydań: {kept}   zapomniane (pliku nie ma w drzewie): {dropped}",
+        "en": "  kept from earlier releases: {kept}   dropped (no file in the tree): {dropped}",
+    },
+    "proj.obj.status_manifest": {
+        "pl": "Zapisano manifest wydania obiektu {canon} → {root}",
+        "en": "Wrote the release manifest of object {canon} → {root}",
     },
     # Powody luki flatu (`lineage.raw_flats_for`) - mapa `projection_dialog._FLAT_GAP_KEYS`.
     "proj.obj.gap.incomplete_recipe": {
@@ -4801,6 +4915,14 @@ CATALOG = {
     },
     "harvest.missing_dir": {"pl": "Katalog nie istnieje: {path}", "en": "Folder does not exist: {path}"},
     "harvest.empty": {"pl": "Brak masterów i stosów w {path}", "en": "No masters or stacks in {path}"},
+    # Plan bez zawartości katalogów, których spacer wyjścia nie przeczytał (AR-222) - ścieżki względem wyjścia.
+    "harvest.unread_dirs": {
+        "pl": {"one": "Plan niepełny: {n} katalog wyjścia nieprzeczytany - {paths}.",
+               "few": "Plan niepełny: {n} katalogi wyjścia nieprzeczytane - {paths}.",
+               "many": "Plan niepełny: {n} katalogów wyjścia nieprzeczytanych - {paths}."},
+        "en": {"one": "Incomplete plan: {n} output folder not read - {paths}.",
+               "other": "Incomplete plan: {n} output folders not read - {paths}."},
+    },
     "harvest.probing": {
         "pl": "Czytam pliki wyjścia i ich historię (podgląd, bez zmian na dysku)…",
         "en": "Reading the output files and their history (preview, no disk changes)…",
@@ -5085,6 +5207,23 @@ CATALOG = {
                "other": "{n} card folders do not exist: {paths} - connect the drive or set the working folder: "
                         "File → WBPP working folder…"},
     },
+    # Karta, której folderu albo `OBJECTS` nie da się przeczytać (zerwany udział, odmowa - AR-222): klasa
+    # błędu w języku UI, surowy tekst systemu w szczególe pola.
+    "harvest.rel.unreachable_one": {
+        "pl": "Folder karty niedostępny: {path} - {msg}",
+        "en": "The card folder is unreachable: {path} - {msg}",
+    },
+    "harvest.rel.unreachable_many": {
+        "pl": {"one": "{n} folder karty niedostępny: {paths}",
+               "few": "{n} foldery kart niedostępne: {paths}",
+               "many": "{n} folderów kart niedostępnych: {paths}"},
+        "en": {"one": "{n} card folder is unreachable: {paths}",
+               "other": "{n} card folders are unreachable: {paths}"},
+    },
+    # Stan wiersza: ścieżki w `out`, których lista nie przeczytała - folder nie jest „wciągnięty” (AR-222).
+    "harvest.rel.unread": {"pl": "nieprzeczytane {n}", "en": "not read {n}"},
+    # Stan wiersza, którego ostatni podgląd padł (AR-222) - blokada zdania „folder możesz skasować”.
+    "harvest.rel.probe_failed": {"pl": "podgląd nieudany", "en": "preview failed"},
     "harvest.rel.probing": {"pl": "Liczę wydania na kartach…", "en": "Counting the releases on the cards…"},
     "harvest.rel.failed": {"pl": "Lista wydań: {msg}", "en": "Release list: {msg}"},
     "harvest.rel.done_note": {
@@ -5108,6 +5247,12 @@ CATALOG = {
     "harvest.manifest_error": {
         "pl": "Kopie leżą w archiwum, ale zeznania żniw nie zapisano: {err}",
         "en": "The copies are in the archive, but the harvest record was not written: {err}",
+    },
+    # Bliźniak bez kopii (AR-218): bieg przerwany przed pierwszą kopią albo same błędy kopii -
+    # zeznanie pisze się i tak, a „Kopie leżą w archiwum” byłoby nieprawdą.
+    "harvest.manifest_error_none": {
+        "pl": "Zeznania żniw nie zapisano: {err}",
+        "en": "The harvest record was not written: {err}",
     },
 
     # ============================================================ drobne (rollout §4: tasks/facets/portfolio)
@@ -7071,6 +7216,27 @@ CATALOG = {
         "en": "the file has the header from before the commit, but it is not the undo result "
               "written by Horreum ({inner}) - rescan the file; a change outside the header is for "
               "a person to decide"},
+    # Pliki obok ścieżki po przerwanym cofnięciu atomowym (AR-127, 0045): werdykt bramki (ślad martwej
+    # albo cudzej próby) i dopiski właściciela śladu na końcu cofnięcia.
+    "objchg.item.undo_cut_kept": {
+        "pl": "przerwane cofnięcie commitu {commit_id} zostawiło obok ścieżki pliki - zostają do oka "
+              "w Porządkach: {paths}",
+        "en": "an interrupted undo of commit {commit_id} left files next to the path - they are kept "
+              "for review in Housekeeping: {paths}"},
+    "objchg.item.undo_files_kept": {
+        "pl": "pliki obok ścieżki zostają do oka w Porządkach („Kopie zostawione do oka”): {paths}",
+        "en": "files next to the path are kept for review in Housekeeping (Copies kept for review): "
+              "{paths}"},
+    "objchg.item.undo_files_unknown": {
+        "pl": "nie da się ustalić, czy obok ścieżki zostały pliki: {paths} - ponów cofnięcie albo "
+              "sprawdź je ręcznie",
+        "en": "it cannot be determined whether files remain next to the path: {paths} - retry the "
+              "undo or check them by hand"},
+    "objchg.item.undo_reconcile_failed": {
+        "pl": "rozstrzygnięcie plików obok ścieżki po cofnięciu commitu {commit_id} padło ({detail}) "
+              "- ponów operację",
+        "en": "settling the files next to the path after the undo of commit {commit_id} failed "
+              "({detail}) - retry the operation"},
     "objchg.item.recover_not_open": {
         "pl": "operacja {op_id} nie jest otwarta ({phase}) - odzysk dotyczy wyłącznie przerwanego "
               "zapisu",
@@ -7187,7 +7353,8 @@ CATALOG = {
               "a person to decide"},
     # Bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
     # `evaluate_manual_change`) i powody wyrażenia (`expr.eval_for`, parametr `inner` powodów
-    # `macro_compute`/`macro_assign`). PL = zdanie rdzenia znak w znak (ASCII, `--` jak w makrze).
+    # `macro_compute`/`macro_assign`). PL = zdanie rdzenia znak w znak (polskie znaki od AR-228,
+    # `--` jak w makrze).
     "objchg.item.macro_raw": {
         "pl": "plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)",
         "en": "RAW file (DSLR) - Horreum does NOT write it (read-only)"},
@@ -7201,32 +7368,32 @@ CATALOG = {
         "pl": "skompresowany master -- edycja poza krokiem 4 (T6)",
         "en": "compressed master - editing is outside step 4 (T6)"},
     "objchg.item.macro_degenerate": {
-        "pl": "tozsamosc nieobliczalna (degenerat) -- zapis rozdwoilby klatke (D-X-13)",
+        "pl": "tożsamość nieobliczalna (degenerat) -- zapis rozdwoiłby klatkę (D-X-13)",
         "en": "identity cannot be computed (degenerate) - a write would split the frame (D-X-13)"},
     "objchg.item.macro_no_header_hash": {
         "pl": "brak header_hash (plik nieczytelny) -- brak kontroli zapisu",
         "en": "no header_hash (unreadable file) - no write control"},
     "objchg.item.macro_frame_gone": {"pl": "frame nieobecny w bazie",
                                      "en": "frame missing from the database"},
-    "objchg.item.macro_set_missing": {"pl": "brak karty '{keyword}' do modyfikacji (uzyj add)",
+    "objchg.item.macro_set_missing": {"pl": "brak karty '{keyword}' do modyfikacji (użyj add)",
                                       "en": "no card '{keyword}' to modify (use add)"},
     "objchg.item.macro_idx_required": {
-        "pl": "keyword '{keyword}' ma wiele wystapien -- wymagany jawny idx",
+        "pl": "keyword '{keyword}' ma wiele wystąpień -- wymagany jawny idx",
         "en": "keyword '{keyword}' occurs more than once - an explicit idx is required"},
-    "objchg.item.macro_add_exists": {"pl": "karta '{keyword}' juz istnieje (uzyj set)",
+    "objchg.item.macro_add_exists": {"pl": "karta '{keyword}' już istnieje (użyj set)",
                                      "en": "card '{keyword}' already exists (use set)"},
     "objchg.item.macro_compute": {"pl": "compute {name}: {inner}", "en": "compute {name}: {inner}"},
     "objchg.item.macro_assign": {"pl": "assign: {inner}", "en": "assign: {inner}"},
     "objchg.item.macro_not_int": {
-        "pl": "wynik niecalkowity ({value}) dla keyworda '{keyword}' typu int",
+        "pl": "wynik niecałkowity ({value}) dla keyworda '{keyword}' typu int",
         "en": "non-integer result ({value}) for int keyword '{keyword}'"},
     "objchg.item.macro_type_mismatch": {
-        "pl": "wartosc '{value}' nie pasuje do typu '{value_type}'",
+        "pl": "wartość '{value}' nie pasuje do typu '{value_type}'",
         "en": "value '{value}' does not match type '{value_type}'"},
     "objchg.item.macro_manual_many": {
-        "pl": "keyword '{keyword}' ma wiele wystapien -- edycja reczna poza krokiem 4",
+        "pl": "keyword '{keyword}' ma wiele wystąpień -- edycja ręczna poza krokiem 4",
         "en": "keyword '{keyword}' occurs more than once - manual editing is outside step 4"},
-    "objchg.item.macro_manual_not_int": {"pl": "wynik niecalkowity ({value}) dla keyworda typu int",
+    "objchg.item.macro_manual_not_int": {"pl": "wynik niecałkowity ({value}) dla keyworda typu int",
                                          "en": "non-integer result ({value}) for an int keyword"},
     "objchg.item.macro_missing_operand": {"pl": "brak operandu: {name}",
                                           "en": "missing operand: {name}"},
@@ -7268,20 +7435,21 @@ CATALOG = {
     "objchg.item.rename_tpl_unknown_token": {"pl": "nieznany token szablonu: {value}",
                                              "en": "unknown pattern token: {value}"},
     # Błędy definicji makra i wyrażenia (AR-194, `expr.compile_expr`, `expr._eval`,
-    # `macro.MacroDef.from_dict`). PL = zdanie rdzenia znak w znak (ASCII, jak `macro_*`).
-    "objchg.item.expr_empty": {"pl": "puste wyrazenie", "en": "empty expression"},
-    "objchg.item.expr_syntax": {"pl": "blad skladni: {detail}", "en": "syntax error: {detail}"},
-    "objchg.item.expr_bad_const": {"pl": "niedozwolona stala: {value}",
+    # `macro.MacroDef.from_dict`). PL = zdanie rdzenia znak w znak (polskie znaki od AR-228, jak
+    # `macro_*`).
+    "objchg.item.expr_empty": {"pl": "puste wyrażenie", "en": "empty expression"},
+    "objchg.item.expr_syntax": {"pl": "błąd składni: {detail}", "en": "syntax error: {detail}"},
+    "objchg.item.expr_bad_const": {"pl": "niedozwolona stała: {value}",
                                    "en": "constant not allowed: {value}"},
-    "objchg.item.expr_store": {"pl": "przypisanie w wyrazeniu niedozwolone",
+    "objchg.item.expr_store": {"pl": "przypisanie w wyrażeniu niedozwolone",
                                "en": "assignment inside an expression is not allowed"},
-    "objchg.item.expr_call_not_allowed": {"pl": "dozwolone tylko wywolania z bialej listy funkcji",
+    "objchg.item.expr_call_not_allowed": {"pl": "dozwolone tylko wywołania z białej listy funkcji",
                                           "en": "only calls of allowed functions are permitted"},
     "objchg.item.expr_kwargs": {"pl": "argumenty nazwane niedozwolone",
                                 "en": "keyword arguments are not allowed"},
-    "objchg.item.expr_starred": {"pl": "rozpakowanie argumentow niedozwolone",
+    "objchg.item.expr_starred": {"pl": "rozpakowanie argumentów niedozwolone",
                                  "en": "argument unpacking is not allowed"},
-    "objchg.item.expr_bad_node": {"pl": "niedozwolony element wyrazenia: {name}",
+    "objchg.item.expr_bad_node": {"pl": "niedozwolony element wyrażenia: {name}",
                                   "en": "element not allowed in an expression: {name}"},
     "objchg.item.macro_def_no_assign": {"pl": "definicja makra wymaga pola 'assign'",
                                         "en": "the macro definition needs an 'assign' field"},
@@ -7330,6 +7498,60 @@ CATALOG = {
               "in the target, but the manifest does not describe them (it is missing or the previous "
               "one remains), so recognizing the object when taking in WBPP results and checking the "
               "tree layout on the next release may be incomplete: {inner}"},
+    # Błąd programu w oknie (AR-209, AR-214, `item_reasons.powod_okna`): surowy tekst w `detail` -
+    # szczegół pod kursorem, nie w zdaniu.
+    "objchg.item.prog_error": {"pl": "błąd programu - szczegół w podpowiedzi",
+                               "en": "a program error - details in the tooltip"},
+    # Naprawa manifestu wydania obiektu (`projection.repair_manifest`, AR-213): odmowy zapisu
+    # manifestu nad drzewem, które już leży w celu. PL = zdanie rdzenia znak w znak.
+    "objchg.item.proj_manifest_incomplete": {
+        "pl": "drzewo wydania nie jest kompletne - pozycji planu bez pliku w celu: {n}; manifest "
+              "zapisuje się wyłącznie nad kompletem - najpierw wydaj brakujące pozycje",
+        "en": "the release tree is not complete - plan items without a file in the target: {n}; the "
+              "manifest is written only over a complete tree - release the missing items first"},
+    "objchg.item.proj_manifest_skipped": {
+        "pl": "klatki planu bez obecnej kopii: {n} - ich miejsca w drzewie wydania nie da się "
+              "potwierdzić, więc manifest nie mógłby ich uczciwie wymienić; przywróć kopię i przeskanuj "
+              "albo wydaj obiekt ponownie z wiersza poleceń (horreum project --object … --apply)",
+        "en": "plan frames without a present copy: {n} - their place in the release tree cannot be "
+              "confirmed, so the manifest could not list them honestly; restore the copy and rescan, "
+              "or release the object again from the command line (horreum project --object … --apply)"},
+    "objchg.item.proj_manifest_unproven": {
+        "pl": "manifest wymienia klatki, których plików w drzewie wydania nie da się potwierdzić: {n} "
+              "(brak obecnej kopii, plik albo folder nieczytelny, inny plik pod tą nazwą) - zapis "
+              "zgubiłby je albo zmyślił; przywróć kopię i przeskanuj albo wydaj obiekt ponownie "
+              "z wiersza poleceń (horreum project --object … --apply)",
+        "en": "the manifest lists frames whose files in the release tree cannot be confirmed: {n} (no "
+              "present copy, an unreadable file or folder, a different file under that name) - writing "
+              "would lose them or make them up; restore the copy and rescan, or release the object "
+              "again from the command line (horreum project --object … --apply)"},
+    "objchg.item.proj_manifest_damaged": {
+        "pl": "manifest wydania (_PROJEKCJA.json) leży w folderze, ale nie jest poprawnym zeznaniem "
+              "({detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
+              "i „Zapisz manifest”",
+        "en": "the release manifest (_PROJEKCJA.json) is in the folder, but it is not a valid record "
+              "({detail}) - it is not overwritten; check it or delete it by hand, then “Refresh "
+              "preview” and “Write manifest”"},
+    "objchg.item.proj_manifest_foreign": {
+        "pl": "manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania (sprzeczne pole: "
+              "{detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
+              "i „Zapisz manifest”",
+        "en": "the release manifest (_PROJEKCJA.json) in the folder belongs to another release "
+              "(conflicting field: {detail}) - it is not overwritten; check it or delete it by hand, "
+              "then “Refresh preview” and “Write manifest”"},
+    "objchg.item.proj_manifest_changed": {
+        "pl": "manifest wydania (_PROJEKCJA.json) zmienił się w trakcie zapisu - inny zapis był "
+              "szybszy; nic nie zapisano, odśwież podgląd",
+        "en": "the release manifest (_PROJEKCJA.json) changed while writing - another write was "
+              "faster; nothing was written, refresh the preview"},
+    "objchg.item.proj_manifest_busy": {
+        "pl": "obok manifestu leży plik roboczy innego zapisu ({path}) - gdy żaden zapis nie trwa, "
+              "skasuj go ręcznie, potem ponów wydanie albo „Odśwież podgląd”",
+        "en": "a working file of another write lies next to the manifest ({path}) - when no write is "
+              "running, delete it by hand, then release again or “Refresh preview”"},
+    "objchg.item.proj_manifest_unreadable": {
+        "pl": "manifestu wydania (_PROJEKCJA.json) nie da się odczytać - nie nadpisuję go: {inner}",
+        "en": "the release manifest (_PROJEKCJA.json) cannot be read - it is not overwritten: {inner}"},
     # Reguła formy folderu obiektu (`resolve.catalog.FOLDER_RULE_CODES`, AR-141) - szczegół
     # pominięcia `bad_target` w języku UI.
     "objchg.folder.empty": {"pl": "kanon pusty albo nie jest tekstem",

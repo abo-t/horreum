@@ -1747,8 +1747,10 @@ def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, rea
 def mark_location_vanished(con, *, location_id, expected_path, root, run_id, now,
                            actor="presence", forced=False):
     """ZDJĘCIE OBECNOŚCI kopii (P5/#7): `present = 0` + zgaszenie markera + `event(location.vanished)`.
-    Jedyna droga zapisu `present=0` w całym pniu — dowód nieobecności zbiera wołający
-    (`presence.check`: `os.lstat` → `ENOENT`/`ENOTDIR`; backstop skanu: ten sam test na ścieżce błędu).
+    Jedyna droga zapisu `present=0` w całym pniu - dowód nieobecności zbiera wołający
+    (`presence.check` i backstop skanu na ścieżce błędu - oba przez `scan.path_gone`: trójstan, „nie
+    ma” wyłącznie z klasy `os_missing` właściciela albo z `NotADirectoryError`; każdy inny `OSError`
+    to „nie wiem” i zero zapisu, AR-211).
 
     APPEND-ONLY: wiersz `location` ZOSTAJE (tożsamość `sha1_data` frame'a i historia nietknięte) —
     znika wyłącznie twierdzenie „plik pod tą ścieżką jest". Powrót kopii przywraca `present=1`
@@ -4699,6 +4701,52 @@ def mark_atomic_undo_synced(con, *, undo_id, now):
         n = con.execute("UPDATE atomic_undo SET synced_at = ? WHERE id = ? AND synced_at IS NULL",
                         (now, undo_id)).rowcount
     return n == 1
+
+
+def unsettled_atomic_undos(con, location_id):
+    """Ślady cofnięć drogą atomową lokacji (backupy KAŻDEGO commitu tej lokacji) bez werdyktu plików obok
+    ścieżki (0045, AR-127) - z `commit_id` backupu. Bez `ORDER BY`: indeks częściowy
+    `idx_atomic_undo_unsettled` wybiera planista tylko wtedy (sonda 2026-10-18: 2,2 µs zamiast 193 µs przy
+    5000 śladach rozstrzygniętych); kolejność ustala wołający."""
+    return con.execute(
+        "SELECT au.*, hb.commit_id FROM atomic_undo au JOIN header_backups hb ON hb.id = au.backup_id "
+        "WHERE hb.location_id = ? AND au.settled_at IS NULL", (location_id,)).fetchall()
+
+
+def settle_atomic_undo(con, *, undo_id, outcome, kept_paths, now):
+    """WERDYKT PLIKÓW OBOK ŚCIEŻKI śladu cofnięcia (0045, AR-127): `kept` - obok ścieżki widziano plik,
+    `kept_paths` = nazwy śladu do oka (wiersz Porządków „Kopie zostawione do oka”); `clean` - obok ścieżki
+    nic nie zostało. Rozstrzyga, kto - wołający (`writeback`): `clean` wyłącznie właściciel śladu.
+
+    EXPECT przed bazą (`ValueError`, zero zapisu): `outcome` ∈ {clean, kept}, `kept_paths` = lista
+    niepustych tekstów, niepusta wtedy i tylko wtedy, gdy `kept` - elementów CHECK 0045 nie sprawdzi.
+    CAS na `settled_at IS NULL`: werdykt pisze się raz; przy `kept` zdarzenie `location.displaced_kept`
+    (to samo co zamiar podmiany 0038) WYŁĄCZNIE po własnym, skutecznym CAS. Zwraca ZAWSZE wiersz
+    kanoniczny (`outcome`, `kept_paths`, `settled_at`) - przy przegranym CAS werdykt zwycięzcy."""
+    if outcome not in ("clean", "kept"):
+        raise ValueError(f"werdykt śladu cofnięcia spoza (clean, kept): {outcome!r}")
+    sciezki = list(kept_paths)
+    if any(not isinstance(s, str) or not s for s in sciezki):
+        raise ValueError(f"nazwy plików śladu cofnięcia muszą być niepustymi tekstami: {sciezki!r}")
+    if (outcome == "kept") != bool(sciezki):
+        raise ValueError(f"werdykt {outcome!r} z listą plików {sciezki!r}")
+    with _immediate(con):
+        n = con.execute(
+            "UPDATE atomic_undo SET outcome = ?, kept_paths = ?, settled_at = ? "
+            "WHERE id = ? AND settled_at IS NULL",
+            (outcome, json.dumps(sciezki), now, undo_id)).rowcount
+        if n == 1 and outcome == "kept":
+            slad = con.execute(
+                "SELECT au.backup_id, hb.location_id FROM atomic_undo au "
+                "JOIN header_backups hb ON hb.id = au.backup_id WHERE au.id = ?", (undo_id,)).fetchone()
+            emit_event(con, actor="user:local", verb="location.displaced_kept",
+                       target=f"location:{slad['location_id']}", now=now,
+                       payload={"undo_id": undo_id, "backup_id": slad["backup_id"], "paths": sciezki})
+        wiersz = con.execute("SELECT outcome, kept_paths, settled_at FROM atomic_undo WHERE id = ?",
+                             (undo_id,)).fetchone()
+    if wiersz is None:
+        raise ValueError(f"ślad cofnięcia {undo_id} nie istnieje")
+    return wiersz
 
 
 def pending_header_backups(con, location_id):

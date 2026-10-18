@@ -156,6 +156,9 @@ from importlib import resources
 # utrwalony przed podmianą: para odcisków wyniku (sha1 pliku i nagłówka), plik zastany i nazwy
 # plików, które cofnięcie może zostawić na dysku (AR-127). Ponowienie rozpoznaje po nim własny wynik.
 # Wchodzi PUSTA - cofnięcia sprzed migracji śladu nie zostawiły.
+# 0045 to PRZYROST (ADD COLUMN + indeks częściowy, AR-127): werdykt plików obok ścieżki na śladzie
+# cofnięcia (`atomic_undo.outcome`/`kept_paths`/`settled_at`) - wiersz Porządków „Kopie zostawione do oka”
+# dla resztek przerwanego cofnięcia. Wchodzi BEZ backfillu: wiersz 0044 rozstrzyga pierwszy dotyk lokacji.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -200,6 +203,7 @@ MIGRATIONS = [
     (42, "0042_writer_reason_code.sql"),
     (43, "0043_frame_object_index.sql"),
     (44, "0044_atomic_undo.sql"),
+    (45, "0045_atomic_undo_settled.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

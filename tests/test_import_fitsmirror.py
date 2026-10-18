@@ -8,6 +8,7 @@ muszą różnicować dane, nie tylko nagłówki.
 import json
 import os
 import sqlite3
+import sys
 from datetime import date
 
 import numpy as np
@@ -872,3 +873,34 @@ def test_fail_kotwicy_drukuje_pochodzenie_i_wiek(tmp_path):
     assert [x.strip() for x in linie[i + 1:i + 4]] == list(pochodzenie)
     # PASS nie niesie pochodzenia - wydruk nie puchnie na zielonych kotwicach
     assert all(p == () for _e, ok_, p in wyniki if ok_)
+
+
+# ============================================================ korzeń dawcy niedostępny (AR-212)
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="`canonize_root` pyta dysk (`GetLongPathNameW`) wyłącznie na Windows")
+def test_import_korzen_dawcy_niedostepny_abort_z_klasa(tmp_path, capsys):
+    """AR-212: drzewo dawcy zniknęło z dysku - `preflight` rzuca `ImportAbort` z klasą błędu systemu
+    i surowym tekstem ze ścieżką, CLI drukuje wiersz ABORT (cp1250) z kodem 1. Do AR-212 goły
+    `FileNotFoundError` z `canonize_root` kończył import śladem stosu (CLI łapie tylko `ImportAbort`).
+    Falsyfikator: `preflight` bez `except OSError` - z `cli.main` ucieka `FileNotFoundError`."""
+    import shutil
+    from horreum import cli
+    donor_path, _files = _mk_donor(tmp_path, SPECS)
+    shutil.rmtree(tmp_path / "astro")
+    donor = open_donor(str(donor_path))
+    try:
+        with pytest.raises(ImportAbort) as abort:
+            preflight(donor)
+    finally:
+        donor.close()
+    tekst = str(abort.value)
+    assert tekst.startswith("korzen dawcy niedostepny: plik albo folder nie istnieje (WinError 2) - "
+                            "FileNotFoundError: [WinError 2] "), tekst
+    assert repr(str(tmp_path / "astro")) in tekst and abort.value.summary is None
+    assert cli.main(["import-fitsmirror", str(donor_path), str(tmp_path / "horreum.db")]) == 1
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    assert "korzen dawcy niedostepny: plik albo folder nie istnieje (WinError 2)" in out
+    assert "Traceback" not in out

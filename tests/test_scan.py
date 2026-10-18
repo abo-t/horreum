@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import struct
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -2423,3 +2424,135 @@ def test_review_state_licznik_i_rozbicie_nieczytelnych_z_jednej_migawki(tmp_path
     pisarz.close()
     assert st.unreadable == sum(st.unreadable_kinds.values()) == 1, st
     con.close()
+
+
+# ============================================================ zerwany udział: dowód nieobecności z klasy
+# właściciela, korzeń z kodem systemu (AR-211, AR-212)
+
+
+def _stat_pada(monkeypatch, sciezka, exc):
+    """`os.stat` ścieżki `sciezka` (bez wielkości liter) rzuca `exc`; reszta jak zwykle."""
+    prawdziwy = os.stat
+    cel = os.path.normcase(str(sciezka))
+
+    def stat(p, *a, **kw):
+        if isinstance(p, (str, os.PathLike)) and os.path.normcase(os.fspath(p)) == cel:
+            raise exc
+        return prawdziwy(p, *a, **kw)
+    monkeypatch.setattr(os, "stat", stat)
+
+
+@pytest.mark.parametrize("kod, werdykt", [(53, None), (67, None), (15, None), (21, None), (5, None),
+                                          (2, True), (3, True)])
+def test_path_gone_nie_ma_wylacznie_z_klasy_wlasciciela(tmp_path, monkeypatch, kod, werdykt):
+    """AR-211: zerwany udział (53/67) i dysk, którego nie ma (15), CPython podaje jako
+    `FileNotFoundError` - podklasa nie jest dowodem nieobecności, więc „nie wiem” (None). „Nie ma”
+    wyłącznie z klasy `os_missing` właściciela (2/3). Falsyfikator: `except (FileNotFoundError,
+    NotADirectoryError): return True` - 53, 67 i 15 mówią „nie ma”."""
+    p = str(tmp_path / "a.fits")
+    exc = OSError(None, "Komunikat systemu", p, kod)
+    if getattr(exc, "winerror", None) != kod:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    _stat_pada(monkeypatch, p, exc)
+    assert scan_module.path_gone(p) is werdykt
+
+
+def test_path_gone_bez_kodu_windows_i_prawdziwy_dysk(tmp_path, monkeypatch):
+    """ENOENT bez kodu Windows i ENOTDIR to „nie ma”; plik, który jest - „jest”; plik, którego nie
+    ma na prawdziwym dysku - „nie ma”."""
+    import errno
+    jest = _light(tmp_path / "jest.fits", 1)
+    assert scan_module.path_gone(str(jest)) is False
+    assert scan_module.path_gone(str(tmp_path / "brak.fits")) is True
+    for exc in (FileNotFoundError(errno.ENOENT, "No such file"), NotADirectoryError(errno.ENOTDIR, "x")):
+        _stat_pada(monkeypatch, str(jest), exc)
+        assert scan_module.path_gone(str(jest)) is True, exc
+
+
+def test_skan_zerwany_udzial_przy_odczycie_zostawia_kopie_obecna_z_markerem(tmp_path, monkeypatch):
+    """AR-211, drugi wołający `path_gone` (backstop `scan_tree`): znana kopia, której `stat` pada
+    zerwanym udziałem (53), zostaje OBECNA z markerem `io` - następny skan przeczyta ją ponownie;
+    zero `location.vanished`. Falsyfikator: dawna klauzula `path_gone` - kopia oznaczona zniknięta."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    exc = OSError(None, "Nie można odnaleźć ścieżki sieciowej", str(f), 53)
+    if getattr(exc, "winerror", None) != 53:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    _stat_pada(monkeypatch, f, exc)
+    s = scan_tree(con, tree, volume="VOL1", now=LATER)
+    row = con.execute("SELECT present, unreadable_since, unreadable_kind FROM location").fetchone()
+    assert (row["present"], row["unreadable_kind"]) == (1, "io") and row["unreadable_since"], tuple(row)
+    assert s.vanished == 0
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'location.vanished'").fetchone()[0] == 0
+    con.close()
+
+
+def test_fakty_kopii_zerwany_udzial_przy_zywym_korzeniu_to_nieczytelne(tmp_path, monkeypatch):
+    """AR-211 w etapie faktów kopii: plik, którego `stat` pada zerwanym udziałem (53), przy żywym
+    korzeniu idzie do `failed` (nie wiadomo), nie do `missing` („skasowany”, kierunek „Oznacz
+    zniknięte”) - świadek waży wyłącznie klasę „nie ma”. Skasowany naprawdę dalej `missing`.
+    Falsyfikator: `if swiadek_zyje(path):` bez pytania o klasę - 53 idzie do `missing`."""
+    from test_copy_facts import NOW as NOW_CF, _baza_sprzed_0021, _dwie_kopie
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    exc = OSError(None, "Nie można odnaleźć ścieżki sieciowej", str(b), 53)
+    if getattr(exc, "winerror", None) != 53:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    with monkeypatch.context() as m:
+        _stat_pada(m, b, exc)
+        s = scan_module.backfill_copy_facts(con, now=NOW_CF, root=root)
+    assert (s.written, s.missing, s.failed) == (1, 0, 1), s
+    assert s.missing_paths == [] and s.failed_paths[0].startswith(f"{b}: FileNotFoundError: [WinError 53]")
+    os.remove(b)
+    s = scan_module.backfill_copy_facts(con, now=NOW_CF, root=root)
+    assert (s.missing, s.failed, s.missing_paths) == (1, 0, [str(b)]), s
+    con.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="`GetLongPathNameW` - wyłącznie Windows")
+def test_canonize_root_niedostepny_korzen_niesie_kod_systemu_i_sciezke(tmp_path):
+    """AR-212: korzeń, którego nie ma, rzuca `OSError` z kodem systemu (2 - folder, 3 - rodzic)
+    i ścieżką - klasę mówi właściciel (`os_missing`), tekst systemu bez kropki przed ścieżką, jak
+    w wyjątkach CPython. Falsyfikator: `FileNotFoundError(f"root skanu …")` - `winerror` None,
+    klasa ginie; `FormatError` bez `rstrip` - „.:” w tekście."""
+    from horreum.item_reasons import powod_systemu
+    for sciezka, kod in ((tmp_path / "nie_ma", 2), (tmp_path / "nie_ma" / "x", 3)):
+        with pytest.raises(FileNotFoundError) as e:
+            scan_module.canonize_root(sciezka)
+        exc = e.value
+        assert (exc.winerror, exc.filename) == (kod, str(sciezka)), (exc.winerror, exc.filename)
+        assert powod_systemu(exc).code == "os_missing"
+        assert str(exc).startswith(f"[WinError {kod}] ") and ".:" not in str(exc), str(exc)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="`GetLongPathNameW` i `winerror` - wyłącznie Windows")
+def test_cli_scan_i_stacks_korzen_niedostepny_mowi_klasa_bez_sladu_stosu(tmp_path, capsys, monkeypatch):
+    """AR-212: `scan` i `stacks` na korzeniu, którego nie ma, kończyły się śladem stosu. Teraz jeden
+    wiersz `blad --` klasą z surowym tekstem systemu (ścieżka jest tylko w nim), kod 1, druk w cp1250;
+    `PermissionError` (21 - dysk niegotowy) tak samo. Falsyfikator: bez handlera wyjątek ucieka
+    z `cli.main`."""
+    from horreum import cli
+    dbp = str(tmp_path / "c.db")
+    db.open_db(dbp).close()
+    brak = tmp_path / "nie_ma"
+    for kom in ("scan", "stacks"):
+        assert cli.main([kom, str(brak), dbp, "--volume", "VOL1"]) == 1
+        out = capsys.readouterr().out
+        out.encode("cp1250")
+        (wiersz,) = [w for w in out.splitlines() if w.startswith(f"Horreum {kom}: blad -- ")]
+        assert wiersz.startswith(f"Horreum {kom}: blad -- plik albo folder nie istnieje (WinError 2) - "
+                                 "FileNotFoundError: [WinError 2] "), wiersz
+        assert repr(str(brak)) in wiersz and "Traceback" not in out     # ścieżka jak w `str(OSError)`
+    zly = OSError(None, "Urządzenie nie jest gotowe", r"X:\L", 21)
+
+    def _pada(_root):
+        raise zly
+    monkeypatch.setattr(scan_module, "canonize_root", _pada)
+    for kom in ("scan", "stacks"):
+        assert cli.main([kom, str(tmp_path), dbp, "--volume", "VOL1"]) == 1
+        out = capsys.readouterr().out
+        out.encode("cp1250")
+        assert (f"Horreum {kom}: blad -- udział sieciowy albo dysk nie odpowiada (WinError 21) - "
+                "PermissionError: [WinError 21] Urządzenie nie jest gotowe") in out, out

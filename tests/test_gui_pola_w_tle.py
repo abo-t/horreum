@@ -990,7 +990,7 @@ def test_ogon_starszego_gestu_nie_nadpisuje_odrzucenia_szuflady(qapp, tmp_path, 
         view._po_gescie_zapisu("zdanie A", [1, 2])          # gest A - ogon czeka na przyłożenie
         assert wszedl.wait(_BEZPIECZNIK_S) and view._zbior_w_drodze()
         slot()                                              # „Odrzuć" w trakcie składu
-        odrzucenie = i18n.t(klucz, n=0)
+        odrzucenie = i18n.t_plural(klucz, 0)               # wpis mnogi (AR-226)
         assert msg[-1] == odrzucenie
         brama.set()
         _czekaj_na_pola(view)

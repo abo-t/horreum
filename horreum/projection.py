@@ -34,6 +34,15 @@ ekspozycji i binningu, a nie po optyce - wspólny folder zmieszałby kamery. Kor
 `<cel>/<obiekt>` (`object_root`), więc każdy obiekt ma własny manifest. Układ `wbpp-obiekt` nie
 jest kolumnowy, więc nie wchodzi do `LAYOUTS`; jego kształt dla manifestu niesie `OBJECT_SEGMENTS`,
 a oba źródła kształtu czyta jedna funkcja `layout_segments`.
+
+NAPRAWA MANIFESTU (`repair_manifest`, AR-213) zapisuje `_PROJEKCJA.json` nad drzewem wydania obiektu,
+które JUŻ leży w celu (manifest niezapisany po udanych linkach, skasowany, nieopisujący kompletu) - bez
+wejścia do `apply`. Treść to ta sama `object_manifest`, a listy zestawów scala się BEZ UTRATY ze starym
+manifestem: id wcześniejszych wydań zostają, gdy świadek drzewa (`_SwiadekDrzewa` - plik roli będący tym
+samym plikiem co obecna kopia klatki) je potwierdza; to samo scalenie robi wydanie (`apply(...,
+extra_sources=)`). Obaj pisarze manifestu (krok manifestu wydania i naprawa) trzymają plik roboczy
+`.part` wyłącznie (`x`) od odczytu starego manifestu do publikacji - cudzy `.part` to odmowa
+`proj_manifest_busy`.
 """
 
 from __future__ import annotations
@@ -44,6 +53,7 @@ import json
 import os
 import re
 import shutil
+import stat
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime
@@ -51,7 +61,7 @@ from datetime import datetime
 from . import hashing, lineage, naming
 from .gui import queries
 from .item_reasons import (   # błąd systemu klasą - jeden właściciel (AR-184); odmowy z kodem (AR-200)
-    OdmowaZPowodem, PowodPozycji, blad_systemu)
+    OdmowaZPowodem, PowodPozycji, blad_systemu, powod_systemu)
 from .resolve.paths import STACKS_DIR
 from .scan import EXCLUDED_DIR_NAMES
 
@@ -210,15 +220,9 @@ def _sources(con, ids):
     """Reguła wyboru ŹRÓDŁA linku w jednym miejscu dla obu planistów: `frame_id -> (ścieżka pierwszej
     OBECNEJ kopii, liczba obecnych kopii)` z `present_locations` (R#1, D-P5: pierwsza w porządku
     `location_id`). Klatka bez obecnej kopii w słowniku się nie pojawia - wołający kładzie ją do
-    `skipped`. `projection_dialog.chosen_present` lustruje tę regułę dla decyzji wolumenowej."""
-    out = {}
-    for r in queries.present_locations(con, ids):
-        if r["location_id"] is None:
-            continue
-        fid = int(r["frame_id"])
-        path, n = out.get(fid, (r["path"], 0))
-        out[fid] = (path, n + 1)
-    return out
+    `skipped`. `projection_dialog.chosen_present` lustruje tę regułę dla decyzji wolumenowej.
+    Kopie klatki - `_obecne_kopie` (te same, które świadczą w drzewie wydania)."""
+    return {fid: (sciezki[0], len(sciezki)) for fid, sciezki in _obecne_kopie(con, ids).items()}
 
 
 def _filter_segment(filter_canon, is_mono):
@@ -514,15 +518,10 @@ def _link_to(src, dst, *, do_apply, copy):
     try:
         if os.path.exists(dst):
             ss, ds = os.stat(src), os.stat(dst)
-            if ds.st_ino == ss.st_ino:
+            if _ten_sam_plik(src, dst, ss, ds, copy=copy):
                 return "exists", None
             if not copy:
                 return "conflict", "cel istnieje z innym i-węzłem (nie nadpisuję)"
-            # Tanie warunki przed odczytem: czas porównuje się bez otwierania plików, a rozmiar
-            # sprawdza `_same_content`, zanim przeczyta prefiks.
-            if (abs(ss.st_mtime_ns - ds.st_mtime_ns) <= _MTIME_TOLERANCE_NS
-                    and _same_content(src, dst, ss, ds)):
-                return "exists", None
             return "conflict", "cel istnieje i nie jest kopią źródła (rozmiar/czas/treść; nie nadpisuję)"
         if not do_apply:
             return "would-link", None
@@ -555,6 +554,30 @@ def _same_content(src, dst, ss, ds, nbytes=_PROBE_BYTES):
         return False
     with open(src, "rb") as a, open(dst, "rb") as b:
         return a.read(nbytes) == b.read(nbytes)
+
+
+def _ten_sam_wezel(ss, ds):
+    """Ten sam plik na dysku - ta sama NIEZEROWA para `(st_dev, st_ino)` (AR-213). Zerowy i-węzeł
+    (nośnik bez i-węzłów, część udziałów SMB) niczego nie dowodzi, a równy i-węzeł z innego
+    urządzenia to inny plik."""
+    return bool(ss.st_ino) and ss.st_ino == ds.st_ino and ss.st_dev == ds.st_dev
+
+
+def _ten_sam_plik(src, dst, ss, ds, *, copy):
+    """Czy plik `dst` jest TYM SAMYM plikiem co źródło `src` - JEDNA reguła dla „cel już stoi”
+    wydania (`_link_to`), sondy kompletu naprawy manifestu i świadka drzewa (`_SwiadekDrzewa`): ten
+    sam węzeł (`_ten_sam_wezel`) albo kopia z wydania - czas w `_MTIME_TOLERANCE_NS` i zgodny rozmiar
+    z prefiksem treści (`_same_content`). Kopię z wydania sprawdza tryb kopii, a w trybie hardlinków
+    także para z zerowym i-węzłem - tam węzeł nie rozstrzyga, a dwa zera nie są dowodem tożsamości.
+    Tanie warunki przed odczytem: czas porównuje się bez otwierania plików, a rozmiar sprawdza
+    `_same_content`, zanim przeczyta prefiks. Odczyt prefiksu może rzucić `OSError` - rozstrzyga
+    wołający."""
+    if _ten_sam_wezel(ss, ds):
+        return True
+    if not copy and ss.st_ino and ds.st_ino:
+        return False
+    return (abs(ss.st_mtime_ns - ds.st_mtime_ns) <= _MTIME_TOLERANCE_NS
+            and _same_content(src, dst, ss, ds))
 
 
 # ============================================================ APPLY (czysta MUTACJA filesystemu)
@@ -625,10 +648,14 @@ class ApplyResult:
     # człowieka, a projekcja jest kasowalna w Eksploratorze.
     drift: str | None = None
     # Wydanie przerwane przed końcem (AR-197): krok z błędem systemu (`proj_root_failed`,
-    # `proj_out_failed`, `proj_verify_failed`, `proj_manifest_failed` - klasa systemu w `inner`) albo
-    # werdykt sondy pierwszego linku (`proj_first_link`, wynik częściowy `ProjectionAbort`). `None` =
+    # `proj_out_failed`, `proj_verify_failed`, `proj_manifest_failed` - klasa systemu w `inner`),
+    # manifest zajęty cudzym plikiem roboczym (`proj_manifest_busy`, AR-213) albo werdykt sondy
+    # pierwszego linku (`proj_first_link`, wynik częściowy `ProjectionAbort`). `None` =
     # wydanie doszło do końca; manifest leży wtedy i tylko wtedy, gdy `do_apply` i `error is None`.
     error: object = None
+    # Ile id wcześniejszych wydań manifest ZAPOMNIAŁ, bo ich plików dowodnie nie ma w drzewie
+    # (scalenie bez utraty, AR-213: `_merge_object_manifest` ze świadkiem `extra_sources`).
+    dropped: int = 0
 
     @property
     def counts(self) -> dict:
@@ -638,7 +665,7 @@ class ApplyResult:
         return c
 
 
-def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
+def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None, extra_sources=None,
           progress: Callable[[int, int, str, str], None] | None = None,
           should_cancel: Callable[[], bool] | None = None) -> ApplyResult:
     """Zmaterializuj PLAN w drzewo `<root>/<segmenty>/<basename>`. `do_apply=False` = DRY (sonduje stan
@@ -653,7 +680,12 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
     korzeń (nic nie powstało), wyjście WBPP (korzeń już stoi), sonda pierwszego linku, która nie
     przeczytała plików (link powstał - pozycja `unverified`, masa nie rusza), manifest (pliki
     wydania leżą, poprzedni manifest nietknięty). Dawniej `OSError` z tych kroków wychodził z CLI
-    `project` śladem stosu."""
+    `project` śladem stosu.
+
+    `extra_sources` (`manifest_sources` wołającego - wydanie obiektu): obecne kopie klatek, które
+    wymienia manifest JUŻ leżący w korzeniu - świadkowie scalenia bez utraty (AR-213). Bez nich id
+    wcześniejszych wydań spoza tego planu zostają w manifeście (niepewne - nic nie ginie); z nimi
+    id, którego pliku dowodnie nie ma w drzewie, schodzi z manifestu (`ApplyResult.dropped`)."""
     _assert_excluded_segment(root)
     # PRZED czymkolwiek: `_write_manifest` nadpisze zeznanie starego drzewa, więc po masie nie byłoby
     # już czego czytać. DRY sonduje ten sam fakt, bo to właśnie DRY ma ostrzec PRZED wydaniem.
@@ -732,21 +764,56 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
                          cancelled, drift)
     if do_apply:
         try:
-            _write_manifest(root, result, now=now, manifest=manifest)
+            dropped = _write_manifest(root, result, now=now, manifest=manifest,
+                                      extra_sources=extra_sources)
+        except _PartZajety as exc:
+            return dataclasses.replace(result, error=_odmowa_zajetego(exc.part))
         except OSError as exc:
-            inner = blad_systemu(exc)
-            # Zdanie mówi, CZEGO brakuje i PO CO: z manifestu żniwa rozpoznają obiekt wydania
-            # (`harvest`, okno żniw), a strażnik rozjazdu układu (`manifest_drift`) czyta z niego
-            # kształt drzewa - pliki leżą, więc „odśwież i ponów” niczego by nie dopisało. Zapis
-            # atomowy zostawia manifest POPRZEDNIEGO wydania, gdy był - zdanie nie obiecuje więc ani
-            # braku rozpoznania, ani braku ostrzeżenia, tylko to, że manifest tych plików nie opisuje.
-            return dataclasses.replace(result, error=PowodPozycji(
-                f"nie zapisano manifestu wydania ({MANIFEST_NAME}) - pliki tego wydania leżą w celu, "
-                f"ale manifest ich nie opisuje (brak go albo został poprzedni), więc rozpoznanie "
-                f"obiektu przy wciąganiu wyników WBPP i kontrola układu drzewa przy następnym "
-                f"wydaniu mogą być niepełne: {inner}",
-                "proj_manifest_failed", inner=inner))
+            return dataclasses.replace(result, error=_powod_manifestu(blad_systemu(exc)))
+        if dropped:
+            return dataclasses.replace(result, dropped=dropped)
     return result
+
+
+def _powod_manifestu(inner):
+    """Powód „manifestu nie zapisano” (`proj_manifest_failed`) - jedno zdanie dla kroku manifestu
+    wydania i dla naprawy manifestu (`repair_manifest`). Mówi, CZEGO brakuje i PO CO: z manifestu
+    żniwa rozpoznają obiekt wydania (`harvest`, okno żniw), a strażnik rozjazdu układu
+    (`manifest_drift`) czyta z niego kształt drzewa. Zapis atomowy zostawia manifest POPRZEDNI, gdy
+    był - zdanie nie obiecuje więc ani braku rozpoznania, ani braku ostrzeżenia, tylko to, że manifest
+    tych plików nie opisuje. `inner` - błąd systemu klasą albo tekst systemu (`blad_systemu`)."""
+    return PowodPozycji(
+        f"nie zapisano manifestu wydania ({MANIFEST_NAME}) - pliki tego wydania leżą w celu, "
+        f"ale manifest ich nie opisuje (brak go albo został poprzedni), więc rozpoznanie "
+        f"obiektu przy wciąganiu wyników WBPP i kontrola układu drzewa przy następnym "
+        f"wydaniu mogą być niepełne: {inner}",
+        "proj_manifest_failed", inner=inner)
+
+
+class _PartZajety(Exception):
+    """Plik roboczy manifestu (`.part`) już leży - zapis innego pisarza w toku albo jego resztka.
+    Nie `OSError`: krok manifestu wydania mówi wtedy odmową `proj_manifest_busy`, nie błędem systemu."""
+
+    def __init__(self, part):
+        super().__init__(part)
+        self.part = part
+
+
+def _odmowa_zajetego(part):
+    """Powód „plik roboczy manifestu zajęty” (`proj_manifest_busy`) - jedno zdanie dla kroku
+    manifestu wydania i dla naprawy manifestu: obaj pisarze zakładają `.part` wyłącznie (`x`),
+    więc cudzy `.part` znaczy zapis w toku albo resztkę po przerwanym. Rada pasuje do obu dróg."""
+    return PowodPozycji(
+        f"obok manifestu leży plik roboczy innego zapisu ({part}) - gdy żaden zapis nie trwa, skasuj "
+        f"go ręcznie, potem ponów wydanie albo „Odśwież podgląd”", "proj_manifest_busy", path=part)
+
+
+def _powod_odczytu(inner):
+    """Powód „manifestu nie da się odczytać” (`proj_manifest_unreadable`) - ścisły odczyt naprawy
+    (`_odczyt_scisly`) padł błędem systemu innym niż brak pliku; naprawa niczego wtedy nie zapisuje."""
+    return PowodPozycji(
+        f"manifestu wydania ({MANIFEST_NAME}) nie da się odczytać - nie nadpisuję go: {inner}",
+        "proj_manifest_unreadable", inner=inner)
 
 
 def _z_kwarantanna(results, projection):
@@ -756,17 +823,26 @@ def _z_kwarantanna(results, projection):
     return results + [LinkResult(fid, "", "", "skipped", why) for fid, why in projection.skipped]
 
 
-def _write_manifest(root, result: ApplyResult, *, now, manifest):
+def _write_manifest(root, result: ApplyResult, *, now, manifest, extra_sources=None):
     """Zapisz `_PROJEKCJA.json` obok korzenia (PLIK, nie DB — projekcja efemeryczna, JEDNA-KLINGA
     nietknięta; brief §3). Snapshot: layout/korzeń/tryb/ts/liczności + `manifest` wołającego
-    (perspektywa/filtr/wolumen). `open(...,'w')` żyje w tej klindze (DOOR meta-testu). Wydanie obiektu
-    scala `zestawy` ze starym manifestem tego samego obiektu (`_merge_object_manifest`); układy
-    kolumnowe piszą dokładnie to, co pisały.
+    (perspektywa/filtr/wolumen). `open(part, "x")` żyje w tej klindze (DOOR meta-testu). Wydanie obiektu
+    scala `zestawy` ze starym manifestem tego samego obiektu (`_merge_object_manifest`, świadek drzewa
+    z `extra_sources`); układy kolumnowe piszą dokładnie to, co pisały. Zwraca liczbę id zdjętych
+    z manifestu (dowodnie nieobecnych w drzewie) - 0 poza wydaniem obiektu.
 
     Publikacja ATOMOWA (AR-197): treść idzie do `.part` obok, `fsync`, potem `os.replace` na manifest.
     Dawny `open(manifest, "w")` ucinał plik przy awarii w połowie zapisu i niszczył zeznanie
-    poprzedniego wydania, z którego żniwa rozpoznają pliki. `.part` to plik tej klingi (resztka po
-    przerwanym biegu jest nadpisywana); przy błędzie jest zdejmowany, a błąd idzie do wołającego."""
+    poprzedniego wydania, z którego żniwa rozpoznają pliki.
+
+    WYŁĄCZNOŚĆ `.part` (AR-213) - jeden protokół z naprawą manifestu (`repair_manifest`): `.part`
+    zakładany `x` PRZED odczytem starego manifestu i trzymany do publikacji, więc dwóch pisarzy
+    (wydanie z CLI i naprawa z okna) nie pisze w jeden plik roboczy ani nie scala z manifestem,
+    który drugi właśnie podmienia. Cudzy `.part` → `_PartZajety` (krok manifestu mówi
+    `proj_manifest_busy`, nic nie ruszone); przy błędzie zdejmowany jest wyłącznie własny `.part`.
+
+    Świadek scalenia zna obecne kopie klatek starego manifestu (`extra_sources`) i źródła pozycji
+    tego wydania - te drugie dla pełności nazw zestawu (`_merge_object_manifest`)."""
     # `segments` obok `layout`: sama NAZWA presetu nie identyfikuje drzewa — zmiana definicji layoutu
     # (P2: `telescope_label`→coalesce z `telescop_canon`) albo nazwanie teleskopu przez usera przesuwa
     # katalogi, a ponowne wydanie do tego samego korzenia zbudowałoby DRUGIE drzewo obok starego
@@ -780,15 +856,26 @@ def _write_manifest(root, result: ApplyResult, *, now, manifest):
         "n_items": len(result.results),
         "counts": result.counts,
     }
-    if manifest:
-        if result.layout == OBJECT_LAYOUT and "zestawy" in manifest:
-            manifest = _merge_object_manifest(read_manifest(root), manifest, now=now, root=root,
-                                              cancelled=result.cancelled)
-        payload.update(manifest)
     path = os.path.join(root, MANIFEST_NAME)
     part = path + PART_SUFFIX
     try:
-        with open(part, "w", encoding="utf-8") as fh:
+        fh = open(part, "x", encoding="utf-8")
+    except FileExistsError:
+        raise _PartZajety(part) from None
+    dropped = 0
+    try:
+        with fh:
+            if manifest:
+                if result.layout == OBJECT_LAYOUT and "zestawy" in manifest:
+                    zrodla = {fid: list(p) for fid, p in (extra_sources or {}).items()}
+                    for r in result.results:
+                        if r.src and r.src not in zrodla.setdefault(r.frame_id, []):
+                            zrodla[r.frame_id].append(r.src)
+                    manifest, dropped = _merge_object_manifest(
+                        read_manifest(root), manifest, now=now, root=root, cancelled=result.cancelled,
+                        swiadek=_SwiadekDrzewa(root, zrodla),
+                        pominiete={r.frame_id for r in result.results if r.status == "skipped"})
+                payload.update(manifest)
             json.dump(payload, fh, ensure_ascii=False, indent=2)
             fh.flush()
             os.fsync(fh.fileno())
@@ -796,9 +883,10 @@ def _write_manifest(root, result: ApplyResult, *, now, manifest):
     except BaseException:
         _drop_part(part)
         raise
+    return dropped
 
 
-def _merge_object_manifest(old, manifest, *, now, root, cancelled):
+def _merge_object_manifest(old, manifest, *, now, root, cancelled, swiadek, pominiete=frozenset()):
     """Proweniencja zestawów przeżywa wydanie INNEGO zestawu tego samego obiektu: drzewo zestawu
     wydanego wczoraj dalej leży w korzeniu obiektu, więc manifest, który by go zapomniał, kłamałby
     żniwom o tym, skąd te linki są. Wpisy bieżącego wydania dostają `ts` tej chwili; wpisy starego
@@ -807,30 +895,67 @@ def _merge_object_manifest(old, manifest, *, now, root, cancelled):
     nadpisanie jak dla każdego układu: obce zeznanie nie należy do tego drzewa. `old` z
     `read_manifest` (tolerancyjnego) - brak, uszkodzony albo obcy plik to po prostu brak scalenia.
 
-    Stary wpis zostaje TYLKO, gdy jego folder zestawu dalej stoi w korzeniu (`os.path.isdir` - sam
-    odczyt): user kasuje wydanie w Eksploratorze, a manifest, który pamiętałby skasowane drzewo,
-    zeznawałby o linkach, których nie ma. Wydanie ANULOWANE (`cancelled`) zostawia w drzewie tylko
-    część pozycji, więc jego wpisy dostają `"cancelled": true` - listy id mówią wtedy, co wydanie
-    zamierzało, nie co leży na dysku. Wpis bez tego klucza to wydanie domknięte.
+    Stary wpis zestawu spoza wydania schodzi TYLKO z dowodem, że jego folderu w korzeniu nie ma
+    (`_stan_folderu` - sam odczyt; jego id liczą się do zwrotu): user kasuje wydanie w Eksploratorze,
+    a manifest, który pamiętałby skasowane drzewo, zeznawałby o linkach, których nie ma. Folder,
+    którego stanu nie da się odczytać (odmowa dostępu, zerwany udział), zostawia wpis bez zmian -
+    `os.path.isdir` brał taki błąd za brak i gubił zeznanie (AR-213). Wydanie ANULOWANE
+    (`cancelled`) zostawia w drzewie tylko część pozycji, więc jego wpisy dostają
+    `"cancelled": true` - listy id mówią wtedy, co wydanie zamierzało, nie co leży na dysku. Wpis
+    bez tego klucza to wydanie domknięte.
 
-    NAZWY ZESTAWU WYDANEGO PONOWNIE SIĘ SUMUJĄ (`_merge_names`), reszta jego wpisu idzie z bieżącego
-    wydania: pliki poprzedniego wydania zostają w folderze zestawu (klinga nie kasuje), więc WBPP je
-    dostanie, a żniwa muszą je dalej rozpoznać po nazwie. Wpis anulowany po którejkolwiek stronie też
-    wnosi swoje nazwy - część jego plików leży na dysku, a nazwa pliku, którego nie ma, niczego
-    w historii WBPP nie dopasuje."""
+    NAZWY ZESTAWU WYDANEGO PONOWNIE SIĘ SUMUJĄ (`_merge_names`), a LISTY ID BEZ UTRATY (F-C1, AR-213):
+    pliki poprzedniego wydania zostają w folderze zestawu (klinga nie kasuje), więc WBPP je dostanie,
+    a żniwa muszą je dalej rozpoznać - po nazwie i po listach (`flat_raw` nazywa wydanie surowych
+    flatów). Id starego wpisu spoza listy bieżącego wydania zostaje, chyba że świadek drzewa
+    (`swiadek`) DOWODZI, że jego pliku w roli zestawu nie ma - wtedy schodzi i liczy się do zwrotu;
+    niepewny (świadek bez kopii klatki, plik nieczytelny) ZOSTAJE: wydanie nie pada na historii,
+    a zachowanie niczego nie zmyśla. Pozostała część wpisu - z bieżącego wydania. Wpis anulowany po
+    którejkolwiek stronie też wnosi swoje nazwy - część jego plików leży na dysku, a nazwa pliku,
+    którego nie ma, niczego w historii WBPP nie dopasuje.
+
+    NAZWY BEZ CZĘŚCIOWEJ MAPY (AR-213): stary wpis bez `names` z zachowanymi lightami spoza tego
+    wydania dostaje nazwy z DRZEWA (`_SwiadekDrzewa.nazwy`) dla scalonych lightów (bez klatek
+    planu bez kopii - `pominiete`) wyłącznie przy pełnym mapowaniu; inaczej `names` schodzi.
+    Mapa samego bieżącego wydania obok zachowanych lightów wyłączyłaby żniwom spadek na bazę dla
+    starszych klatek. Zwraca `(manifest, zdjęte id)`."""
     stempel = {"ts": now, "cancelled": True} if cancelled else {"ts": now}
     zestawy = {seg: {**z, **stempel} for seg, z in manifest["zestawy"].items()}
+    dropped = 0
     if (old and old.get("layout") == OBJECT_LAYOUT and old.get("object_id") == manifest.get("object_id")
             and isinstance(old.get("zestawy"), dict)):
         for seg, z in old["zestawy"].items():
             if not isinstance(z, dict):
                 continue
             if seg not in zestawy:
-                if os.path.isdir(os.path.join(root, seg)):
+                stan = _stan_folderu(os.path.join(root, seg))
+                if stan == _NIE_MA:
+                    dropped += len(_id_wpisu(z))
+                elif stan == _NIEPEWNY:
                     zestawy[seg] = {**z, "ts": z.get("ts", old.get("ts"))}
-            elif isinstance(z.get("names"), dict) and isinstance(zestawy[seg].get("names"), dict):
-                zestawy[seg]["names"] = _merge_names(z["names"], zestawy[seg]["names"])
-    return {**manifest, "zestawy": dict(sorted(zestawy.items()))}
+                else:
+                    listy, _kept, zdjete, _niepewne = _listy_bez_utraty(seg, {}, z, swiadek,
+                                                                        zachowaj_niepewne=True)
+                    zestawy[seg] = {**z, **listy, "ts": z.get("ts", old.get("ts"))}
+                    dropped += zdjete
+                continue
+            plan_lights = set(_ids(zestawy[seg].get("lights")))
+            listy, _kept, zdjete, _niepewne = _listy_bez_utraty(seg, zestawy[seg], z, swiadek,
+                                                                zachowaj_niepewne=True)
+            zestawy[seg].update(listy)
+            dropped += zdjete
+            nowe_nazwy = zestawy[seg].get("names")
+            if not isinstance(nowe_nazwy, dict):
+                continue
+            if isinstance(z.get("names"), dict):
+                zestawy[seg]["names"] = _merge_names(z["names"], nowe_nazwy)
+            elif set(listy["lights"]) - plan_lights:
+                z_drzewa = swiadek.nazwy(seg, sorted(set(listy["lights"]) - set(pominiete)))
+                if z_drzewa is None:
+                    del zestawy[seg]["names"]
+                else:
+                    zestawy[seg]["names"] = _merge_names(z_drzewa, nowe_nazwy)
+    return {**manifest, "zestawy": dict(sorted(zestawy.items()))}, dropped
 
 
 def _merge_names(stare, nowe):
@@ -844,6 +969,675 @@ def _merge_names(stare, nowe):
         else:
             out[name] = fid
     return out
+
+
+# ============================================================ ŚWIADEK DRZEWA I NAPRAWA MANIFESTU (AR-213)
+
+# Listy id zestawu manifestu → folder ich roli w drzewie wydania (`plan_object`); mastery - osobno,
+# bo to słownik relacji, a wszystkie relacje leżą pod `MASTER`.
+_ROLE_LIST = (("lights", "LIGHT"), ("flat_raw", "FLAT_RAW"))
+_ROLA_MASTEROW = "MASTER"
+_JEST, _NIE_MA, _NIEPEWNY = "jest", "nie_ma", "niepewny"
+
+
+class _Przerwano(Exception):
+    """Diagnoza naprawy przerwana na żądanie wołającego (`should_cancel`) - wynik `cancelled`."""
+
+
+def _ids(wartosc):
+    """Lista id z pola manifestu - tolerancyjnie (droga wydania czyta manifest `read_manifest`):
+    nie-lista albo element nie-int (bool to nie id) odpada."""
+    if not isinstance(wartosc, list):
+        return []
+    return [v for v in wartosc if isinstance(v, int) and not isinstance(v, bool)]
+
+
+def _id_wpisu(z):
+    """Id list jednego wpisu zestawu (`lights`, `flat_raw`, relacje `masters`) - każda lista bez
+    powtórzeń, tolerancyjnie; rozliczenie wpisu zdjętego albo niepewnego w całości (`_stan_folderu`)."""
+    out = []
+    for pole, _rola in _ROLE_LIST:
+        out.extend(sorted(set(_ids(z.get(pole)))))
+    mastery = z.get("masters")
+    for _rel, ids in (sorted(mastery.items()) if isinstance(mastery, dict) else ()):
+        out.extend(sorted(set(_ids(ids))))
+    return out
+
+
+def _stan_folderu(path):
+    """`jest` | `nie_ma` | `niepewny` - folder zestawu w korzeniu wydania (AR-213). `nie_ma` WYŁĄCZNIE
+    z dowodem: klasa `os_missing` (`powod_systemu`) albo plik w miejscu folderu; inny błąd systemu
+    (odmowa dostępu, zerwany udział) to `niepewny` - `os.path.isdir` brał go za brak folderu."""
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        klasa = powod_systemu(exc)
+        return _NIE_MA if klasa is not None and klasa.code == "os_missing" else _NIEPEWNY
+    return _JEST if stat.S_ISDIR(st.st_mode) else _NIE_MA
+
+
+def _ids_manifestu(payload):
+    """Wszystkie id, które manifest wydania obiektu wymienia w listach zestawów (tolerancyjnie)."""
+    out = set()
+    zestawy = payload.get("zestawy") if isinstance(payload, dict) else None
+    for z in (zestawy.values() if isinstance(zestawy, dict) else ()):
+        if not isinstance(z, dict):
+            continue
+        for pole, _rola in _ROLE_LIST:
+            out.update(_ids(z.get(pole)))
+        mastery = z.get("masters")
+        for ids in (mastery.values() if isinstance(mastery, dict) else ()):
+            out.update(_ids(ids))
+    return out
+
+
+def _obecne_kopie(con, ids):
+    """`frame_id -> [ścieżki obecnych kopii]` w porządku `location_id` (`present_locations`, R#1) -
+    jedno źródło dla wyboru źródła linku (`_sources`: pierwsza) i dla świadka drzewa (każda)."""
+    out = {}
+    for r in queries.present_locations(con, sorted(ids)):
+        if r["location_id"] is not None:
+            out.setdefault(int(r["frame_id"]), []).append(r["path"])
+    return out
+
+
+def manifest_sources(con, root):
+    """Obecne kopie (`_obecne_kopie`) każdej klatki, którą wymienia manifest JUŻ leżący w korzeniu
+    wydania obiektu (`read_manifest`, tolerancyjnie) - `extra_sources` dla `apply`: świadkowie
+    scalenia bez utraty (AR-213). Brak manifestu → `{}`. Odczyt bazy i manifestu, zero zapisu."""
+    return _obecne_kopie(con, _ids_manifestu(read_manifest(root)))
+
+
+class _SwiadekDrzewa:
+    """Czy klatka LEŻY w drzewie wydania obiektu - w folderze swojej roli (`<root>/<zestaw>/<LIGHT|
+    MASTER|FLAT_RAW>/**`) - ustalane z plików, nie z manifestu. Świadkiem jest plik, który jest TYM
+    SAMYM plikiem co któraś obecna kopia klatki (`sources`, `_obecne_kopie`): ten sam węzeł
+    (`_ten_sam_wezel` - niezerowa para urządzenie/i-węzeł) albo kopia z wydania (`_ten_sam_plik`
+    w trybie kopii - także przy zerowych i-węzłach).
+
+    Werdykt (`werdykt`): `jest`; `nie_ma` - DOWÓD nieobecności: każda obecna kopia czytelna, folder
+    roli przeczytany (brak folderu to pusty folder), a w nim ani tego pliku, ani pliku o nazwie
+    którejś kopii; `niepewny` - klatka bez kopii w `sources`, kopia albo folder nieczytelne, a w roli
+    INNY plik pod jej nazwą (np. kopia sprzed zapisu nagłówka). Sam odczyt; folder roli czytany raz.
+    `sources=None` (wołający bez bazy) - każdy werdykt `niepewny`. `should_cancel` (diagnoza okna)
+    sprawdzany przed każdym folderem i każdą klatką - prawda → `_Przerwano`."""
+
+    def __init__(self, root, sources, should_cancel=None):
+        self._root = root
+        self._zrodla = sources or {}
+        self._anuluj = should_cancel
+        self._role = {}
+        self._kopie_klatek = {}
+
+    def _stop(self):
+        if self._anuluj is not None and self._anuluj():
+            raise _Przerwano
+
+    def _pliki(self, seg, rola):
+        """`([(ścieżka, stat)], czy odczyt niepełny)` plików roli zestawu (rekurencyjnie)."""
+        klucz = (seg, rola)
+        if klucz not in self._role:
+            bledy, pliki = [], []
+
+            def _blad(exc):
+                powod = powod_systemu(exc)
+                if powod is None or powod.code != "os_missing":   # brak folderu = pusty folder
+                    bledy.append(exc)
+            for dp, _dn, fn in os.walk(os.path.join(self._root, seg, rola), onerror=_blad):
+                self._stop()
+                for n in fn:
+                    p = os.path.join(dp, n)
+                    try:
+                        pliki.append((p, os.stat(p)))
+                    except OSError:
+                        bledy.append(p)
+            self._role[klucz] = (pliki, bool(bledy))
+        return self._role[klucz]
+
+    def _kopie(self, fid):
+        """`([(ścieżka, stat)] czytelnych obecnych kopii, czy któraś nieczytelna)`."""
+        if fid not in self._kopie_klatek:
+            self._stop()
+            kopie, blad = [], False
+            for src in self._zrodla.get(fid) or ():
+                try:
+                    kopie.append((src, os.stat(src)))
+                except OSError:
+                    blad = True
+            self._kopie_klatek[fid] = (kopie, blad)
+        return self._kopie_klatek[fid]
+
+    def _plik_klatki(self, pliki, fid):
+        """`(plik roli będący tą samą treścią co kopia klatki albo None, czy porównanie niepełne)` -
+        najpierw tanio po węźle (`_ten_sam_wezel`), potem kopia z wydania (czas, rozmiar, prefiks)."""
+        kopie, _ = self._kopie(fid)
+        for _src, ss in kopie:
+            for p, ds in pliki:
+                if _ten_sam_wezel(ss, ds):
+                    return p, False
+        blad = False
+        for src, ss in kopie:
+            for p, ds in pliki:
+                try:
+                    if _ten_sam_plik(src, p, ss, ds, copy=True):
+                        return p, False
+                except OSError:
+                    blad = True
+        return None, blad
+
+    def werdykt(self, seg, rola, fid):
+        """`jest` | `nie_ma` | `niepewny` - klatka `fid` w roli `rola` zestawu `seg` (opis klasy)."""
+        if not self._zrodla.get(fid):
+            return _NIEPEWNY
+        pliki, blad_roli = self._pliki(seg, rola)
+        plik, blad_tresci = self._plik_klatki(pliki, fid)
+        if plik is not None:
+            return _JEST
+        kopie, blad_kopii = self._kopie(fid)
+        if blad_roli or blad_tresci or blad_kopii or not kopie:
+            return _NIEPEWNY
+        nazwy = {os.path.basename(src).casefold() for src in self._zrodla[fid]}
+        if any(os.path.basename(p).casefold() in nazwy for p, _ in pliki):
+            return _NIEPEWNY
+        return _NIE_MA
+
+    def nazwy(self, seg, ids):
+        """`{nazwa pliku: frame_id}` plików `LIGHT` zestawu (nazwa dwóch klatek → `None`, reguła
+        `_merge_names`) albo `None`, gdy mapowanie NIE jest pełne: plik bez klatki spośród `ids`,
+        klatka `ids` bez pliku, odczyt niepełny. Nazwy z DRZEWA: pod nimi WBPP dostał lighty."""
+        pliki, blad = self._pliki(seg, "LIGHT")
+        if blad:
+            return None
+        po_wezle = {}
+        for fid in ids:
+            for _src, ss in self._kopie(fid)[0]:
+                if ss.st_ino:
+                    po_wezle.setdefault((ss.st_dev, ss.st_ino), fid)
+        out, pokryte = {}, set()
+        for p, ds in pliki:
+            fid = po_wezle.get((ds.st_dev, ds.st_ino)) if ds.st_ino else None
+            if fid is None:
+                fid = next((f for f in ids if self._plik_klatki([(p, ds)], f) == (p, False)), None)
+            if fid is None:
+                return None
+            nazwa = os.path.basename(p)
+            out[nazwa] = fid if out.get(nazwa, fid) == fid else None
+            pokryte.add(fid)
+        return out if pokryte >= set(ids) else None
+
+
+def _listy_bez_utraty(seg, nowy, stary, swiadek, *, zachowaj_niepewne):
+    """Listy id zestawu (`lights`, `flat_raw`, `masters`) = lista wpisu `nowy` ∪ id wpisu `stary`
+    spoza niej, które świadek drzewa potwierdza (`jest`). Dowodnie nieobecne (`nie_ma`) schodzą;
+    niepewne zostają, gdy `zachowaj_niepewne` (droga wydania), inaczej wracają do wołającego (naprawa
+    odmawia). Zwraca `(listy, zachowane, zdjęte, niepewne)`."""
+    listy, kept, dropped, niepewne = {}, 0, 0, []
+
+    def _dolacz(cel, fid, rola):
+        nonlocal kept, dropped
+        werdykt = swiadek.werdykt(seg, rola, fid)
+        if werdykt == _JEST or (werdykt == _NIEPEWNY and zachowaj_niepewne):
+            cel.add(fid)
+            kept += 1
+        elif werdykt == _NIE_MA:
+            dropped += 1
+        else:
+            niepewne.append(fid)
+    for pole, rola in _ROLE_LIST:
+        cel = set(_ids(nowy.get(pole)))
+        for fid in sorted(set(_ids(stary.get(pole))) - cel):
+            _dolacz(cel, fid, rola)
+        listy[pole] = sorted(cel)
+    mastery = {rel: set(_ids(ids)) for rel, ids in (nowy.get("masters") or {}).items()}
+    stare = stary.get("masters")
+    for rel, ids in (sorted(stare.items()) if isinstance(stare, dict) else ()):
+        cel = mastery.setdefault(rel, set())
+        for fid in sorted(set(_ids(ids)) - cel):
+            _dolacz(cel, fid, _ROLA_MASTEROW)
+    listy["masters"] = {rel: sorted(ids) for rel, ids in sorted(mastery.items()) if ids}
+    return listy, kept, dropped, niepewne
+
+
+@dataclasses.dataclass(frozen=True)
+class ManifestRepair:
+    """Wynik `repair_manifest`: `current` (manifest już opisuje komplet - nic do zapisu) ·
+    `would-write` (sonda: zapis wolny, `payload` gotowy) · `written` · `refused` (odmowa z kodem,
+    `powod`; bajty manifestu i drzewa nietknięte) · `error` (błąd systemu - `proj_manifest_failed`,
+    `proj_manifest_unreadable`) · `cancelled` (diagnoza przerwana na żądanie wołającego).
+    `stan` - z czym rozjechał się manifest: `missing` (nie było go) albo `stale` (nie opisywał
+    kompletu); `kept` / `dropped` - id wcześniejszych wydań zachowane i zdjęte (pliku nie ma).
+    `roznice` - czym zapis różni się od starego manifestu (`_roznice`: `sets`, `ids`, `names`,
+    `cancelled`, `ts`; pusto przy `missing`); `obce_foldery` - foldery w korzeniu, których manifest
+    nie opisze (ani w planie, ani w starym zeznaniu; bez `out`), `None` - korzenia nie odczytano."""
+    status: str
+    powod: object = None
+    stan: str | None = None
+    payload: dict | None = None
+    kept: int = 0
+    dropped: int = 0
+    roznice: tuple = ()
+    obce_foldery: tuple | None = ()
+
+
+def _klucz_sciezki(sciezka):
+    return os.path.normcase(os.path.normpath(os.path.abspath(str(sciezka))))
+
+
+def _lista_id(wartosc):
+    return isinstance(wartosc, list) and all(
+        isinstance(v, int) and not isinstance(v, bool) for v in wartosc)
+
+
+def _zly_ksztalt(m):
+    """Nazwa pierwszego pola manifestu wydania obiektu o złym kształcie albo None - pola, które
+    czytają scalenie i żniwa (nagłówek, zestawy, listy id, mastery, nazwy, `ts`). Klucz listy albo
+    słownika może nie istnieć (manifest sprzed tego pola), ale obecny musi mieć swój typ - jawne
+    `null` to uszkodzenie, nie brak (AR-213). `null` wolno wyłącznie w `ts` (wydanie bez daty)."""
+    if not isinstance(m, dict):
+        return "manifest"
+    for pole in ("layout", "root", "object_canon"):
+        if not isinstance(m.get(pole), str):
+            return pole
+    if not isinstance(m.get("object_id"), int) or isinstance(m.get("object_id"), bool):
+        return "object_id"
+    if m.get("ts") is not None and not isinstance(m["ts"], str):
+        return "ts"
+    if "segments" in m and not isinstance(m["segments"], list):
+        return "segments"
+    zestawy = m.get("zestawy")
+    if not isinstance(zestawy, dict):
+        return "zestawy"
+    for seg, z in zestawy.items():
+        if not isinstance(z, dict):
+            return f"zestawy.{seg}"
+        for pole, _rola in _ROLE_LIST:
+            if pole in z and not _lista_id(z[pole]):
+                return f"zestawy.{seg}.{pole}"
+        mastery = z.get("masters")
+        if "masters" in z and not (isinstance(mastery, dict) and all(
+                isinstance(rel, str) and _lista_id(ids) for rel, ids in mastery.items())):
+            return f"zestawy.{seg}.masters"
+        nazwy = z.get("names")
+        if "names" in z and not (isinstance(nazwy, dict) and all(
+                isinstance(n, str) and (f is None or (isinstance(f, int) and not isinstance(f, bool)))
+                for n, f in nazwy.items())):
+            return f"zestawy.{seg}.names"
+        if z.get("ts") is not None and not isinstance(z["ts"], str):
+            return f"zestawy.{seg}.ts"
+    return None
+
+
+def _obce_pole(stary, manifest, root):
+    """Pole, w którym poprawny manifest zeznaje SPRZECZNIE z tym wydaniem (inny układ, obiekt,
+    kanon, korzeń, kształt drzewa) albo None. Brak `segments` (manifest sprzed tego pola) to nie
+    rozjazd - jak `manifest_drift`."""
+    if stary["layout"] != OBJECT_LAYOUT:
+        return "layout"
+    if stary["object_id"] != manifest.get("object_id"):
+        return "object_id"
+    if stary["object_canon"] != manifest.get("object_canon"):
+        return "object_canon"
+    if _klucz_sciezki(stary["root"]) != _klucz_sciezki(root):
+        return "root"
+    if stary.get("segments") and (_shape(OBJECT_LAYOUT, stary["segments"])
+                                  != _shape(OBJECT_LAYOUT, OBJECT_SEGMENTS)):
+        return "segments"
+    return None
+
+
+def _podpis(path):
+    """Podpis świadka CAS - `(bajty, st_size, st_mtime_ns)` pliku albo None (nie ma go, nieczytelny) -
+    ten sam kształt, który zapamiętuje `_odczyt_scisly` przy pierwszym odczycie."""
+    try:
+        st = os.stat(path)
+        with open(path, "rb") as fh:
+            dane = fh.read()
+    except OSError:
+        return None
+    return dane, st.st_size, st.st_mtime_ns
+
+
+def _odczyt_scisly(path):
+    """Ścisły świadek naprawy → `(stary manifest albo None, podpis albo None, odmowa albo None)`.
+    „Nie ma” WYŁĄCZNIE przy klasie `os_missing` (`powod_systemu` - WinError 2/3, ENOENT); zerwany
+    udział (53/67 - `FileNotFoundError` w CPythonie, AR-211) i odmowa dostępu to błąd, nie brak.
+    Błąd systemu odczytu - `error` z `proj_manifest_unreadable` (odczyt, nie zapis). Bajty spoza
+    UTF-8, JSON nieczytelny albo zły kształt pól (`_zly_ksztalt`) - odmowa `proj_manifest_damaged`;
+    plik nietknięty. Tolerancyjny `read_manifest` zostaje dla żniw i strażnika rozjazdu - naprawa
+    nie może brać „nie wiem” za „nie ma”."""
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        klasa = powod_systemu(exc)
+        if klasa is not None and klasa.code == "os_missing":
+            return None, None, None
+        return None, None, ManifestRepair("error", _powod_odczytu(blad_systemu(exc)))
+    try:
+        with open(path, "rb") as fh:
+            dane = fh.read()
+    except OSError as exc:
+        return None, None, ManifestRepair("error", _powod_odczytu(blad_systemu(exc)))
+    podpis = (dane, st.st_size, st.st_mtime_ns)
+    try:
+        stary = json.loads(dane.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None, None, ManifestRepair("refused", _odmowa_uszkodzonego("UTF-8"))
+    except ValueError:
+        return None, None, ManifestRepair("refused", _odmowa_uszkodzonego("JSON"))
+    pole = _zly_ksztalt(stary)
+    if pole is not None:
+        return None, None, ManifestRepair("refused", _odmowa_uszkodzonego(pole))
+    return stary, podpis, None
+
+
+def _odmowa_uszkodzonego(detail):
+    return PowodPozycji(
+        f"manifest wydania ({MANIFEST_NAME}) leży w folderze, ale nie jest poprawnym zeznaniem "
+        f"({detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
+        f"i „Zapisz manifest”", "proj_manifest_damaged", detail=detail)
+
+
+def _sonda_kompletu(projection, root, copy, sonda):
+    """`(pozycje planu bez potwierdzonego celu, czy każdy cel to hardlink źródła)`. Cel pozycji =
+    `<root>/<segmenty>/<basename>` będący TYM SAMYM plikiem co źródło (`_ten_sam_plik`). `sonda` -
+    wynik DRY wołającego (statusy `exists`), wyłącznie przy samej diagnozie."""
+    if sonda is not None:
+        brak = sum(1 for r in sonda.results if r.status not in ("exists", "skipped"))
+        return brak, not sonda.copy
+    brak, hardlinki = 0, True
+    for item in projection.items:
+        dst = os.path.join(root, *item.segments, item.basename)
+        try:
+            ss, ds = os.stat(item.src), os.stat(dst)
+            if not _ten_sam_plik(item.src, dst, ss, ds, copy=copy):
+                brak += 1
+                continue
+        except OSError:
+            brak += 1
+            continue
+        hardlinki = hardlinki and _ten_sam_wezel(ss, ds)
+    return brak, hardlinki
+
+
+def _listy_wpisu(z):
+    """Listy id wpisu zestawu w postaci porównywalnej: posortowane listy ról i niepuste relacje
+    masterów - jedna postać dla starego manifestu, planu i treści naprawy."""
+    mastery = z.get("masters")
+    return ([sorted(_ids(z.get(pole))) for pole, _rola in _ROLE_LIST],
+            {rel: sorted(_ids(ids)) for rel, ids in sorted(mastery.items()) if _ids(ids)}
+            if isinstance(mastery, dict) else {})
+
+
+def _roznice(stary, payload):
+    """Czym `payload` różni się od starego manifestu w tym, co czytają konsumenci (żniwa, scalenie,
+    strażnik rozjazdu) - krotka tokenów w stałym porządku: `sets` (inne zestawy), `ids` (listy id
+    albo mastery wspólnego zestawu), `names` (nazwy plików), `cancelled` (stary wpis anulowany),
+    `ts` (czas nagłówka - z niego żniwa liczą datę wydania). Pusta = stary manifest mówi to samo
+    (`current`); `stary=None` - pusta, stan mówi `missing`. Pola informacyjne się nie liczą."""
+    if stary is None:
+        return ()
+    out = []
+    wspolne = sorted(set(stary["zestawy"]) & set(payload["zestawy"]))
+    if set(stary["zestawy"]) != set(payload["zestawy"]):
+        out.append("sets")
+    if any(_listy_wpisu(stary["zestawy"][s]) != _listy_wpisu(payload["zestawy"][s]) for s in wspolne):
+        out.append("ids")
+    if any(stary["zestawy"][s].get("names") != payload["zestawy"][s].get("names") for s in wspolne):
+        out.append("names")
+    if any(stary["zestawy"][s].get("cancelled") for s in wspolne):
+        out.append("cancelled")
+    if stary.get("ts") != payload.get("ts"):
+        out.append("ts")
+    return tuple(out)
+
+
+def _skrot_aktualny(stary, manifest, root, ts):
+    """Tani dowód `current` BEZ świadka drzewa (diagnoza okna przy każdej sondzie): stary manifest
+    wymienia dokładnie zestawy, listy id i nazwy planu, żaden wpis nie jest anulowany, czas próby
+    (`ts`) nie jest nowszy, a w folderze `LIGHT` każdego zestawu leżą wyłącznie pliki o nazwach
+    planu (sam listing, bez `stat`). Pełna droga dałaby wtedy ten sam werdykt: list nie ma czym
+    poszerzyć, a nazwy z drzewa to nazwy planu. Komplet celu sprawdza wołający przed skrótem."""
+    if stary is None or set(stary["zestawy"]) != set(manifest["zestawy"]):
+        return False
+    if ts is not None and stary.get("ts") != ts:
+        return False
+    for seg, z in manifest["zestawy"].items():
+        s = stary["zestawy"][seg]
+        if s.get("cancelled") or not isinstance(z.get("names"), dict) or s.get("names") != z["names"]:
+            return False
+        if _listy_wpisu(s) != _listy_wpisu(z):
+            return False
+        bledy, nazwy = [], []
+        for _dp, _dn, fn in os.walk(os.path.join(root, seg, "LIGHT"), onerror=bledy.append):
+            nazwy.extend(fn)
+        if bledy or sorted(nazwy) != sorted(z["names"]):
+            return False
+    return True
+
+
+def _tresc_naprawy(projection, root, stary, manifest, swiadek, *, ts, now, hardlinki):
+    """Treść naprawionego manifestu → `(payload, zachowane, zdjęte, niepewne)`. Nagłówek jak
+    w `_write_manifest`, treść = głęboka kopia `manifest` wołającego (`object_manifest` + etykieta
+    okna - jedno źródło z wydaniem), zestawy scalone bez utraty (`_listy_bez_utraty`), a klucze
+    starego manifestu spoza tego zbioru przeniesione (etykieta starego wydania, gdy wołający nie
+    podał swojej). Zestaw spoza planu (`_stan_folderu`): folder stoi - scalany jak zestaw planu;
+    dowodnie go nie ma - wpis schodzi, jego id liczą się do zdjętych; stanu nie da się odczytać -
+    wpis zostaje bez zmian, a jego id idą do niepewnych (naprawa odmawia).
+
+    `ts` nagłówka: czas nieudanej próby wołającego (`ts`), inaczej `ts` starego manifestu, inaczej
+    `None` + `repaired_at` (chwila naprawy) - data wydania bez dowodu nie istnieje (żniwa: `None` to
+    wydanie bez daty, bez „czeka na WBPP”). `ts` wpisu zestawu - ze starego wpisu, a dla zestawu bez
+    starego zeznania - nagłówka. `names` zestawu z drzewa (`_SwiadekDrzewa.nazwy`) WYŁĄCZNIE przy
+    pełnym mapowaniu wszystkich `lights` zestawu, scalone ze starymi; inaczej stare albo brak -
+    częściowe `names` wyłączyłoby żniwom spadek na bazę. `cancelled` schodzi - drzewo to komplet.
+    `copy` - z drzewa (każdy cel to hardlink źródła → `false`)."""
+    ts_naglowka = ts if ts is not None else (
+        stary.get("ts") if stary is not None and isinstance(stary.get("ts"), str) else None)
+    payload = {
+        "layout": OBJECT_LAYOUT,
+        "segments": [list(s) if isinstance(s, tuple) else [s] for s in OBJECT_SEGMENTS],
+        "root": root,
+        "copy": not hardlinki,
+        "ts": ts_naglowka,
+        "n_items": len(projection.items),
+        "counts": {"exists": len(projection.items)},
+    }
+    payload.update(_copy.deepcopy(manifest))
+    for klucz, wartosc in (stary or {}).items():
+        payload.setdefault(klucz, wartosc)
+    if ts_naglowka is None:
+        payload["repaired_at"] = now
+    else:
+        payload.pop("repaired_at", None)
+    nowe, stare = manifest["zestawy"], (stary or {}).get("zestawy") or {}
+    zestawy, kept, dropped, niepewne = {}, 0, 0, []
+    for seg in sorted(set(nowe) | set(stare)):
+        zn, zs = nowe.get(seg), stare.get(seg)
+        if zn is None:
+            stan = _stan_folderu(os.path.join(root, seg))
+            if stan == _NIE_MA:
+                dropped += len(_id_wpisu(zs))
+                continue
+            if stan == _NIEPEWNY:
+                niepewne += _id_wpisu(zs)
+                zestawy[seg] = _copy.deepcopy(zs)        # zeznanie bez zmian - nic nie ginie
+                continue
+        listy, k, d, n = _listy_bez_utraty(seg, zn or {}, zs or {}, swiadek, zachowaj_niepewne=False)
+        kept, dropped, niepewne = kept + k, dropped + d, niepewne + n
+        wpis = {**(zs or {}), **_copy.deepcopy(zn or {}), **listy}
+        wpis.pop("cancelled", None)
+        wpis["ts"] = zs["ts"] if zs is not None and isinstance(zs.get("ts"), str) else ts_naglowka
+        z_drzewa = swiadek.nazwy(seg, wpis["lights"])
+        stare_nazwy = zs.get("names") if zs is not None and isinstance(zs.get("names"), dict) else None
+        if z_drzewa is not None:
+            wpis["names"] = _merge_names(stare_nazwy, z_drzewa) if stare_nazwy else z_drzewa
+        elif stare_nazwy is not None:
+            wpis["names"] = stare_nazwy
+        else:
+            wpis.pop("names", None)
+        zestawy[seg] = wpis
+    payload["zestawy"] = zestawy
+    return payload, kept, dropped, niepewne
+
+
+def _obce_foldery(root, payload):
+    """Foldery w korzeniu wydania, których zapis nie opisze (ani zestaw planu, ani zestaw starego
+    zeznania; bez wyjścia WBPP `out`) - krotka nazw albo `None`, gdy korzenia nie odczytano. Sam
+    listing; okno mówi z niego, że manifest opisze tylko zestawy planu."""
+    try:
+        with os.scandir(root) as it:
+            foldery = sorted(e.name for e in it if e.is_dir())
+    except OSError:
+        return None
+    return tuple(f for f in foldery if f not in payload["zestawy"] and f != OUTPUT_DIR)
+
+
+def _werdykt_naprawy(con, projection, root, path, *, copy, now, manifest, ts, sonda, should_cancel,
+                     part_cudzy):
+    """Diagnoza `repair_manifest` bez publikacji → `(ManifestRepair, podpis starego manifestu)`.
+    `part_cudzy` - ścieżka `.part`, której obecność przy werdykcie zapisu znaczy `busy` (sama
+    diagnoza; zapis trzyma własny `.part` i podaje `None`). `should_cancel` - prawda → `_Przerwano`."""
+    def _stop():
+        if should_cancel is not None and should_cancel():
+            raise _Przerwano
+    stary, podpis, odmowa = _odczyt_scisly(path)
+    if odmowa is not None:
+        return odmowa, None
+    pole = _obce_pole(stary, manifest, root) if stary is not None else None
+    if pole is not None:
+        return ManifestRepair("refused", PowodPozycji(
+            f"manifest wydania ({MANIFEST_NAME}) w folderze należy do innego wydania (sprzeczne pole: "
+            f"{pole}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
+            f"i „Zapisz manifest”", "proj_manifest_foreign", detail=pole)), None
+    _stop()
+    n, hardlinki = _sonda_kompletu(projection, root, copy, sonda)
+    if n:
+        return ManifestRepair("refused", PowodPozycji(
+            f"drzewo wydania nie jest kompletne - pozycji planu bez pliku w celu: {n}; manifest zapisuje "
+            f"się wyłącznie nad kompletem - najpierw wydaj brakujące pozycje", "proj_manifest_incomplete",
+            n=n)), None
+    _stop()
+    if _skrot_aktualny(stary, manifest, root, ts):
+        return ManifestRepair("current"), podpis
+    ids = _ids_manifestu(stary) | {it.frame_id for it in projection.items}
+    swiadek = _SwiadekDrzewa(root, _obecne_kopie(con, ids), should_cancel)
+    payload, kept, dropped, niepewne = _tresc_naprawy(projection, root, stary, manifest, swiadek,
+                                                      ts=ts, now=now, hardlinki=hardlinki)
+    roznice = _roznice(stary, payload)
+    # Manifest, który JUŻ opisuje komplet, nie jest luką - także przy klatkach planu bez kopii:
+    # sonda każdego wydania z kwarantanną mówiłaby inaczej odmowę nad dobrym manifestem. Nowszy
+    # czas próby (`ts`) to różnica (`ts` w `roznice`) - żniwa liczą z nagłówka datę wydania.
+    if stary is not None and not niepewne and not roznice:
+        return ManifestRepair("current"), podpis
+    if projection.skipped:
+        n = len(projection.skipped)
+        return ManifestRepair("refused", PowodPozycji(
+            f"klatki planu bez obecnej kopii: {n} - ich miejsca w drzewie wydania nie da się "
+            f"potwierdzić, więc manifest nie mógłby ich uczciwie wymienić; przywróć kopię i przeskanuj "
+            f"albo wydaj obiekt ponownie z wiersza poleceń (horreum project --object … --apply)",
+            "proj_manifest_skipped", n=n)), None
+    if niepewne:
+        n = len(niepewne)
+        return ManifestRepair("refused", PowodPozycji(
+            f"manifest wymienia klatki, których plików w drzewie wydania nie da się potwierdzić: {n} "
+            f"(brak obecnej kopii, plik albo folder nieczytelny, inny plik pod tą nazwą) - zapis zgubiłby "
+            f"je albo zmyślił; przywróć kopię i przeskanuj albo wydaj obiekt ponownie z wiersza poleceń "
+            f"(horreum project --object … --apply)", "proj_manifest_unproven", n=n)), None
+    if part_cudzy is not None and os.path.lexists(part_cudzy):
+        return ManifestRepair("refused", _odmowa_zajetego(part_cudzy)), None
+    return ManifestRepair("would-write", stan="missing" if stary is None else "stale", payload=payload,
+                          kept=kept, dropped=dropped, roznice=roznice,
+                          obce_foldery=_obce_foldery(root, payload)), podpis
+
+
+def repair_manifest(con, projection, root, *, copy, now, manifest, ts=None, do_write=False,
+                    sonda=None, should_cancel=None) -> ManifestRepair:
+    """NAPRAWA MANIFESTU WYDANIA OBIEKTU (AR-213): zapis `_PROJEKCJA.json` nad drzewem, które JUŻ
+    leży w celu - BEZ wejścia do `apply` (zero `makedirs`, zero `_link_to`, zero linków). Baza tylko
+    do odczytu (`_obecne_kopie`); pisze wyłącznie manifest przez `.part`. `do_write=False` - sonda
+    (`current` / `would-write` / odmowa / `cancelled`); `do_write=True` - wszystko od nowa
+    i publikacja. `sonda` (wynik DRY wołającego) wolno podać wyłącznie bez zapisu - przy zapisie
+    sonda kompletu jest świeża. `should_cancel` (diagnoza okna) - przerwanie między krokami i w
+    świadku drzewa, wynik `cancelled`.
+
+    Kolejność (każda odmowa zostawia bajty manifestu i drzewa nietknięte): świadek ścisły
+    (`_odczyt_scisly`: uszkodzony - `proj_manifest_damaged`, nieczytelny - `error` z
+    `proj_manifest_unreadable`); zeznanie obce (`_obce_pole` - `proj_manifest_foreign`); cel
+    pozycji planu, który nie jest tym samym plikiem co źródło (`proj_manifest_incomplete`); tani
+    skrót do `current` (`_skrot_aktualny` - bez świadka drzewa); treść (`_tresc_naprawy`) - gdy
+    stary manifest mówi konsumentom to samo (`_roznice` puste, także `ts`), wynik `current`;
+    pozycje planu bez obecnej kopii (`proj_manifest_skipped`); id wcześniejszego wydania bez dowodu
+    w żadną stronę (`proj_manifest_unproven`); w samej diagnozie cudzy `.part`
+    (`proj_manifest_busy`). Id DOWODNIE nieobecne schodzą (`dropped`).
+
+    WYŁĄCZNOŚĆ `.part` - jeden protokół z krokiem manifestu wydania (`_write_manifest`): zapis
+    zakłada `.part` trybem `x` PRZED odczytem starego manifestu i trzyma go do publikacji (leży
+    cudzy - `proj_manifest_busy`, nietknięty); werdykt inny niż zapis zdejmuje własny `.part`.
+    PUBLIKACJA Z CAS: `fsync`, tuż przed publikacją drugi odczyt świadka: manifest zmienił się od
+    odczytu (podpis: bajty, rozmiar, `mtime_ns`) albo - przy braku - powstał w międzyczasie
+    (`os.path.lexists`, potem `os.rename`, które na Windows rzuca `FileExistsError`, gdy cel już
+    stoi) → `proj_manifest_changed`, `.part` zdjęty, wersja drugiego pisarza zostaje. Okno
+    resztkowe między drugim odczytem a `os.replace` (Win32 nie ma atomowego porównaj-i-zamień poza
+    `ReplaceFileW`) zostaje - mikrosekundy wobec sekund sondy; pisarz spoza protokołu `.part`
+    (ręka, stara wersja) mieści się tylko w nim. Błąd systemu przy zapisie → `error`
+    z `proj_manifest_failed`, `.part` zdjęty."""
+    if do_write and sonda is not None:
+        raise ValueError("repair_manifest: wynik DRY (`sonda`) wolno podać wyłącznie bez zapisu")
+    _assert_excluded_segment(root)
+    if projection.layout != OBJECT_LAYOUT or projection.info is None:
+        raise ValueError(f"naprawa manifestu wymaga planu {OBJECT_LAYOUT!r} z info "
+                         f"(jest {projection.layout!r})")
+    path = os.path.join(root, MANIFEST_NAME)
+    part = path + PART_SUFFIX
+    argumenty = dict(copy=copy, now=now, manifest=manifest, ts=ts, sonda=sonda,
+                     should_cancel=should_cancel)
+    if not do_write:
+        try:
+            return _werdykt_naprawy(con, projection, root, path, part_cudzy=part, **argumenty)[0]
+        except _Przerwano:
+            return ManifestRepair("cancelled")
+    try:
+        fh = open(part, "x", encoding="utf-8")
+    except FileExistsError:
+        return ManifestRepair("refused", _odmowa_zajetego(part))
+    except OSError as exc:
+        return ManifestRepair("error", _powod_manifestu(blad_systemu(exc)))
+    zmiana = PowodPozycji(
+        f"manifest wydania ({MANIFEST_NAME}) zmienił się w trakcie zapisu - inny zapis był szybszy; "
+        f"nic nie zapisano, odśwież podgląd", "proj_manifest_changed")
+    try:
+        with fh:
+            wynik, podpis = _werdykt_naprawy(con, projection, root, path, part_cudzy=None, **argumenty)
+            if wynik.status == "would-write":
+                json.dump(wynik.payload, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+        if wynik.status != "would-write":
+            _drop_part(part)
+            return wynik
+        if podpis is None:
+            if os.path.lexists(path):
+                _drop_part(part)
+                return ManifestRepair("refused", zmiana)
+            os.rename(part, path)
+        else:
+            if _podpis(path) != podpis:
+                _drop_part(part)
+                return ManifestRepair("refused", zmiana)
+            os.replace(part, path)
+    except _Przerwano:
+        _drop_part(part)
+        return ManifestRepair("cancelled")
+    except FileExistsError:
+        _drop_part(part)
+        return ManifestRepair("refused", zmiana)
+    except OSError as exc:
+        _drop_part(part)
+        return ManifestRepair("error", _powod_manifestu(blad_systemu(exc)))
+    except BaseException:
+        _drop_part(part)
+        raise
+    return dataclasses.replace(wynik, status="written")
 
 
 # ============================================================ KOPIA MASTERA (żniwa, `horreum/harvest.py`)

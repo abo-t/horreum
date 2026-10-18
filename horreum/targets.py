@@ -981,7 +981,8 @@ class BrakStanowiska(ValueError):
     """Baza nie zna stanowiska z pozycją GPS - planer nie ma z czego policzyć nocy.
 
     Osobna klasa, bo to STAN bazy, a nie awaria rachunku: ekran planera pokazuje wtedy pusty stan
-    z gestem „Ustaw stanowisko…" (AR-48), a każdy inny błąd zostaje surowym komunikatem.
+    z gestem „Ustaw stanowisko…" (AR-48), a każdy inny błąd mówi regułą wyjątku okna
+    (`item_reasons.powod_okna`: klasa błędu bazy albo systemu, inaczej błąd programu ze szczegółem).
     Rozpoznanie po TOŻSAMOŚCI, nie po brzmieniu i nie po stanie bazy w chwili doręczenia - inaczej
     blokada bazy przy bazie bez stanowiska przebierała się za brak stanowiska. Podklasa
     `ValueError`, więc dotychczasowi wołający łapiący `ValueError` działają bez zmian."""

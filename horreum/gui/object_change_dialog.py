@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import ntpath
 import re
-import sqlite3
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
@@ -59,8 +58,9 @@ from horreum.gui.wb_worker import (EtykietaBledu, WritebackRunner, czytelny_powo
                                    podziel_powod_spadku, spadek_na_droge_atomowa, status_pozycji,
                                    tekst_powodu, wiersz_systemu, wiersz_szczegolu,
                                    zdanie_wyniku_zapisu)
-# Wyjątek planu - błąd systemu klasą (AR-184); odmowa stagingu z powodem albo tekstem (AR-200).
-from horreum.item_reasons import blad_systemu, powod_wyjatku
+# Wyjątek planu i odmowa stagingu - jedna reguła wyjątku okna (`powod_okna`): powód klingi z kodem
+# (AR-200), błąd systemu albo bazy klasą (AR-184, AR-198), EXPECT rdzenia - błąd programu (AR-209).
+from horreum.item_reasons import powod_okna
 from horreum.resolve.paths import STACK_KIND, object_folder
 
 # Kolumny listy pozycji: plik dziś, plik po zmianie, karta `OBJECT` stara → nowa i - po biegu
@@ -271,7 +271,7 @@ class PlanWorker(QObject):
         try:
             self.done.emit(self._gen, self._compute())
         except Exception as exc:        # szczerze na ekran, nie cicha śmierć wątku
-            self.failed.emit(self._gen, blad_systemu(exc))
+            self.failed.emit(self._gen, powod_okna(exc))
         finally:
             self.finished.emit()
 
@@ -496,15 +496,18 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
 
 def zdanie_odmowy_stagingu(exc):
     """Odmowa stagingu planu (`repo.stage_object_change`) → `(zdanie, szczegół)` pola błędu okna
-    (AR-200). Odmowa klingi z powodem (`OdmowaZPowodem`) i błąd bazy (`sqlite3.Error` - klasę
-    błędu bazy ma jeden właściciel, `item_reasons.blad_systemu`) mówią powodem w języku UI,
-    szczegół systemu idzie pod kursor (`wiersz_systemu`). Goły `ValueError` to inwariant planu
-    (EXPECT w klindze - błąd programu): zdanie w języku UI, surowy tekst inwariantu w szczególe."""
-    powod = blad_systemu(exc) if isinstance(exc, sqlite3.Error) else getattr(exc, "powod", None)
-    if powod is not None:
-        return i18n.t("objchg.err.stage", msg=tekst_powodu(powod)), wiersz_systemu(powod)
-    return (i18n.t("objchg.err.stage", msg=i18n.t("objchg.err.stage_plan")),
-            i18n.t("objchg.st.detail_tip", detail=powod_wyjatku(exc)))
+    (AR-200) - ta sama reguła wyjątku okna co plan (`item_reasons.powod_okna`, AR-209). Odmowa
+    klingi z powodem (`OdmowaZPowodem`) i błąd bazy (`sqlite3.Error` - klasę ma jeden właściciel)
+    mówią powodem w języku UI, szczegół systemu idzie pod kursor (`wiersz_systemu`). Goły
+    `ValueError` to inwariant planu (EXPECT w klindze - błąd programu `prog_error`): zdanie
+    stagingu „plan niespójny z regułami zapisu” w języku UI, surowy tekst inwariantu z typem
+    w szczególe technicznym. Inny wyjątek (`TypeError`, `KeyError` - błąd programu, ale nie inwariant
+    planu) - zdanie błędu programu, bez obietnicy, że winny jest plan."""
+    powod = powod_okna(exc)
+    if getattr(powod, "code", None) == "prog_error" and isinstance(exc, ValueError):
+        return (i18n.t("objchg.err.stage", msg=i18n.t("objchg.err.stage_plan")),
+                wiersz_systemu(powod))
+    return i18n.t("objchg.err.stage", msg=tekst_powodu(powod)), wiersz_systemu(powod)
 
 
 def ruszyl_cokolwiek(res):
@@ -843,8 +846,10 @@ class ObjectChangeDialog(QDialog):
 
     @Slot(int, object)
     def _on_plan_failed(self, gen, powod):
-        """Wyjątek planu (`PlanWorker`): błąd systemu klasą w języku UI (`tekst_powodu`), surowy
-        tekst systemu pod kursorem (`wiersz_systemu`, AR-184); inny wyjątek - tekstem `Typ: opis`."""
+        """Wyjątek planu (`PlanWorker`, `powod_okna`): błąd systemu albo bazy klasą w języku UI
+        (`tekst_powodu`), surowy tekst systemu pod kursorem (`wiersz_systemu`, AR-184); EXPECT
+        planera (goły `ValueError`, `AssertionError`) - błąd programu w języku UI, proza rdzenia
+        w szczególe technicznym (AR-209)."""
         if gen != self._gen:
             return
         self.counts.setText("")
@@ -1185,11 +1190,12 @@ class ObjectChangeDialog(QDialog):
             if self._plan is None or self._domkniety or not liczby_planu(self._plan)["robota"]:
                 return
             # Staging na wątku okna: jedna transakcja na wierszach planu, bez dysku. Odmowa
-            # klingi (`ValueError`) i błąd bazy (`sqlite3.Error`: zajęta, drugi staging tego
-            # przebiegu) zostawiają okno z powodem i zero zapisu - transakcja wycofuje się cała.
+            # klingi (`ValueError`), błąd bazy (`sqlite3.Error`: zajęta, drugi staging tego
+            # przebiegu) i błąd programu zostawiają okno z powodem i zero zapisu - transakcja
+            # wycofuje się cała na każdym wyjątku (`repo._immediate`), więc wyjątek nie ucieka ze slotu.
             try:
                 repo.stage_object_change(self.con, plan=self._plan, now=self._now())
-            except (ValueError, sqlite3.Error) as e:
+            except Exception as e:
                 self.error.ustaw(*zdanie_odmowy_stagingu(e))
                 return
             self._run_id = self._plan.run_id

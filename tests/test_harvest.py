@@ -1461,7 +1461,8 @@ def test_missing_roots_tylko_karty_bez_folderu_raz_na_pisownie(tmp_path):
     pusta.mkdir()
     brak = tmp_path / "F" / "_WBPP"
     drugi = tmp_path / "G"
-    assert harvest.missing_roots([str(pusta), str(brak), str(brak).upper(), str(drugi)]) == (str(brak), str(drugi))
+    assert harvest.missing_roots([str(pusta), str(brak), str(brak).upper(), str(drugi)]) == (
+        (str(brak), None), (str(drugi), None))
     assert harvest.missing_roots([str(pusta)]) == ()
 
 
@@ -1700,3 +1701,208 @@ def test_releases_zbior_z_pozycji_review_nie_swiadczy(con, tmp_path, status, cze
     [row] = harvest.releases([str(tmp_path / "_WBPP")], archive_root=str(arch), con=con)
     assert row.done == 1
     assert row.lineage == ((("stos-a", tuple(ids), str(kopia), None),) if czeka else ())   # pozycja bez `release`
+
+
+# ============================================================ zerwany udział i odmowa w żniwach (AR-222)
+
+
+def _bez_winerror(exc, kod):
+    if getattr(exc, "winerror", None) != kod:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+
+
+def _pada_dla(monkeypatch, nazwa, bledy):
+    """`os.<nazwa>` (`stat`, `scandir`, `listdir`) rzuca `bledy[ścieżka]` (bez wielkości liter); reszta
+    jak zwykle. `os.walk` bierze podmieniony `os.scandir` (sonda fazy 2, `sonda_b4`)."""
+    prawdziwa = getattr(os, nazwa)
+    bledy = {os.path.normcase(str(k)): v for k, v in bledy.items()}
+
+    def funkcja(p=".", *a, **kw):
+        exc = bledy.get(os.path.normcase(os.fspath(p))) if isinstance(p, (str, os.PathLike)) else None
+        if exc is not None:
+            raise exc
+        return prawdziwa(p, *a, **kw)
+    monkeypatch.setattr(os, nazwa, funkcja)
+
+
+def test_missing_roots_zerwany_udzial_i_odmowa_to_nie_brak(tmp_path, monkeypatch):
+    """AR-222: karta na zerwanym udziale (53 - CPython daje `FileNotFoundError`) i karta z odmową (5)
+    NIE są brakiem - para niesie powód klasą; karty, której nie ma, i pliku zamiast folderu - `None`
+    (brak), jak dotąd. Falsyfikator: `os.path.isdir` z powrotem - 53 i 5 mówią „nie ma”."""
+    udzial, odmowa, brak, plik = (str(tmp_path / n) for n in ("udzial", "odmowa", "brak", "plik"))
+    (tmp_path / "plik").write_bytes(b"x")
+    bledy = {udzial: OSError(None, "Nie można odnaleźć ścieżki sieciowej", udzial, 53),
+             odmowa: OSError(None, "Odmowa dostępu", odmowa, 5)}
+    _bez_winerror(bledy[udzial], 53)
+    _pada_dla(monkeypatch, "stat", bledy)
+    wynik = harvest.missing_roots([udzial, odmowa, brak, plik])
+    assert [(k, getattr(p, "code", p)) for k, p in wynik] == [
+        (udzial, "os_share_lost"), (odmowa, "os_denied"), (brak, None), (plik, None)]
+
+
+def test_discover_zbiera_katalogi_nieprzeczytane(tmp_path, monkeypatch):
+    """AR-222: spacer wyjścia zbiera katalogi, których nie przeczytał (odmowa 5 - powód klasą), plik
+    z katalogu czytelnego zostaje kandydatem; katalog, którego już nie ma (2 - skasowany w trakcie),
+    nie jest nieprzeczytany; samo wyjście bez listingu = jedyna pozycja z jego ścieżką i zero
+    kandydatów; bez listy - jak dotąd. Falsyfikatory: `os.walk` bez `onerror` - lista pusta; bez
+    filtra `os_missing` - pozycja dla katalogu skasowanego."""
+    wbpp = tmp_path / "wbpp"
+    a = _out(tmp_path, name="masterFlat_A.xisf")
+    _out(tmp_path, name="masterFlat_B.xisf", sub="zablokowany")
+    (wbpp / "znika").mkdir()
+    zablokowany, znika = str(wbpp / "zablokowany"), str(wbpp / "znika")
+    odmowa = PermissionError(None, "Odmowa dostępu", zablokowany, 5)
+    _bez_winerror(odmowa, 5)
+    with monkeypatch.context() as m:
+        _pada_dla(m, "scandir", {zablokowany: odmowa,
+                                 znika: FileNotFoundError(None, "Nie można odnaleźć", znika, 2)})
+        bledy = []
+        assert harvest.discover(str(wbpp), errors_out=bledy) == [a]
+        assert [(p, w.code) for p, w in bledy] == [(zablokowany, "os_denied")]
+        assert harvest.discover(str(wbpp)) == [a]
+    with monkeypatch.context() as m:
+        _pada_dla(m, "scandir", {wbpp: PermissionError(None, "Odmowa dostępu", str(wbpp), 5)})
+        bledy = []
+        assert harvest.discover(str(wbpp), errors_out=bledy) == []
+        assert [(p, w.code) for p, w in bledy] == [(str(wbpp), "os_denied")]
+
+
+def test_plan_niesie_katalogi_nieprzeczytane(con, tmp_path, monkeypatch):
+    """`HarvestPlan.unreadable_dirs` = katalogi, których spacer planu nie przeczytał (AR-222); plan
+    z części czytelnej bez zmian. Falsyfikator: `plan` bez `errors_out` - pole puste."""
+    src = _out(tmp_path)
+    zablokowany = str(tmp_path / "wbpp" / "zablokowany")
+    os.mkdir(zablokowany)
+    odmowa = PermissionError(None, "Odmowa dostępu", zablokowany, 5)
+    _bez_winerror(odmowa, 5)
+    _pada_dla(monkeypatch, "scandir", {zablokowany: odmowa})
+    p = _plan(con, tmp_path, {src: _testimony(src)})
+    assert [it.src for it in p.items] == [src]
+    assert [(d, w.code) for d, w in p.unreadable_dirs] == [(zablokowany, "os_denied")]
+
+
+def test_lista_wydan_spacer_niepelny_nie_jest_wciagniety(tmp_path, monkeypatch):
+    """AR-222 na liście wydań: podkatalog `out` z odmową (5) i kandydat, którego `stat` pada
+    zerwanym udziałem (53), lądują w `ReleaseRow.unreadable` - wiersz z jednym plikiem wciągniętym
+    i niczym „do wciągnięcia” nie jest „wciągnięty” (`is_harvested`, okno). Falsyfikatory:
+    `_release_state` bez `errors_out` - brak katalogu; `continue` dla 53 - brak pliku (kandydat
+    znikał z liczb, a folder wyglądał na pusty)."""
+    root = _wydanie_na_dysku(tmp_path)
+    a = _wynik_wbpp(root, "masterFlat_A.xisf")
+    b = _wynik_wbpp(root, "masterFlat_B.xisf")
+    _zeznanie_zniw(root / projection.OUTPUT_DIR / "master", {a: "placed"})
+    zablokowany = str(root / projection.OUTPUT_DIR / "zablokowany")
+    os.mkdir(zablokowany)
+    odmowa = PermissionError(None, "Odmowa dostępu", zablokowany, 5)
+    _bez_winerror(odmowa, 5)
+    _pada_dla(monkeypatch, "scandir", {zablokowany: odmowa})
+    _pada_dla(monkeypatch, "stat", {b: OSError(None, "Nie można odnaleźć ścieżki sieciowej", b, 53)})
+    [row] = harvest.releases([str(tmp_path / "_WBPP")])
+    assert (row.pending, row.done, row.review) == (0, 1, 0)
+    assert row.unreadable == (zablokowany, b)
+
+
+def test_releases_karta_z_objects_nieczytelnym_mowi_o_sobie(tmp_path, monkeypatch):
+    """AR-222 (`releases`): karta jest, a `OBJECTS` nie da się przeczytać (odmowa 5) - para karty
+    z powodem klasą w `errors_out` (okno mówi „Folder karty niedostępny”), nie milczenie jak przy
+    karcie bez wydań; karta bez `OBJECTS` (brak) dalej milczy. Falsyfikator: `except OSError:
+    continue` bez `errors_out` - lista pusta, okno mówi „Na kartach nie ma jeszcze wydań”."""
+    karta, pusta = tmp_path / "_WBPP", tmp_path / "PUSTA"
+    (karta / projection.OBJECT_NAMESPACE).mkdir(parents=True)
+    pusta.mkdir()
+    objects = str(karta / projection.OBJECT_NAMESPACE)
+    odmowa = PermissionError(None, "Odmowa dostępu", objects, 5)
+    _bez_winerror(odmowa, 5)
+    _pada_dla(monkeypatch, "listdir", {objects: odmowa})
+    bledy = []
+    assert harvest.releases([str(karta), str(pusta)], errors_out=bledy) == []
+    assert [(k, w.code) for k, w in bledy] == [(str(karta), "os_denied")]
+
+
+def test_releases_katalog_i_manifest_wydania_nieczytelne_mowia_o_karcie(tmp_path, monkeypatch):
+    """AR-222 (`releases`, po udanym `listdir(OBJECTS)`): katalog wydania z odmową (5) i manifest
+    wydania na zerwanym udziale (53) nie milczą jak brak - karta z powodem klasą w `errors_out`, raz
+    na kartę (drugi błąd tej samej karty nie dubluje wpisu); wydanie czytelne obok zostaje na liście,
+    folder bez manifestu dalej milczy. Falsyfikatory: `os.path.isdir` katalogu wydania - K1 bez wpisu;
+    bez `os.stat` manifestu - wydanie C wraca na listę (otwarcie pliku przechodzi), K2 bez wpisu;
+    bez „raz na kartę” - K1 dwa razy."""
+    a = _wydanie_na_dysku(tmp_path, "A", karta="K1")
+    _wydanie_na_dysku(tmp_path, "B", karta="K1")
+    e = _wydanie_na_dysku(tmp_path, "E", karta="K1")
+    c = _wydanie_na_dysku(tmp_path, "C", karta="K2")
+    (tmp_path / "K2" / projection.OBJECT_NAMESPACE / "D").mkdir()       # folder bez manifestu
+    odmowa = PermissionError(None, "Odmowa dostępu", str(a), 5)
+    _bez_winerror(odmowa, 5)
+    zerwany = lambda p: OSError(None, "Nie można odnaleźć ścieżki sieciowej", str(p), 53)  # noqa: E731
+    _pada_dla(monkeypatch, "stat", {a: odmowa, e / projection.MANIFEST_NAME: zerwany(e),
+                                    c / projection.MANIFEST_NAME: zerwany(c)})
+    bledy = []
+    rows = harvest.releases([str(tmp_path / "K1"), str(tmp_path / "K2")], errors_out=bledy)
+    assert [r.object_canon for r in rows] == ["B"]
+    assert [(k, w.code) for k, w in bledy] == [(str(tmp_path / "K1"), "os_denied"),
+                                               (str(tmp_path / "K2"), "os_share_lost")]
+
+
+# ============================================================ AR-213: żniwa po naprawie manifestu wydania
+
+def _wydanie_po_naprawie_bez_czasu(tmp_path):
+    """PRAWDZIWE wydanie obiektu NGC 6992 (RC8: light `lb1` z master flatem) zegarem `NOW`, manifest
+    skasowany, wyjście WBPP z jednym kandydatem żniw zapisanym PO wydaniu, naprawa bez dowodu czasu
+    (`ts` None) → `(con, plan, root, karta, ids, stary manifest)`."""
+    from test_projection import _klatka, _osie, _stan
+    con = db.open_db(str(tmp_path / "zn.db"))
+    _osie(con)
+    ids = {"lb1": _klatka(con, tmp_path, "lb1.fits", kind="light", config_id=20, object_id=1,
+                          filter_canon="Ha"),
+           "mf2": _klatka(con, tmp_path, "mf2.xisf", kind="master_flat", config_id=20, filter_canon="Ha"),
+           "f1": _klatka(con, tmp_path, "f1.fits", kind="flat", config_id=20, filter_canon="Ha")}
+    _stan(con, ids["lb1"], ids["mf2"], "flat")
+    karta = str(tmp_path / "_WBPP")
+    p = projection.plan_object(con, 1)
+    root = projection.object_root(karta, p)
+    projection.apply(p, root, do_apply=True, now=NOW, manifest=projection.object_manifest(p))
+    sciezka = os.path.join(root, projection.MANIFEST_NAME)
+    stary = json.loads(open(sciezka, encoding="utf-8").read())
+    os.remove(sciezka)
+    wynik_wbpp = os.path.join(root, projection.OUTPUT_DIR, "master", "masterFlat_A.xisf")
+    os.makedirs(os.path.dirname(wynik_wbpp))
+    with open(wynik_wbpp, "wb") as fh:
+        fh.write(b"A")
+    assert harvest.releases([karta]) == []                    # bez manifestu wydania nie ma na liście
+    wynik = projection.repair_manifest(con, p, root, copy=False, now="2026-10-11T00:00:00+00:00",
+                                       manifest=projection.object_manifest(p), do_write=True)
+    assert wynik.status == "written"
+    return con, p, root, karta, ids, stary
+
+
+def test_zniwa_widza_wydanie_po_naprawie_manifestu(tmp_path):
+    """Konsumenci manifestu po `projection.repair_manifest` (PRAWDZIWE wydanie obiektu, PRAWDZIWA
+    lista wydań): bez manifestu wydania na liście nie ma; po naprawie bez dowodu czasu - wiersz
+    z kanonem i korzeniem, `ts` None: kandydat WBPP jest „do sprawdzenia”, a NIE „czeka na WBPP”
+    (chwila naprawy jako `ts` udawałaby wydanie nowsze od wyników); po naprawie nad starym
+    manifestem bez `names` - `ts` starego wydania, nazwy lightu świadczą (`_names_index`), a
+    `flat_raw` zachowany z drzewa nazywa wydanie surowych flatów (`_release`)."""
+    con, p, root, karta, ids, stary = _wydanie_po_naprawie_bez_czasu(tmp_path)
+    lb1, f1 = ids["lb1"], ids["f1"]
+    sciezka = os.path.join(root, projection.MANIFEST_NAME)
+    [row] = harvest.releases([karta])
+    assert (row.object_canon, row.ts, row.awaiting_wbpp, row.pending) == ("NGC 6992", None, False, 1)
+    assert row.object_root == root
+    # Stary manifest sprzed `names` z surowym flatem wcześniejszego wydania, którego hardlink leży.
+    seg = "RC8_ASI2600MM"
+    del stary["zestawy"][seg]["names"]
+    stary["zestawy"][seg]["flat_raw"] = [f1]
+    flat = os.path.join(root, seg, "FLAT_RAW", "Ha", "f1.fits")
+    os.makedirs(os.path.dirname(flat))
+    os.link(str(tmp_path / "lib" / "f1.fits"), flat)
+    with open(sciezka, "w", encoding="utf-8") as fh:
+        json.dump(stary, fh)
+    wynik = projection.repair_manifest(con, p, root, copy=False, now="2026-10-12T00:00:00+00:00",
+                                       manifest=projection.object_manifest(p), do_write=True)
+    assert (wynik.status, wynik.kept) == ("written", 1)
+    manifest = projection.read_manifest(root)
+    [row] = harvest.releases([karta])
+    assert row.ts == NOW and manifest["root"] == root
+    assert harvest._names_index(harvest._object_witness(manifest)).hits("lb1_c.xisf") == {(seg, lb1)}
+    assert harvest._release(manifest, [f1]) == ("NGC 6992", seg)
+    con.close()

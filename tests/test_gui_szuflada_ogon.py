@@ -415,10 +415,11 @@ def kolejka(qapp, tmp_path):
 
 
 def test_po_gescie_w_perspektywie_potwierdzania_cel_przechodzi_na_nastepny(kolejka):
-    """Klik stosu 40 w perspektywie „Rodowód do potwierdzenia”, panel „Rodowód”, klik kandydata,
-    „Potwierdź”: wejście ręki wietrzy powód stosu, więc 40 wypada z perspektywy, a zaznaczenie
-    i panel przechodzą na następny obraz (24) - gest na nim jest o klik bliżej. Falsyfikator: cel
-    na następny tylko w perspektywie „Rodowód z klatkami nowszymi” (zaznaczenie puste)."""
+    """Klik stosu 40 w perspektywie „Rodowód do potwierdzenia” (panel „Rodowód” otwiera samo wejście,
+    AR-219), klik kandydata, „Potwierdź”: wejście ręki wietrzy powód stosu, więc 40 wypada
+    z perspektywy, a zaznaczenie i panel przechodzą na następny obraz (24) - gest na nim jest o klik
+    bliżej. Falsyfikator: cel na następny tylko w perspektywie „Rodowód z klatkami nowszymi”
+    (zaznaczenie puste)."""
     from test_gui_rodowod_tabela import _klik, _klik_wiersza
     s, c = kolejka
     v = s.frames_view
@@ -427,7 +428,6 @@ def test_po_gescie_w_perspektywie_potwierdzania_cel_przechodzi_na_nastepny(kolej
     _czekaj(lambda: not v._zbior_w_drodze(), "zbiór perspektywy")
     assert sorted(v._frame_ids) == [24, 40]
     _klik_komorki(v, 40, 1)
-    _klik(v.sel_bar.btn_lineage)
     _odczekaj_debounce()
     assert v._lineage_panel_open() and v._lineage_frame_id == 40
     _klik_wiersza(v.lineage_bar.items, 42)

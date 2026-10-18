@@ -20,7 +20,8 @@ Krok po kroku dla każdego frame'a z `frame_ids` (już przefiltrowanych przez `f
 
 Plik bez operandu / z błędem obliczenia / łamiący regułę operacji → POMINIĘTY z jawnym powodem
 (zebrany w `MacroRun.skipped`). Powód bramki celu i zmiany to `item_reasons.PowodPozycji` z kodem
-`macro_*` (AR-181): zdanie PL bez zmiany znaku (CLI, testy, sklejenia biorą je jak tekst), a okno
+`macro_*` (AR-181): zdanie PL (`str` - CLI, testy, sklejenia biorą je jak tekst; z polskimi znakami
+od AR-228, wcześniej ASCII z czasów druku CLI), a okno
 składa z kodu zdanie w języku UI (`gui.wb_worker.tekst_powodu`). Reguły operacji: `set` wymaga istniejącej karty (keyword
 kardynalności >1 wymaga jawnego `idx`); `add` wymaga braku karty. Operand `0` to WARTOSC, nie brak.
 Zmiana łamiąca reguły karty FITS 4.0 (`card_rules.card_violation` - ten sam właściciel, którego
@@ -259,10 +260,10 @@ def _evaluate_change(
 
     if md.assign.op == "set":
         if cardinality == 0:
-            return None, PowodPozycji(f"brak karty '{kw}' do modyfikacji (uzyj add)",
+            return None, PowodPozycji(f"brak karty '{kw}' do modyfikacji (użyj add)",
                                       "macro_set_missing", keyword=kw)
         if cardinality > 1 and md.assign.idx is None:
-            return None, PowodPozycji(f"keyword '{kw}' ma wiele wystapien -- wymagany jawny idx",
+            return None, PowodPozycji(f"keyword '{kw}' ma wiele wystąpień -- wymagany jawny idx",
                                       "macro_idx_required", keyword=kw)
         idx = md.assign.idx if md.assign.idx is not None else 0
         existing = first.get(kw)
@@ -272,7 +273,7 @@ def _evaluate_change(
         )
     else:  # add
         if cardinality > 0:
-            return None, PowodPozycji(f"karta '{kw}' juz istnieje (uzyj set)", "macro_add_exists",
+            return None, PowodPozycji(f"karta '{kw}' już istnieje (użyj set)", "macro_add_exists",
                                       keyword=kw)
         idx = None
         old_value = None
@@ -300,13 +301,13 @@ def _evaluate_change(
     value_type = base_type or _infer_type(value)
 
     if value_type == "int" and isinstance(value, float) and not value.is_integer():
-        return None, PowodPozycji(f"wynik niecalkowity ({repr(value)}) dla keyworda '{kw}' typu int",
+        return None, PowodPozycji(f"wynik niecałkowity ({repr(value)}) dla keyworda '{kw}' typu int",
                                   "macro_not_int", value=repr(value), keyword=kw)
 
     try:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
-        return None, PowodPozycji(f"wartosc '{md.assign.expr}' nie pasuje do typu '{value_type}'",
+        return None, PowodPozycji(f"wartość '{md.assign.expr}' nie pasuje do typu '{value_type}'",
                                   "macro_type_mismatch", value=md.assign.expr,
                                   value_type=value_type)
 
@@ -362,7 +363,7 @@ def resolve_target(rows) -> tuple[dict | None, str | None]:
         # sierota z zeznaniem i `object_id`. Bramka ma blizniaka w pisarzu (`_xisf_gates` patrzy
         # na brak obrazu-attachmentu) -- ta czyta baze, tamta plik.
         return None, PowodPozycji(
-            "tozsamosc nieobliczalna (degenerat) -- zapis rozdwoilby klatke (D-X-13)",
+            "tożsamość nieobliczalna (degenerat) -- zapis rozdwoiłby klatkę (D-X-13)",
             "macro_degenerate")
     if target["header_hash"] is None:
         return None, PowodPozycji("brak header_hash (plik nieczytelny) -- brak kontroli zapisu",
@@ -462,7 +463,7 @@ def evaluate_manual_change(cards, keyword: str, new_text: str,
     else:
         if len(matching) > 1:
             return ManualResult(False, PowodPozycji(
-                f"keyword '{keyword}' ma wiele wystapien -- edycja reczna poza krokiem 4",
+                f"keyword '{keyword}' ma wiele wystąpień -- edycja ręczna poza krokiem 4",
                 "macro_manual_many", keyword=keyword))
         card = matching[0]
         op, idx, old_value = "set", int(card["idx"]), card["value_raw"]
@@ -473,13 +474,13 @@ def evaluate_manual_change(cards, keyword: str, new_text: str,
 
     if value_type == "int" and isinstance(value, float) and not value.is_integer():
         return ManualResult(False, PowodPozycji(
-            f"wynik niecalkowity ({repr(value)}) dla keyworda typu int", "macro_manual_not_int",
+            f"wynik niecałkowity ({repr(value)}) dla keyworda typu int", "macro_manual_not_int",
             value=repr(value)))
     try:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
         return ManualResult(False, PowodPozycji(
-            f"wartosc '{new_text}' nie pasuje do typu '{value_type}'", "macro_type_mismatch",
+            f"wartość '{new_text}' nie pasuje do typu '{value_type}'", "macro_type_mismatch",
             value=new_text, value_type=value_type))
     naruszenie = card_rules.card_violation(keyword, new_value, comment, new_card=op == "add")
     if naruszenie is not None:                       # AR-9: te same reguły co pisarz

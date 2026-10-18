@@ -2354,8 +2354,9 @@ def _powody_pozycji():
     oraz w modułach, w których zdanie odmowy rodzi się z kodem (AR-158): czytnik XISF `scan`
     i reguły karty `card_rules`, bramki makra i wyrażenia (`macro`, `expr`, AR-181, AR-194), podgląd
     i wzór nazw (`naming`, AR-193), wydanie obiektu (`projection`, AR-197) i właściciele błędów
-    systemu i bazy klasą (`item_reasons.powod_systemu`, `powod_bazy`, AR-184, AR-198 - z modułu tylko
-    te funkcje: reszta kodeka składa powód z kodu odczytanego, nie z literału)."""
+    systemu i bazy klasą (`item_reasons.powod_systemu`, `powod_bazy`, AR-184, AR-198) z regułą
+    wyjątku okna (`powod_okna`, błąd programu, AR-214) - z modułu tylko te funkcje: reszta kodeka
+    składa powód z kodu odczytanego, nie z literału."""
     import ast
     import inspect
     from horreum import card_rules, expr, item_reasons, macro, naming, projection, scan
@@ -2364,7 +2365,8 @@ def _powody_pozycji():
     zrodla = [(m, inspect.getsource(m)) for m in (writeback, repo_mod, scan, card_rules, macro, expr,
                                                   naming, projection)]
     zrodla += [(item_reasons, inspect.getsource(f))
-               for f in (item_reasons.powod_systemu, item_reasons.powod_bazy)]
+               for f in (item_reasons.powod_systemu, item_reasons.powod_bazy,
+                         item_reasons.powod_okna)]
     for modul, zrodlo in zrodla:
         for w in ast.walk(ast.parse(zrodlo)):
             if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
@@ -3676,9 +3678,9 @@ def test_staging_niespojny_plan_mowi_w_jezyku_UI_a_inwariant_w_szczegole(qapp, c
                                                                         lang):
     """Plan łamiący inwariant stagingu (CAS ręki nie-trójką) - PRAWDZIWY `repo.stage_object_change`
     odmawia gołym `ValueError` (EXPECT, błąd programu): zdanie okna w języku UI
-    (`objchg.err.stage_plan`), surowy tekst inwariantu wyłącznie w szczególe technicznym pod
-    kursorem. Falsyfikator: gałąź EXPECT mówiąca `tekst_powodu(powod_wyjatku(e))` → proza PL
-    w zdaniu EN."""
+    (`objchg.err.stage_plan`), surowy tekst inwariantu z typem wyłącznie w szczególe technicznym pod
+    kursorem (błąd programu `prog_error`, ta sama reguła co wyjątek planu). Falsyfikator: gałąź
+    EXPECT mówiąca `tekst_powodu(powod)` → zdanie `prog_error` zamiast zdania stagingu."""
     import dataclasses
     rdzen.plany = [_plan(items=(dataclasses.replace(_pozycja(1), expected_object=(7, "header")),))]
     monkeypatch.setattr(repo, "stage_object_change", _STAGING_PRAWDZIWY)
@@ -3689,12 +3691,97 @@ def test_staging_niespojny_plan_mowi_w_jezyku_UI_a_inwariant_w_szczegole(qapp, c
         zdanie = dlg.error.text()
         assert zdanie == i18n.t("objchg.err.stage", msg=i18n.t("objchg.err.stage_plan")), zdanie
         szczegol = i18n.t("objchg.st.detail_tip",
-                          detail="frame:1: CAS ręki to trójca (object_id, object_source, "
+                          detail="ValueError: frame:1: CAS ręki to trójca (object_id, object_source, "
                                  "object_cleared_id)")
         assert dlg.error.toolTip() == zdanie + "\n" + szczegol, dlg.error.toolTip()
         if lang == "en":
             assert not set(zdanie) & _POLSKIE_LITERY, zdanie
         assert con.execute("SELECT COUNT(*) FROM object_change_run").fetchone()[0] == 0
+        assert rdzen.commity == [] and dlg.action_btn.isEnabled()
+        dlg.reject()
+    finally:
+        i18n.set_lang("pl")
+
+
+# ═══════════════════════════════════════════════ AR-209: EXPECT planera zmiany obiektu w języku UI
+
+def _szpieg_reguly_okna(monkeypatch):
+    """Wyjątki, które dotarły do reguły wyjątku okna (`powod_okna`) - dowód, że pole błędu mówi
+    o wyjątku PRAWDZIWEGO rdzenia. Reguła działa dalej bez zmian."""
+    from horreum.gui import object_change_dialog as ocd
+    wyjatki, regula = [], ocd.powod_okna
+    monkeypatch.setattr(ocd, "powod_okna", lambda exc: wyjatki.append(exc) or regula(exc))
+    return wyjatki
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_plan_zmiany_obiektu_EXPECT_rdzenia_zdanie_w_jezyku_UI(qapp, con, monkeypatch, lang):
+    """PRAWDZIWY read-model planu (`queries.object_change_rows`) rzuca goły `ValueError` „frame nie
+    istnieje” (EXPECT: klatki nie znikają z bazy, wołający podał zły id) - pole błędu: „Plan się
+    nie policzył:” ze zdaniem błędu programu w języku UI, proza rdzenia z typem wyłącznie
+    w szczególe technicznym. Falsyfikator: `PlanWorker.run` z `blad_systemu(exc)` - `ValueError:
+    <proza PL>` w zdaniu, także w UI EN."""
+    wyjatki = _szpieg_reguly_okna(monkeypatch)
+    try:
+        i18n.set_lang(lang)
+        dlg = _okno(qapp, con, target=None, frame_ids=[999])
+        (exc,) = wyjatki
+        assert type(exc) is ValueError and "999" in str(exc), exc
+        zdanie = i18n.t("objchg.err.plan", msg=i18n.t("objchg.item.prog_error"))
+        assert dlg.error.text() == zdanie, dlg.error.text()
+        assert dlg.error.szczegol() == i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE_LITERY, zdanie
+        dlg.reject()
+    finally:
+        i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_plan_zmiany_obiektu_wyjatek_z_callbacku_kolizji_mowi_bledem_programu(qapp, archiwum,
+                                                                              monkeypatch, lang):
+    """Wyjątek z callbacku, który planer woła przy kolizji celu w bazie (`location_at` z
+    `queries.location_lookup`, `KeyError`) - ta sama reguła wyjątku okna: zdanie błędu programu
+    w języku UI, `Typ: opis` w szczególe. Falsyfikator: `PlanWorker.run` bez `powod_okna`."""
+    a = archiwum
+    fa, _pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    monkeypatch.setattr(queries, "location_lookup",
+                        lambda _con: (lambda _volume, _path: {}["kolizja"]))
+    wyjatki = _szpieg_reguly_okna(monkeypatch)
+    try:
+        i18n.set_lang(lang)
+        dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fa])
+        (exc,) = wyjatki
+        assert type(exc) is KeyError, exc
+        zdanie = i18n.t("objchg.err.plan", msg=i18n.t("objchg.item.prog_error"))
+        assert dlg.error.text() == zdanie, dlg.error.text()
+        assert dlg.error.szczegol() == i18n.t("objchg.st.detail_tip", detail="KeyError: 'kolizja'")
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE_LITERY, zdanie
+        dlg.reject()
+    finally:
+        i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_staging_blad_programu_spoza_inwariantu_nie_ucieka_ze_slotu(qapp, con, rdzen, monkeypatch, lang):
+    """Staging pada błędem programu, który NIE jest inwariantem planu (`TypeError`): wyjątek nie
+    ucieka ze slotu akcji, pole błędu mówi zdaniem błędu programu w języku UI (bez obietnicy
+    „plan niespójny z regułami zapisu”), `Typ: opis` w szczególe technicznym, zero zapisu i akcja
+    gotowa do ponowienia. Falsyfikator: `except (ValueError, sqlite3.Error)` w `_on_action`."""
+    def _zly(_con, *, plan, now):
+        raise TypeError("zły argument stagingu")
+    monkeypatch.setattr(repo, "stage_object_change", _zly)
+    try:
+        i18n.set_lang(lang)
+        dlg = _okno(qapp, con)
+        _klik_akcji(dlg)
+        zdanie = dlg.error.text()
+        assert zdanie == i18n.t("objchg.err.stage", msg=i18n.t("objchg.item.prog_error")), zdanie
+        assert dlg.error.szczegol() == i18n.t("objchg.st.detail_tip",
+                                              detail="TypeError: zły argument stagingu")
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE_LITERY, zdanie
         assert rdzen.commity == [] and dlg.action_btn.isEnabled()
         dlg.reject()
     finally:

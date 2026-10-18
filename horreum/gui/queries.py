@@ -2255,18 +2255,35 @@ def withheld_testimony_frame_ids(con):
 
 
 def kept_copy_frame_ids(con):
-    """KOPIE ZOSTAWIONE DO OKA (AR-64, 0038, C8): klatki, przy których rekoncyliacja przerwanej
-    podmiany zamknęła zamiar werdyktem `kept` i zostawiła pliki OBOK ścieżki (kopia wyparta,
-    zwrotna, tymczasowy - `replace_intent.kept_paths`), a któryś z nich nadal leży na dysku. Stan,
-    nie zdanie jednego wyniku: wiersz Porządków trwa, dopóki człowiek plików nie rozstrzygnie
-    (porówna i usunie zbędne) - skan ich nie widzi (sufiks kopii), więc bez tego wiersza nikt by
-    o nich nie wiedział. Ścieżek jest garstka, więc sprawdzenie dysku kosztuje tyle co nic. set[int]."""
+    """KOPIE ZOSTAWIONE DO OKA (AR-64, 0038, C8; AR-127, 0045): klatki, przy których przerwana podmiana
+    zostawiła pliki OBOK ścieżki (kopia wyparta, zwrotna, tymczasowy) z werdyktem `kept` - zamiar
+    podmiany commitu (`replace_intent.kept_paths`) albo ślad cofnięcia (`atomic_undo.kept_paths`) - a
+    któregoś z nich nie da się uznać za usunięty. Stan, nie zdanie jednego wyniku: wiersz Porządków
+    trwa, dopóki człowiek plików nie rozstrzygnie (porówna i usunie zbędne) - skan ich nie widzi
+    (sufiks kopii), więc bez tego wiersza nikt by o nich nie wiedział. Ścieżek jest garstka, więc
+    sprawdzenie dysku kosztuje tyle co nic. set[int].
+
+    TRÓJSTAN (AR-127): nazwa znika z wiersza WYŁĄCZNIE po dowiedzionym braku (`scan.path_gone` →
+    `True`); „nie wiem” (brak uprawnień, zerwany udział) zostaje widoczne - inaczej awaria sieci
+    ukryłaby resztkę, którą werdykt w bazie dalej zgłasza. TOTALNOŚĆ: CHECK obu migracji nie
+    sprawdza elementów listy, więc wiersz z JSON-em spoza listy albo element inny niż niepusty tekst
+    nie wywraca Porządków - taki element się pomija."""
+    from horreum import scan                 # trójstan nieobecności - właściciel `path_gone` (AR-211)
     wynik = set()
     for r in con.execute(
             "SELECT l.frame_id, ri.kept_paths FROM replace_intent ri "
             "JOIN header_backups hb ON hb.id = ri.backup_id JOIN location l ON l.id = hb.location_id "
-            "WHERE ri.outcome = 'kept' AND ri.kept_paths <> '[]'").fetchall():
-        if any(os.path.exists(s) for s in json.loads(r[1])):
+            "WHERE ri.outcome = 'kept' AND ri.kept_paths <> '[]' "
+            "UNION ALL "
+            "SELECT l.frame_id, au.kept_paths FROM atomic_undo au "
+            "JOIN header_backups hb ON hb.id = au.backup_id JOIN location l ON l.id = hb.location_id "
+            "WHERE au.outcome = 'kept'").fetchall():
+        try:
+            sciezki = json.loads(r[1])
+        except ValueError:
+            continue
+        if isinstance(sciezki, list) and any(
+                isinstance(s, str) and s and scan.path_gone(s) is not True for s in sciezki):
             wynik.add(int(r[0]))
     return wynik
 
@@ -4351,6 +4368,18 @@ def pending_cards_for_run(con, run_id):
     return con.execute(
         "SELECT l.frame_id, p.keyword, p.op, p.old_value, p.new_value, p.new_comment "
         "FROM pending_changes p JOIN location l ON l.id = p.location_id "
+        "WHERE p.run_id = ? AND p.status = 'pending' ORDER BY p.id",
+        (run_id,)).fetchall()
+
+
+def pending_renames_for_run(con, run_id):
+    """Oczekujące wpisy stagingu NAZW przebiegu z klatką pod ich LOCATION - jednym zapytaniem, bliźniak
+    `pending_cards_for_run` (podgląd pozostałych nazw po zapisie przerwanym anulowaniem, AR-220). Kopia
+    bez wiersza `location` wypada (INNER JOIN). Kolejność `id` = kolejność stagingu. Zwraca: frame_id,
+    old_path, new_path."""
+    return con.execute(
+        "SELECT l.frame_id, p.old_path, p.new_path "
+        "FROM pending_renames p JOIN location l ON l.id = p.location_id "
         "WHERE p.run_id = ? AND p.status = 'pending' ORDER BY p.id",
         (run_id,)).fetchall()
 

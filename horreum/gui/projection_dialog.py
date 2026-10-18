@@ -35,6 +35,13 @@ a nie zbiór gridu. Wejściem jest okno teczek `ObjectPickDialog` (read-model
 obiektu, który już w całości leży w celu, kończy się od razu „Otwórz w Eksploratorze" - WBPP
 wskazuje się folderem, a nie ma czego wydawać drugi raz.
 
+NAPRAWA MANIFESTU (AR-213) to trzecia droga zapisu tego samego okna: sonda nad kompletem diagnozuje
+manifest (`projection.repair_manifest` bez zapisu), a przy luce „Utwórz” staje się „Zapisz manifest”
+ze złotą wagą - drugie kliknięcie, `ManifestWorker`, zero linków. Wydanie obiektu, które padło na
+kroku manifestu, samo uruchamia świeżą sondę: pod głową błędu staje jej werdykt (oferta albo odmowa
+z radą), nie przepowiednia. Zapis manifestu jest nieprzerywalny - zamknięcie okna w biegu czeka
+na jego koniec i zamyka okno po zapisie.
+
 Cała logika plan/link/sonda/guard w Qt-wolnej klindze `horreum.projection` (NIETKNIĘTA — §0 briefu);
 tu glue widżetów + czyste pomocniki decyzji (Qt-wolne funkcje modułowe, testowane wprost). Walidacja
 segmentu `_WBPP`/`_Review` przy DODAWANIU celu (raz); guard w klindze zostaje drugą linią. Plik na
@@ -64,7 +71,8 @@ from horreum.gui import facet_model, i18n, queries, theme
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.i18n_catalog import CATALOG
 from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu   # błąd systemu w języku UI (AR-184)
-from horreum.item_reasons import blad_systemu, powod_wyjatku     # odmowy klingi z kodem (AR-200)
+# odmowy klingi z kodem (AR-200); jedna reguła wyjątku workera okna (AR-214)
+from horreum.item_reasons import powod_okna, powod_wyjatku
 from horreum.volumes import volume_serial
 
 _TREE_CAP = 30                        # ile folderów kategorii pokazać w raporcie dialogu
@@ -258,6 +266,31 @@ def dry_complete(res):
             and not c.get("conflict", 0) and not c.get("error", 0))
 
 
+def manifest_offer_lines(naprawa):
+    """Wiersze oferty „Zapisz manifest” (Qt-WOLNE, testowane wprost) z diagnozy `would-write`
+    (`projection.repair_manifest`, AR-213): CZYM zapis różni się od manifestu w folderze (brak go;
+    listy id albo zestawy; same nazwy plików; sam czas próby wydania), ile id wcześniejszych wydań
+    zostaje i ile schodzi, czy manifest wyjdzie bez daty wydania (żniwa: bez „czeka na WBPP”)
+    i których folderów korzenia nie opisze. Dawniej każda luka mówiła „dopisze brakujące” - także
+    sam brak nazw, a zapis, który usuwa id, nie podawał ich liczby przed kliknięciem."""
+    if naprawa.stan == "missing":
+        linie = [i18n.t("proj.obj.manifest_missing")]
+    elif set(naprawa.roznice) & {"sets", "ids", "cancelled"}:
+        linie = [i18n.t("proj.obj.manifest_stale")]
+    elif "names" in naprawa.roznice:
+        linie = [i18n.t("proj.obj.manifest_stale_names")]
+    else:
+        linie = [i18n.t("proj.obj.manifest_stale_ts")]
+    if naprawa.kept or naprawa.dropped:
+        linie.append(i18n.t("proj.obj.manifest_will_keep", kept=naprawa.kept, dropped=naprawa.dropped))
+    if naprawa.payload.get("ts") is None:
+        linie.append(i18n.t("proj.obj.manifest_no_ts"))
+    if naprawa.obce_foldery:
+        linie.append(i18n.t("proj.obj.manifest_only_sets", sets=", ".join(naprawa.payload["zestawy"]),
+                            other=", ".join(naprawa.obce_foldery)))
+    return linie
+
+
 def report_outcome(res, *, partial):
     """Wynik wydania → rola koloru nagłówka raportu: `ok` | `warn` (Qt-WOLNE, testowane wprost).
 
@@ -420,10 +453,12 @@ class DryWorker(QObject):
     def run(self):
         try:
             self.done.emit(self._gen, self._compute())
-        except ValueError as exc:                    # guard korzenia klingi (druga linia po walidacji celu)
-            self.failed.emit(self._gen, powod_wyjatku(exc))   # odmowa z kodem - zdanie w języku UI (AR-200)
-        except Exception as exc:                     # OSError sondy FS itp. - szczerze, nie cicha śmierć wątku
-            self.failed.emit(self._gen, blad_systemu(exc))
+        except Exception as exc:
+            # Szczerze, nie cicha śmierć wątku - jedna reguła wyjątku okna (`powod_okna`): odmowa
+            # strażnika korzenia z kodem (AR-200), błąd systemu sondy FS albo bazy klasą, a goły
+            # `ValueError` rdzenia (EXPECT, np. „nieznany obiekt”) - błąd programu w języku UI
+            # z prozą rdzenia w szczególe (AR-214).
+            self.failed.emit(self._gen, powod_okna(exc))
         finally:
             self.finished.emit()
 
@@ -437,16 +472,29 @@ class DryWorker(QObject):
             else:
                 plan = projection.plan(con, self._frame_ids, self._layout)
                 rows = queries.present_locations(con, self._frame_ids)
+            root = projection.object_root(self._root, plan) if self._object_id is not None else self._root
+            chosen = chosen_present(rows)
+            target_serial = volume_serial(root)
+            auto_copy = volume_decision(chosen, target_serial)
+            eff_copy = bool(self._force_copy) or auto_copy
+            res = projection.apply(plan, root, do_apply=False, copy=eff_copy, now=self._now,
+                                   should_cancel=lambda: self._cancel)
+            # Wydanie obiektu (AR-213): świadkowie scalenia manifestu bez utraty dla `apply` i - gdy
+            # komplet leży w celu bez rozjazdu układu - diagnoza manifestu (bez zapisu, na tej sondzie).
+            # Diagnoza słucha anulowania: zamknięcie okna w trakcie sondy nie czeka na świadka drzewa.
+            naprawa, zrodla = None, None
+            if self._object_id is not None:
+                zrodla = projection.manifest_sources(con, root)
+                if dry_complete(res) and res.drift is None and not self._cancel:
+                    naprawa = projection.repair_manifest(
+                        con, plan, root, copy=eff_copy, now=self._now,
+                        manifest=projection.object_manifest(plan), sonda=res,
+                        should_cancel=lambda: self._cancel)
+                    if naprawa.status == "cancelled":
+                        naprawa = None
         finally:
             if own:
                 con.close()
-        root = projection.object_root(self._root, plan) if self._object_id is not None else self._root
-        chosen = chosen_present(rows)
-        target_serial = volume_serial(root)
-        auto_copy = volume_decision(chosen, target_serial)
-        eff_copy = bool(self._force_copy) or auto_copy
-        res = projection.apply(plan, root, do_apply=False, copy=eff_copy, now=self._now,
-                               should_cancel=lambda: self._cancel)
         # Rozmiar kopii to bajty, które wydanie NAPRAWDĘ skopiuje: wyłącznie pozycje `would-link`
         # sondy. Liczony po całym planie obiecywał przy ponownym wydaniu gigabajty plików, które już
         # leżą w celu (`exists`). Pozycja, nie klatka: master wspólny dwóch zestawów to dwie kopie
@@ -456,7 +504,7 @@ class DryWorker(QObject):
             [by_frame[r.frame_id] for r in res.results if r.status == "would-link"])
         return {"plan": plan, "res": res, "auto_copy": auto_copy, "copy": eff_copy,
                 "target_serial": target_serial, "size_total": total, "size_missing": missing,
-                "root": root}
+                "root": root, "manifest": naprawa, "extra_sources": zrodla}
 
 
 # ---------------------------------------------------------------- worker apply (wątek tła)
@@ -478,13 +526,14 @@ class ApplyWorker(QObject):
     failed = Signal(object)                 # powód wyjątku → sygnał, NIE crash apki (kod: AR-184)
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
-    def __init__(self, plan, root, copy, now, manifest):
+    def __init__(self, plan, root, copy, now, manifest, extra_sources=None):
         super().__init__()
         self._plan = plan
         self._root = root
         self._copy = copy
         self._now = now
         self._manifest = manifest
+        self._extra_sources = extra_sources   # świadkowie scalenia manifestu bez utraty (AR-213)
         self._cancel = threading.Event()
 
     def request_cancel(self):
@@ -495,13 +544,14 @@ class ApplyWorker(QObject):
         try:
             res = projection.apply(self._plan, self._root, do_apply=True, copy=self._copy,
                                    now=self._now, manifest=self._manifest,
+                                   extra_sources=self._extra_sources,
                                    progress=self._emit_progress, should_cancel=self._cancel.is_set)
         except projection.ProjectionAbort as exc:
             self.aborted.emit(powod_wyjatku(exc), exc.result)
-        except ValueError as exc:                    # guard korzenia klingi (druga linia)
-            self.failed.emit(powod_wyjatku(exc))
-        except Exception as exc:                     # OSError itp. - szczerze, nie cicha śmierć wątku
-            self.failed.emit(blad_systemu(exc))
+        except Exception as exc:
+            # Strażnik korzenia (druga linia), `OSError` spoza kroków wydania, EXPECT rdzenia -
+            # szczerze, nie cicha śmierć wątku, jedną regułą wyjątku okna (`powod_okna`, AR-214).
+            self.failed.emit(powod_okna(exc))
         else:
             self.done.emit(res)
         finally:
@@ -509,6 +559,53 @@ class ApplyWorker(QObject):
 
     def _emit_progress(self, done, total, dst, status):
         self.progress.emit(done, total, dst, status)
+
+
+class ManifestWorker(QObject):
+    """Zapis manifestu wydania nad kompletem, który JUŻ leży w celu (AR-213) - drugie kliknięcie po
+    świeżej sondzie, poza wątkiem GUI (cel bywa udziałem SMB). Woła `projection.repair_manifest`
+    z zapisem: sonda kompletu, scalenie bez utraty i CAS liczą się od nowa, bo między sondą a
+    kliknięciem drzewo i manifest mogły się zmienić. Własne połączenie po `db_path` (świadkowie
+    drzewa czytają obecne kopie z bazy); tryb inline dostaje `con` wołającego. Linków nie zakłada,
+    więc nie ma czego przerywać - `request_cancel` jest pusty; zamknięcie okna w biegu
+    (`ProjectionDialog.done`) czeka na koniec zapisu i zamyka okno po sprzątnięciu wątku."""
+
+    done = Signal(object)                   # projection.ManifestRepair
+    failed = Signal(object)                 # powód wyjątku (`powod_okna`, AR-214)
+    finished = Signal()
+
+    def __init__(self, db_path, plan, root, copy, now, manifest, ts, con=None):
+        super().__init__()
+        self._db_path = db_path
+        self._con = con
+        self._plan = plan
+        self._root = root
+        self._copy = copy
+        self._now = now
+        self._manifest = manifest
+        self._ts = ts
+
+    def request_cancel(self):
+        """Zapis jednego pliku - przerwanie na granicy pliku nie ma czego dzielić."""
+
+    @Slot()
+    def run(self):
+        try:
+            own = bool(self._db_path)
+            con = db.connect(self._db_path) if own else self._con
+            try:
+                res = projection.repair_manifest(con, self._plan, self._root, copy=self._copy,
+                                                 now=self._now, manifest=self._manifest, ts=self._ts,
+                                                 do_write=True)
+            finally:
+                if own:
+                    con.close()
+        except Exception as exc:
+            self.failed.emit(powod_okna(exc))
+        else:
+            self.done.emit(res)
+        finally:
+            self.finished.emit()
 
 
 class _MiddleElidedLabel(ElidedLabel):
@@ -585,6 +682,15 @@ class ProjectionDialog(QDialog):
         self._apply_thread = None
         self._apply_worker = None
         self._apply_root = None          # korzeń bieżącego/ostatniego apply (obiekt: `object_root`)
+        self._apply_now = None           # `now` ostatniego wydania - czas manifestu, którego nie zapisano
+        # (korzeń, czas) wydania, które padło na kroku manifestu (AR-213): naprawa w tej sesji okna
+        # stempluje manifest czasem tamtej próby, nie chwilą naprawy (żniwa liczą z niego datę wydania).
+        self._ts_po_awarii = None
+        self._zapis_manifestu = False    # świeża sonda zastała komplet z luką manifestu - „Zapisz manifest”
+        # (głowa błędu, szczegół pod kursorem) wydania obiektu, które padło na kroku manifestu - stoi
+        # nad raportem świeżej sondy uruchomionej po awarii, do zmiany parametru albo nowego biegu.
+        self._po_awarii = None
+        self._zamknij_po_zapisie = None  # wynik `done(r)` z Esc w biegu zapisu manifestu - zamknięcie po nim
         self.summary = None              # zdanie o wydaniu dla statusbara wołającego (wiz P-C #4)
         self.setWindowTitle(i18n.t("proj.title" if object_id is None else "proj.obj.title"))
         self.setModal(True)
@@ -749,13 +855,25 @@ class ProjectionDialog(QDialog):
         act.addWidget(self.btn_open)
         act.addWidget(btn_close)
         v.addLayout(act)
-        self._set_gold(self.btn_apply)
+        self._waga_akcji()
+
+    def _waga_akcji(self):
+        """JEDYNE miejsce, które wybiera przycisk złotej wagi - ze stanu okna, nie z wołającego:
+        oferta zapisu manifestu (`_zapis_manifestu`) → „Zapisz manifest” (`btn_apply`; Eksplorator
+        otworzy folder i bez manifestu, ale żniwa bez niego wydania nie zobaczą); inaczej uzbrojony
+        folder (`_released_root`) → „Otwórz w Eksploratorze”; inaczej `btn_apply`. Dwóch pisarzy wagi
+        (`_arm_open` i sonda nadpisująca ją po nim) zostawiało złoto i Enter na wygaszonym „Przerwane
+        błędem” obok uzbrojonego Eksploratora."""
+        if self._zapis_manifestu or self._released_root is None:
+            self._set_gold(self.btn_apply)
+        else:
+            self._set_gold(self.btn_open)
 
     def _set_gold(self, btn):
         """Waga złotej akcji - bold, wysokość jak „Przyjmij nowe" Dostawy i domyślny Enter - na
         JEDNYM przycisku: `btn_apply` (wydanie) albo `btn_open` (folder gotowy pod WBPP). Wiz F3 #3:
         terminalna akcja ma się odróżniać od pomocniczych. Po wydaniu waga zostawała na wygaszonym
-        „Utworzono ✓", a następny krok - Eksplorator - stał bez niej; przenosi ją `_arm_open`."""
+        „Utworzono ✓", a następny krok - Eksplorator - stał bez niej. Przycisk wybiera `_waga_akcji`."""
         for b in (self.btn_apply, self.btn_open):
             gold = b is btn
             f = b.font(); f.setBold(gold); b.setFont(f)
@@ -852,6 +970,8 @@ class ProjectionDialog(QDialog):
         self._gen += 1
         self._plan = None
         self._dry = None
+        self._zapis_manifestu = False
+        self._po_awarii = None                       # głowa awarii mówiła o parametrach, które odeszły
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(i18n.t("proj.btn_create"))
         self._arm_open(None)
@@ -884,7 +1004,7 @@ class ProjectionDialog(QDialog):
         if self._dry_worker is not None or self._apply_worker is not None:
             return                                   # w biegu apply DRY nie startuje (plan jest materializowany)
         self._dry_pending = False                    # flagę gasi UDANY start — odbity re-trigger nie przepada
-        self._show_report(i18n.t("proj.probing"))
+        self._pokaz_sonde(i18n.t("proj.probing"))
         self.busy.setVisible(True)                   # bieg widoczny, nie tylko tekstem (wiz W2)
         self.btn_dry.setEnabled(False)               # jeden DRY naraz — „Odśwież" gaśnie na czas biegu
         worker = DryWorker(self._db_path, self._frame_ids, self.combo_layout.currentData(),
@@ -934,17 +1054,26 @@ class ProjectionDialog(QDialog):
         self._plan = payload["plan"]
         self._dry = payload
         text, warn = self._format(payload["res"], payload["plan"], dry=True, payload=payload)
-        self._show_report(text, warn=warn)
+        self._pokaz_sonde(text, warn=warn)
         n = payload["res"].counts.get("would-link", 0)
-        key = "proj.create_copies" if payload["copy"] else "proj.create_links"
-        self.btn_apply.setText(i18n.t_plural(key, n))
-        self.btn_apply.setEnabled(n > 0)             # zero do utworzenia → szczery disabled
+        # Komplet w celu z luką manifestu (AR-213): „Utwórz” staje się „Zapisz manifest” - drugie
+        # kliknięcie po świeżej sondzie, osobną operacją manifestową (`ManifestWorker`).
+        naprawa = payload["manifest"]
+        self._zapis_manifestu = naprawa is not None and naprawa.status == "would-write"
+        if self._zapis_manifestu:
+            self.btn_apply.setText(i18n.t("proj.obj.btn_write_manifest"))
+            self.btn_apply.setEnabled(True)
+        else:
+            key = "proj.create_copies" if payload["copy"] else "proj.create_links"
+            self.btn_apply.setText(i18n.t_plural(key, n))
+            self.btn_apply.setEnabled(n > 0)         # zero do utworzenia → szczery disabled
         self._update_card_note(payload)
         if self._object_id is not None:
             self._fill_zestawy(payload["plan"].info)
             self._show_object_head(payload["plan"].info)
             # Komplet zastany w celu to ten sam stan folderu co po udanym wydaniu - droga do
             # niego od razu, bez „wydania" zera pozycji tylko po to, żeby przycisk się pojawił.
+            # Złotą wagę (oferta zapisu manifestu albo Eksplorator) wybiera `_waga_akcji`.
             self._arm_open(payload["root"] if dry_complete(payload["res"]) else None)
 
     @Slot(int, object)
@@ -956,13 +1085,25 @@ class ProjectionDialog(QDialog):
         self.btn_dry.setEnabled(True)
         self._plan = None
         self._dry = None
+        self._zapis_manifestu = False                # oferta należała do sondy, która właśnie padła
         self.btn_apply.setEnabled(False)
         self._arm_open(None)                         # sonda bieżących parametrów padła - folderu nie znamy
         # Błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem raportu (AR-184).
-        self._show_report(i18n.t("proj.dry_failed", msg=tekst_powodu(msg)), "error",
+        self._pokaz_sonde(i18n.t("proj.dry_failed", msg=tekst_powodu(msg)), "error",
                           tip=wiersz_systemu(msg))
         if self._object_id is not None:
             self._show_object_head(None)             # liczby poprzedniego planu kłamałyby o bieżącym
+
+    def _pokaz_sonde(self, text, outcome=None, warn=(), tip=""):
+        """Raport sondy (bieg, wynik, porażka) - JEDNA droga dla `_trigger_dry`, `_on_dry_done`
+        i `_on_dry_failed`. Po awarii kroku manifestu wydania obiektu (`_po_awarii`, AR-213) raport
+        stoi pod głową tamtego błędu w roli błędu, a pod kursorem zostaje szczegół awarii (albo
+        porażki sondy, gdy ta go ma) - werdykt świeżej sondy zamiast przepowiedni."""
+        if self._po_awarii is None:
+            self._show_report(text, outcome, warn=warn, tip=tip)
+            return
+        glowa, szczegol = self._po_awarii
+        self._show_report(glowa + text, "error", warn=warn, tip=tip or szczegol)
 
     # ---- tryb obiektu: zestawy, nagłówek, Eksplorator ----
     def _fill_zestawy(self, info):
@@ -1015,11 +1156,12 @@ class ProjectionDialog(QDialog):
         B z „do skopiowania: N" przycisk otwierałby folder z karty A. Samo wydanie niczego nie
         unieważnia, więc zaraz po nim przycisk stoi na właśnie wydanym folderze.
 
-        Waga złotej akcji idzie za przyciskiem (`_set_gold`): uzbrojony folder to następny krok,
-        a „Utwórz" stoi wtedy wygaszone - waga na nim wskazywałaby martwy przycisk."""
+        Waga złotej akcji idzie za stanem (`_waga_akcji`): uzbrojony folder to następny krok,
+        a „Utwórz" stoi wtedy wygaszone - waga na nim wskazywałaby martwy przycisk; wyjątkiem jest
+        oferta zapisu manifestu."""
         self._released_root = root
         self.btn_open.setVisible(root is not None)
-        self._set_gold(self.btn_open if root is not None else self.btn_apply)
+        self._waga_akcji()
         # Wiersz „Wyjście WBPP" żyje i gaśnie razem z przyciskiem: ten sam folder, te same parametry.
         if self.out_box is not None:
             self._out_dir = os.path.join(root, projection.OUTPUT_DIR) if root else None
@@ -1081,14 +1223,41 @@ class ProjectionDialog(QDialog):
         else:
             manifest = {"perspektywa": self._perspektywa, "n_frames": len(self._frame_ids)}
         self._apply_root = root
+        self._po_awarii = None                       # nowy bieg mówi własnym raportem
+        if self._zapis_manifestu:
+            self._zapisz_manifest(root, manifest)
+            return
+        self._apply_now = self._now()
         self._apply_begin(len(self._plan.items), root)
-        worker = ApplyWorker(self._plan, root, self._dry["copy"], self._now(), manifest)
+        worker = ApplyWorker(self._plan, root, self._dry["copy"], self._apply_now, manifest,
+                             extra_sources=self._dry["extra_sources"])
         worker.progress.connect(self._on_apply_progress)
         worker.done.connect(self._on_apply_done)
         worker.aborted.connect(self._on_apply_aborted)
         worker.failed.connect(self._on_apply_failed)
+        self._uruchom_bieg(worker, watek=self._off_thread)
+
+    def _zapisz_manifest(self, root, manifest):
+        """Drugie kliknięcie naprawy manifestu (AR-213): `ManifestWorker` zamiast `ApplyWorker` - zero
+        linków i katalogów, sonda kompletu, scalenie bez utraty i CAS od nowa w rdzeniu. Czas
+        manifestu: nieudanej próby wydania z tej sesji na tym samym korzeniu (`_ts_po_awarii`), inaczej
+        rozstrzyga rdzeń (`ts` starego manifestu albo brak daty z `repaired_at`). Wątek wymaga ścieżki
+        bazy - połączenie nie przechodzi między wątkami."""
+        po_awarii = self._ts_po_awarii
+        ts = (po_awarii[1] if po_awarii is not None and _target_key(po_awarii[0]) == _target_key(root)
+              else None)
+        self._apply_begin(0, root, raport=i18n.t("proj.obj.writing_manifest", root=root))
+        worker = ManifestWorker(self._db_path, self._plan, root, self._dry["copy"], self._now(),
+                                manifest, ts, con=None if self._db_path else self.con)
+        worker.done.connect(self._on_manifest_done)
+        worker.failed.connect(self._on_manifest_failed)
+        self._uruchom_bieg(worker, watek=self._off_thread and bool(self._db_path))
+
+    def _uruchom_bieg(self, worker, *, watek):
+        """Bieg zapisu (`ApplyWorker`, `ManifestWorker`) w wątku tła albo inline (seam testowy,
+        sygnały direct = synchronicznie) - jedno miejsce sprzątania (`_cleanup_apply_thread`)."""
         self._apply_worker = worker
-        if self._off_thread:
+        if watek:
             self._apply_thread = QThread(self)
             worker.moveToThread(self._apply_thread)
             self._apply_thread.started.connect(worker.run)
@@ -1100,6 +1269,7 @@ class ProjectionDialog(QDialog):
                 worker.run()                         # inline: sloty lecą direct = synchronicznie
             finally:
                 self._apply_worker = None
+            self._po_biegu()
 
     def _cleanup_apply_thread(self):
         # wait() przed thread.deleteLater() — ten sam deadlock GIL × ~QThread co w _cleanup_dry_thread
@@ -1109,30 +1279,47 @@ class ProjectionDialog(QDialog):
         self._apply_thread.deleteLater()
         self._apply_worker = None
         self._apply_thread = None
+        self._po_biegu()
 
-    def _apply_begin(self, total, root):
+    def _po_biegu(self):
+        """Ogon biegu zapisu PO sprzątnięciu workera (oba tryby `_uruchom_bieg`): sonda czekająca na
+        koniec biegu (`_dry_pending` - świeża sonda po awarii kroku manifestu; w biegu DRY nie
+        startuje) i zamknięcie okna odłożone z Esc w biegu zapisu manifestu (`_zamknij_po_zapisie`).
+        Dopiero tu, nie w slocie wyniku: wątek jeszcze żyje, gdy wynik dolatuje, a okno zamknięte nad
+        żywym QThread to twardy abort apki."""
+        if self._zamknij_po_zapisie is not None:
+            r, self._zamknij_po_zapisie = self._zamknij_po_zapisie, None
+            self.done(r)
+            return
+        if self._dry_pending:
+            self._trigger_dry()
+
+    def _apply_begin(self, total, root, raport=None):
         """Wejście w tryb wydania: pasek determinowany (PROCENT — liczby niesie nota, żeby licznik nie
         stał w oknie dwa razy), „Anuluj" w miejscu „Utwórz", parametry zamrożone, RAPORT PRZEPISANY.
 
         Przepisanie raportu jest obowiązkowe: panel niósł tekst DRY („bez zmian na dysku, do
         zlinkowania: N") i przez CAŁY bieg twierdziłby to samo, mutując dysk — największa powierzchnia
         okna kłamałaby najgłośniej (wiz P1 #1). Przy okazji jest to jedyne miejsce, gdzie w biegu widać
-        DOKĄD lecą pliki (karty celu są wygaszone, wiz #8)."""
+        DOKĄD lecą pliki (karty celu są wygaszone, wiz #8).
+
+        `raport` - zapis manifestu (AR-213): jeden plik, pasek nieokreślony bez noty postępu i bez
+        „Przerwij” (przerywać nie ma czego), raport mówi, co się pisze."""
         self._apply_started = time.monotonic()       # baza ETA (zegar wydania ≠ `now_fn` manifestu)
         self._apply_seen = (0, total)                # ostatni postęp — raport błędu mówi, ile już powstało
         self.busy.setRange(0, total if total > 0 else 0)
         self.busy.setValue(0)
         self.busy.setFormat("%p%")
-        self.busy.setTextVisible(True)
+        self.busy.setTextVisible(raport is None)
         self.busy.setVisible(True)
-        self.progress_note.set_full_text(f"0/{total}")
+        self.progress_note.set_full_text(f"0/{total}" if raport is None else "")
         # Tryb obiektu mówi swoim słownikiem - „Wydaję na stół" to wydanie perspektywy gridu.
-        self._show_report(i18n.t("proj.applying" if self._object_id is None else "proj.obj.applying",
-                                 root=root))
+        self._show_report(raport if raport is not None else i18n.t(
+            "proj.applying" if self._object_id is None else "proj.obj.applying", root=root))
         self.btn_apply.setVisible(False)
         self.btn_apply.setEnabled(False)             # WPROST, nie tylko przez ukrycie (default-button łapie Enter)
-        self.btn_cancel.setVisible(True)
-        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setVisible(raport is None)
+        self.btn_cancel.setEnabled(raport is None)
         self._set_params_enabled(False)
 
     def _apply_end(self):
@@ -1146,6 +1333,26 @@ class ProjectionDialog(QDialog):
         self.btn_cancel.setVisible(False)
         self.btn_apply.setVisible(True)
         self._set_params_enabled(True)
+
+    def _zakoncz_bledem(self, glowa, powod, przycisk, res=None):
+        """Ogon zakończenia biegu zapisu błędem - JEDEN dla pięciu dróg (AR-215, AR-213): krok
+        wydania z błędem systemu albo zajętym manifestem (`_on_apply_done`, `res.error`), werdykt
+        sondy pierwszego linku (`_on_apply_aborted`), wyjątek całej operacji wydania
+        (`_on_apply_failed`), odmowa albo błąd zapisu manifestu (`_on_manifest_done`) i wyjątek
+        zapisu manifestu (`_on_manifest_failed`). Wyjście z trybu wydania, raport w roli `error`:
+        `glowa` (zdanie błędu z odstępem) nad raportem wyniku częściowego `res` (`_format` - liczby
+        tego, co zaszło, i nietknięte; drogi bez wyniku - `None`), szczegół systemu `powod` pod
+        kursorem; „Utwórz” wygaszone z etykietą `przycisk` (gotowy tekst - wołający podaje
+        `i18n.t(<literał>)`, bramka kluczy katalogu widzi wyłącznie literały), bo dysk mógł się
+        zmienić częściowo - kolejne wydanie idzie przez świeżą sondę. Oferta zapisu manifestu
+        gaśnie razem z przyciskiem, więc złota waga idzie za stanem (`_waga_akcji`)."""
+        self._apply_end()
+        text, warn = ("", ()) if res is None else self._format(res, self._plan, dry=False, partial=True)
+        self._show_report(glowa + text, "error", warn=warn, tip=wiersz_systemu(powod))
+        self.btn_apply.setEnabled(False)
+        self.btn_apply.setText(przycisk)
+        self._zapis_manifestu = False
+        self._waga_akcji()
 
     def _set_params_enabled(self, on):
         """Zamrożenie/odmrożenie parametrów DRY na czas apply (ochrona `self._plan` w biegu). Cały
@@ -1184,18 +1391,28 @@ class ProjectionDialog(QDialog):
         Krok wydania przerwany błędem systemu (AR-197, `res.error`): zdanie błędu w języku UI nad
         raportem częściowym (liczby tego, co zaszło, i nietknięte), szczegół systemu pod kursorem,
         „Przerwane błędem” - jak awaria całej operacji (`_on_apply_failed`), ale z liczbami.
-        Niezapisany manifest (`proj_manifest_failed`) nie dostaje rady „Odśwież podgląd”: pliki
-        leżą, sonda zobaczy komplet, a zdanie powodu mówi, czego brakuje i po co."""
+        Niezapisany manifest (`proj_manifest_failed`, `proj_manifest_busy` - cudzy plik roboczy):
+        pliki leżą, więc zdanie powodu mówi, czego brakuje i po co; czas tej próby czeka na naprawę
+        (`_ts_po_awarii`, AR-213). Wydanie obiektu uruchamia wtedy samo świeżą sondę (po sprzątnięciu
+        biegu - `_po_biegu`), a pod głową błędu staje jej werdykt: oferta „Zapisz manifest” albo
+        odmowa z radą (`_pokaz_sonde`). Głowa niczego nie obiecuje - naprawa bywa odmówiona."""
         if res.error is not None:
-            self._apply_end()
-            text, warn = self._format(res, self._plan, dry=False, partial=True)
-            glowa = (i18n.t("proj.manifest_error_head", msg=tekst_powodu(res.error))
-                     if res.error.code == "proj_manifest_failed"
-                     else i18n.t("proj.apply_error", msg=tekst_powodu(res.error), made="") + "\n\n")
-            self._show_report(glowa + text, "error", warn=warn, tip=wiersz_systemu(res.error))
-            self.btn_apply.setEnabled(False)
-            self.btn_apply.setText(i18n.t("proj.btn_error"))
+            krok_manifestu = res.error.code in ("proj_manifest_failed", "proj_manifest_busy")
+            if krok_manifestu:
+                # Pliki leżą, manifestu nie ma: naprawa w tej sesji okna (świeża sonda → „Zapisz
+                # manifest”) stempluje manifest czasem TEJ próby (AR-213).
+                self._ts_po_awarii = (self._apply_root, self._apply_now)
+                glowa = i18n.t("proj.manifest_error_head", msg=tekst_powodu(res.error))
+            else:
+                glowa = i18n.t("proj.apply_error", msg=tekst_powodu(res.error), made="") + "\n\n"
+            self._zakoncz_bledem(glowa, res.error, i18n.t("proj.btn_error"), res)
+            if krok_manifestu and self._object_id is not None:
+                self._po_awarii = (glowa, wiersz_systemu(res.error))
+                self._dry_pending = True             # sonda rusza po sprzątnięciu biegu (`_po_biegu`)
             return
+        if self._ts_po_awarii is not None and _target_key(self._ts_po_awarii[0]) == _target_key(
+                self._apply_root):
+            self._ts_po_awarii = None                # manifest tego korzenia zapisany tym wydaniem
         self._apply_end()
         # Cel był ZAMROŻONY na czas biegu, więc `_current_root()` to dokładnie ten, na który wydano.
         _settings().setValue("projection/last_target", _canon_path(self._current_root()))   # ostatnio UŻYTY = domyślny
@@ -1229,13 +1446,10 @@ class ProjectionDialog(QDialog):
     @Slot(object, object)
     def _on_apply_aborted(self, powod, partial):
         """Sonda pierwszego linku padła (SMB oddał kopię zamiast hardlinka) - werdykt o wolumenie.
-        Powód z kodem (`proj_first_link`, AR-200) mówi w języku UI."""
-        self._apply_end()
-        text, warn = self._format(partial, self._plan, dry=False, partial=True)
-        self._show_report(i18n.t("proj.abort_prefix", msg=tekst_powodu(powod)) + text, "error",
-                          warn=warn, tip=wiersz_systemu(powod))
-        self.btn_apply.setEnabled(False)
-        self.btn_apply.setText(i18n.t("proj.btn_not_created"))  # NIE obiecuje akcji, której raport zabrania (wiz #4)
+        Powód z kodem (`proj_first_link`, AR-200) mówi w języku UI. „Nie utworzono” - przycisk NIE
+        obiecuje akcji, której raport zabrania (wiz #4)."""
+        self._zakoncz_bledem(i18n.t("proj.abort_prefix", msg=tekst_powodu(powod)), powod,
+                             i18n.t("proj.btn_not_created"), partial)
 
     @Slot(object)
     def _on_apply_failed(self, msg):
@@ -1243,12 +1457,52 @@ class ProjectionDialog(QDialog):
         # częściowe drzewo (ścieżka anulowania to mówi, ścieżka błędu milczała - wiz #2). Błąd
         # systemu klasą w języku UI, surowy tekst systemu pod kursorem raportu (AR-184).
         done_n, total = self._apply_seen
-        self._apply_end()
         made = i18n.t("proj.made_before_error", done=done_n, total=total) if done_n else ""
-        self._show_report(i18n.t("proj.apply_error", msg=tekst_powodu(msg), made=made), "error",
-                          tip=wiersz_systemu(msg))
-        self.btn_apply.setEnabled(False)             # dysk mógł się zmienić częściowo — DRY musi przeliczyć
-        self.btn_apply.setText(i18n.t("proj.btn_error"))
+        self._zakoncz_bledem(i18n.t("proj.apply_error", msg=tekst_powodu(msg), made=made), msg,
+                             i18n.t("proj.btn_error"))
+
+    @Slot(object)
+    def _on_manifest_done(self, res):
+        """Wynik zapisu manifestu (AR-213, `ManifestWorker`). Zapisany - raport z liczbą id
+        wcześniejszych wydań zachowanych i zapomnianych (i ostrzeżeniem, gdy manifest nie ma daty
+        wydania), zdanie na pasek, „Manifest zapisany ✓”, Eksplorator ze złotą wagą (folder jest
+        gotowy i dla żniw); manifest opisał komplet w międzyczasie (`current`) - zdanie bez zapisu
+        i „Bez zmian ✓”. Odmowa albo błąd - ogon zakończenia błędem: zdanie odmowy mówi radę
+        (skasuj `.part`, sprawdź manifest, odśwież podgląd); zamknięcie odłożone z Esc w biegu
+        przepada - okno zostaje, żeby odmowa miała dokąd trafić."""
+        if res.status in ("refused", "error"):
+            self._zamknij_po_zapisie = None
+            self._zakoncz_bledem(i18n.t("proj.obj.manifest_error", msg=tekst_powodu(res.powod)),
+                                 res.powod, i18n.t("proj.btn_error"))
+            return
+        self._apply_end()
+        self._zapis_manifestu = False
+        if self._ts_po_awarii is not None and _target_key(self._ts_po_awarii[0]) == _target_key(
+                self._apply_root):
+            self._ts_po_awarii = None
+        if res.status == "written":
+            linie = [i18n.t("proj.obj.manifest_written")]
+            if res.kept or res.dropped:
+                linie.append(i18n.t("proj.obj.manifest_kept", kept=res.kept, dropped=res.dropped))
+            warn = []
+            if res.payload.get("ts") is None:
+                warn.append(i18n.t("proj.obj.manifest_no_ts"))
+            self._show_report("\n".join(linie + warn), "ok", warn=warn)
+            self.summary = i18n.t("proj.obj.status_manifest", canon=self._canon, root=self._apply_root)
+            przycisk = i18n.t("proj.obj.btn_manifest_written")
+        else:
+            self._show_report(i18n.t("proj.obj.manifest_current"), "ok")
+            przycisk = i18n.t("proj.btn_nothing_new")
+        self._arm_open(self._apply_root)
+        self.btn_apply.setEnabled(False)
+        self.btn_apply.setText(przycisk)
+
+    @Slot(object)
+    def _on_manifest_failed(self, powod):
+        """Wyjątek zapisu manifestu (`powod_okna`) - ten sam ogon co odmowa, okno zostaje."""
+        self._zamknij_po_zapisie = None
+        self._zakoncz_bledem(i18n.t("proj.obj.manifest_error", msg=tekst_powodu(powod)), powod,
+                             i18n.t("proj.btn_error"))
 
     def _show_report(self, text, outcome=None, warn=(), tip=""):
         """JEDYNA droga tekstu do panelu raportu. `outcome` (None | 'ok' | 'warn' | 'error') koloruje
@@ -1317,6 +1571,14 @@ class ProjectionDialog(QDialog):
                     m = payload["size_missing"]
                     size_line += f"  {i18n.t_plural('proj.files_no_size', m)}"
                 lines.append(size_line)
+            naprawa = payload["manifest"] if payload is not None else None
+            if naprawa is not None and naprawa.status != "current":
+                # Komplet z luką manifestu (AR-213) - rolą ostrzeżenia, bo żniwa wydania nie widzą:
+                # co zapis dopisze albo dlaczego zapisu nie będzie.
+                linie = (manifest_offer_lines(naprawa) if naprawa.status == "would-write"
+                         else [i18n.t("proj.obj.manifest_refused", msg=tekst_powodu(naprawa.powod))])
+                lines.extend(linie)
+                warn.extend(linie)
         else:
             # abort → nie „Utworzono" (wizytator #6); anulowanie nazywa się WPROST (W1) — user ma
             # wiedzieć, że reszta planu jest nietknięta, a nie że wydanie zawiodło. Rozbiór stanów
@@ -1331,6 +1593,10 @@ class ProjectionDialog(QDialog):
                 # Link utworzony, sonda nie przeczytała plików (AR-197) - leży na dysku, więc nie
                 # znika z liczb, ale nie jest „zlinkowany” z dowodem tożsamości.
                 lines.append(i18n.t("proj.unverified", n=c["unverified"]))
+            if res.dropped:
+                # Scalenie manifestu bez utraty (AR-213): id wcześniejszych wydań, których plików
+                # dowodnie nie ma w drzewie - manifest mówi o drzewie, nie o historii.
+                lines.append(i18n.t("proj.manifest_dropped", n=res.dropped))
             if res.cancelled or res.error is not None:
                 # Ile planu ZOSTAŁO: drzewo kategorii niżej rysuje się z PEŁNEGO planu, więc bez tej
                 # linii raport po anulowaniu albo przerwaniu (abort sondy, krok z błędem systemu -
@@ -1380,7 +1646,17 @@ class ProjectionDialog(QDialog):
         też po to, by raport „Przerwano" (ile powstało, ile nietkniętych) miał dokąd trafić — bez
         niego user zostaje z częściowym drzewem i zerową wiedzą. Drugie Esc, już po biegu, zamyka.
 
-        SONDA DRY: krótka i NICZEGO nie tworzy → cancel + wait, jak dotąd."""
+        ZAPIS MANIFESTU W BIEGU (AR-213): jeden plik, nieprzerywalny - „Anulowanie… (po bieżącym
+        pliku)” kłamałoby, bo manifest i tak powstaje. Nota mówi, że okno zamknie się po zapisie,
+        a zamknięcie czeka na sprzątnięcie wątku (`_po_biegu`); odmowa albo błąd zapisu zostawiają
+        okno otwarte z raportem.
+
+        SONDA DRY: krótka i NICZEGO nie tworzy → cancel + wait, jak dotąd; diagnoza manifestu słucha
+        tego samego anulowania (`DryWorker`)."""
+        if isinstance(self._apply_worker, ManifestWorker):
+            self._zamknij_po_zapisie = r
+            self.progress_note.set_full_text(i18n.t("proj.obj.closing_after_manifest"))
+            return
         if self._apply_worker is not None:
             self._on_cancel_apply()
             return

@@ -328,3 +328,37 @@ def test_cli_project_krok_wydania_bez_tracebacku_kod_1(tmp_path, capsys, monkeyp
     assert "  manifest: " not in out, out
     if krok == "sonda":
         assert "niezweryfikowane: 1" in out and "UNVERIFIED " in out, out
+
+
+# ============================================================ AR-213: scalenie manifestu bez utraty w CLI
+
+def test_cli_project_apply_scala_manifest_bez_utraty_kod_0_i_1(tmp_path, capsys, monkeypatch):
+    """Ponowne `project --object --apply` po wycofaniu `l_oiii` (surowe flaty schodzą z planu) i skasowaniu
+    z drzewa pliku `f2`: manifest zachowuje `l_oiii` i `f1` (pliki leżą), zapomina `f2` (pliku dowodnie
+    nie ma - świadkowie `manifest_sources`), druk mówi liczbę, kod 0. Krok manifestu pada - kod 1,
+    stary manifest bajt w bajt (bez częściowego nadpisania). Wyjście ASCII."""
+    import json
+    dbp = _seed_obiekt(tmp_path)
+    root = tmp_path / "_WBPP" / "karta"
+    assert cli.main(["project", str(dbp), "--root", str(root), "--object", "IC1795", "--apply"]) == 0
+    obj_root = root / "OBJECTS" / "IC1795"
+    (obj_root / "A140R_ASI2600MM" / "FLAT_RAW" / "OIII" / "f2.fits").unlink()
+    con = db.open_db(str(dbp))
+    ids = {n: con.execute("SELECT frame_id FROM location WHERE path LIKE ?", (f"%{n}",)).fetchone()[0]
+           for n in ("l_oiii.fits", "f1.fits", "f2.fits")}
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, ids["l_oiii.fits"]))
+    con.commit()
+    con.close()
+    capsys.readouterr()
+    assert cli.main(["project", str(dbp), "--root", str(root), "--object", "IC1795", "--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "manifest: zapomniane klatki, ktorych plikow nie ma w drzewie: 1" in out and out.isascii()
+    z = json.loads((obj_root / projection.MANIFEST_NAME).read_text(encoding="utf-8"))["zestawy"]["A140R_ASI2600MM"]
+    assert ids["l_oiii.fits"] in z["lights"] and z["flat_raw"] == [ids["f1.fits"]]
+    przed = (obj_root / projection.MANIFEST_NAME).read_bytes()
+
+    def _pada(*_a, **_k):
+        raise OSError(None, "Komunikat systemu", r"X:\L\a.fits", 64)
+    monkeypatch.setattr(projection, "_write_manifest", _pada)
+    assert cli.main(["project", str(dbp), "--root", str(root), "--object", "IC1795", "--apply"]) == 1
+    assert (obj_root / projection.MANIFEST_NAME).read_bytes() == przed

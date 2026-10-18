@@ -587,64 +587,302 @@ def test_okno_zniw_sufit_z_ekranu_rodzica(qapp, tmp_path, monkeypatch):
     con.close()
 
 
-# Parametry `msg=`/`err=`/`e=` zdań GUI bez opakowania powodu (rozszerzenie zapadki AR-167 z
-# `test_gui_powody_pisarza.py` na parametry tekstu błędu) - znane wyjątki z kategorią. Nowy surowy
-# przypadek = czerwień; naprawiony musi zejść z listy.
+# Parametry `msg=`/`err=`/`e=`/`exc=`/`error=` zdań GUI bez opakowania powodu (rozszerzenie zapadki
+# AR-167 z `test_gui_powody_pisarza.py` na parametry tekstu błędu; `exc`/`error` - AR-210) - znane
+# wyjątki z kategorią. Nowy surowy przypadek = czerwień; naprawiony musi zejść z listy.
 _ODMOWA_OSI = "odmowa klingi osi albo okna (`ValueError`) - nie błąd systemu plików"
 _ZNANE_SUROWE_MSG = {
-    ("app.py", "_on_item_changed", "e", "e"): _ODMOWA_OSI,
-    ("app.py", "_on_optics_edited", "e", "e"): _ODMOWA_OSI,
-    ("app.py", "_on_restore_optics", "e", "e"): _ODMOWA_OSI,
-    ("app.py", "_on_approve", "e", "e"): _ODMOWA_OSI,
-    ("app.py", "_on_merge", "e", "e"): _ODMOWA_OSI,
-    ("app.py", "_on_unmerge", "e", "e"): _ODMOWA_OSI,
-    ("grid.py", "_on_wb_failed", "msg", "msg"): "zdanie z wykonawcy (`WritebackWorker.run` - `tekst_powodu`)",
-    ("grid.py", "_on_pola_failed", "msg", "msg"): "zdanie z wykonawcy (`PolaWorker.run` - `tekst_powodu`)",
-    ("grid.py", "_after_undo", "msg", "msg"): "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
-    ("grid.py", "_after_undo_rename", "msg", "msg"): "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
-    ("grid.py", "_on_transfer_facts", "err", "str(e)"): _ODMOWA_OSI,
-    ("harvest_dialog.py", "_on_apply_failed", "msg", "msg"): "zdanie po `tekst_powodu` w tej funkcji",
-    ("harvest_dialog.py", "_summary_fact", "msg", "self._last_error"): "zdanie z `_on_apply_failed`",
-    ("harvest_dialog.py", "_summary_tail", "msg", "self._last_error"): "zdanie z `_on_apply_failed`",
-    ("observatory_dialog.py", "_validate_and_accept", "e", "e"): _ODMOWA_OSI,
-    ("pipeline.py", "_pokaz_odmowe", "msg", "msg"): "worker Dostawy - poza drogami plików (rejestr)",
+    ("app.py", "TelescopeAxisView._on_item_changed", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "TelescopeAxisView._on_optics_edited", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "TelescopeAxisView._on_restore_optics", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "TelescopeAxisView._on_approve", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "TelescopeAxisView._on_merge", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "TelescopeAxisView._on_unmerge", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "ObservatoryAxisView._on_item_changed", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "ObservatoryAxisView._on_merge", "e", "e"): _ODMOWA_OSI,
+    ("app.py", "ObservatoryAxisView._on_unmerge", "e", "e"): _ODMOWA_OSI,
+    ("grid.py", "FramesView._on_wb_failed", "msg", "msg"):
+        "zdanie z wykonawcy (`WritebackWorker.run` - `tekst_powodu`)",
+    ("grid.py", "FramesView._on_pola_failed", "msg", "msg"):
+        "zdanie z wykonawcy (`PolaWorker.run` - `tekst_powodu`)",
+    ("grid.py", "FramesView._after_undo", "msg", "msg"): "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
+    ("grid.py", "FramesView._after_undo_rename", "msg", "msg"):
+        "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
+    ("grid.py", "FramesView._on_transfer_facts", "err", "str(e)"): _ODMOWA_OSI,
+    ("harvest_dialog.py", "HarvestDialog._on_apply_failed", "msg", "msg"): "zdanie po `tekst_powodu` w tej funkcji",
+    ("harvest_dialog.py", "HarvestDialog._summary_fact", "msg", "self._last_error"): "zdanie z `_on_apply_failed`",
+    ("harvest_dialog.py", "HarvestDialog._summary_tail", "msg", "self._last_error"): "zdanie z `_on_apply_failed`",
+    ("observatory_dialog.py", "AssignObservatoryDialog._validate_and_accept", "e", "e"): _ODMOWA_OSI,
+    ("pipeline.py", "PipelineView._pokaz_odmowe", "msg", "msg"): "worker Dostawy - poza drogami plików (rejestr)",
 }
 
 
-def test_zapadka_msg_err_e_w_zdaniach_GUI():
-    """Rozszerzenie zapadki AR-167: parametr `msg=`/`err=`/`e=` zdania GUI mówi przez
-    `tekst_powodu`/`czytelny_powod` albo zdaniem katalogu - wyjątki z listy z kategorią. Nowe surowe
-    miejsce = czerwień, naprawione musi zejść z listy. Falsyfikator: `_on_dry_failed` okna żniw
-    z `msg=msg` zamiast `tekst_powodu(msg)` → nowy wpis spoza listy."""
+def _wolania_zdan_gui():
+    """Każdy parametr wołania `i18n.t`/`t_plural` w modułach `horreum/gui` RAZEM z podkatalogami
+    (`flows/`): `(plik, nazwa funkcji, parametr, węzeł wartości, opakowana?, nazwy z except)`. Plik
+    względem `horreum/gui` (`flows/przyjmij.py`), nazwa funkcji kwalifikowana łańcuchem klas i funkcji
+    nad wołaniem (`TelescopeAxisView._on_item_changed`) - metody o tej samej nazwie w dwóch klasach to
+    dwa klucze, nie jeden. Opakowana = wołanie `tekst_powodu`/`czytelny_powod`/`t`/`t_plural`. Nazwy
+    z except = nazwy związane przez `except ... as <nazwa>` w najbliższej obejmującej funkcji."""
     import ast
     from pathlib import Path
     import horreum.gui as gui
     opakowania = {"tekst_powodu", "czytelny_powod", "t", "t_plural"}
-    znalezione = set()
-    for plik in sorted(Path(gui.__file__).parent.glob("*.py")):
+    korzen = Path(gui.__file__).parent
+    for plik in sorted(korzen.rglob("*.py")):
         drzewo = ast.parse(plik.read_text(encoding="utf-8"))
         rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
 
-        def _funkcja(w):
+        def _przodkowie(w):
             while w in rodzic:
                 w = rodzic[w]
-                if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return w.name
-            return None
+                if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    yield w
+
+        def _funkcja(w):
+            return next((p for p in _przodkowie(w) if not isinstance(p, ast.ClassDef)), None)
+        z_wyjatku = {}
+        for h in ast.walk(drzewo):
+            if isinstance(h, ast.ExceptHandler) and h.name:
+                z_wyjatku.setdefault(_funkcja(h), set()).add(h.name)
         for w in ast.walk(drzewo):
             if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Attribute)
                     and w.func.attr in ("t", "t_plural") and isinstance(w.func.value, ast.Name)
                     and w.func.value.id == "i18n"):
                 continue
+            nazwa = ".".join(reversed([p.name for p in _przodkowie(w)])) or None
             for k in w.keywords:
-                if k.arg not in ("msg", "err", "e"):
-                    continue
                 v = k.value
-                if isinstance(v, ast.Call):
-                    nazwa = v.func.attr if isinstance(v.func, ast.Attribute) else getattr(v.func, "id", None)
-                    if nazwa in opakowania:
-                        continue
-                znalezione.add((plik.name, _funkcja(w), k.arg, ast.unparse(v)))
+                opakowana = isinstance(v, ast.Call) and (
+                    v.func.attr if isinstance(v.func, ast.Attribute) else getattr(v.func, "id", None)) in opakowania
+                yield (plik.relative_to(korzen).as_posix(), nazwa, k.arg, v, opakowana,
+                       z_wyjatku.get(_funkcja(w), set()))
+
+
+def test_zapadka_msg_err_e_w_zdaniach_GUI():
+    """Rozszerzenie zapadki AR-167: parametr `msg=`/`err=`/`e=`/`exc=`/`error=` zdania GUI mówi przez
+    `tekst_powodu`/`czytelny_powod` albo zdaniem katalogu - wyjątki z listy z kategorią. Nowe surowe
+    miejsce = czerwień, naprawione musi zejść z listy. `exc`/`error` od AR-210: `grid.macro.error`
+    brał `exc=exc` poza krotką. Falsyfikatory: `_on_dry_failed` okna żniw z `msg=msg` zamiast
+    `tekst_powodu(msg)`, `grid._run` z `exc=exc` → nowy wpis spoza listy. Granica skanu: wyłącznie
+    parametry wołań `i18n.t`/`t_plural` w `horreum/gui` z podkatalogami (`_wolania_zdan_gui`, wspólny
+    z bliźniakiem po pochodzeniu wartości niżej); klucz = plik, `Klasa.metoda`, parametr, wartość."""
+    import ast
+    znalezione = {(plik, nazwa, arg, ast.unparse(v)) for plik, nazwa, arg, v, opakowana, _w in _wolania_zdan_gui()
+                  if arg in ("msg", "err", "e", "exc", "error") and not opakowana}
     nowe, stare = znalezione - set(_ZNANE_SUROWE_MSG), set(_ZNANE_SUROWE_MSG) - znalezione
     assert not nowe, f"surowy tekst błędu w zdaniu GUI: {sorted(nowe)}"
     assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"
+
+
+# ============================ AR-210: zapadka tekstu wyjątku po POCHODZENIU wartości
+
+# Parametry z wartością z `except ... as <nazwa>`, które nie są tekstem wyjątku - jawnie, z kategorią.
+_ZNANE_Z_WYJATKU = {
+    ("app.py", "MainWindow._open_path", "found", "exc.found"): "numer wersji schematu z `db.SchemaTooNew` - liczba",
+}
+
+
+def test_zapadka_tekstu_wyjatku_po_pochodzeniu_w_zdaniach_GUI():
+    """AR-210, bliźniak zapadek po NAZWIE parametru (`msg`/`err`/`e`/`exc`/`error` wyżej, `reason`/
+    `reasons` - AR-167, `test_gui_powody_pisarza.py`): parametr DOWOLNEJ nazwy, którego wartość używa
+    WPROST nazwy związanej przez `except ... as <nazwa>` tej funkcji (`e`, `str(e)`, `exc.found`), mówi
+    przez `tekst_powodu`/`czytelny_powod` albo zdaniem katalogu - nazwa parametru spoza krotek nie chowa
+    surowego tekstu wyjątku. Wyjątki: listy obu zapadek po nazwie (te same miejsca, kategoria tam; klucz
+    zapadki AR-167 nie zna klasy - porównanie po samej metodzie) i `_ZNANE_Z_WYJATKU` (wartość nie jest
+    tekstem); wpis własnej listy, którego już nie ma, schodzi z niej.
+
+    Granice skanu (świadome): (1) wyłącznie parametry wołań `i18n.t`/`t_plural` - funkcje-zdania spoza
+    katalogu (np. `_set_summary(error=…)` okna żniw) i ujścia bez katalogu (`QMessageBox.warning(...,
+    str(e))`, `setText(str(e))` - kategoria `_ODMOWA_OSI`) są poza skanem; (2) wyłącznie bezpośrednie
+    użycie nazwy z `except` - tekst przepisany najpierw do zmiennej pośredniej (`powod = str(e)`) jest
+    poza skanem. Falsyfikator: `i18n.t(..., szczegol=str(exc))` w `except` → nowy wpis spoza list."""
+    import ast
+    from test_gui_powody_pisarza import _ZNANE_SUROWE
+    znalezione = {(plik, nazwa, arg, ast.unparse(v)) for plik, nazwa, arg, v, opakowana, wyj in _wolania_zdan_gui()
+                  if not opakowana and {n.id for n in ast.walk(v) if isinstance(n, ast.Name)} & wyj}
+    znane_ar167 = set(_ZNANE_SUROWE)
+    nowe = {z for z in znalezione - set(_ZNANE_SUROWE_MSG) - set(_ZNANE_Z_WYJATKU)
+            if (z[0], (z[1] or "").rsplit(".", 1)[-1], z[2], z[3]) not in znane_ar167}
+    stare = set(_ZNANE_Z_WYJATKU) - znalezione
+    assert not nowe, f"surowy tekst wyjątku w zdaniu GUI: {sorted(nowe)}"
+    assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"
+
+
+# ============================================================ AR-209, AR-214: jedna reguła wyjątku okna
+
+_EXPECT_RDZENIA = "złamany inwariant rdzenia: wersja stosu bez oryginału"
+
+
+def _rzut(rodzaj, tmp_path):
+    """Wyjątek reprezentatywny drogi okna: goły EXPECT rdzenia (proza PL), wyjątek biblioteki
+    (`json.JSONDecodeError`), `KeyError`, błąd systemu klasą (zerwany udział) i PRAWDZIWY błąd
+    SQLite z kodem (CANTOPEN - baza w katalogu, którego nie ma)."""
+    import json
+    import sqlite3
+    if rodzaj == "rdzen":
+        raise ValueError(_EXPECT_RDZENIA)
+    if rodzaj == "biblioteka":
+        json.loads("{")
+    if rodzaj == "klucz":
+        raise KeyError("lights")
+    if rodzaj == "system":
+        raise OSError(None, "Nazwa sieciowa jest już niedostępna", r"X:\L", 64)
+    if rodzaj == "zamkniete":                      # API bazy wbrew kontraktowi - błąd programu
+        c = sqlite3.connect(":memory:")
+        c.close()
+        c.execute("SELECT 1")
+    sqlite3.connect(str(tmp_path / "brak" / "x.db"))
+    raise AssertionError(rodzaj)
+
+
+def _szczegol_programu(rodzaj, tmp_path):
+    """Wiersz szczegółu technicznego błędu programu: `Typ: opis` TEGO SAMEGO wyjątku co `_rzut`."""
+    try:
+        _rzut(rodzaj, tmp_path)
+    except Exception as exc:                       # noqa: BLE001 - test zbiera dowolny wyjątek rzutu
+        return i18n.t("objchg.st.detail_tip", detail=f"{type(exc).__name__}: {exc}")
+    raise AssertionError(rodzaj)
+
+
+def _oczekiwane(rodzaj):
+    """`(zdanie powodu w języku UI, wiersz szczegółu)`; błąd programu - szczegół `None` (osobny
+    test niżej)."""
+    if rodzaj == "system":
+        return (i18n.t("objchg.item.os_share_lost", os_code="WinError 64"), i18n.t(
+            "wb.os_detail_tip", detail=r"OSError: [WinError 64] Nazwa sieciowa jest już niedostępna: 'X:\L'"))
+    if rodzaj == "baza":
+        return (i18n.t("objchg.item.db_unavailable", db_code="SQLITE_CANTOPEN"),
+                i18n.t("wb.os_detail_tip", detail="OperationalError: unable to open database file"))
+    return i18n.t("objchg.item.prog_error"), None
+
+
+def _okno_planera(tmp_path, monkeypatch, _ustawienia, rzut):
+    """Planer: rachunek nocy pada w rdzeniu (`targets.plan`) - nagłówek nocy i jego szczegół."""
+    from horreum import targets
+    from horreum.gui.planner import PlannerView
+    from test_gui_planner import _seed
+    con = _seed(str(tmp_path / "planer.db"))
+    v = PlannerView(con, db_path=None)
+    monkeypatch.setattr(targets, "plan", lambda *_a, **_k: rzut())
+    v.replan()
+    wynik = v.night_label.text(), v.night_label.szczegol()
+    v.close()
+    con.close()
+    return wynik, lambda zdanie: zdanie
+
+
+def _okno_sondy(tmp_path, monkeypatch, ustawienia, rzut):
+    """Okno wydania: sonda DRY pada w planiście (`projection.plan`) - raport i jego podpowiedź."""
+    from horreum.gui import projection_dialog as pd_mod
+    from test_gui_projection import _dlg, _seed_files, _target
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "sonda.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    monkeypatch.setattr(projection, "plan", lambda *_a, **_k: rzut())
+    dlg = _dlg(con, ids)
+    wynik = dlg.report.toPlainText(), dlg.report.toolTip()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("proj.dry_failed", msg=zdanie)
+
+
+def _okno_wydania(tmp_path, monkeypatch, ustawienia, rzut):
+    """Okno wydania: klik „Utwórz” po udanej sondzie, `apply` pada wyjątkiem całej operacji."""
+    from horreum.gui import projection_dialog as pd_mod
+    from test_gui_projection import _dlg, _seed_files, _target
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "wydanie.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    monkeypatch.setattr(projection, "apply", lambda *_a, **_k: rzut())
+    dlg.show()
+    _klik(dlg.btn_apply)
+    wynik = dlg.report.toPlainText(), dlg.report.toolTip()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("proj.apply_error", msg=zdanie, made="")
+
+
+def _okno_manifestu(tmp_path, monkeypatch, ustawienia, rzut):
+    """Okno wydania obiektu (AR-213): „Zapisz manifest” po sondzie z ofertą, zapis
+    (`repair_manifest` z zapisem w `ManifestWorker`) pada wyjątkiem - raport i jego podpowiedź."""
+    from horreum.gui import projection_dialog as pd_mod
+    from test_gui_projection import _obiekt_wydania, _okno_rc8
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    _klik(dlg.btn_apply)
+    (card / "OBJECTS" / "NGC_6992" / projection.MANIFEST_NAME).unlink()
+    prawdziwa = projection.repair_manifest
+    monkeypatch.setattr(projection, "repair_manifest",
+                        lambda *a, **k: rzut() if k.get("do_write") else prawdziwa(*a, **k))
+    _klik(dlg.btn_dry)
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_write_manifest")
+    _klik(dlg.btn_apply)
+    wynik = dlg.report.toPlainText(), dlg.report.toolTip()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("proj.obj.manifest_error", msg=zdanie)
+
+
+def _okno_zmiany(tmp_path, monkeypatch, _ustawienia, rzut):
+    """Okno „Uzgodnij pliki…”: plan pada (`policz_plan`) - pole błędu i jego szczegół."""
+    from horreum.gui import object_change_dialog as ocd
+    from test_gui_object_change import _lighty
+    con = db.open_db(str(tmp_path / "zmiana.db"))
+    _lighty(tmp_path / "ASTRO_", con, "NGC7635", 1, baza=3)
+    monkeypatch.setattr(ocd, "policz_plan", lambda *_a, **_k: rzut())
+    dlg = _okno_uzgodnij(con, monkeypatch)
+    wynik = dlg.error.text(), dlg.error.szczegol()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("objchg.err.plan", msg=zdanie)
+
+
+_OKNA_WORKEROW = {"planer": _okno_planera, "sonda": _okno_sondy, "wydanie": _okno_wydania,
+                  "manifest": _okno_manifestu, "zmiana": _okno_zmiany}
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("rodzaj", ["rdzen", "biblioteka", "klucz", "zamkniete", "system", "baza"])
+@pytest.mark.parametrize("okno", list(_OKNA_WORKEROW))
+def test_cztery_workery_jedna_regula_wyjatku_okna(qapp, tmp_path, ustawienia, monkeypatch, jezyk,
+                                                  okno, rodzaj, lang):
+    """AR-209, AR-214: wyjątek workera planera, sondy i biegu wydania oraz planu zmiany obiektu
+    mówi JEDNĄ regułą (`item_reasons.powod_okna`): błąd systemu i bazy - klasą w języku UI ze
+    szczegółem pod kursorem; goły EXPECT rdzenia, wyjątek biblioteki i `KeyError` - zdaniem błędu
+    programu w języku UI (nic po polsku w EN), a nie prozą rdzenia albo `Typ: opis` w zdaniu.
+    Falsyfikator: gałąź `ValueError` planera z `str(exc)`, sonda z `powod_wyjatku(exc)`, plan
+    zmiany obiektu z `blad_systemu(exc)` - zdanie niesie surowy tekst wyjątku."""
+    jezyk(lang)
+    (zdanie, szczegol), glowa = _OKNA_WORKEROW[okno](tmp_path, monkeypatch, ustawienia,
+                                                      lambda: _rzut(rodzaj, tmp_path))
+    powod, wiersz = _oczekiwane(rodzaj)
+    assert zdanie.startswith(glowa(powod)), zdanie
+    if wiersz is not None:
+        assert szczegol == wiersz, szczegol
+    if lang == "en":
+        assert not set(zdanie.split("\n")[0]) & _POLSKIE, zdanie
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("rodzaj", ["rdzen", "zamkniete"])
+@pytest.mark.parametrize("okno", list(_OKNA_WORKEROW))
+def test_cztery_workery_blad_programu_szczegol_techniczny_z_typem(qapp, tmp_path, ustawienia,
+                                                                   monkeypatch, jezyk, okno, rodzaj,
+                                                                   lang):
+    """Błąd programu w czterech oknach - goły EXPECT rdzenia i API bazy wbrew kontraktowi
+    (`sqlite3.ProgrammingError` na zamkniętym połączeniu - nie stan bazy): proza z typem wyjątku stoi
+    WYŁĄCZNIE w szczególe technicznym pod kursorem (`objchg.st.detail_tip`), zdanie okna mówi błąd
+    programu w języku UI. Falsyfikator: `prog_error` bez wiersza szczegółu; `ProgrammingError`
+    klasą przez `blad_systemu` - angielski tekst SQLite w zdaniu."""
+    jezyk(lang)
+    (zdanie, szczegol), glowa = _OKNA_WORKEROW[okno](tmp_path, monkeypatch, ustawienia,
+                                                      lambda: _rzut(rodzaj, tmp_path))
+    assert zdanie.startswith(glowa(i18n.t("objchg.item.prog_error"))), zdanie
+    assert szczegol == _szczegol_programu(rodzaj, tmp_path), szczegol

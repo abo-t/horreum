@@ -880,9 +880,12 @@ def test_rodowod_ze_zniw_nie_zapisuje_po_przebiegu_przerwanym_odmowionym_ani_z_b
     try:
         win.pipeline_view.btn_harvest.click()
         win.pipeline_view.run_finished.emit(_zapis_przebiegu(**pola))
-        assert win._pelny_komunikat == (
-            "rodowód dokładny stosów (1) NIE zapisany - Dostawa nie doszła do końca; folderu wydania nie "
-            "kasuj, otwórz ponownie „Wciągnij z WBPP…” i „Zamknij i przyjmij do archiwum”")
+        utrata = ("rodowód dokładny stosów (1) NIE zapisany - Dostawa nie doszła do końca; folderu wydania "
+                  "nie kasuj, otwórz ponownie „Wciągnij z WBPP…” i „Zamknij i przyjmij do archiwum”")
+        # Instrukcja ratunku na początku, za nią wiersz awarii albo powód odmowy i podsumowanie okna
+        # żniw - zdanie zastępuje oba raporty, więc niesie je (AR-218).
+        przyczyna = [pola[k] for k in ("failed", "refused") if k in pola]
+        assert win._pelny_komunikat == " - ".join([utrata, *przyczyna, "Wciągnięto stosy"])
         win.pipeline_view.run_finished.emit(_zapis_przebiegu())
         assert wolane == []
     finally:

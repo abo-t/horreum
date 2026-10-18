@@ -58,7 +58,8 @@ from urllib.request import pathname2url
 
 from . import db, derive, repo
 from .grouper import NO_TELESCOPE_KINDS
-from .item_reasons import blad_systemu     # błąd systemu i bazy klasą w komunikacie abortu (AR-198)
+from .item_reasons import (   # błąd systemu i bazy klasą w komunikacie abortu (AR-198, AR-212)
+    blad_systemu, proza_z_diagnoza)
 from .resolve.cameras import normalize_camera
 from .resolve.frames import normalize_kind
 from .scan import (
@@ -388,7 +389,14 @@ def preflight(donor, *, rng_seed=None, repaired_paths=None, relocations=None):
                           f"jedno drzewo na jednym dysku") from exc
     if os.path.isfile(common):                         # jeden plik → rootem jest jego katalog
         common = os.path.dirname(common)
-    root = canonize_root(common)                       # guard UNC + casing z dysku (R3-a1/a2)
+    try:
+        root = canonize_root(common)                   # guard UNC + casing z dysku (R3-a1/a2)
+    except OSError as exc:
+        # Korzeń dawcy niedostępny (AR-212): abort klasą z kodu systemu, ścieżka w surowym tekście -
+        # CLI łapie wyłącznie `ImportAbort`, więc goły wyjątek kończył import śladem stosu. Odmowa
+        # UNC (`ValueError`) tu nie dochodzi: ścieżki UNC odcina pętla wyżej.
+        raise ImportAbort(f"korzen dawcy niedostepny: "
+                          f"{proza_z_diagnoza(blad_systemu(exc, z_typem=False))}") from exc
     volume = volume_serial(root)
     if volume is None:
         raise ImportAbort(

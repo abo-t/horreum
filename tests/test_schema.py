@@ -107,8 +107,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v44_po_migracji(tmp_path):
-    """0044 podnosi user_version do 44 (świeża baza leci 0002→…→0044 sekwencyjnie; 0025 = wersja
+def test_user_version_v45_po_migracji(tmp_path):
+    """0045 podnosi user_version do 45 (świeża baza leci 0002→…→0045 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -127,13 +127,14 @@ def test_user_version_v44_po_migracji(tmp_path):
     `pending_object_change.reason_code`/`reason_args`, AR-141; 0042 = kod i parametry powodu
     warstwy pisarza karty i renamu w `pending_changes`/`pending_renames`/`withheld_write`, AR-148;
     0043 = indeks `frame(object_id)` pod materiał okna stosu i propozycję rodowodu, AR-154;
-    0044 = ślad własnego cofnięcia drogi atomowej `atomic_undo`, AR-182).
+    0044 = ślad własnego cofnięcia drogi atomowej `atomic_undo`, AR-182; 0045 = werdykt plików obok
+    ścieżki na śladzie cofnięcia `atomic_undo.outcome`/`kept_paths`/`settled_at`, AR-127).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 44
-    assert db.SCHEMA_VERSION == 44
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 45
+    assert db.SCHEMA_VERSION == 45
     con.close()
 
 
@@ -155,7 +156,7 @@ def test_0044_slad_cofniecia_przyrost_na_bazie_v43_i_CHECK(tmp_path):
     con.commit()
     przed = {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
              for t in ("frame", "location", "commits", "header_backups")}
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v44_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
     assert con.execute("SELECT count(*) FROM atomic_undo").fetchone()[0] == 0
     assert {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in przed} == przed
     assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
@@ -185,6 +186,61 @@ def test_0044_slad_cofniecia_przyrost_na_bazie_v43_i_CHECK(tmp_path):
     con.close()
 
 
+def test_0045_werdykt_sladu_przyrost_na_bazie_v44_i_CHECK(tmp_path):
+    """AR-127: 0045 na bazie v44 ze śladami cofnięcia - nowe kolumny wchodzą jako „nierozstrzygnięty”
+    (`outcome` NULL, `kept_paths` '[]', `settled_at` NULL) bez ruszania wierszy, druga migracja = no-op,
+    indeks częściowy po `backup_id` dla śladów bez werdyktu. CHECK-i (baza = ostatnia bramka): werdykt
+    spoza (clean, kept), werdykt bez chwili i chwila bez werdyktu, chwila pusta, `kept` bez nazw (także
+    `[ ]`), nazwy przy `clean` albo bez werdyktu, lista nie-JSON albo nie-lista. Elementów listy CHECK
+    nie sprawdza (`[null]` wchodzi) - to robota klingi i czytelnika. Falsyfikator: zdejmij warunek
+    `json_array_length` - `kept` z `'[ ]'` wchodzi."""
+    con = db.connect(str(tmp_path / "h.db"))
+    for version, filename in db.MIGRATIONS:
+        if version <= 44:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    con.execute("INSERT INTO frame(id, sha1_data, kind, first_seen_at) VALUES (1, 'a', 'light', 't')")
+    con.execute("INSERT INTO location(id, frame_id, volume, path) VALUES (1, 1, 'V', 'R:\\L\\a.fits')")
+    con.execute("INSERT INTO commits(id, run_id) VALUES (1, 'R')")
+    con.execute("INSERT INTO header_backups(id, commit_id, location_id, header_text, post_hash) "
+                "VALUES (1, 1, 1, 'x', 'p')")
+    s = "a" * 40
+    for i in (1, 2):
+        con.execute("INSERT INTO atomic_undo(id, backup_id, result_sha1, result_size, result_hash, "
+                    "source_sha1, source_size, displaced_path, prepared_path, recorded_at) "
+                    "VALUES (?, 1, ?, 1, ?, ?, 1, 'k', 't', 't')", (i, s, s, s))
+    con.commit()
+    przed = [tuple(r) for r in con.execute("SELECT * FROM atomic_undo ORDER BY id")]
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
+    po = [tuple(r) for r in con.execute(
+        "SELECT * FROM atomic_undo ORDER BY id")]
+    assert [r[:len(przed[0])] for r in po] == przed
+    assert [tuple(r) for r in con.execute(
+        "SELECT outcome, kept_paths, settled_at FROM atomic_undo ORDER BY id")] == [(None, "[]", None)] * 2
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    indeks = con.execute("SELECT sql FROM sqlite_master WHERE name = 'idx_atomic_undo_unsettled'"
+                         ).fetchone()[0]
+    assert "(backup_id)" in indeks and "WHERE settled_at IS NULL" in indeks, indeks
+    zle = ("UPDATE atomic_undo SET outcome = ?, kept_paths = ?, settled_at = ? WHERE id = 1")
+    for wartosci in (("gone", "[]", "t"),               # werdykt spoza zbioru
+                     ("clean", "[]", None),             # werdykt bez chwili
+                     (None, "[]", "t"),                 # chwila bez werdyktu
+                     ("clean", "[]", ""),               # chwila pusta
+                     ("kept", "[]", "t"),               # kept bez nazw
+                     ("kept", "[ ]", "t"),              # kept z pustą listą zapisaną inaczej
+                     ("clean", '["k"]', "t"),           # nazwy przy clean
+                     (None, '["k"]', None),             # nazwy bez werdyktu
+                     ("kept", "k", "t"),                # nie-JSON
+                     ("kept", '{"a": 1}', "t"),         # nie-lista
+                     ("kept", None, "t")):              # NULL
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(zle, wartosci)
+    con.execute(zle, ("kept", '["k", "z", "t"]', "t"))
+    con.execute("UPDATE atomic_undo SET outcome = 'kept', kept_paths = '[null]', settled_at = 't' "
+                "WHERE id = 2")                         # elementów CHECK nie widzi (klinga i czytelnik)
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    con.close()
+
+
 def test_0043_indeks_frame_object_na_bazie_v42(tmp_path):
     """AR-154: 0043 na bazie v42 z klatkami - indeks `idx_frame_object` prowadzony `frame.object_id`
     powstaje, wiersze nietknięte, druga migracja = no-op; plan zapytania materiału okna stosu
@@ -196,7 +252,7 @@ def test_0043_indeks_frame_object_na_bazie_v42(tmp_path):
     przed = [tuple(r) for r in con.execute("SELECT * FROM frame ORDER BY id")]
     assert db._user_version(con) == 42
     assert "idx_frame_object" not in {r[1] for r in con.execute("PRAGMA index_list(frame)")}
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v44_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
     assert [r[2] for r in con.execute("PRAGMA index_info(idx_frame_object)")] == ["object_id"]
     assert [tuple(r) for r in con.execute("SELECT * FROM frame ORDER BY id")] == przed
     assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
@@ -224,7 +280,7 @@ def test_0041_kod_powodu_pozycji_przyrost_na_bazie_v40_i_CHECK(tmp_path):
                 "'blocked', ?)", (proza,))
     con.commit()
     assert db._user_version(con) == 40
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v44_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
     assert tuple(con.execute("SELECT reason, reason_code, reason_args FROM pending_object_change"
                              ).fetchone()) == (proza, None, None)
     assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
@@ -271,7 +327,7 @@ def test_0042_kody_powodow_pisarza_przyrost_na_bazie_v41_i_CHECK(tmp_path):
     con.execute("UPDATE pending_renames SET status = 'skipped', reason = 'cofnięto (undo)' WHERE id = 1")
     con.commit()
     assert db._user_version(con) == 41
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v44_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
     tabele = ("pending_changes", "pending_renames", "withheld_write")
     assert [tuple(con.execute(f"SELECT reason, reason_code, reason_args FROM {t}").fetchone())
             for t in tabele] == [(proza, None, None), ("cofnięto (undo)", None, None),

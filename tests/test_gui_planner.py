@@ -893,3 +893,42 @@ def test_planer_baza_niedostepna_klasa_i_szczegol(view, tmp_path, lang):
         assert "2026-08-15" in view.night_label.text() and view.night_label.szczegol() == ""
     finally:
         i18n.set_lang("pl")
+
+
+# ============================================================ AR-214: EXPECT rdzenia planera
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_planer_blad_programu_rdzenia_zdanie_w_jezyku_UI_szczegol_techniczny(view, tmp_path,
+                                                                            monkeypatch, lang):
+    """PRAWDZIWY rdzeń: rekord assetu planera bez pola rozmiaru - `targets._target` rzuca goły
+    `ValueError` z prozą PL (EXPECT: asset pakietu pilnują testy assetu). Nagłówek nocy i pasek
+    mówią zdaniem błędu programu w języku UI, proza rdzenia z typem stoi wyłącznie w szczególe
+    technicznym, a zdanie na pasek jedzie razem ze szczegółem (`ZdanieZeSzczegolem`).
+    Falsyfikator: gałąź `ValueError` `PlanWorker.run` z `str(exc)` - proza PL na ekranie i w EN."""
+    import json
+    from horreum.gui import i18n, planner as planner_mod
+    from horreum.gui.wb_worker import szczegol_zdania
+    zly = tmp_path / "targets_core.json"
+    zly.write_text(json.dumps({"targets": [{"c": "X1", "t": "G", "r": 10.0, "d": 41.0}]}),
+                   encoding="utf-8")
+    prawdziwy_asset = targets._asset_file
+    monkeypatch.setattr(targets, "_asset_file",
+                        lambda layer: zly if layer == "core" else prawdziwy_asset(layer))
+    wyjatki, regula = [], planner_mod.powod_okna
+    monkeypatch.setattr(planner_mod, "powod_okna", lambda exc: wyjatki.append(exc) or regula(exc))
+    pasek = []
+    view.status_message.connect(pasek.append)
+    i18n.set_lang(lang)
+    try:
+        view.replan()
+        (exc,) = wyjatki
+        assert type(exc) is ValueError and "X1" in str(exc), exc       # rdzeń, nie atrapa
+        zdanie = i18n.t("objchg.item.prog_error")
+        szczegol = i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
+        assert view.night_label.text() == zdanie and view.night_label.szczegol() == szczegol
+        assert pasek[-1] == zdanie and szczegol_zdania(pasek[-1]) == szczegol
+        assert view.model.rowCount() == 0 and not view.bez_stanowiska
+        if lang == "en":
+            assert not set(zdanie) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), zdanie
+    finally:
+        i18n.set_lang("pl")

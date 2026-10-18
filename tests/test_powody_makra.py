@@ -3,9 +3,10 @@ który makro woła) rodzi powód pominięcia albo odmowy, oddaje `PowodPozycji` 
 jak dotąd (CLI, testy, sklejenia biorą je jak tekst), kod `macro_*` i parametry, a okno mówi je
 w języku UI (`gui.wb_worker.tekst_powodu`).
 
-Test złoty: zdanie PL każdej drogi jest LITERAŁEM sprzed kodów (zmiana znaku = czerwień) i zdanie EN
-jest DOKŁADNE - polszczyzna makra jest ASCII (`brak`, `wartosc`), więc sam brak polskich liter nie
-odróżniłby powrotu do surowej prozy od tłumaczenia. Powód wyrażenia (`compute`/`assign`) jedzie
+Test złoty: zdanie PL każdej drogi jest LITERAŁEM (zmiana znaku = czerwień; polskie znaki od AR-228)
+i zdanie EN jest DOKŁADNE - część polszczyzny makra nie ma polskich liter (`brak obecnej kopii`,
+`frame nieobecny w bazie`), więc sam brak polskich liter nie odróżniłby powrotu do surowej prozy od
+tłumaczenia. Powód wyrażenia (`compute`/`assign`) jedzie
 parametrem `inner`: z kodem, gdy to brak operandu albo dzielenie przez zero, prozą-granicą, gdy to
 tekst wyjątku Pythona."""
 import pytest
@@ -44,7 +45,7 @@ def _cel_odmowa(**kw):
 _OGNISKOWA = [_karta("FOCALLEN", "600", num=600.0, vtype="float")]
 _HISTORIA = [_karta("HISTORY", "a"), _karta("HISTORY", "b", idx=1)]
 
-# (droga, powód z prawdziwego wywołania, kod, zdanie PL sprzed kodów, zdanie EN)
+# (droga, powód z prawdziwego wywołania, kod, zdanie PL - polskie znaki od AR-228, zdanie EN)
 _DROGI = [
     ("resolve_target RAW", lambda: _cel_odmowa(filetype="raw"), "macro_raw",
      "plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)",
@@ -59,7 +60,7 @@ _DROGI = [
      "skompresowany master -- edycja poza krokiem 4 (T6)",
      "compressed master - editing is outside step 4 (T6)"),
     ("resolve_target degenerat", lambda: _cel_odmowa(sha1_data_uncomputable=1), "macro_degenerate",
-     "tozsamosc nieobliczalna (degenerat) -- zapis rozdwoilby klatke (D-X-13)",
+     "tożsamość nieobliczalna (degenerat) -- zapis rozdwoiłby klatkę (D-X-13)",
      "identity cannot be computed (degenerate) - a write would split the frame (D-X-13)"),
     ("resolve_target bez header_hash", lambda: _cel_odmowa(header_hash=None),
      "macro_no_header_hash", "brak header_hash (plik nieczytelny) -- brak kontroli zapisu",
@@ -72,13 +73,13 @@ _DROGI = [
      lambda: macro.plan_manual_change([], "TELESCOP", "X", cards_fn=lambda lid: [])[1],
      "macro_frame_gone", "frame nieobecny w bazie", "frame missing from the database"),
     ("_evaluate_change set bez karty", lambda: _makro("TELESCOP", "set", "'RC8'", _OGNISKOWA),
-     "macro_set_missing", "brak karty 'TELESCOP' do modyfikacji (uzyj add)",
+     "macro_set_missing", "brak karty 'TELESCOP' do modyfikacji (użyj add)",
      "no card 'TELESCOP' to modify (use add)"),
     ("_evaluate_change wiele wystąpień", lambda: _makro("HISTORY", "set", "'x'", _HISTORIA),
-     "macro_idx_required", "keyword 'HISTORY' ma wiele wystapien -- wymagany jawny idx",
+     "macro_idx_required", "keyword 'HISTORY' ma wiele wystąpień -- wymagany jawny idx",
      "keyword 'HISTORY' occurs more than once - an explicit idx is required"),
     ("_evaluate_change add na istniejącej", lambda: _makro("FOCALLEN", "add", "800", _OGNISKOWA),
-     "macro_add_exists", "karta 'FOCALLEN' juz istnieje (uzyj set)",
+     "macro_add_exists", "karta 'FOCALLEN' już istnieje (użyj set)",
      "card 'FOCALLEN' already exists (use set)"),
     ("_evaluate_change compute bez operandu", lambda: _makro(
         "FOCALLEN", "set", "round(new, 2)", _OGNISKOWA, [("new", "FOCALLEN / FOCRATIO")]),
@@ -95,23 +96,23 @@ _DROGI = [
      "assign: TypeError: unsupported operand type(s) for +: 'float' and 'str'"),
     ("_evaluate_change wynik niecałkowity", lambda: _makro(
         "NAXIS1", "set", "2.5", [_karta("NAXIS1", "4", num=4.0, vtype="int")]),
-     "macro_not_int", "wynik niecalkowity (2.5) dla keyworda 'NAXIS1' typu int",
+     "macro_not_int", "wynik niecałkowity (2.5) dla keyworda 'NAXIS1' typu int",
      "non-integer result (2.5) for int keyword 'NAXIS1'"),
     ("_evaluate_change typ", lambda: _makro(
         "FOCRATIO", "set", "abc", [_karta("FOCRATIO", "7.5", num=7.5, vtype="float")]),
-     "macro_type_mismatch", "wartosc 'abc' nie pasuje do typu 'float'",
+     "macro_type_mismatch", "wartość 'abc' nie pasuje do typu 'float'",
      "value 'abc' does not match type 'float'"),
     ("evaluate_manual_change wiele wystąpień",
      lambda: macro.evaluate_manual_change(_HISTORIA, "HISTORY", "x").reason, "macro_manual_many",
-     "keyword 'HISTORY' ma wiele wystapien -- edycja reczna poza krokiem 4",
+     "keyword 'HISTORY' ma wiele wystąpień -- edycja ręczna poza krokiem 4",
      "keyword 'HISTORY' occurs more than once - manual editing is outside step 4"),
     ("evaluate_manual_change wynik niecałkowity", lambda: macro.evaluate_manual_change(
         [_karta("NAXIS1", "4", num=4.0, vtype="int")], "NAXIS1", "2.5").reason,
-     "macro_manual_not_int", "wynik niecalkowity (2.5) dla keyworda typu int",
+     "macro_manual_not_int", "wynik niecałkowity (2.5) dla keyworda typu int",
      "non-integer result (2.5) for an int keyword"),
     ("evaluate_manual_change typ", lambda: macro.evaluate_manual_change(
         [_karta("FOCRATIO", "7.5", num=7.5, vtype="float")], "FOCRATIO", "abc").reason,
-     "macro_type_mismatch", "wartosc 'abc' nie pasuje do typu 'float'",
+     "macro_type_mismatch", "wartość 'abc' nie pasuje do typu 'float'",
      "value 'abc' does not match type 'float'"),
 ]
 _IDS = [d[0] for d in _DROGI]
@@ -120,7 +121,7 @@ _IDS = [d[0] for d in _DROGI]
 @pytest.mark.parametrize("droga, wywolanie, kod, pl, _en", _DROGI, ids=_IDS)
 def test_ZLOTE_powody_makra_PL_znak_w_znak_z_kodem(droga, wywolanie, kod, pl, _en):
     """Każda droga rodzenia powodu w `macro` (18 miejsc) i dwa powody `expr.eval_for`: zdanie PL
-    = literał sprzed kodów, `PowodPozycji` z kodem drogi. Falsyfikator: jeden znak zdania
+    = literał (polskie znaki od AR-228), `PowodPozycji` z kodem drogi. Falsyfikator: jeden znak zdania
     w `macro.py` zmieniony (`--` → `-`) albo miejsce z gołym f-stringiem → czerwień."""
     powod = wywolanie()
     assert str(powod) == pl, (droga, str(powod))
@@ -181,27 +182,27 @@ def _eval_wezla():
     return expr._eval(ast.List(elts=[], ctx=ast.Load()), {})
 
 
-# (droga, wywołanie rzucające, kod, zdanie PL sprzed kodów, zdanie EN)
+# (droga, wywołanie rzucające, kod, zdanie PL - polskie znaki od AR-228, zdanie EN)
 _DEFINICJE = [
-    ("compile_expr puste", lambda: expr.compile_expr("   "), "expr_empty", "puste wyrazenie",
+    ("compile_expr puste", lambda: expr.compile_expr("   "), "expr_empty", "puste wyrażenie",
      "empty expression"),
     ("compile_expr składnia", lambda: expr.compile_expr("1 +"), "expr_syntax",
-     "blad skladni: invalid syntax (<unknown>, line 1)",
+     "błąd składni: invalid syntax (<unknown>, line 1)",
      "syntax error: invalid syntax (<unknown>, line 1)"),
     ("_validate stała", lambda: expr.compile_expr("None"), "expr_bad_const",
-     "niedozwolona stala: None", "constant not allowed: None"),
-    ("_validate przypisanie", _wezel_store, "expr_store", "przypisanie w wyrazeniu niedozwolone",
+     "niedozwolona stała: None", "constant not allowed: None"),
+    ("_validate przypisanie", _wezel_store, "expr_store", "przypisanie w wyrażeniu niedozwolone",
      "assignment inside an expression is not allowed"),
     ("_validate wywołanie spoza listy", lambda: expr.compile_expr("foo(1)"), "expr_call_not_allowed",
-     "dozwolone tylko wywolania z bialej listy funkcji",
+     "dozwolone tylko wywołania z białej listy funkcji",
      "only calls of allowed functions are permitted"),
     ("_validate nazwane", lambda: expr.compile_expr("min(a=1)"), "expr_kwargs",
      "argumenty nazwane niedozwolone", "keyword arguments are not allowed"),
     ("_validate rozpakowanie", lambda: expr.compile_expr("max(*A)"), "expr_starred",
-     "rozpakowanie argumentow niedozwolone", "argument unpacking is not allowed"),
+     "rozpakowanie argumentów niedozwolone", "argument unpacking is not allowed"),
     ("_validate element", lambda: expr.compile_expr("A.b"), "expr_bad_node",
-     "niedozwolony element wyrazenia: Attribute", "element not allowed in an expression: Attribute"),
-    ("_eval element", _eval_wezla, "expr_bad_node", "niedozwolony element wyrazenia: List",
+     "niedozwolony element wyrażenia: Attribute", "element not allowed in an expression: Attribute"),
+    ("_eval element", _eval_wezla, "expr_bad_node", "niedozwolony element wyrażenia: List",
      "element not allowed in an expression: List"),
     ("from_dict bez assign", lambda: macro.MacroDef.from_dict({"name": "x"}), "macro_def_no_assign",
      "definicja makra wymaga pola 'assign'", "the macro definition needs an 'assign' field"),
@@ -218,7 +219,7 @@ _IDS_DEF = [d[0] for d in _DEFINICJE]
 @pytest.mark.parametrize("droga, wywolanie, kod, pl, _en", _DEFINICJE, ids=_IDS_DEF)
 def test_ZLOTE_bledy_definicji_PL_znak_w_znak_z_kodem(droga, wywolanie, kod, pl, _en):
     """Każde miejsce, w którym `expr` odrzuca wyrażenie, i każda odmowa `MacroDef.from_dict`: `str`
-    wyjątku = zdanie PL sprzed kodów (ASCII), `powod` z kodem drogi, klasa wyjątku bez zmian
+    wyjątku = zdanie PL z polskimi znakami (AR-228), `powod` z kodem drogi, klasa wyjątku bez zmian
     (`ExprError` nie jest `ValueError`, odmowa definicji jest). Falsyfikator: `raise` z gołym
     f-stringiem albo znak zdania zmieniony."""
     exc = _blad(wywolanie)
@@ -250,7 +251,7 @@ def test_bledy_definicji_mowia_w_UI_PL_znak_w_znak_a_EN_dokladnie(droga, wywolan
 def test_meta_bledy_definicji_tylko_z_kodem():
     """Bramka AST (żeby nie wracało): każdy `raise ExprError(...)` w `expr` niesie `PowodPozycji(...)`,
     a każdy `raise` w `MacroDef.from_dict` - `OdmowaZPowodem(PowodPozycji(...))`; liczby miejsc
-    jak w zbiorze (9 i 3). Falsyfikator: `raise ExprError("puste wyrazenie")`."""
+    jak w zbiorze (9 i 3). Falsyfikator: `raise ExprError("puste wyrażenie")`."""
     import ast
     import inspect
     import textwrap
@@ -278,7 +279,7 @@ def test_blad_wyrazenia_w_obliczeniu_jedzie_z_kodem_a_reszta_bez_zmian():
                      names=frozenset())
     wynik = expr.eval_for(obce, {})
     assert not wynik.ok and isinstance(wynik.reason, PowodPozycji)
-    assert wynik.reason.code == "expr_bad_node" and str(wynik.reason) == "niedozwolony element wyrazenia: List"
+    assert wynik.reason.code == "expr_bad_node" and str(wynik.reason) == "niedozwolony element wyrażenia: List"
     brak = expr.eval_for(expr.compile_expr("A / B"), {"A": 1})
     assert (brak.missing_operand, brak.reason.code, str(brak.reason)) == (
         True, "macro_missing_operand", "brak operandu: B")
@@ -288,3 +289,39 @@ def test_blad_wyrazenia_w_obliczeniu_jedzie_z_kodem_a_reszta_bez_zmian():
     typ = expr.eval_for(expr.compile_expr("A + 'x'"), {"A": 1})
     assert type(typ.reason) is str and typ.reason == (
         "TypeError: unsupported operand type(s) for +: 'int' and 'str'")
+
+
+# ============================ AR-228: zdania z polskimi znakami w stronach kodowych konsoli
+
+
+def _kody(powod):
+    """Kod powodu i kody powodów zagnieżdżonych w parametrach (`inner`)."""
+    if not isinstance(powod, PowodPozycji):
+        return set()
+    return {powod.code}.union(*(_kody(v) for _k, v in powod.params))
+
+
+def test_zdania_makra_i_wyrazenia_mieszcza_sie_w_cp1250():
+    """AR-228: zdania PL powodów makra i wyrażenia niosą polskie znaki - świadoma reguła: mieszczą się
+    w stronie ANSI cp1250 (zapis tekstu przy wyjściu przekierowanym na Windows: log, kolumna prozowa,
+    przyszły druk). CLI tych zdań dziś nie drukuje, a jego stdout jest UTF-8 (`cli._main`,
+    `reconfigure`), więc strony OEM cp852 nie pilnujemy - brakuje w niej typografii („ ”, …), którą
+    zdania mogą kiedyś nieść. Kodujemy zdania SFORMATOWANE z prawdziwych dróg (`_DROGI`, `_DEFINICJE`)
+    i dwa z próbką z polskimi znakami (wartość pola, nazwa operandu); zbiór dróg pokrywa KAŻDY kod
+    `PowodPozycji` z `expr` i `macro` (AST), więc nowa droga bez próbki jest czerwienią. Falsyfikator:
+    „→” w zdaniu."""
+    import ast
+    import inspect
+    powody = [w() for _d, w, *_r in _DROGI] + [_blad(w).powod for _d, w, *_r in _DEFINICJE]
+    powody += [
+        macro.evaluate_manual_change([_karta("FOCRATIO", "7.5", num=7.5, vtype="float")], "FOCRATIO",
+                                     "żółć").reason,
+        expr.eval_for(expr.compile_expr("A / ŻÓŁW"), {"A": 1}).reason,
+    ]
+    assert str(powody[-2]) == "wartość 'żółć' nie pasuje do typu 'float'" and str(powody[-1]) == (
+        "brak operandu: ŻÓŁW")
+    w_zrodle = {w.args[1].value for m in (expr, macro) for w in ast.walk(ast.parse(inspect.getsource(m)))
+                if isinstance(w, ast.Call) and getattr(w.func, "id", None) == "PowodPozycji"}
+    assert set().union(*(_kody(p) for p in powody)) == w_zrodle
+    for zdanie in map(str, powody):
+        assert zdanie.encode("cp1250").decode("cp1250") == zdanie, zdanie

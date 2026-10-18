@@ -2199,3 +2199,655 @@ def test_abort_sondy_pierwszego_linku_w_jezyku_UI(qapp, tmp_path, ustawienia, mo
         assert not set(raport.split("\n")[0]) & _POLSKIE, raport
     dlg.reject()
     con.close()
+
+
+# ============================================================ AR-214: EXPECT rdzenia w oknie wydania
+
+def _szpieg_reguly(monkeypatch):
+    """Wyjątki, które dotarły do reguły wyjątku okna (`powod_okna`) - dowód, że raport mówi
+    o wyjątku PRAWDZIWEGO rdzenia, nie o czymś po drodze. Reguła działa dalej bez zmian."""
+    wyjatki, regula = [], pd_mod.powod_okna
+    monkeypatch.setattr(pd_mod, "powod_okna", lambda exc: wyjatki.append(exc) or regula(exc))
+    return wyjatki
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_sonda_DRY_blad_programu_rdzenia_w_jezyku_UI(qapp, tmp_path, ustawienia, monkeypatch, jezyk,
+                                                     lang):
+    """PRAWDZIWY `plan_object` rzuca goły `ValueError` „nieznany obiekt” (EXPECT: obiekt nie znika
+    z bazy, wołający podał zły id) - klik „Odśwież podgląd”: raport „Nie można:” ze zdaniem błędu
+    programu w języku UI, proza rdzenia z typem w szczególe technicznym pod kursorem, „Utwórz”
+    i Eksplorator wygaszone. Falsyfikator: `DryWorker` z `powod_wyjatku(exc)` - proza PL w raporcie."""
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    dlg = _dlg_obj(con)
+    wyjatki = _szpieg_reguly(monkeypatch)
+    dlg._object_id = 999
+    dlg.show()
+    _klik(dlg.btn_dry)
+    (exc,) = wyjatki
+    assert type(exc) is ValueError and "999" in str(exc), exc
+    raport = dlg.report.toPlainText()
+    assert raport == i18n.t("proj.dry_failed", msg=i18n.t("objchg.item.prog_error")), raport
+    assert dlg.report.toolTip() == i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
+    assert not dlg.btn_apply.isEnabled() and dlg.btn_open.isHidden()
+    if lang == "en":
+        assert not set(raport) & _POLSKIE, raport
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wydanie_blad_programu_rdzenia_w_jezyku_UI(qapp, tmp_path, ustawienia, monkeypatch, jezyk, lang):
+    """PRAWDZIWY rdzeń: plan z układem spoza `LAYOUTS` (błąd programu wołającego) - linki powstają,
+    a `_write_manifest` pada w `layout_segments` gołym `ValueError` (nie `OSError` kroku, więc nie
+    wynik z powodem): raport „Błąd:” ze zdaniem błędu programu w języku UI i liczbą utworzonych
+    przed błędem, szczegół techniczny pod kursorem, „Przerwane błędem”. Falsyfikator: `ApplyWorker`
+    z `powod_wyjatku(exc)` - proza PL w zdaniu raportu."""
+    import dataclasses
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "bp.db"))
+    ids = _seed_files(con, tmp_path, 2)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    dlg._plan = dataclasses.replace(dlg._plan, layout="zly-uklad")
+    wyjatki = _szpieg_reguly(monkeypatch)
+    dlg.show()
+    _klik(dlg.btn_apply)
+    (exc,) = wyjatki
+    assert type(exc) is ValueError and "zly-uklad" in str(exc), exc
+    raport = dlg.report.toPlainText()
+    assert raport == i18n.t("proj.apply_error", msg=i18n.t("objchg.item.prog_error"),
+                            made=i18n.t("proj.made_before_error", done=2, total=2)), raport
+    assert dlg.report.toolTip() == i18n.t("objchg.st.detail_tip", detail=f"ValueError: {exc}")
+    assert dlg.btn_apply.text() == i18n.t("proj.btn_error") and not dlg.btn_apply.isEnabled()
+    if lang == "en":
+        assert not set(raport.split("\n")[0]) & _POLSKIE, raport
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wydanie_wyjatek_z_callbacku_postepu_mowi_bledem_programu(qapp, tmp_path, ustawienia,
+                                                                  monkeypatch, jezyk, lang):
+    """Wyjątek z callbacku, który rdzeń woła w biegu (`progress` workera, `KeyError`) - ta sama
+    reguła: zdanie błędu programu w języku UI, `Typ: opis` wyłącznie w szczególe. Falsyfikator:
+    gałąź `Exception` bez `powod_okna` - `KeyError: 'postep'` w zdaniu raportu."""
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "cb.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    wyjatki = _szpieg_reguly(monkeypatch)
+    monkeypatch.setattr(pd_mod.ApplyWorker, "_emit_progress", lambda self, *_a: {}["postep"])
+    dlg.show()
+    _klik(dlg.btn_apply)
+    (exc,) = wyjatki
+    assert type(exc) is KeyError, exc
+    raport = dlg.report.toPlainText()
+    assert raport == i18n.t("proj.apply_error", msg=i18n.t("objchg.item.prog_error"), made=""), raport
+    assert dlg.report.toolTip() == i18n.t("objchg.st.detail_tip", detail="KeyError: 'postep'")
+    if lang == "en":
+        assert not set(raport.split("\n")[0]) & _POLSKIE, raport
+    dlg.reject()
+    con.close()
+
+
+# ============================================================ AR-215: jeden ogon zakończenia błędem
+
+@pytest.mark.parametrize("droga, przycisk, z_szczegolem", [
+    ("krok_manifestu", "proj.btn_error", True), ("sonda_hardlinka", "proj.btn_not_created", False),
+    ("wyjatek_operacji", "proj.btn_error", True)])
+def test_trzy_drogi_bledu_wydania_jeden_ogon(qapp, tmp_path, ustawienia, monkeypatch, droga, przycisk,
+                                             z_szczegolem):
+    """Krok wydania z błędem systemu (`res.error`), werdykt sondy pierwszego linku i wyjątek całej
+    operacji kończą się TYM SAMYM ogonem (`_zakoncz_bledem`): pasek schowany i z powrotem
+    nieokreślony, nota postępu pusta, „Przerwij” schowany, „Utwórz” widoczny i wygaszony z etykietą
+    drogi, parametry odmrożone, pierwszy blok raportu w kolorze błędu, szczegół drogi pod kursorem.
+    Falsyfikator: pomocnik bez `_apply_end()` albo bez wygaszenia „Utwórz”."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "ogon.db"))
+    ids = _seed_files(con, tmp_path, 3)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    blad = OSError(None, "Komunikat systemu", r"X:\L\a.fits", 64)
+
+    def _pada(*_a, **_k):
+        raise blad
+    if droga == "krok_manifestu":
+        monkeypatch.setattr(projection, "_write_manifest", _pada)
+    elif droga == "sonda_hardlinka":
+        monkeypatch.setattr(projection, "_verify_content", lambda src, dst, nbytes=65536: False)
+    else:
+        monkeypatch.setattr(projection, "apply", _pada)
+    dlg.show()
+    _klik(dlg.btn_apply)
+    assert dlg.busy.isHidden() and (dlg.busy.minimum(), dlg.busy.maximum()) == (0, 0)
+    assert not dlg.busy.isTextVisible() and dlg.progress_note.full_text() == ""
+    assert dlg.btn_cancel.isHidden() and not dlg.btn_apply.isHidden()
+    assert not dlg.btn_apply.isEnabled() and dlg.btn_apply.text() == i18n.t(przycisk)
+    assert all(w.isEnabled() for w in (dlg.combo_layout, dlg.chk_copy, dlg.btn_add, dlg.btn_dry))
+    assert all(c["holder"].isEnabled() for c in dlg._cards)
+    glowa = _block_fmt(dlg.report, 0)
+    assert glowa.foreground().color().name() == pd_mod._COLORS["error"].name()
+    assert dlg.report.toolTip() == (i18n.t("wb.os_detail_tip", detail=_SZCZEGOL) if z_szczegolem else "")
+    dlg.reject()
+    con.close()
+
+
+def test_ogon_bledu_wygasza_utworz_niezaleznie_od_wejscia_w_bieg(qapp, tmp_path, ustawienia, monkeypatch):
+    """Kontrakt ogona (`_zakoncz_bledem`): slot porażki SAM wygasza „Utwórz”, a nie polega na tym,
+    że wejście w bieg (`_apply_begin`) już je wygasiło - uzbrojony przycisk po porażce obiecywałby
+    akcję nad drzewem zmienionym częściowo. Falsyfikator: ogon bez `setEnabled(False)`."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "kontrakt.db"))
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, _seed_files(con, tmp_path, 1))
+    dlg.btn_apply.setEnabled(True)
+    dlg._apply_seen = (0, 1)
+    dlg._on_apply_failed(pd_mod.powod_okna(OSError("dysk odpięty")))   # ładunek jak z workera
+    assert not dlg.btn_apply.isEnabled() and dlg.btn_apply.text() == i18n.t("proj.btn_error")
+    dlg.reject()
+    con.close()
+
+
+# ============================================================ AR-213: „Zapisz manifest” z okna wydania
+
+def _zegar():
+    """Zegar okna: każde wołanie to kolejna sekunda - wydanie i naprawa mają RÓŻNE czasy."""
+    licznik = iter(range(100_000))
+
+    def teraz():
+        n = next(licznik)
+        return f"2026-07-17T{n // 3600:02d}:{n // 60 % 60:02d}:{n % 60:02d}+00:00"
+    return teraz
+
+
+def _okno_rc8(con, ustawienia, card, *, off_thread=False):
+    """Okno wydania obiektu NGC 6992 na zestawie RC8 (bez klatek bez kopii) z zegarem `_zegar`."""
+    _target(ustawienia, card)
+    dlg = ProjectionDialog(con, object_id=1, now_fn=_zegar(), off_thread=off_thread)
+    dlg.show()
+    return dlg
+
+
+def _czekaj(pred, s=10.0):
+    """Pętla zdarzeń + krótki sen, aż `pred()` - wynik wątku tła dolatuje sygnałem kolejkowanym."""
+    import time
+    koniec = time.monotonic() + s
+    while not pred():
+        if time.monotonic() > koniec:
+            return False
+        QApplication.processEvents()
+        time.sleep(0.01)
+    return True
+
+
+def _manifest_okna(root):
+    return json.loads((root / projection.MANIFEST_NAME).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_manifest_skasowany_sonda_proponuje_drugie_klikniecie_zapisuje(qapp, tmp_path, ustawienia,
+                                                                       monkeypatch, jezyk, lang):
+    """Wydanie (zegar okna), manifest skasowany razem z `out`; klik „Odśwież podgląd” - raport mówi
+    lukę manifestu rolą ostrzeżenia i zapowiada manifest bez daty wydania, „Utwórz” staje się
+    „Zapisz manifest” ze ZŁOTĄ wagą (Eksplorator zwykły); klik - `ManifestWorker`: treść wydania
+    (etykieta okna, listy, nazwy), `ts` None + `repaired_at` z późniejszego zegara, drzewo bez zmian
+    (`out` nie wraca), raport z ostrzeżeniem o braku daty, przycisk i zdanie paska naprawy; świeża
+    sonda - już bez oferty. Falsyfikator: `_on_apply` przez `ApplyWorker` (zakłada `out`), złoto na
+    Eksploratorze, zapis `ts: None` bez słowa w oknie."""
+    import shutil
+    from test_projection import _bez_ts, _migawka
+    jezyk(lang)
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)                    # RC8_ASI2600MM
+    _klik(dlg.btn_apply)
+    root = card / "OBJECTS" / "NGC_6992"
+    stary = _manifest_okna(root)
+    (root / projection.MANIFEST_NAME).unlink()
+    shutil.rmtree(root / projection.OUTPUT_DIR)
+    przed = _migawka(str(root))
+    _klik(dlg.btn_dry)
+    raport = dlg.report.toPlainText()
+    assert i18n.t("proj.obj.manifest_missing") in raport, raport
+    assert i18n.t("proj.obj.manifest_no_ts") in raport, raport
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_write_manifest") and dlg.btn_apply.isEnabled()
+    assert dlg.btn_apply.font().bold() and not dlg.btn_open.isHidden() and not dlg.btn_open.font().bold()
+    _klik(dlg.btn_apply)
+    nowy = _manifest_okna(root)
+    assert _migawka(str(root)) == przed and not (root / projection.OUTPUT_DIR).exists()
+    assert nowy["ts"] is None and nowy["repaired_at"] > stary["ts"]
+    assert nowy["etykieta"] == stary["etykieta"] == "NGC 6992 / RC8_ASI2600MM"
+    assert _bez_ts(nowy["zestawy"]) == _bez_ts(stary["zestawy"])
+    assert dlg.report.toPlainText().startswith(i18n.t("proj.obj.manifest_written"))
+    assert i18n.t("proj.obj.manifest_no_ts") in dlg.report.toPlainText().split("\n")
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_manifest_written") and not dlg.btn_apply.isEnabled()
+    assert dlg.summary == i18n.t("proj.obj.status_manifest", canon="NGC 6992", root=str(root))
+    if lang == "en":
+        for klucz in ("proj.obj.manifest_missing", "proj.obj.manifest_written", "proj.obj.manifest_no_ts",
+                      "proj.obj.btn_write_manifest", "proj.obj.btn_manifest_written"):
+            assert not set(i18n.t(klucz)) & _POLSKIE, klucz
+        assert not set(dlg.summary) & _POLSKIE - set(str(root)), dlg.summary
+    _klik(dlg.btn_dry)
+    assert dlg.btn_apply.text() != i18n.t("proj.obj.btn_write_manifest") and not dlg.btn_apply.isEnabled()
+    assert i18n.t("proj.obj.manifest_missing") not in dlg.report.toPlainText()
+    dlg.reject()
+    con.close()
+
+
+def _pada_krok_manifestu(monkeypatch):
+    """Krok manifestu wydania pada zerwanym udziałem; zwraca prawdziwy `_write_manifest`."""
+    prawdziwy = projection._write_manifest
+
+    def _pada(*_a, **_k):
+        raise OSError(None, "Komunikat systemu", r"X:\L\a.fits", 64)
+    monkeypatch.setattr(projection, "_write_manifest", _pada)
+    return prawdziwy
+
+
+def _glowa_awarii_manifestu():
+    klasa = i18n.t("objchg.item.os_share_lost", os_code="WinError 64")
+    return i18n.t("proj.manifest_error_head", msg=i18n.t("objchg.item.proj_manifest_failed", inner=klasa))
+
+
+def test_awaria_kroku_manifestu_sama_sonduje_a_naprawa_bierze_czas_proby(qapp, tmp_path, ustawienia,
+                                                                         monkeypatch):
+    """Krok manifestu pada zerwanym udziałem: okno SAMO uruchamia świeżą sondę i pod głową błędu
+    (bez obietnicy) stawia jej werdykt - lukę manifestu i „Zapisz manifest” ze złotą wagą, pierwszy
+    blok w kolorze błędu, szczegół awarii pod kursorem. Klik stempluje manifest czasem TEJ próby
+    wydania (`ts`), nie chwilą naprawy - z niego żniwa liczą datę wydania. Falsyfikator: głowa
+    z przepowiednią bez sondy („Przerwane błędem” do ręcznego „Odśwież podgląd”); `ts` z `now_fn`."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    prawdziwy = _pada_krok_manifestu(monkeypatch)
+    _klik(dlg.btn_apply)
+    czas_proby = dlg._apply_now
+    raport = dlg.report.toPlainText()
+    sonda = i18n.t("proj.dry_head_complete", layout=pd_mod.layout_text(projection.OBJECT_LAYOUT),
+                   mode=i18n.t("proj.mode_links"))
+    assert raport.startswith(_glowa_awarii_manifestu() + sonda), raport
+    assert i18n.t("proj.obj.manifest_missing") in raport.split("\n"), raport
+    assert _block_fmt(dlg.report, 0).foreground().color().name() == pd_mod._COLORS["error"].name()
+    assert dlg.report.toolTip() == i18n.t("wb.os_detail_tip", detail=_SZCZEGOL)
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_write_manifest") and dlg.btn_apply.isEnabled()
+    assert dlg.btn_apply.font().bold() and dlg.btn_apply.isDefault() and not dlg.btn_open.font().bold()
+    monkeypatch.setattr(projection, "_write_manifest", prawdziwy)
+    _klik(dlg.btn_apply)
+    nowy = _manifest_okna(card / "OBJECTS" / "NGC_6992")
+    assert nowy["ts"] == czas_proby and "repaired_at" not in nowy
+    assert {z["ts"] for z in nowy["zestawy"].values()} == {czas_proby}
+    assert i18n.t("proj.obj.manifest_no_ts") not in dlg.report.toPlainText()
+    dlg.reject()
+    con.close()
+
+
+def test_awaria_kroku_manifestu_z_klatka_bez_kopii_daje_odmowe_z_rada(qapp, tmp_path, ustawienia,
+                                                                     monkeypatch):
+    """„Wszystkie” zestawy z klatką bez obecnej kopii (`la_gone`): krok manifestu pada, świeża sonda
+    po awarii mówi pod głową błędu ODMOWĘ `proj_manifest_skipped` z radą (przywróć kopię albo wydaj
+    z wiersza poleceń) - bez oferty zapisu, złota waga na Eksploratorze, nie na wygaszonym
+    przycisku. Falsyfikator: głowa obiecująca „zaproponuje ponowny zapis”, której rdzeń odmówi."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    dlg = _okno_rc8(con, ustawienia, tmp_path / "_WBPP" / "karta")
+    assert dlg.combo_zestaw.currentData() is None and dlg._plan.skipped
+    _pada_krok_manifestu(monkeypatch)
+    _klik(dlg.btn_apply)
+    raport = dlg.report.toPlainText()
+    odmowa = i18n.t("proj.obj.manifest_refused", msg=i18n.t("objchg.item.proj_manifest_skipped", n=1))
+    assert raport.startswith(_glowa_awarii_manifestu()) and odmowa in raport.split("\n"), raport
+    assert "horreum project --object" in odmowa
+    assert not dlg.btn_apply.isEnabled() and dlg.btn_apply.text() != i18n.t("proj.obj.btn_write_manifest")
+    assert dlg.btn_open.font().bold() and dlg.btn_open.isDefault() and not dlg.btn_apply.font().bold()
+    dlg.reject()
+    con.close()
+
+
+def test_zajety_plik_roboczy_manifestu_w_wydaniu_tez_sonduje(qapp, tmp_path, ustawienia, monkeypatch):
+    """Cudzy `.part` obok manifestu w chwili wydania: krok manifestu odmawia `proj_manifest_busy`
+    (pliki leżą, plik roboczy nietknięty) - okno traktuje to jak awarię kroku manifestu: głowa błędu,
+    czas próby czeka na naprawę, świeża sonda sama mówi pod głową tę samą odmowę z radą.
+    Falsyfikator: gałąź awarii manifestu tylko dla `proj_manifest_failed`."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    root = card / "OBJECTS" / "NGC_6992"
+    part = root / (projection.MANIFEST_NAME + projection.PART_SUFFIX)
+    root.mkdir(parents=True)
+    part.write_bytes(b"cudzy")
+    _klik(dlg.btn_apply)
+    zdanie = i18n.t("objchg.item.proj_manifest_busy", path=str(part))
+    raport = dlg.report.toPlainText()
+    assert raport.startswith(i18n.t("proj.manifest_error_head", msg=zdanie)), raport
+    assert i18n.t("proj.obj.manifest_refused", msg=zdanie) in raport.split("\n"), raport
+    assert dlg._ts_po_awarii == (str(root), dlg._apply_now) and part.read_bytes() == b"cudzy"
+    assert not (root / projection.MANIFEST_NAME).exists()
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("przypadek", ["opisany", "uszkodzony", "obcy", "rozjazd", "bez_nazw_z_obcym"])
+def test_komplet_bez_oferty_zapisu_manifestu(qapp, tmp_path, ustawienia, monkeypatch, przypadek):
+    """Sonda nad kompletem NIE proponuje zapisu, gdy manifest opisuje drzewo (`current`), także bez
+    `names`, gdy w `LIGHT` leży plik spoza klatek (mapa z drzewa niepełna - zapis nie miałby czego
+    dopisać), gdy jest uszkodzony albo należy do innego wydania (linia z powodem i radą „usuń
+    ręcznie”, bez przycisku) i gdy układ drzewa się rozjechał (linia rozjazdu, bez diagnozy
+    manifestu); bajty manifestu po sondzie = przed. Falsyfikator: oferta przy każdym komplecie."""
+    import hashlib
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    _klik(dlg.btn_apply)
+    root = card / "OBJECTS" / "NGC_6992"
+    sciezka = root / projection.MANIFEST_NAME
+    linia = None
+    if przypadek == "uszkodzony":
+        sciezka.write_bytes(b"{")
+        linia = i18n.t("proj.obj.manifest_refused", msg=i18n.t("objchg.item.proj_manifest_damaged",
+                                                               detail="JSON"))
+    elif przypadek in ("obcy", "rozjazd"):
+        m = _manifest_okna(root)
+        m.update({"object_id": 999} if przypadek == "obcy" else {"segments": [["inny"]]})
+        sciezka.write_text(json.dumps(m), encoding="utf-8")
+        if przypadek == "obcy":
+            linia = i18n.t("proj.obj.manifest_refused", msg=i18n.t("objchg.item.proj_manifest_foreign",
+                                                                   detail="object_id"))
+    elif przypadek == "bez_nazw_z_obcym":
+        m = _manifest_okna(root)
+        del m["zestawy"]["RC8_ASI2600MM"]["names"]
+        sciezka.write_text(json.dumps(m), encoding="utf-8")
+        (root / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "obcy.fits").write_bytes(b"nie klatka")
+    przed = hashlib.sha256(sciezka.read_bytes()).hexdigest()
+    _klik(dlg.btn_dry)
+    raport = dlg.report.toPlainText()
+    assert hashlib.sha256(sciezka.read_bytes()).hexdigest() == przed
+    assert dlg.btn_apply.text() != i18n.t("proj.obj.btn_write_manifest") and not dlg.btn_apply.isEnabled()
+    if linia is not None:
+        assert linia in raport and "usuń ręcznie" in linia and "„Odśwież podgląd”" in linia, raport
+    else:
+        assert i18n.t("proj.obj.manifest_refused", msg="").strip() not in raport, raport
+        assert i18n.t("proj.obj.manifest_stale").strip() not in raport, raport
+    assert (i18n.t("proj.drift", was="wbpp-obiekt: inny") in raport) == (przypadek == "rozjazd"), raport
+    dlg.reject()
+    con.close()
+
+
+def test_klikniecie_zapisu_sprawdza_drzewo_od_nowa(qapp, tmp_path, ustawienia, monkeypatch):
+    """Między sondą a kliknięciem z drzewa zniknął plik - „Zapisz manifest” sprawdza komplet od nowa
+    i odmawia (`proj_manifest_incomplete`) ogonem zakończenia błędem; manifestu nie ma dalej, a złota
+    waga i Enter schodzą z wygaszonego „Przerwane błędem” na uzbrojony Eksplorator (jedna funkcja
+    wagi ze stanu). Falsyfikator: zapis z wyniku sondy (`sonda=`) zamiast świeżego sprawdzenia;
+    waga zostawiona przez sondę na przycisku oferty."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    _klik(dlg.btn_apply)
+    root = card / "OBJECTS" / "NGC_6992"
+    (root / projection.MANIFEST_NAME).unlink()
+    _klik(dlg.btn_dry)
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_write_manifest")
+    (root / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "lb1.fits").unlink()
+    _klik(dlg.btn_apply)
+    assert dlg.report.toPlainText().startswith(i18n.t(
+        "proj.obj.manifest_error", msg=i18n.t("objchg.item.proj_manifest_incomplete", n=1)))
+    assert dlg.btn_apply.text() == i18n.t("proj.btn_error") and not dlg.btn_apply.isEnabled()
+    assert not (root / projection.MANIFEST_NAME).exists()
+    assert dlg.btn_open.font().bold() and dlg.btn_open.isDefault()
+    assert not dlg.btn_apply.font().bold() and not dlg.btn_apply.isDefault()
+    dlg.reject()
+    con.close()
+
+
+def test_zapis_manifestu_na_prawdziwym_qthread(qapp, tmp_path, ustawienia, monkeypatch):
+    """`ManifestWorker` na PRAWDZIWYM `QThread` (własne połączenie po ścieżce bazy, sygnał
+    kolejkowany, sprzątanie `_cleanup_apply_thread`): manifest zapisany, wątek zebrany."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card, off_thread=True)
+    assert _czekaj(lambda: dlg._dry_worker is None and dlg._plan is not None)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    assert _czekaj(lambda: dlg._dry_worker is None and dlg.btn_apply.isEnabled())
+    _klik(dlg.btn_apply)
+    assert _czekaj(lambda: dlg._apply_thread is None and dlg._apply_worker is None)
+    root = card / "OBJECTS" / "NGC_6992"
+    (root / projection.MANIFEST_NAME).unlink()
+    _klik(dlg.btn_dry)
+    assert _czekaj(lambda: dlg._dry_worker is None and dlg.btn_apply.text()
+                   == i18n.t("proj.obj.btn_write_manifest"))
+    _klik(dlg.btn_apply)
+    assert _czekaj(lambda: dlg._apply_thread is None and dlg._apply_worker is None)
+    assert (root / projection.MANIFEST_NAME).exists()
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_manifest_written")
+    dlg.done(0)
+    con.close()
+
+
+def test_wydanie_z_okna_scala_manifest_bez_utraty(qapp, tmp_path, ustawienia, monkeypatch):
+    """Ponowne wydanie z okna (nowy light) po wycofaniu `la2`, którego plik skasowano z drzewa: sonda
+    liczy świadków starego manifestu (`manifest_sources`), wydanie dostaje je (`extra_sources`) -
+    `la2` schodzi z `lights` i raport mówi to linią `proj.manifest_dropped`, a wycofany `la1`, którego
+    plik leży, zostaje. Falsyfikator: `ApplyWorker` bez `extra_sources` (la2 zostałby - niepewny)."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(1)                    # A140R_ASI2600MM
+    _klik(dlg.btn_apply)
+    root = card / "OBJECTS" / "NGC_6992"
+    (root / "A140R_ASI2600MM" / "LIGHT" / "OIII" / "la2.fits").unlink()
+    con.execute("UPDATE frame SET retired_at = ? WHERE id IN (?, ?)", (NOW, ids["la1"], ids["la2"]))
+    src = tmp_path / "lib" / "la9.fits"
+    src.write_bytes(b"la9")
+    fid = con.execute("INSERT INTO frame (sha1_data, kind, filetype, camera_id, config_id, object_id, "
+                      "filter_canon, first_seen_at) VALUES ('la9', 'light', 'fits', 1, 10, 1, 'Ha', ?)",
+                      (NOW,)).lastrowid
+    con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime, xbinning) "
+                "VALUES (?, '{}', '2024-03-01T23:00:00', 300.0, 1)", (fid,))
+    con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                (fid, str(src)))
+    con.commit()
+    _klik(dlg.btn_dry)
+    assert dlg.btn_apply.isEnabled() and dlg.btn_apply.text() != i18n.t("proj.obj.btn_write_manifest")
+    _klik(dlg.btn_apply)
+    lights = _manifest_okna(root)["zestawy"]["A140R_ASI2600MM"]["lights"]
+    assert fid in lights and ids["la1"] in lights and ids["la2"] not in lights
+    assert i18n.t("proj.manifest_dropped", n=1) in dlg.report.toPlainText()
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wiersze_oferty_manifestu_mowia_czym_zapis_sie_rozni(jezyk, lang):
+    """Oferta „Zapisz manifest” (`manifest_offer_lines`, Qt-wolne): brak manifestu; listy albo
+    zestawy (ogólne „dopisze brakujące”); same nazwy plików; sam czas próby; liczby zachowanych
+    i zapominanych id, brak daty wydania i foldery korzenia bez zeznania - każde osobnym wierszem,
+    w języku UI. Falsyfikator: „dopisze brakujące” za sam brak nazw; liczby dopiero po kliknięciu."""
+    jezyk(lang)
+    t = i18n.t
+
+    def oferta(**kw):
+        payload = kw.pop("payload", {"ts": "T1", "zestawy": {"A": {}}})
+        return projection.ManifestRepair("would-write", payload=payload, **kw)
+    linie = pd_mod.manifest_offer_lines
+    assert linie(oferta(stan="missing")) == [t("proj.obj.manifest_missing")]
+    assert linie(oferta(stan="stale", roznice=("ids", "names"))) == [t("proj.obj.manifest_stale")]
+    assert linie(oferta(stan="stale", roznice=("names", "ts"))) == [t("proj.obj.manifest_stale_names")]
+    assert linie(oferta(stan="stale", roznice=("ts",))) == [t("proj.obj.manifest_stale_ts")]
+    pelna = linie(oferta(stan="stale", roznice=("sets",), kept=2, dropped=1, obce_foldery=("C",),
+                         payload={"ts": None, "zestawy": {"A": {}, "B": {}}}))
+    assert pelna == [t("proj.obj.manifest_stale"), t("proj.obj.manifest_will_keep", kept=2, dropped=1),
+                     t("proj.obj.manifest_no_ts"), t("proj.obj.manifest_only_sets", sets="A, B", other="C")]
+    if lang == "en":
+        for w in pelna + linie(oferta(stan="stale", roznice=("names",))) + linie(
+                oferta(stan="stale", roznice=("ts",))):
+            assert not set(w) & _POLSKIE, w
+
+
+def test_oferta_po_samych_nazwach_i_z_liczbami_zachowanych(qapp, tmp_path, ustawienia, monkeypatch):
+    """Sonda nad kompletem: manifest bez samych nazw - linia „nie zna nazw plików”, nie ogólne
+    „dopisze brakujące”; manifest z surowymi flatami wcześniejszego wydania (jeden plik leży, drugiego
+    nie ma) - ogólna linia luki i PRZED kliknięciem liczby: zachowa 1, zapomni 1. Falsyfikator:
+    jedna linia `stale` na każdą lukę, liczby dopiero w raporcie po zapisie."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    _klik(dlg.btn_apply)
+    root = card / "OBJECTS" / "NGC_6992"
+    m = _manifest_okna(root)
+    del m["zestawy"]["RC8_ASI2600MM"]["names"]
+    (root / projection.MANIFEST_NAME).write_text(json.dumps(m), encoding="utf-8")
+    _klik(dlg.btn_dry)
+    raport = dlg.report.toPlainText().split("\n")
+    assert i18n.t("proj.obj.manifest_stale_names") in raport and i18n.t("proj.obj.manifest_stale") not in raport
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_write_manifest")
+    m["zestawy"]["RC8_ASI2600MM"]["flat_raw"] = sorted([ids["f1"], ids["f2"]])
+    (root / projection.MANIFEST_NAME).write_text(json.dumps(m), encoding="utf-8")
+    flat = root / "RC8_ASI2600MM" / "FLAT_RAW" / "OIII" / "f1.fits"
+    flat.parent.mkdir(parents=True)
+    os.link(tmp_path / "lib" / "f1.fits", flat)
+    _klik(dlg.btn_dry)
+    raport = dlg.report.toPlainText().split("\n")
+    assert i18n.t("proj.obj.manifest_stale") in raport, raport
+    assert i18n.t("proj.obj.manifest_will_keep", kept=1, dropped=1) in raport, raport
+    dlg.reject()
+    con.close()
+
+
+def test_manifest_opisany_w_miedzyczasie_daje_bez_zmian(qapp, tmp_path, ustawienia, monkeypatch):
+    """Między sondą z ofertą a kliknięciem inny zapis położył manifest opisujący komplet - zapis
+    mówi `current`: raport „już opisuje komplet” i przycisk „Bez zmian ✓”, nie „Manifest zapisany ✓”
+    nad niezapisanym plikiem. Falsyfikator: jedna etykieta przycisku dla `written` i `current`."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    _klik(dlg.btn_apply)
+    sciezka = card / "OBJECTS" / "NGC_6992" / projection.MANIFEST_NAME
+    bajty, po_wydaniu = sciezka.read_bytes(), dlg.summary
+    sciezka.unlink()
+    _klik(dlg.btn_dry)
+    assert dlg.btn_apply.text() == i18n.t("proj.obj.btn_write_manifest")
+    sciezka.write_bytes(bajty)
+    _klik(dlg.btn_apply)
+    assert dlg.report.toPlainText() == i18n.t("proj.obj.manifest_current")
+    assert dlg.btn_apply.text() == i18n.t("proj.btn_nothing_new") and not dlg.btn_apply.isEnabled()
+    assert sciezka.read_bytes() == bajty and dlg.summary == po_wydaniu    # pasek nie mówi o zapisie
+    dlg.reject()
+    con.close()
+
+
+def test_esc_w_biegu_zapisu_manifestu_zamyka_okno_po_zapisie(qapp, tmp_path, ustawienia, monkeypatch):
+    """Esc w biegu `ManifestWorker` na PRAWDZIWYM QThread: zapis jednego pliku jest nieprzerywalny -
+    okno zostaje, nota mówi, że zamknie się po zapisie (nie „Anulowanie… po bieżącym pliku”),
+    a po zapisie i sprzątnięciu wątku okno zamyka się samo: manifest na dysku, zdanie na pasek,
+    wynik `Rejected`. Falsyfikator: `done()` przez `_on_cancel_apply` - nota anulowania i okno
+    otwarte po zapisie."""
+    import threading
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card, off_thread=True)
+    assert _czekaj(lambda: dlg._dry_worker is None and dlg._plan is not None)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    assert _czekaj(lambda: dlg._dry_worker is None and dlg.btn_apply.isEnabled())
+    _klik(dlg.btn_apply)
+    assert _czekaj(lambda: dlg._apply_thread is None and dlg._apply_worker is None)
+    root = card / "OBJECTS" / "NGC_6992"
+    (root / projection.MANIFEST_NAME).unlink()
+    _klik(dlg.btn_dry)
+    assert _czekaj(lambda: dlg._dry_worker is None and dlg.btn_apply.text()
+                   == i18n.t("proj.obj.btn_write_manifest"))
+    puszczony = threading.Event()
+    prawdziwa = projection.repair_manifest
+
+    def _czeka_na_esc(*a, **k):
+        if k.get("do_write"):
+            assert puszczony.wait(10)
+        return prawdziwa(*a, **k)
+    monkeypatch.setattr(projection, "repair_manifest", _czeka_na_esc)
+    _klik(dlg.btn_apply)
+    assert isinstance(dlg._apply_worker, pd_mod.ManifestWorker)
+    QTest.keyClick(dlg, Qt.Key_Escape)
+    assert dlg.isVisible() and dlg.progress_note.full_text() == i18n.t("proj.obj.closing_after_manifest")
+    assert not (root / projection.MANIFEST_NAME).exists()
+    puszczony.set()
+    assert _czekaj(lambda: not dlg.isVisible())
+    assert dlg._apply_thread is None and dlg._apply_worker is None
+    assert (root / projection.MANIFEST_NAME).exists() and dlg.result() == QDialog.Rejected
+    assert dlg.summary == i18n.t("proj.obj.status_manifest", canon="NGC 6992", root=str(root))
+    con.close()
+
+
+def test_czas_awarii_zerowany_tylko_dla_tego_samego_korzenia(qapp, tmp_path, ustawienia, monkeypatch):
+    """Czas nieudanej próby (`_ts_po_awarii`) czeka na naprawę SWOJEGO korzenia: udane wydanie i zapis
+    manifestu na innym korzeniu go nie zerują, na tym samym - tak. Falsyfikator: zerowanie przy
+    każdym sukcesie (naprawa korzenia A po wydaniu na B stempluje czasem naprawy)."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    inny = (str(tmp_path / "inna" / "OBJECTS" / "NGC_6992"), "T-awarii")
+    dlg._ts_po_awarii = inny
+    _klik(dlg.btn_apply)
+    root = str(card / "OBJECTS" / "NGC_6992")
+    assert dlg._apply_root == root and dlg._ts_po_awarii == inny
+    dlg._on_manifest_done(projection.ManifestRepair("current"))
+    assert dlg._ts_po_awarii == inny
+    dlg._ts_po_awarii = (root, "T-awarii")
+    dlg._on_apply_done(projection.ApplyResult(root, projection.OBJECT_LAYOUT, True, False, [], False))
+    assert dlg._ts_po_awarii is None
+    dlg.reject()
+    con.close()
+
+
+def test_sonda_anulowana_nie_diagnozuje_manifestu(qapp, tmp_path, monkeypatch):
+    """Diagnoza manifestu słucha anulowania sondy (zamknięcie okna w biegu): anulowanie przed
+    diagnozą - diagnozy nie ma; w trakcie - rdzeń dostaje `should_cancel`, a wynik `cancelled` to
+    „brak diagnozy”, nie odmowa w raporcie. Falsyfikator: diagnoza bez `_cancel` - Esc w sondzie
+    czeka na świadka drzewa."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = str(tmp_path / "_WBPP" / "karta")
+    plan = projection.plan_object(con, 1, config_id=20)
+    root = projection.object_root(card, plan)
+    projection.apply(plan, root, do_apply=True, now=NOW, manifest=projection.object_manifest(plan))
+    os.remove(os.path.join(root, projection.MANIFEST_NAME))
+    worker = pd_mod.DryWorker(None, [], None, card, False, NOW, 0, con=con, object_id=1, config_id=20)
+    sluchacze, prawdziwa = [], projection.repair_manifest
+    monkeypatch.setattr(projection, "repair_manifest",
+                        lambda *a, **k: sluchacze.append(k["should_cancel"]) or prawdziwa(*a, **k))
+    assert worker._compute()["manifest"].status == "would-write" and sluchacze[-1]() is False
+    prawdziwe_zrodla = projection.manifest_sources
+
+    def _esc_w_sondzie(*a):
+        worker.request_cancel()
+        return prawdziwe_zrodla(*a)
+    monkeypatch.setattr(projection, "manifest_sources", _esc_w_sondzie)
+    assert worker._compute()["manifest"] is None and len(sluchacze) == 1
+    worker._cancel = False
+    monkeypatch.setattr(projection, "manifest_sources", prawdziwe_zrodla)
+    monkeypatch.setattr(projection, "repair_manifest", lambda *a, **k: projection.ManifestRepair("cancelled"))
+    assert worker._compute()["manifest"] is None
+    con.close()

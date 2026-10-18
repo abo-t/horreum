@@ -844,7 +844,14 @@ def test_zadanie_rodowodu_otwiera_perspektywe(qapp, tmp_path):
     a grid pokazuje DOKŁADNIE obrazy czekające na gest. Wiersz celuje w perspektywę, nie
     w podstronę, bo gest (potwierdź / odrzuć wejście / wskaż odniesienie) mieszka w panelu
     „Rodowód" TAM - i do tej zmiany dojście do niego wiodło przez przeklikanie archiwum stosów.
-    Wiersz i perspektywa mówią JEDNĄ nazwą (dawniej wiersz „Obrazy bez rodowodu")."""
+    Wiersz i perspektywa mówią JEDNĄ nazwą (dawniej wiersz „Obrazy bez rodowodu").
+
+    AR-219: prawdziwy klik wiersza stawia gest od razu - pierwszy obraz w zaznaczeniu, panel
+    „Rodowód” otwarty na nim, bez recepty gestu zbiorczego (ten mieszka tylko w perspektywie
+    nowszych). Falsyfikator: `_po_perspektywie` bez wejścia w kolejkę dla tej perspektywy."""
+    import time
+    from PySide6.QtTest import QTest
+    from horreum.gui import i18n
     from horreum.gui.grid import PRESET_LINEAGE
     path = _seeded_db(tmp_path, object_axis=True)
     con = db.open_db(path)
@@ -854,19 +861,37 @@ def test_zadanie_rodowodu_otwiera_perspektywe(qapp, tmp_path):
         # materiału w propozycji z kubełka wypada (AR-154).
         con.execute("INSERT INTO integration (master_frame_id, created_at, unresolved_reason) "
                     "VALUES (?, '2026-08-08T20:00:00', 'telescope_mismatch')", (fid,))
+        # Gotowy obraz - panel „Rodowód” mówi o stosie tylko przy `master_light` (AR-219).
+        con.execute("UPDATE frame SET kind = 'master_light' WHERE id = ?", (fid,))
         con.commit()
     finally:
         con.close()
     win = MainWindow(path)
     try:
+        win.show()
+        win._show_view(NAV_PORZADKI)
         assert _task_row(win, "stacks_lineage_pending")[0] == "Rodowód do potwierdzenia"
-        win.tasks_view.tasks.itemClicked.emit(_task_item(win, "stacks_lineage_pending"))
+        recepty = []
+        win.grid_view.status_recipe.connect(recepty.append)
+        lista = win.tasks_view.tasks
+        wiersz = lista.visualItemRect(_task_item(win, "stacks_lineage_pending"))
+        QTest.mouseClick(lista.viewport(), Qt.LeftButton, Qt.NoModifier, wiersz.center())
+        v = win.grid_view
+        koniec = time.monotonic() + 30
+        while v._zbior_w_drodze() and time.monotonic() < koniec:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        assert not v._zbior_w_drodze(), "zbiór perspektywy nie dojechał"
         assert win.stack.currentIndex() == STRONA_ZBIORY
-        assert win.grid_view._only_lineage is True
-        assert win.grid_view.combo_persp.currentData() == ("preset", PRESET_LINEAGE)
-        assert win.grid_view.combo_persp.currentText() == "Rodowód do potwierdzenia"
-        widoczne = set(win.grid_view._frame_ids)          # to, co WIDAĆ po trimie perspektywy
+        assert v._only_lineage is True
+        assert v.combo_persp.currentData() == ("preset", PRESET_LINEAGE)
+        assert v.combo_persp.currentText() == "Rodowód do potwierdzenia"
+        widoczne = set(v._frame_ids)                      # to, co WIDAĆ po trimie perspektywy
         assert widoczne == queries.lineage_pending_frame_ids(win.con) == {fid}
+        assert [r["frame_id"] for r in v._selected_data_rows()] == [fid]
+        assert v._lineage_panel_open() and v._lineage_frame_id == fid
+        zbiorczy = i18n.t("grid.lin.reject_newer_all")
+        assert not any(zbiorczy in str(r) for r in recepty), recepty
     finally:
         win.close()
 

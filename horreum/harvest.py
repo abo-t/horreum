@@ -56,6 +56,7 @@ import html
 import json
 import os
 import re
+import stat
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime
@@ -139,16 +140,28 @@ def _wpisy_siedziby(seat, *, brak=(FileNotFoundError,)):
         raise _SiedzibaNieczytelna(exc) from exc
 
 
-def discover(wbpp_dir, *, should_cancel=None):
+def discover(wbpp_dir, *, should_cancel=None, errors_out=None):
     """Kandydaci żniw w drzewie wyjścia WBPP: pliki XISF (`scan.XISF_SUFFIXES`), rekurencyjnie, których
     nazwa (bez wielkości liter) zaczyna się od `masterflat`, `masterdark`, `masterbias` albo
     `masterlight`. Stos wyłącznie bez znacznika pochodnej obróbki (`scan.is_derived_name` - ten sam
     właściciel granicy, co sito skanu): `…_starless.xisf` obok stosu to produkt obróbki, nie stos, a
     `…_autocrop.xisf` jest wariantem obrazu i wchodzi. FITS pominięte (historii w nim nie ma). Brak
     katalogu = pusta lista. Posortowane po pełnej ścieżce - kolejność planu i nazw. `should_cancel()`
-    sprawdzane przy każdym katalogu (drzewo warsztatu po SMB bywa duże) → `HarvestCancelled`."""
+    sprawdzane przy każdym katalogu (drzewo warsztatu po SMB bywa duże) → `HarvestCancelled`.
+
+    `errors_out` (lista, AR-222): katalogi, których spacer NIE PRZECZYTAŁ - `(ścieżka, powód)`, powód
+    klasą od właściciela (`item_reasons.blad_systemu`: odmowa 5, zerwany udział 53/67/64…). `os.walk`
+    domyślnie połyka te błędy, a wtedy odmowa na wyjściu dawała pusty plan („Brak masterów i stosów”),
+    zerwanie w środku spaceru - plan częściowy po cichu. Katalog, którego NIE MA (`os_missing`: wyjście
+    jeszcze nie powstało, podkatalog skasowany w trakcie), nie jest nieprzeczytany. Samo `wbpp_dir`
+    nieprzeczytane = jedyna pozycja z jego ścieżką i zero kandydatów. Bez listy - jak `os.walk`."""
     out = []
-    for dirpath, _dirnames, filenames in os.walk(wbpp_dir):
+
+    def _nieprzeczytany(exc):                         # os.walk woła z OSError (ma .filename)
+        if errors_out is not None and getattr(powod_systemu(exc), "code", None) != "os_missing":
+            errors_out.append((exc.filename or os.fspath(wbpp_dir), blad_systemu(exc)))
+
+    for dirpath, _dirnames, filenames in os.walk(wbpp_dir, onerror=_nieprzeczytany):
         if should_cancel is not None and should_cancel():
             raise HarvestCancelled(wbpp_dir)
         for name in filenames:
@@ -281,11 +294,14 @@ class HarvestPlan:
     świadka (`None` bez manifestu); `wbpp_dir` = katalog wyjścia, w którym `apply` zostawi zeznanie
     biegu `_ZNIWA_<znacznik>.json`. `archive_root` = korzeń archiwum, pod którym leżą biblioteki
     `CALIBRATION` i `STACKS` (wskazanie `…\\CALIBRATION` daje korzeń przed segmentem, `library_root`)
-    - jedyna podstawa guardu kopii (`projection.copy_master(..., library_root=...)`)."""
+    - jedyna podstawa guardu kopii (`projection.copy_master(..., library_root=...)`).
+    `unreadable_dirs` = katalogi wyjścia, których spacer `discover` nie przeczytał - `(ścieżka, powód)`
+    (AR-222): plan bez ich zawartości jest NIEPEŁNY i okno to mówi."""
     items: list
     manifest_root: str | None
     wbpp_dir: str | None = None
     archive_root: str | None = None
+    unreadable_dirs: tuple = ()
 
 
 def _split_at(path, nazwy):
@@ -761,8 +777,9 @@ def plan(con, wbpp_dir, *, archive_root, manifest=None, read=read_master, should
     zestawy = projection.zestawy_configow(con)
     reserved = set()
     items = []
+    nieprzeczytane = []                                   # katalogi, których spacer nie przeczytał (AR-222)
 
-    for src in discover(wbpp_dir, should_cancel=should_cancel):
+    for src in discover(wbpp_dir, should_cancel=should_cancel, errors_out=nieprzeczytane):
         if should_cancel is not None and should_cancel():
             raise HarvestCancelled(wbpp_dir)
         prefix = next(p for p in _PREFIXES if os.path.basename(src).lower().startswith(p))
@@ -913,7 +930,8 @@ def plan(con, wbpp_dir, *, archive_root, manifest=None, read=read_master, should
             _review(item, "name_taken", _SEQ_DIGITS)
 
     manifest_root = witness.get("root") if witness is not None else None
-    return HarvestPlan(items=items, manifest_root=manifest_root, wbpp_dir=str(wbpp_dir), archive_root=root)
+    return HarvestPlan(items=items, manifest_root=manifest_root, wbpp_dir=str(wbpp_dir), archive_root=root,
+                       unreadable_dirs=tuple(nieprzeczytane))
 
 
 # ============================================================ APPLY (kopia przez klingę)
@@ -1120,7 +1138,11 @@ class ReleaseRow:
     (`stacks.harvest_lineage_pending`): `(sha1_data, frame_ids, ścieżka kopii pod STACKS, kanon obiektu
     wydania albo None)` - zbiór wejść
     leży wtedy tylko w zeznaniu żniw w tym folderze (AR-104). Liczone wyłącznie z bazą i archiwum
-    (`releases(..., archive_root=, con=)`); bez nich puste."""
+    (`releases(..., archive_root=, con=)`); bez nich puste.
+
+    `unreadable` = ścieżki w `out_dir`, których lista NIE PRZECZYTAŁA (AR-222): katalogi spaceru
+    `discover` i kandydaci, których `stat` padł inaczej niż „nie ma” (zerwany udział, odmowa). Liczby
+    nie obejmują tego, czego w nich nie widać, więc taki wiersz nie jest „wciągnięty”."""
     root: str
     object_root: str
     object_canon: str | None
@@ -1131,6 +1153,7 @@ class ReleaseRow:
     review: int
     awaiting_wbpp: bool = False
     lineage: tuple = ()
+    unreadable: tuple = ()
 
 
 def _iso_timestamp(value):
@@ -1224,7 +1247,8 @@ def _pending_stack(con, klucz, mtime_ns, zeznania, stacks_root):
 
 
 def _release_state(out_dir, release_ts, *, archive_root=None, con=None):
-    """`(pending, done, review, awaiting_wbpp, lineage)` kandydatów żniw w `out_dir`. Stan kandydata mówi
+    """`(pending, done, review, awaiting_wbpp, lineage, unreadable)` kandydatów żniw w `out_dir`
+    (`unreadable` - ścieżki nieprzeczytane, `ReleaseRow.unreadable`, AR-222). Stan kandydata mówi
     NAJNOWSZE zeznanie, które go wymienia (bieg nad `out\\master` nie zna plików spoza tego katalogu):
     `placed`/`exists` przy pliku niezmienionym od planu tego biegu = wciągnięty, `review` tak samo = do
     przeglądu, cała reszta - bieg przerwany (`would-place`, `cancelled`), konflikt, błąd, plik bez
@@ -1251,10 +1275,15 @@ def _release_state(out_dir, release_ts, *, archive_root=None, con=None):
     pending = done = review = 0
     najnowszy = None
     lineage = {}
-    for src in discover(out_dir):
+    nieprzeczytane = []
+    for src in discover(out_dir, errors_out=nieprzeczytane):
         try:
             st = os.stat(src)
-        except OSError:                                   # plik zniknął między listą a odczytem
+        except OSError as exc:                            # plik zniknął między listą a odczytem
+            # Zerwany udział albo odmowa to nie zniknięcie: kandydat wypadłby z liczb, a wiersz bez
+            # niczego do wciągnięcia mówi „folder możesz skasować” (AR-222).
+            if getattr(powod_systemu(exc), "code", None) != "os_missing":
+                nieprzeczytane.append((src, blad_systemu(exc)))
             continue
         najnowszy = st.st_mtime if najnowszy is None else max(najnowszy, st.st_mtime)
         klucz = _path_key(src)
@@ -1276,10 +1305,11 @@ def _release_state(out_dir, release_ts, *, archive_root=None, con=None):
         else:
             pending += 1
     awaiting = najnowszy is not None and release_ts is not None and release_ts > najnowszy
-    return pending, done, review, awaiting, tuple(lineage.values())
+    return (pending, done, review, awaiting, tuple(lineage.values()),
+            tuple(sciezka for sciezka, _powod in nieprzeczytane))
 
 
-def releases(roots, *, archive_root=None, con=None):
+def releases(roots, *, archive_root=None, con=None, errors_out=None):
     """Lista wydań obiektu z kart celu (odczyt dysku; z `con` - też bazy) → `[ReleaseRow]` od
     najnowszego wydania (`ts` manifestu malejąco; nieczytelny `ts` na końcu). `roots` = korzenie kart
     (folder roboczy WBPP i karty celu wydania); pod każdym podkatalogi `<root>\\OBJECTS\\*` z manifestem
@@ -1287,47 +1317,82 @@ def releases(roots, *, archive_root=None, con=None):
     karty liczy się raz. Stan wyjścia - `_release_state` (`archive_root` = archiwum okna żniw, `con` =
     baza do rodowodu stosów). Czas zeznań i wydań: ISO ze strefą (UTC od okna), naiwny znacznik liczony
     lokalnie (`_iso_timestamp`) - porównanie z `mtime` pliku jest wtedy poprawne tylko w strefie czasu,
-    w której go zapisano."""
-    rows, widziane = [], set()
+    w której go zapisano.
+
+    `errors_out` (lista, AR-222): karty, których `OBJECTS`, katalogu wydania albo manifestu wydania nie
+    da się przeczytać - `(karta, powód klasą)`, raz na kartę (pierwszy błąd). Brak (`os_missing`) to
+    karta albo folder bez wydania, nie błąd; odmowa albo zerwanie udziału milczały dotąd jak brak, więc
+    lista bywała częściowa albo mówiła „Na kartach nie ma jeszcze wydań”."""
+    rows, widziane, zgloszone = [], set(), set()
+
+    def _nieczytelna(root, exc):
+        """Błąd spoza „nie ma” → karta raz w `errors_out` (pierwszy błąd); brak - milczenie jak dotąd."""
+        if (errors_out is not None and str(root) not in zgloszone
+                and getattr(powod_systemu(exc), "code", None) != "os_missing"):
+            zgloszone.add(str(root))
+            errors_out.append((str(root), blad_systemu(exc)))
+
     for root in roots:
         przestrzen = os.path.join(str(root), projection.OBJECT_NAMESPACE)
         try:
             nazwy = sorted(os.listdir(przestrzen))
-        except OSError:
+        except OSError as exc:
+            _nieczytelna(root, exc)
             continue
         for nazwa in nazwy:
             object_root = os.path.join(przestrzen, nazwa)
             klucz = os.path.normcase(os.path.normpath(os.path.abspath(object_root)))
-            if klucz in widziane or not os.path.isdir(object_root):
+            if klucz in widziane:
+                continue
+            # `os.stat` z klasą katalogu wydania i jego manifestu, nie `os.path.isdir` ani sam
+            # tolerancyjny `projection.read_manifest` (AR-222): odmowa albo zerwany udział milczały
+            # jak brak, a lista bywała częściowa albo pusta („Na kartach nie ma jeszcze wydań”).
+            try:
+                if not stat.S_ISDIR(os.stat(object_root).st_mode):
+                    continue
+                os.stat(os.path.join(object_root, projection.MANIFEST_NAME))
+            except OSError as exc:
+                _nieczytelna(root, exc)
                 continue
             manifest = _object_witness(projection.read_manifest(object_root))
             if manifest is None:
                 continue
             widziane.add(klucz)
             out_dir = os.path.join(object_root, projection.OUTPUT_DIR)
-            pending, done, review, awaiting, lineage = _release_state(
+            pending, done, review, awaiting, lineage, unreadable = _release_state(
                 out_dir, _iso_timestamp(manifest.get("ts")), archive_root=archive_root, con=con)
             rows.append(ReleaseRow(root=str(root), object_root=object_root,
                                    object_canon=manifest.get("object_canon"), ts=manifest.get("ts"),
                                    out_dir=out_dir, pending=pending, done=done, review=review,
-                                   awaiting_wbpp=awaiting, lineage=lineage))
+                                   awaiting_wbpp=awaiting, lineage=lineage, unreadable=unreadable))
     rows.sort(key=lambda r: (_iso_timestamp(r.ts) is not None, _iso_timestamp(r.ts) or 0.0,
                              str(r.ts), r.object_root), reverse=True)
     return rows
 
 
 def missing_roots(roots):
-    """Karty listy wydań, których folderu NIE MA na dysku (dysk niepodłączony, karta po zmianie
-    dysku) - w kolejności `roots`, ta sama karta pod dwiema pisowniami raz (AR-147). `releases`
-    milczy o takiej karcie tak samo jak o karcie bez `OBJECTS`, a to dwa różne fakty: karta bez
-    wydań istnieje i jest pusta, brak karty mówi, że listy nie dało się policzyć. Odczyt dysku -
-    przy uśpionym udziale SMB wolny, więc wołający liczy go poza wątkiem GUI."""
+    """Karty listy wydań, których folderu nie widać → `((karta, powód), …)` w kolejności `roots`, ta
+    sama karta pod dwiema pisowniami raz (AR-147). `powód` None = folderu NIE MA (dysk niepodłączony,
+    karta po zmianie dysku: klasa `os_missing` albo plik zamiast folderu); inaczej folderu nie da się
+    sprawdzić - powód klasą (`item_reasons.blad_systemu`: zerwany udział 53/67, który CPython podaje
+    jako `FileNotFoundError`, odmowa 5), AR-222. `os.stat`, nie `os.path.isdir` (bliźniak AR-199):
+    `isdir` połyka każdy błąd jako „nie ma”, więc zerwany udział mówił „Folder karty nie istnieje”.
+    `releases` milczy o takiej karcie tak samo jak o karcie bez `OBJECTS`, a to różne fakty: karta bez
+    wydań istnieje i jest pusta, brak karty mówi, że listy nie dało się policzyć. Odczyt dysku - przy
+    uśpionym udziale SMB wolny, więc wołający liczy go poza wątkiem GUI."""
     brak, widziane = [], set()
     for root in roots:
         klucz = os.path.normcase(os.path.normpath(os.path.abspath(str(root))))
         if klucz in widziane:
             continue
         widziane.add(klucz)
-        if not os.path.isdir(str(root)):
-            brak.append(str(root))
+        try:
+            jest = stat.S_ISDIR(os.stat(str(root)).st_mode)
+        except OSError as exc:
+            if getattr(powod_systemu(exc), "code", None) != "os_missing":
+                brak.append((str(root), blad_systemu(exc)))
+                continue
+            jest = False
+        if not jest:
+            brak.append((str(root), None))
     return tuple(brak)

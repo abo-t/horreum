@@ -99,7 +99,7 @@ def test_add_when_card_exists_skips(tmp_path):
     con = _con(tmp_path)
     a = _frame(con, sha1="d", cards=[_txt("OBJECT", "M51")])
     run = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": "NGC"}}, [a])
-    assert not run.touched and "juz istnieje" in run.skipped[0].reason
+    assert not run.touched and "już istnieje" in run.skipped[0].reason
 
 
 def test_add_when_absent(tmp_path):
@@ -113,14 +113,14 @@ def test_multi_occurrence_requires_idx(tmp_path):
     con = _con(tmp_path)
     a = _frame(con, sha1="f", cards=[_txt("COMMENT", "x", idx=0), _txt("COMMENT", "y", idx=1)])
     run = _run(con, {"assign": {"keyword": "COMMENT", "op": "set", "expr": "z"}}, [a])
-    assert not run.touched and "wiele wystapien" in run.skipped[0].reason
+    assert not run.touched and "wiele wystąpień" in run.skipped[0].reason
 
 
 def test_int_fractional_result_skips(tmp_path):
     con = _con(tmp_path)
     a = _frame(con, sha1="g", cards=[("GAIN", 0, "100", 100.0, "int", None)])
     run = _run(con, {"assign": {"keyword": "GAIN", "op": "set", "expr": "100 / 3"}}, [a])
-    assert not run.touched and "niecalkowit" in run.skipped[0].reason
+    assert not run.touched and "niecałkowit" in run.skipped[0].reason
 
 
 # --- NOWE bramki celu (brief §6) ---
@@ -194,7 +194,7 @@ def test_add_na_karcie_obecnej_odmawia(tmp_path):
     a = _frame(con, sha1="dup", cards=[_txt("OBJECT", "M51")], locations=[{"path": "R:/dup.fits"}])
     run = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": repr("NGC7635"),
                                 "value_type": "str"}}, [a])
-    assert not run.touched and "juz istnieje" in run.skipped[0].reason
+    assert not run.touched and "już istnieje" in run.skipped[0].reason
 
 
 def test_degenerat_tozsamosci_skipped_dx13(tmp_path):
@@ -206,7 +206,7 @@ def test_degenerat_tozsamosci_skipped_dx13(tmp_path):
     con.execute("UPDATE frame SET sha1_data_uncomputable = 1 WHERE id = ?", (a,))
     con.commit()
     run = _run(con, {"assign": {"keyword": "OBJECT", "op": "set", "expr": "NGC"}}, [a])
-    assert not run.touched and "rozdwoil" in run.skipped[0].reason
+    assert not run.touched and "rozdwoił" in run.skipped[0].reason
 
 
 def test_multi_present_location_skipped_dw1(tmp_path):

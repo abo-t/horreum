@@ -28,7 +28,8 @@ from horreum.gui import i18n, queries
 from horreum.gui.grid import PRESET_LINEAGE, PRESET_VANISHED
 from horreum.gui.grid_lineage import SciezkaLabel
 from horreum.gui.progress import counts_snapshot, should_emit
-from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
+from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198)
+                                   tekst_powodu, wiersz_systemu)
 from horreum.item_reasons import blad_systemu
 from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
@@ -73,11 +74,26 @@ class PipelineWorker(QObject):
         self._now = now_fn
         self._cancel = threading.Event()
         self._stage = None
+        self._etap = None                      # (pod)etap w biegu - nazwa w `failed` (`_start`)
         self._params = {}
 
     def configure(self, stage, **params):
         self._stage = stage
         self._params = params
+
+    def _start(self, name):
+        """(Pod)etap rusza: ogłoszony widokowi (`stage_started`) i zapamiętany dla awarii - `failed`
+        nazywa etap, który padł, nie bieg: łańcuch „Przyjmij nowe” (`all`) mówił „Etap „all” nie
+        powiódł się.”, tokenem biegu zamiast nazwy etapu w języku UI."""
+        self._etap = name
+        self.stage_started.emit(name)
+
+    def _zakoncz_etap(self, name, wynik):
+        """Etap skończony: zapamiętana nazwa schodzi, zanim pójdzie `stage_done` - praca MIĘDZY etapami
+        (kandydaci następnego etapu łańcucha, zapytania przed `on_start`) padając mówi nazwą biegu
+        (`_stage`, „Przyjmij nowe” dla `all`), nie nazwą etapu, który się już udał."""
+        self._etap = None
+        self.stage_done.emit(name, wynik)
 
     def request_cancel(self):
         """Kooperatywne anulowanie — stawiane w GŁÓWNYM wątku, czytane w workerze (`Event` jest
@@ -126,7 +142,8 @@ class PipelineWorker(QObject):
             # Błąd systemu albo bazy KLASĄ (AR-198): zerwany udział mówił surowym tekstem systemu
             # po polsku także w UI EN. Odmowa klingi z kodem (`OdmowaZPowodem` - resolver woła
             # `repo.upsert_object` bez handlera) mówi swoim kodem, jak w `WritebackWorker.run`.
-            self.failed.emit(self._stage or "?", getattr(exc, "powod", None) or blad_systemu(exc))
+            self.failed.emit(self._etap or self._stage or "?",
+                             getattr(exc, "powod", None) or blad_systemu(exc))
         finally:
             if con is not None:
                 con.close()
@@ -170,7 +187,7 @@ class PipelineWorker(QObject):
         i guard mieszania serialu (`powod_mieszania`), który zależy od serialu zmierzonego dopiero
         przez sondę. Wstrzymanie wraca jako `start_refused(powód)` - okno pokazuje je tak samo jak
         dawniej guard w slocie (`PipelineView._pokaz_odmowe`)."""
-        self.stage_started.emit("scan")
+        self._start("scan")
         if not self._zrodlo():
             return False
         powod = powod_mieszania(con, self._params["volume"])
@@ -189,7 +206,7 @@ class PipelineWorker(QObject):
         if summary.cancelled:
             self.cancelled.emit("scan", summary)
             return False
-        self.stage_done.emit("scan", summary)
+        self._zakoncz_etap("scan", summary)
         return True
 
     def _stacks(self, con):
@@ -214,7 +231,7 @@ class PipelineWorker(QObject):
         (3)): sonda korzenia z serialem (`_zrodlo`, bez wskazywania korzenia - `wskaz=False`)
         i guard mieszania serialu (`powod_mieszania`). Dawniej serial korzenia stosów mierzył slot
         okna zaraz po dialogu - na odłączonym udziale okno stało do timeoutu sieci."""
-        self.stage_started.emit("stacks")
+        self._start("stacks")
         if not self._zrodlo(wskaz=False):
             return False
         powod = powod_mieszania(con, self._params["volume"])
@@ -233,10 +250,10 @@ class PipelineWorker(QObject):
         if s.cancelled:
             self.cancelled.emit("stacks", s)
             return False
-        self.stage_done.emit("stacks", s)
+        self._zakoncz_etap("stacks", s)
         if not self._emit_chain(derive.adopt_stages(
                 con, self._params.get("root"), self._now, self._cancel.is_set,
-                on_start=self.stage_started.emit, progress=self._on_chain_progress)):
+                on_start=self._start, progress=self._on_chain_progress)):
             return False
         # Rodowód stosów raz na przebieg: ta droga nie wchodzi w łańcuch Dostawy
         # (`derive.DERIVED_STAGES`), więc nikt nie liczy go tu drugi raz.
@@ -270,7 +287,7 @@ class PipelineWorker(QObject):
         parametrów - rdzeń aborciuje, gdy dysk potwierdza inny zbiór niż ten z dialogu). Złota akcja
         flagi nie niesie - jej DRY dalej oszczędza koszt `stat` pod hamulcem."""
         name = "presence"
-        self.stage_started.emit(name)
+        self._start(name)
         if not self._zrodlo():
             return None
         s = presence.check(
@@ -282,7 +299,7 @@ class PipelineWorker(QObject):
         if s.cancelled:
             self.cancelled.emit(name, s)
         else:
-            self.stage_done.emit(name, s)
+            self._zakoncz_etap(name, s)
         return s
 
     def _adopt_and_derive(self, con, *, derive_always=False):
@@ -318,7 +335,7 @@ class PipelineWorker(QObject):
         (`_run_all`). Zwraca `False`, gdy któryś etap anulowano."""
         return self._emit_chain(derive.adopt_and_derive(
             con, self._params.get("root"), self._now, self._cancel.is_set,
-            derive_always=derive_always, on_start=self.stage_started.emit,
+            derive_always=derive_always, on_start=self._start,
             progress=self._on_chain_progress))
 
     def _emit_chain(self, pary):
@@ -329,7 +346,7 @@ class PipelineWorker(QObject):
             if getattr(wynik, "cancelled", False):
                 self.cancelled.emit(name, wynik)
                 return False
-            self.stage_done.emit(name, wynik)
+            self._zakoncz_etap(name, wynik)
         return True
 
     def _bulk(self, con, name):
@@ -337,7 +354,7 @@ class PipelineWorker(QObject):
         od sekund do minut, bez progresu per-wiersz; pojedynczy przycisk etapu i droga „Stosy".
         Funkcje pochodnych (z rodowodem stosów) bierze z rdzenia (`derive.DERIVED`). delta jest
         READ-ONLY (zero DML). Emituje stage_started → stage_done."""
-        self.stage_started.emit(name)
+        self._start(name)
         if name in derive.DERIVED:
             result = derive.DERIVED[name](con, self._now(), self._cancel.is_set)
         else:                                          # delta — read-only
@@ -345,7 +362,7 @@ class PipelineWorker(QObject):
         if getattr(result, "cancelled", False):        # rodowód stosów przerwany w czytaniu plików
             self.cancelled.emit(name, result)
             return
-        self.stage_done.emit(name, result)
+        self._zakoncz_etap(name, result)
 
     def _run_all(self, con):
         """„Przetwórz wszystko": scan→group→resolve→calibrate→lineage→stack_lineage→delta w jednym
@@ -377,7 +394,7 @@ class PipelineWorker(QObject):
             self._presence(con, apply=False)
         else:
             # Cisza czytałaby się jak „sprawdzone, nic nie znikło" — a to jest „nie sprawdzone".
-            self.stage_done.emit("presence", presence.PresenceSummary(
+            self._zakoncz_etap("presence", presence.PresenceSummary(
                 aborted=i18n.t("pipeline.presence.skipped_no_volume")))
 
     def _on_chain_progress(self, etap, done, total, path, s):
@@ -398,7 +415,7 @@ class PipelineWorker(QObject):
 # — nie module-level, D-L1 restart); wartości danych ("cold"/"scratch") to identyfikatory poziomu
 # zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione. "—" neutralne — zostaje dosłowne.
 _TIERS = [("—", None), ("pipeline.tier.cold", "cold"), ("pipeline.tier.scratch", "scratch")]
-_STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks",
+_STAGE_LABEL = {"all": "pipeline.receive", "scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks",
                 "group": "pipeline.stage.group",
                 "resolve": "pipeline.stage.resolve", "calibrate": "pipeline.stage.calibrate",
                 "lineage": "pipeline.stage.lineage", "delta": "pipeline.stage.delta",
@@ -561,7 +578,7 @@ class PipelineView(QWidget):
     (`PipelineWorker._zrodlo`); skan `'?'` do bazy z realnymi wolumenami wstrzymuje guard
     `powod_mieszania` (F5R#3).
 
-    Sygnały do gospodarza (`MainWindow`): `status_message(str)` (pasek statusu), `stage_status(str)`
+    Sygnały do gospodarza (`MainWindow`): `status_message(zdanie)` (pasek statusu), `stage_status(str)`
     (zdanie „<etap>: gotowe.” - też na pasek, ale ustępuje świeżemu raportowi gestu, AR-97),
     `stage_finished(str)`
     (etap zakończył zapis - znacznik etapu dla testów i słuchaczy; gospodarz NIE odświeża na nim
@@ -571,7 +588,9 @@ class PipelineView(QWidget):
     Etapy bez połączenia z bazą (`ETAPY_BEZ_BAZY`) `running_changed` nie emitują - gaszą wyłącznie
     przyciski Dostawy."""
 
-    status_message = Signal(str)
+    # `str` albo `wb_worker.ZdanieZeSzczegolem` - awaria etapu niesie szczegół systemu do podpowiedzi
+    # paska gospodarza (AR-218); `object`, bo `Signal(str)` gubi podklasę (zmierzone, PySide6 6.9.2).
+    status_message = Signal(object)
     # Zdanie zwykłego końca etapu idzie OSOBNYM kanałem (AR-97): w łańcuchu pada co etap, w tle,
     # i wypierało z paska odmowę albo wynik gestu po ~0,4 s. Gospodarz trzyma je w poczekalni przez
     # okno priorytetu gestu. Przerwanie i błąd etapu zostają na `status_message` - pierwsze jest
@@ -1674,7 +1693,10 @@ class PipelineView(QWidget):
         self.last_run["failed_tip"] = szczegol
         self.lbl_error.ustaw(wiersz, szczegol)
         self.lbl_error.setVisible(True)                 # czerwony, osobny wiersz — nie ginie w panelu
-        self.status_message.emit(i18n.t("pipeline.stage_failed_status", stage=_stage_label(name)))
+        # Pasek gospodarza: zdanie etapu ze szczegółem systemu pod kursorem (AR-218) - zostaje nad
+        # Domem, gdy bieg ruszył stamtąd, a pole błędu Dostawy jest na innej stronie.
+        self.status_message.emit(ZdanieZeSzczegolem(
+            i18n.t("pipeline.stage_failed_status", stage=_stage_label(name)), szczegol))
 
     # ---------------------------------------------------------------- formatowanie / stan przycisków
 

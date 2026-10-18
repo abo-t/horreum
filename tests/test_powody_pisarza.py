@@ -841,6 +841,7 @@ _DROGI_PLIKOW = {
     # `OdmowaZPowodem.powod` albo tekst odmowy, nie system) i nazwa TYPU wartości w komunikacie
     # EXPECT kodeka (`_do_slownika`, nie tekst wyjątku); `_surowy` - jedyne złożenie `Typ: opis`,
     # wołane wyłącznie przez właścicieli klas systemu i bazy (`powod_systemu`, `powod_bazy`, AR-198)
+    # i regułę wyjątku okna (`powod_okna` - szczegół błędu programu, AR-214)
     "item_reasons.py": {("powod_wyjatku", None), ("_do_slownika", None), ("_surowy", None)},
     # `e` to etykieta zestawu w składaniu nazwy folderu (`zestawy_configow`), nie wyjątek
     "projection.py": {("zestawy_configow", None)},
@@ -860,8 +861,8 @@ _DROGI_PLIKOW = {
     "gui/home.py": set(),
     "gui/tasks.py": set(),
     "gui/grid_workers.py": set(),
-    # stan bazy bez stanowiska (AR-48) i zdanie rdzenia planera (`ValueError`) - nie błąd systemu
-    "gui/planner.py": {("run", "targets.BrakStanowiska"), ("run", "ValueError")},
+    # brak stanowiska (AR-48), błąd bazy i EXPECT rdzenia planera - jedną regułą `powod_okna` (AR-214)
+    "gui/planner.py": set(),
     # ścieżka katalogu nieprzeczytanego (`errors_out` walkera, nie powód); właściciel DIAGNOZY odczytu
     # do `location.unreadable_reason` i `failed_paths` (P4-2, P4-6: kod Windows przed errno, bez
     # ścieżki); odmowy klingi rodzaju i generacji zapisu w miejscu
@@ -883,7 +884,9 @@ _DROGI_PLIKOW = {
     # odmowa stagingu mówi powodem (`zdanie_odmowy_stagingu`, AR-200) - bez sklejki z wyjątku
     "gui/object_change_dialog.py": set(),
 }
-_WLASCICIEL = {"powod_systemu", "blad_systemu"}
+# `powod_okna` - reguła wyjątku okna (AR-209, AR-214): pyta `blad_systemu`, więc okno, które woła
+# tylko ją, woła właściciela klasy
+_WLASCICIEL = {"powod_systemu", "blad_systemu", "powod_okna"}
 _SZEROKIE = {"Exception", "BaseException", "OSError"}
 # Podklasy `OSError` - klasyfikacja nimi kłamie (53/67 to `FileNotFoundError`, 21 `PermissionError`)
 _PODKLASY_OS = {"PermissionError", "FileNotFoundError", "FileExistsError", "IsADirectoryError",
@@ -1241,3 +1244,47 @@ def test_juz_cofniete_po_skanie_odtwarza_nagrobek_raz(tmp_path, inplace):
     drugie = writeback.undo(con, res.commit_id, now=NOW)
     assert drugie.complete and _ev(con, "object.tombstone_restored") == 1, drugie
     con.close()
+
+
+# ============================================================ AR-209, AR-214: reguła wyjątku okna
+
+
+def _cantopen(tmp_path):
+    """PRAWDZIWY `sqlite3.OperationalError` z kodem (SQLITE_CANTOPEN): baza w katalogu, którego nie ma."""
+    import sqlite3
+    try:
+        sqlite3.connect(str(tmp_path / "brak" / "x.db"))
+    except sqlite3.OperationalError as exc:
+        return exc
+    raise AssertionError("sqlite3.connect nie rzucił")
+
+
+def test_powod_okna_odmowa_system_baza_i_blad_programu(tmp_path):
+    """Jedna reguła wyjątku drogi okna (`item_reasons.powod_okna`): odmowa z powodem (klinga,
+    strażnik korzenia, sonda hardlinka) → ten powód; błąd systemu i bazy → klasa, a spoza klas →
+    tekst systemu jak dotąd; każdy inny wyjątek (goły `ValueError` rdzenia, wyjątek biblioteki,
+    `KeyError`, `AssertionError`, `BrakStanowiska` bez powodu) → błąd programu `prog_error`, zdanie
+    PL = wpis katalogu, surowy `Typ: opis` w `detail`. `prog_error` nie jest błędem systemu - poza
+    `SYSTEM_REASON_CODES`. Falsyfikator: gałąź programu oddająca surowy tekst wyjątku."""
+    from horreum import item_reasons, projection, targets
+    from horreum.item_reasons import OdmowaZPowodem, powod_okna
+    odmowa = PowodPozycji("pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) - "
+                          "wolumen nie wspiera hardlinków? włącz tryb kopii", "proj_first_link")
+    assert powod_okna(OdmowaZPowodem(odmowa)) is odmowa
+    assert powod_okna(projection.ProjectionAbort(odmowa, None)) is odmowa
+    assert powod_okna(OSError(None, "Komunikat", r"X:\L\a.fits", 64)).code == "os_share_lost"
+    assert powod_okna(OSError("dysk odpięty")) == "OSError: dysk odpięty"
+    assert not isinstance(powod_okna(OSError("dysk odpięty")), PowodPozycji)
+    assert powod_okna(_cantopen(tmp_path)).code == "db_unavailable"
+    try:
+        json.loads("{")
+    except json.JSONDecodeError as exc:
+        z_biblioteki = exc
+    for exc in (ValueError("nieznany obiekt: 9"), z_biblioteki, KeyError("lights"),
+                AssertionError("wersja stosu 7 bez oryginału"), targets.BrakStanowiska("brak GPS")):
+        powod = powod_okna(exc)
+        assert isinstance(powod, PowodPozycji) and powod.code == "prog_error", (exc, powod)
+        assert str(powod) == CATALOG["objchg.item.prog_error"]["pl"]
+        assert dict(powod.params) == {"detail": f"{type(exc).__name__}: {exc}"}
+    assert "prog_error" in ITEM_REASON_CODES
+    assert "prog_error" not in item_reasons.SYSTEM_REASON_CODES

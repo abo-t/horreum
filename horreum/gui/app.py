@@ -33,8 +33,9 @@ from horreum import db, macro as macro_mod, projection, repo, resolver, stacks
 from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-wolny)
 from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
-from horreum.gui.wb_worker import (EtykietaBledu, ogon_cofniecia, podpowiedz_kart, tekst_powodu,
-                                   zdanie_commitu_kart)
+from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem, ogon_cofniecia,
+                                   podpowiedz_kart, szczegol_zdania, tekst_powodu,
+                                   zdanie_commitu_kart, zlacz_zdania)
 from horreum.gui.config_dialog import AssignConfigDialog, dopasuj_wysokosc
 # Kontener strony zbiorów: stałe prezentacji są wartościami jego sygnału, a `_TRASY` (poziom modułu)
 # ich potrzebuje; import ciągnie grid (~30 ms przy imporcie okna, zmierzone 2026-10-09).
@@ -884,7 +885,7 @@ def plan_kart_sciezki(con, canon, frame_ids):
     read-only, brak obecnej kopii, wiele obecnych kopii, skompresowany master, degenerat, brak
     `header_hash`), którymi idzie „Napraw nagłówek…" - lista pominiętych nie jest drugą regułą.
     Operacja `add`: karta, która już JEST (także z inną wartością), nie zostanie nadpisana, tylko
-    pominięta z powodem („karta juz istnieje") - rozjazd pliku z folderem rozstrzyga człowiek.
+    pominięta z powodem („karta już istnieje") - rozjazd pliku z folderem rozstrzyga człowiek.
 
     Wartość = `header_form(canon)` (`NGC 7635`), SPOT formy nagłówka. Dwie bramki PRZED silnikiem
     pomijają całą pozycję z jednym powodem: wartość łamiąca reguły karty FITS (ten sam właściciel,
@@ -1134,6 +1135,9 @@ class ConfirmPathObjectsDialog(QDialog):
         if not wybrane:
             self.error.setText(i18n.t("path.err.nothing"))
             return
+        # Błąd POPRZEDNIEJ próby schodzi z pola przed nową - odmowa i awaria tej próby stawiają
+        # własne zdanie; inaczej po udanym ponowieniu pasek dokleiłby starą awarię do sukcesu (AR-218).
+        self.error.ustaw("")
         gest = repo.ObjectGesture()
         przeszly = 0                 # pozycje, które klinga przyjęła (po `break` nie liczą się następne)
         # FAZA Z LICZNIKIEM (F-1): zapis idzie transakcja per NAZWA, więc „zapisuję" bez liczby
@@ -1688,7 +1692,8 @@ class RepairHeaderDialog(QDialog):
     def _build_ui(self):
         lay = QVBoxLayout(self)
         n_frames = sum(len(g["rows"]) for g in self._groups)
-        head = QLabel(i18n.t("repair.head", frames=n_frames, groups=len(self._groups)))
+        head = QLabel(i18n.t_plural("repair.head", n_frames,          # odmiana obu liczb
+                                    groups=i18n.t_plural("repair.head_groups", len(self._groups))))
         head.setWordWrap(True)
         lay.addWidget(head)
 
@@ -2025,7 +2030,9 @@ class ObjectAxisView(QWidget):
     # cofnięte). Złożone z właścicieli dróg naprawy (ręka, karta), bez trzeciej wyliczanki.
     KUBELKI_OSI_OBIEKTU = _ASSIGN_TAGS | _CARD_TAGS | frozenset({"path_proposals"})
 
-    status_message = Signal(str)
+    # `str` albo `ZdanieZeSzczegolem` - zdanie okna „Zatwierdź ze ścieżki…” ze szczegółem po jego
+    # zamknięciu (AR-218); `object`, bo `Signal(str)` gubi podklasę (jak `FramesView.status_message`).
+    status_message = Signal(object)
     writeback_busy = Signal(bool)         # okno naprawy pisze do plików → mutex gridu (D-PD-3)
     # Gest „Przypisz zestaw…" zmienia oś TELESKOPU: liczbę klatek, wartość z plików, a „Dopisz
     # nowy…" dokłada wiersz (wizytacja N4) - gospodarz odświeża nią Oś teleskopu.
@@ -3033,7 +3040,11 @@ class ObjectAxisView(QWidget):
         finally:
             self._repair_dlg = None
         if dlg.assigned:
-            self.status_message.emit(dlg.status.text())
+            # Zdania OBU pól okna RAZEM z ich szczegółami (AR-218): wynik zapisu stoi w `status`,
+            # awaria zapisu kart - w `error`; okno się zamknęło, więc plik, który padł, zostaje już
+            # tylko w podpowiedzi paska.
+            self.status_message.emit(zlacz_zdania(" - ", (
+                ZdanieZeSzczegolem(pole.text(), pole.szczegol()) for pole in (dlg.status, dlg.error))))
             self.refresh(select_first=True)
 
     def _on_confirm_path_changed(self):
@@ -3999,7 +4010,10 @@ class MainWindow(QMainWindow):
         # zwykłymi widżetami w kolejności czytania, a pole komunikatu `QStatusBar` zostaje puste
         # (pisze do niego już tylko Qt, pustym `QStatusTipEvent` z menu). Etykieta ma minimum 1 px:
         # minimum równe tekstowi trzymałoby szerokość okna przy zwężaniu, zanim elizja się powtórzy.
-        self.report_label = QLabel("")
+        # POLE ZDANIA Z PROTOKOŁU OKIEN ZAPISU (AR-218, `EtykietaBledu`): raport ze szczegółem systemu
+        # (`ZdanieZeSzczegolem`) dostaje glif wskaźnika, szczegół w podpowiedzi i menu „Kopiuj
+        # zdanie / Kopiuj szczegół” - plik, który padł w zamkniętym oknie, zostaje pod kursorem.
+        self.report_label = EtykietaBledu("")
         self.report_label.setTextFormat(Qt.PlainText)
         self.report_label.setMinimumWidth(1)
         self.statusBar().addWidget(self.report_label)
@@ -4221,7 +4235,7 @@ class MainWindow(QMainWindow):
         self._clear_views()
         motyw = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
         pipeline = PipelineView(self.db_path, now_fn=self._now)
-        pipeline.status_message.connect(self._flash)
+        pipeline.status_message.connect(self._flash_dostawy)
         pipeline.stage_status.connect(self._raport_etapu)   # „<etap>: gotowe.” ustępuje gestowi (AR-97)
         # `stage_finished` ŚWIADOMIE NIEPODPIĘTE: widoki odświeża koniec PRZEBIEGU
         # (`running_changed(False)`), nie koniec etapu - patrz `_odswiez_widoki_po_przebiegu`.
@@ -4574,7 +4588,8 @@ class MainWindow(QMainWindow):
             elif dlg.harvested_stacks:
                 self._zapisz_rodowod_po_przebiegu(list(dlg.harvested_stacks), dlg.summary)
         if zdania:
-            self._flash(" - ".join(zdania))
+            # Złączenie niesie szczegół błędu biegu z `summary` okna (AR-218) - `" - ".join` go gubił.
+            self._flash(zlacz_zdania(" - ", zdania))
 
     def _zapisz_rodowod_po_przebiegu(self, stosy, podsumowanie=""):
         """Rodowód stosów wciągniętych w oknie żniw: JEDNORAZOWY nasłuch końca przebiegu, który
@@ -4612,8 +4627,17 @@ class MainWindow(QMainWindow):
             widok.run_finished.disconnect(po_przebiegu)
             if con is not self.con:
                 return
-            if zapis["cancelled"] or zapis["refused"] or zapis["failed"]:
-                self._flash(i18n.t("status.harvest_lineage_lost", n=len(stosy)))
+            if zapis["failed"] or zapis["cancelled"] or zapis["refused"]:
+                # Przebieg bez sukcesu: zdanie utraty rodowodu (instrukcja ratunku) NA POCZĄTKU - pasek
+                # ucina koniec. Zastępuje raport Dostawy i podsumowanie żniw, więc niesie oba (AR-218):
+                # wiersz awarii z jej szczegółem systemu z zapisu przebiegu (`failed`, `failed_tip` -
+                # ten sam co w polu Dostawy, nie z paska, którego treść zależy od kolejności raportów)
+                # albo powód odmowy, a za nimi podsumowanie okna żniw z jego szczegółem i członem
+                # niezapisanego zeznania.
+                przyczyna = (ZdanieZeSzczegolem(zapis["failed"], zapis["failed_tip"] or "")
+                             if zapis["failed"] else zapis["refused"] or "")
+                self._flash(zlacz_zdania(" - ", (i18n.t("status.harvest_lineage_lost", n=len(stosy)),
+                                                 przyczyna, podsumowanie)))
                 return
             try:
                 zdanie = self._zdanie_rodowodu(con, stosy)
@@ -4624,7 +4648,7 @@ class MainWindow(QMainWindow):
             if rozjazdy:
                 self._pokaz_gest_obiektu_wydania(con, rozjazdy, podsumowanie, zdanie)
             elif zdanie:
-                self._flash(" - ".join(c for c in (podsumowanie, zdanie) if c))
+                self._flash(zlacz_zdania(" - ", (podsumowanie, zdanie)))
 
         widok.run_finished.connect(po_przebiegu)
 
@@ -4710,8 +4734,8 @@ class MainWindow(QMainWindow):
         nie da się porównać (`wydanie_poza_baza`), dostają samo zdanie - gest bez celu nie staje.
         Nigdy cicha podmiana: zapis robi wyłącznie klik."""
         from horreum.gui.grid_model import CzlonRecepty, Recepta
-        tekst = " - ".join(c for c in (self._zdanie_obiektu_wydania(rozjazdy), podsumowanie,
-                                       zdanie_rodowodu) if c)
+        tekst = zlacz_zdania(" - ", (self._zdanie_obiektu_wydania(rozjazdy), podsumowanie,
+                                     zdanie_rodowodu))   # szczegół `podsumowanie` jedzie dalej (AR-218)
         cele = [r for r in rozjazdy if r["verdict"] in ("inny", "brak")]
         self._obiekty_wydania = (con, cele) if cele else None
         self._flash(tekst, ms=0 if cele else 5000, miejsce=self._strona())
@@ -5021,6 +5045,15 @@ class MainWindow(QMainWindow):
         widok na Dostawę), nie dostaje powiązania - nie ma z czym gasnąć, a zdanie ma paść."""
         self._flash(msg, miejsce=STRONA_ZBIORY if self._strona() == STRONA_ZBIORY else None)
 
+    def _flash_dostawy(self, msg):
+        """Raport Dostawy (przerwanie i awaria etapu, odmowa, źródło nieosiągalne) - związany
+        z Dostawą, gdy pada przy niej, jak wynik gestu gridu (`_flash_grid`, AR-34): po wyjściu
+        z Dostawy zdanie i jego szczegół (AR-218) schodzą z paska, a awaria zostaje w polu błędu
+        Dostawy i na stronie Przyjmij. Wizytacja natywna zastała „Etap „Rozwiązywanie” nie powiódł
+        się.” nad Domem. Raport biegu w tle, gdy Dostawy nie widać, powiązania nie dostaje - nie ma
+        z czym gasnąć. Zdanie zwykłego końca etapu ma własny kanał (`_raport_etapu`)."""
+        self._flash(msg, miejsce=STRONA_DOSTAWA if self._strona() == STRONA_DOSTAWA else None)
+
     def _raport_wczytania_gridu(self, msg):
         """Raport WCZYTANIA zbioru („Wczytuję klatki…", „Grid: N klatek…") - na pasek tylko wtedy,
         gdy Zbiory są widoczne; inaczej czeka na wejście w Zbiory (`_on_nav_changed`).
@@ -5087,7 +5120,13 @@ class MainWindow(QMainWindow):
         etapu czeka (`_raport_etapu`). Domyślnie TAK - prawie każdy raport odpowiada na ruch
         człowieka (odmowa, wynik gestu, wynik okna); `False` mówią stan okna (baza wczytana, brak
         bazy) i sam raport etapu. Każdy raport zastępuje raport etapu czekający w oknie: ten jest
-        starszy od zdania, które właśnie staje na pasku."""
+        starszy od zdania, które właśnie staje na pasku.
+
+        SZCZEGÓŁ JEDZIE W ZDANIU (AR-218): `msg` bywa `ZdanieZeSzczegolem` (awaria zapisu Zbiorów,
+        żniw, Dostawy, okna kart po zamknięciu) - podpowiedź paska niesie wtedy zdanie i szczegół,
+        a pole raportu glif wskaźnika. Szczegół nie ma własnego pola: czyta się go z ŻYWEGO raportu
+        (`szczegol_zdania(self._pelny_komunikat)`), więc znika razem z nim - następny raport,
+        wygaśnięcie (`_wygas_raport`), także wyjście z miejsca, z którym raport jest związany."""
         self._ustaw_recepte("")
         self._pelny_komunikat = msg
         self._miejsce_komunikatu = miejsce
@@ -5214,8 +5253,12 @@ class MainWindow(QMainWindow):
 
     def _wyswietl(self, msg):
         """Wyrenderuj raport na jego etykietę - po elizji (`_zwezone`). Sam tekst: zegar wygaśnięcia
-        stawia `_flash`, więc ponowny pomiar (`_przelicz_pasek`) nie przedłuża życia raportu."""
-        self.report_label.setText(self._zwezone(msg))
+        stawia `_flash`, więc ponowny pomiar (`_przelicz_pasek`) nie przedłuża życia raportu. Pole
+        pokazuje skrót, „Kopiuj zdanie” bierze pełne zdanie (`pelne`). PODPOWIEDŹ JEST JEDNA - paska
+        (zdanie, recepta, szczegół; `_zwezone`): podpowiedź pola zasłaniałaby ją nad etykietą bez
+        członu recepty, więc schodzi zaraz po `ustaw`."""
+        self.report_label.ustaw(self._zwezone(msg), szczegol_zdania(msg), pelne=msg)
+        self.report_label.setToolTip("")
 
     def _przelicz_pasek(self):
         """Przemierz elizję ŻYWEGO raportu - po każdej zmianie szerokości widżetów obok niego.
@@ -5325,14 +5368,21 @@ class MainWindow(QMainWindow):
         raport plus recepta - zdejmuje wszystkie trzy bez ani jednej gałęzi.
 
         PRZED POKAZANIEM OKNA NIE TNIEMY: geometria jest wtedy zastępcza (domyślne 640 px), więc
-        elizja liczona z niej okroiłaby zdanie, które w prawdziwym oknie mieści się w całości."""
+        elizja liczona z niej okroiłaby zdanie, które w prawdziwym oknie mieści się w całości.
+
+        Szczegół raportu (AR-218) stoi w podpowiedzi wierszem pod zdaniem (jak w polu zdania okien
+        zapisu), a glif wskaźnika zabiera zdaniu swoje wcięcie - odliczone od zapasu."""
         bar = self.statusBar()
-        bar.setToolTip(" · ".join(x for x in (msg, self._pelna_recepta) if x))
+        szczegol = szczegol_zdania(msg)
+        bar.setToolTip("\n".join(x for x in (" · ".join(x for x in (msg, self._pelna_recepta) if x),
+                                             szczegol) if x))
         if not bar.isVisible():
             return msg
         stale = sum(w.sizeHint().width() + _PASEK_ODSTEP
                     for w in (self.phase_label, self.recipe_label) if w.isVisible())
         zapas = bar.width() - stale - _PASEK_MARGINES
+        if szczegol:
+            zapas -= self.report_label._szerokosc_wskaznika()
         fm = QFontMetrics(self.report_label.font())
         if zapas < _PASEK_MIN_KOMUNIKATU or fm.horizontalAdvance(msg) <= zapas:
             return msg

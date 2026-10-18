@@ -31,8 +31,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
 
 from horreum import db, repo, sky, targets
 from horreum.gui import i18n, planner_model as pm, queries, theme
-from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
-from horreum.item_reasons import blad_systemu
+from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198, AR-218)
+                                   tekst_powodu, wiersz_systemu)
+from horreum.item_reasons import powod_okna   # jedna reguła wyjątku okna (AR-209, AR-214)
 
 # Debounce zmian parametrów: pojedyncze kliknięcie w strzałkę spinboxa nie ma prawa startować
 # rachunku nocy, a przytrzymana strzałka wygenerowałaby ich kilkanaście.
@@ -121,9 +122,11 @@ class PlanWorker(QObject):
     sygnał (precedens `stage_done` w `pipeline.py`)."""
 
     done = Signal(int, object)          # (generacja, targets.PlanResult)
-    # (generacja, powód) - zdanie rdzenia (`ValueError`) albo błąd bazy/systemu klasą (AR-198)
+    # (generacja, powód) - błąd bazy/systemu klasą (AR-198) albo błąd programu (`powod_okna`, AR-214)
     failed = Signal(int, object)
-    no_site = Signal(int, str)          # (generacja, komunikat) - `targets.BrakStanowiska` (AR-48)
+    # (generacja, wyjątek) - `targets.BrakStanowiska` (AR-48): zwykły brak stanowiska to STAN, więc
+    # sygnał niesie sam wyjątek; klasą błędu programu mówi go wyłącznie bezpiecznik pętli (slot)
+    no_site = Signal(int, object)
     finished = Signal()
 
     def __init__(self, db_path, params, gen, con=None):
@@ -141,15 +144,15 @@ class PlanWorker(QObject):
             # STAN bazy, nie awaria - osobny sygnał, żeby ekran rozpoznał go po TOŻSAMOŚCI błędu,
             # a nie po stanie bazy w chwili doręczenia (Z2: blokada bazy przy bazie bez stanowiska
             # przebierała się za brak stanowiska i chowała prawdziwy komunikat).
-            self.no_site.emit(self._gen, str(exc))
-        except ValueError as exc:
-            # INNY `ValueError` rdzenia (brak stanowiska łapie gałąź wyżej) - zdanie rdzenia jest
-            # samo w sobie opisem, więc idzie na ekran SUROWE, bez nazwy klasy.
-            self.failed.emit(self._gen, str(exc))
+            # Bez śladu stosu: wyjątek jedzie sygnałem kolejkowanym do wątku GUI, a ślad trzymałby
+            # ramki workera (z jego połączeniem) do chwili doręczenia.
+            self.no_site.emit(self._gen, exc.with_traceback(None))
         except Exception as exc:
             # Planer czyta bazę i dane pakietu - realna awaria to błąd SQLite: klasą bazy w języku
-            # UI, surowy tekst w szczególe nagłówka (AR-198).
-            self.failed.emit(self._gen, blad_systemu(exc))
+            # UI, surowy tekst w szczególe nagłówka (AR-198). Inny `ValueError` rdzenia (rekord
+            # assetu, inwariant) to błąd programu: zdanie w języku UI, proza rdzenia w szczególe
+            # (`powod_okna`, AR-214) - dawniej szła na ekran surowa, po polsku także w UI EN.
+            self.failed.emit(self._gen, powod_okna(exc))
         finally:
             self.finished.emit()
 
@@ -334,7 +337,9 @@ class PlannerView(QWidget):
     oraz `con` dla zapisów kuratelii na GŁÓWNYM wątku (T5d). Bez `db_path` (testy, `:memory:`)
     rachunek idzie inline na `con` — synchronicznie, bez wątku."""
 
-    status_message = Signal(str)
+    # `object`: zdanie nieudanego rachunku jedzie ze szczegółem (`ZdanieZeSzczegolem`, AR-218) -
+    # `Signal(str)` zamieniłby nośnik na goły `str` i szczegół przepadłby po cichu.
+    status_message = Signal(object)
     show_frames_for = Signal(object)     # T5e: kanony archiwum celu → most do gridu
     open_sites = Signal()                # AR-48: pusty stan „bez stanowiska" → oś obserwatorium
 
@@ -1160,14 +1165,15 @@ class PlannerView(QWidget):
     @Slot(int, object)
     def _on_failed(self, gen, powod):
         """Rachunek padł z powodu INNEGO niż brak stanowiska - komunikat zostaje: błąd bazy
-        albo systemu klasą w języku UI, szczegół pod kursorem nagłówka (AR-198)."""
+        albo systemu klasą, a błąd programu zdaniem `prog_error` - w języku UI, szczegół pod
+        kursorem nagłówka (AR-198, AR-214)."""
         if gen != self._gen:
             return
         self._pokaz_blad(gen, tekst_powodu(powod), bez_stanowiska=False,
                          szczegol=wiersz_systemu(powod))
 
-    @Slot(int, str)
-    def _on_no_site(self, gen, message):
+    @Slot(int, object)
+    def _on_no_site(self, gen, exc):
         """Rachunek padł, bo baza nie zna stanowiska z GPS (`targets.BrakStanowiska`, AR-48).
 
         ODWROTNY WYŚCIG (Z8): bieg ruszył bez stanowiska, ale zanim jego błąd tu dotarł, stanowisko
@@ -1184,7 +1190,11 @@ class PlannerView(QWidget):
                 self._ponowiono_bez_stanowiska = True
                 QTimer.singleShot(0, self, self.replan)
                 return
-            self._pokaz_blad(gen, message, bez_stanowiska=False)   # stanowisko jest - nie pusty stan
+            # Stanowisko jest - nie pusty stan, tylko błąd programu (rozjazd predykatów, EXPECT):
+            # zdanie w języku UI, zdanie rdzenia w szczególe (`powod_okna`, AR-214).
+            powod = powod_okna(exc)
+            self._pokaz_blad(gen, tekst_powodu(powod), bez_stanowiska=False,
+                             szczegol=wiersz_systemu(powod))
             return
         self._pokaz_blad(gen, i18n.t("planner.no_site_title"), bez_stanowiska=True)
 
@@ -1194,7 +1204,8 @@ class PlannerView(QWidget):
         pasek stanu, także nad ekranem Dostawy). Każdy inny błąd - tabela i komunikat. To,
         czy zdanie w ogóle padnie na pasek, rozstrzyga gospodarz (tylko przy widocznym planerze).
         `szczegol` - wiersz szczegółu systemu albo bazy pod kursorem nagłówka (AR-198); następny
-        tekst nagłówka (noc policzonego planu) go zdejmuje."""
+        tekst nagłówka (noc policzonego planu) go zdejmuje. Zdanie na pasek jedzie RAZEM ze
+        szczegółem (`ZdanieZeSzczegolem`, AR-218) - pasek gospodarza pokazuje go pod kursorem."""
         self._result = None
         self._shown_gen = gen
         self.model.set_rows(())
@@ -1210,7 +1221,7 @@ class PlannerView(QWidget):
         self.empty_note.setVisible(self.bez_stanowiska)
         self.empty_btn.setVisible(self.bez_stanowiska)
         self.table.setVisible(not self.bez_stanowiska)
-        self.status_message.emit(message)
+        self.status_message.emit(ZdanieZeSzczegolem(message, szczegol))
 
     # ---------------------------------------------------------------- render
 

@@ -520,7 +520,7 @@ def test_podglad_makra_brak_karty_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
     jezyk(lang)
     view, con, _p = _widok_nad(qapp, tmp_path)
     tip = _podglad_makra(view, "OBSERVER", "Zdzin")
-    zdanie = {"pl": "brak karty 'OBSERVER' do modyfikacji (uzyj add)",
+    zdanie = {"pl": "brak karty 'OBSERVER' do modyfikacji (użyj add)",
               "en": "no card 'OBSERVER' to modify (use add)"}[lang]
     assert tip == i18n.t("grid.preview.skipped_tip", reason=zdanie), tip
     view.close()
@@ -559,7 +559,7 @@ def test_Napraw_naglowek_wszystko_pominiete_mowi_powod_makra_w_jezyku_UI(qapp, t
                                                                         lang):
     """„Napraw nagłówek…”: grupa, której każda klatka ma już kartę `OBJECT` - prawdziwy klik
     „Zapisz karty” kończy się zdaniem „Nic do zapisu” z powodem makra w języku UI, zero zapisu.
-    Falsyfikator: `_on_save` z gołym `skipped[0][1]` → „karta 'OBJECT' juz istnieje…” w EN."""
+    Falsyfikator: `_on_save` z gołym `skipped[0][1]` → „karta 'OBJECT' już istnieje…” w EN."""
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from test_gui_object_change import _niebo
@@ -580,7 +580,7 @@ def test_Napraw_naglowek_wszystko_pominiete_mowi_powod_makra_w_jezyku_UI(qapp, t
     g["edit"].clear()
     QTest.keyClicks(g["edit"], "NGC 7635")
     QTest.mouseClick(dlg.save_btn, Qt.LeftButton)
-    powod = {"pl": "karta 'OBJECT' juz istnieje (uzyj set)",
+    powod = {"pl": "karta 'OBJECT' już istnieje (użyj set)",
              "en": "card 'OBJECT' already exists (use set)"}[lang]
     assert dlg.error.text() == i18n.t("repair.err.all_skipped", reason=powod), dlg.error.text()
     assert open(path, "rb").read() == przed
@@ -598,7 +598,7 @@ def test_Zatwierdz_ze_sciezki_lista_bez_karty_mowi_w_jezyku_UI(sciezka_karty, je
     dlg = _okno_sciezki(v, con)
     try:
         pozycje = sorted(dlg.cards_skipped.item(i).text() for i in range(dlg.cards_skipped.count()))
-        powody = {"pl": ["karta 'OBJECT' juz istnieje (uzyj set)",
+        powody = {"pl": ["karta 'OBJECT' już istnieje (użyj set)",
                          "plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)",
                          "wiele obecnych kopii (2) -- writeback poza v1 (D-W1)"],
                   "en": ["RAW file (DSLR) - Horreum does NOT write it (read-only)",
@@ -814,8 +814,8 @@ def test_zly_wzor_nazwy_mowi_w_jezyku_UI_w_podgladzie_i_stagingu(rn_view, jezyk,
 @pytest.mark.parametrize("lang", ["pl", "en"])
 def test_blad_skladni_makra_mowi_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
     """AR-194: krok „Oblicz” z błędem składni - „Podgląd” klikiem: pasek stanu i wynik szuflady
-    mówią błąd definicji w języku UI (EN dokładnie; PL znak w znak jak dotąd - `Błąd makra: blad
-    skladni: …`). Falsyfikator: `_run` z `exc=exc` → „blad skladni” w EN."""
+    mówią błąd definicji w języku UI (EN dokładnie; PL znak w znak jak zdanie rdzenia - `Błąd makra:
+    błąd składni: …`). Falsyfikator: `_run` z `exc=exc` → „błąd składni” w EN."""
     jezyk(lang)
     view, con, _p = _widok_nad(qapp, tmp_path)
     view.show()
@@ -829,7 +829,7 @@ def test_blad_skladni_makra_mowi_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
     bar.asg_op.setCurrentIndex(0)
     bar.asg_expr.setText("EQ6")
     _klik_w(bar.btn_prev)
-    blad = {"pl": "blad skladni: invalid syntax (<unknown>, line 1)",
+    blad = {"pl": "błąd składni: invalid syntax (<unknown>, line 1)",
             "en": "syntax error: invalid syntax (<unknown>, line 1)"}[lang]
     oczek = i18n.t("grid.macro.error", exc=blad)
     assert komunikaty[-1] == oczek, komunikaty

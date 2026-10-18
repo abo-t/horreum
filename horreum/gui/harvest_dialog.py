@@ -89,8 +89,8 @@ from horreum import db, harvest, projection
 from horreum.gui import i18n, queries
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.projection_dialog import _COLORS, _elide_path
-from horreum.gui.wb_worker import (EtykietaBledu, tekst_powodu,   # błąd systemu w języku UI (AR-184)
-                                   wiersz_systemu)
+from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # błąd systemu w języku UI
+                                   tekst_powodu, wiersz_systemu)       # (AR-184), szczegół na pasek (AR-218)
 from horreum.item_reasons import blad_systemu, powod_systemu
 
 # Ile poziomów nad wyjściem WBPP szukać manifestu wydania: WBPP pisze `master/` (i `calibrated/`)
@@ -364,10 +364,24 @@ def plan_counts(items):
     return c.get("would-place", 0), c.get("exists", 0), c.get("review", 0)
 
 
+@dataclasses.dataclass(frozen=True)
+class SondaNiepelna:
+    """Wpis „świeżego” stanu wiersza po podglądzie `out`, który nie przeczytał wyjścia całego
+    (`unreadable` = katalogi nieprzeczytane) albo padł (`unreadable == 0`), AR-222. BLOKADA
+    bezwzględna: stan wiersza mówi o niej, nie o liczbach, a `is_harvested` jest fałszywe - ani liczby
+    tego podglądu (nie obejmują nieprzeczytanego), ani liczby listy sprzed niego (stare) nie mogą
+    odsłonić zdania „folder możesz skasować”. Zdejmuje ją dopiero pełny podgląd tego `out`."""
+    unreadable: int = 0
+
+
 def release_counts(row, fresh=None):
     """`(niewciągnięte, wciągnięte, do przeglądu)` wiersza listy: ze świeżego planu (`plan_counts`),
-    gdy podgląd przeliczył `out` tego wiersza, inaczej z listy (`harvest.ReleaseRow`)."""
-    return fresh if fresh is not None else (row.pending, row.done, row.review)
+    gdy podgląd przeliczył `out` tego wiersza, inaczej z listy (`harvest.ReleaseRow`). Pod blokadą
+    (`SondaNiepelna`) - liczby listy wyłącznie dla zdań, które WSTRZYMUJĄ kasowanie (przegląd,
+    rodowód); stan wiersza i `is_harvested` blokują same."""
+    if fresh is None or isinstance(fresh, SondaNiepelna):
+        return row.pending, row.done, row.review
+    return fresh
 
 
 def release_state_text(row, fresh=None):
@@ -376,7 +390,12 @@ def release_state_text(row, fresh=None):
     zeznania może być równie dobrze przeglądem; „do wciągnięcia” mówi dopiero świeży plan (`fresh`).
     Wydanie nowsze od wyników (`awaiting_wbpp`) zaczyna od „czeka na WBPP”, a wciągnięte z poprzednich
     wyników są „poprzednio wciągnięte” - nie są wynikami OSTATNIEGO wydania. Stosy bez rodowodu
-    dokładnego w bazie (`row.lineage`, z listy - plan bazy o nie nie pyta) to „rodowód do zapisania”."""
+    dokładnego w bazie (`row.lineage`, z listy - plan bazy o nie nie pyta) to „rodowód do zapisania”,
+    a ścieżki, których lista nie przeczytała (`row.unreadable`, AR-222) - „nieprzeczytane”. Pod blokadą
+    podglądu (`SondaNiepelna`) stan mówi wyłącznie o niej - żadnej liczby, więc i żadnego „wciągnięte”."""
+    if isinstance(fresh, SondaNiepelna):
+        return (i18n.t("harvest.rel.unread", n=fresh.unreadable) if fresh.unreadable
+                else i18n.t("harvest.rel.probe_failed"))
     pending, done, review = release_counts(row, fresh)
     parts = [i18n.t("harvest.rel.waiting")] if row.awaiting_wbpp else []
     if pending:
@@ -389,15 +408,33 @@ def release_state_text(row, fresh=None):
         parts.append(i18n.t("harvest.rel.review", n=review))
     if row.lineage:
         parts.append(i18n.t("harvest.rel.lineage", n=len(row.lineage)))
+    if row.unreadable:
+        parts.append(i18n.t("harvest.rel.unread", n=len(row.unreadable)))
     return " · ".join(parts) if parts else i18n.t("harvest.rel.waiting")
+
+
+def unread_note(dirs, out):
+    """`(zdanie, szczegół)` planu NIEPEŁNEGO (AR-222) z `HarvestPlan.unreadable_dirs` - katalogi
+    względem wyjścia (`rel_text`), szczegół = wiersze systemu (`wiersz_systemu`, ścieżka w surowym
+    tekście); bez katalogów nieprzeczytanych `("", "")`."""
+    if not dirs:
+        return "", ""
+    zdanie = i18n.t_plural("harvest.unread_dirs", len(dirs),
+                           paths=", ".join(rel_text(sciezka, out) for sciezka, _powod in dirs))
+    return zdanie, "\n".join(w for w in (wiersz_systemu(powod) for _s, powod in dirs) if w)
 
 
 def is_harvested(row, fresh=None):
     """Folder wydania przestał być Horreum potrzebny: nic do wciągnięcia ani do przeglądu (pliki
-    przeglądu leżą tylko tam), coś wciągnięto, wyniki są wynikami OSTATNIEGO wydania, a każdy stos
-    z tego folderu ma w bazie rodowód dokładny (inaczej zbiór jego wejść leży tylko w zeznaniu żniw)."""
+    przeglądu leżą tylko tam), coś wciągnięto, wyniki są wynikami OSTATNIEGO wydania, każdy stos
+    z tego folderu ma w bazie rodowód dokładny (inaczej zbiór jego wejść leży tylko w zeznaniu żniw),
+    a lista przeczytała cały folder - w katalogu nieprzeczytanym (AR-222) mogą leżeć pliki, których
+    archiwum nie ma. Ostatni podgląd tego `out` niepełny albo nieudany (`SondaNiepelna`) - nigdy."""
+    if isinstance(fresh, SondaNiepelna):
+        return False
     pending, done, review = release_counts(row, fresh)
-    return pending == 0 and review == 0 and done > 0 and not row.awaiting_wbpp and not row.lineage
+    return (pending == 0 and review == 0 and done > 0 and not row.awaiting_wbpp and not row.lineage
+            and not row.unreadable)
 
 
 def needs_lineage(row, fresh=None):
@@ -575,7 +612,9 @@ class HarvestReleasesWorker(QObject):
     końca i nikt jej nie odbiera. Funkcję bierze z modułu rdzenia W CHWILI biegu (seam testowy)."""
 
     done = Signal(int, object)        # (generacja, [ReleaseRow])
-    missing = Signal(int, object)     # (generacja, karty bez folderu) - przed `done` tej generacji
+    # (generacja, `((karta, powód), …)` - powód None = folderu nie ma, inaczej nie da się go przeczytać,
+    # `harvest.missing_roots` i `releases(errors_out=)`, AR-222) - przed `done` tej generacji
+    missing = Signal(int, object)
     failed = Signal(int, object)      # (generacja, powód) - `object` niesie kod (AR-184)
     finished = Signal()
 
@@ -592,12 +631,17 @@ class HarvestReleasesWorker(QObject):
         try:
             own = bool(self._db_path)
             con = db.connect(self._db_path) if own else self._con
+            nieczytelne = []                         # karty z `OBJECTS` nie do przeczytania (AR-222)
             try:
-                rows = harvest.releases(self._roots, archive_root=self._archive_root or None, con=con)
+                rows = harvest.releases(self._roots, archive_root=self._archive_root or None, con=con,
+                                        errors_out=nieczytelne)
             finally:
                 if own:
                     con.close()
             brak = harvest.missing_roots(self._roots)
+            # Karta, której folderu nie widać, mówi raz - zdaniem z `missing_roots`.
+            widziane = {karta for karta, _powod in brak}
+            brak += tuple(p for p in nieczytelne if p[0] not in widziane)
         except Exception as exc:                     # lista pada szczerze, nie cichą śmiercią wątku
             self.failed.emit(self._gen, blad_systemu(exc))
         else:
@@ -610,18 +654,62 @@ class HarvestReleasesWorker(QObject):
 # ---------------------------------------------------------------- dialog
 
 def _szerokosc_od_okna(label):
-    """Zdanie stanu nie dyktuje szerokości okna (AR-140). Zawijanie łamie wiersz tylko na spacjach,
-    więc ścieżka w zdaniu jest jednym słowem, a minimum etykiety - jej pełną szerokością: zdanie
+    """Zdanie stanu nie dyktuje szerokości okna (AR-140). Zawijanie Qt nie łamie wiersza po `\\`,
+    więc ścieżka w zdaniu była jednym słowem, a minimum etykiety - jej pełną szerokością: zdanie
     podglądu z `<wydanie>\\OBJECTS\\<obiekt>` dłuższe od okna poszerzało je samo, okno już nie
     wracało, wskazówka u góry traciła wiersz, a pole z „Wskaż…” i „Zmień…” podjeżdżało pod kursorem
-    o ten wiersz. Etykieta bierze szerokość, którą daje jej okno; ścieżki dłuższej od okna nie widać
-    do końca, więc droga do pełnej treści stoi tu, przy samej regule: etykieta jest zaznaczalna
-    (kopia z menu kontekstowego), a pełny tekst pod kursorem stawia pole zdania (`EtykietaBledu.ustaw`,
-    AR-204 - zdanie ze szczegółem systemu, ten sam protokół co pola okien zapisu i szuflada)."""
+    o ten wiersz. Etykieta bierze szerokość, którą daje jej okno, a ścieżkę dłuższą od okna pole
+    zdania łamie po `\\` w kolejnych wierszach (`EtykietaBledu`, AR-221 - miejsca łamania tylko
+    w malowaniu). Etykieta jest zaznaczalna (kopia z menu kontekstowego i Ctrl+C - zdanie bez znaków
+    łamania), a pełny tekst pod kursorem stawia pole zdania (`EtykietaBledu.ustaw`, AR-204 - zdanie
+    ze szczegółem systemu, ten sam protokół co pola okien zapisu i szuflada)."""
     sp = label.sizePolicy()
     sp.setHorizontalPolicy(QSizePolicy.Ignored)
     label.setSizePolicy(sp)
     label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+
+class _ZdanieZRezerwa(QLabel):
+    """Zdanie, które pod kursorem zmienia się na jedno z kilku zdań katalogu (`klucze`), rezerwuje
+    wysokość NAJWYŻSZEGO z nich przy bieżącej szerokości (AR-225): `heightForWidth` = max po zdaniach,
+    tekst u góry etykiety - krótsze zdanie zostawia wolne miejsce pod sobą, nie nad. Układ liczy
+    wysokość i minimum wiersza przez `heightForWidth` (`_fit_height`, `_podloga_wysokosci` też), więc
+    rezerwa idzie za szerokością okna bez własnych haków.
+
+    Dlaczego: wiersz zaznaczonego wydania rezerwował wysokość zdania z konstrukcji („folder możesz
+    skasować”), a lista z tła pokazywała inne - krótsze „najpierw rozstrzygnij” podnosiło pole,
+    „Wskaż…” i „Zmień…” pod kursorem (natywnie font ×1,6, PL i EN: -18 px; offscreen ×1,6 EN: -14 px),
+    dłuższe zdanie o rodowodzie przy wąskim oknie spychało je w dół (natywnie ×1 PL: 32 px wobec 24 px
+    rezerwy). Koszt: wiersz od otwarcia ma wysokość najdłuższego zdania (natywnie ×1 PL 24 → 32 px).
+
+    Miarą jest ukryta etykieta-dziecko z zawijaniem, po jednej na zdanie - ta sama droga liczenia co
+    etykiety; tekst miary zmienia się tylko, gdy zdanie klucza w języku chwili liczenia jest inne (bez
+    zdarzeń zmiany tekstu przy każdym przeliczeniu układu). Font etykiety idzie do miar przy każdym
+    liczeniu: przy arkuszu stylu aplikacji `setFont` rodzica nie schodzi do dzieci. Zdania w języku
+    chwili liczenia (`i18n.t`); okno żniw jest modalne i budowane przy każdym otwarciu, więc język
+    się w jego życiu nie zmienia."""
+
+    def __init__(self, klucze):
+        self._klucze = tuple(klucze)
+        super().__init__(i18n.t(self._klucze[0]))
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self._miary = []
+        for _klucz in self._klucze:
+            miara = QLabel(self)
+            miara.setWordWrap(True)
+            miara.hide()
+            self._miary.append(miara)
+
+    def heightForWidth(self, w):
+        wysokosc = super().heightForWidth(w)
+        for klucz, miara in zip(self._klucze, self._miary):
+            miara.setFont(self.font())
+            zdanie = i18n.t(klucz)
+            if miara.text() != zdanie:
+                miara.setText(zdanie)
+            wysokosc = max(wysokosc, miara.heightForWidth(w))
+        return wysokosc
 
 
 class HarvestDialog(QDialog):
@@ -671,11 +759,16 @@ class HarvestDialog(QDialog):
         self._lineage = {}               # `norm_path` → kopia stosu pod STACKS bez rodowodu dokładnego (lista)
         self._lineage_stacks = {}        # sha1_data → (frame_ids, kanon) tych stosów (z zeznania żniw, AR-104)
         self._fresh = {}                 # `norm_path(out)` → `plan_counts` ostatniego podglądu tego wyjścia
+        # `norm_path(out)` → `SondaNiepelna`: ostatni podgląd tego wyjścia nie przeczytał go całego albo
+        # padł (AR-222) - blokada „wciągnięte” do pełnego podglądu tego `out`; zmiana archiwum jej nie zdejmuje
+        self._sonda_niepelna = {}
         self._trouble = Counter()        # konflikty, błędy, niezgodne bajty - wszystkie biegi okna
         self._ran = False                # okno puściło choć jeden bieg apply
         self._last_counts = Counter()    # statusy ostatniego biegu (zdanie „nic nie wciągnięto”)
         self._last_cancelled = 0         # nietknięte w ostatnim, przerwanym biegu
         self._last_error = None          # wyjątek rdzenia ostatniego biegu
+        self._last_manifest = None       # niezapisane zeznanie ostatniego biegu (zdanie)
+        self._szczegoly_biegu = ""       # szczegół systemu obu - podpowiedź zdania paska (AR-218)
         self._close_after_apply = None   # kod zamknięcia zgłoszonego w biegu apply
         self._closing = False
         self._zwolnione = False          # `deleteLater` po zamknięciu już zlecone (`_zwolnij_gdy_wolne`)
@@ -695,7 +788,7 @@ class HarvestDialog(QDialog):
         self._rel_pending = False        # zamówienie przyszło w biegu listy → świeża lista po sprzątnięciu
         self._rel_started = False        # pierwsza lista przyszła (wybór startowy zrobiony albo oddany polu)
         self._releases = []              # wiersze listy wydań w kolejności tabeli
-        self._rel_missing = ()           # karty bez folderu na dysku z ostatniej listy (AR-147)
+        self._rel_missing = ()           # `(karta, powód)` kart bez folderu albo nieczytelnych (AR-147, AR-222)
         self.setWindowTitle(i18n.t("harvest.title"))
         self.setModal(True)
         self.resize(980, 600)
@@ -758,16 +851,18 @@ class HarvestDialog(QDialog):
         self.rel_table.setVisible(reserve)
         v.addWidget(self.rel_table)
         # Wiersz zaznaczonego wydania bez niczego do wciągnięcia: zdanie (folder można skasować albo
-        # najpierw przegląd) i „Otwórz” - bez kasowania.
+        # najpierw przegląd albo rodowód) i „Otwórz” - bez kasowania. Zarezerwowany wiersz trzyma
+        # wysokość NAJWYŻSZEGO z trzech zdań (`_ZdanieZRezerwa`, AR-225) - zdanie, które lista z tła
+        # pokaże, nie przesuwa pola pod nim.
         row_d = QHBoxLayout()
-        self.rel_done_note = QLabel(i18n.t("harvest.rel.done_note"))
+        self.rel_done_note = _ZdanieZRezerwa(("harvest.rel.done_note", "harvest.rel.review_note",
+                                              "harvest.rel.lineage_note"))
         self.rel_done_note.setProperty("role", "secondary")
-        self.rel_done_note.setWordWrap(True)
         row_d.addWidget(self.rel_done_note, 1)
         self.btn_open_release = QPushButton(i18n.t("harvest.rel.btn_open"))
         self.btn_open_release.setAutoDefault(False)
         self.btn_open_release.clicked.connect(self._on_open_release)
-        row_d.addWidget(self.btn_open_release)
+        row_d.addWidget(self.btn_open_release, 0, Qt.AlignTop)     # przy zdaniu, nie w środku wyższego wiersza
         v.addLayout(row_d)
         for w in (self.rel_done_note, self.btn_open_release):
             if reserve:
@@ -1360,9 +1455,15 @@ class HarvestDialog(QDialog):
         if payload["missing"]:
             self._show_notice(i18n.t("harvest.missing_dir", path=wbpp_dir), "error")
             return
+        plan = payload["plan"]
+        nieprzeczytane = plan.unreadable_dirs
+        if nieprzeczytane and norm_path(nieprzeczytane[0][0]) == norm_path(wbpp_dir):
+            # Samego wyjścia nie da się przeczytać (`stat` przeszedł, listing nie: odmowa 5, zerwanie
+            # udziału - AR-222): to sonda, która padła, nie pusty katalog - jak błąd `stat` (AR-199).
+            self._on_dry_failed(gen, nieprzeczytane[0][1])
+            return
         # Pamięć pola = ostatnie wyjście, które ISTNIAŁO: literówka nie wraca przy następnym otwarciu.
         self._settings().setValue("harvest/last_output", wbpp_dir)
-        plan = payload["plan"]
         self._plan = plan
         self._probed = wbpp_dir
         self._shown_out = wbpp_dir                   # wynik biegu z tego planu liczy pliki względem tego samego wyjścia
@@ -1380,13 +1481,25 @@ class HarvestDialog(QDialog):
                                     if it.status == "exists" and not it.known_to_db
                                     and it.kind == "master_light" and it.sha1_data and it.frame_ids)
         # Wiersz listy z tym `out` liczy się teraz ze świeżego planu, nie z zeznań (wynik bez
-        # zeznania wisiałby inaczej jako „do sprawdzenia” na zawsze); inne wiersze stoją.
-        self._fresh[norm_path(wbpp_dir)] = plan_counts(plan.items)
+        # zeznania wisiałby inaczej jako „do sprawdzenia” na zawsze); inne wiersze stoją. Plan
+        # NIEPEŁNY (AR-222) wiersza nie liczy, a stawia BLOKADĘ (`SondaNiepelna`): jego zera nie
+        # obejmują katalogów nieprzeczytanych, a liczby listy sprzed podglądu są stare - jedne i drugie
+        # odsłoniłyby „folder możesz skasować”. Zdejmuje ją dopiero pełny podgląd tego `out`.
+        if nieprzeczytane:
+            self._fresh.pop(norm_path(wbpp_dir), None)
+            self._sonda_niepelna[norm_path(wbpp_dir)] = SondaNiepelna(len(nieprzeczytane))
+        else:
+            self._sonda_niepelna.pop(norm_path(wbpp_dir), None)
+            self._fresh[norm_path(wbpp_dir)] = plan_counts(plan.items)
         self._render_release_states()
         self._fill(plan.items)
+        niepelny, szczegol = unread_note(nieprzeczytane, wbpp_dir)
         if not plan.items:
             self.head_label.setText("")
-            self._show_notice(i18n.t("harvest.empty", path=wbpp_dir))
+            if niepelny:                             # pusto w części przeczytanej - nie „brak masterów”
+                self._show_notice(niepelny, "warn", szczegol)
+            else:
+                self._show_notice(i18n.t("harvest.empty", path=wbpp_dir))
         else:
             c = status_counts(plan.items)
             self.head_label.setText(i18n.t("harvest.head_dry", place=c.get("would-place", 0),
@@ -1395,19 +1508,31 @@ class HarvestDialog(QDialog):
             # obiektu) - manifest perspektywy gridu leżący wyżej nie jest wydaniem tych flatów.
             # Ścieżka = gdzie plik manifestu LEŻY, nie korzeń zapisany w nim w dniu wydania.
             found = payload.get("manifest_root")
-            self._show_notice(i18n.t("harvest.manifest_note", path=found or plan.manifest_root)
-                              if plan.manifest_root else "")
+            wydanie = (i18n.t("harvest.manifest_note", path=found or plan.manifest_root)
+                       if plan.manifest_root else "")
+            if niepelny:                             # najpierw plan niepełny, potem wydanie
+                self._show_notice(" ".join(z for z in (niepelny, wydanie) if z), "warn", szczegol)
+            else:
+                self._show_notice(wydanie)
         self._sync_stale()
 
     @Slot(int, object)
     def _on_dry_failed(self, gen, msg):
-        """Sonda padła: błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem (AR-184)."""
+        """Sonda padła: błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem (AR-184).
+        Wiersz listy z tym wyjściem dostaje blokadę „podgląd nieudany” (AR-222): ani poprzedni podgląd,
+        ani liczby listy nie mówią „wciągnięte”, dopóki pełny podgląd tego `out` się nie uda. Wyjście
+        zna worker sondy (żyje do sprzątnięcia wątku, także przy wywołaniu z `_on_dry_done`)."""
         self._set_probing(False)
         if self._closing:
             return
         if gen != self._gen:
             self._dry_pending = True
             return
+        wyjscie = getattr(self._dry_worker, "_wbpp_dir", None)
+        if wyjscie:
+            self._fresh.pop(norm_path(wyjscie), None)
+            self._sonda_niepelna[norm_path(wyjscie)] = SondaNiepelna()
+            self._render_release_states()
         self._plan = None
         self._sync_buttons()
         self._show_notice(i18n.t("harvest.dry_failed", msg=tekst_powodu(msg)), "error",
@@ -1593,15 +1718,29 @@ class HarvestDialog(QDialog):
         self._select_release_for(path)
 
     def _zdanie_listy(self, rows):
-        """`(zdanie, rola)` nad listą wydań: karta bez folderu na dysku mówi o SOBIE w roli ostrzeżenia
-        (AR-147) - także obok listy z innych kart, bo jej wydań lista nie policzyła - a zdanie o pustych
-        kartach zostaje dla kart, które istnieją i nie mają wydań. Pusty tekst = lista mówi sama."""
-        brak = self._rel_missing
+        """`(zdanie, rola, szczegół)` nad listą wydań: karta bez folderu na dysku mówi o SOBIE w roli
+        ostrzeżenia (AR-147) - także obok listy z innych kart, bo jej wydań lista nie policzyła - a zdanie
+        o pustych kartach zostaje dla kart, które istnieją i nie mają wydań. Karta, której folderu albo
+        `OBJECTS` nie da się przeczytać (zerwany udział, odmowa - AR-222), mówi klasą błędu w języku UI,
+        a surowy tekst systemu stoi w szczególe; obok braku - drugim zdaniem. Pusty tekst = lista mówi
+        sama."""
+        brak = [karta for karta, powod in self._rel_missing if powod is None]
+        nieczytelne = [(karta, powod) for karta, powod in self._rel_missing if powod is not None]
+        zdania = []
         if len(brak) == 1:
-            return i18n.t("harvest.rel.missing_one", path=brak[0]), "warn"
-        if brak:
-            return i18n.t_plural("harvest.rel.missing_many", len(brak), paths=", ".join(brak)), "warn"
-        return ("" if rows else i18n.t("harvest.rel.none")), None
+            zdania.append(i18n.t("harvest.rel.missing_one", path=brak[0]))
+        elif brak:
+            zdania.append(i18n.t_plural("harvest.rel.missing_many", len(brak), paths=", ".join(brak)))
+        if len(nieczytelne) == 1:
+            karta, powod = nieczytelne[0]
+            zdania.append(i18n.t("harvest.rel.unreachable_one", path=karta, msg=tekst_powodu(powod)))
+        elif nieczytelne:
+            zdania.append(i18n.t_plural("harvest.rel.unreachable_many", len(nieczytelne),
+                                        paths=", ".join(karta for karta, _powod in nieczytelne)))
+        if zdania:
+            szczegol = "\n".join(w for w in (wiersz_systemu(p) for _k, p in nieczytelne) if w)
+            return " ".join(zdania), "warn", szczegol
+        return ("" if rows else i18n.t("harvest.rel.none")), None, ""
 
     def _take_lineage(self, rows):
         """Stosy z listy, których rodowodu dokładnego baza nie ma (AR-104: zwykłe „Zamknij”, potem
@@ -1617,8 +1756,10 @@ class HarvestDialog(QDialog):
         self._sync_buttons()
 
     def _fresh_of(self, row):
-        """`plan_counts` ostatniego podglądu `out` tego wiersza albo None (wiersz mówi listą)."""
-        return self._fresh.get(norm_path(row.out_dir))
+        """`plan_counts` ostatniego podglądu `out` tego wiersza, `SondaNiepelna` (podgląd niepełny albo
+        nieudany - blokada przed każdą liczbą, AR-222) albo None (wiersz mówi listą)."""
+        klucz = norm_path(row.out_dir)
+        return self._sonda_niepelna.get(klucz) or self._fresh.get(klucz)
 
     def _render_release_states(self):
         """Komórka stanu każdego wiersza - z listy albo ze świeżego planu jego `out` (`_fresh`) -
@@ -1823,11 +1964,12 @@ class HarvestDialog(QDialog):
         self._show_head_done(c, cancelled=res.cancelled)
         if res.manifest_error:
             # Błąd systemu klasą w języku UI, surowy tekst systemu pod kursorem (AR-184).
-            self._show_notice(i18n.t("harvest.manifest_error", err=tekst_powodu(res.manifest_error)),
+            self._show_notice(self._zdanie_zeznania(res.manifest_error, c),
                               "warn", wiersz_systemu(res.manifest_error))
         else:
             self._show_notice("")
-        self._set_summary(c, cancelled_n=c.get("cancelled", 0) if res.cancelled else 0)
+        self._set_summary(c, cancelled_n=c.get("cancelled", 0) if res.cancelled else 0,
+                          manifest_error=res.manifest_error)
         self._outcome = i18n.t("harvest.btn_cancelled" if res.cancelled else
                                "harvest.btn_done" if c.get("placed") else "harvest.btn_nothing")
         self._sync_buttons()
@@ -1838,7 +1980,8 @@ class HarvestDialog(QDialog):
         """Wyjątek rdzenia w biegu. Tabela, liczby i `summary` biorą prawdę z postępu: pozycja,
         która przeszła przez klingę, ma jej status; reszta planu nie została tknięta (`cancelled`).
         Kopie, które leżą, dalej można przyjąć. Błąd systemu klasą mówi w języku UI w notce
-        i w zdaniu paska (`_set_summary`), surowy tekst systemu - pod kursorem notki (AR-184)."""
+        i w zdaniu paska (`_set_summary`), surowy tekst systemu - pod kursorem notki (AR-184) i zdania
+        paska (AR-218)."""
         msg = tekst_powodu(powod)
         done_n, total = self._apply_seen
         self._apply_end()
@@ -1851,7 +1994,7 @@ class HarvestDialog(QDialog):
         made = i18n.t("harvest.made_before_error", done=done_n, total=total) if done_n else ""
         self._show_notice(i18n.t("harvest.apply_error", msg=msg, made=made), "error",
                           wiersz_systemu(powod))
-        self._set_summary(c, cancelled_n=0, error=msg)
+        self._set_summary(c, cancelled_n=0, error=powod)
         self._outcome = i18n.t("harvest.btn_error")
         self._sync_buttons()
         self._trigger_releases()                     # kopie sprzed błędu też zmieniają stan wydania
@@ -1866,14 +2009,30 @@ class HarvestDialog(QDialog):
             head += i18n.t("harvest.cancelled_tail", n=c.get("cancelled", 0))
         self.head_label.setText(head)
 
-    def _set_summary(self, c, *, cancelled_n, error=None):
+    def _set_summary(self, c, *, cancelled_n, error=None, manifest_error=None):
         """Fakty ostatniego biegu do zdania paska (statusy, nietknięte przy przerwaniu, wyjątek
-        rdzenia); samo zdanie składa `_refresh_summary` ze wszystkich faktów okna."""
+        rdzenia, niezapisane zeznanie biegu); samo zdanie składa `_refresh_summary` ze wszystkich
+        faktów okna. `error` i `manifest_error` to powody rdzenia: zdanie w języku UI idzie do zdania
+        paska, surowy tekst systemu (`wiersz_systemu`) do jego podpowiedzi (AR-218) - pasek stanu
+        to jedyny ślad po zamknięciu okna, a notka z plikiem, który padł, zamyka się z nim."""
         self._ran = True
         self._last_counts = Counter(c)
         self._last_cancelled = cancelled_n
-        self._last_error = error
+        self._last_error = tekst_powodu(error) if error else None
+        self._last_manifest = self._zdanie_zeznania(manifest_error, c) if manifest_error else None
+        self._szczegoly_biegu = "\n".join(wiersz_systemu(p) for p in (error, manifest_error)
+                                          if p and wiersz_systemu(p))
         self._refresh_summary()
+
+    def _zdanie_zeznania(self, powod, c):
+        """Zdanie niezapisanego zeznania biegu (notka i zdanie paska): „Kopie leżą w archiwum, ale…”
+        wyłącznie wtedy, gdy kopie leżą - wciągnięte w oknie (`_placed_n`) albo zastane w archiwum
+        w tym biegu (`exists` w statusach `c`). Zeznanie pisze się zawsze, także przy biegu
+        przerwanym przed pierwszą kopią i przy samych błędach kopii - wtedy samo „zeznania nie
+        zapisano”."""
+        klucz = ("harvest.manifest_error" if self._placed_n or c.get("exists")
+                 else "harvest.manifest_error_none")
+        return i18n.t(klucz, err=tekst_powodu(powod))
 
     def _summary_fact(self, *, with_root):
         """Zdanie główne paska: ile wciągnięto, a bez kopii - ile kopii w archiwum nie zna baza,
@@ -1905,10 +2064,17 @@ class HarvestDialog(QDialog):
         """Dopiski zdania paska ze WSZYSTKICH biegów okna: błąd przy kopiach, które leżą, niezerowe
         konflikty, błędy i niezgodne bajty (zera milczą), kopie nieznane bazie obok wciągniętych,
         nietknięte przy przerwaniu. Pasek stanu to jedyny ślad po zamknięciu okna, a „wciągnięto 3”
-        bez „konflikty: 1” kłamie o komplecie."""
+        bez „konflikty: 1” kłamie o komplecie.
+
+        Błąd biegu stoi w zdaniu ZAWSZE: w zdaniu głównym, gdy nic nie leży, a inaczej tutaj - także
+        przy samych stosach do rodowodu (`_lineage`), przy których zdanie główne mówiło stosy, a błąd
+        znikał z paska. Niezapisane zeznanie biegu (`manifest_error`) - tak samo: notka okna mówiła
+        o nim, pasek milczał (AR-218)."""
         tail = ""
-        if self._last_error and (self._placed_n or self._unknown):
+        if self._last_error and (self._placed_n or self._unknown or self._lineage):
             tail += " · " + i18n.t("harvest.status_error", msg=self._last_error)
+        if self._last_manifest:
+            tail += " · " + self._last_manifest
         for status, key in _TROUBLE_KEYS:
             if self._trouble[status]:
                 tail += i18n.t(key, n=self._trouble[status])
@@ -1923,7 +2089,13 @@ class HarvestDialog(QDialog):
         """`summary` = zdanie główne ze ścieżką + dopiski. Drugi bieg z zerem po pierwszym
         z wciągnięciem mówiłby inaczej „nic nie wciągnięto” nad korzeniem, który gospodarz przyjmuje."""
         fact = self._summary_fact(with_root=True)
-        self.summary = None if fact is None else fact + self._summary_tail()
+        self.summary = None if fact is None else self._zdanie_paska(fact + self._summary_tail())
+
+    def _zdanie_paska(self, tekst):
+        """Zdanie paska ze szczegółem systemu błędu i niezapisanego zeznania ostatniego biegu
+        (`ZdanieZeSzczegolem`, AR-218) - oba człony zdanie mówi zawsze (`_summary_fact`,
+        `_summary_tail`), więc szczegół zawsze ma swoje zdanie. Bez szczegółu - zwykły tekst."""
+        return ZdanieZeSzczegolem(tekst, self._szczegoly_biegu) if self._szczegoly_biegu else tekst
 
     def _close_summary(self):
         """Zdanie zwykłego „Zamknij” przy kopiach do przyjęcia: fakt, dopiski, INSTRUKCJA, a ścieżka
@@ -2043,7 +2215,7 @@ class HarvestDialog(QDialog):
         self.harvested_stacks = ([(sha1, ids, kanon) for sha1, (ids, kanon) in stosy.items()]
                                  if accepted else [])
         if not accepted and self._receivable_dirs():
-            self.summary = self._close_summary()
+            self.summary = self._zdanie_paska(self._close_summary())
         super().done(r)
         self._zwolnij_gdy_wolne()
 

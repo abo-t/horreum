@@ -64,6 +64,7 @@ from . import exif, repo
 from .hashing import sha1_of, sha1_of_span
 from .item_reasons import OdmowaZPowodem, PowodPozycji   # odmowy XISF z kodem (AR-158) - liść
 from .item_reasons import blad_systemu, proza_z_diagnoza   # błąd systemu klasą w odmowie (AR-198)
+from .item_reasons import powod_systemu    # dowód nieobecności z klasy, nie z podklasy wyjątku (AR-211)
 from .resolve.cameras import camera_identity
 from .resolve.frames import (HISTORY_MASTER_KINDS, kind_from_path, kind_from_testimony,
                              normalize_kind)
@@ -1574,10 +1575,13 @@ def path_gone(path):
     """DOWÓD NIEOBECNOŚCI pliku (P5/D-V-12) — TRÓJSTANOWY, bo „nie ma" i „nie wolno spojrzeć" to
     dwie różne odpowiedzi, a tylko pierwsza uprawnia do zdjęcia obecności (`present=0`):
 
-      `True`  — system mówi NIE MA: `FileNotFoundError` (ENOENT) albo `NotADirectoryError`
-                (ENOTDIR — komponent ścieżki przestał być katalogiem);
-      `False` — plik jest;
-      `None`  — NIE WIEM: każdy inny `OSError` (brak uprawnień, zerwany SMB, timeout, ELOOP).
+      `True`  - system mówi NIE MA: klasa `os_missing` właściciela (`item_reasons.powod_systemu`:
+                WinError 2/3, ENOENT bez kodu Windows) albo `NotADirectoryError` (ENOTDIR - komponent
+                ścieżki przestał być katalogiem);
+      `False` - plik jest;
+      `None`  - NIE WIEM: każdy inny `OSError` (brak uprawnień, zerwany SMB, timeout, ELOOP) - także
+                `FileNotFoundError`, którym CPython podaje zerwany udział (WinError 53/67) i dysk,
+                którego nie ma (15). Podklasa wyjątku nie jest dowodem (AR-211).
 
     `os.path.exists` jest tu ZAKAZANY: zwraca `False` w OBU złych przypadkach, więc awaria sieci
     albo odebrane uprawnienia wyglądałyby jak skasowany plik. Wołający MUSI rozróżniać `is True`
@@ -1587,8 +1591,10 @@ def path_gone(path):
     zerwane dowiązanie = treści nie ma. Hardlinki projekcji (`projection.py`) statują normalnie."""
     try:
         os.stat(path)
-    except (FileNotFoundError, NotADirectoryError):
+    except NotADirectoryError:
         return True
+    except FileNotFoundError as exc:
+        return True if getattr(powod_systemu(exc), "code", None) == "os_missing" else None
     except OSError:
         return None
     return False
@@ -2179,7 +2185,9 @@ def canonize_root(root):
          (tożsamość `location.path` jest LITEROWA; UNC dublowałby lokacje przy tym samym
          `volume_serial` i brama by pudłowała);
       4. `GetLongPathNameW` — casing/długa forma Z DYSKU (zachowuje literę dysku — skill
-         `windows-mapped-drive-path-identity`); zwrot 0 = root nie istnieje → **abort** (EXPECT);
+         `windows-mapped-drive-path-identity`); zwrot 0 = root nie istnieje albo niedostępny →
+         **abort** (EXPECT) wyjątkiem `OSError` z kodem systemu i ścieżką (AR-212: podklasa z kodu -
+         2/3/53/67 `FileNotFoundError`, 5/21 `PermissionError`; klasę mówi `item_reasons.powod_systemu`);
       5. wielka litera dysku.
 
     Komponenty PONIŻEJ roota niesie `os.walk` (readdir — casing z dysku, jak u dawcy).
@@ -2189,10 +2197,15 @@ def canonize_root(root):
         raise ValueError(
             f"root UNC ({s!r}) poza torem tożsamości — zamapuj literę dysku i skanuj przez nią")
     if sys.platform == "win32":
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)   # kod błędu pewny dopiero tak
         buf = ctypes.create_unicode_buffer(32768)
-        n = ctypes.windll.kernel32.GetLongPathNameW(s, buf, 32768)
+        n = k32.GetLongPathNameW(s, buf, 32768)
         if n == 0:                        # EXPECT: root nie istnieje / niedostępny → abort
-            raise FileNotFoundError(f"root skanu nie istnieje albo niedostępny: {s}")
+            # Kod z `GetLastError` (AR-212) - ten sam, który dałby `os.stat`; tekst systemu bez
+            # kropki końcowej, jak w wyjątkach CPython, i ze ścieżką. Do AR-212 `FileNotFoundError`
+            # z prozą PL bez kodu: klasa ginęła, a zdanie rdzenia szło do UI EN.
+            err = ctypes.get_last_error()
+            raise OSError(None, ctypes.FormatError(err).rstrip(" .\r\n"), s, err)
         s = buf.value
         if len(s) >= 2 and s[1] == ":":
             s = s[0].upper() + s[1:]
@@ -2468,14 +2481,16 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     Plik nieczytelny / nieosiągalny → `failed` + ścieżka, ZERO zapisu (nie stawiamy markerów, nie
     zdejmujemy obecności - od tego są `scan_tree` i `presence`); zostaje w `remaining`.
 
-    Pliku BRAK (`FileNotFoundError`), a KORZEŃ przebiegu jest osiągalny → `missing` + ścieżka, też
-    ZERO zapisu: kopię skasowano z dysku, a baza jeszcze o tym nie wie. To nie jest fakt o czytelności
-    pliku, tylko robota passa obecności - raport nazywa ją osobno, żeby „nieczytelne 2" nie wysyłało
-    człowieka do pliku, którego nie ma. Świadkiem jest korzeń, nie katalog-rodzic: skasowanie CAŁEGO
-    folderu nocy zabiera rodzica razem z plikiem, a to nadal jest skasowanie. Korzeń nieosiągalny
-    (zerwany udział) → `failed`: wtedy brak pliku nie dowodzi niczego. Rozróżnienie musi iść przez
-    świadka, bo Windows zgłasza zerwaną ścieżkę sieciową (`ERROR_BAD_NETPATH`) tym samym
-    `FileNotFoundError` co skasowany plik.
+    Pliku BRAK (klasa `os_missing`, WinError 2/3), a KORZEŃ przebiegu jest osiągalny → `missing`
+    i ścieżka, też ZERO zapisu: kopię skasowano z dysku, a baza jeszcze o tym nie wie. To nie jest
+    fakt o czytelności pliku, tylko robota passa obecności - raport nazywa ją osobno, żeby
+    „nieczytelne 2" nie wysyłało człowieka do pliku, którego nie ma. Świadkiem jest korzeń, nie
+    katalog-rodzic: skasowanie CAŁEGO folderu nocy zabiera rodzica razem z plikiem, a to nadal jest
+    skasowanie. Korzeń nieosiągalny
+    (zerwany udział) → `failed`: wtedy brak pliku nie dowodzi niczego. Zerwaną ścieżkę sieciową
+    (`ERROR_BAD_NETPATH` 53, `ERROR_BAD_NET_NAME` 67) Windows zgłasza tym samym `FileNotFoundError`
+    co skasowany plik - rozstrzyga najpierw klasa właściciela (`item_reasons.powod_systemu`: 53/67
+    → `failed` od razu, AR-211), a świadek waży wyłącznie brak (2/3).
       * `root` podany → świadek = `canonize_root(root)` (ta sama forma, którą zawęża kandydatów).
       * `root is None` → świadek = najbliższy ISTNIEJĄCY przodek pliku PONIŻEJ litery dysku albo
         korzenia udziału (`R:\\`, `\\\\host\\share\\`), a gdy takiego nie ma - sama kotwica. Bez
@@ -2534,8 +2549,12 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                     raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
                 header, _cards, header_hash, _hdu, _comp, _span, image_roles, _hist = _read_meta(
                     path, os.stat(path).st_size)
-            except FileNotFoundError as exc:   # skasowany albo zerwany udział - rozstrzyga świadek
-                if swiadek_zyje(path):
+            except FileNotFoundError as exc:   # skasowany albo zerwany udział - klasa, potem świadek
+                # Zerwany udział (WinError 53/67) i dysk, którego nie ma (15), CPython podaje tą samą
+                # podklasą: brak mówi wyłącznie klasa `os_missing` właściciela, a świadek rozstrzyga
+                # dopiero ją (AR-211) - inaczej plik na zerwanym udziale przy żywym korzeniu szedł
+                # do `missing`, czyli do „Oznacz zniknięte”.
+                if getattr(powod_systemu(exc), "code", None) == "os_missing" and swiadek_zyje(path):
                     s.missing += 1
                     s.missing_paths.append(path)
                 else:
@@ -3123,8 +3142,9 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 # odczytem (walk go widział, `stat`/otwarcie już nie). Marker znaczy „kopia JEST
                 # nieczytelna, przeczytaj ją ponownie" - dla nieistniejącego pliku to kłamstwo bez
                 # wyjścia, a przy `present=0` byłoby hybrydą zakazaną przez inwariant D-V-5.
-                # Rozstrzyga `_gone` (lstat + errno), nie domysł; zniknięcie idzie do
-                # `mark_location_vanished` (ta sama klinga).
+                # Rozstrzyga `path_gone` (klasa „nie ma” właściciela), nie domysł; zniknięcie idzie do
+                # `mark_location_vanished` (ta sama klinga). „Nie wiem” (zerwany udział 53/67, odmowa)
+                # zostawia kopię obecną z markerem - następny skan przeczyta ją ponownie (AR-211).
                 #
                 # RODZAJ (P4-2) nadany wyżej, przy obiekcie wyjątku; diagnozę składa ten sam
                 # właściciel, co w `scan_file` (`unreadable_reason_of`), więc obie drogi mówią

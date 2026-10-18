@@ -466,3 +466,73 @@ def test_raport_cli_obecnosci_mowi_ile_nieprzeczytanych_ucial():
     assert tekst.count("... i 2 wiecej") == 1
     pelna = _format_presence("x.db", s, apply=False, limit=7)
     assert "R:/A/k6" in pelna and "wiecej" not in pelna
+
+
+# ============================================================ zerwany udział w potwierdzeniu (AR-211, AR-212)
+
+
+def test_obecnosc_zerwany_udzial_nierozstrzygniety_bez_zapisu(tree, monkeypatch, capsys):
+    """AR-211 na szwie `presence` ↔ `scan.path_gone` (PRAWDZIWE `path_gone`, atrapa tylko `os.stat`
+    usuniętej kopii): zerwany udział (53 - `FileNotFoundError`) to „nie wiem”, nie zniknięcie -
+    `undecided` ze ścieżką, apply nic nie zapisuje, raport CLI wypisuje kopię do sprawdzenia.
+    Falsyfikator: dawna klauzula `path_gone` - `confirmed_gone == 1` i oznaczenie zniknięcia."""
+    from horreum import cli
+    con, root, vol, paths = tree
+    os.remove(paths[0])
+    exc = OSError(None, "Nie można odnaleźć ścieżki sieciowej", paths[0], 53)
+    if getattr(exc, "winerror", None) != 53:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    prawdziwy = os.stat
+
+    def stat(p, *a, **kw):
+        if isinstance(p, (str, os.PathLike)) and os.fspath(p) == paths[0]:
+            raise exc
+        return prawdziwy(p, *a, **kw)
+    monkeypatch.setattr(os, "stat", stat)
+    s = presence.check(con, root, volume=vol, apply=True, now=LATER)
+    assert (s.candidates, s.undecided, s.confirmed_gone, s.vanished) == (1, 1, 0, 0)
+    assert s.undecided_paths == [paths[0]]
+    assert _loc(con, paths[0])["present"] == 1
+    assert _count(con, "location.vanished") == 0
+    con.commit()
+    dbp = con.execute("PRAGMA database_list").fetchone()[2]
+    assert cli.main(["presence", dbp, "--root", root, "--volume", vol]) == 0
+    linie = capsys.readouterr().out.splitlines()
+    i = linie.index("  NIEROZSTRZYGNIETE: 1 (stat bez odpowiedzi -- zero zapisu)")
+    assert linie[i + 1] == f"    {paths[0]}", linie
+
+
+def test_raport_cli_nierozstrzygnietych_uciety_do_limitu():
+    """Lista kopii nierozstrzygniętych w raporcie CLI (AR-211) ucięta do `limit` z ogonem „ile
+    więcej” - jak lista wynurzonych i zniknięć."""
+    from horreum.cli import _format_presence
+    s = presence.PresenceSummary(root="R:/A", volume="V", confirmed=True, undecided=7,
+                                 undecided_paths=[f"R:/A/u{i}.fits" for i in range(7)])
+    tekst = _format_presence("x.db", s, apply=False, limit=5)
+    assert "R:/A/u4.fits" in tekst and "R:/A/u5.fits" not in tekst
+    assert "(+2 wiecej; zwieksz --limit)" in tekst
+
+
+@pytest.mark.parametrize("kod, klasa", [(21, "udział sieciowy albo dysk nie odpowiada (WinError 21)"),
+                                        (5, "odmowa dostępu do pliku (WinError 5)")])
+def test_cli_presence_korzen_permission_error_mowi_klasa_kod_1(tmp_path, capsys, monkeypatch, kod, klasa):
+    """AR-212: korzeń z dyskiem niegotowym (21) albo odmową (5) to `PermissionError`, nie
+    `FileNotFoundError` - handler `presence` łapał tylko tę drugą, więc CLI kończyło się śladem
+    stosu. Teraz wiersz `blad --` klasą z surowym tekstem, kod 1, druk w cp1250. Falsyfikator:
+    `except (ValueError, FileNotFoundError)` - wyjątek ucieka z `cli.main`."""
+    from horreum import cli
+    exc = OSError(None, "Komunikat systemu", r"X:\L", kod)
+    if not isinstance(exc, PermissionError):
+        pytest.skip("podklasa z `winerror` - wyłącznie Windows")
+    dbp = str(tmp_path / "p.db")
+    db.open_db(dbp).close()
+
+    def _pada(*_a, **_k):
+        raise exc
+    monkeypatch.setattr(presence, "check", _pada)
+    assert cli.main(["presence", dbp, "--root", str(tmp_path), "--volume", "V"]) == 1
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    (wiersz,) = [w for w in out.splitlines() if w.startswith("Horreum presence: blad -- ")]
+    assert wiersz.startswith(f"Horreum presence: blad -- {klasa} - PermissionError: [WinError {kod}] "
+                             "Komunikat systemu"), wiersz

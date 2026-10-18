@@ -563,7 +563,8 @@ def test_poza_klasa_bazy_tekst_jak_dotad(tmp_path, rodzaj):
 
 def test_druk_presence_zerwany_udzial_klasa_kod_1(tmp_path, capsys, monkeypatch):
     """`presence`: zerwany udział (53 to `FileNotFoundError`) - wiersz `blad --` mówi klasą
-    z surowym tekstem, kod 1 bez śladu stosu; odmowa korzenia (`canonize_root`) zdaniem jak dotąd."""
+    z surowym tekstem, kod 1 bez śladu stosu; wyjątek bez kodu systemu (sama proza) mówi swoim
+    tekstem jak dotąd. Odmowa korzenia `canonize_root` niesie od AR-212 kod systemu i mówi klasą."""
     from horreum import cli, presence
     dbp = str(tmp_path / "p.db")
     db.open_db(dbp).close()

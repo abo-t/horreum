@@ -6,6 +6,49 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.17.0] - 2026-10-18
+
+Wydanie o **zerwanym udziale, który znaczy „nie wiem”, i cofnięciu, które zostawia pliki do oka**. Gdy dysk
+sieciowy zniknie w trakcie skanu, sprawdzania kopii albo żniw, program nie uznaje plików za skasowane - mówi,
+czego nie przeczytał, i niczego nie zapisuje. Przerwane cofnięcie zapisu kart zostawiało obok pliku kopie,
+o których ponowienie milczało; teraz każda trafia do Porządków. Manifest wydania obiektu da się zapisać
+ponownie z okna wydania. **Schemat bazy 44 → 45** (werdykt plików przy śladzie cofnięcia): bazę otwartą w tej
+wersji 0.16.0 już nie otworzy - przed pierwszym uruchomieniem zrób kopię pliku bazy.
+
+### Dodane
+
+- **Werdykt plików przy śladzie cofnięcia** (migracja 0045): kopia zostawiona obok pliku przez przerwane
+  cofnięcie zapisu atomowego trafia do Porządków „Kopie zostawione do oka”, a kolejny zapis tej klatki raz
+  odmawia z powodem. Program niczego nie kasuje ani nie przenosi - pliki porównujesz i usuwasz sam; nazwa
+  znika z listy dopiero przy dowiedzionym braku pliku.
+- **„Zapisz manifest” w oknie wydania:** manifest uszkodzony albo niezapisany po awarii zapisuje się ponownie
+  bez ponownego wydania - program sam sprawdza komplet plików wydania i nie gubi niczego z poprzedniego
+  manifestu; po awarii kroku manifestu okno od razu pokazuje wynik świeżego sprawdzenia.
+- Cofnięcie z kopii tekstowej nagłówka po skanie rozpoznaje plik już cofnięty i mówi, na czym opiera ten
+  dowód (`header-fix --undo` podaje to osobnym wierszem).
+
+### Zmienione
+
+- **Zerwany udział sieciowy to „nie wiem”, nie „nie ma”:** skan, obecność kopii i fakty kopii uznają plik za
+  zniknięty wyłącznie przy dowiedzionym braku; przy zerwanym udziale niczego nie zapisują, a raport `presence`
+  wymienia ścieżki nierozstrzygnięte. Polecenia `scan`, `stacks` i `presence` przy niedostępnym korzeniu
+  kończą się jednym wierszem z klasą błędu (kod 1), import z fitsmirror tak samo.
+- **Żniwa:** katalogi, których nie dało się przeczytać, są wymienione w planie i na liście wydań; plan niepełny
+  nie oznacza wydania jako „wciągnięte” i nie podpowiada, że folder wydania można skasować.
+- **Odmowy w oknach** planera, wydania obiektu i zmiany obiektu: odmowa z powodem mówi swoim zdaniem, błąd
+  systemu albo bazy - klasą, a błąd nieprzewidziany - „błąd programu” ze szczegółem technicznym pod kursorem.
+- **Pasek stanu** Zbiorów, osi obiektu, Dostawy i planera ma szczegół błędu w podpowiedzi i menu „Kopiuj
+  zdanie / Kopiuj szczegół”; awaria etapu Dostawy nazywa etap; żniwa i „Zatwierdź ze ścieżki…” zostawiają
+  szczegół na pasku po zamknięciu okna; długa ścieżka w zdaniu łamie się w kilku wierszach.
+- **Szuflada zmian:** po zapisie przerwanym przez „Anuluj” podgląd pokazuje pozostałe zmiany; zdania bez
+  technicznych przedrostków („Writeback:”, „Undo:”, „Rename:”) i z odmianą liczby zmian.
+- „Rodowód do potwierdzenia” otwiera się na pierwszym obrazie z panelem Rodowód.
+- Okno żniw: pole i przyciski pod listą wydań nie skaczą przy zmianie zdania.
+
+### Naprawione
+
+- Komunikaty wyrażeń filtra i makra z polskimi znakami.
+
 ## [0.16.0] - 2026-10-16
 
 Wydanie o **błędach mówionych jednym zdaniem i cofaniu zapisu ze śladem w bazie**. Awaria dysku sieciowego albo
@@ -1477,7 +1520,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.16.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/abo-t/horreum/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/abo-t/horreum/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/abo-t/horreum/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/abo-t/horreum/compare/v0.13.0...v0.14.0

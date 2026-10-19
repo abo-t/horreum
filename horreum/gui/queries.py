@@ -11,10 +11,12 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 `json_each(?)` — literał stały, jeden parametr (zamiast dynamicznych `?` — PLAN_gui_grid §3).
 """
 
+import itertools
 import json
 import ntpath
 import os
 import re
+import threading
 from typing import NamedTuple
 
 from horreum import item_reasons                    # kodek powodu pozycji zmiany obiektu (AR-141)
@@ -2254,22 +2256,93 @@ def withheld_testimony_frame_ids(con):
         "SELECT DISTINCT frame_id FROM withheld_write WHERE settled_at IS NULL").fetchall()}
 
 
-def kept_copy_frame_ids(con):
-    """KOPIE ZOSTAWIONE DO OKA (AR-64, 0038, C8; AR-127, 0045): klatki, przy których przerwana podmiana
-    zostawiła pliki OBOK ścieżki (kopia wyparta, zwrotna, tymczasowy) z werdyktem `kept` - zamiar
-    podmiany commitu (`replace_intent.kept_paths`) albo ślad cofnięcia (`atomic_undo.kept_paths`) - a
-    któregoś z nich nie da się uznać za usunięty. Stan, nie zdanie jednego wyniku: wiersz Porządków
-    trwa, dopóki człowiek plików nie rozstrzygnie (porówna i usunie zbędne) - skan ich nie widzi
-    (sufiks kopii), więc bez tego wiersza nikt by o nich nie wiedział. Ścieżek jest garstka, więc
-    sprawdzenie dysku kosztuje tyle co nic. set[int].
+# PAMIĘĆ OBECNOŚCI KOPII ZOSTAWIONYCH DO OKA (AR-246, AR-252, AR-260): ostatni odczyt `scan.path_gone`
+# każdej nazwy z `kept_paths`, zrobiony przez PRZEGLĄD TŁA Porządków (`tasks._sprawdz_kopie`, wątek Pythona,
+# jeden na bazę). Czytelnik (`kept_copy_frame_ids` - liczniki Porządków w wątku GUI i w wątku liczników,
+# perspektywa Zbiorów) czyta tę pamięć BEZ I/O: `stat` zerwanego udziału nie zatrzyma już montażu, wejścia
+# w Porządki ani zamknięcia okna. Wynik NIETRWAŁY - pamięć procesu, nie baza: plik, który wrócił, pokaże
+# następny przegląd (montaż, każde wejście w Porządki, ponowienie). Klucz = nazwa znak w znak (ścieżka
+# bezwzględna - fakt o dysku, niezależny od bazy, więc zmiana bazy niczego nie unieważnia); wpisów nikt nie
+# sprząta - nazwa spoza wierszy `kept` nie ma czytelnika, a nazw jest garstka.
+# BILET (generacja): przegląd bierze bilet z jednego licznika PRZED każdym `stat`, a zapis przechodzi
+# wyłącznie z biletem wyższym niż zapisany dla tej nazwy - wygrywa odczyt rozpoczęty najpóźniej, więc
+# przegląd, który wisiał (zatrzymany widok, inna baza z tą samą nazwą), nie cofnie nowszego wyniku. Odczyt
+# odrzucony biletem, który przeczy zapisanemu „nie ma”, obniża wpis do „nie wiem” - kolejność biletów nie
+# musi być kolejnością `stat` (bilet pod zamkiem, `stat` poza nim), więc sprzeczność rozstrzyga się widocznie.
+# PRÓG ZAUFANIA (`ustaw_prog_obecnosci`): przegląd bazy wiszący ponad limit stawia swój bilet startu, a czytelnik
+# tej bazy traktuje „nie ma” zapisane PRZED tym biletem jak niesprawdzone - kopia przywrócona po dawnym odczycie
+# nie zostaje ukryta do powrotu udziału, na którym wisi inna nazwa.
+_OBECNOSC_LOCK = threading.Lock()
+_OBECNOSC: dict = {}                         # nazwa → (bilet, `True` | `False` | `None`)
+_PROGI: dict = {}                            # klucz bazy (`klucz_bazy`) → bilet startu wiszącego przeglądu
+_BILETY = itertools.count(1)
 
-    TRÓJSTAN (AR-127): nazwa znika z wiersza WYŁĄCZNIE po dowiedzionym braku (`scan.path_gone` →
-    `True`); „nie wiem” (brak uprawnień, zerwany udział) zostaje widoczne - inaczej awaria sieci
-    ukryłaby resztkę, którą werdykt w bazie dalej zgłasza. TOTALNOŚĆ: CHECK obu migracji nie
-    sprawdza elementów listy, więc wiersz z JSON-em spoza listy albo element inny niż niepusty tekst
-    nie wywraca Porządków - taki element się pomija."""
-    from horreum import scan                 # trójstan nieobecności - właściciel `path_gone` (AR-211)
-    wynik = set()
+
+def klucz_bazy(db_path):
+    """Klucz bazy w pamięci przeglądu (próg zaufania, rejestr przeglądów `tasks._PRZEGLADY`)."""
+    return os.path.normcase(os.path.abspath(db_path))
+
+
+def bilet_obecnosci():
+    """Bilet odczytu obecności - brany PRZED `scan.path_gone` (pamięć wyżej)."""
+    with _OBECNOSC_LOCK:
+        return next(_BILETY)
+
+
+def zapamietaj_obecnosc(sciezka, bilet, werdykt):
+    """Odczyt `scan.path_gone(sciezka)` z biletem `bilet` do pamięci - wyłącznie, gdy bilet jest wyższy
+    niż zapisany dla tej nazwy; odczyt z biletem niższym, który przeczy zapisanemu `True`, obniża wpis do
+    `None` (widoczny). Zwraca, czy zmieniła się WARTOŚĆ pod nazwą (nazwa niesprawdzona też jest wartością)."""
+    with _OBECNOSC_LOCK:
+        stary = _OBECNOSC.get(sciezka)
+        if stary is None or stary[0] < bilet:
+            _OBECNOSC[sciezka] = (bilet, werdykt)
+            return stary is None or stary[1] is not werdykt
+        if stary[1] is True and werdykt is not True:
+            _OBECNOSC[sciezka] = (stary[0], None)
+            return True
+        return False
+
+
+def ustaw_prog_obecnosci(db_path, bilet):
+    """Przegląd bazy `db_path` wisi ponad limit od biletu `bilet`: „nie ma” zapisane przed nim czytelnik tej
+    bazy traktuje jak niesprawdzone (pamięć wyżej)."""
+    with _OBECNOSC_LOCK:
+        _PROGI[klucz_bazy(db_path)] = bilet
+
+
+def zdejmij_prog_obecnosci(db_path, bilet):
+    """Przegląd z biletem startu `bilet` skończył - próg bazy, który nie jest nowszy, znika."""
+    with _OBECNOSC_LOCK:
+        klucz = klucz_bazy(db_path)
+        if klucz in _PROGI and _PROGI[klucz] <= bilet:
+            del _PROGI[klucz]
+
+
+def obecnosc_kopii(sciezki, *, od_biletu=None):
+    """Migawka pamięci obecności dla `sciezki`: `{nazwa: True | False | None}` - nazwa nigdy nie sprawdzona
+    w tym procesie nie ma klucza; `True` z biletem niższym niż `od_biletu` (próg zaufania) też nie. Bez I/O."""
+    with _OBECNOSC_LOCK:
+        return {s: _OBECNOSC[s][1] for s in sciezki if s in _OBECNOSC
+                and not (_OBECNOSC[s][1] is True and od_biletu is not None and _OBECNOSC[s][0] < od_biletu)}
+
+
+def zapomnij_obecnosc():
+    """Pamięć obecności i progi zaufania od zera (testy - pamięć modułu przeżywa test)."""
+    with _OBECNOSC_LOCK:
+        _OBECNOSC.clear()
+        _PROGI.clear()
+
+
+def kept_copy_names(con):
+    """Nazwy plików zostawionych OBOK ścieżki przy werdykcie `kept` - zamiar podmiany commitu
+    (`replace_intent.kept_paths`, 0038) albo ślad cofnięcia (`atomic_undo.kept_paths`, 0045):
+    `[(frame_id, (nazwa, …)), …]`, wiersz po wierszu. Jeden właściciel predykatu dla czytelnika Porządków
+    (`kept_copy_frame_ids`) i przeglądu tła, który te nazwy sprawdza. Bez I/O.
+
+    TOTALNOŚĆ: CHECK obu migracji nie sprawdza elementów listy, więc wiersz z JSON-em spoza listy albo
+    element inny niż niepusty tekst nie wywraca Porządków - taki element się pomija."""
+    wynik = []
     for r in con.execute(
             "SELECT l.frame_id, ri.kept_paths FROM replace_intent ri "
             "JOIN header_backups hb ON hb.id = ri.backup_id JOIN location l ON l.id = hb.location_id "
@@ -2282,10 +2355,32 @@ def kept_copy_frame_ids(con):
             sciezki = json.loads(r[1])
         except ValueError:
             continue
-        if isinstance(sciezki, list) and any(
-                isinstance(s, str) and s and scan.path_gone(s) is not True for s in sciezki):
-            wynik.add(int(r[0]))
+        if isinstance(sciezki, list):
+            wynik.append((int(r[0]), tuple(s for s in sciezki if isinstance(s, str) and s)))
     return wynik
+
+
+def kept_copy_frame_ids(con):
+    """KOPIE ZOSTAWIONE DO OKA (AR-64, 0038, C8; AR-127, 0045): klatki, przy których przerwana podmiana
+    zostawiła pliki OBOK ścieżki (kopia wyparta, zwrotna, tymczasowy) z werdyktem `kept`
+    (`kept_copy_names`), a któregoś z nich nie da się uznać za usunięty. Stan, nie zdanie jednego wyniku:
+    wiersz Porządków trwa, dopóki człowiek plików nie rozstrzygnie (porówna i usunie zbędne) - skan ich nie
+    widzi (sufiks kopii), więc bez tego wiersza nikt by o nich nie wiedział. set[int].
+
+    TRÓJSTAN (AR-127): nazwa znika z wiersza WYŁĄCZNIE po dowiedzionym braku - ostatni odczyt przeglądu tła
+    (`scan.path_gone` → `True`, pamięć obecności wyżej); „nie wiem” (brak uprawnień, zerwany udział),
+    plik jest i nazwa jeszcze niesprawdzona w tym procesie - zostaje widoczne, inaczej awaria sieci albo start
+    aplikacji ukryłyby resztkę, którą werdykt w bazie dalej zgłasza. Czytelnik NIE dotyka dysku (AR-246):
+    usunięcie kopii przez człowieka zdejmuje wiersz po najbliższym przeglądzie, nie przy rachunku. Przy
+    przeglądzie tej bazy wiszącym ponad limit „nie ma” sprzed jego startu nie ukrywa nazwy (próg zaufania)."""
+    wiersze = kept_copy_names(con)
+    if not wiersze:
+        return set()
+    sciezka_bazy = db_path_of(con)
+    with _OBECNOSC_LOCK:
+        prog = _PROGI.get(klucz_bazy(sciezka_bazy)) if sciezka_bazy else None
+    migawka = obecnosc_kopii({s for _fid, sciezki in wiersze for s in sciezki}, od_biletu=prog)
+    return {fid for fid, sciezki in wiersze if any(migawka.get(s) is not True for s in sciezki)}
 
 
 def torn_write_frame_ids(con):

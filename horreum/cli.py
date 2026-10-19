@@ -735,6 +735,11 @@ def _main(argv=None):
             # Krok wydania przerwany błędem systemu (AR-197): wynik z powodem, nie ślad stosu. Zdanie
             # kroku z klasą i surowy tekst systemu ze ścieżką - wiersz CLI nie ma jej obok.
             print(f"Horreum project: blad -- {proza_z_diagnoza(res.error)}")
+            # Odmowa kroku manifestu mówi fakt i radę wspólną; gest ponowienia w terminalu to to samo
+            # polecenie - okno mówi tu swoje przyciski, CLI ich nie ma (AR-251).
+            if getattr(res.error, "code", None) in ("proj_manifest_damaged", "proj_manifest_foreign",
+                                                    "proj_manifest_busy"):
+                print("  potem: ponow to samo polecenie (horreum project ... --apply)")
             return 1
         return 0
     if args.cmd == "presence":

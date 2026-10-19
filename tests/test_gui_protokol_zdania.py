@@ -21,7 +21,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QCoreApplication, QEventLoop, Qt
-from PySide6.QtGui import QContextMenuEvent, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 import horreum
@@ -32,6 +32,7 @@ from horreum.gui.wb_worker import EtykietaBledu, InplaceGestureResult, Writeback
 from horreum.item_reasons import blad_systemu
 from horreum.lead_copy import LeadCopyResult
 
+from prawy_klik import menu_pola_otwarte, prawy_klik
 from test_gui_lead_copy import _po_gescie, _pozycje_kopii, _prawy_klik, _wiersz, widok  # noqa: F401
 from test_gui_powody_pisarza import _widok_nad
 
@@ -66,14 +67,6 @@ def _czekaj(warunek, opis, s=30):
             raise AssertionError(f"bezpiecznik {s} s: {opis}")
         QCoreApplication.processEvents(QEventLoop.AllEvents, 50)
         time.sleep(0.005)
-
-
-def _menu_pola(pole):
-    """Zdarzenie menu kontekstowego na polu - droga prawego kliku (`contextMenuEvent`)."""
-    srodek = pole.rect().center()
-    QApplication.sendEvent(pole, QContextMenuEvent(QContextMenuEvent.Mouse, srodek,
-                                                   pole.mapToGlobal(srodek)))
-    QApplication.processEvents()
 
 
 # ============================================================ API pola
@@ -127,35 +120,44 @@ def test_pole_zdania_minimum_szerokosci_zero(qapp):
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
 def test_kopiuj_szczegol_z_menu_prawego_kliku(qapp, jezyk, lang):
-    """Prawy klik na polu ze szczegółem: menu „Kopiuj zdanie” / „Kopiuj szczegół” (+ „Kopiuj
-    zaznaczenie” na polu z zaznaczonym tekstem); pozycja kopiuje do schowka (`trigger`, wzór
-    `test_gui_lead_copy`). Bez szczegółu - menu domyślne pola, własne nie powstaje. Falsyfikator:
-    menu bez pozycji szczegółu."""
+    """PRAWDZIWY prawy klik (`prawy_klik`: mysz przez okno, AR-254) na polu ze szczegółem: menu „Kopiuj
+    zdanie” / „Kopiuj szczegół” (+ „Kopiuj zaznaczenie” na polu z zaznaczonym tekstem - zaznaczenie
+    zostaje); pozycja kopiuje do schowka (`trigger`, wzór `test_gui_lead_copy`). Bez szczegółu - menu
+    własne nie powstaje. Pole stoi w oknie-rodzicu: pole najwyższego poziomu dostaje klik okna także
+    wtedy, gdy droga myszy do niego nie prowadzi. Falsyfikatory: menu bez pozycji szczegółu; pole bez
+    `contextMenuEvent`; pole przezroczyste dla myszy (syntetyczne zdarzenie menu go nie odróżnia)."""
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
     jezyk(lang)
+    okno = QWidget()
     pole = EtykietaBledu("")
-    pole.resize(300, 30)
-    pole.show()
-    _menu_pola(pole)
-    assert pole._menu is None
-    pole.ustaw("awaria", _tip())
-    _menu_pola(pole)
-    pozycje = {a.text(): a for a in pole._menu.actions()}
-    assert list(pozycje) == [i18n.t("wb.copy_sentence"), i18n.t("wb.copy_detail")]
-    pozycje[i18n.t("wb.copy_detail")].trigger()
-    assert QGuiApplication.clipboard().text() == _tip()
-    pozycje[i18n.t("wb.copy_sentence")].trigger()
-    assert QGuiApplication.clipboard().text() == "awaria"
-    pole._menu.hide()
-    if lang == "en":
-        assert not set("".join(pozycje)) & _POLSKIE
-    pole.setTextInteractionFlags(Qt.TextSelectableByMouse)        # jak notki żniw
-    pole.setSelection(0, 3)
-    _menu_pola(pole)
-    zaznaczenie = next(a for a in pole._menu.actions() if a.text() == i18n.t("wb.copy_selection"))
-    zaznaczenie.trigger()
-    assert QGuiApplication.clipboard().text() == "awa"
-    pole._menu.hide()
-    pole.close()
+    QVBoxLayout(okno).addWidget(pole)
+    okno.resize(320, 60)
+    okno.show()
+    try:
+        assert prawy_klik(pole) is None and pole._menu is None
+        pole.ustaw("awaria", _tip())
+        prawy_klik(pole)
+        pozycje = menu_pola_otwarte(pole)
+        assert list(pozycje) == [i18n.t("wb.copy_sentence"), i18n.t("wb.copy_detail")]
+        pozycje[i18n.t("wb.copy_detail")].trigger()
+        assert QGuiApplication.clipboard().text() == _tip()
+        pozycje[i18n.t("wb.copy_sentence")].trigger()
+        assert QGuiApplication.clipboard().text() == "awaria"
+        pole._menu.hide()
+        if lang == "en":
+            assert not set("".join(pozycje)) & _POLSKIE
+        pole.setTextInteractionFlags(Qt.TextSelectableByMouse)        # jak notki żniw
+        pole.setSelection(0, 3)
+        prawy_klik(pole)
+        pozycje = menu_pola_otwarte(pole)
+        assert list(pozycje) == [i18n.t("wb.copy_selection"), i18n.t("wb.copy_sentence"),
+                                 i18n.t("wb.copy_detail")]
+        assert pole.selectedText() == "awa"
+        pozycje[i18n.t("wb.copy_selection")].trigger()
+        assert QGuiApplication.clipboard().text() == "awa"
+        pole._menu.hide()
+    finally:
+        okno.close()
 
 
 # ============================================================ okna kart, szuflada, żniwa
@@ -177,7 +179,7 @@ def test_pole_bledu_okna_kart_nie_rozpycha_okna(qapp, tmp_path):
     sciezka = "X:\\" + "\\".join(["ASTRO_", "LIGHTS", "NGC7635_Bubble_Nebula_2023", "RC8_2600MC_OSC",
                                   "NGC7635_20230104_210700_LIGHT_OSC_300s_FLATGRP_NOFLAT_FWHM_.fits"])
     surowy = f"PermissionError: [WinError 32] Proces nie może uzyskać dostępu do pliku: '{sciezka}'"
-    dlg._on_failed("commit_inplace", surowy, "")             # tekst systemu spoza klas, jak z workera
+    dlg._on_failed("commit", surowy, "")                     # tekst systemu spoza klas, jak z workera
     QApplication.processEvents()
     dlg.layout().activate()
     assert dlg.error.text() == i18n.t("grid.wb.error", msg=czytelny_powod(surowy))
@@ -438,3 +440,25 @@ def test_kopia_wiodaca_para_zdania_i_szczegolu_pasuje_do_protokolu():
         LeadCopyResult("failed", 1, r"X:\L\a.fits", reason=_odmowa_systemu()))
     assert podpowiedz == wiersz_systemu(_odmowa_systemu()) == _tip()
     assert zdanie and "\n" not in zdanie and _tip() not in zdanie
+
+
+# ============================================================ AR-254 - pomocnik prawdziwego kliku na starszym Qt
+
+
+@pytest.mark.parametrize("wersja, wynik", [("6.7.3", pytest.skip.Exception), ("6.9.2", AssertionError)])
+def test_prawy_klik_bez_przypiecia_wyzwalacza_pomija_test(qapp, monkeypatch, wersja, wynik):
+    """AR-254: PySide6 bez `QStyleHints.setContextMenuTrigger` (Qt < 6.8 - pakiet deklaruje `>=6.5`)
+    nie przypnie wyzwalacza menu, więc gest mierzyłby artefakt platformy - pomocnik POMIJA test z powodem
+    i nie wykonuje gestu (atrapa `styleHints` bez atrybutu). Rozstrzyga WERSJA Qt: na Qt >= 6.8 brak API
+    to błąd testu, nie pominięcie. Falsyfikatory: asercja dostępności API zamiast pominięcia (błąd testu
+    na wspieranej konfiguracji); pominięcie po samym braku atrybutu (zmiana nazwy API = cichy SKIP)."""
+    from types import SimpleNamespace
+
+    import prawy_klik as pk
+    gesty = []
+    monkeypatch.setattr(pk, "qVersion", lambda: wersja)
+    monkeypatch.setattr(pk, "QGuiApplication", SimpleNamespace(styleHints=lambda: SimpleNamespace()))
+    monkeypatch.setattr(pk, "QTest", SimpleNamespace(mouseClick=lambda *a, **k: gesty.append(a)))
+    with pytest.raises(BaseException, match="setContextMenuTrigger") as e:     # skip to BaseException
+        pk.prawy_klik(EtykietaBledu("zdanie"))
+    assert e.type is wynik and gesty == [], (e.type, gesty)

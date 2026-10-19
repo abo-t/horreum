@@ -7,7 +7,7 @@ Warstwa widżetów.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QFont, QPainter
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QDialog, QDialogButtonBox,
@@ -19,6 +19,48 @@ from horreum.gui import i18n
 from horreum.gui.grid_model import PREZENTACJA_KLASYCZNA, PREZENTACJA_ZNAJDZ, _set_role
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.wb_worker import EtykietaBledu   # pole zdania okien zapisu (AR-204)
+
+# Łącznik członów licznika paska „N klatek · M zaznaczonych” (`FramesView._update_count`) - po nim
+# `_Licznik` odcina człon klatek, z którego liczy minimum szerokości.
+SEPARATOR_LICZNIKA = "  ·  "
+
+
+class _Licznik(QLabel):
+    """Licznik paska zbioru: minimum szerokości z PIERWSZEGO członu (klatki), nie z całego tekstu (AR-263).
+
+    Zwykły `QLabel` bez zawijania zgłasza minimum = szerokość całego tekstu, a człon „· 16998
+    zaznaczonych” dokładał je do podłogi okna: natywnie, kopia pf4, Ctrl+A - 1 433 → 1 564 px przy
+    fontcie ×1,0 i 1 845 → 2 053 px przy ×1,6 (okno wypychane poza ekran 1920). Gdy cały licznik nie
+    mieści się obok przycisków, pasek przenosi go razem z kryteriami do drugiego rzędu
+    (`SelectionBar._dopasuj_kryteria`) - tam ma całą szerokość paska. Elizja w malowaniu zostaje
+    bezpiecznikiem skrajnie wąskiego paska, z pełnym tekstem w podpowiedzi; `text()` zawsze pełny -
+    wołający czytają treść licznika, nie to, co się akurat zmieściło."""
+
+    def minimumSizeHint(self):
+        m = super().minimumSizeHint()
+        klatki = self.text().split(SEPARATOR_LICZNIKA, 1)[0]
+        c = self.contentsMargins()
+        return QSize(min(m.width(), self.fontMetrics().horizontalAdvance(klatki) + c.left() + c.right()),
+                     m.height())
+
+    def setText(self, text):
+        super().setText(text)
+        self._sync_podpowiedzi()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._sync_podpowiedzi()
+
+    def _sync_podpowiedzi(self):
+        pelny = self.fontMetrics().horizontalAdvance(self.text())
+        self.setToolTip(self.text() if pelny > self.contentsRect().width() else "")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        tekst = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, rect.width())
+        self.style().drawItemText(painter, rect, int(self.alignment()), self.palette(),
+                                  self.isEnabled(), tekst, self.foregroundRole())
 
 
 class SelectionBar(QFrame):
@@ -39,12 +81,16 @@ class SelectionBar(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
         # Dwa rzędy w zapasie (AR-77): rząd przycisków i - tylko gdy obok przycisków nie mieści się
-        # nawet pierwsze kryterium - rząd samych kryteriów pod nim (`_dopasuj_kryteria`).
+        # nawet pierwsze kryterium - rząd kryteriów pod nim, a gdy nie mieści się cały licznik, licznik
+        # schodzi tam razem z nimi (AR-263, `_dopasuj_kryteria`). Pusty rząd dolny nie bierze wysokości.
         self._zew = QVBoxLayout(self); self._zew.setContentsMargins(8, 4, 8, 4); self._zew.setSpacing(2)
         lay = QHBoxLayout(); lay.setContentsMargins(0, 0, 0, 0)
         self._zew.addLayout(lay)
-        self._kryteria_pod = False
-        self.count_label = QLabel("")
+        self._dol = QHBoxLayout(); self._dol.setContentsMargins(0, 0, 0, 0)
+        self._zew.addLayout(self._dol)
+        self._tryb = 0                # 0 - jeden rząd; 1 - kryteria pod; 2 - licznik i kryteria pod
+        self._kryteria_pod = False    # `_tryb >= 1` (czytają go testy AR-77 i `_uloz`)
+        self.count_label = _Licznik("")
         f = QFont(); f.setBold(True); self.count_label.setFont(f)
         self.criteria_label = ElidedLabel()
         self.criteria_label.setProperty("role", "secondary")   # kryteria zbioru czytelne na dark (F6 §7)
@@ -169,16 +215,21 @@ class SelectionBar(QFrame):
                 self.btn_rename, self.btn_lineage, self.btn_object, self.btn_frame, self.btn_save]
 
     def _uloz(self):
-        lay = self._lay
-        while lay.count():
-            lay.takeAt(0)            # widżety zostają dziećmi paska; odstępy znikają z elementem
-        self._zew.removeWidget(self.criteria_label)
-        lay.addWidget(self.count_label); lay.addSpacing(8)
-        if self._kryteria_pod:
+        lay, dol = self._lay, self._dol
+        for uklad in (lay, dol):
+            while uklad.count():
+                uklad.takeAt(0)      # widżety zostają dziećmi paska; odstępy znikają z elementem
+        if self._tryb == 2:
+            dol.addWidget(self.count_label); dol.addSpacing(8)
+            dol.addWidget(self.criteria_label, 1)
             lay.addStretch(1)        # przyciski zostają przy prawej krawędzi, jak w jednym rzędzie
-            self._zew.addWidget(self.criteria_label)
         else:
-            lay.addWidget(self.criteria_label, 1)
+            lay.addWidget(self.count_label); lay.addSpacing(8)
+            if self._kryteria_pod:
+                lay.addStretch(1)
+                dol.addWidget(self.criteria_label, 1)
+            else:
+                lay.addWidget(self.criteria_label, 1)
         rzad = self._rzad()
         # NAJPIERW UKŁAD, POTEM WIDOCZNOŚĆ: widżet pokazywany jest już na swoim miejscu w pasku.
         for w in rzad:
@@ -212,6 +263,10 @@ class SelectionBar(QFrame):
     # do własnego rzędu na całą szerokość paska. Minimum paska nie rośnie (podłogę okna wiąże
     # `QSplitter` widoku, kanon „MINIMALNY WSPIERANY EKRAN"), a drugi rząd kosztuje wysokość
     # jednej linii tekstu wyłącznie wtedy, gdy bez niego kryteria byłyby nieczytelne.
+    # LICZNIK TEŻ NIE PODNOSI MINIMUM (AR-263): jego minimum to człon klatek (`_Licznik`), a gdy cały
+    # licznik („· 16998 zaznaczonych”) nie mieści się obok przycisków, schodzi do rzędu kryteriów -
+    # rząd zbioru (licznik i kryteria) pod rzędem akcji. Natywnie, kopia pf4, Ctrl+A: podłoga Zbiorów
+    # 1 564 → 1 432 px przy ×1,0 i 2 053 → 1 749 px przy ×1,6, licznik w całości.
     _SEPARATOR_KRYTERIOW = " · "     # łącznik `FramesView._describe_criteria`
 
     def _miejsce_na_kryteria(self):
@@ -237,14 +292,24 @@ class SelectionBar(QFrame):
         return self.criteria_label.fontMetrics().horizontalAdvance(pierwsze + "…") + 5
 
     def _dopasuj_kryteria(self):
-        """Kryteria w rzędzie przycisków albo pod nim - przełożenie tylko przy zmianie trybu, więc
-        `LayoutRequest`, który przełożenie samo wywoła, kończy się tu bez pracy. Niepokazany pasek
-        zostaje w jednym rzędzie: jego szerokość nie jest jeszcze szerokością z układu."""
+        """Trzy tryby paska: wszystko w rzędzie przycisków; kryteria pod nim (obok przycisków nie
+        mieści się pierwsze kryterium); licznik i kryteria pod nim (nie mieści się cały licznik).
+        Przełożenie tylko przy zmianie trybu, więc `LayoutRequest`, który przełożenie samo wywoła,
+        kończy się tu bez pracy. Rachunek z podpowiedzi (`_miejsce_na_kryteria` - cały licznik), więc
+        tryb nie zależy od tego, gdzie licznik stoi teraz. Niepokazany pasek zostaje w jednym rzędzie:
+        jego szerokość nie jest jeszcze szerokością z układu."""
         if not self.isVisible():
             return
-        pod = self._miejsce_na_kryteria() < self._potrzeba_kryteriow()
-        if pod != self._kryteria_pod:
-            self._kryteria_pod = pod
+        miejsce = self._miejsce_na_kryteria()
+        if miejsce >= self._potrzeba_kryteriow():
+            tryb = 0
+        elif miejsce >= 0:
+            tryb = 1
+        else:
+            tryb = 2
+        if tryb != self._tryb:
+            self._tryb = tryb
+            self._kryteria_pod = tryb >= 1
             self._uloz()
 
     def event(self, e):

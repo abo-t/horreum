@@ -383,3 +383,48 @@ def test_cli_project_perspektywa_do_folderu_obiektu_nie_zastepuje_jego_manifestu
     assert "Horreum project: blad -- manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania " \
            "(sprzeczne pole: layout)" in out
     assert "Traceback" not in out and (obj_root / projection.MANIFEST_NAME).read_bytes() == przed
+
+
+# ============================================================ AR-251: odmowa kroku manifestu w terminalu
+
+
+@pytest.mark.parametrize("przypadek", ["uszkodzony", "obcy", "zajety"])
+def test_cli_odmowa_manifestu_mowi_krokiem_terminala(tmp_path, capsys, przypadek):
+    """`project --object --apply` nad manifestem uszkodzonym, manifestem innego obiektu i przy cudzym
+    pliku roboczym: kod 1, wiersz `blad --` ze złotym zdaniem rdzenia (fakt i rada wspólna) i wiersz
+    `potem:` z gestem terminala - bez przycisków okna wydania, których CLI nie ma. Plik nietknięty,
+    wydruk koduje się w cp1250, bez śladu stosu. Falsyfikatory: zdanie rdzenia z radą okna („Odśwież
+    podgląd”, „Zapisz manifest”); CLI bez wiersza ponowienia."""
+    import json
+    dbp = _seed_obiekt(tmp_path)
+    root = tmp_path / "_WBPP" / "karta"
+    argv = ["project", str(dbp), "--root", str(root), "--object", "IC1795", "--apply"]
+    assert cli.main(argv) == 0
+    obj_root = root / "OBJECTS" / "IC1795"
+    man = obj_root / projection.MANIFEST_NAME
+    part = obj_root / (projection.MANIFEST_NAME + projection.PART_SUFFIX)
+    if przypadek == "uszkodzony":
+        man.write_bytes(b"{")
+        zdanie = ("manifest wydania (_PROJEKCJA.json) leży w folderze, ale nie jest poprawnym zeznaniem "
+                  "(JSON) - nie nadpisuję go; sprawdź go albo usuń ręcznie")
+    elif przypadek == "obcy":
+        m = json.loads(man.read_text(encoding="utf-8"))
+        m["object_id"] = 999
+        man.write_text(json.dumps(m), encoding="utf-8")
+        zdanie = ("manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania (sprzeczne pole: "
+                  "object_id) - nie nadpisuję go; sprawdź go albo usuń ręcznie")
+    else:
+        part.write_bytes(b"cudzy")
+        zdanie = (f"obok manifestu leży plik roboczy innego zapisu ({part}) - gdy żaden zapis nie trwa, "
+                  f"skasuj go ręcznie")
+    przed = man.read_bytes()
+    capsys.readouterr()
+    assert cli.main(argv) == 1
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    wiersze = out.splitlines()
+    i = wiersze.index(f"Horreum project: blad -- {zdanie}")
+    assert wiersze[i + 1] == "  potem: ponow to samo polecenie (horreum project ... --apply)", wiersze[i:]
+    assert "Odśwież podgląd" not in out and "Zapisz manifest" not in out, out
+    assert "Traceback" not in out and man.read_bytes() == przed
+    assert przypadek != "zajety" or part.read_bytes() == b"cudzy"

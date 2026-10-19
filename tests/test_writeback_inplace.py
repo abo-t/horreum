@@ -44,11 +44,12 @@ def _fits(path, *, obj="NGC6992", seed=0, extra=(), comment=KOMENTARZ, dane=None
 
 
 def _xisf(path, *, obj="'NGC6992'", comment="nazwa obiektu", pad=64, payload=b"\x07" * 32,
-          props="", wypelnienie=b"\x00"):
-    """Monolityczny XISF: XML + REZERWA `pad` + attachment (offset na stałej szerokości)."""
+          props="", wypelnienie=b"\x00", karty=""):
+    """Monolityczny XISF: XML + REZERWA `pad` + attachment (offset na stałej szerokości);
+    `karty` - dodatkowe elementy `<FITSKeyword>` za kartą `OBJECT`."""
     def body(start):
         kw = (f'<FITSKeyword name="IMAGETYP" value="\'Light\'" comment=""/>'
-              f'<FITSKeyword name="OBJECT" value="{obj}" comment="{comment}"/>')
+              f'<FITSKeyword name="OBJECT" value="{obj}" comment="{comment}"/>' + karty)
         return ('<?xml version="1.0" encoding="UTF-8"?>'
                 '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">' + props
                 + f'<Image geometry="4:4:1" sampleFormat="UInt16" '
@@ -194,9 +195,10 @@ def test_dziennik_powstaje_przed_zapisem_a_jego_porazka_nie_rusza_pliku(tmp_path
     ("dopisanie karty bez miejsca (END na ostatnim rekordzie bloku)",
      lambda tp: _fits(tp / "f.fits", extra=[(f"PAD{i}", i) for i in range(27)]),
      [writeback.WriteOp("OBSERVER", "add", "Zdzin", "str")], "potrzebuje 1 wolnego rekordu"),
-    ("wartość liczbowa",
+    # Karta liczbowa idzie w miejscu (AR-261); spada zmiana RODZAJU wartości karty.
+    ("tekst na karcie liczbowej",
      lambda tp: _fits(tp / "g.fits", extra=[("FOCALLEN", 800)]),
-     [writeback.WriteOp("FOCALLEN", "set", "789", "int")], "int"),
+     [writeback.WriteOp("FOCALLEN", "set", "789", "str")], "nie jest tekstem"),
 ])
 def test_fits_niekwalifikujacy_sie_spada_przed_zapisem(tmp_path, opis, plik, ops, fragment):
     """Spadek (`Fallback`) zapada PRZED dziennikiem i zapisem - plik i baza nietknięte."""

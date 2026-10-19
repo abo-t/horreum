@@ -851,6 +851,7 @@ class HarvestDialog(QDialog):
         self.setModal(True)
         self.resize(980, 600)
         self._build_ui()
+        self._sync_buttons()             # waga przycisków od pierwszej klatki - ze stanu, nie z budowy
         self._show_archive()
         self.edit_output.setText(str(self._settings().value("harvest/last_output", "") or ""))
         if self._rel_roots:
@@ -1020,9 +1021,7 @@ class HarvestDialog(QDialog):
         act.addWidget(self.progress_note, 1)
         self.btn_apply = QPushButton(i18n.t_plural("harvest.btn_apply", 0))
         self.btn_apply.setEnabled(False)             # uzbraja WYŁĄCZNIE świeża sonda z czymś do wciągnięcia
-        self.btn_apply.setDefault(True)
-        _fa = self.btn_apply.font(); _fa.setBold(True); self.btn_apply.setFont(_fa)
-        self.btn_apply.setMinimumHeight(34)
+        # Waga (bold, wysokość, Enter) - wyłącznie `_sync_buttons`, ze stanu okna (AR-262).
         self.btn_apply.clicked.connect(self._on_apply)
         act.addWidget(self.btn_apply)
         self.btn_cancel = QPushButton(i18n.t("harvest.btn_cancel_apply"))
@@ -1413,10 +1412,13 @@ class HarvestDialog(QDialog):
         self.btn_accept.setEnabled(receivable and self._close_after_apply is None)
         # Waga idzie za JEDYNĄ robotą okna: bez niczego do wciągnięcia, a z czymś do przyjęcia, gruby
         # i wysoki jest przycisk przyjęcia, nie wygaszony „Wciągnij 0 plików”. Domyślnym (Enter)
-        # przyjęcie nie zostaje nigdy - bez domyślnego Enter w oknie nic nie robi.
+        # przyjęcie nie zostaje nigdy - bez domyślnego Enter w oknie nic nie robi. „Wciągnij” waży
+        # WYŁĄCZNIE aktywny (AR-262, jak `ProjectionDialog._waga_akcji`): wygaszony gruby i domyślny
+        # wskazywał martwy przycisk, gdy okno nie ma żadnej roboty.
         accept_heavy = receivable and n == 0 and not running
-        self.btn_apply.setDefault(not accept_heavy)
-        for btn, heavy in ((self.btn_apply, not accept_heavy), (self.btn_accept, accept_heavy)):
+        apply_heavy = self.btn_apply.isEnabled() and not accept_heavy
+        self.btn_apply.setDefault(apply_heavy)
+        for btn, heavy in ((self.btn_apply, apply_heavy), (self.btn_accept, accept_heavy)):
             font = btn.font()
             font.setBold(heavy)
             btn.setFont(font)
@@ -1511,7 +1513,12 @@ class HarvestDialog(QDialog):
             return
         wbpp_dir = payload["wbpp_dir"]
         if payload["missing"]:
-            self._show_notice(i18n.t("harvest.missing_dir", path=wbpp_dir), "error")
+            # Wyjście WYDANIA z listy bez folderu `out` to stan „czeka na WBPP” (wiersz listy mówi to
+            # samo), nie awaria - notka rolą drugorzędną (AR-262). Ścieżka spoza listy: błąd jak dotąd.
+            if norm_path(wbpp_dir) in {norm_path(r.out_dir) for r in self._releases}:
+                self._show_notice(i18n.t("harvest.out_waiting", path=wbpp_dir), "secondary")
+            else:
+                self._show_notice(i18n.t("harvest.missing_dir", path=wbpp_dir), "error")
             return
         if payload.get("manifest_error") is not None:
             # Manifest najbliższego wydania leży, a nie da się go przeczytać (AR-234): sonda padła -

@@ -953,12 +953,13 @@ def test_OPS_prowadza_gest_i_karte_w_miejscu_do_rdzenia(monkeypatch):
                         lambda con, t, **k: wolania.append(("object_change", t)))
     monkeypatch.setattr(writeback, "undo_object_change",
                         lambda con, t, **k: wolania.append(("undo_object_change", t)))
-    for op in ("commit_inplace", "object_change", "undo_object_change", "commit"):
+    for op in ("commit", "object_change", "undo_object_change"):
         WritebackWorker._OPS[op](None, "r1", NOW, lambda *a: None, lambda: False)
-    # Szuflada Zbiorów (`commit`) też pisze w miejscu (AR-161) - ten sam wołacz co okna kart.
+    # Szuflada Zbiorów i okna kart piszą JEDNĄ operacją `commit` w miejscu (AR-161, AR-258) - drugiej
+    # nazwy tej samej operacji nie ma.
     assert wolania == [("commit", "r1", True), ("object_change", "r1"),
-                       ("undo_object_change", "r1"), ("commit", "r1", True)]
-    assert WritebackWorker._OPS["commit"] is WritebackWorker._OPS["commit_inplace"]
+                       ("undo_object_change", "r1")]
+    assert "commit_inplace" not in WritebackWorker._OPS
 
 
 def test_zdanie_drogi_zapisu_mowi_TYLKO_o_spadku_na_atomowa():
@@ -976,12 +977,12 @@ def test_zdanie_drogi_zapisu_mowi_TYLKO_o_spadku_na_atomowa():
                                      "do zapisania")
     assert zdanie_drogi_zapisu(writeback.CommitResult("r", 3, [a, potwierdzony], [], [], [],
                                                       in_place=[a])) == ""
-    # zwykły commit (atomowy z założenia) nie dostaje członu o „spadku”; zapis w miejscu mówi
-    # o spadku zdaniem człowieka - szczegół rdzenia nie wchodzi do zdania (podpowiedź okna)
+    # zdanie okien kart (jedna operacja z szufladą, AR-258) mówi o spadku zdaniem człowieka tylko
+    # wtedy, gdy spadek jest - szczegół rdzenia nie wchodzi do zdania (podpowiedź okna)
     czlon = i18n.t("wb.inplace_fallback", n=1)
-    assert czlon not in zdanie_commitu_kart(spadek, "grid.wb.applied")[0]
-    w_miejscu = zdanie_commitu_kart(spadek, "grid.wb.applied", w_miejscu=True)[0]
-    assert czlon in w_miejscu and "karta się nie mieści" not in w_miejscu
+    assert czlon not in zdanie_commitu_kart(wszystko_w_miejscu, "grid.wb.applied")[0]
+    ze_spadkiem = zdanie_commitu_kart(spadek, "grid.wb.applied")[0]
+    assert czlon in ze_spadkiem and "karta się nie mieści" not in ze_spadkiem
 
 
 # ═══════════════════════════════════════════════ pasek Zbiorów: „Zmień obiekt…” i `changeable`
@@ -3145,14 +3146,14 @@ def test_Napraw_naglowek_rozne_powody_stoja_w_podpowiedzi_a_zdanie_do_niej_odsyl
                        "undo_already")
     b1 = writeback.FileResult(1, "X:/L/a.fits", "blocked", zmieniony)
     b2 = writeback.FileResult(2, "X:/L/b.fits", "blocked", juz)
-    dlg._after_commit("commit_inplace", writeback.CommitResult("r", None, [], [b1, b2], [], []))
+    dlg._after_commit("commit", writeback.CommitResult("r", None, [], [b1, b2], [], []))
     assert dlg.status.text().endswith(i18n.t("wb.reasons_tip")), dlg.status.text()
     # Protokół pola (AR-204): szczegół = wiersze powodów, podpowiedź = zdanie + szczegół.
     assert dlg.status.szczegol().splitlines() == [
         i18n.t("wb.reason_line", file="a.fits", reason=tekst_powodu(zmieniony)),
         i18n.t("wb.reason_line", file="b.fits", reason=tekst_powodu(juz))]
     assert dlg.status.toolTip() == dlg.status.text() + "\n" + dlg.status.szczegol()
-    dlg._after_commit("commit_inplace", writeback.CommitResult("r", None, [], [b1], [], []))
+    dlg._after_commit("commit", writeback.CommitResult("r", None, [], [b1], [], []))
     assert i18n.t("wb.reasons_tip") not in dlg.status.text() and dlg.status.szczegol() == ""
     dlg.reject()
     con.close()

@@ -682,7 +682,12 @@ def _bez_ksztaltu_ze_skrotem(m):
 @pytest.mark.parametrize("zmiana, fragment", [
     (lambda m: m["pozycje"], "schemacie sprzed AR-165"),
     (_bez_ksztaltu_ze_skrotem, "obce klucze ['object']"),
-    (lambda m: {**m, "schemat": 3}, "schemacie 3"),
+    (lambda m: {**m, "schemat": 4}, "schemacie 4, kontrola zna 2 i 3"),
+    (lambda m: {**m, "schemat": True}, "schemacie True"),
+    # Schemat 3 niesie `wydanie` w każdym wpisie (AR-189), schemat 2 - nigdy: każdy swoim zbiorem.
+    (lambda m: {**m, "pozycje": [{k: v for k, v in w.items() if k != "wydanie"}
+                                 for w in m["pozycje"]]}, "brak kluczy ['wydanie']"),
+    (lambda m: {**m, "schemat": 2}, "obce klucze ['wydanie']"),
     (lambda m: {**m, "obcy": 1}, "obce klucze ['obcy']"),
     (lambda m: {**m, "pozycje": [{k: v for k, v in w.items() if k != "tozsamosc"}
                                  for w in m["pozycje"]]}, "brak kluczy ['tozsamosc']"),
@@ -700,13 +705,15 @@ def _bez_ksztaltu_ze_skrotem(m):
      "typ pola spoza schematu"),
     (lambda m: {**m, "plan": {**m["plan"], "sha1": 5}}, "pole nie jest tekstem"),
     (lambda m: {**m, "srodowisko": {"python": "3.13"}}, "brak kluczy ['komputer']"),
-], ids=["lista_sprzed_AR165", "skrot_object_we_wpisie", "inny_schemat", "obcy_klucz_glowny",
+], ids=["lista_sprzed_AR165", "skrot_object_we_wpisie", "inny_schemat", "schemat_bool",
+        "schemat_3_bez_wydania", "schemat_2_z_wydaniem", "obcy_klucz_glowny",
         "brak_tozsamosci", "granice_null", "indeks_zero", "liczba_w_wynikach_blokady",
         "blokada_kod_1", "kod_0_przy_wyniku_NIE", "karty_nie_para", "sha1_planu_liczba",
         "srodowisko_niepelne"])
 def test_manifest_spoza_schematu_2_to_NIE_z_powodem(tmp_path, zmiana, fragment):
-    """Schemat manifestu ZAMKNIĘTY (AR-165): manifest sprzed AR-165 (lista wpisów - także ze skrótem
-    `object`, który zna już wyłącznie PLAN), obcy albo brakujący klucz i typ spoza schematu to NIE
+    """Schemat manifestu ZAMKNIĘTY (AR-165, schematy 2 i 3 - AR-189): manifest sprzed AR-165 (lista
+    wpisów - także ze skrótem `object`, który zna już wyłącznie PLAN), schemat spoza znanych, wpis
+    z kluczami cudzego schematu, obcy albo brakujący klucz i typ spoza schematu to NIE
     z powodem - nie zgadywanie i nie wyjątek w środku `po` (`granice` null dawały `TypeError`).
     `wyniki` blokady niosą wyłącznie tekst - `kod` i `wolumin` stoją piętro wyżej."""
     p = _fits(tmp_path / "a.fits")
@@ -1588,3 +1595,179 @@ def test_st_ino_porownany_tylko_w_tym_samym_pythonie(tmp_path, tryb):
         ino = os.stat(p).st_ino
         assert raport["uwagi"] == [f"st_ino nieporownany - inny Python niz przy przed: przed "
                                    f"{ino + 1}, po {ino}; rozstrzyga tozsamosc z uchwytu"], raport
+
+
+# ============================================================ AR-259: błąd Windows ze ścieżką
+
+
+@pytest.mark.parametrize("cel, kod, klasa", [
+    pytest.param(lambda tp: tp / "nie_ma.fits", 2, FileNotFoundError, id="brak_pliku"),
+    pytest.param(lambda tp: Path(r"\\.\NUL"), 1, OSError, id="urzadzenie_bez_informacji"),
+])
+def test_tozsamosc_prawdziwy_blad_windows_niesie_sciezke(tmp_path, cel, kod, klasa):
+    """AR-259: `_tozsamosc` na prawdziwym błędzie Windows - `CreateFileW` pliku, którego nie ma (2),
+    i `GetFileInformationByHandle` na urządzeniu (1) - rzuca `OSError` z kodem, podklasą i ŚCIEŻKĄ
+    (`item_reasons.blad_windows`); dawniej `ctypes.WinError` bez nazwy pliku. Falsyfikator:
+    `ctypes.WinError` w którymkolwiek z dwóch miejsc → `filename` None."""
+    if sys.platform != "win32":
+        pytest.skip("GetFileInformationByHandle - wyłącznie Windows")
+    sciezka = cel(tmp_path)
+    with pytest.raises(OSError) as blad:
+        K._tozsamosc(sciezka)
+    assert type(blad.value) is klasa and blad.value.winerror == kod, blad.value
+    assert blad.value.filename == str(sciezka), blad.value
+
+
+# ============================================================ AR-261: karta liczbowa poza pilotażem
+
+
+def test_przed_jawnie_wylacza_karte_liczbowa_z_pilotazu(tmp_path):
+    """AR-261: pisarz pisze kartę liczbową W MIEJSCU, ale kontrola pilotażu jej nie modeluje
+    (plan niesie wartość tekstem) - `set` na karcie liczbowej to JAWNA odmowa przed pierwszą kopią,
+    zdaniem, które mówi, że karta liczbowa jest poza modelem; wyjście ASCII. Falsyfikator: odmowa
+    zdjęta → kontrola przyjęłaby pozycję, której modelu rekordu nie ma."""
+    p = _fits_z_kartami(tmp_path / "a.fits", [("FOCALLEN", 800)])
+    with pytest.raises(SystemExit) as odmowa:
+        _plan(tmp_path, [{"plik": str(p), "keyword": "FOCALLEN", "value": "1000", "comment": None,
+                          "op": "set"}])
+    tekst = str(odmowa.value)
+    assert "odmowa: pozycja 0" in tekst and "karta liczbowa i logiczna sa poza modelem kontroli" \
+        in tekst and tekst.isascii(), tekst
+    assert not (tmp_path / "kopie").exists()
+
+
+# ============================================================ AR-189: wydanie (dowiązanie twarde)
+
+
+def _z_wydaniem(tmp_path, *, op="set"):
+    """FITS w `archiwum/` i jego dowiązanie twarde w `_WBPP/` (NTFS `tmp_path`), plan `set OBJECT`
+    z wydaniem → `(plik, wydanie, kopie)`. Nazwa z polskimi znakami - wiersz kontroli ma zostać ASCII."""
+    (tmp_path / "archiwum").mkdir()
+    (tmp_path / "_WBPP").mkdir()
+    p = _fits(tmp_path / "archiwum" / "żółw.fits")
+    wydanie = tmp_path / "_WBPP" / "żółw.fits"
+    os.link(p, wydanie)
+    kopie = _plan(tmp_path, [{"plik": str(p), "keyword": "OBJECT", "value": "NGC 6992",
+                              "comment": None, "op": op, "wydanie": str(wydanie)}])
+    return p, wydanie, kopie
+
+
+@pytest.mark.parametrize("droga", ["w_miejscu", "atomowo"])
+def test_wydanie_przezywa_zapis_w_miejscu_a_droga_atomowa_je_zrywa(tmp_path, capsys, droga):
+    """AR-189: pozycja z wydaniem - po zapisie W MIEJSCU dowiązanie ma tożsamość pliku (OK), po
+    drodze atomowej (podmiana - nowy węzeł) NIE z „dowiązanie wydania zerwane”. Liczba dowiązań tego
+    nie rozstrzyga (przez SMB 1 także przy dowiązaniu, zmierzone 584/584 na `R:`) - rozstrzyga
+    tożsamość z uchwytu. Wiersz `po` w ASCII. Falsyfikator: porównanie wydania zdjęte z `po` →
+    atomowo OK."""
+    p, wydanie, kopie = _z_wydaniem(tmp_path)
+    ops = [writeback.WriteOp("OBJECT", "set", "NGC 6992", "str", idx=0)]
+    if droga == "w_miejscu":
+        _zapisz(p, "NGC 6992")
+    else:
+        assert writeback.write_changes(str(p), ops, None).status == "applied"
+    capsys.readouterr()
+    kod = _po(kopie)
+    wyjscie = capsys.readouterr().out
+    assert wyjscie.isascii(), wyjscie
+    problemy = _raport(kopie)["problemy"]
+    if droga == "w_miejscu":
+        assert kod == 0 and not problemy, problemy
+        assert fits.getheader(str(wydanie))["OBJECT"] == "NGC 6992"
+    else:
+        assert kod == 1 and any("dowiazanie wydania zerwane" in x for x in problemy), problemy
+        assert "dowiazanie wydania zerwane" in wyjscie and all(x.isascii() for x in problemy)
+
+
+@pytest.mark.parametrize("jak", ["kopia_zamiast_dowiazania", "ta_sama_sciezka",
+                                 "ta_sama_inna_wielkosc_liter", "sciezka_po"])
+def test_przed_odmawia_wydania_ktore_nie_jest_dowiazaniem_pliku(tmp_path, jak):
+    """AR-189: wydanie musi być DOWIĄZANIEM pliku - kopia (inna tożsamość) to odmowa; wydanie
+    wskazujące sam plik (także inną wielkością liter) albo jego ścieżkę `po` to odmowa (porównanie
+    pliku z nim samym nie złapałoby zerwania). Odmowa przed pierwszą kopią, ASCII. Falsyfikatory:
+    bramka tożsamości zdjęta; porównanie ścieżek bez `normcase`."""
+    import shutil
+    (tmp_path / "archiwum").mkdir()
+    (tmp_path / "_WBPP").mkdir()
+    p = _fits(tmp_path / "archiwum" / "a.fits")
+    pozycja = {"plik": str(p), "keyword": "OBJECT", "value": "NGC 6992", "comment": None,
+               "op": "set"}
+    if jak == "kopia_zamiast_dowiazania":
+        wydanie = tmp_path / "_WBPP" / "a.fits"
+        shutil.copyfile(p, wydanie)
+        fragment = "nie jest dowiazaniem twardym pliku"
+    elif jak == "sciezka_po":
+        wydanie = tmp_path / "archiwum" / "b.fits"
+        pozycja["po"] = str(wydanie)
+        fragment = "ten sam plik co 'plik' albo 'po'"
+    else:
+        wydanie = Path(str(p).upper()) if jak.endswith("liter") else p
+        fragment = "ten sam plik co 'plik' albo 'po'"
+    with pytest.raises(SystemExit) as odmowa:
+        _plan(tmp_path, [{**pozycja, "wydanie": str(wydanie)}])
+    tekst = str(odmowa.value)
+    assert "odmowa: pozycja 0" in tekst and fragment in tekst and tekst.isascii(), tekst
+    assert not (tmp_path / "kopie").exists()
+
+
+def test_po_undo_sprawdza_wydanie(tmp_path, capsys):
+    """AR-189: cofnięcie W MIEJSCU zostawia dowiązanie przy pliku (OK), cofnięcie podmianą (droga
+    atomowa) - NIE z „dowiązanie wydania zerwane”, choć plik pod ścieżką ma bajty sprzed. Wiersz
+    w ASCII. Falsyfikator: `po-undo` bez sprawdzenia wydania → OK po podmianie."""
+    p, wydanie, kopie = _z_wydaniem(tmp_path)
+    przed = p.read_bytes()
+    assert _po_undo(kopie) == 0                                    # nic nie zapisano - stan sprzed
+    nowy = p.with_name("nowy.fits")
+    nowy.write_bytes(przed)
+    os.replace(nowy, p)                                            # te same bajty, nowy węzeł
+    capsys.readouterr()
+    assert _po_undo(kopie) == 1
+    wyjscie = capsys.readouterr().out
+    assert "dowiazanie wydania zerwane" in wyjscie and wyjscie.isascii(), wyjscie
+
+
+def test_manifest_schematu_2_czyta_sie_jako_pozycje_bez_wydania(tmp_path):
+    """AR-189 (zgodność): manifest schematu 2 (pilotaż zaczęty przed AR-189 - wpisy BEZ klucza
+    `wydanie`) przechodzi `po` i `po-undo` jak dotąd - pozycja bez wydania. Wzorzec manifestu jest
+    ZAMROŻONY w teście (struktura schematu 2 literałem - także kontenery tożsamości, granic i kart,
+    z planem w skrócie sprzed AR-156); z plików testowych pochodzą wyłącznie wartości-liście: sha1,
+    rozmiar, `st_ino`, wolumin i indeks z uchwytu, offsety granic, wartości i komentarze kart.
+    Bieżący `przed` pisze schemat 3. Falsyfikator: czytnik tylko schematu 3 → NIE „manifest
+    w schemacie 2”."""
+    import hashlib
+    import shutil
+    p = _fits(tmp_path / "a.fits")
+    plan = tmp_path / "plan.json"
+    plan.write_bytes(json.dumps([{"plik": str(p), "object": "NGC 6992"}]).encode("utf-8"))
+    kopie = tmp_path / "kopie"
+    kopie.mkdir()
+    kopia = kopie / "0000.fits"
+    shutil.copyfile(p, kopia)
+    sha1 = hashlib.sha1(p.read_bytes()).hexdigest()
+    uchwyt = K._tozsamosc(p)
+    tozsamosc = {"wolumin": uchwyt["wolumin"], "indeks": uchwyt["indeks"]}
+    naglowek, dane = K._granice(p)
+    karty = {f"{c.keyword}[{c.idx}]": [c.value_raw, c.comment] for c in scan.scan_file(str(p)).cards}
+    manifest_v2 = {
+        "schemat": 2,
+        "plan": {"sciezka": str(plan), "sha1": hashlib.sha1(plan.read_bytes()).hexdigest()},
+        "srodowisko": {"python": sys.version, "komputer": platform.node()},
+        "blokada": {"katalog": str(tmp_path / "blokada"), "wolumin": tozsamosc["wolumin"], "kod": 0,
+                    "wyniki": {"drugie otwarcie do zapisu": "odrzucone", "usuniecie": "odrzucone",
+                               "os.replace na plik": "odrzucone",
+                               "zapis z INNEGO procesu": "odrzucone",
+                               "odczyt osobnym uchwytem": "dziala",
+                               "zapis wlasnym uchwytem": "dziala", "st_ino stabilny": "tak",
+                               "tozsamosc z uchwytu stabilna": "tak",
+                               "os.replace proba 1": "wykonana",
+                               "os.replace zmienia tozsamosc z uchwytu": "tak"}},
+        "pozycje": [{"plik": str(p), "po": None, "kopia": str(kopia), "sha1": sha1,
+                     "sha1_kopii": sha1, "rozmiar": os.path.getsize(p), "ino": os.stat(p).st_ino,
+                     "tozsamosc": tozsamosc, "granice": [naglowek, dane],
+                     "keyword": "OBJECT", "value": "NGC 6992", "comment": None, "op": "set",
+                     "karty": karty}],
+    }
+    (kopie / "manifest.json").write_text(json.dumps(manifest_v2, indent=1), encoding="utf-8")
+    assert _po_undo(kopie) == 0
+    _zapisz(p, "NGC 6992")
+    assert _po(kopie) == 0, _raport(kopie)
+    assert _po_undo(kopie) == 1                       # po zapisie to już nie stan sprzed pilotażu

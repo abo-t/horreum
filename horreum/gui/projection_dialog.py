@@ -315,19 +315,51 @@ def manifest_fact_lines(naprawa, *, foldery=True):
     return linie
 
 
-def szczegol_powodu(powod):
+# Kody odmów i błędów kroku manifestu, których szczegół bez tekstu systemu to ścieżka pliku manifestu
+# (`szczegol_powodu`, AR-262): zdanie mówi, co z manifestem, a plik do sprawdzenia stoi pod kursorem.
+_KODY_PLIKU_MANIFESTU = frozenset({"proj_manifest_damaged", "proj_manifest_foreign",
+                                   "proj_manifest_changed", "proj_manifest_failed",
+                                   "proj_manifest_unreadable"})
+
+
+def szczegol_powodu(powod, *, root):
     """Podpowiedź raportu i paska przy błędzie zapisu (Qt-WOLNE): szczegół systemu (`wiersz_systemu`),
-    a przy manifeście uszkodzonym (`proj_manifest_damaged`, AR-234) - jego ścieżka (zdanie mówi pole,
-    które padło, a plik do sprawdzenia albo usunięcia stoi pod kursorem); przy drzewie niekompletnym
-    (`proj_manifest_incomplete`) - folder wydania, w którym brakuje plików."""
+    a bez niego przy kroku manifestu - plik, którego dotyczy zdanie: drzewo niekompletne
+    (`proj_manifest_incomplete`) - folder wydania, w którym brakuje plików; cudzy plik roboczy
+    (`proj_manifest_busy`) - ten plik; manifest uszkodzony, obcy, zmieniony w trakcie albo niezapisany
+    tekstem spoza klas - plik manifestu (ścieżka z powodu albo `root/_PROJEKCJA.json` korzenia biegu).
+    `root` OBOWIĄZKOWY: pominięty po cichu dawał pusty szczegół czterem kodom, a z nim zdanie paska
+    gasnące po 5 s - wołający (biegi zapisu) znają korzeń zawsze (`_on_apply` stawia `_apply_root`).
+    PO ZAMKNIĘCIU OKNA (AR-262): zdanie paska gospodarza ze szczegółem nie gaśnie zegarem (`_flash`),
+    więc każda odmowa kroku manifestu niesie szczegół - bez niego gasła po 5 s, a okno, z którego
+    przyszła, bywa już zamknięte (Esc w biegu zapisu)."""
     wiersz = wiersz_systemu(powod)
     kod = getattr(powod, "code", None)
-    if wiersz or kod not in ("proj_manifest_damaged", "proj_manifest_incomplete"):
+    if wiersz:
         return wiersz
-    params = dict(powod.params)
-    if kod == "proj_manifest_damaged":
-        return i18n.t("proj.manifest_path_tip", path=params["path"]) if params.get("path") else ""
-    return i18n.t("proj.manifest_folder_tip", dir=params["dir"]) if params.get("dir") else ""
+    params = dict(getattr(powod, "params", ()))
+    if kod == "proj_manifest_incomplete":
+        return i18n.t("proj.manifest_folder_tip", dir=params["dir"]) if params.get("dir") else ""
+    if kod == "proj_manifest_busy":
+        return i18n.t("proj.manifest_part_tip", path=params["path"]) if params.get("path") else ""
+    if kod in _KODY_PLIKU_MANIFESTU:
+        sciezka = params.get("path") or (os.path.join(root, projection.MANIFEST_NAME) if root else None)
+        return i18n.t("proj.manifest_path_tip", path=sciezka) if sciezka else ""
+    return ""
+
+
+def zdanie_odmowy(powod):
+    """Zdanie powodu w ŻYWYM oknie wydania (Qt-WOLNE, AR-251): `tekst_powodu`, a za odmową kroku
+    manifestu, którą da się ponowić z okna - gest okna (`proj_manifest_damaged`/`_foreign`: „Odśwież
+    podgląd” i „Zapisz manifest”, `proj_manifest_busy`: ponowienie wydania albo „Odśwież podgląd”).
+    Zdanie rdzenia mówi fakt i radę wspólną dla każdej powierzchni (CLI drukuje je z własnym gestem);
+    pasek gospodarza po zamknięciu okna mówi samym `tekst_powodu` - przycisku zamkniętego okna nie ma."""
+    kod = getattr(powod, "code", None)
+    if kod in ("proj_manifest_damaged", "proj_manifest_foreign"):
+        return i18n.t("proj.manifest_retry", msg=tekst_powodu(powod))
+    if kod == "proj_manifest_busy":
+        return i18n.t("proj.manifest_busy_retry", msg=tekst_powodu(powod))
+    return tekst_powodu(powod)
 
 
 def czas_proby_dla(po_awarii, root):
@@ -745,6 +777,7 @@ class ProjectionDialog(QDialog):
         # nad raportem świeżej sondy uruchomionej po awarii, do zmiany parametru albo nowego biegu.
         self._po_awarii = None
         self._zamknij_po_zapisie = None  # wynik `done(r)` z Esc w biegu zapisu manifestu - zamknięcie po nim
+        self._raport_biegu = None        # raport biegu z `_apply_begin` - Esc w zapisie manifestu dopisuje notkę
         self.summary = None              # zdanie o wydaniu dla statusbara wołającego (wiz P-C #4)
         self.setWindowTitle(i18n.t("proj.title" if object_id is None else "proj.obj.title"))
         self.setModal(True)
@@ -1372,6 +1405,7 @@ class ProjectionDialog(QDialog):
         self._apply_started = time.monotonic()       # baza ETA (zegar wydania ≠ `now_fn` manifestu)
         self._apply_seen = (0, total)                # ostatni postęp — raport błędu mówi, ile już powstało
         self.summary = None                          # pasek mówi o TYM biegu - koniec biegu stawia zdanie (AR-245)
+        self._raport_biegu = raport
         self.busy.setRange(0, total if total > 0 else 0)
         self.busy.setValue(0)
         self.busy.setFormat("%p%")
@@ -1418,7 +1452,7 @@ class ProjectionDialog(QDialog):
         manifestu; bez niego pasek po zamknięciu okna milczał albo mówił o poprzednim biegu."""
         self._apply_end()
         text, warn = ("", ()) if res is None else self._format(res, self._plan, dry=False, partial=True)
-        szczegol = szczegol_powodu(powod)
+        szczegol = szczegol_powodu(powod, root=self._apply_root)
         self._show_report(glowa + text, "error", warn=warn, tip=szczegol)
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(przycisk)
@@ -1479,12 +1513,12 @@ class ProjectionDialog(QDialog):
                 # Pliki leżą, manifestu nie ma: naprawa w tej sesji okna (świeża sonda → „Zapisz
                 # manifest”) stempluje manifest czasem TEJ próby (AR-213).
                 self._ts_po_awarii = (self._apply_root, self._apply_now)
-                glowa = i18n.t("proj.manifest_error_head", msg=tekst_powodu(res.error))
+                glowa = i18n.t("proj.manifest_error_head", msg=zdanie_odmowy(res.error))
             else:
                 glowa = i18n.t("proj.apply_error", msg=tekst_powodu(res.error), made="") + "\n\n"
             self._zakoncz_bledem(glowa, res.error, i18n.t("proj.btn_error"), res)
             if krok_manifestu and self._object_id is not None:
-                self._po_awarii = (glowa, szczegol_powodu(res.error))
+                self._po_awarii = (glowa, szczegol_powodu(res.error, root=self._apply_root))
                 self._dry_pending = True             # sonda rusza po sprzątnięciu biegu (`_po_biegu`)
             return
         if self._ts_po_awarii is not None and _target_key(self._ts_po_awarii[0]) == _target_key(
@@ -1563,7 +1597,7 @@ class ProjectionDialog(QDialog):
         z Esc w biegu wykonuje `_po_biegu` na KAŻDEJ drodze końca zapisu - odmowa ma dokąd trafić
         (pasek gospodarza), więc okno nie zostaje wbrew Esc."""
         if res.status in ("refused", "error"):
-            self._zakoncz_bledem(i18n.t("proj.obj.manifest_error", msg=tekst_powodu(res.powod)),
+            self._zakoncz_bledem(i18n.t("proj.obj.manifest_error", msg=zdanie_odmowy(res.powod)),
                                  res.powod, i18n.t("proj.btn_error"),
                                  pasek=i18n.t("proj.obj.status_manifest_failed", canon=self._canon,
                                               msg=tekst_powodu(res.powod), root=self._apply_root))
@@ -1595,7 +1629,7 @@ class ProjectionDialog(QDialog):
     def _on_manifest_failed(self, powod):
         """Wyjątek zapisu manifestu (`powod_okna`) - ten sam ogon co odmowa: zdanie na pasek ze
         szczegółem, a zamknięcie odłożone z Esc wykonuje `_po_biegu` (AR-245)."""
-        self._zakoncz_bledem(i18n.t("proj.obj.manifest_error", msg=tekst_powodu(powod)), powod,
+        self._zakoncz_bledem(i18n.t("proj.obj.manifest_error", msg=zdanie_odmowy(powod)), powod,
                              i18n.t("proj.btn_error"),
                              pasek=i18n.t("proj.obj.status_manifest_failed", canon=self._canon,
                                           msg=tekst_powodu(powod), root=self._apply_root))
@@ -1672,7 +1706,7 @@ class ProjectionDialog(QDialog):
                 # Komplet z luką manifestu (AR-213) - rolą ostrzeżenia, bo żniwa wydania nie widzą:
                 # co zapis dopisze albo dlaczego zapisu nie będzie.
                 linie = (manifest_offer_lines(naprawa) if naprawa.status == "would-write"
-                         else [i18n.t("proj.obj.manifest_refused", msg=tekst_powodu(naprawa.powod))])
+                         else [i18n.t("proj.obj.manifest_refused", msg=zdanie_odmowy(naprawa.powod))])
                 lines.extend(linie)
                 warn.extend(linie)
         else:
@@ -1743,16 +1777,18 @@ class ProjectionDialog(QDialog):
         niego user zostaje z częściowym drzewem i zerową wiedzą. Drugie Esc, już po biegu, zamyka.
 
         ZAPIS MANIFESTU W BIEGU (AR-213): jeden plik, nieprzerywalny - „Anulowanie… (po bieżącym
-        pliku)” kłamałoby, bo manifest i tak powstaje. Nota mówi, że okno zamknie się po zapisie,
-        a zamknięcie czeka na sprzątnięcie wątku (`_po_biegu`) na KAŻDEJ drodze końca zapisu (AR-245):
-        odmowa albo błąd zapisu idą zdaniem na pasek gospodarza ze szczegółem (`summary`), więc Esc
-        nie zostawia okna otwartego wbrew człowiekowi.
+        pliku)” kłamałoby, bo manifest i tak powstaje. Notka, że okno zamknie się samo, staje wierszem
+        PANELU RAPORTU pod raportem biegu (AR-262) - nota postępu obok paska ma ~145 px i elizja zjadała
+        jej sens (zmierzone natywnie: 146 px na 316 px treści); panel zawija. Raport składa się od raportu
+        biegu, więc drugie Esc nie dopisuje notki drugi raz. Zamknięcie czeka na sprzątnięcie wątku
+        (`_po_biegu`) na KAŻDEJ drodze końca zapisu (AR-245): odmowa albo błąd zapisu idą zdaniem na
+        pasek gospodarza ze szczegółem (`summary`), więc Esc nie zostawia okna otwartego wbrew człowiekowi.
 
         SONDA DRY: krótka i NICZEGO nie tworzy → cancel + wait, jak dotąd; diagnoza manifestu słucha
         tego samego anulowania (`DryWorker`)."""
         if isinstance(self._apply_worker, ManifestWorker):
             self._zamknij_po_zapisie = r
-            self.progress_note.set_full_text(i18n.t("proj.obj.closing_after_manifest"))
+            self._show_report(self._raport_biegu + "\n\n" + i18n.t("proj.obj.closing_after_manifest"))
             return
         if self._apply_worker is not None:
             self._on_cancel_apply()

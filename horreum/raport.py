@@ -53,6 +53,10 @@ import stat
 import sys
 import weakref
 
+# Błąd Windows z kodem i ŚCIEŻKĄ katalogu (AR-242): wiersz CLI `streaks` drukuje `exc.filename`, a
+# `ctypes.WinError(err)` jej nie niesie - jedna konstrukcja u właściciela klasyfikacji (AR-259).
+from .item_reasons import blad_windows as _blad_windows
+
 ASTAP_DIR = "astap"          # podkatalog raportu z kopiami klatek do rozwiązania przez ASTAP
 _CHUNK = 1 << 20
 
@@ -172,14 +176,6 @@ def _bez_przedrostka(path):
     if path.startswith("\\\\?\\UNC\\"):
         return "\\\\" + path[8:]
     return path[4:] if path.startswith("\\\\?\\") else path
-
-
-def _blad_windows(err, path):
-    """Błąd wywołania Windows jako `OSError` z kodem i ŚCIEŻKĄ katalogu (AR-242): `ctypes.WinError(err)`
-    nie niesie nazwy, a wiersz CLI `streaks` drukuje `exc.filename`. Podklasa i `errno` z `winerror`
-    jak u `ctypes.WinError` - wzór `scan.canonize_root` (AR-212), `writeback._blad_windows`."""
-    import ctypes
-    return OSError(None, ctypes.FormatError(err).rstrip(" .\r\n"), path, err)
 
 
 def _przypnij(path, powod):

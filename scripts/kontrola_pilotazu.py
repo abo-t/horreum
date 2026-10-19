@@ -21,32 +21,41 @@ Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
       zna - jego wpis ma zawsze pełny kształt). Klucze kształtu są obowiązkowe - brak to literówka
       planu, nie „bez karty”. Ścieżki `plik` i `po` BEZWZGLĘDNE - plan czyta ponownie `po`, w innym
       procesie i innym katalogu bieżącym (AR-165). Keyword: FITS - dowolna karta tekstowa (`OBJECT`
-      gestu „Zmień obiekt…”, `FILTER` naprawy `header-fix`); XISF - `set` wyłącznie `OBJECT` bez
-      komentarza (model wycinków XML niżej), `add` dowolnej karty, z komentarzem albo bez (model
-      wstawki niżej). `add` przy kopii, która kartę już ma, `set` przy kopii bez karty, `set`, który
-      niczego nie zmienia (ta sama wartość i komentarz - pilotaż nic by nie sprawdził; od tego jest
-      `none`), `add` karty `OBJECT` klatce kalibracyjnej (`IMAGETYP` dark/flat/bias i mastery),
+      gestu „Zmień obiekt…”, `FILTER` naprawy `header-fix`); karta liczbowa i logiczna - JAWNIE poza
+      pilotażem (plan niesie wartość tekstem, `set` na niej → odmowa); XISF - `set` wyłącznie
+      `OBJECT` bez komentarza (model wycinków XML niżej), `add` dowolnej karty, z komentarzem albo
+      bez (model wstawki niżej). `add` przy kopii, która kartę już ma, `set` przy kopii bez karty,
+      `set`, który niczego nie zmienia (ta sama wartość i komentarz - pilotaż nic by nie sprawdził;
+      od tego jest `none`), `add` karty `OBJECT` klatce kalibracyjnej (`IMAGETYP` dark/flat/bias
+      i mastery),
       XISF bez obrazu-attachmentu albo z niekompletnym wypełnieniem, karta XISF spoza drukowalnego
       ASCII albo dłuższa niż jeden rekord 80 znaków i `add`, którego model niżej nie umie dopisać
       W MIEJSCU (brak zapasu za `END`, brak rezerwy nagłówka XISF, brak wzorca karty) → odmowa,
       zanim powstanie jakakolwiek kopia. Opcjonalne `"po": ścieżka` - PARA
       ŚCIEŻEK gestu „Zmień obiekt…” (AR-17 krok 3): `plik` = ścieżka przed przeniesieniem, `po` =
-      ścieżka po nim (jeden `os.rename` zmienia folder i nazwę). Tożsamość każdego pliku z UCHWYTU
+      ścieżka po nim (jeden `os.rename` zmienia folder i nazwę). Opcjonalne `"wydanie": ścieżka`
+      (AR-189) - DOWIĄZANIE TWARDE pliku w wydaniu (`_WBPP`): ścieżka bezwzględna, inna niż `plik`
+      i `po` (`normcase`), z tą samą tożsamością z uchwytu co `plik` - inaczej odmowa. Liczby dowiązań
+      udział SMB nie podaje (1 także dla pliku z dowiązaniem - zmierzone 584/584 na `R:`), więc
+      dowodem jest tożsamość. Tożsamość każdego pliku z UCHWYTU
       (`GetFileInformationByHandle`: wolumin + indeks pliku, AR-165; poza Windows odmowa) - zero
       w woluminie, indeksie albo `st_ino` → odmowa. Przed pierwszą kopią pomiar `blokada` (niżej) na
       KATALOG_TESTOWY - katalogu testowym udziału pilotażu, poza archiwum, z WYŁĄCZNIE plikami
       `horreum_proba_*`: cudzy plik, którykolwiek wynik „NIE”, inny korzeń ścieżki (litera dysku albo
       `\\\\serwer\\udział`) albo wolumin niż plików planu → odmowa (blokadę mierzymy tam, gdzie pisze
       pisarz). Pełna kopia każdego pliku do KATALOG_KOPII (lokalny dysk; katalog na woluminie plików
-      planu → odmowa), tworzona wyłącznie jako NOWY plik; manifest.json w schemacie 2 (zamkniętym):
+      planu → odmowa), tworzona wyłącznie jako NOWY plik; manifest.json w schemacie 3 (zamkniętym;
+      schemat 2 = 3 bez `wydanie`):
       kotwica planu (ścieżka i sha1 pliku PLAN.json), środowisko (`sys.version`, nazwa komputera),
       wynik pomiaru blokady, a per pozycja sha1 oryginału i kopii (muszą
-      być równe), rozmiar, `st_ino`, tożsamość z uchwytu, granice nagłówka, karty i pełny kształt
-      pozycji - zapisany atomowo dopiero po skopiowaniu i sprawdzeniu wszystkich plików. Katalog
+      być równe), rozmiar, `st_ino`, tożsamość z uchwytu, granice nagłówka, karty, pełny kształt
+      pozycji i ścieżka wydania (albo null) - zapisany atomowo dopiero po skopiowaniu i sprawdzeniu
+      wszystkich plików. Katalog
       z manifestem albo z plikiem kopii (`NNNN.*`) → odmowa: kopie sprzed zapisu są jedynym
       materiałem porównania i nie wolno ich nadpisać.
   po KATALOG_KOPII PLAN.json
-      manifest w schemacie 2 (manifest sprzed AR-165 → NIE z powodem - kontrola nie zgaduje), obcy
+      manifest w schemacie 3 albo 2 - każdy własnym zamkniętym zbiorem kluczy, wpis schematu 2 to
+      pozycja bez wydania (manifest sprzed AR-165 → NIE z powodem - kontrola nie zgaduje), obcy
       albo brakujący klucz i typ spoza schematu → NIE; KOTWICA LICZBY POZYCJI poza manifestem =
       plik planu: sha1 PLAN.json równy zapisanemu przy `przed`, pozycje planu = wpisy manifestu
       (liczba, kolejność, ścieżki, kształt), kopie w katalogu = wpisy. Potem dla każdego pliku (przy
@@ -93,12 +102,14 @@ Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
           drzewo kopii + jeden element karty z planu, rodzeństwo ostatniej karty, zaraz za nią.
       Niezależnie od różnic: czytnik skanu widzi po zapisie `keyword[0]` = wartość z planu,
       z komentarzem z planu (przy `set` z komentarzem null - sprzed), a przy `add` karty przed
-      zapisem nie było - brak wykonania zmiany to NIE, nie „zero różnic".
+      zapisem nie było - brak wykonania zmiany to NIE, nie „zero różnic". Pozycja z wydaniem:
+      tożsamość z uchwytu ścieżki wydania == tożsamość pliku po zapisie, inaczej NIE „dowiązanie
+      wydania zerwane” (plik przepisany w całości ma nowy węzeł, wydanie zostaje przy starej treści).
       Kod wyjścia 1 przy którymkolwiek NIE.
   po-undo KATALOG_KOPII PLAN.json
       manifest i kotwica planu jak w `po`; po cofnięciu pilotażu: sha1 CAŁEGO pliku == sha1 sprzed
       pilotażu, ten sam rozmiar, `st_ino` i tożsamość z uchwytu - pod ścieżką `plik` (przed); przy
-      parze pod ścieżką `po` nie ma już nic.
+      parze pod ścieżką `po` nie ma już nic; wydanie - ta sama tożsamość co `plik`.
   blokada KATALOG_TESTOWY
       pomiar blokady `writeback._exclusive` na udziale: tworzy WŁASNE pliki testowe (unikalna nazwa,
       tworzenie wyłączne `xb`), trzyma blokadę i sprawdza, że zapis z INNEGO procesu, drugie
@@ -129,6 +140,7 @@ from astropy.io import fits
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from horreum import scan, writeback  # noqa: E402
+from horreum.item_reasons import blad_windows  # noqa: E402
 from horreum.resolve.frames import LIGHT_KINDS, normalize_kind  # noqa: E402
 
 ARCHIWUM = "R:\\ASTRO_"
@@ -207,12 +219,13 @@ def _tozsamosc(path):
     takze_katalog = 0x02000000                               # FILE_FLAG_BACKUP_SEMANTICS
     uchwyt = k32.CreateFileW(os.fspath(path), czytaj_atrybuty, wspoldziel_wszystko, None,
                              otworz_istniejacy, takze_katalog, None)
+    # Błąd z kodem Windows i ŚCIEŻKĄ (`blad_windows`, AR-259) - `ctypes.WinError` jej nie niósł.
     if uchwyt in (None, wintypes.HANDLE(-1).value):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise blad_windows(ctypes.get_last_error(), os.fspath(path))
     try:
         info = _Informacja()
         if not k32.GetFileInformationByHandle(uchwyt, ctypes.byref(info)):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise blad_windows(ctypes.get_last_error(), os.fspath(path))
     finally:
         k32.CloseHandle(uchwyt)
     return {"wolumin": info.dwVolumeSerialNumber,
@@ -277,29 +290,40 @@ def _pozycja(p):
 _KLUCZE_STARE = frozenset({"plik", "object"})          # skrót sprzed AR-156
 _KLUCZE_NOWE = frozenset({"plik", *_KSZTALT})
 _KLUCZ_PARY = "po"                                     # opcjonalny w obu kształtach
+_KLUCZ_WYDANIA = "wydanie"                             # opcjonalny w obu kształtach (AR-189)
 
 
 def _pozycja_planu(p):
-    """`(plik, po, kształt)` pozycji planu - schemat ZAMKNIĘTY: obiekt JSON z kluczami dokładnie
-    jednego kształtu (+ opcjonalne `po`), `plik` niepustym tekstem, `po` tekstem albo null. Obcy
-    klucz (literówka `coment`, `poo`) → `ValueError` z jego nazwą, nie cicha wartość domyślna.
-    Ścieżka względna → `ValueError`: plan czyta też `po` (kotwica pozycji, AR-165), w innym procesie
-    i katalogu bieżącym - ta sama względna ścieżka wskazałaby tam inny plik."""
+    """`(plik, po, wydanie, kształt)` pozycji planu - schemat ZAMKNIĘTY: obiekt JSON z kluczami
+    dokładnie jednego kształtu (+ opcjonalne `po` i `wydanie`), `plik` niepustym tekstem, `po`
+    i `wydanie` tekstem albo null. Obcy klucz (literówka `coment`, `poo`) → `ValueError` z jego
+    nazwą, nie cicha wartość domyślna. Ścieżka względna → `ValueError`: plan czyta też `po` (kotwica
+    pozycji, AR-165), w innym procesie i katalogu bieżącym - ta sama względna ścieżka wskazałaby tam
+    inny plik. `wydanie` (AR-189) = dowiązanie twarde pliku w wydaniu - ścieżka INNA niż `plik` i `po`
+    (`normcase`): wydanie równe plikowi porównałoby po zapisie plik z nim samym i nie złapałoby
+    zerwania."""
     if not isinstance(p, dict):
         raise ValueError(f"pozycja nie jest obiektem JSON ({type(p).__name__})")
-    obce = sorted(set(p) - _KLUCZE_STARE - _KLUCZE_NOWE - {_KLUCZ_PARY})
+    obce = sorted(set(p) - _KLUCZE_STARE - _KLUCZE_NOWE - {_KLUCZ_PARY, _KLUCZ_WYDANIA})
     if obce:
         raise ValueError(f"obce klucze {', '.join(map(repr, obce))}")
     if not isinstance(p.get("plik"), str) or not p["plik"]:
         raise ValueError("'plik' nie jest niepustym tekstem")
-    po = p.get(_KLUCZ_PARY)
-    if po is not None and (not isinstance(po, str) or not po):
-        raise ValueError("'po' nie jest niepustym tekstem ani null")
-    wzgledne = [k for k in ("plik", _KLUCZ_PARY) if p.get(k) and not os.path.isabs(p[k])]
+    for klucz in (_KLUCZ_PARY, _KLUCZ_WYDANIA):
+        if p.get(klucz) is not None and (not isinstance(p[klucz], str) or not p[klucz]):
+            raise ValueError(f"'{klucz}' nie jest niepustym tekstem ani null")
+    wzgledne = [k for k in ("plik", _KLUCZ_PARY, _KLUCZ_WYDANIA)
+                if p.get(k) and not os.path.isabs(p[k])]
     if wzgledne:
         raise ValueError(f"sciezka wzgledna w {', '.join(map(repr, wzgledne))} - plan nosi sciezki "
                          f"bezwzgledne (po czyta go w innym procesie i katalogu biezacym)")
-    return os.path.abspath(p["plik"]), os.path.abspath(po) if po else None, _pozycja(p)
+    po, wydanie = p.get(_KLUCZ_PARY), p.get(_KLUCZ_WYDANIA)
+    if wydanie and os.path.normcase(os.path.abspath(wydanie)) in {
+            os.path.normcase(os.path.abspath(s)) for s in (p["plik"], po) if s}:
+        raise ValueError("'wydanie' wskazuje ten sam plik co 'plik' albo 'po' - podaj sciezke "
+                         "dowiazania w wydaniu (_WBPP), nie pliku archiwum")
+    return (os.path.abspath(p["plik"]), os.path.abspath(po) if po else None,
+            os.path.abspath(wydanie) if wydanie else None, _pozycja(p))
 
 
 # Bramka kwalifikacji zapisu w miejscu - WŁASNY kod kontroli, nie import z pisarza (niezależność):
@@ -415,7 +439,11 @@ def _odmowa_pozycji(path, poz):
         if len(wartosci) != 1:
             return f"op 'set', a karta {kw} wystepuje {len(wartosci)} razy - pisarz wymaga jednej"
         if not isinstance(wartosci[0], str):
-            return f"op 'set', a zastana wartosc {kw} nie jest tekstem ({_a(repr(wartosci[0]))})"
+            # Karta liczbowa i logiczna (pisarz pisze ją w miejscu od AR-261) jest JAWNIE poza
+            # pilotażem: plan niesie wartość tekstem, a model rekordu zna wyłącznie kartę tekstową.
+            return (f"op 'set', a zastana wartosc {kw} nie jest tekstem ({_a(repr(wartosci[0]))}) - "
+                    f"karta liczbowa i logiczna sa poza modelem kontroli (pilotaz wylacznie kart "
+                    f"tekstowych)")
     if poz["op"] == "set":
         # Pozycja, która niczego nie zmienia, przeszłaby `po` bez żadnego zapisu - plik równy
         # kopii JEST plikiem oczekiwanym; „brak wykonania zmiany to NIE” wymaga zmiany w planie.
@@ -477,6 +505,28 @@ def _tozsamosc_planu(p):
         return (f"tozsamosc z uchwytu niepelna (wolumin {t['wolumin']}, indeks {t['indeks']}) - "
                 f"udzial nie podaje trwalego identyfikatora, zapisu w miejscu nie da sie odroznic")
     return None
+
+
+def _odmowa_wydania(p, wydanie):
+    """Powód odmowy pozycji z wydaniem (AR-189) albo `None`: wydanie ma być DOWIĄZANIEM TWARDYM pliku -
+    ta sama tożsamość z uchwytu (wolumin + indeks). Liczba dowiązań tego nie rozstrzyga: udział SMB
+    podaje 1 także dla pliku z dowiązaniem (zmierzone 584/584 na `R:`). Kopia zamiast dowiązania ma
+    inną tożsamość - `po` nie miałoby czego porównać, więc odmowa przed pierwszą kopią."""
+    if wydanie is None:
+        return None
+    if _tozsamosc(wydanie) != _tozsamosc(p):
+        return (f"wydanie {_a(wydanie)} nie jest dowiazaniem twardym pliku (inna tozsamosc "
+                f"z uchwytu: wolumin, indeks) - po nie sprawdzi, czy dowiazanie przezylo zapis")
+    return None
+
+
+def _wydanie_zerwane(w, plik):
+    """Problem `po`/`po-undo` (AR-189) albo `None`: wydanie pozycji ma po zapisie tożsamość pliku
+    `plik` - inna = plik przepisany w całości dostał nowy węzeł, a wydanie zostało przy starej treści."""
+    if w["wydanie"] is None or _tozsamosc(w["wydanie"]) == _tozsamosc(plik):
+        return None
+    return (f"dowiazanie wydania zerwane - wydanie {_a(w['wydanie'])} zostalo przy starej tresci "
+            f"(inna tozsamosc z uchwytu niz plik)")
 
 
 _PROBA_PLIK = "horreum_proba_"                 # prefiks plików pomiaru `blokada`
@@ -550,14 +600,15 @@ def przed(katalog, plan_json, katalog_blokady):
         raise SystemExit(f"odmowa: plan nieczytelny: {_a(exc)}") from exc
     if not isinstance(plan, list) or not plan:
         raise SystemExit("odmowa: plan nie jest niepusta lista pozycji")
-    sciezki, pary, pozycje = [], [], []
+    sciezki, pary, wydania, pozycje = [], [], [], []
     for i, pozycja in enumerate(plan):
         p = None
         try:
-            p, po, poz = _pozycja_planu(pozycja)
+            p, po, wydanie, poz = _pozycja_planu(pozycja)
             # Tożsamość najpierw: zapis atomowy `po` rozpoznaje po jej zmianie, więc plik bez niej
             # (i każdy plik poza Windows) odpada, zanim cokolwiek przeczytamy z treści.
-            powod = _tozsamosc_planu(p) or _odmowa_pozycji(p, poz)
+            powod = (_tozsamosc_planu(p) or _odmowa_wydania(p, wydanie)
+                     or _odmowa_pozycji(p, poz))
         except Exception as exc:  # noqa: BLE001 - każda porażka bramki planu to odmowa, nie wyjątek
             powod = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ValueError) else str(exc)
         if powod is not None:
@@ -565,6 +616,7 @@ def przed(katalog, plan_json, katalog_blokady):
             raise SystemExit(f"odmowa: pozycja {i}{gdzie}: {_a(powod)}")
         sciezki.append(p)
         pary.append(po)
+        wydania.append(wydanie)
         pozycje.append(poz)
     if len(set(map(os.path.normcase, sciezki))) != len(sciezki):
         raise SystemExit("odmowa: plan z powtorzonym plikiem")
@@ -582,7 +634,7 @@ def przed(katalog, plan_json, katalog_blokady):
     pomiar = _blokada_udzialu(katalog_blokady, sciezki)
     katalog.mkdir(parents=True, exist_ok=True)
     manifest = []
-    for i, (p, poz, po) in enumerate(zip(sciezki, pozycje, pary)):
+    for i, (p, poz, po, wydanie) in enumerate(zip(sciezki, pozycje, pary, wydania)):
         kopia = katalog / f"{i:04d}{os.path.splitext(p)[1]}"
         st = os.stat(p)
         tozsamosc = _tozsamosc(p)
@@ -591,7 +643,7 @@ def przed(katalog, plan_json, katalog_blokady):
         # Plik bez zmiany treści (RAW, karta już w formie) nie potrzebuje granic nagłówka -
         # porównanie obejmuje cały plik, a RAW nie otworzy się czytnikiem FITS.
         granice = [0, 0] if poz["op"] == "none" else list(_granice(p))
-        wpis = {"plik": p, "po": po, "kopia": str(kopia), "sha1": _sha1(p),
+        wpis = {"plik": p, "po": po, "wydanie": wydanie, "kopia": str(kopia), "sha1": _sha1(p),
                 "sha1_kopii": _sha1(kopia), "rozmiar": st.st_size, "ino": st.st_ino,
                 "tozsamosc": tozsamosc, "granice": granice, **poz, "karty": karty}
         st_po = os.stat(p)
@@ -603,7 +655,8 @@ def przed(katalog, plan_json, katalog_blokady):
             raise SystemExit(f"PLIK ZMIENIL SIE W TRAKCIE KOPII: {_a(p)}")
         manifest.append(wpis)
         print(f"przed OK {_a(p)} sha1={wpis['sha1']} "
-              f"tozsamosc={tozsamosc['wolumin']:#x}:{tozsamosc['indeks']}")
+              f"tozsamosc={tozsamosc['wolumin']:#x}:{tozsamosc['indeks']}"
+              + (f" wydanie={_a(wydanie)}" if wydanie else ""))
     tresc = {"schemat": _SCHEMAT,
              "plan": {"sciezka": os.path.abspath(plan_json),
                       "sha1": hashlib.sha1(surowy).hexdigest()},
@@ -1128,6 +1181,9 @@ def _problemy_pliku(w, ten_sam_python, uwagi):
     # z powodem, a nie cichy wynik z samego `st_ino`.
     if _tozsamosc(plik) != w["tozsamosc"]:
         problemy.append(f"tozsamosc z uchwytu (wolumin, indeks) zmieniona - {skutek}")
+    zerwane = _wydanie_zerwane(w, plik)             # dowiązanie w wydaniu przeżyło zapis (AR-189)
+    if zerwane is not None:
+        problemy.append(zerwane)
     if poz["op"] == "none":
         if not _porownaj_poza(plik, w["kopia"], 0, 0):
             problemy.append("karta bez zmiany w planie, a bajty pliku rozne od kopii")
@@ -1167,14 +1223,18 @@ def _problemy_pliku(w, ten_sam_python, uwagi):
     return problemy
 
 
-_SCHEMAT = 2                 # manifest AR-165: kotwica planu, tożsamość z uchwytu, pomiar blokady
+# Manifest AR-165 (kotwica planu, tożsamość z uchwytu, pomiar blokady) = schemat 2; schemat 3 dokłada
+# ścieżkę wydania pozycji (AR-189). `przed` pisze 3, `po` i `po-undo` czytają oba - każdy własnym
+# ZAMKNIĘTYM zbiorem kluczy wpisu, wpis schematu 2 to pozycja bez wydania (pilotaż zaczęty przed AR-189).
+_SCHEMAT = 3
 _KLUCZE_MANIFESTU = frozenset({"schemat", "plan", "srodowisko", "blokada", "pozycje"})
 _KLUCZE_PLANU = frozenset({"sciezka", "sha1"})
 _KLUCZE_SRODOWISKA = frozenset({"python", "komputer"})
 _KLUCZE_BLOKADY = frozenset({"katalog", "wolumin", "kod", "wyniki"})
 _KLUCZE_TOZSAMOSCI = frozenset({"wolumin", "indeks"})
-_KLUCZE_WPISU = frozenset({"plik", "po", "kopia", "sha1", "sha1_kopii", "rozmiar", "ino",
-                           "tozsamosc", "granice", "karty", *_KSZTALT})
+_KLUCZE_WPISU_2 = frozenset({"plik", "po", "kopia", "sha1", "sha1_kopii", "rozmiar", "ino",
+                             "tozsamosc", "granice", "karty", *_KSZTALT})
+_KLUCZE_WPISU = {2: _KLUCZE_WPISU_2, 3: _KLUCZE_WPISU_2 | {_KLUCZ_WYDANIA}}
 
 
 def _klucze(obiekt, wymagane, gdzie):
@@ -1192,7 +1252,7 @@ def _liczba(x, *, dodatnia=False):
 def _typy_wpisu(w):
     """Czy pola wpisu mają typy schematu - typ spoza niego to NIE, nie wyjątek w środku `po`."""
     return (all(isinstance(w[k], str) for k in ("plik", "kopia", "sha1", "sha1_kopii"))
-            and (w["po"] is None or isinstance(w["po"], str))
+            and all(w[k] is None or isinstance(w[k], str) for k in ("po", _KLUCZ_WYDANIA))
             and _liczba(w["rozmiar"]) and _liczba(w["ino"]) and isinstance(w["karty"], dict)
             and all(isinstance(k, str) and isinstance(v, list) and len(v) == 2
                     for k, v in w["karty"].items())
@@ -1203,7 +1263,9 @@ def _typy_wpisu(w):
 
 def _manifest(katalog, plan_json):
     """`(manifest, None)` albo `(None, problem)` - manifest pusty, niepełny, rozjechany z planem
-    albo z kopiami to NIE, nie „zero pozycji = zero problemów”. Schemat 2 ZAMKNIĘTY (AR-165): obiekt
+    albo z kopiami to NIE, nie „zero pozycji = zero problemów”. Schemat 3 albo 2 ZAMKNIĘTY (AR-165,
+    AR-189 - wpis schematu 3 niesie `wydanie`, wpis schematu 2 czyta się jako pozycję bez wydania;
+    zwrócony manifest ma `wydanie` w każdym wpisie): obiekt
     `{schemat, plan, srodowisko, blokada, pozycje}`, w nim `plan {sciezka, sha1}` i `srodowisko
     {python, komputer}` (tekst), `blokada {katalog, wolumin, kod, wyniki}` - wyniki tekstowe,
     a `kod` PRZELICZONY z wyników (nie przyjęty na wiarę) równy zapisanemu i równy 0; wpisy
@@ -1227,8 +1289,10 @@ def _manifest(katalog, plan_json):
                       "tozsamosci z uchwytu i pomiaru blokady) - kontrola nie zgaduje; dokoncz "
                       "pilotaz kontrola, ktora go zaczela, albo zrob przed od nowa")
     problem = _klucze(manifest, _KLUCZE_MANIFESTU, "manifest")
-    if problem is None and manifest["schemat"] != _SCHEMAT:
-        problem = f"manifest w schemacie {manifest['schemat']!r}, kontrola zna {_SCHEMAT}"
+    schemat = None if problem is not None else manifest["schemat"]
+    if problem is None and not (type(schemat) is int and schemat in _KLUCZE_WPISU):
+        problem = (f"manifest w schemacie {manifest['schemat']!r}, kontrola zna "
+                   f"{' i '.join(map(str, sorted(_KLUCZE_WPISU)))}")
     problem = (problem or _klucze(manifest["plan"], _KLUCZE_PLANU, "plan manifestu")
                or _klucze(manifest["srodowisko"], _KLUCZE_SRODOWISKA, "srodowisko manifestu")
                or _klucze(manifest["blokada"], _KLUCZE_BLOKADY, "blokada manifestu"))
@@ -1259,22 +1323,26 @@ def _manifest(katalog, plan_json):
     if not isinstance(plan, list) or len(plan) != len(wpisy):
         return None, (f"plan ma {len(plan) if isinstance(plan, list) else '?'} pozycji, manifest "
                       f"{len(wpisy)} - pozycja manifestu usunieta albo dopisana")
-    nazwy = []
+    nazwy, czytane = [], []
     for i, (w, pozycja) in enumerate(zip(wpisy, plan)):
-        problem = (_klucze(w, _KLUCZE_WPISU, f"wpis {i}")
+        problem = (_klucze(w, _KLUCZE_WPISU[schemat], f"wpis {i}")
                    or _klucze(w["tozsamosc"], _KLUCZE_TOZSAMOSCI, f"wpis {i} tozsamosc"))
         if problem is not None:
             return None, problem
+        w = {_KLUCZ_WYDANIA: None, **w}                  # schemat 2: pozycja bez wydania
         if not _typy_wpisu(w):
             return None, f"wpis {i}: typ pola spoza schematu"
         try:
             poz = _pozycja(w)
-            plik, po, poz_planu = _pozycja_planu(pozycja)
+            plik, po, wydanie, poz_planu = _pozycja_planu(pozycja)
         except ValueError as exc:
             return None, f"wpis {i}: {exc}"
-        if ((os.path.normcase(plik), os.path.normcase(po or ""), poz_planu)
-                != (os.path.normcase(w["plik"]), os.path.normcase(w["po"] or ""), poz)):
-            return None, f"wpis {i} inny niz pozycja {i} planu (plik, po albo ksztalt)"
+        if ((os.path.normcase(plik), os.path.normcase(po or ""), os.path.normcase(wydanie or ""),
+             poz_planu)
+                != (os.path.normcase(w["plik"]), os.path.normcase(w["po"] or ""),
+                    os.path.normcase(w[_KLUCZ_WYDANIA] or ""), poz)):
+            return None, f"wpis {i} inny niz pozycja {i} planu (plik, po, wydanie albo ksztalt)"
+        czytane.append(w)
         kopia = Path(w["kopia"])
         if (not re.fullmatch(rf"{i:04d}\.[^.]*", kopia.name)
                 or os.path.normcase(kopia.resolve().parent) != os.path.normcase(katalog.resolve())):
@@ -1284,7 +1352,7 @@ def _manifest(katalog, plan_json):
     if kopie != sorted(nazwy):
         return None, (f"kopie w katalogu ({', '.join(kopie)}) inne niz pozycje manifestu "
                       f"({', '.join(nazwy)})")
-    return manifest, None
+    return {**manifest, "pozycje": czytane}, None
 
 
 def po(katalog, plan_json):
@@ -1307,9 +1375,10 @@ def po(katalog, plan_json):
         zle += bool(problemy)
         plik = _przeniesiony(w) or w["plik"]
         raport.append({"plik": plik, "ok": not problemy, "problemy": problemy, "uwagi": uwagi})
-        print(f"po {'OK ' if not problemy else 'NIE'} {_a(plik)}"
-              + (f" | {'; '.join(problemy)}" if problemy else "")
-              + (f" | uwaga: {'; '.join(uwagi)}" if uwagi else ""))
+        # Cały wiersz przez `_a` (wyjście ASCII, nagłówek modułu) - problemy i uwagi niosą ścieżki.
+        print(_a(f"po {'OK ' if not problemy else 'NIE'} {plik}"
+                 + (f" | {'; '.join(problemy)}" if problemy else "")
+                 + (f" | uwaga: {'; '.join(uwagi)}" if uwagi else "")))
     (katalog / "raport_po.json").write_text(json.dumps(raport, indent=1, ensure_ascii=False),
                                             encoding="utf-8")
     return 1 if zle else 0
@@ -1333,10 +1402,14 @@ def po_undo(katalog, plan_json):
                   and (not ten_sam_python or st.st_ino == w["ino"])
                   and _tozsamosc(w["plik"]) == w["tozsamosc"]
                   and st.st_size == w["rozmiar"] and (po is None or not os.path.exists(po)))
+            zerwane = _wydanie_zerwane(w, w["plik"])  # cofnięcie podmianą też rwie wydanie (AR-189)
+            if zerwane is not None:
+                ok = False
+                uwaga += f" | {zerwane}"
         except OSError:                    # pod ścieżką sprzed nie ma pliku albo poza Windows
             ok = False
         zle += not ok
-        print(f"po-undo {'OK ' if ok else 'NIE'} {_a(w['plik'])}{uwaga}")
+        print(_a(f"po-undo {'OK ' if ok else 'NIE'} {w['plik']}{uwaga}"))
     return 1 if zle else 0
 
 
@@ -1459,7 +1532,7 @@ def blokada(katalog):
     wyniki["kod"] = _kod_blokady(wyniki)
     wyniki["wolumin"] = tozsamosc["wolumin"]               # po `kod` - liczba, nie wynik pomiaru
     for k, v in wyniki.items():
-        print(f"blokada {k}: {v}")
+        print(_a(f"blokada {k}: {v}"))
     return wyniki
 
 

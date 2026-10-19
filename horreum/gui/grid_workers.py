@@ -74,9 +74,10 @@ class PolaWorker(QObject):
                         self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
                         self._con = None
         except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
-            # Zdanie w języku UI składane TU (wzorzec `WritebackWorker.run`): odbiorca w `grid.py`
-            # bierze tekst. Pokrycie czyta wyłącznie bazę, więc realna awaria to błąd SQLite -
-            # klasą bazy (AR-198); przerwanie zapytania (stara generacja) zostaje tekstem SQLite.
+            # Zdanie w języku UI składane TU, w wątku: odbiorca w `grid.py` bierze tekst. Pokrycie
+            # czyta wyłącznie bazę, więc realna awaria to błąd SQLite - klasą bazy (AR-198);
+            # przerwanie zapytania (stara generacja) zostaje tekstem SQLite. Błąd programu idzie tu
+            # jeszcze tekstem `Typ: opis` - okna zapisu mówią go już regułą okna (`powod_okna`, AR-263).
             error = tekst_powodu(blad_systemu(exc))
         if error is not None:
             self.failed.emit(self._gen, error)

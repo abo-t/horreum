@@ -37,7 +37,8 @@ from test_gui_app_object import sciezka_karty  # noqa: F401  (oś obiektu z prop
 from test_gui_planner import view  # noqa: F401  (fikstura planera - prawdziwy rachunek nocy)
 from test_gui_pola_w_tle import _klik_komorki
 from test_gui_powody_pisarza import _widok_nad
-from test_gui_protokol_zdania import _menu_pola, _odmowa_systemu, _tip
+from prawy_klik import menu_pola_otwarte, prawy_klik
+from test_gui_protokol_zdania import _odmowa_systemu, _tip
 
 NOW = "2026-10-18T12:00:00"
 _POLSKIE = set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
@@ -215,8 +216,8 @@ def test_pasek_gospodarza_zdanie_ze_szczegolem(qapp, jezyk, lang):
         assert win.statusBar().toolTip() == dlugie + "\n" + _tip()
         assert win.report_label.toolTip() == ""                       # podpowiedź jest jedna - paska
         assert win.report_label.szczegol() == _tip() and win.report_label.indent() > 0
-        _menu_pola(win.report_label)
-        pozycje = {a.text(): a for a in win.report_label._menu.actions()}
+        prawy_klik(win.report_label)
+        pozycje = menu_pola_otwarte(win.report_label)
         assert list(pozycje) == [i18n.t("wb.copy_sentence"), i18n.t("wb.copy_detail")]
         win._wygas_raport()                                           # raport gaśnie przy otwartym menu
         assert win.report_label.szczegol() == "" and win.statusBar().toolTip() == ""
@@ -310,7 +311,7 @@ def test_okno_sciezki_po_zamknieciu_zdanie_i_awaria_kart_na_pasku(sciezka_karty,
 
     def _odmowa(*_a, **_k):
         raise OSError(None, "Odmowa dostępu.", r"X:\L\a.fits", 5)
-    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _odmowa)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", _odmowa)
     okna = []
 
     def _exec(dlg):
@@ -654,7 +655,8 @@ def _anuluj_w_biegu(view, brama, doszlo, stary):
 def test_zapis_przerwany_anulowaniem_podglad_pozostalych_makra(trzy, monkeypatch):
     """Staging makra na trzech plikach, „Zatwierdź”, po pierwszym pliku „Anuluj” (prawdziwy wątek):
     szuflada mówi „2 do dokończenia”, a kolumna podglądu po przyłożeniu pokazuje WYŁĄCZNIE dwa
-    oczekujące wpisy - zapisanej klatki w niej nie ma. Falsyfikator: ogon `set_preview({})`."""
+    oczekujące wpisy - zapisanej klatki w niej nie ma. Falsyfikator: podgląd przykładany razem ze
+    zbiorem pusty (`_podglad_przy_przylozeniu` = `{}` w `_after_commit`, AR-250)."""
     view, con, _pliki = trzy
     _staging_makra(view)
     stary = view.model._preview
@@ -671,7 +673,8 @@ def test_zapis_przerwany_anulowaniem_podglad_pozostalych_makra(trzy, monkeypatch
 
 def test_zmiana_nazw_przerwana_anulowaniem_podglad_pozostalych(trzy, monkeypatch):
     """To samo dla nazw: staging trzech nazw, „Zatwierdź”, „Anuluj” po pierwszym pliku - podgląd
-    „nazwa →” wyłącznie dwóch nazw, które czekają. Falsyfikator: ogon `set_preview({})`."""
+    „nazwa →” wyłącznie dwóch nazw, które czekają. Falsyfikator: podgląd przykładany razem ze zbiorem
+    pusty (`_podglad_przy_przylozeniu` = `{}` w `_after_commit_rename`, AR-250)."""
     view, con, _pliki = trzy
     view._on_rename_stage(_POL)
     stary = view.model._preview
@@ -750,8 +753,8 @@ def test_kopia_pola_zaznaczalnego_bez_znaku_lamania(qapp):
         QGuiApplication.clipboard().setText("")
         QTest.keyClick(pole, Qt.Key_C, Qt.ControlModifier)
         assert QGuiApplication.clipboard().text() == _ZDANIE
-        _menu_pola(pole)
-        pozycje = {a.text(): a for a in pole._menu.actions()}
+        prawy_klik(pole)
+        pozycje = menu_pola_otwarte(pole)
         assert list(pozycje) == [i18n.t("wb.copy_selection"), i18n.t("wb.copy_sentence")]
         pozycje[i18n.t("wb.copy_selection")].trigger()
         assert QGuiApplication.clipboard().text() == _ZDANIE
@@ -759,8 +762,8 @@ def test_kopia_pola_zaznaczalnego_bez_znaku_lamania(qapp):
         assert QGuiApplication.clipboard().text() == _ZDANIE
         pole._menu.hide()
         pole.ustaw(_ZDANIE, _tip())
-        _menu_pola(pole)
-        assert [a.text() for a in pole._menu.actions()][-1] == i18n.t("wb.copy_detail")
+        prawy_klik(pole)
+        assert list(menu_pola_otwarte(pole))[-1] == i18n.t("wb.copy_detail")
         pole._menu.hide()
     finally:
         pole.close()
@@ -983,7 +986,7 @@ def test_okno_sciezki_udane_ponowienie_nie_niesie_starej_awarii(sciezka_karty, m
     a pole błędu jest puste. Falsyfikator: `_on_confirm` bez zdjęcia błędu poprzedniej próby."""
     from horreum.gui import app as app_mod
     v, _con, _pliki, _fid = sciezka_karty
-    prawdziwy = WritebackWorker._OPS["commit_inplace"]
+    prawdziwy = WritebackWorker._OPS["commit"]
 
     def _odmowa(*_a, **_k):
         raise OSError(None, "Odmowa dostępu.", r"X:\L\a.fits", 5)
@@ -993,11 +996,11 @@ def test_okno_sciezki_udane_ponowienie_nie_niesie_starej_awarii(sciezka_karty, m
         okna.append(dlg)
         dlg._runner.async_ok = False
         dlg.show()
-        WritebackWorker._OPS["commit_inplace"] = _odmowa
+        WritebackWorker._OPS["commit"] = _odmowa
         try:
             QTest.mouseClick(dlg.confirm_btn, Qt.LeftButton)
         finally:
-            WritebackWorker._OPS["commit_inplace"] = prawdziwy
+            WritebackWorker._OPS["commit"] = prawdziwy
         assert dlg.error.text() and dlg.confirm_btn.isEnabled()
         QTest.mouseClick(dlg.confirm_btn, Qt.LeftButton)
         return QDialog.Accepted
@@ -1018,30 +1021,11 @@ def test_okno_sciezki_udane_ponowienie_nie_niesie_starej_awarii(sciezka_karty, m
 
 import re  # noqa: E402
 
-from PySide6.QtCore import QPoint  # noqa: E402
-
 from horreum.gui.app import NAV_PORZADKI  # noqa: E402
 
 from test_gui_app_object import NOW_PD, _nameless_tree, _select_review_tag, repair  # noqa: E402,F401
 
 _ZNACZNIK = r"BŁĄD: plik zajęty przez inny program (X:\L\<a>.fits)"
-
-
-def _prawy_klik(pole, punkt=None):
-    """PRAWDZIWY prawy klik: zdarzenie myszy przez okno najwyższego poziomu (`QWindow`), jak od
-    systemu - Qt sam składa z niego `QContextMenuEvent`. `QTest.mouseClick` na widżecie doręcza
-    samą mysz i menu kontekstowego nie budzi (zmierzone: 0 zdarzeń na `windows` i `offscreen`).
-    Pozycja w oknie przez współrzędne ekranu (`mapToGlobal` → `mapFromGlobal` uchwytu okna)."""
-    punkt = punkt or QPoint(5, pole.height() // 2)
-    uchwyt = pole.window().windowHandle()
-    QTest.mouseClick(uchwyt, Qt.RightButton, Qt.NoModifier, uchwyt.mapFromGlobal(pole.mapToGlobal(punkt)))
-    QApplication.processEvents()
-
-
-def _menu_otwarte_na(pole):
-    """Akcje menu własnego, które prawy klik otworzył NA TYM polu (aktywne menu wyskakujące)."""
-    assert pole._menu is not None and QApplication.activePopupWidget() is pole._menu, pole
-    return {a.text(): a for a in pole._menu.actions()}
 
 
 def test_pole_zdania_tekst_zwykly_nazwa_w_ksztalcie_znacznika(qapp):
@@ -1078,7 +1062,7 @@ def test_pole_bledu_okna_zapisu_bez_szczegolu_prawy_klik_kopiuje_sciezke(repair,
 
     def _zajety(*_a, **_k):
         raise OSError(None, "Proces nie może uzyskać dostępu do pliku.", r"X:\L\a.fits", 32)
-    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _zajety)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", _zajety)
     dlg = _open()
     dlg.show()
     try:
@@ -1086,8 +1070,8 @@ def test_pole_bledu_okna_zapisu_bez_szczegolu_prawy_klik_kopiuje_sciezke(repair,
         assert r"X:\L\a.fits" in dlg.error.text() and dlg.error.szczegol() == ""
         assert not dlg.error.textInteractionFlags() & Qt.TextSelectableByMouse
         assert _LAMANIE in QLabel.text(dlg.error)
-        _prawy_klik(dlg.error)
-        pozycje = _menu_otwarte_na(dlg.error)
+        prawy_klik(dlg.error)
+        pozycje = menu_pola_otwarte(dlg.error)
         assert list(pozycje) == [i18n.t("wb.copy_sentence")]
         QGuiApplication.clipboard().setText("")
         pozycje[i18n.t("wb.copy_sentence")].trigger()
@@ -1110,15 +1094,15 @@ def test_raport_paska_bez_sciezki_i_szczegolu_prawy_klik_kopiuje_cale_zdanie(qap
         dlugie = "Wciągnięto 3 mastery z wyjścia WBPP; " * 8
         win._flash(dlugie)
         assert win.report_label.text().endswith("…") and _LAMANIE not in QLabel.text(win.report_label)
-        _prawy_klik(win.report_label)
-        pozycje = _menu_otwarte_na(win.report_label)
+        prawy_klik(win.report_label)
+        pozycje = menu_pola_otwarte(win.report_label)
         assert list(pozycje) == [i18n.t("wb.copy_sentence")]
         pozycje[i18n.t("wb.copy_sentence")].trigger()
         assert QGuiApplication.clipboard().text() == dlugie
         win.report_label._menu.hide()
         menu = win.report_label._menu
         win._wygas_raport()
-        _prawy_klik(win.report_label)
+        prawy_klik(win.report_label)
         assert win.report_label._menu is menu                        # puste pole - nowe menu nie powstaje
     finally:
         win.close()
@@ -1223,7 +1207,7 @@ def test_okno_naprawy_po_zamknieciu_wynik_na_pasku(repair, monkeypatch):
     v.show()
     zdania = _komunikaty(v)
     blad = i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
-    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _odmowa_zapisu)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", _odmowa_zapisu)
     okna = _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
     _select_review_tag(v, "nameless")
     QTest.mouseClick(v.repair_btn, Qt.LeftButton)
@@ -1253,7 +1237,7 @@ def test_wynik_okna_naprawy_na_pasku_przezywa_nawigacje_i_zegar(qapp, tmp_path, 
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
                            summary=scan.ScanSummary())
     con.close()
-    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _odmowa_zapisu)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", _odmowa_zapisu)
     _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
     win = MainWindow(str(path))
     try:

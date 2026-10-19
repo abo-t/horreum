@@ -1189,8 +1189,9 @@ class ConfirmPathObjectsDialog(QDialog):
         self._domkniety = True
         self._begin_progress(staged)
         # Karta W MIEJSCU (AR-117): droga atomowa przepisuje cały plik po SMB i zrywa dowiązania
-        # `_WBPP`; plik, w którym karta się nie mieści, rdzeń zapisuje atomowo i mówi dlaczego.
-        self._runner.start("commit_inplace", run_id, on_progress=self._on_progress,
+        # `_WBPP`; plik, w którym karta się nie mieści, rdzeń zapisuje atomowo i mówi dlaczego. Ta sama
+        # operacja co szuflada Zbiorów (`commit`, AR-258).
+        self._runner.start("commit", run_id, on_progress=self._on_progress,
                            on_done=self._after_commit, on_failed=self._on_failed)
 
     def _stage_karty(self, wybrane):
@@ -1242,9 +1243,8 @@ class ConfirmPathObjectsDialog(QDialog):
         teraz". `commit_id` widoczny - po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki
         (ta sama umowa co w „Napraw nagłówek…"). Commit, który NIE podmienił żadnego pliku (same
         `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty.
-        Zapis w miejscu (`commit_inplace`) mówi o drodze zapisu tylko przy spadku na atomową."""
-        summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied",
-                                              w_miejscu=op == "commit_inplace")
+        Zapis w miejscu mówi o drodze zapisu tylko przy spadku na atomową (`zdanie_commitu_kart`)."""
+        summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied")
         if cofnij is not None:
             self._commit_id = cofnij
             self.undo_btn.setVisible(True)
@@ -1891,8 +1891,8 @@ class RepairHeaderDialog(QDialog):
 
         self._run_id = run_id
         self._begin_progress(staged)
-        # Karta W MIEJSCU (AR-117) - ten sam powód co w „Zatwierdź ze ścieżki…".
-        self._runner.start("commit_inplace", run_id, on_progress=self._on_progress,
+        # Karta W MIEJSCU (AR-117) - ten sam powód i ta sama operacja co w „Zatwierdź ze ścieżki…".
+        self._runner.start("commit", run_id, on_progress=self._on_progress,
                            on_done=self._after_commit, on_failed=self._on_failed)
 
     def _begin_progress(self, total):
@@ -1918,8 +1918,7 @@ class RepairHeaderDialog(QDialog):
         Zdanie i regułę „kiedy wolno cofnąć" daje `zdanie_commitu_kart` - wspólne z oknem
         „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij")."""
         self.bar.setVisible(False)
-        summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied",
-                                              w_miejscu=op == "commit_inplace")
+        summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied")
         if cofnij is not None:
             self._commit_id = cofnij
             self._committed = True

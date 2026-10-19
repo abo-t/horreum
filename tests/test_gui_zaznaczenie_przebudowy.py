@@ -861,12 +861,12 @@ def test_shift_klik_po_sorcie_kotwiczy_na_biezacej_klatce(dluga):
 
 
 def _prawy_klik(view, wiersz):
-    """Menu kontekstowe na wierszu (`QContextMenuEvent` na viewporcie - droga prawego kliku Qt)."""
-    from PySide6.QtGui import QContextMenuEvent
-    vp = view.table.viewport()
+    """PRAWDZIWY prawy klik w wiersz (`tests/prawy_klik.py`: mysz przez uchwyt okna, wyzwalacz menu
+    Windows `Release`) - nie syntetyczny `QContextMenuEvent`, który omijał nacisk myszy, a to w nacisku
+    Qt przestawiał zaznaczenie przed menu (AR-263, wizytacja natywna)."""
+    from prawy_klik import prawy_klik
     punkt = view.table.visualRect(view.model.index(wiersz, 1)).center()
-    QApplication.sendEvent(vp, QContextMenuEvent(QContextMenuEvent.Mouse, punkt, vp.mapToGlobal(punkt)))
-    QApplication.processEvents()
+    return prawy_klik(view.table.viewport(), punkt)
 
 
 def test_prawy_klik_po_sorcie_cel_menu_z_odtworzonego_zaznaczenia(dluga):
@@ -1057,51 +1057,792 @@ def test_zdjecie_podgladu_nazw_oddaje_staging_jednym_resetem(nazwy):
     assert _zaznaczone(view) == cel
 
 
-def test_shift_klik_po_odtworzeniu_zastepuje_cale_zaznaczenie(dluga):
-    """ŚWIADOMY DŁUG - test pinuje DZISIEJSZE zachowanie, nie regułę docelową. Klik A, Ctrl+klik B, sort
-    klikiem, Shift+klik C trzy wiersze nad B. Przed sortem Qt trzyma A w części TRWAŁEJ zaznaczenia,
-    a Shift+klik podmienia tylko część BIEŻĄCĄ (od kotwicy B); odtworzenie po sorcie kładzie całe
-    zaznaczenie jednym `select()` w część bieżącą, więc Shift+klik zastępuje je w całości - zostaje pas od
-    C do B, A wypada. Wariant docelowy: migawka zachowuje podział na część trwałą i bieżącą."""
+def _gest_resetu(view, gest):
+    """Reset modelu z odtworzeniem zaznaczenia: sort klikiem, „Grupuj wg: Rodzaj”, podgląd makra
+    (przyciskiem) albo nie-nawigacyjne przeładowanie tego samego zbioru."""
+    if gest == "sort":
+        _klik_naglowka(view, view.model.base_col("path"))
+    elif gest == "grupowanie":
+        _wybierz_w_combo(view.combo_group, "kind")
+        assert "_group" in view.model._rows[0]
+    elif gest == "podglad":
+        _klik_przycisku(view.sel_bar.btn_macro)
+        view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+        view.macro_bar.asg_expr.setText("EQ6")
+        _klik_przycisku(view.macro_bar.btn_prev)
+        assert view.model._preview_active()
+    else:
+        view.przeladuj_z_zaznaczeniem()
+    _odczekaj_debounce()
+
+
+@pytest.mark.parametrize("gest", ["sort", "grupowanie", "podglad", "przeladowanie"])
+def test_shift_klik_po_odtworzeniu_zostawia_czesc_trwala(dluga, gest):
+    """AR-249 (był ŚWIADOMYM DŁUGIEM - test pinował, że A wypada). Klik A, Ctrl+klik B, gest z resetem
+    modelu, Shift+klik C trzy wiersze nad B. Qt trzyma A w części TRWAŁEJ zaznaczenia, a Shift+klik
+    podmienia tylko część BIEŻĄCĄ (od kotwicy B) - bez resetu zostaje A i pas od C do B. Odtworzenie
+    jednym `ClearAndSelect` kładło całość do części bieżącej i Shift zastępował całe zaznaczenie; migawka
+    z częścią trwałą (`_czesc_trwala_zaznaczenia`) oddaje oba człony. Falsyfikator: odtworzenie bez
+    `trwale` (jedno `select` całości) - A wypada."""
     view = dluga
-    vb = view.table.verticalScrollBar()
-    vb.setValue(0)
+    view.table.verticalScrollBar().setValue(0)
     QApplication.processEvents()
-    a = view.model._rows[view.table.rowAt(view.table.viewport().height() // 8)]["frame_id"]
-    b = view.model._rows[view.table.rowAt(view.table.viewport().height() // 4)]["frame_id"]
+    a, b = view.model._rows[1]["frame_id"], view.model._rows[12]["frame_id"]
     _klik_komorki(view, a, 1)
     _klik_komorki(view, b, 1, Qt.ControlModifier)
     assert _zaznaczone(view) == sorted([a, b])
-    _klik_naglowka(view, view.model.base_col("path"))
-    _odczekaj_debounce()
+    _gest_resetu(view, gest)
     assert _zaznaczone(view) == sorted([a, b])
     wiersz = _wiersz(view, b)
-    assert view.table.currentIndex().row() == wiersz and wiersz >= 3
-    pas = list(range(wiersz - 3, wiersz + 1))
-    assert _wiersz(view, a) not in pas, "A w pasie - test nic by nie mierzył"
-    _klik_komorki(view, view.model._rows[wiersz - 3]["frame_id"], 1, Qt.ShiftModifier)
-    assert _zaznaczone(view) == sorted(view.model._rows[i]["frame_id"] for i in pas)
-    assert a not in _zaznaczone(view)
+    assert view.table.currentIndex().row() == wiersz
+    pas = [i for i in range(wiersz - 3, wiersz + 1) if "_group" not in view.model._rows[i]]
+    assert len(pas) == 4 and _wiersz(view, a) not in pas, "A w pasie - test nic by nie mierzył"
+    _klik_komorki(view, view.model._rows[pas[0]]["frame_id"], 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == sorted([a] + [view.model._rows[i]["frame_id"] for i in pas])
+
+
+_STOS_DUZY = 1001          # gotowy obraz z rodowodem z lightów 1 i 2 w bazie `_baza_dluga`
+
+
+def _dopisz_stos(path):
+    """Gotowy obraz `_STOS_DUZY` (rodowód z lightów 1 i 2) w bazie lightów - panel Rodowód ma co pokazać."""
+    con = db.connect(path)
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (?, 'm-duzy', 'master_light', 'xisf', ?)", (_STOS_DUZY, NOW))
+    con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', '/a/S/stos.xisf', 1)",
+                (_STOS_DUZY,))
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch) VALUES (77, ?, ?, 0, 0, 0)", (_STOS_DUZY, NOW))
+    con.executemany("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by) "
+                    "VALUES (77, ?, 'window')", [(1,), (2,)])
+    con.commit()
+    con.close()
+
+
+def _panel_z_wyborem(view, wiersz_listy):
+    """Panel Rodowód otwarty przyciskiem paska, wiersz listy kliknięty myszą - stan panelu do asercji."""
+    _klik_przycisku(view.sel_bar.btn_lineage)
+    _odczekaj_debounce()
+    assert view._lineage_panel_open()
+    _klik_listy_panelu(view.lineage_bar.items, wiersz_listy)
+    return view._lineage_frame_id, view.lineage_bar.selected_frame_ids()
 
 
 @pytest.mark.parametrize("gest", ["grupowanie", "przeladowanie"])
 def test_500_klatek_wraca_po_grupowaniu_i_nienawigacyjnym_przeladowaniu(qapp, tmp_path, gest):
-    """500 klatek × kolumny tabeli - ponad dawnym progiem 3 750 komórek: Ctrl+A, potem „Grupuj wg:
-    Rodzaj” albo nie-nawigacyjne przeładowanie tego samego zbioru (`przeladuj_z_zaznaczeniem` - droga
-    wyniku Pól, Dostawy, kolumn ręką): wraca całe zaznaczenie i licznik je liczy. Falsyfikator: próg
-    ~250 wierszy w `_zaznaczenie_po_resecie` albo w `_zastosuj_zbior`."""
-    con, view = _widok_dlugi(tmp_path, 500)
+    """500 klatek × kolumny tabeli - ponad dawnym progiem 3 750 komórek - i stos z rodowodem: Ctrl+A,
+    panel Rodowód z wierszem listy, potem „Grupuj wg: Rodzaj” albo nie-nawigacyjne przeładowanie tego
+    samego zbioru (`przeladuj_z_zaznaczeniem` - droga wyniku Pól, Dostawy, kolumn ręką): wraca całe
+    zaznaczenie, licznik je liczy, a panel zostaje przy stosie z tym samym wierszem listy (dawna luka
+    testu, AR-250). Falsyfikatory: próg ~250 wierszy w `_zaznaczenie_po_resecie` albo
+    w `_zastosuj_zbior`; `_refresh_lineage()` bez wyboru z migawki w `_zastosuj_zbior` (wiersz listy
+    znika po przeładowaniu); bez `_date_timer.stop()` w `_zaznaczenie_po_resecie` (debounce
+    przebudowuje panel bez wiersza po grupowaniu)."""
+    path = _baza_dluga(tmp_path, 500)
+    _dopisz_stos(path)
+    con = db.connect(path)
+    view = grid_mod.FramesView(con, now_fn=lambda: NOW)
     try:
+        view.resize(1400, 700)
+        view.show()
+        _odczekaj_debounce()
         assert 500 * view.model.columnCount() > 3_750
         _ctrl_a(view)
+        _odczekaj_debounce()
+        panel = _panel_z_wyborem(view, 2)
+        assert panel == (_STOS_DUZY, [2]), panel
+        wszystkie = list(range(1, 501)) + [_STOS_DUZY]
         if gest == "grupowanie":
             _wybierz_w_combo(view.combo_group, "kind")
             assert "_group" in view.model._rows[0]
         else:
             view.przeladuj_z_zaznaczeniem()
         _odczekaj_debounce()
-        assert _zaznaczone(view) == list(range(1, 501))
-        assert view.count_label.text().endswith(i18n.t_plural("grid.selected", 500))
+        assert _zaznaczone(view) == wszystkie
+        assert view.count_label.text().endswith(i18n.t_plural("grid.selected", 501))
+        assert (view._lineage_frame_id, view.lineage_bar.selected_frame_ids()) == panel
     finally:
         view.close()
         con.close()
+
+
+# ---------- AR-249: część trwała zaznaczenia przeżywa odtworzenie, jednym sygnałem ----------
+#
+# Qt trzyma zaznaczenie w części TRWAŁEJ i BIEŻĄCEJ (Shift podmienia tylko bieżącą). Kryterium: zbiór
+# zaznaczonych wierszy po geście z resetem = zbiór bez resetu. Kotwica Shift po resecie (prywatne
+# `currentSelectionStartIndex` Qt - reset ją unieważnia, kotwicą zostaje bieżąca komórka) to osobny
+# mechanizm - „kotwica Shift po resecie, rejestr” - więc sekwencje niżej nie kończą resetu zakresem Shift.
+
+def _reset_bez_zmiany_kolejnosci(view):
+    """Dwa resety modelu bez przestawiania wierszy (postawienie i zdjęcie podglądu) - każdy z migawką
+    i odtworzeniem zaznaczenia (`_zaznaczenie_przed_resetem`/`_po_resecie`)."""
+    fid = view.model._rows[0]["frame_id"]
+    view.model.set_preview({fid: {"skipped": "x"}})
+    view.model.set_preview({})
+    QApplication.processEvents()
+
+
+def _sekwencja(view, kroki, reset):
+    """Kroki gestów na wierszach `dluga` (stała kolejność - podgląd nie sortuje): ("klik", w),
+    ("ctrl", w), ("shift", w), ("ctrl_a",); `reset` = reset przed OSTATNIM krokiem."""
+    view.table.clearSelection()
+    view.table.verticalScrollBar().setValue(0)
+    QApplication.processEvents()
+    for i, krok in enumerate(kroki):
+        if reset and i == len(kroki) - 1:
+            _reset_bez_zmiany_kolejnosci(view)
+        if krok[0] == "ctrl_a":
+            _ctrl_a(view)
+            continue
+        mod = {"klik": Qt.NoModifier, "ctrl": Qt.ControlModifier, "shift": Qt.ShiftModifier}[krok[0]]
+        _klik_komorki(view, view.model._rows[krok[1]]["frame_id"], 1, mod)
+    return _zaznaczone(view)
+
+
+@pytest.mark.parametrize("kroki", [
+    [("klik", 1), ("ctrl", 12), ("shift", 9)],                      # Ctrl+klik utrwala A, Shift od B
+    [("ctrl_a",), ("ctrl", 6), ("shift", 3)],                       # Ctrl+klik odznacza po Ctrl+A
+    [("klik", 1), ("shift", 3), ("ctrl", 12), ("shift", 9)],        # zakres, potem Ctrl+klik
+    [("klik", 6), ("ctrl_a",), ("shift", 3)],                       # Ctrl+A to część bieżąca - Shift ją podmienia
+    [("klik", 1), ("ctrl", 12), ("ctrl", 12), ("shift", 15)],       # bieżąca na wierszu niezaznaczonym
+], ids=["ctrl", "ctrl_a_odznacz", "zakres_ctrl", "ctrl_a", "biezaca_niezaznaczona"])
+def test_odtworzenie_daje_ten_sam_zbior_co_brak_resetu(dluga, kroki):
+    """Różnicowy: te same gesty bez resetu i z resetem przed ostatnim Shift+klikiem - ten sam zbiór
+    zaznaczonych klatek. Sekwencja `ctrl_a` pilnuje drugiej strony: po Ctrl+A Shift podmienia całość
+    także bez resetu (`selectAll` = `ClearAndSelect`), więc odtworzenie „wszystko trwałe” byłoby
+    błędem. `biezaca_niezaznaczona`: drugi Ctrl+klik B odznacza B, a bieżąca komórka (kotwica Shift
+    po resecie) zostaje na B - bez resetu Shift daje A i pas B..C, a bieżąca przeniesiona na pierwszy
+    zaznaczony dawała pas A..C. Falsyfikatory: odtworzenie bez części trwałej (`ctrl`, `zakres_ctrl`,
+    `ctrl_a_odznacz` czerwone); odtworzenie wszystkiego jako trwałe (`ctrl_a` czerwone); bieżąca
+    szukana wyłącznie wśród zaznaczonych (`biezaca_niezaznaczona` czerwone)."""
+    bez = _sekwencja(dluga, kroki, reset=False)
+    z_resetem = _sekwencja(dluga, kroki, reset=True)
+    assert z_resetem == bez, (sorted(set(bez) - set(z_resetem)), sorted(set(z_resetem) - set(bez)))
+
+
+def test_migawka_zaznaczenia_nie_zmienia_zaznaczenia(dluga):
+    """`_czesc_trwala_zaznaczenia` podmienia na chwilę część bieżącą (odczyt części trwałej publicznym
+    API) - migawka wzięta POZA resetem zostawia zaznaczenie, a kolejny Shift+klik działa jak bez niej.
+    Falsyfikator: odczyt bez przywrócenia części bieżącej (B znika z zaznaczenia)."""
+    view = dluga
+    a, b, c = (view.model._rows[w]["frame_id"] for w in (1, 12, 9))
+    _klik_komorki(view, a, 1)
+    _klik_komorki(view, b, 1, Qt.ControlModifier)
+    migawka = view._migawka_zaznaczenia()
+    assert sorted(migawka[0]) == sorted([a, b]) and migawka[4] == [a]
+    assert _zaznaczone(view) == sorted([a, b])
+    _klik_komorki(view, c, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == sorted({a} | {view.model._rows[w]["frame_id"] for w in range(9, 13)})
+
+
+@pytest.mark.parametrize("przygotowanie", ["ctrl_a", "ctrl", "ctrl_a_odznacz"])
+def test_odtworzenie_jednym_sygnalem_i_jednym_licznikiem(dluga, przygotowanie):
+    """Odtworzenie po sorcie emituje `selectionChanged` RAZ i liczy pasek RAZ - także z częścią trwałą
+    (dwa `select` pod zablokowanymi sygnałami + jedna emisja różnicy). Stan pośredni (sama część
+    trwała) nie dochodzi do licznika, paneli ani zdarzenia dostępności. Falsyfikator: dwa `select`
+    bez blokady sygnałów (dwie emisje, dwa `_update_count`)."""
+    view = dluga
+    if przygotowanie == "ctrl_a":
+        _ctrl_a(view)
+    elif przygotowanie == "ctrl":
+        for w, mod in ((1, Qt.NoModifier), (5, Qt.ControlModifier), (9, Qt.ControlModifier)):
+            _klik_komorki(view, view.model._rows[w]["frame_id"], 1, mod)
+    else:
+        _ctrl_a(view)
+        _klik_komorki(view, view.model._rows[5]["frame_id"], 1, Qt.ControlModifier)
+    _odczekaj_debounce()
+    przed = _zaznaczone(view)
+    emisje, liczniki = [], []
+    view.table.selectionModel().selectionChanged.connect(lambda *_: emisje.append(1))
+    prawdziwy = view._update_count
+    view._update_count = lambda: (liczniki.append(1), prawdziwy())[1]
+    _klik_naglowka(view, view.model.base_col("path"))
+    assert _zaznaczone(view) == przed
+    assert (len(emisje), len(liczniki)) == (1, 1)
+    assert view.count_label.text().endswith(i18n.t_plural("grid.selected", len(przed)))
+
+
+def test_naglowki_tabeli_bez_gestu_zaznaczenia(dluga):
+    """Kryterium „zaznaczenie przez nagłówek” nie ma gestu w tej tabeli (N/A z dowodem): nagłówek
+    poziomy przy `setSortingEnabled(True)` łączy wyłącznie sort (Qt `QTableView::setSortingEnabled` -
+    połączenie `sectionPressed` → `selectColumn` istnieje tylko bez sortu), pionowy jest ukryty, a róg
+    (`QTableCornerButton` → `selectAll`) chowa się, gdy którykolwiek nagłówek jest ukryty. Prawdziwy
+    klik w sekcję nagłówka sortuje i zostawia zaznaczenie. Falsyfikator: pokazany nagłówek pionowy
+    (róg widoczny - klik w niego zaznacza wszystko)."""
+    from PySide6.QtWidgets import QAbstractButton
+    view = dluga
+    t = view.table
+    assert t.isSortingEnabled() and t.verticalHeader().isHidden()
+    rog = [b for b in t.findChildren(QAbstractButton) if b.parent() is t]
+    assert rog and all(b.isHidden() for b in rog)
+    a = view.model._rows[3]["frame_id"]
+    _klik_komorki(view, a, 1)
+    przed = _kolejnosc(view)
+    _klik_naglowka(view, view.model.base_col("path"))
+    assert _kolejnosc(view) != przed and _zaznaczone(view) == [a]
+
+
+# ---------- AR-250: zapis szuflady przykłada podgląd razem ze zbiorem - jeden reset, jedno odtworzenie ----------
+
+def _pliki_ze_stosem(tmp_path):
+    """Trzy prawdziwe lighty FITS (TELESCOP, DATE-OBS - zapis makra i nazw ma z czego się złożyć) i gotowy
+    obraz 10 z rodowodem z dwóch pierwszych (panel Rodowód ma co pokazać). Zwraca `(ścieżka bazy, id lightów)`."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    path = str(tmp_path / "szuflada.db")
+    con = db.open_db(path)
+    for i in (1, 2, 3):
+        p = tmp_path / f"wb{i}.fits"
+        hdu = fits.PrimaryHDU(data=np.full((4, 4), i, dtype=np.int16))
+        hdu.header["TELESCOP"] = "RC8"
+        hdu.header["IMAGETYP"] = "Light"
+        hdu.header["OBJECT"] = "M42"
+        hdu.header["FILTER"] = "Ha"
+        hdu.header["EXPTIME"] = 300.0
+        hdu.header["DATE-OBS"] = f"2024-03-{14 + i:02d}T21:30:45"
+        hdu.writeto(str(p), overwrite=True)
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    ids = [r[0] for r in con.execute("SELECT id FROM frame ORDER BY id")]
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (10, 'm10', 'master_light', 'xisf', ?)", (NOW,))
+    con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (10, 'V', '/a/S/stos.xisf', 1)")
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch) VALUES (5, 10, ?, 0, 0, 0)", (NOW,))
+    con.executemany("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by) "
+                    "VALUES (5, ?, 'window')", [(ids[0],), (ids[1],)])
+    con.commit()
+    con.close()
+    return path, ids
+
+
+def _widok_szuflady(path, *, watek_zapisu=False, zbior_w_tle=False):
+    con = db.connect(path)
+    view = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=zbior_w_tle)
+    view._writeback_async = watek_zapisu
+    view.resize(1400, 800)
+    view.show()
+    if zbior_w_tle:
+        from test_gui_pola_w_tle import _czekaj_na_pola
+        _czekaj_na_pola(view)
+    _odczekaj_debounce()
+    return con, view
+
+
+def _podsluch_resetow(view, monkeypatch):
+    """Licznik resetów modelu (`modelAboutToBeReset`) i odtworzeń zaznaczenia (`_przywroc_zaznaczenie`
+    z niepustym celem - cel gestu `()` ogona zapisu się nie liczy)."""
+    resety, odtworzenia = [], []
+    view.model.modelAboutToBeReset.connect(lambda: resety.append(1))
+    prawdziwe = grid_mod.FramesView._przywroc_zaznaczenie
+
+    def _licz(self, frame_ids, **kw):
+        if frame_ids:
+            odtworzenia.append(1)
+        return prawdziwe(self, frame_ids, **kw)
+    monkeypatch.setattr(grid_mod.FramesView, "_przywroc_zaznaczenie", _licz)
+    return resety, odtworzenia
+
+
+def _makro_do_stagingu(view):
+    bar = view.macro_bar
+    bar.asg_kw.setCurrentText("TELESCOP")
+    bar.asg_op.setCurrentIndex(0)
+    bar.asg_expr.setText("EQ6")
+    bar._emit_stage()
+
+
+@pytest.mark.parametrize("klinga", ["makro", "nazwy"])
+def test_zapis_szuflady_jeden_reset_jedno_odtworzenie_panel_zostaje(qapp, tmp_path, monkeypatch, klinga):
+    """Ctrl+A (trzy lighty i stos), panel Rodowód przy stosie z wierszem listy, staging makra albo nazw,
+    „Zatwierdź” myszą w szufladzie: przeładowanie po zapisie to JEDEN reset modelu i JEDNO odtworzenie
+    zaznaczenia (podgląd schodzi w resecie `set_data`), zaznaczenie i panel z wyborem zostają, podglądu
+    nie ma. Falsyfikator: ogon `set_preview` w `_zbior_ogony` zamiast podglądu przy przyłożeniu (dwa resety,
+    dwa odtworzenia)."""
+    from test_gui_pasek_szczegol import _POL
+    path, ids = _pliki_ze_stosem(tmp_path)
+    con, view = _widok_szuflady(path)
+    try:
+        _ctrl_a(view)
+        _odczekaj_debounce()
+        panel = _panel_z_wyborem(view, ids[1])
+        assert panel == (10, [ids[1]]), panel
+        if klinga == "makro":
+            _makro_do_stagingu(view)
+        else:
+            view._on_rename_stage(_POL)
+        assert view.model._preview_active()
+        wszystkie = _zaznaczone(view)
+        resety, odtworzenia = _podsluch_resetow(view, monkeypatch)
+        _klik_przycisku(view.drawer.btn_commit)
+        _odczekaj_debounce()
+        assert (len(resety), len(odtworzenia)) == (1, 1)
+        assert not view.model._preview_active()
+        assert _zaznaczone(view) == wszystkie
+        assert (view._lineage_frame_id, view.lineage_bar.selected_frame_ids()) == panel
+    finally:
+        view.close()
+        con.close()
+
+
+def test_zapis_przerwany_jeden_reset_podglad_pozostalych_panel_zostaje(qapp, tmp_path, monkeypatch):
+    """Zapis w PRAWDZIWYM wątku, „Anuluj” po pierwszym pliku: ogon przerwanego zapisu stawia podgląd
+    samych oczekujących wpisów TYM SAMYM resetem, co przyłożenie zbioru - jeden reset, jedno odtworzenie;
+    panel Rodowód z wyborem zostaje. Falsyfikator: podgląd pozostałych ogonem po przyłożeniu (dwa resety)."""
+    from horreum.gui import queries
+    from test_gui_pasek_szczegol import _anuluj_w_biegu, _brama_po_pierwszym_pliku
+    path, ids = _pliki_ze_stosem(tmp_path)
+    con, view = _widok_szuflady(path, watek_zapisu=True)
+    try:
+        _ctrl_a(view)
+        _odczekaj_debounce()
+        panel = _panel_z_wyborem(view, ids[1])
+        _makro_do_stagingu(view)
+        stary = view.model._preview
+        brama, doszlo = _brama_po_pierwszym_pliku(monkeypatch)
+        resety, odtworzenia = _podsluch_resetow(view, monkeypatch)
+        QTest.mouseClick(view.drawer.btn_commit, Qt.LeftButton)
+        _anuluj_w_biegu(view, brama, doszlo, stary)
+        _odczekaj_debounce()
+        oczekujace = {w["frame_id"] for w in queries.pending_cards_for_run(con, view._run_id)}
+        assert oczekujace and set(view.model._preview) == oczekujace
+        assert (len(resety), len(odtworzenia)) == (1, 1)
+        assert (view._lineage_frame_id, view.lineage_bar.selected_frame_ids()) == panel
+    finally:
+        from test_gui_pola_w_tle import _czekaj
+        _czekaj(lambda: not view._wb.is_busy, "wątek zapisu przed zamknięciem")
+        view.close()
+        con.close()
+
+
+@pytest.mark.parametrize("podglad", ["aktywny", "zdjety"])
+def test_odrzucenie_w_trakcie_przeladowania_wygrywa_z_podgladem_po_zapisie(qapp, tmp_path, monkeypatch, podglad):
+    """Kolizja z pisarzem `set_preview`: zapis przerwany „Anuluj”, przeładowanie po nim składa się w tle
+    (brama na `_sklad_zbioru` w wątku), a człowiek w tym czasie klika „Odrzuć” w szufladzie - staging
+    znika, kolumna podglądu też. Przyłożenie NIE stawia podglądu oczekujących (już odrzuconych): nowsza
+    intencja wygrywa (`_odloz_podglad_do_przylozenia` - licznik wołań pisarzy podglądu modelu). Dawny ogon
+    `set_preview(pozostale)` przywracał po cichu podgląd odrzuconego stagingu. `zdjety`: panel Rodowód
+    zdjął podgląd makra przed „Zatwierdź”, więc „Odrzuć” woła `set_preview({})` na pustym podglądzie - bez
+    podmiany obiektu. Falsyfikatory: przyłożenie bez sprawdzenia nowszej intencji (oba warianty - podgląd
+    dwóch wpisów po odrzuceniu); intencja z tożsamości obiektu podglądu (`zdjety`)."""
+    import threading
+    from horreum.gui import grid_workers
+    from test_gui_pasek_szczegol import _brama_po_pierwszym_pliku
+    from test_gui_pola_w_tle import _czekaj
+    path, _ids = _pliki_ze_stosem(tmp_path)
+    con, view = _widok_szuflady(path, watek_zapisu=True, zbior_w_tle=True)
+    sklad = threading.Event()
+    try:
+        view.table.clearSelection()
+        _klik_komorki(view, _ids[0], 1)
+        for fid in _ids[1:]:
+            _klik_komorki(view, fid, 1, Qt.ControlModifier)
+        _makro_do_stagingu(view)
+        assert view._pending_count() == 3 and view.model._preview_active()
+        if podglad == "zdjety":
+            _klik_przycisku(view.sel_bar.btn_lineage)
+            assert view._lineage_panel_open() and not view.model._preview_active()
+            assert view._pending_count() == 3 and view.drawer.btn_commit.isVisible()
+        brama, doszlo = _brama_po_pierwszym_pliku(monkeypatch)
+        prawdziwy = grid_workers._sklad_zbioru
+
+        def _sklad(*a, **k):
+            if threading.current_thread() is not threading.main_thread():
+                sklad.wait(30)
+            return prawdziwy(*a, **k)
+        monkeypatch.setattr(grid_workers, "_sklad_zbioru", _sklad)
+        QTest.mouseClick(view.drawer.btn_commit, Qt.LeftButton)
+        _czekaj(lambda: doszlo.is_set() and view.drawer.btn_cancel.isVisible(), "pierwszy plik")
+        QTest.mouseClick(view.drawer.btn_cancel, Qt.LeftButton)
+        brama.set()
+        _czekaj(lambda: not view._wb.is_busy and view._zbior_w_drodze(), "przeładowanie po zapisie w drodze")
+        assert view._pending_count() == 2
+        assert view.drawer.btn_reject.isVisible() and view.drawer.btn_reject.isEnabled()
+        QTest.mouseClick(view.drawer.btn_reject, Qt.LeftButton)
+        assert view._pending_count() == 0
+        sklad.set()
+        _czekaj(lambda: not view._zbior_w_drodze(), "przyłożenie zbioru")
+        _odczekaj_debounce()
+        assert not view.model._preview_active(), view.model._preview
+    finally:
+        sklad.set()
+        _czekaj(lambda: not view._wb.is_busy and not view._zbior_w_drodze(), "wątki przed zamknięciem")
+        view.zatrzymaj_pola()
+        view.close()
+        con.close()
+
+
+def test_licznik_wolan_podgladu_rosnie_przy_kazdym_pisarzu():
+    """Kotwica reguły „nowsza intencja” (`GridTableModel._wersja_podgladu`) rośnie przy KAŻDYM pisarzu
+    podglądu: `set_preview` ze zmianą i bez niej (zdjęcie pustego - bez resetu, obiekt podglądu ten sam)
+    oraz `set_data(preview=…)`; `set_data` bez podglądu i reset bez podglądu (sort) jej nie ruszają.
+    Falsyfikatory: licznik NIEpodbity po wczesnym powrocie `set_preview` (pierwsza asercja po zdjęciu pustego);
+    `set_data(preview=…)` bez podbicia."""
+    m = grid_mod.GridTableModel()
+    base = [{"frame_id": i, "path": f"/a/{i}.fits", "kind": "light"} for i in (1, 2)]
+    m.set_data(base, pivot_mod.build_pivot([1, 2], [], []), [])
+    w = [m._wersja_podgladu]
+    pusty = m._preview
+    m.set_preview({})                                   # nic do zdjęcia - bez resetu, ten sam obiekt
+    assert m._preview is pusty
+    w.append(m._wersja_podgladu)
+    m.set_preview({1: {"skipped": "x"}})
+    w.append(m._wersja_podgladu)
+    m.sort(0, Qt.DescendingOrder)
+    m.set_data(base, pivot_mod.build_pivot([1, 2], [], []), [])
+    w.append(m._wersja_podgladu)
+    m.set_data(base, pivot_mod.build_pivot([1, 2], [], []), [], preview={})
+    w.append(m._wersja_podgladu)
+    assert [b - a for a, b in zip(w, w[1:])] == [1, 1, 0, 1]
+
+
+def test_zatrzymanie_widoku_gasi_podglad_odlozony_do_przylozenia(qapp, tmp_path, monkeypatch):
+    """Zapis szuflady odkłada podgląd do przyłożenia zbioru, przeładowanie po nim składa się w tle (brama
+    na `_sklad_zbioru` w wątku), a widok znika (`zatrzymaj_pola`) - odłożony podgląd schodzi razem z ogonami
+    zleceń (`_zatrzymaj_zbior`). Pierwsze przyłożenie po powrocie widoku (przeładowanie synchroniczne)
+    zostawia podgląd modelu bez zmian: `set_data` dostaje `preview=None`, nie podgląd sprzed zatrzymania.
+    Falsyfikator: `_zatrzymaj_zbior` bez zdjęcia odłożonego podglądu (przyłożenie po powrocie z `{}`)."""
+    import threading
+    from horreum.gui import grid_workers
+    from test_gui_pola_w_tle import _czekaj
+    path, ids = _pliki_ze_stosem(tmp_path)
+    con, view = _widok_szuflady(path, zbior_w_tle=True)
+    sklad = threading.Event()
+    try:
+        _klik_komorki(view, ids[0], 1)
+        _makro_do_stagingu(view)
+        assert view.model._preview_active()
+        prawdziwy = grid_workers._sklad_zbioru
+
+        def _sklad(*a, **k):
+            if threading.current_thread() is not threading.main_thread():
+                sklad.wait(30)
+            return prawdziwy(*a, **k)
+        monkeypatch.setattr(grid_workers, "_sklad_zbioru", _sklad)
+        _klik_przycisku(view.drawer.btn_commit)
+        assert view._zbior_w_drodze() and view._podglad_przy_przylozeniu is not None
+        sklad.set()
+        view.zatrzymaj_pola()
+        assert view._podglad_przy_przylozeniu is None
+        podglady = []
+        prawdziwe = view.model.set_data
+        monkeypatch.setattr(view.model, "set_data",
+                            lambda *a, **k: (podglady.append(k.get("preview")), prawdziwe(*a, **k))[1])
+        view.refresh()
+        assert podglady == [None]
+    finally:
+        sklad.set()
+        _czekaj(lambda: not view._wb.is_busy, "wątek zapisu przed zamknięciem")
+        view.zatrzymaj_pola()
+        view.close()
+        con.close()
+
+
+# ---------- AR-263: prawy przycisk nie rusza zaznaczenia - jedna reguła, menu decyduje ----------
+#
+# Prawdziwy prawy klik przez uchwyt okna przy OBU wyzwalaczach menu: `Release` (Windows - pomocnik
+# `tests/prawy_klik.py`) i `Press` (offscreen; pomocnik przypina Release, więc tu własna droga - także
+# dla modyfikatorów i dwukliku, z przypięciem wyzwalacza z pomocnika).
+
+from test_gui_lead_copy import widok  # noqa: E402,F401 - fikstura „Kopie niezgodne” (gest kopii wiodącej)
+from test_gui_stack_versions import wcon  # noqa: E402,F401 - fikstura bazy „Wersje stosów”
+
+# Wyzwalacze NAZWĄ, nie `Qt.ContextMenuTrigger.*`: enum jest od Qt 6.8, a parametry liczą się przy kolekcji -
+# na starszym PySide6 (pakiet `>=6.5`) wywróciłyby moduł, zanim strażnik `przypiecie_wyzwalacza` pominie test.
+_WYZWALACZE = ["Press", "Release"]
+
+
+def _prawy_klik_tabeli(view, punkt, wyzwalacz, mod=Qt.NoModifier, *, dwuklik=False):
+    """Prawdziwy prawy klik (`dwuklik` - dwuklik) z modyfikatorami `mod` w `punkt` viewportu tabeli przy
+    wyzwalaczu menu `wyzwalacz`; zwraca aktywne menu albo None (czekanie pętlą - gest bez menu to też
+    wynik). Zwykły klik przy `Release` idzie pomocnikiem `tests/prawy_klik.py`, reszta tu - z tym samym
+    przypięciem wyzwalacza (`przypiecie_wyzwalacza`: Qt < 6.8 - pominięcie z powodem, nowszy bez API -
+    błąd testu)."""
+    import time
+    from prawy_klik import prawy_klik, przypiecie_wyzwalacza
+    vp = view.table.viewport()
+    hints = przypiecie_wyzwalacza()          # PRZED pierwszym `Qt.ContextMenuTrigger` (API Qt >= 6.8)
+    wyzwalacz = getattr(Qt.ContextMenuTrigger, wyzwalacz)
+    if wyzwalacz == Qt.ContextMenuTrigger.Release and mod == Qt.NoModifier and not dwuklik:
+        return prawy_klik(vp, punkt)
+    assert QApplication.activePopupWidget() is None, "przed gestem otwarte menu"
+    poprzedni = hints.contextMenuTrigger()
+    hints.setContextMenuTrigger(wyzwalacz)
+    try:
+        uchwyt = vp.window().windowHandle()
+        gest = QTest.mouseDClick if dwuklik else QTest.mouseClick
+        gest(uchwyt, Qt.RightButton, mod, uchwyt.mapFromGlobal(vp.mapToGlobal(punkt)))
+        koniec = time.monotonic() + 0.3
+        while QApplication.activePopupWidget() is None and time.monotonic() < koniec:
+            QApplication.processEvents()
+            time.sleep(0.005)
+    finally:
+        hints.setContextMenuTrigger(poprzedni)
+    return QApplication.activePopupWidget()
+
+
+def _srodek(view, wiersz, kolumna=1):
+    return view.table.visualRect(view.model.index(wiersz, kolumna)).center()
+
+
+def _zamknij_menu(menu):
+    if menu is not None:
+        menu.hide()
+        QApplication.processEvents()
+
+
+def _stan(view):
+    return _zaznaczone(view), view.table.currentIndex().row()
+
+
+@pytest.mark.parametrize("cel", ["poza", "w_zaznaczenie", "pusty_obszar", "belka"])
+@pytest.mark.parametrize("wyzwalacz", _WYZWALACZE, ids=["press", "release"])
+def test_prawy_klik_bez_menu_nic_nie_zmienia(qapp, tmp_path, wyzwalacz, cel):
+    """Zwykły widok (menu nie powstaje): prawy klik POZA zaznaczeniem, W zaznaczenie, w pusty obszar pod
+    wierszami i na belce grupy - zaznaczenie z Ctrl+kliku i bieżąca komórka bez zmian. Dawniej Qt
+    przestawiał je w nacisku: poza - zaznaczenie = kliknięty wiersz, pusty obszar i belka - czyszczenie
+    (zmierzone prawdziwym klikiem, wizytacja natywna). Falsyfikator: `_TabelaKlatek` bez nadpisanego
+    nacisku i puszczenia prawym."""
+    con, view = _widok_dlugi(tmp_path, 5 if cel == "pusty_obszar" else 300)
+    try:
+        if cel == "belka":
+            _wybierz_w_combo(view.combo_group, "kind")
+            assert "_group" in view.model._rows[0]
+        dane = [i for i, r in enumerate(view.model._rows) if "_group" not in r]
+        _klik_komorki(view, view.model._rows[dane[0]]["frame_id"], 1)
+        _klik_komorki(view, view.model._rows[dane[2]]["frame_id"], 1, Qt.ControlModifier)
+        przed = _stan(view)
+        if cel == "poza":
+            punkt = _srodek(view, dane[3])
+        elif cel == "w_zaznaczenie":
+            punkt = _srodek(view, dane[0])
+        elif cel == "pusty_obszar":
+            punkt = QPoint(60, view.table.visualRect(view.model.index(dane[-1], 1)).bottom() + 40)
+            assert view.table.indexAt(punkt).isValid() is False
+        else:
+            punkt = _srodek(view, 0, 0)
+        menu = _prawy_klik_tabeli(view, punkt, wyzwalacz)
+        _zamknij_menu(menu)
+        assert menu is None
+        assert _stan(view) == przed
+    finally:
+        view.close()
+        con.close()
+
+
+@pytest.mark.parametrize("cel", ["poza", "w_zaznaczenie", "belka"])
+@pytest.mark.parametrize("wyzwalacz", _WYZWALACZE, ids=["press", "release"])
+def test_prawy_klik_z_menu_zaznacza_wylacznie_klatke_spoza(qapp, tmp_path, wyzwalacz, cel):
+    """Perspektywa z sekcją menu (flaga „Zastąpione” wprost): menu powstaje; KLATKA spoza zaznaczenia
+    staje się zaznaczeniem i bieżącą (konwencja platformy), klik W zaznaczenie i na belce grupy (nie
+    klatka) zostawia zaznaczenie i bieżącą. Falsyfikator: belka liczona jako wiersz spoza zaznaczenia
+    (zaznaczenie zdjęte, `selectRow` na belce)."""
+    con, view = _widok_dlugi(tmp_path, 300)
+    try:
+        setattr(view, grid_mod._FLAGA_ZASTAPIONYCH, True)
+        if cel == "belka":
+            _wybierz_w_combo(view.combo_group, "kind")
+        dane = [i for i, r in enumerate(view.model._rows) if "_group" not in r]
+        _klik_komorki(view, view.model._rows[dane[0]]["frame_id"], 1)
+        _klik_komorki(view, view.model._rows[dane[2]]["frame_id"], 1, Qt.ControlModifier)
+        przed = _stan(view)
+        wiersz = {"poza": dane[3], "w_zaznaczenie": dane[0], "belka": 0}[cel]
+        menu = _prawy_klik_tabeli(view, _srodek(view, wiersz, 0 if cel == "belka" else 1), wyzwalacz)
+        try:
+            assert menu is view._menu_tabeli
+            if cel == "poza":
+                assert _stan(view) == ([view.model._rows[wiersz]["frame_id"]], wiersz)
+            else:
+                assert _stan(view) == przed
+        finally:
+            _zamknij_menu(menu)
+    finally:
+        view.close()
+        con.close()
+
+
+# Osobny wiersz na przypadek: przy wyzwalaczu `Press` prawy nacisk w TYM SAMYM punkcie okna co menu
+# poprzedniego testu nie doręcza menu tabeli (zmierzone offscreen: `ContextMenu` dochodzi do okna, nie do
+# viewportu; w innym punkcie albo w świeżym procesie - dochodzi) - artefakt wejścia testowego, nie gest.
+@pytest.mark.parametrize("wyzwalacz, mod, wiersz", [
+    ("Press", Qt.ControlModifier, 6), ("Press", Qt.ShiftModifier, 7),
+    ("Release", Qt.ControlModifier, 8), ("Release", Qt.ShiftModifier, 9),
+], ids=["press-ctrl", "press-shift", "release-ctrl", "release-shift"])
+def test_prawy_klik_z_menu_z_modyfikatorem_zaznacza_wylacznie_klatke_spoza(qapp, tmp_path, wyzwalacz, mod, wiersz):
+    """Ctrl+prawy i Shift+prawy na klatce spoza zaznaczenia (menu powstaje): klatka staje się JEDYNYM
+    zaznaczeniem i bieżącą - modyfikator jej nie dokłada (Ctrl) ani nie robi zakresu od kotwicy (Shift).
+    Falsyfikator: `selectRow` - liczy polecenie z modyfikatorów klawiatury w chwili wołania (Ctrl: trzy
+    zaznaczone klatki, Shift: pas od kotwicy)."""
+    con, view = _widok_dlugi(tmp_path, 300)
+    try:
+        setattr(view, grid_mod._FLAGA_ZASTAPIONYCH, True)
+        _klik_komorki(view, view.model._rows[1]["frame_id"], 1)
+        _klik_komorki(view, view.model._rows[3]["frame_id"], 1, Qt.ControlModifier)
+        menu = _prawy_klik_tabeli(view, _srodek(view, wiersz), wyzwalacz, mod)
+        try:
+            assert menu is view._menu_tabeli
+            assert _stan(view) == ([view.model._rows[wiersz]["frame_id"]], wiersz)
+        finally:
+            _zamknij_menu(menu)
+    finally:
+        view.close()
+        con.close()
+
+
+@pytest.mark.parametrize("klawisz", ["Menu", "Shift+F10"])
+def test_menu_z_klawiatury_dla_zaznaczenia_bez_zmiany(qapp, tmp_path, klawisz):
+    """Klawisz Menu i Shift+F10 doręczają tabeli (widżetowi z fokusem) to samo zdarzenie -
+    `QContextMenuEvent` z przyczyną `Keyboard`, w punkcie bieżącej komórki. `QTest.keyClick` go nie
+    wytwarza (zmierzone offscreen i natywnie: 0 zdarzeń menu), natywnie klawisz Menu systemu (`VK_APPS`)
+    dał je z przyczyną klawiatura - test doręcza to zdarzenie wprost. Bieżąca komórka POZA zaznaczeniem
+    (Ctrl+↓): menu dotyczy zaznaczenia, zaznaczenie i bieżąca bez zmian. Falsyfikator: reguła „klatka
+    pod kursorem” także dla klawiatury (zaznaczenie = wiersz bieżącej komórki)."""
+    from PySide6.QtGui import QContextMenuEvent
+    con, view = _widok_dlugi(tmp_path, 300)
+    try:
+        setattr(view, grid_mod._FLAGA_ZASTAPIONYCH, True)
+        _klik_komorki(view, view.model._rows[1]["frame_id"], 1)
+        _klik_komorki(view, view.model._rows[4]["frame_id"], 1, Qt.ControlModifier)
+        view.table.setFocus()
+        QTest.keyClick(view.table, Qt.Key_Down, Qt.ControlModifier)
+        QApplication.processEvents()
+        przed = _stan(view)
+        assert przed[1] == 5 and not view.table.selectionModel().isRowSelected(5)
+        t = view.table
+        punkt = t.viewport().mapTo(t, t.visualRect(t.currentIndex()).center())
+        QApplication.sendEvent(t, QContextMenuEvent(QContextMenuEvent.Keyboard, punkt, t.mapToGlobal(punkt)))
+        QApplication.processEvents()
+        menu = QApplication.activePopupWidget()
+        try:
+            assert menu is view._menu_tabeli
+            assert _stan(view) == przed
+        finally:
+            _zamknij_menu(menu)
+    finally:
+        view.close()
+        con.close()
+
+
+def test_inna_wersja_qt_prawy_klik_wraca_do_metody_qt(qapp, tmp_path, monkeypatch):
+    """Bezpiecznik wersji obejmuje też zdarzenia myszy `_TabelaKlatek`: przy wersji Qt spoza
+    `_QT_TABELI_KLATEK` prawy przycisk idzie metodą Qt - prawy klik poza zaznaczeniem przestawia je
+    (zachowanie Qt). Falsyfikator: nadpisanie nacisku bez sprawdzenia wersji."""
+    from horreum.gui import grid_model
+    con, view = _widok_dlugi(tmp_path, 300)
+    try:
+        _klik_komorki(view, view.model._rows[1]["frame_id"], 1)
+        _klik_komorki(view, view.model._rows[3]["frame_id"], 1, Qt.ControlModifier)
+        monkeypatch.setattr(grid_model, "qVersion", lambda: "6.10.0")
+        _zamknij_menu(_prawy_klik_tabeli(view, _srodek(view, 6), "Release"))
+        assert _zaznaczone(view) == [view.model._rows[6]["frame_id"]]
+    finally:
+        view.close()
+        con.close()
+
+
+@pytest.mark.parametrize("wyzwalacz, dwuklik, wiersz", [
+    ("Press", False, 4), ("Press", True, 5),
+    ("Release", False, 7), ("Release", True, 8),
+], ids=["press-klik", "press-dwuklik", "release-klik", "release-dwuklik"])
+def test_prawy_klik_na_komorce_ostatniego_lewego_kliku_bez_gestu_qt(qapp, tmp_path, wyzwalacz, dwuklik, wiersz):
+    """Prawy klik i prawy dwuklik W KOMÓRKĘ ostatniego lewego kliku (zwykły widok - menu nie powstaje).
+    Nacisk prawym nie dochodzi do Qt, więc `pressedIndex` widoku zostaje z lewego kliku: puszczenie
+    prawym oddane metodzie Qt liczy się jako klik tej komórki (`QAbstractItemView::mouseReleaseEvent` -
+    `activated` na platformie z aktywacją pojedynczym klikiem, tu styl z `SH_ItemView_ActivateItemOnSingleClick`),
+    a dwuklik prawym - jako dwuklik (`doubleClicked`). Żaden sygnał gestu tabeli nie pada, zaznaczenie,
+    bieżąca i stan widoku bez zmian. Falsyfikatory: puszczenie prawym przez metodę Qt (`activated`),
+    dwuklik prawym przez metodę Qt (`doubleClicked`)."""
+    from PySide6.QtWidgets import QAbstractItemView, QProxyStyle, QStyle
+
+    class _AktywacjaKlikiem(QProxyStyle):
+        def styleHint(self, hint, option=None, widget=None, returnData=None):
+            if hint == QStyle.SH_ItemView_ActivateItemOnSingleClick:
+                return 1
+            return super().styleHint(hint, option, widget, returnData)
+
+    con, view = _widok_dlugi(tmp_path, 300)
+    try:
+        t = view.table
+        styl = _AktywacjaKlikiem()
+        styl.setParent(t)                    # żyje tyle, co tabela (`setStyle` nie przejmuje własności)
+        t.setStyle(styl)
+        _klik_komorki(view, view.model._rows[1]["frame_id"], 1)
+        _klik_komorki(view, view.model._rows[wiersz]["frame_id"], 1, Qt.ControlModifier)
+        przed = _stan(view)
+        sygnaly = []
+        for nazwa in ("pressed", "clicked", "doubleClicked", "activated"):
+            getattr(t, nazwa).connect(lambda idx, n=nazwa: sygnaly.append((n, idx.row())))
+        menu = _prawy_klik_tabeli(view, _srodek(view, wiersz), wyzwalacz, dwuklik=dwuklik)
+        _zamknij_menu(menu)
+        assert menu is None
+        assert sygnaly == []
+        assert _stan(view) == przed and t.state() == QAbstractItemView.NoState
+    finally:
+        view.close()
+        con.close()
+
+
+def _klik_pozycji_menu(menu, akcja):
+    """Prawdziwy klik pozycji menu wyskakującego (otwarte - inaczej pozycji nie ma gdzie kliknąć)."""
+    assert menu.isVisible() and akcja.isVisible() and akcja.isEnabled(), akcja.text()
+    QTest.mouseClick(menu, Qt.LeftButton, Qt.NoModifier, menu.actionGeometry(akcja).center())
+    QApplication.processEvents()
+
+
+@pytest.mark.parametrize("wyzwalacz", _WYZWALACZE, ids=["press", "release"])
+def test_prawy_klik_zostaw_te_wersje_cel_z_klatki_pod_kursorem(qapp, wcon, wyzwalacz):
+    """„Zostaw tę wersję” naprawdę: zaznaczona wersja 102, prawy klik na wersji 101 (poza zaznaczeniem) -
+    101 staje się zaznaczeniem i bieżącą, klik pozycji menu kopiuje do schowka ścieżki POZOSTAŁEJ wersji
+    (102 - jej ścieżka) i nie rusza zaznaczenia ani bieżącej. Falsyfikator: cel gestu z zaznaczenia sprzed
+    prawego kliku (schowek mówiłby ścieżkami 101)."""
+    from test_gui_pola_w_tle import _czekaj
+    view = grid_mod.FramesView(wcon, now_fn=lambda: NOW)
+    view._writeback_async = False
+    try:
+        view.resize(1400, 800)
+        view.show()
+        view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+        _odczekaj_debounce()
+        QApplication.clipboard().setText("nietknięte")
+        _klik_komorki(view, 102, 1)
+        menu = _prawy_klik_tabeli(view, _srodek(view, _wiersz(view, 101)), wyzwalacz)
+        try:
+            assert menu is view._menu_tabeli
+            assert _stan(view) == ([101], _wiersz(view, 101))
+            _klik_pozycji_menu(menu, view.act_keep_version)
+        finally:
+            _zamknij_menu(QApplication.activePopupWidget())
+        _czekaj(lambda: QApplication.clipboard().text() != "nietknięte", "schowek po geście")
+        assert QApplication.clipboard().text().split("\n") == ["/st/IC1795/Ha/stara.xisf", "/kopia/stara.xisf"]
+        assert _stan(view) == ([101], _wiersz(view, 101))
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize("wyzwalacz", _WYZWALACZE, ids=["press", "release"])
+def test_prawy_klik_ta_kopia_prowadzi_cel_z_klatki_pod_kursorem(qapp, widok, wyzwalacz):
+    """„Ta kopia prowadzi” naprawdę (podmenu kopii, wątek tła gestu): perspektywa „Kopie niezgodne” bez
+    zaznaczenia, prawy klik na klatce - ona staje się zaznaczeniem, klik w podmenu, klik kopii CLS -
+    nagłówek klatki mówi CLS, zaznaczenie i bieżąca na tej klatce po odświeżeniu zbioru. Falsyfikator:
+    menu z pustym zaznaczeniem (podmenu kopii bez celu)."""
+    from test_gui_lead_copy import _header, _po_gescie
+    from test_gui_pola_w_tle import _czekaj
+    con, v, fid, _a, _b = widok
+    v.apply_perspective(grid_mod.PRESET_COPY_CONFLICT)
+    _odczekaj_debounce()
+    assert v._frame_ids == [fid] and _zaznaczone(v) == []
+    menu = _prawy_klik_tabeli(v, _srodek(v, _wiersz(v, fid)), wyzwalacz)
+    try:
+        assert menu is v._menu_tabeli
+        assert _stan(v) == ([fid], _wiersz(v, fid))
+        _klik_pozycji_menu(menu, v._menu_kopii.menuAction())
+        _czekaj(v._menu_kopii.isVisible, "podmenu kopii")
+        pozycje = [a for a in v._menu_kopii.actions() if not a.isSeparator()]
+        _klik_pozycji_menu(v._menu_kopii, pozycje[1])
+    finally:
+        _zamknij_menu(QApplication.activePopupWidget())
+        v._menu_tabeli.hide()
+    assert _po_gescie(v)
+    _odczekaj_debounce()
+    assert _header(con, fid)["filter_raw"] == "CLS"
+    assert _stan(v) == ([fid], _wiersz(v, fid))

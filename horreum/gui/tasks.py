@@ -22,13 +22,17 @@ w podstronach piszą wstrzykniętym zegarem, asercja tożsamości `_now` w testa
 a sam widok przy powrocie „← Porządki" (user mógł nazwać teleskopy w podstronie). Po gestach
 Zbiorów gospodarz woła `refresh_counts(w_tle=True)` - stan liczy wątek tła (`_LicznikiWorker`).
 
-Przy montażu (start GUI, zmiana bazy) widok przegląda ślady cofnięcia bez werdyktu (AR-231,
-`writeback.przejrzyj_slady_cofniecia`) w wątku Pythona, na który zamknięcie nie czeka; resztka martwej
-próby trafia do wiersza „Kopie zostawione do oka” bez dotyku lokacji, porażka - do wiersza pasywnego
-z ponowieniem."""
-import queue
+Przy montażu (start GUI, zmiana bazy) i przy każdym wejściu w Porządki widok zleca PRZEGLĄD PLIKÓW OBOK
+ŚCIEŻKI w wątku Pythona, na który zamknięcie nie czeka (jeden przegląd na bazę, AR-252): ślady cofnięcia bez
+werdyktu (AR-231, `writeback.przejrzyj_slady_cofniecia`) - resztka martwej próby trafia do wiersza „Kopie
+zostawione do oka” bez dotyku lokacji - i odczyt obecności kopii zostawionych (`_sprawdz_kopie`, pamięć
+`queries.zapamietaj_obecnosc`). To JEDYNY `stat` archiwum Porządków (AR-246): rachunek liczników czyta pamięć
+obecności bez I/O. Przegląd ponad limit, porażka i „nie wiem” mówią w wierszu pasywnym z ponowieniem."""
+import dataclasses
+import os
 import sqlite3
 import threading
+import time
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
@@ -365,27 +369,83 @@ class _LicznikiWorker(QObject):
             self.finished.emit()
 
 
-# Okres odczytu skrzynki przeglądu śladów (AR-231) w wątku GUI - wynik przychodzi raz na montaż.
+# Okres odczytu wyniku przeglądu plików obok ścieżki (AR-231) w wątku GUI.
 _PRZEGLAD_TAKT_MS = 250
+# PRZEGLĄD DŁUŻSZY NIŻ PRÓG mówi w wierszu pasywnym „trwa” (AR-252), zamiast milczeć jak „brak śladów”.
+# Zdrowy przegląd to SQL + jeden `stat` na nazwę (0,03 ms na `R:`, komentarz `writeback._rekoncyliuj_slady`),
+# więc 3 s jest o rzędy nad zdrowym biegiem, a pod limitem sesji klienta SMB, na który czeka `stat` zerwanego
+# udziału - przy dysku sprawnym wiersz nie mignie.
+_PRZEGLAD_LIMIT_S = 3.0
 
 
-def _przeglad_slady(db_path, now, skrzynka, zeton):
-    """Przegląd śladów cofnięcia bez werdyktu (`writeback.przejrzyj_slady_cofniecia`, AR-231) w WĄTKU
-    PYTHONA: własne połączenie (`db.connect`), wynik albo powód porażki (`powod_okna` - klasa błędu
-    systemu albo bazy, błąd programu) do skrzynki z żetonem zlecenia. Nie dotyka obiektów Qt - widok czyta
-    skrzynkę timerem w wątku GUI. Wątek, nie `QThread`: zamknięcie okna i zmiana bazy NIE czekają na
-    przegląd (`stat` na zerwanym udziale potrafi wisieć), a `QThread` skasowany z widokiem w biegu to twardy
-    abort aplikacji."""
-    con = None
+@dataclasses.dataclass(eq=False)
+class _Przeglad:
+    """Jedno zlecenie przeglądu (`_przeglad_slady`): wątek, chwila startu (`time.monotonic`), bilet startu
+    (`queries.bilet_obecnosci` - próg zaufania czytelnika, gdy zlecenie wisi), `pelny` - czy przegląda też ślady
+    cofnięcia (montaż, ponowienie) czy wyłącznie kopie zostawione (wejście w Porządki), zdarzenie końca i wynik -
+    `(PrzegladSladow, {nazwa kopii: odczyt path_gone}, czy pamięć obecności zmieniła wartość)` albo powód
+    porażki. Wynik pisze wątek PRZED `gotowe.set()`, czyta wątek GUI po nim."""
+    watek: threading.Thread | None = None
+    start: float = 0.0
+    bilet: int = 0
+    pelny: bool = True
+    gotowe: threading.Event = dataclasses.field(default_factory=threading.Event)
+    wynik: object = None
+
+
+# JEDEN PRZEGLĄD NA BAZĘ (AR-252): `stat` zerwanego udziału zawiesza wątek przeglądu do końca procesu (nie da
+# się go przerwać), więc kolejny montaż, wejście w Porządki albo ponowienie PODPINA się pod żywy wpis zamiast
+# zakładać drugi wątek z własnym połączeniem. Klucz = ścieżka bazy (`queries.klucz_bazy`). Wpisów nikt nie
+# sprząta: gotowy zastępuje następne zlecenie, a widok trzyma SWÓJ wpis, więc zastąpienie w rejestrze nie odbiera
+# mu wyniku. Plik bazy skasowany i założony od nowa pod tą samą ścieżką dostałby wiszący przegląd starego pliku -
+# na Windows otwarte połączenie wątku blokuje skasowanie, więc skutek kończy się na jednym wiszącym przeglądzie.
+_PRZEGLADY: dict = {}
+
+
+def _sprawdz_kopie(con):
+    """Odczyt obecności kopii zostawionych do oka (AR-246): każda nazwa `queries.kept_copy_names` raz
+    `scan.path_gone`, z biletem wziętym PRZED odczytem, do pamięci obecności (`queries.zapamietaj_obecnosc` -
+    nowszy odczyt wygrywa). Zapis odczyt po odczycie: zawieszenie na N-tej nazwie zostawia w pamięci
+    poprzednie. Zwraca `({nazwa: True | False | None}, czy pamięć zmieniła wartość)` tego przeglądu."""
+    wyniki, zmiana = {}, False
+    for _fid, sciezki in queries.kept_copy_names(con):
+        for s in sciezki:
+            if s in wyniki:
+                continue
+            bilet = queries.bilet_obecnosci()
+            wyniki[s] = scan.path_gone(s)
+            zmiana = queries.zapamietaj_obecnosc(s, bilet, wyniki[s]) or zmiana
+    return wyniki, zmiana
+
+
+def _przeglad_slady(db_path, now, zlecenie):
+    """PRZEGLĄD PLIKÓW OBOK ŚCIEŻKI w WĄTKU PYTHONA: własne połączenie (`db.connect`), przy zleceniu `pelny`
+    ślady cofnięcia bez werdyktu (`writeback.przejrzyj_slady_cofniecia`, AR-231) i - po nich, więc ślad, który
+    przegląd właśnie postawił w `kept`, już się liczy - odczyt obecności kopii zostawionych (`_sprawdz_kopie`).
+    Zlecenie z wejścia w Porządki (`pelny=False`) śladów NIE przegląda: obserwator przy wejściu widziałby ślad
+    żywego cofnięcia tego procesu (nawigacja nie gaśnie przy zapisie) i odbierałby właścicielowi `clean`.
+    Wynik albo powód porażki (`powod_okna` - klasa błędu systemu albo bazy, błąd programu) do zlecenia,
+    połączenie zamknięte, próg zaufania tego zlecenia zdjęty, potem `gotowe` - KAŻDĄ drogą (`finally`), żeby
+    zlecenie nie wisiało w „trwa” po błędzie samego sprzątania. Nie dotyka obiektów Qt - widok czyta zlecenie
+    timerem w wątku GUI. Wątek, nie `QThread`: zamknięcie okna i zmiana bazy NIE czekają na przegląd (`stat`
+    na zerwanym udziale potrafi wisieć), a `QThread` skasowany z widokiem w biegu to twardy abort aplikacji."""
+    wynik = None
     try:
-        con = db.connect(db_path)
-        wynik = writeback.przejrzyj_slady_cofniecia(con, now=now)
-    except Exception as exc:  # noqa: BLE001 - porażka idzie do widoku powodem, nie cicho
-        wynik = powod_okna(exc)
+        con = None
+        try:
+            con = db.connect(db_path)
+            slady = (writeback.przejrzyj_slady_cofniecia(con, now=now) if zlecenie.pelny
+                     else writeback.PrzegladSladow())
+            wynik = (slady, *_sprawdz_kopie(con))
+        except Exception as exc:  # noqa: BLE001 - porażka idzie do widoku powodem, nie cicho
+            wynik = powod_okna(exc)
+        finally:
+            if con is not None:
+                con.close()
     finally:
-        if con is not None:
-            con.close()
-    skrzynka.put((zeton, wynik))
+        queries.zdejmij_prog_obecnosci(db_path, zlecenie.bilet)
+        zlecenie.wynik = wynik
+        zlecenie.gotowe.set()
 
 
 # Wiersz, którego podstrona ma kilka kubełków: klik ZAZNACZA właściwy, żeby lista klatek i gest
@@ -471,14 +531,18 @@ class TasksView(QWidget):
         # wejście w Porządki pomija rachunek, gdy baza się od niego nie zmieniła (`odswiez_przy_wejsciu`).
         self._odcisk_licznikow = None
         self._odcisk_biegu = None
-        # PRZEGLĄD ŚLADÓW COFNIĘCIA bez werdyktu (AR-231): wątek Pythona (`_przeglad_watek`, bez `join`
-        # przy zatrzymaniu), skrzynka wyniku i timer, który ją czyta w wątku GUI (`_przeglad_timer`).
-        # Wynik z żetonem innym niż bieżący (widok zatrzymany, ponowienie) idzie do kosza.
+        # PRZEGLĄD PLIKÓW OBOK ŚCIEŻKI (AR-231, AR-246, AR-252): zlecenie, które widok obserwuje
+        # (`_przeglad`, wpis rejestru `_PRZEGLADY`), jego wątek Pythona (`_przeglad_watek`, bez `join` przy
+        # zatrzymaniu) i timer, który czyta zlecenie w wątku GUI (`_przeglad_timer`). Widok zatrzymany puszcza
+        # zlecenie - wynik nie ma czytelnika. Stan wiersza pasywnego: `_stan_sladow`. `_prog_ustawiony` - zlecenie
+        # obserwowane przez widok wisiało ponad limit i widok postawił próg zaufania czytelnika (rachunek po wyniku);
+        # flaga należy do zlecenia, nie do stanu wiersza - ponowienie zaczyna w „trwa”, a próg i tak musi powstać.
         self._now_fn = now_fn
-        self._przeglad_zeton = 0
+        self._przeglad = None
         self._przeglad_watek = None
         self._przeglad_timer = None
-        self._przeglad_skrzynka = queue.SimpleQueue()
+        self._stan_sladow = "schowany"
+        self._prog_ustawiony = False
         # pod-widoki osi z FORWARDOWANYM now_fn (F5R#2) — wystawione dla aliasów MainWindow
         self.axis_view = TelescopeAxisView(con, now_fn=now_fn)
         self.observatory_view = ObservatoryAxisView(con, now_fn=now_fn)
@@ -487,18 +551,19 @@ class TasksView(QWidget):
         # Oś teleskopu odświeża się od razu, bez ręcznego „Odśwież" (wizytacja N4).
         self.object_view.telescope_axis_changed.connect(self.axis_view.refresh)
         self._build_ui()
-        # Montaż = start GUI albo zmiana bazy: ślady bez werdyktu (jeden SELECT z indeksu częściowego)
-        # przegląda wątek tła; bez śladów - bez wątku i bez timera.
+        # Montaż = start GUI albo zmiana bazy: ślady bez werdyktu (jeden SELECT z indeksu częściowego) i kopie
+        # zostawione do oka przegląda wątek tła; bez nich - bez wątku i bez timera.
         if self._db_path and self._sa_slady_do_przegladu():
             self._przejrzyj_slady()
 
     def _sa_slady_do_przegladu(self):
-        """Czy montaż ma zlecić przegląd śladów (AR-231). Błąd BAZY klasą (`powod_bazy`: zablokowana ponad
-        `busy_timeout`, niedostępna, uszkodzona) to „nie wiem, czy są ślady” → przegląd startuje i sam
-        zgłasza porażkę w wierszu pasywnym (to samo zapytanie na własnym połączeniu) - montaż nie pada.
-        Błąd spoza klas (np. operacja na zamkniętym połączeniu) to błąd programu - leci dalej (EXPECT)."""
+        """Czy zlecić przegląd plików obok ścieżki (AR-231, AR-246): są ślady cofnięcia bez werdyktu albo
+        kopie zostawione do oka (`queries.kept_copy_names`). Błąd BAZY klasą (`powod_bazy`: zablokowana ponad
+        `busy_timeout`, niedostępna, uszkodzona) to „nie wiem, czy są” → przegląd startuje i sam zgłasza
+        porażkę w wierszu pasywnym (te same zapytania na własnym połączeniu) - montaż nie pada. Błąd spoza
+        klas (np. operacja na zamkniętym połączeniu) to błąd programu - leci dalej (EXPECT)."""
         try:
-            return bool(repo.unsettled_atomic_undos(self.con))
+            return bool(repo.unsettled_atomic_undos(self.con)) or bool(queries.kept_copy_names(self.con))
         except sqlite3.Error as exc:
             if powod_bazy(exc) is None:
                 raise
@@ -524,17 +589,25 @@ class TasksView(QWidget):
         self.blad_licznikow.setWordWrap(True)
         self.blad_licznikow.setVisible(False)
         lv.addWidget(self.blad_licznikow)
-        # Porażka przeglądu śladów cofnięcia (AR-231): wiersz PASYWNY - zdanie klasy błędu ze szczegółem
-        # pod kursorem i przycisk ponowienia, bez okna. Schowany do porażki; udany przegląd go chowa.
+        # Przegląd plików obok ścieżki (AR-231, AR-252): wiersz PASYWNY - zdanie ze szczegółem pod kursorem
+        # i przycisk ponowienia, bez okna. Dwie etykiety o stałej roli - porażka (`blad_sladow`, `error`) oraz
+        # „trwa” i „nie wiem” (`stan_sladow`, `warn`); widoczna co najwyżej jedna, stan stawia wyłącznie
+        # `_ustaw_wiersz_sladow`.
         self.wiersz_sladow = QWidget()
         wsl = QHBoxLayout(self.wiersz_sladow)
         wsl.setContentsMargins(0, 0, 0, 0)
+        self.stan_sladow = EtykietaBledu("")
+        self.stan_sladow.setProperty("role", "warn")
+        self.stan_sladow.setWordWrap(True)
+        self.stan_sladow.setVisible(False)
+        wsl.addWidget(self.stan_sladow, 1)
         self.blad_sladow = EtykietaBledu("")
         self.blad_sladow.setProperty("role", "error")
         self.blad_sladow.setWordWrap(True)
+        self.blad_sladow.setVisible(False)
         wsl.addWidget(self.blad_sladow, 1)
         self.ponow_slady = QPushButton(i18n.t("tasks.traces_retry"))
-        self.ponow_slady.clicked.connect(lambda: self._przejrzyj_slady())
+        self.ponow_slady.clicked.connect(lambda: self._przejrzyj_slady(pelny=True))
         wsl.addWidget(self.ponow_slady, 0, Qt.AlignTop)
         self.wiersz_sladow.setVisible(False)
         lv.addWidget(self.wiersz_sladow)
@@ -676,7 +749,24 @@ class TasksView(QWidget):
 
         Skrót tylko przy SCHOWANYM wierszu błędu: po porażce rachunku lista nie mówi prawdy, choćby
         odcisk się nie zmienił. Odcisk, którego nie da się przeczytać, też nie jest „bez zmian” -
-        pełny rachunek powie błąd zdaniem (`refresh_counts`, AR-198)."""
+        pełny rachunek powie błąd zdaniem (`refresh_counts`, AR-198).
+
+        Wejście zleca też przegląd KOPII zostawionych do oka (AR-246) PRZED skrótem: człowiek usuwa albo
+        przywraca je poza programem, a odcisk bazy tego nie widzi. Śladów cofnięcia wejście NIE przegląda
+        (`_przeglad_slady`, `pelny=False`) - obserwator zostaje przy montażu i ponowieniu. Błąd bazy w pytaniu
+        „czy są kopie” to pominięcie zlecenia - mówi o nim rachunek niżej zdaniem (AR-198), jak dotąd na
+        wejściu. Nic do przeglądu (ani kopii, ani śladów bez werdyktu) i żadnego zlecenia w biegu - wiersz pasywny
+        poprzedniego przeglądu gaśnie, bo nie ma już czego ponawiać."""
+        if self._db_path:
+            try:
+                kopie = bool(queries.kept_copy_names(self.con))
+                slady = kopie or bool(repo.unsettled_atomic_undos(self.con))
+            except sqlite3.Error:
+                kopie = slady = None
+            if kopie:
+                self._przejrzyj_slady(pelny=False)
+            elif slady is False and self._przeglad is None:
+                self._ustaw_wiersz_sladow("schowany")
         if self._odcisk_licznikow is not None and self.blad_licznikow.isHidden():
             try:
                 bez_zmian = queries.odcisk_bazy(self.con) == self._odcisk_licznikow
@@ -743,11 +833,13 @@ class TasksView(QWidget):
         metodę po nazwie u każdej strony stosu): ZBIERZ wątek liczników, zanim rodzic go skasuje
         (`~QThread` w biegu to twardy abort). Generacja w górę, więc wynik, który zdążył wyjść
         z wątku, nie dotknie listy ani zamkniętego połączenia. Rachunek nie ma punktu przerwania -
-        `wait` czeka na jego koniec (wzór teczek Domu). Idempotentne.
+        `wait` czeka na jego koniec (wzór teczek Domu) - rachunek czyta wyłącznie bazę i pamięć obecności
+        kopii, żadnego `stat` archiwum (AR-246). Idempotentne.
 
-        PRZEGLĄD ŚLADÓW (AR-231) NIE JEST ZBIERANY: żeton w górę i timer stop - czas stały, bez `join`.
-        Wątek Pythona kończy sam (zapisuje wyłącznie `kept` do bazy SWOJEGO połączenia - po zmianie bazy
-        starej, werdykt dalej prawdziwy dla jej śladu), wynik ze starym żetonem nie ma czytelnika."""
+        PRZEGLĄD PLIKÓW OBOK ŚCIEŻKI (AR-231) NIE JEST ZBIERANY: widok puszcza zlecenie i zatrzymuje timer -
+        czas stały, bez `join`. Wątek Pythona kończy sam (zapisuje wyłącznie `kept` do bazy SWOJEGO połączenia -
+        po zmianie bazy starej, werdykt dalej prawdziwy dla jej śladu - i odczyty obecności do pamięci, gdzie
+        starszy odczyt nie cofnie nowszego), a jego wynik nie ma czytelnika."""
         self._zatrzymaj_przeglad()
         self._liczniki_stop = True
         self._liczniki_ponow = False
@@ -763,52 +855,103 @@ class TasksView(QWidget):
 
     # ---------------------------------------------------------------- przegląd śladów cofnięcia (AR-231)
 
-    def _przejrzyj_slady(self):
-        """Zlecenie przeglądu śladów cofnięcia bez werdyktu w wątku Pythona (`_przeglad_slady`) - przy
-        montażu (start GUI, zmiana bazy) i z przycisku ponowienia wiersza porażki, który gaśnie do wyniku.
-        Nowy żeton unieważnia wynik biegu wcześniejszego."""
-        self._przeglad_zeton += 1
-        self.ponow_slady.setEnabled(False)
-        self._przeglad_watek = threading.Thread(
-            target=_przeglad_slady, name="horreum-przeglad-sladow", daemon=True,
-            args=(self._db_path, self._now_fn(), self._przeglad_skrzynka, self._przeglad_zeton))
-        self._przeglad_watek.start()
+    def _przejrzyj_slady(self, *, pelny=True):
+        """Zlecenie przeglądu plików obok ścieżki w wątku Pythona (`_przeglad_slady`) - pełnego (ślady cofnięcia
+        i kopie) przy montażu (start GUI, zmiana bazy) i z przycisku ponowienia, samych kopii (`pelny=False`)
+        przy wejściu w Porządki. Żywe zlecenie tej bazy (`_PRZEGLADY`) dostaje kolejnego obserwatora zamiast
+        drugiego wątku (AR-252); brak albo gotowe - nowe zlecenie, wpisane do rejestru dopiero po udanym starcie
+        wątku. Żądanie pełnego podpięte pod żywy przegląd samych kopii zostaje przy nim - obserwator śladów rusza
+        przy następnym montażu albo ponowieniu, NIE sam po wyniku: ślad mógł w tym czasie utrwalić żywy właściciel
+        cofnięcia tego procesu, a obserwator odebrałby mu `clean` (powód, dla którego wejście w Porządki nie
+        przegląda śladów).
+        Wiersz pasywny widoczny (porażka, „nie wiem”) przechodzi od razu w „trwa” z ponowieniem zgaszonym;
+        schowany zostaje schowany do limitu (`_odbierz_przeglad`) - przy sprawnym dysku nie mignie."""
+        klucz = queries.klucz_bazy(self._db_path)
+        zlecenie = _PRZEGLADY.get(klucz)
+        if zlecenie is None or zlecenie.gotowe.is_set():
+            zlecenie = _Przeglad(start=time.monotonic(), bilet=queries.bilet_obecnosci(), pelny=pelny)
+            zlecenie.watek = threading.Thread(
+                target=_przeglad_slady, name="horreum-przeglad-sladow", daemon=True,
+                args=(self._db_path, self._now_fn(), zlecenie))
+            zlecenie.watek.start()
+            _PRZEGLADY[klucz] = zlecenie
+        if self._przeglad is not zlecenie:
+            self._prog_ustawiony = False
+        self._przeglad = zlecenie
+        self._przeglad_watek = zlecenie.watek
+        self._ustaw_wiersz_sladow("schowany" if self._stan_sladow == "schowany" else "trwa")
         if self._przeglad_timer is None:
             self._przeglad_timer = QTimer(self)
             self._przeglad_timer.timeout.connect(self._odbierz_przeglad)
         self._przeglad_timer.start(_PRZEGLAD_TAKT_MS)
 
     def _odbierz_przeglad(self):
-        """Takt timera w wątku GUI: wynik bieżącego żetonu ze skrzynki → widok. Porażka (wyjątek całego
-        przeglądu albo śladu - `PrzegladSladow.padly`) → wiersz pasywny ze zdaniem klasy błędu i aktywnym
-        ponowieniem; przegląd bez porażki chowa wiersz. Werdykt `kept` → rachunek liczników w tle
-        (wiersz „Kopie zostawione do oka” i plakietka)."""
-        while True:
-            try:
-                zeton, wynik = self._przeglad_skrzynka.get_nowait()
-            except queue.Empty:
-                return
-            if zeton != self._przeglad_zeton:
-                continue                           # bieg wyprzedzony ponowieniem - do kosza
+        """Takt timera w wątku GUI. Zlecenie w biegu ponad `_PRZEGLAD_LIMIT_S` → „trwa” (AR-252) i próg zaufania
+        czytelnika (`queries.ustaw_prog_obecnosci` - „nie ma” sprzed startu zlecenia nie ukrywa kopii) z rachunkiem
+        liczników w tle. Zlecenie gotowe → stan wiersza z wyniku: porażka (wyjątek całego przeglądu albo śladu -
+        `PrzegladSladow.padly`; zlecenie bez wyniku - błąd programu) → zdanie klasy błędu; odczyt „nie wiem”
+        (`None` - kopia zostawiona albo ślad, `PrzegladSladow.nie_wiem_nazwy`) → zdanie „nie wiem” z nazwami pod
+        kursorem; inaczej wiersz schowany. Ślad bez werdyktu z TRZEMA dowiedzionymi brakami wiersza nie zapala:
+        obok ścieżki nic nie ma, a `clean` pisze wyłącznie właściciel (AR-247) - ostrzeżenie świeciłoby na zawsze
+        bez gestu, który je gasi. Werdykt `kept`, zmieniona wartość pamięci obecności albo zdjęty próg → rachunek
+        liczników w tle (wiersz „Kopie zostawione do oka” i plakietka) - bez zmiany nie ma rachunku (AR-84)."""
+        zlecenie = self._przeglad
+        if zlecenie is None:
             self._przeglad_timer.stop()
-            self._przeglad_watek = None
-            powod = wynik.powod if isinstance(wynik, writeback.PrzegladSladow) else wynik
-            if powod is not None:
-                self.blad_sladow.ustaw(i18n.t("tasks.traces_failed", msg=tekst_powodu(powod)),
-                                       wiersz_systemu(powod))
-                self.wiersz_sladow.setVisible(True)
-            else:
-                self.blad_sladow.clear()
-                self.wiersz_sladow.setVisible(False)
-            self.ponow_slady.setEnabled(True)
-            if isinstance(wynik, writeback.PrzegladSladow) and wynik.kept:
+            return
+        if not zlecenie.gotowe.is_set():
+            if not self._prog_ustawiony and time.monotonic() - zlecenie.start > _PRZEGLAD_LIMIT_S:
+                self._ustaw_wiersz_sladow("trwa")
+                queries.ustaw_prog_obecnosci(self._db_path, zlecenie.bilet)
+                self._prog_ustawiony = True
                 self.refresh_counts(w_tle=True)
             return
+        self._przeglad_timer.stop()
+        self._przeglad = None
+        self._przeglad_watek = None
+        queries.zdejmij_prog_obecnosci(self._db_path, zlecenie.bilet)
+        wynik = zlecenie.wynik
+        if wynik is None:                  # zlecenie bez wyniku - klasyfikacja porażki sama padła
+            wynik = powod_okna(RuntimeError("przegląd plików obok ścieżki skończył się bez wyniku"))
+        slady, kopie, zmiana = wynik if isinstance(wynik, tuple) else (None, {}, False)
+        powod = slady.powod if slady is not None else wynik
+        nie_wiem = list(dict.fromkeys(
+            [s for s, v in kopie.items() if v is None] + list(slady.nie_wiem_nazwy if slady else ())))
+        if powod is not None:
+            self._ustaw_wiersz_sladow("porazka", i18n.t("tasks.traces_failed", msg=tekst_powodu(powod)),
+                                      wiersz_systemu(powod))
+        elif nie_wiem:
+            self._ustaw_wiersz_sladow("nie_wiem", i18n.t("tasks.traces_unknown"), "\n".join(nie_wiem))
+        else:
+            self._ustaw_wiersz_sladow("schowany")
+        prog, self._prog_ustawiony = self._prog_ustawiony, False
+        if (slady is not None and (slady.kept or zmiana)) or prog:
+            self.refresh_counts(w_tle=True)
+
+    def _ustaw_wiersz_sladow(self, stan, zdanie="", szczegol=""):
+        """JEDYNY setter wiersza pasywnego przeglądu: `schowany` | `trwa` | `porazka` | `nie_wiem`. W stanie
+        widocznym dokładnie jedna etykieta niesie zdanie (porażka - `blad_sladow`, reszta - `stan_sladow`),
+        druga jest pusta i schowana; ponowienie zgaszone wyłącznie w „trwa” (drugi wątek tej bazy i tak by
+        nie ruszył - `_PRZEGLADY`)."""
+        self._stan_sladow = stan
+        if stan == "trwa":
+            zdanie = i18n.t("tasks.traces_pending")
+        for etykieta, jej in ((self.blad_sladow, stan == "porazka"),
+                              (self.stan_sladow, stan in ("trwa", "nie_wiem"))):
+            if jej:
+                etykieta.ustaw(zdanie, szczegol)
+            else:
+                etykieta.clear()
+            etykieta.setVisible(jej)
+        self.wiersz_sladow.setVisible(stan != "schowany")
+        self.ponow_slady.setEnabled(stan != "trwa")
 
     def _zatrzymaj_przeglad(self):
-        """Widok znika: wynik przeglądu w biegu traci czytelnika (żeton), timer stoi - bez czekania na
+        """Widok znika: zlecenie w biegu traci czytelnika (widok je puszcza), timer stoi - bez czekania na
         wątek (`zatrzymaj_pola`)."""
-        self._przeglad_zeton += 1
+        self._przeglad = None
+        self._przeglad_watek = None
+        self._prog_ustawiony = False
         if self._przeglad_timer is not None:
             self._przeglad_timer.stop()
 

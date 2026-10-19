@@ -300,3 +300,49 @@ def test_EN_recepty_i_pusty_stan_perspektywy_jednym_rodzajem_cudzyslowu():
     assert all("“" in CATALOG[k]["en"] for k in klucze)
     for forma in CATALOG["grid.sel.reveal_target"]["en"].values():
         assert '"' not in forma
+
+
+# ---- BRAMKA: cudzysłów EN (AR-255) ------------------------------------------------------------------
+
+_CUDZYSLOW_OBCY_EN = "„«»"      # polski „, francuskie/niemieckie « »
+
+
+def _wartosci_en(wartosc):
+    """Teksty wpisu EN - prosty `str` i formy mnogie (słownik form), rekurencyjnie."""
+    if isinstance(wartosc, str):
+        yield wartosc
+    elif isinstance(wartosc, dict):
+        for forma in wartosc.values():
+            yield from _wartosci_en(forma)
+
+
+def _pary_angielskie(tekst):
+    """Każde U+201C zamyka U+201D, zanim otworzy się następne, i żadne U+201D nie stoi bez otwarcia."""
+    otwarty = False
+    for znak in tekst:
+        if znak == "“":
+            if otwarty:
+                return False
+            otwarty = True
+        elif znak == "”":
+            if not otwarty:
+                return False
+            otwarty = False
+    return not otwarty
+
+
+def test_EN_cudzyslow_wylacznie_angielski_w_parach():
+    """EN `path.cards_restored_note` mówił „Confirm” polskim cudzysłowem (AR-255) - i nie on jeden:
+    predykat znalazł 9 takich wpisów EN (`„…”` otwiera U+201E, a zamyka U+201D, więc w EN zamknięcie
+    wisi bez otwarcia). Bramka idzie po WARTOŚCIACH katalogu (komentarze i wzmianki w źródle nie są
+    wejściem): w żadnej wartości EN, także w formach mnogich, nie ma U+201E, U+00AB ani U+00BB, a U+201C
+    i U+201D stoją parami. Falsyfikator: jeden wpis EN z `„…”` - czerwień z nazwą klucza."""
+    obce, bez_pary = [], []
+    for klucz, wpis in CATALOG.items():
+        for tekst in _wartosci_en(wpis["en"]):
+            if set(tekst) & set(_CUDZYSLOW_OBCY_EN):
+                obce.append(klucz)
+            if not _pary_angielskie(tekst):
+                bez_pary.append(klucz)
+    assert not obce, f"cudzysłów spoza EN w wartości EN: {sorted(set(obce))}"
+    assert not bez_pary, f"cudzysłów EN bez pary: {sorted(set(bez_pary))}"

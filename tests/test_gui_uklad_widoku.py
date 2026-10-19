@@ -689,13 +689,36 @@ def _pasek(qapp, licznik, kryteria):
     return bar
 
 
+def _uklad_paska(bar):
+    """Odcisk układu paska: geometria i tekst licznika oraz kryteriów, tryb rzędów."""
+    return (bar.count_label.geometry().getRect(), bar.criteria_label.geometry().getRect(),
+            bar.criteria_label.text(), bar._kryteria_pod, bar.width())
+
+
+def _do_stabilnego_ukladu(qapp, bar, s=3.0):
+    """Pętla zdarzeń, aż układ paska przestanie się zmieniać (trzy obroty z rzędu bez zmiany) -
+    przełożenie rzędów kończy się `LayoutRequest`-em i resize'em etykiety, więc jeden
+    `processEvents()` mierzyłby stan pośredni. Bezpiecznik czasu - czerwień, nie zawieszenie."""
+    import time
+    koniec = time.monotonic() + s
+    poprzedni, stale = None, 0
+    while stale < 3:
+        assert time.monotonic() < koniec, "układ paska się nie ustalił"
+        qapp.processEvents()
+        teraz = _uklad_paska(bar)
+        stale = stale + 1 if teraz == poprzedni else 0
+        poprzedni = teraz
+        time.sleep(0.01)
+
+
 def test_AR77_kryteria_schodza_do_wlasnego_rzedu_zamiast_zwijac_sie_do_obie(qapp):
     """Przy „1 zaznaczona" licznik urósł i „Obiekt: NGC1976" zwijał się do „Obie…" - przyciski nie
     maleją, więc kryteria dostawały resztę. Gdy obok przycisków nie mieści się PIERWSZE kryterium,
     kryteria schodzą pod przyciski na całą szerokość; gdy znów się mieści - wracają. Zmiana
     licznika z zewnątrz (`_update_count` pisze wprost do etykiety) też przekłada pasek. Minimum
     paska w dwóch rzędach nie rośnie, więc podłogi okna to nie podnosi. Szerokości liczone
-    z podpowiedzi widżetów, nie pinowane w pikselach.
+    z podpowiedzi widżetów, nie pinowane w pikselach. Każdy krok czeka na stabilny układ, nie na
+    jeden obrót pętli.
 
     Falsyfikator: zdejmij `_dopasuj_kryteria` z `event` - zmiana licznika zostawia „Obie…"."""
     kryteria = "Obiekt: NGC1976 · Teleskop: RC8 · Filtr: Ha"
@@ -704,30 +727,30 @@ def test_AR77_kryteria_schodza_do_wlasnego_rzedu_zamiast_zwijac_sie_do_obie(qapp
         # szeroko: całe kryteria mieszczą się obok przycisków nawet przy długim liczniku
         bar.resize(bar.width() - bar._miejsce_na_kryteria()
                    + bar.criteria_label.fontMetrics().horizontalAdvance(kryteria) + 600, bar.height())
-        qapp.processEvents()
+        _do_stabilnego_ukladu(qapp, bar)
         assert not bar._kryteria_pod
         assert bar.criteria_label.width() == bar._miejsce_na_kryteria(), "rachunek miejsca = układ"
         bar.count_label.setText("12 klatek  ·  1 zaznaczona")
-        qapp.processEvents()
+        _do_stabilnego_ukladu(qapp, bar)
         assert not bar._kryteria_pod
         min_jeden_rzad = bar.minimumSizeHint().width()     # minimum z długim licznikiem
         bar.count_label.setText("12 klatek")
-        qapp.processEvents()
+        _do_stabilnego_ukladu(qapp, bar)
         # szerokość, przy której pierwsze kryterium mieści się z zapasem 10 px - dłuższy licznik
         # (człon „1 zaznaczona") je wypycha
         szer = bar.width() - bar._miejsce_na_kryteria() + bar._potrzeba_kryteriow() + 10
         bar.resize(szer, bar.height())
-        qapp.processEvents()
+        _do_stabilnego_ukladu(qapp, bar)
         assert not bar._kryteria_pod
         assert bar.criteria_label.text().startswith("Obiekt: NGC1976")
         bar.count_label.setText("12 klatek  ·  1 zaznaczona")
-        qapp.processEvents()
+        _do_stabilnego_ukladu(qapp, bar)
         assert bar._kryteria_pod, "kryteria zostały w rzędzie przycisków"
         assert bar._lay.indexOf(bar.criteria_label) == -1
         assert bar.criteria_label.text() == kryteria, "we własnym rzędzie kryteria mówią w całości"
         assert bar.minimumSizeHint().width() <= min_jeden_rzad
         bar.resize(szer + 400, bar.height())
-        qapp.processEvents()
+        _do_stabilnego_ukladu(qapp, bar)
         assert not bar._kryteria_pod and bar._lay.indexOf(bar.criteria_label) >= 0
     finally:
         bar.close()

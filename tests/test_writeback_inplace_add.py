@@ -177,16 +177,14 @@ def test_add_rownowazny_drodze_atomowej(tmp_path, plik, ops, bajty_jak_atom):
                  [_add()], "potrzebuje 1 wolnego rekordu", id="zera_za_END"),
     pytest.param(lambda tp: _fits_bez(tp / "b.fits", zapas=1),
                  [_add(), _add("OBSERVER", "Zdzin")], "potrzebuje 2", id="dwa_add_jeden_wolny_rekord"),
-    pytest.param(lambda tp: _fits_bez(tp / "b.fits", karty=[("IMAGETYP", "Light"),
-                                                           ("OBJECT", "M31")]),
-                 [_add()], "już jest", id="add_karty_obecnej"),
-    pytest.param(lambda tp: _fits_bez(tp / "b.fits"),
-                 [writeback.WriteOp("FOCALLEN", "add", "800", "int")], "add/int",
-                 id="add_wartosci_liczbowej"),
+    pytest.param(lambda tp: _fits_bez(tp / "b.fits", zapas=0),
+                 [writeback.WriteOp("FOCALLEN", "add", "800", "int")],
+                 "potrzebuje 1 wolnego rekordu", id="add_liczby_bez_zapasu"),
 ])
 def test_add_bez_miejsca_spada_przed_zapisem(tmp_path, plik, ops, fragment):
-    """Brak zapasu (nagłówek urósłby o blok i przesunął dane), karta już obecna i wartość
-    nietekstowa → `Fallback` PRZED dziennikiem i zapisem, plik bajt w bajt nietknięty."""
+    """Brak zapasu (nagłówek urósłby o blok i przesunął dane) - także przy karcie liczbowej, która
+    od AR-261 idzie w miejscu, gdy zapas jest → `Fallback` PRZED dziennikiem i zapisem, plik bajt
+    w bajt nietknięty. `add` karty obecnej to odmowa, nie spadek (AR-257, blok na końcu pliku)."""
     p = plik(tmp_path)
     przed = p.read_bytes()
     res = writeback.write_changes_inplace(str(p), ops, _hash(p), journal=_NieWolno())
@@ -483,8 +481,8 @@ def test_header_fix_mieszanka_w_miejscu_spadek_i_set_potem_undo_bajt_w_bajt(tmp_
 def test_przewidywanie_drogi_add_mowi_zalezy_od_pliku(tmp_path):
     """`inplace_route(op="add")` nie obiecuje zapisu w miejscu: zapas nagłówka nie jest faktem
     bazy, więc mieszcząca się karta dostaje powód „zależy od pliku”, a rozstrzyga pisarz - plik
-    z zapasem w miejscu, bez zapasu spadek. `set` bez zmian; karta, która się nie mieści, i wartość
-    nietekstowa dostają swoje powody; XISF → `None`."""
+    z zapasem w miejscu, bez zapasu spadek. `set` bez zmian; karta, która się nie mieści, dostaje
+    swój powód; karta liczbowa (AR-261) - ta sama reguła co tekstowa; XISF → `None`."""
     powod = writeback.inplace_route("fits", "OBJECT", "NGC 7635", "str", None, op="add")
     assert powod is not None and powod.startswith("zależy od pliku")
     z = _fits_bez(tmp_path / "z.fits")
@@ -496,7 +494,7 @@ def test_przewidywanie_drogi_add_mowi_zalezy_od_pliku(tmp_path):
     nie_miesci = writeback.inplace_route("fits", "OBJECT", "V" * 20, "str", "k" * 60, op="add")
     assert nie_miesci == writeback._fits_card_image("OBJECT", "V" * 20, "k" * 60)[1]
     assert writeback.inplace_route("fits", "FOCALLEN", "800", "int", None,
-                                   op="add").startswith("operacja add/int")
+                                   op="add").startswith("zależy od pliku")
     assert writeback.inplace_route("xisf", "OBJECT", "NGC 7635", "str", None, op="add") is None
 
 
@@ -583,3 +581,247 @@ def test_prognoza_bez_lustra_mowi_zalezy_od_pliku():
                                    cards=lustro).code == "fb_card_too_long"
     assert writeback.inplace_route("xisf", "OBJECT", "NGC 7635", "str", None, op="add",
                                    cards=lustro) is None
+
+
+# ============================================================ AR-257: odmowa łaty w planie, bez spadku
+
+
+def test_plan_w_miejscu_odmawia_add_obecnej_karty_bez_spadku(tmp_path):
+    """AR-257: `add` karty, która już jest - plan w miejscu odmawia OD RAZU tym samym powodem co
+    droga atomowa (`macro_add_exists`), zamiast spadku `fb_card_present`, po którym droga atomowa
+    i tak odmawiała. Dziennik nieotwarty, plik bajt w bajt. Falsyfikator: gałąź spadku przywrócona
+    → `Fallback`."""
+    p = _fits_bez(tmp_path / "b.fits", karty=[("IMAGETYP", "Light"), ("OBJECT", "M31")])
+    przed = p.read_bytes()
+    res = writeback.write_changes_inplace(str(p), [_add()], _hash(p), journal=_NieWolno())
+    assert isinstance(res, writeback.WriteResult) and res.status == "blocked", res
+    assert res.reason.code == "macro_add_exists" and dict(res.reason.params) == {"keyword": "OBJECT"}
+    assert res.backup_text is None and p.read_bytes() == przed
+
+
+@pytest.mark.parametrize("fallback", [True, False], ids=["spadek", "pilotaz"])
+def test_commit_add_obecnej_karty_jednym_przebiegiem(tmp_path, monkeypatch, fallback):
+    """AR-257: `commit(inplace=True)` (op szuflady i okien) stagingiem bez kotwicy - droga atomowa
+    NIE jest wołana (jeden przebieg pod blokadą zamiast dwóch), wpis 'blocked' z kodem
+    `macro_add_exists` w obu trybach; tryb pilotażu mówi prawdziwy powód zamiast `no_fallback`.
+    Falsyfikator: spadek przywrócony → `write_changes` wołany / kod `no_fallback`."""
+    p = _fits_bez(tmp_path / "b.fits", karty=[("IMAGETYP", "Light"), ("OBJECT", "M31")])
+    przed = p.read_bytes()
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    _stage_add(con, "R", _loc(con, p)["id"], None)
+    wolania = []
+    prawdziwy = writeback.write_changes
+    monkeypatch.setattr(writeback, "write_changes",
+                        lambda *a, **k: wolania.append(a) or prawdziwy(*a, **k))
+    res = writeback.commit(con, "R", now=NOW, inplace=True, fallback=fallback)
+    (fr,) = res.blocked
+    assert fr.reason.code == "macro_add_exists" and not wolania and res.commit_id is None, fr.reason
+    (w,) = con.execute("SELECT status, reason_code FROM pending_changes WHERE run_id = 'R'")
+    assert tuple(w) == ("blocked", "macro_add_exists")
+    assert con.execute("SELECT count(*) FROM inplace_op").fetchone()[0] == 0
+    assert p.read_bytes() == przed
+    con.close()
+
+
+def test_przebieg_probny_na_jednej_kopii_naglowka_bez_ruszania_oryginalu(tmp_path, monkeypatch):
+    """AR-257 (przebieg próbny): łata idzie po kolei na JEDNEJ kopii nagłówka - druga z dwóch
+    zależnych operacji (`add` tej samej karty dwa razy) widzi skutek pierwszej i odmawia tak jak droga
+    atomowa (`macro_add_exists`), a nagłówek planu (oryginał z `_fits_hdu_bounds`) zostaje: obrazy
+    kart i `header_hash` bez zmian. Falsyfikatory: osobna kopia na każdą operację → druga nie widzi
+    pierwszej (spadek zamiast odmowy); praca na oryginale → oryginał z kartą łaty."""
+    p = _fits_bez(tmp_path / "b.fits")
+    przed = p.read_bytes()
+    naglowki = []
+    prawdziwy = writeback._fits_hdu_bounds
+
+    def _granice(path, expected):
+        wynik = prawdziwy(path, expected)
+        hdr = wynik[0]
+        naglowki.append((hdr, [c.image for c in hdr.cards], scan._header_hash(hdr)))
+        return wynik
+    monkeypatch.setattr(writeback, "_fits_hdu_bounds", _granice)
+    ops = [_add("OBSERVER", "Zdzin"), _add("OBSERVER", "Ktos")]
+    res = writeback.write_changes_inplace(str(p), ops, _hash(p), journal=_NieWolno())
+    assert isinstance(res, writeback.WriteResult) and res.status == "blocked", res
+    assert res.reason.code == "macro_add_exists" and dict(res.reason.params) == {
+        "keyword": "OBSERVER"}
+    ((hdr, obrazy, hash_przed),) = naglowki
+    assert [c.image for c in hdr.cards] == obrazy and scan._header_hash(hdr) == hash_przed
+    assert "OBSERVER" not in hdr and p.read_bytes() == przed
+    atom = writeback.write_changes(str(p), ops, _hash(p))               # ta sama odmowa atomowo
+    assert (atom.status, atom.reason.code) == ("blocked", "macro_add_exists")
+
+
+# ============================================================ AR-261: karta liczbowa W MIEJSCU
+
+
+def _rekordy_naglowka(dane):
+    koniec = dane.index(writeback._FITS_END_RECORD)
+    blok = -(-(koniec // 80 + 1) * 80 // 2880) * 2880
+    return [dane[i:i + 80] for i in range(0, blok, 80)]
+
+
+_LICZBOWE = [("IMAGETYP", "Light"), ("FOCALLEN", 800, "ogniskowa [mm]"), ("EXPTIME", 300.0),
+             ("FLIPPED", True), ("GAIN", 0), ("SETTEMP", 0.0)]
+
+
+def _op(kw, op, wartosc, typ, comment=None):
+    return writeback.WriteOp(kw, op, wartosc, typ, idx=0 if op == "set" else None, comment=comment)
+
+
+@pytest.mark.parametrize("op", [
+    pytest.param(_op("FOCALLEN", "set", "1000", "int"), id="int"),
+    pytest.param(_op("FOCALLEN", "set", str(2 ** 62 + 1), "int"), id="int_duzy"),
+    pytest.param(_op("EXPTIME", "set", "1.5e-05", "float"), id="float_wykladniczy"),
+    pytest.param(_op("EXPTIME", "set", "-0.0", "float"), id="float_minus_zero"),
+    pytest.param(_op("GAIN", "set", "-0.0", "float"), id="minus_zero_na_int_zero"),
+    pytest.param(_op("SETTEMP", "set", "-0.0", "float"), id="minus_zero_na_float_zero"),
+    pytest.param(_op("EXPTIME", "set", repr(-1.2345678901234567e-300), "float"),
+                 id="float_dluzszy_niz_pole"),
+    pytest.param(_op("FLIPPED", "set", "F", "bool"), id="bool"),
+    pytest.param(_op("FOCALLEN", "set", "1000", "int", comment="nowy komentarz"), id="komentarz"),
+    pytest.param(_op("FOCALLEN", "set", "800", "int"), id="ta_sama_wartosc"),
+    pytest.param(_op("EXPTIME", "set", "60", "int"), id="int_na_float"),
+    pytest.param(_op("FOCALLEN", "set", "1000.5", "float"), id="float_na_int"),
+    pytest.param(_op("XBINNING", "add", "2", "int"), id="add_int"),
+    pytest.param(_op("CCD-TEMP", "add", "-10.1", "float", comment="C"), id="add_float"),
+    pytest.param(_op("SIMULATE", "add", "T", "bool"), id="add_bool"),
+])
+def test_karta_liczbowa_w_miejscu_bajt_w_bajt_jak_droga_atomowa(tmp_path, op):
+    """AR-261 człon 1: karta liczbowa i logiczna idzie W MIEJSCU (dawniej zawsze spadek `fb_op_kind`
+    - przepisanie całego pliku zrywało dowiązanie `_WBPP`). Plik w miejscu == plik drogi atomowej
+    BAJT W BAJT (dokładne 80 B rekordu karty i cały region, dane), ten sam `st_ino`. Zakres zmiany:
+    `set` - jeden rekord (karta wartości równej zastanej wg reguły astropy, np. `-0.0` na `0.0`,
+    `800` na `800` - zero; `-0.0` na int `0` to zmiana typu); `add` - ciąg od miejsca wstawienia do
+    przesuniętego `END`, reszta nietknięta.
+    Float dłuższy niż pole karty traci cyfry w OBU drogach jednakowo (znalezisko poza tym punktem).
+    Falsyfikatory: `value_type != "str"` z powrotem w spadku → `Fallback`; obraz z `fits.Card` dla
+    karty, której astropy nie przełożył → `-0.0`/ta sama wartość różnią się od atomu."""
+    p = _fits_bez(tmp_path / "n.fits", karty=_LICZBOWE)
+    przed = p.read_bytes()
+    ra, rw, atom, wm, ino = _dwie_drogi(p, [op])
+    assert ra.status == "applied", ra
+    assert isinstance(rw, writeback.WriteResult) and rw.status == "applied" and rw.in_place, rw
+    assert os.stat(wm).st_ino == ino and wm.read_bytes() == atom.read_bytes()
+    stare, nowe = _rekordy_naglowka(przed), _rekordy_naglowka(wm.read_bytes())
+    assert len(stare) == len(nowe) and wm.read_bytes()[len(nowe) * 80:] == przed[len(stare) * 80:]
+    inne = [i for i, (a, b) in enumerate(zip(stare, nowe)) if a != b]
+    kw = op.keyword.ljust(8).encode("ascii")
+    if op.op == "set":
+        cel = [i for i, r in enumerate(stare) if r[:8] == kw]
+        assert inne in ([], cel), (inne, cel)
+        assert inne or op.value in ("800", "-0.0"), inne         # bez zmiany tylko wartość równa
+    else:
+        koniec = nowe.index(writeback._FITS_END_RECORD)
+        assert inne == list(range(inne[0], koniec + 1)) and nowe[inne[0]][:8] == kw, inne
+    assert scan.read_fits_meta(str(wm)).header_hash == rw.post_hash
+
+
+@pytest.mark.parametrize("zastana, op, kod", [
+    pytest.param(("FOCALLEN", 800), _op("FOCALLEN", "set", "789", "str"), "fb_value_not_text",
+                 id="tekst_na_liczbie"),
+    pytest.param(("FLIPPED", True), _op("FLIPPED", "set", "F", "str"), "fb_value_not_text",
+                 id="tekst_na_logice"),
+    pytest.param(("TELESCOP", "RC8"), _op("TELESCOP", "set", "8", "int"), "fb_op_kind",
+                 id="liczba_na_tekscie"),
+    pytest.param(("FLIPPED", True), _op("FLIPPED", "set", "1", "int"), "fb_op_kind",
+                 id="liczba_na_logice"),
+    pytest.param(("TELESCOP", "RC8"), _op("TELESCOP", "set", "T", "bool"), "fb_op_kind",
+                 id="logika_na_tekscie"),
+    pytest.param(("FOCALLEN", 800), _op("FOCALLEN", "set", "T", "bool"), "fb_op_kind",
+                 id="logika_na_liczbie"),
+])
+def test_zapis_innego_rodzaju_niz_zastana_karta_spada_na_droge_atomowa(tmp_path, zastana, op, kod):
+    """AR-261: w miejscu wyłącznie przy ZGODNYM rodzaju wartości (tekst / logika / liczba, int i float
+    to jeden rodzaj - `bool` rozpoznany PRZED `int`, bo jest jego podklasą); sześć zmian rodzaju
+    spada przed dziennikiem, plik nietknięty. Falsyfikatory: kontrola rodzaju zdjęta → zapis w miejscu
+    ze zmianą typu karty; `bool` klasyfikowany jako liczba → `logika_na_liczbie`/`liczba_na_logice`
+    w miejscu."""
+    p = _fits_bez(tmp_path / "r.fits", karty=[("IMAGETYP", "Light"), zastana])
+    przed = p.read_bytes()
+    res = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
+    assert isinstance(res, writeback.Fallback) and res.reason.code == kod, res
+    assert p.read_bytes() == przed
+
+
+@pytest.mark.parametrize("wartosc", ["nan", "inf"])
+def test_nan_i_inf_ta_sama_porazka_obu_drog_bez_zmiany_pliku(tmp_path, wartosc):
+    """AR-261: wartości, której karta FITS nie zniesie (`nan`, `inf` - astropy rzuca), obie drogi
+    odmawiają TĄ SAMĄ porażką ('failed' z tekstem astropy) przed jakimkolwiek zapisem: plik bajt
+    w bajt, bez pliku tymczasowego, dziennik nieotwarty. Falsyfikator: obraz liczony bez przebiegu
+    próbnego w innym miejscu niż droga atomowa → inny tekst albo zapis."""
+    p = _fits_bez(tmp_path / "x.fits", karty=_LICZBOWE)
+    przed = p.read_bytes()
+    op = _op("EXPTIME", "set", wartosc, "float")
+    rw = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
+    ra = writeback.write_changes(str(p), [op], _hash(p))
+    assert (rw.status, ra.status) == ("failed", "failed") and str(rw.reason) == str(ra.reason), (
+        rw, ra)
+    assert "not allowed in FITS headers" in str(rw.reason)
+    assert p.read_bytes() == przed and sorted(x.name for x in tmp_path.iterdir()) == ["x.fits"]
+
+
+def test_dowiazanie_twarde_przezywa_zapis_karty_liczbowej_i_cofniecie(tmp_path):
+    """AR-261 sedno: `commit(inplace=True)` karty liczbowej (`set FOCALLEN 1000`) - dowiązanie twarde
+    (wydanie `_WBPP`) widzi nową wartość, plik ten sam węzeł, zapis w miejscu (`in_place`, operacja
+    w dzienniku), a „Cofnij” w miejscu oddaje plik bajt w bajt i dowiązanie dalej ten sam węzeł.
+    Falsyfikator: karta liczbowa z powrotem w spadku → dowiązanie przy 800, nowy węzeł."""
+    p = _fits_bez(tmp_path / "arch" / "a.fits", karty=_LICZBOWE)
+    link = tmp_path / "_WBPP" / "a.fits"
+    link.parent.mkdir()
+    os.link(p, link)
+    przed, ino = p.read_bytes(), os.stat(p).st_ino
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    loc = _loc(con, p)
+    repo.stage_pending(con, run_id="R", location_id=loc["id"], keyword="FOCALLEN", idx=0, op="set",
+                       old_value="800", new_value="1000", new_type="int", new_comment=None,
+                       expected_header_hash=loc["header_hash"])
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.applied) == 1 and res.in_place == res.applied, res
+    assert fits.getheader(str(link))["FOCALLEN"] == 1000
+    assert os.stat(p).st_ino == os.stat(link).st_ino == ino
+    assert [tuple(o)[1:] for o in _operacje(con)] == [("commit", "synced")]
+    ures = writeback.undo(con, res.commit_id, now=NOW)
+    assert len(ures.restored) == 1 and not ures.failed, ures
+    assert p.read_bytes() == przed == link.read_bytes() and os.stat(link).st_ino == ino
+    con.close()
+
+
+@pytest.mark.parametrize("rekord, op, format_zostaje", [
+    pytest.param("OBJECT  = 'M31                 ' / stary komentarz",
+                 _op("OBJECT", "set", "M31", "str", comment="nowy komentarz"), True,
+                 id="tekst_dopelniony_sam_komentarz"),
+    pytest.param("FOCRATIO=              1.0E+00 / stary komentarz",
+                 _op("FOCRATIO", "set", "1.0", "float", comment="nowy komentarz"), True,
+                 id="liczba_wykladnicza_sam_komentarz"),
+    pytest.param("EXPTIME =                 600. / stary komentarz",
+                 _op("EXPTIME", "set", "600.0", "float", comment="nowy komentarz"), False,
+                 id="liczba_z_kropka_sam_komentarz"),
+    pytest.param("FOCRATIO=              1.0E+00 / stary komentarz",
+                 _op("FOCRATIO", "set", "2.5", "float"), False,
+                 id="liczba_wykladnicza_nowa_wartosc"),
+    pytest.param("OBJECT  = 'M31                 ' / stary komentarz",
+                 _op("OBJECT", "set", "M 31", "str"), False, id="tekst_dopelniony_nowa_wartosc"),
+])
+def test_karta_o_zastanym_formacie_wartosci_w_miejscu_bajt_w_bajt_jak_droga_atomowa(
+        tmp_path, rekord, op, format_zostaje):
+    """AR-261: rekord w formacie wartości INNYM niż świeża karta astropy (tekst dopełniony spacjami
+    w apostrofach, liczba wykładnicza `1.0E+00`, liczba `600.`). Przy zmianie SAMEGO komentarza
+    astropy zachowuje zastany format wartości tekstu dopełnionego i `1.0E+00` (`600.` przekłada po
+    swojemu), przy zmianie wartości - układa ją po swojemu; plik w miejscu == plik drogi atomowej BAJT
+    W BAJT (ta sama karta po `_apply_op`, nie świeża `fits.Card`), jeden zmieniony rekord.
+    Falsyfikator: obraz karty ze świeżej `fits.Card` → zmiana samego komentarza 'failed' (obraz inny
+    niż karta drogi atomowej) albo inne bajty."""
+    p = _fits_z_bajtow(tmp_path / "f.fits", ["IMAGETYP= 'Light   '", rekord])
+    przed = p.read_bytes()
+    ra, rw, atom, wm, ino = _dwie_drogi(p, [op])
+    assert ra.status == "applied", ra
+    assert isinstance(rw, writeback.WriteResult) and rw.status == "applied" and rw.in_place, rw
+    assert os.stat(wm).st_ino == ino and wm.read_bytes() == atom.read_bytes()
+    stare, nowe = _rekordy_naglowka(przed), _rekordy_naglowka(wm.read_bytes())
+    assert [i for i, (a, b) in enumerate(zip(stare, nowe)) if a != b] == [6], (stare[6], nowe[6])
+    if format_zostaje:
+        assert nowe[6][:30] == stare[6][:30], nowe[6]                     # format wartości zostaje
+    assert fits.getheader(str(wm)).comments[op.keyword] == (op.comment or "stary komentarz")

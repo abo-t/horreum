@@ -23,7 +23,8 @@ Plik bez operandu / z błędem obliczenia / łamiący regułę operacji → POMI
 `macro_*` (AR-181): zdanie PL (`str` - CLI, testy, sklejenia biorą je jak tekst; z polskimi znakami
 od AR-228, wcześniej ASCII z czasów druku CLI), a okno
 składa z kodu zdanie w języku UI (`gui.wb_worker.tekst_powodu`). Reguły operacji: `set` wymaga istniejącej karty (keyword
-kardynalności >1 wymaga jawnego `idx`); `add` wymaga braku karty. Operand `0` to WARTOSC, nie brak.
+kardynalności >1 wymaga jawnego `idx`, a `idx` - wystąpienia, które jest; AR-256 - te same odmowy mówi pisarz
+`writeback`); `add` wymaga braku karty. Operand `0` to WARTOSC, nie brak.
 Zmiana łamiąca reguły karty FITS 4.0 (`card_rules.card_violation` - ten sam właściciel, którego
 pyta pisarz) też jest pominięciem z powodem już w PODGLĄDZIE, a nie 'blocked' przy commicie (AR-9).
 Silnik nie importuje astropy: reguły mieszkają w `card_rules` (ujednolicenie karty OBJECT, które
@@ -266,6 +267,12 @@ def _evaluate_change(
             return None, PowodPozycji(f"keyword '{kw}' ma wiele wystąpień -- wymagany jawny idx",
                                       "macro_idx_required", keyword=kw)
         idx = md.assign.idx if md.assign.idx is not None else 0
+        if not 0 <= idx < cardinality:
+            # Bramka zakresu (AR-256): to samo zdanie i kod co odmowa pisarza (`writeback._set_nth`) -
+            # dawniej wpis przechodził do stagingu, a zapis kończył się 'failed' prozą.
+            return None, PowodPozycji(
+                f"karta '{kw}' nie ma wystąpienia [{idx}] - w nagłówku jest ich {cardinality}",
+                "card_idx_missing", keyword=kw, idx=idx, n=cardinality)
         existing = first.get(kw)
         old_value = existing["value_raw"] if existing is not None else None
         base_type = md.assign.value_type or (

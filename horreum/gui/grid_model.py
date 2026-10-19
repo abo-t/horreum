@@ -16,7 +16,7 @@ from typing import NamedTuple
 from PySide6.QtCore import (
     QAbstractTableModel, QEvent, QItemSelection, QItemSelectionRange, QModelIndex, Qt, qVersion, Signal,
 )
-from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QFont, QRegion
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QContextMenuEvent, QFont, QRegion
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QLineEdit, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTableView, QWidget,
@@ -1435,9 +1435,23 @@ class _TabelaKlatek(QTableView):
     `rowCount` i 9,4 s na HEAD. Zakresy przycinamy do pasa widocznych wierszy przed bazą - obszar
     w kadrze ten sam, a reszta i tak maluje się dopiero po przewinięciu.
 
+    PRAWY PRZYCISK MYSZY NIE ZMIENIA ZAZNACZENIA ANI BIEŻĄCEJ KOMÓRKI (AR-263). Qt prowadzi prawy
+    przycisk przez `QAbstractItemView::mousePressEvent` jak lewy: nacisk na wierszu niezaznaczonym
+    to `ClearAndSelect`, a puszczenie nad pustym obszarem czyści zaznaczenie
+    (`QAbstractItemViewPrivate::extendedSelectionCommand`) - i to ZANIM przyjdzie menu kontekstowe.
+    Zmierzone prawdziwym prawym klikiem (natywnie i offscreen tak samo): zaznaczenie z Ctrl+klików
+    znikało przy prawym kliku na zwykłej klatce, w pusty obszar pod wierszami i na belce grupy, choć
+    menu nie powstawało. Nacisk, puszczenie i dwuklik prawym idą tu z pominięciem metody Qt, a o
+    zaznaczeniu przy prawym kliku decyduje menu tabeli (`FramesView._on_table_menu`). Przyczynę menu
+    (klawiatura - klawisz Menu, Shift+F10 - albo mysz) tabela podaje na czas `customContextMenuRequested`
+    (`menu_z_klawiatury`): menu z klawiatury dotyczy zaznaczenia, nie komórki pod jakimś punktem.
+
     Metoda Qt jest pomijana w całości, więc nowa treść `QTableView::selectionChanged` w innej wersji Qt
     przepadłaby po cichu - stąd lista wersji przeczytanych (`_QT_TABELI_KLATEK`): przy innej wersji
-    tabela woła metodę Qt (wolniej, ale wiernie), a test pęka, żeby ktoś ją przeczytał od nowa."""
+    tabela woła metodę Qt (wolniej, ale wiernie), a test pęka, żeby ktoś ją przeczytał od nowa. Ten sam
+    bezpiecznik obejmuje każdą nadpisaną metodę klasy (zdarzenia myszy i menu też)."""
+
+    _menu_z_klawiatury = False
 
     def _dziecko_dostepnosci(self, idx):
         """Numer dziecka komórki w interfejsie dostępności tabeli - nagłówki liczą się jako wiersz
@@ -1481,6 +1495,50 @@ class _TabelaKlatek(QTableView):
                     zdarzenie.setChild(self._dziecko_dostepnosci(idx))
                     QAccessible.updateAccessibility(zdarzenie)
         QAbstractItemView.selectionChanged(self, selected, deselected)
+
+    @staticmethod
+    def _prawy_bez_qt(e):
+        return e.button() == Qt.RightButton and qVersion() in _QT_TABELI_KLATEK
+
+    def mousePressEvent(self, e):
+        if self._prawy_bez_qt(e):
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._prawy_bez_qt(e):
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        # Dwuklik prawym: Qt woła tu nacisk (inny wiersz niż ostatni nacisk) albo emituje `doubleClicked`.
+        if self._prawy_bez_qt(e):
+            e.accept()
+            return
+        super().mouseDoubleClickEvent(e)
+
+    def menu_z_klawiatury(self):
+        """Czy menu kontekstowe, które właśnie powstaje, wywołała klawiatura - prawda wyłącznie w trakcie
+        `customContextMenuRequested` (Qt emituje go synchronicznie z obsługi zdarzenia menu)."""
+        return self._menu_z_klawiatury
+
+    def _z_przyczyna_menu(self, e, metoda):
+        if e.type() != QEvent.ContextMenu or qVersion() not in _QT_TABELI_KLATEK:
+            return metoda(e)
+        self._menu_z_klawiatury = e.reason() != QContextMenuEvent.Reason.Mouse
+        try:
+            return metoda(e)
+        finally:
+            self._menu_z_klawiatury = False
+
+    def event(self, e):
+        # Menu z klawiatury trafia do widżetu z fokusem (tabela), z myszy - do viewportu (niżej).
+        return self._z_przyczyna_menu(e, super().event)
+
+    def viewportEvent(self, e):
+        return self._z_przyczyna_menu(e, super().viewportEvent)
 
 
 def elizja_w_srodku(table, col):
@@ -1583,6 +1641,10 @@ class GridTableModel(QAbstractTableModel):
         self._miejsca_czasu = 0    # ta sama reguła dla kolumny „Czas” widoku Znajdź (`row["exptime"]`)
         self._preview = {}      # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
         self._preview_label = i18n.t("grid.preview.macro")   # etykieta efemerycznej kolumny (klinga-zależna, R1 #4)
+        # Licznik WOŁAŃ pisarzy podglądu (`set_preview`, także bez zmiany, i `set_data(preview=…)`) -
+        # kotwica reguły „nowsza intencja” odłożonego podglądu zapisu szuflady (AR-250). Tożsamość
+        # obiektu `_preview` jej nie niesie: zdjęcie pustego podglądu wraca bez podmiany obiektu.
+        self._wersja_podgladu = 0
         self._version_col_on = False   # kolumna „Wersja" - perspektywa „Wersje stosów" albo wybór w Znajdź
         # Kolumny bazowe BIEŻĄCEJ prezentacji: `BASE_COLS` (klasyczna) albo `FIND_COLS` (Znajdź).
         # Numery liczone od nich - keywordy, „Wersja" i podgląd idą za nimi w obu prezentacjach.
@@ -1623,7 +1685,9 @@ class GridTableModel(QAbstractTableModel):
 
         Zdjęcie podglądu, którego nie ma, nie resetuje modelu (AR-207): gest bez skutku nie przebudowuje
         tabeli - reset to migawka i odtworzenie zaznaczenia, układ kolumn i przemalowanie całego kadru
-        za „Wyczyść podgląd”, który nie miał czego zdjąć."""
+        za „Wyczyść podgląd”, który nie miał czego zdjąć. Licznik wołań (`_wersja_podgladu`) rośnie i tu:
+        to nadal intencja pisarza, nowsza niż podgląd odłożony do przyłożenia zbioru."""
+        self._wersja_podgladu += 1
         if not preview and not self._preview:
             return
         self.beginResetModel()
@@ -1635,7 +1699,7 @@ class GridTableModel(QAbstractTableModel):
         return bool(self._preview)
 
     def set_data(self, base_rows, pivot, keywords, group_by=None, version_col=False,
-                 images_unknown=False):
+                 images_unknown=False, preview=None, preview_label=None):
         """base_rows: list[dict] (z `_derive`); pivot: horreum.pivot.Pivot; keywords: list[str].
 
         `version_col` dokłada kolumnę „Wersja" (fakty `_wersja` z `_adnotuj_wersje`) zaraz po
@@ -1644,9 +1708,18 @@ class GridTableModel(QAbstractTableModel):
         wszędzie), ale kolumna pojawia się tylko tam, gdzie wybór wersji jest robotą ekranu.
 
         `images_unknown` - perspektywa, w której brak liczby obrazów jest robotą, nie stanem
-        archiwum (`_FLAGI_OBRAZOW`): komórka kandydata do zebrania faktów mówi wtedy „?"."""
+        archiwum (`_FLAGI_OBRAZOW`): komórka kandydata do zebrania faktów mówi wtedy „?".
+
+        `preview` (nie-`None`, także `{}`) podmienia podgląd klingi W TYM SAMYM resecie (`label` jak
+        w `set_preview`): ogon zapisu szuflady zdejmował go osobnym `set_preview` po przyłożeniu -
+        drugi reset i drugie odtworzenie zaznaczenia (AR-250). `None` - podgląd bez zmian."""
         self._version_col_on = bool(version_col)
         self._obrazy_pytajnik = bool(images_unknown)
+        if preview is not None:
+            self._wersja_podgladu += 1
+            self._preview = dict(preview)
+            self._preview_label = (preview_label if preview_label is not None
+                                   else i18n.t("grid.preview.macro"))
         cells = {r.frame_id: r.cells for r in pivot.rows}
         for d in base_rows:
             d["cells"] = cells.get(d["frame_id"], {})

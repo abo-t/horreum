@@ -48,7 +48,7 @@ def _probki():
         "rename_id": 4, "commit_id": 11, "before": 60, "after": 40,
         "needed": writeback._wolne_rekordy(2), "free": 1,
         "attr": "comment", "attrs": "foo, id", "char": "'\\x07'", "name": "'OBJECTNAM'",
-        "length": 70, "limit": 68,
+        "length": 70, "limit": 68, "idx": 1,
         "features": [writeback._CECHA_ROZMIAR, writeback._CECHA_NAGLOWEK],
         "paths": ["X:/L/a", "X:/L/b"], "sums": ["CHECKSUM", "DATASUM"],
         "os_code": "WinError 5", "db_code": "SQLITE_BUSY",
@@ -209,19 +209,23 @@ def test_meta_wyniki_pisarza_bez_golej_prozy():
 
 def test_przepowiednia_drogi_FITS_mowi_kodem():
     """`inplace_route` (podgląd drogi bez pliku) i obraz karty (`_fits_card_image`) oddają powód
-    przez `return`, poza strażą konstruktorów wyżej - każdy niesie kod, a PL jest zdaniem rdzenia."""
+    przez `return`, poza strażą konstruktorów wyżej - każdy niesie kod, a PL jest zdaniem rdzenia.
+    Karta liczbowa (AR-261) idzie tą samą regułą rekordu co tekstowa: `set` mieszczący się - w miejscu
+    (`None`), `add` - zależy od zapasu, za długi zastany komentarz - rekord się nie mieści."""
     przypadki = [
         (writeback.inplace_route("fits", "OBJECT", "NGC 7635", "str", None, op="add"),
          "route_depends", {"keyword": "OBJECT"}),
         (writeback.inplace_route("fits", "FOCALLEN", "800", "int", None, op="add"),
-         "fb_op_kind", {"op": "add", "value_type": "int", "keyword": "FOCALLEN"}),
-        (writeback.inplace_route("fits", "FOCALLEN", "800", "int", None),
-         "fb_value_not_text", {"keyword": "FOCALLEN"}),
+         "route_depends", {"keyword": "FOCALLEN"}),
+        (writeback.inplace_route("fits", "FOCALLEN", "800", "int", "k" * 60),
+         "fb_card_too_long", {"keyword": "FOCALLEN"}),
         (writeback.inplace_route("fits", "OBJECT", "V" * 20, "str", "k" * 60),
          "fb_card_too_long", {"keyword": "OBJECT"}),
         (writeback._fits_card_image("OBJECT", "V" * 20, "k" * 60)[1],
          "fb_card_too_long", {"keyword": "OBJECT"}),
     ]
+    assert writeback.inplace_route("fits", "FOCALLEN", "800", "int", None) is None
+    assert writeback.inplace_route("fits", "FLIPPED", "T", "bool", "flaga") is None
     for powod, kod, params in przypadki:
         assert isinstance(powod, PowodPozycji) and powod.code == kod, powod
         assert dict(powod.params) == params, powod.params
@@ -691,7 +695,7 @@ def test_FITS_z_suma_odmowa_na_OBU_drogach_tym_samym_powodem(tmp_path):
 
 @pytest.mark.parametrize("inplace", [True, False], ids=["szuflada_w_miejscu", "droga_atomowa"])
 def test_szuflada_commit_FITS_z_suma_blokuje_bez_commit_id(tmp_path, inplace):
-    """AR-166: op szuflady Zbiorów - zapis W MIEJSCU od AR-161 (`commit` = `commit_inplace`) - i droga
+    """AR-166: op `commit` szuflady Zbiorów i okien kart - zapis W MIEJSCU od AR-161 (AR-258) - i droga
     atomowa rdzenia na FITS z sumą: 'blocked', commit bez `commit_id` (nic nie podmieniono), bez
     operacji w dzienniku zapisu w miejscu (odmowa przed dziennikiem), wpis stagingu niesie kod i nazwy
     kart (trójka 0042)."""
@@ -1320,9 +1324,10 @@ def test_pisarz_add_na_istniejacej_karcie_odmawia_kodem_podgladu(tmp_path):
 
 def test_commit_bez_kotwicy_add_na_istniejacej_karcie_blokuje_z_kodem_w_bazie(tmp_path):
     """AR-232 przez `commit` w miejscu (op szuflady i okien, AR-161) przy stagingu BEZ kotwicy
-    `header_hash`: plan w miejscu oddaje spadek (`fb_card_present`), droga atomowa odmawia - wpis
-    stagingu 'blocked' z kodem `macro_add_exists`, bez `commit_id`, bez operacji w dzienniku, plik
-    nietknięty. Falsyfikator: odmowa jako wyjątek łapany szeroko → wpis 'failed' bez kodu."""
+    `header_hash`: plan w miejscu odmawia od razu przebiegiem próbnym łaty (AR-257 - bez spadku na
+    drogę atomową) - wpis stagingu 'blocked' z kodem `macro_add_exists`, bez `commit_id`, bez
+    operacji w dzienniku, plik nietknięty. Falsyfikator: odmowa jako wyjątek łapany szeroko → wpis
+    'failed' bez kodu."""
     from test_writeback_inplace import _fits, _loc, _scan_in
     p = _fits(tmp_path / "a.fits")
     przed = p.read_bytes()
@@ -1435,3 +1440,337 @@ def test_szczegol_odmowy_w_oknie_niesie_sciezke_bez_repr():
     sciezka = r"X:\L\a.fits"
     wiersz = wiersz_systemu(writeback._blad_systemu(writeback._blad_windows(5, sciezka)))
     assert f"'{sciezka}'" in wiersz and "\\\\" not in wiersz, wiersz
+
+
+# ============================================================ AR-256: odmowy łaty z kodem podglądu
+
+
+def _odmowa_obu_drog(p, ops):
+    """`(droga atomowa, zapis w miejscu)` tych samych operacji na pliku `p` bez kotwicy stagingu;
+    plik bajt w bajt, katalog bez pliku tymczasowego, dziennik w miejscu nieotwarty."""
+    from test_writeback_inplace import _NieWolno
+    przed = p.read_bytes()
+    wyniki = (writeback.write_changes(str(p), ops, None),
+              writeback.write_changes_inplace(str(p), ops, None, journal=_NieWolno()))
+    assert p.read_bytes() == przed and sorted(x.name for x in p.parent.iterdir()) == [p.name]
+    return wyniki
+
+
+def _odmowa_z_kodem(res, kod, params):
+    """Wynik 'blocked' z powodem `kod`/`params`, zdanie PL = wpis katalogu, okno PL i EN."""
+    assert isinstance(res, writeback.WriteResult) and res.status == "blocked", res
+    assert res.backup_text is None and res.reason.code == kod, res.reason
+    assert dict(res.reason.params) == params, res.reason.params
+    assert str(res.reason) == CATALOG[f"objchg.item.{kod}"]["pl"].format(**params)
+    return _okno(res.reason)
+
+
+def test_set_wystapienia_spoza_naglowka_odmawia_kodem(tmp_path):
+    """AR-256: `set` wystąpienia, którego w nagłówku nie ma (`idx` 1 przy jednej karcie, 3 przy
+    dwóch, 1 przy braku karty) - obie drogi FITS 'blocked' z kodem `card_idx_missing` (karta,
+    wystąpienie, liczba wystąpień), plik nietknięty. Dawniej `KeyError: '…nie istnieje w naglowku'`
+    → 'failed' prozą ASCII bez kodu. Falsyfikator: `_set_nth` z `KeyError`."""
+    pytest.importorskip("PySide6")
+    from test_writeback_inplace import _fits
+    for nazwa, extra, kw, idx, ile in (("jedna", (), "OBJECT", 1, 1),
+                                       ("dwie", [("FILTER", "Ha"), ("FILTER", "OIII")], "FILTER", 3, 2),
+                                       ("brak", (), "FILTER", 1, 0)):
+        (tmp_path / nazwa).mkdir()
+        p = _fits(tmp_path / nazwa / "a.fits", extra=extra)
+        for res in _odmowa_obu_drog(p, [writeback.WriteOp(kw, "set", "SII", "str", idx=idx)]):
+            _odmowa_z_kodem(res, "card_idx_missing", {"keyword": kw, "idx": idx, "n": ile})
+
+
+def test_xisf_set_wystapienia_spoza_naglowka_tym_samym_kodem_co_FITS(tmp_path):
+    """AR-256: XISF `set` z jawnym `idx` spoza nagłówka (karta jest raz, `idx` 1) - obie drogi
+    'blocked' z kodem i zdaniem FITS/podglądu (`card_idx_missing`), nie `xisf_set_missing`;
+    karta NIEOBECNA dalej mówi `xisf_set_missing` („'set' nie zakłada karty”). Falsyfikator: XISF bez
+    rozróżnienia → `xisf_set_missing` przy karcie obecnej."""
+    pytest.importorskip("PySide6")
+    from test_writeback_inplace import _xisf
+    (tmp_path / "x").mkdir()
+    p = _xisf(tmp_path / "x" / "a.xisf")
+    for res in _odmowa_obu_drog(p, [writeback.WriteOp("OBJECT", "set", "M 31", "str", idx=1)]):
+        _odmowa_z_kodem(res, "card_idx_missing", {"keyword": "OBJECT", "idx": 1, "n": 1})
+    for res in _odmowa_obu_drog(p, [writeback.WriteOp("FILTER", "set", "Ha", "str", idx=1)]):
+        assert res.status == "blocked" and res.reason.code == "xisf_set_missing", res
+
+
+def test_xisf_set_wystapienia_bez_atrybutu_value_mowi_powodem_czytnika(tmp_path):
+    """AR-256: XISF `set` wystąpienia, które JEST (karta raz, `idx` 0), ale bez atrybutu `value=` -
+    obie drogi 'blocked' z powodem czytnika (`xisf_card_attr_missing` w szczególe `xisf_set_missing`),
+    nie „nie ma wystąpienia [0] - jest ich 1”; `idx` ujemny przy karcie obecnej to brak wystąpienia
+    jak w podglądzie (`card_idx_missing`), nie „'set' nie zakłada karty”. Falsyfikatory: każdy brak
+    celu czytnika przy karcie obecnej mapowany na `card_idx_missing`; `idx` ujemny poza tą regułą;
+    szczegół bez kodu czytnika."""
+    pytest.importorskip("PySide6")
+    from test_writeback_inplace import _xisf
+    (tmp_path / "x").mkdir()
+    p = _xisf(tmp_path / "x" / "a.xisf", karty='<FITSKeyword name="FILTER" comment="filtr"/>')
+    for res in _odmowa_obu_drog(p, [writeback.WriteOp("FILTER", "set", "Ha", "str", idx=0)]):
+        assert res.status == "blocked" and res.reason.code == "xisf_set_missing", res
+        szczegol = dict(res.reason.params)["detail"]
+        assert szczegol.code == "xisf_card_attr_missing", szczegol
+        assert dict(szczegol.params) == {"keyword": "FILTER", "n": 0, "attr": "value"}, szczegol.params
+    for res in _odmowa_obu_drog(p, [writeback.WriteOp("OBJECT", "set", "M 31", "str", idx=-1)]):
+        _odmowa_z_kodem(res, "card_idx_missing", {"keyword": "OBJECT", "idx": -1, "n": 1})
+
+
+def test_podglad_i_pisarz_odmawiaja_wystapienia_tym_samym_zdaniem(tmp_path):
+    """AR-256 (bramka zakresu w podglądzie): makro z `idx` spoza nagłówka pomija klatkę TYM SAMYM
+    powodem, którym odmówiłby pisarz - zdanie, kod i parametry równe; wpis nie trafia do stagingu.
+    Falsyfikator: bramka zakresu zdjęta z `macro._evaluate_change` → wpis w `touched`."""
+    from horreum import macro
+    from test_powody_makra import _cel, _karta
+    from test_writeback_inplace import _fits
+    p = _fits(tmp_path / "a.fits", extra=[("FILTER", "Ha"), ("FILTER", "OIII")])
+    karty = [_karta("FILTER", "Ha"), _karta("FILTER", "OIII", idx=1)]
+    md = macro.MacroDef(assign=macro.Assign(keyword="FILTER", op="set", expr="'SII'", idx=2))
+    run = macro.run_macro(md, [1], targets_fn=lambda ids: [_cel()], cards_fn=lambda fid: karty)
+    assert not run.touched, run.touched
+    podglad = run.skipped[0].reason
+    pisarz = writeback.write_changes(str(p), [writeback.WriteOp("FILTER", "set", "SII", "str",
+                                                                 idx=2)], None).reason
+    assert (str(podglad), podglad.code, dict(podglad.params)) == (
+        str(pisarz), pisarz.code, dict(pisarz.params)) == (
+        "karta 'FILTER' nie ma wystąpienia [2] - w nagłówku jest ich 2", "card_idx_missing",
+        {"keyword": "FILTER", "idx": 2, "n": 2})
+
+
+def test_wartosc_niezgodna_z_typem_odmawia_kodem_podgladu(tmp_path):
+    """AR-256: wartość, która nie jest liczbą typu karty - obie drogi 'blocked' z kodem i zdaniem
+    podglądu `macro_type_mismatch`, plik nietknięty (dawniej goły `ValueError` z `int()` → 'failed').
+    Falsyfikator: `_coerce` bez odmowy."""
+    pytest.importorskip("PySide6")
+    from test_writeback_inplace import _fits
+    p = _fits(tmp_path / "a.fits", extra=[("FOCALLEN", 800)])
+    for res in _odmowa_obu_drog(p, [writeback.WriteOp("FOCALLEN", "set", "abc", "int", idx=0)]):
+        _odmowa_z_kodem(res, "macro_type_mismatch", {"value": "abc", "value_type": "int"})
+
+
+def test_karta_juz_jest_jednym_kodem_i_zdaniem_FITS_i_XISF(tmp_path):
+    """AR-256: `add` karty, która już jest - FITS i XISF, obie drogi - JEDEN kod `macro_add_exists`
+    i JEDNO zdanie (PL i EN), bliźniak podglądu makra; dawniej XISF mówił `xisf_card_exists` innym
+    zdaniem. Falsyfikator: XISF z dawnym literałem → inny kod i inne zdanie."""
+    pytest.importorskip("PySide6")
+    from test_writeback_inplace import _fits, _xisf
+    (tmp_path / "f").mkdir()
+    (tmp_path / "x").mkdir()
+    op = [writeback.WriteOp("OBJECT", "add", "NGC 7635", "str")]
+    wyniki = (*_odmowa_obu_drog(_fits(tmp_path / "f" / "a.fits"), op),
+              *_odmowa_obu_drog(_xisf(tmp_path / "x" / "a.xisf"), op))
+    zdania = {_odmowa_z_kodem(res, "macro_add_exists", {"keyword": "OBJECT"}) for res in wyniki}
+    assert len(zdania) == 1, zdania
+
+
+def test_set_bez_idx_na_karcie_powtorzonej_odmawia_jak_podglad(tmp_path):
+    """AR-256: `set` bez `idx` na karcie występującej dwa razy - FITS i XISF, obie drogi - 'blocked'
+    z kodem podglądu `macro_idx_required`; dawniej pisarz po cichu zapisywał PIERWSZE wystąpienie.
+    Jawne `idx=0` dalej pisze pierwsze. Falsyfikator: odmowa zdjęta → 'applied'."""
+    pytest.importorskip("PySide6")
+    from astropy.io import fits
+    from test_writeback import _xisf as _xisf_karty
+    from test_writeback_inplace import _fits
+    (tmp_path / "f").mkdir()
+    (tmp_path / "x").mkdir()
+    pf = _fits(tmp_path / "f" / "a.fits", extra=[("FILTER", "Ha"), ("FILTER", "OIII")])
+    px = _xisf_karty(tmp_path / "x", "a.xisf", props="",
+                     keywords=[("IMAGETYP", "'Light'"), ("FILTER", "'Ha'"), ("FILTER", "'OIII'")])
+    for p in (pf, px):
+        for res in _odmowa_obu_drog(p, [writeback.WriteOp("FILTER", "set", "SII", "str")]):
+            _odmowa_z_kodem(res, "macro_idx_required", {"keyword": "FILTER"})
+    res = writeback.write_changes(str(pf), [writeback.WriteOp("FILTER", "set", "SII", "str",
+                                                               idx=0)], None)
+    assert res.status == "applied", res
+    assert [c.value for c in fits.getheader(str(pf)).cards if c.keyword == "FILTER"] == ["SII",
+                                                                                         "OIII"]
+
+
+@pytest.mark.parametrize("inplace", [True, False], ids=["w_miejscu", "atomowo"])
+@pytest.mark.parametrize("op, kod", [
+    (writeback.WriteOp("OBJECT", "set", "M 31", "str", idx=1), "card_idx_missing"),
+    (writeback.WriteOp("FOCALLEN", "set", "abc", "int", idx=0), "macro_type_mismatch"),
+], ids=["wystapienie", "typ"])
+def test_commit_bez_kotwicy_odmowy_laty_maja_kod_w_bazie(tmp_path, inplace, op, kod):
+    """AR-256 przez `commit` (staging bez kotwicy `header_hash`): wpis 'blocked' z kodem w bazie
+    (`reason_code`), bez `commit_id`, bez operacji w dzienniku, plik nietknięty - nie 'failed' prozą.
+    Falsyfikator: odmowa łaty jako `KeyError`/`ValueError` → wpis 'failed' bez kodu."""
+    from test_writeback_inplace import _fits, _loc, _scan_in
+    p = _fits(tmp_path / "a.fits", extra=[("FOCALLEN", 800)])
+    przed = p.read_bytes()
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    repo.stage_pending(con, run_id="R", location_id=_loc(con, p)["id"], keyword=op.keyword,
+                       idx=op.idx, op=op.op, old_value=None, new_value=op.value,
+                       new_type=op.value_type, new_comment=None, expected_header_hash=None)
+    res = writeback.commit(con, "R", now=NOW, inplace=inplace)
+    (fr,) = res.blocked
+    assert res.commit_id is None and fr.reason.code == kod, fr.reason
+    (w,) = con.execute("SELECT status, reason_code FROM pending_changes WHERE run_id = 'R'")
+    assert tuple(w) == ("blocked", kod)
+    assert con.execute("SELECT count(*) FROM inplace_op").fetchone()[0] == 0
+    assert p.read_bytes() == przed
+    con.close()
+
+
+# ============================================================ AR-258: jedna operacja zapisu kart
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_jedna_operacja_zapisu_kart_zdanie_z_obu_stron(tmp_path, lang):
+    """AR-258: okna kart i szuflada piszą JEDNĄ operacją `commit` (zapis w miejscu ze spadkiem);
+    `commit_inplace` i flaga `w_miejscu` zniknęły. Zdanie okien (`zdanie_commitu_kart`) na
+    prawdziwym rdzeniu: wszystko w miejscu - bez członu o przepisaniu pliku, spadek (FITS bez zapasu)
+    - z członem. Falsyfikator: flaga wrócona z domyślnym `False` → człon ginie przy spadku."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import WritebackWorker, zdanie_commitu_kart
+    from test_writeback_inplace import _loc, _scan_in
+    from test_writeback_inplace_add import _fits_bez, _stage_add
+    con = db.open_db(str(tmp_path / "h.db"))
+    wyniki = {}
+    for run, zapas, seed in (("Z", None, 1), ("B", 0, 2)):
+        p = _fits_bez(tmp_path / f"{run}.fits", zapas=zapas, seed=seed)
+        _scan_in(con, p)
+        loc = _loc(con, p)
+        _stage_add(con, run, loc["id"], loc["header_hash"])
+        wyniki[run] = WritebackWorker._OPS["commit"](con, run, NOW, lambda *a: None, lambda: False)
+    i18n.set_lang(lang)
+    try:
+        czlon = i18n.t("wb.inplace_fallback", n=1)
+        assert wyniki["Z"].in_place and czlon not in zdanie_commitu_kart(wyniki["Z"],
+                                                                          "grid.wb.applied")[0]
+        assert wyniki["B"].applied and not wyniki["B"].in_place
+        assert czlon in zdanie_commitu_kart(wyniki["B"], "grid.wb.applied")[0]
+    finally:
+        i18n.set_lang("pl")
+        con.close()
+    assert "commit_inplace" not in WritebackWorker._OPS
+    assert "w_miejscu" not in inspect.signature(zdanie_commitu_kart).parameters
+
+
+# ============================================================ AR-259: jedna konstrukcja błędu Windows
+
+
+def test_jedna_konstrukcja_bledu_windows():
+    """AR-259 (bramka zamiast wyliczanki): w `horreum/**` i `scripts/*.py` NIE MA `ctypes.WinError`,
+    `ctypes.FormatError` ani `OSError(...)` z czterema argumentami poza właścicielem
+    (`item_reasons.blad_windows`) - kod Windows bez ścieżki albo czwarta kopia konstrukcji to
+    czerwień; wołający pisarza i drzwi raportu mają TEN SAM obiekt. Falsyfikatory: kopia konstrukcji
+    wrócona do `raport` → tożsamość; `ctypes.WinError` w skrypcie kontroli pilotażu → AST."""
+    from pathlib import Path
+    import horreum
+    from horreum import item_reasons, raport
+    pakiet = Path(horreum.__file__).parent
+    linie, start = inspect.getsourcelines(item_reasons.blad_windows)
+    wlasciciel = range(start, start + len(linie))
+    poza = []
+    for plik in [*sorted(pakiet.rglob("*.py")), *sorted((pakiet.parent / "scripts").glob("*.py"))]:
+        for w in ast.walk(ast.parse(plik.read_text(encoding="utf-8"))):
+            if not isinstance(w, ast.Call):
+                continue
+            f = w.func
+            ctypes_win = (isinstance(f, ast.Attribute) and f.attr in ("WinError", "FormatError")
+                          and getattr(f.value, "id", None) == "ctypes")
+            oserror_4 = isinstance(f, ast.Name) and f.id == "OSError" and len(w.args) == 4
+            if (ctypes_win or oserror_4) and not (plik.name == "item_reasons.py"
+                                                  and w.lineno in wlasciciel):
+                poza.append(f"{plik.name}:{w.lineno}: {ast.unparse(w)[:70]}")
+    assert not poza, "\n".join(poza)
+    assert writeback._blad_windows is raport._blad_windows is item_reasons.blad_windows
+
+
+def test_blad_windows_prawdziwy_u_kazdego_wolajacego(tmp_path):
+    """AR-259: prawdziwy błąd Windows (ścieżka, której nie ma - kod 2) u każdego wołającego
+    właściciela w pakiecie: przypięcie katalogu raportu (`raport._przypnij`), kanonizacja korzenia
+    skanu (`scan.canonize_root`), blokada pliku pisarza (`writeback._exclusive`) - `FileNotFoundError`
+    z `winerror`, ŚCIEŻKĄ (`filename`) i klasą `os_missing`. Skrypt kontroli pilotażu: test w
+    `test_kontrola_pilotazu.py`. Falsyfikator: `ctypes.WinError` u któregokolwiek → `filename` None."""
+    import sys
+    if sys.platform != "win32":
+        pytest.skip("kody Windows - wyłącznie Windows")
+    from horreum import raport, scan
+    from horreum.item_reasons import powod_systemu
+    brak = str(tmp_path / "nie_ma")
+    wyniki = []
+    with pytest.raises(FileNotFoundError) as blad:
+        raport._przypnij(brak, "dowiązanie")
+    wyniki.append(blad.value)
+    with pytest.raises(FileNotFoundError) as blad:
+        scan.canonize_root(brak)
+    wyniki.append(blad.value)
+    with pytest.raises(FileNotFoundError) as blad:
+        with writeback._exclusive(brak):
+            pass
+    wyniki.append(blad.value)
+    for exc in wyniki:
+        assert (exc.winerror, exc.filename) == (2, brak), (exc.winerror, exc.filename)
+        assert powod_systemu(exc).code == "os_missing" and str(exc).endswith(f": {brak!r}"), exc
+
+
+# ============================================================ AR-261: podpowiedź spadku z nazwą pliku
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_podpowiedz_spadku_nazywa_pliki_i_mowi_o_dowiazaniach(tmp_path, lang):
+    """AR-261 człon 2: podpowiedź zdania wyniku (okna kart i szuflada - `podpowiedz_kart`)
+    wymienia KAŻDY plik przepisany w całości z nazwy, ze szczegółem rdzenia w języku UI, a na końcu
+    mówi o dowiązaniach wydania - warunkowo, bo liczby dowiązań przez SMB nie widać. Prawdziwy rdzeń:
+    jeden plik w miejscu, dwa bez zapasu nagłówka (spadek). Falsyfikatory: podpowiedź bez nazwy pliku
+    albo tylko z pierwszym spadkiem; bez wiersza o dowiązaniach."""
+    pytest.importorskip("PySide6")
+    import os
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import podpowiedz_kart, podpowiedz_spadku, tekst_powodu
+    from test_writeback_inplace import _loc, _scan_in
+    from test_writeback_inplace_add import _fits_bez, _stage_add
+    con = db.open_db(str(tmp_path / "h.db"))
+    for nazwa, zapas, seed in (("w_miejscu", None, 1), ("pelny_a", 0, 2), ("pelny_b", 0, 3)):
+        p = _fits_bez(tmp_path / f"{nazwa}.fits", zapas=zapas, seed=seed)
+        _scan_in(con, p)
+        loc = _loc(con, p)
+        _stage_add(con, "R", loc["id"], loc["header_hash"])
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    con.close()
+    spadki = [fr for fr in res.applied if fr not in res.in_place]
+    assert len(res.in_place) == 1 and len(spadki) == 2, res
+    i18n.set_lang(lang)
+    try:
+        wiersze = podpowiedz_spadku(res).splitlines()
+        oczekiwane = [i18n.t("objchg.st.detail_tip", detail=i18n.t(
+            "wb.reason_line", file=os.path.basename(fr.path),
+            reason=tekst_powodu(dict(fr.reason.params)["detail"]))) for fr in spadki]
+        assert wiersze == oczekiwane + [i18n.t("wb.fallback_links")], wiersze
+        assert {"pelny_a.fits", "pelny_b.fits"} <= set(" ".join(wiersze).replace(":", " ").split())
+        assert podpowiedz_kart(res).startswith(podpowiedz_spadku(res))
+        if lang == "en":
+            assert not set("".join(wiersze)) & _POLSKIE, wiersze
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_podpowiedz_spadku_limit_wierszy_i_odmiana():
+    """AR-261 człon 2: najwyżej `_SPADKI_W_PODPOWIEDZI` plików z nazwy, reszta liczbą
+    (`wb.fallback_more`, wpis mnogi: 1, 2, 5, 12, 22 w PL, 1 i 2 w EN), wiersz o dowiązaniach na
+    końcu. Falsyfikator: bez limitu → 12 wierszy plików."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import _SPADKI_W_PODPOWIEDZI, podpowiedz_spadku
+    szczegol = writeback._brak_miejsca(1, 0)
+    spadek = PowodPozycji(f"{writeback.PREFIKS_DROGI_ATOMOWEJ}: {szczegol}", "inplace_fallback",
+                          detail=szczegol)
+    pliki = [writeback.FileResult(i, f"X:/L/p{i:02d}.fits", "applied", spadek,
+                                  code=writeback.CODE_INPLACE_FALLBACK) for i in range(12)]
+    wiersze = podpowiedz_spadku(writeback.CommitResult("r", 1, pliki, [], [], [])).splitlines()
+    assert _SPADKI_W_PODPOWIEDZI == 10 and len(wiersze) == 12, wiersze
+    assert all("p0" in w or "p09" in w for w in wiersze[:10]) and "p10" not in "".join(wiersze)
+    assert wiersze[10:] == ["… i jeszcze 2 pliki", i18n.t("wb.fallback_links")], wiersze
+    for n, pl in ((1, "… i jeszcze 1 plik"), (2, "… i jeszcze 2 pliki"), (5, "… i jeszcze 5 plików"),
+                  (12, "… i jeszcze 12 plików"), (22, "… i jeszcze 22 pliki")):
+        assert i18n.t_plural("wb.fallback_more", n) == pl, n
+    i18n.set_lang("en")
+    try:
+        assert [i18n.t_plural("wb.fallback_more", n) for n in (1, 2)] == [
+            "… and 1 more file", "… and 2 more files"]
+    finally:
+        i18n.set_lang("pl")

@@ -3251,8 +3251,9 @@ def _okno_karty_z_mieszanka(tmp_path, ktore):
 @pytest.mark.parametrize("ktore", ["sciezka", "naprawa"])
 def test_okna_kart_pisza_W_MIEJSCU_a_FITS_bez_zapasu_SPADA_i_MOWI_to(
         ktore, zapas, request, monkeypatch, qapp, tmp_path):
-    """AR-117 + AR-118: „Zatwierdź ze ścieżki…" i „Napraw nagłówek…" startują `commit_inplace` -
-    droga atomowa przepisywała cały plik po SMB i zrywała dowiązania `_WBPP`.
+    """AR-117 + AR-118: „Zatwierdź ze ścieżki…" i „Napraw nagłówek…" startują zapis kart W MIEJSCU -
+    `commit`, ta sama operacja co szuflada Zbiorów (AR-258) - droga atomowa przepisywała cały plik po
+    SMB i zrywała dowiązania `_WBPP`.
 
     Oba okna DOPISUJĄ kartę (`add`). FITS z zapasem nagłówka (pusta karta na końcu albo wolny
     rekord za `END`) dostaje ją W MIEJSCU - plik zostaje tym samym plikiem (`st_ino`), a zdanie
@@ -3261,8 +3262,9 @@ def test_okna_kart_pisza_W_MIEJSCU_a_FITS_bez_zapasu_SPADA_i_MOWI_to(
     (`writeback.CODE_INPLACE_FALLBACK`), po którym okno go rozpoznaje - test pinuje go na
     PRAWDZIWYM pisarzu.
 
-    Falsyfikator: wróć do `start("commit", …)` w którymkolwiek oknie → pierwsza asercja; zdejmij
-    dopisanie w miejscu (`add` → `Fallback`) → `z_zapasem` pada na `in_place`."""
+    Falsyfikator: inna operacja niż `commit` w którymkolwiek oknie → pierwsza asercja; zdejmij
+    dopisanie w miejscu (`add` → `Fallback`) → `z_zapasem` pada na `in_place`; podpowiedź bez nazwy
+    przepisanego pliku albo bez wiersza o dowiązaniach (AR-261) → ostatnie asercje."""
     from horreum import writeback
     from horreum.gui.wb_worker import bez_prefiksu_spadku
     from astropy.io import fits
@@ -3285,7 +3287,7 @@ def test_okna_kart_pisza_W_MIEJSCU_a_FITS_bez_zapasu_SPADA_i_MOWI_to(
     monkeypatch.setattr(dlg, "_after_commit", lambda op, res: wyniki.append(res)
                         or prawdziwy_koniec(op, res))
     klik()
-    assert ops == ["commit_inplace"]
+    assert ops == ["commit"]
     assert [fits.getheader(str(p))["OBJECT"] for p in pliki] == ["NGC 7635"] * len(pliki)
     w_miejscu = {fr.location_id for fr in wyniki[0].in_place}
     spadek = [fr for fr in wyniki[0].applied if fr.location_id not in w_miejscu]
@@ -3303,8 +3305,11 @@ def test_okna_kart_pisza_W_MIEJSCU_a_FITS_bez_zapasu_SPADA_i_MOWI_to(
         assert "potrzebuje 1 wolnego rekordu" in szczegol
         assert i18n.t("wb.inplace_fallback", n=1) in dlg.status.text()
         assert szczegol not in dlg.status.text()
-        # Protokół pola (AR-204): podpowiedź = zdanie + szczegół.
-        assert dlg.status.szczegol() == i18n.t("objchg.st.detail_tip", detail=szczegol)
+        # Protokół pola (AR-204): podpowiedź = zdanie + szczegół - z nazwą przepisanego pliku
+        # i wierszem o dowiązaniach wydania (AR-261).
+        wiersz = i18n.t("wb.reason_line", file=os.path.basename(spadek[0].path), reason=szczegol)
+        assert dlg.status.szczegol() == (i18n.t("objchg.st.detail_tip", detail=wiersz) + "\n"
+                                         + i18n.t("wb.fallback_links"))
         assert dlg.status.toolTip() == dlg.status.text() + "\n" + dlg.status.szczegol()
     dlg.reject()
     if con is not None:
@@ -3376,13 +3381,15 @@ def test_spadek_na_droge_atomowa_MOWI_szczegol_w_podpowiedzi_a_UWAGE_w_zdaniu(kt
     b = writeback.FileResult(2, "b.fits", "applied",
                              f"{writeback.PREFIKS_DROGI_ATOMOWEJ}: brak miejsca w nagłówku; {uwaga}",
                              code=writeback.CODE_INPLACE_FALLBACK)
-    dlg._after_commit("commit_inplace", writeback.CommitResult(
+    dlg._after_commit("commit", writeback.CommitResult(
         run_id="r", commit_id=7, applied=[a, b], blocked=[], failed=[], skipped=[], in_place=[a]))
     zdanie = dlg.status.text()
     assert i18n.t("wb.inplace_fallback", n=1) + i18n.t("objchg.res.notes", n=1, note=uwaga) \
         in zdanie, zdanie
     assert "brak miejsca w nagłówku" not in zdanie and writeback.PREFIKS_DROGI_ATOMOWEJ not in zdanie
-    assert dlg.status.szczegol() == i18n.t("objchg.st.detail_tip", detail="brak miejsca w nagłówku")
+    wiersz = i18n.t("wb.reason_line", file="b.fits", reason="brak miejsca w nagłówku")   # AR-261
+    assert dlg.status.szczegol() == (i18n.t("objchg.st.detail_tip", detail=wiersz) + "\n"
+                                     + i18n.t("wb.fallback_links"))
     assert dlg.status.toolTip() == zdanie + "\n" + dlg.status.szczegol()      # protokół pola (AR-204)
     dlg._commit_id = None                                  # nie cofamy atrapy przy zamknięciu
     dlg.reject()
@@ -3397,7 +3404,7 @@ def test_okna_kart_mowia_PLIK_ZAJETY_slowami_okna_ze_sciezka(sciezka_karty):
     dlg = _okno_sciezki(v, con)
     exc = PermissionError(None, "Proces nie może uzyskać dostępu do pliku", r"R:\A\b.fits", 32)
     b = writeback.FileResult(2, "b.fits", "failed", f"{type(exc).__name__}: {exc}")
-    dlg._after_commit("commit_inplace", writeback.CommitResult(
+    dlg._after_commit("commit", writeback.CommitResult(
         run_id="r", commit_id=None, applied=[], blocked=[], failed=[b], skipped=[]))
     zdanie = dlg.status.text()
     assert i18n.t("objchg.reason.busy") + r" (R:\A\b.fits)" in zdanie, zdanie

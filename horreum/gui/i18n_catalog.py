@@ -544,7 +544,7 @@ CATALOG = {
         "en": "value {value} breaks the FITS card rules ({reason})"},
     "path.card_skip.no_roundtrip": {
         "pl": "nagłówek „{value}” nie wróciłby do kanonu {canon} - karta przeniosłaby klatkę",
-        "en": "header „{value}” would not resolve back to canon {canon} - the card would move "
+        "en": "header “{value}” would not resolve back to canon {canon} - the card would move "
               "the frame"},
     "path.undo_cards_btn": {"pl": "Cofnij karty", "en": "Undo cards"},
     "path.cards_applied": {"pl": "karty OBJECT zapisane w plikach: {n}",
@@ -555,7 +555,7 @@ CATALOG = {
         "pl": " - klatki zostają nazwane z folderu (w bazie), pliki są bez karty; "
               "„Zatwierdź” dopisze karty ponownie.",
         "en": " - frames stay named from the folder (in the database), files have no card; "
-              "„Confirm” writes the cards again."},
+              "“Confirm” writes the cards again."},
     # To samo zdanie na pasku PO ZAMKNIĘCIU okna (AR-236): przycisku „Zatwierdź” już nie ma, więc bez
     # obietnicy - sam stan bazy i plików.
     "path.cards_restored_closed_note": {
@@ -2164,7 +2164,7 @@ CATALOG = {
     "grid.empty_view": {"pl": "Brak klatek w tym widoku.", "en": "No frames in this view."},
     "grid.empty_db": {
         "pl": "Baza pusta — przyjmij dostawę (miejsce „Dostawa” w lewym pasku).",
-        "en": "Database empty — take a delivery (the „Intake” place in the left bar).",
+        "en": "Database empty - take a delivery (the “Intake” place in the left bar).",
     },
 
     # --- kolumna podglądu klingi (makro/rename) ---
@@ -3297,14 +3297,14 @@ CATALOG = {
     "grid.persp.unknown": {"pl": "Nieznana perspektywa: {name}", "en": "Unknown perspective: {name}"},
     "grid.persp.save_title": {"pl": "Zapisz perspektywę", "en": "Save perspective"},
     "grid.persp.save_prompt": {"pl": "Nazwa:", "en": "Name:"},
-    "grid.persp.saved": {"pl": "Zapisano perspektywę „{name}”", "en": "Perspective „{name}” saved"},
+    "grid.persp.saved": {"pl": "Zapisano perspektywę „{name}”", "en": "Perspective “{name}” saved"},
     # I-1: perspektywa mieszka w BAZIE, więc ta sama nazwa bywa przyjechana z drugiej maszyny.
     # Nadpisanie musi być POWIEDZIANE — „zapisano" mówiłoby o czymś, co się nie stało.
     "grid.persp.overwritten": {"pl": "Nadpisano perspektywę „{name}” (nazwa była już w bazie)",
-                               "en": "Perspective „{name}” overwritten (name already in database)"},
+                               "en": "Perspective “{name}” overwritten (name already in database)"},
     "grid.persp.unreadable": {
         "pl": "Perspektywa „{name}” zapisana w starym formacie (SQL) — nie umiem jej zastosować",
-        "en": "Perspective „{name}” stored in the old format (SQL) — cannot apply it",
+        "en": "Perspective “{name}” stored in the old format (SQL) - cannot apply it",
     },
 
     # --- projekcja / kryteria zbioru ---
@@ -3415,9 +3415,9 @@ CATALOG = {
     },
     "grid.wb.commit_id": {"pl": "  (commit {id})", "en": "  (commit {id})"},
     "grid.wb.run_id": {"pl": "  (run {id})", "en": "  (run {id})"},
-    "grid.wb.committed_label": {
-        "pl": "Zatwierdzono: {n} (commit {id})", "en": "Committed: {n} (commit {id})",
-    },
+    # Etykieta szuflady po zapisie BEZ identyfikatora commitu (AR-255): stoi w tym samym wierszu, co
+    # zdanie wyniku z ogonem `grid.wb.commit_id` - identyfikator raz, w zdaniu (jak `renamed_label`).
+    "grid.wb.committed_label": {"pl": "Zatwierdzono: {n}", "en": "Committed: {n}"},
     "grid.rename.renamed_label": {"pl": "Przemianowano: {n}", "en": "Renamed: {n}"},
     "grid.wb.error": {"pl": "BŁĄD: {msg}", "en": "ERROR: {msg}"},
     # Awaria całej operacji uchwytu zapisu Zbiorów na pasku (AR-204): zdanie per operacja startowana
@@ -3794,11 +3794,11 @@ CATALOG = {
     "pipeline.btn.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "pipeline.tip.calibrate": {
         "pl": "Przepis klatek kalibracyjnych — po „Rozwiąż” (przepis flata potrzebuje filtra)",
-        "en": "Calibration frames recipe — after „Resolve” (the flat recipe needs the filter)",
+        "en": "Calibration frames recipe - after “Resolve” (the flat recipe needs the filter)",
     },
     "pipeline.tip.lineage": {
         "pl": "Powiąż lighty z masterami po przepisie — po „Kalibracja” (potrzebuje osi przepisu)",
-        "en": "Link lights to masters by recipe — after „Calibrate” (needs the recipe axis)",
+        "en": "Link lights to masters by recipe - after “Calibrate” (needs the recipe axis)",
     },
     # Trzy podpowiedzi „Sprawdź obecność" - po jednej na źródło drzewa, w kolejności wyboru
     # (`PipelineView._on_presence`, AR-28 (a)): wskazany katalog, ostatnie źródło, pytanie.
@@ -3997,7 +3997,7 @@ CATALOG = {
         "en": "interrupted after {n} files - database consistent, a rescan will finish.",
     },
     "pipeline.stage_interrupted": {
-        "pl": "Etap „{stage}” przerwany.", "en": "Stage „{stage}” interrupted.",
+        "pl": "Etap „{stage}” przerwany.", "en": "Stage “{stage}” interrupted.",
     },
     "pipeline.stage_failed_status": {
         "pl": "Etap „{stage}” nie powiódł się.", "en": "Stage “{stage}” failed.",
@@ -4648,6 +4648,14 @@ CATALOG = {
     "proj.manifest_path_tip": {"pl": "Plik manifestu: {path}", "en": "Manifest file: {path}"},
     # Szczegół odmowy zapisu nad drzewem niekompletnym: folder wydania, w którym brakuje plików.
     "proj.manifest_folder_tip": {"pl": "Folder wydania: {dir}", "en": "Release folder: {dir}"},
+    # Szczegół odmowy przy cudzym pliku roboczym manifestu (`proj_manifest_busy`): plik do skasowania.
+    "proj.manifest_part_tip": {"pl": "Plik roboczy: {path}", "en": "Working file: {path}"},
+    # Gest okna wydania za odmową kroku manifestu (AR-251): zdanie rdzenia mówi fakt i radę wspólną,
+    # ŻYWE okno dokłada swoje przyciski; pasek gospodarza po zamknięciu okna mówi bez nich.
+    "proj.manifest_retry": {"pl": "{msg}, potem „Odśwież podgląd” i „Zapisz manifest”",
+                            "en": "{msg}, then “Refresh preview” and “Write manifest”"},
+    "proj.manifest_busy_retry": {"pl": "{msg}, potem ponów wydanie albo „Odśwież podgląd”",
+                                 "en": "{msg}, then release again or “Refresh preview”"},
     # Scalenie manifestu bez utraty (AR-213): id wcześniejszych wydań, których plików nie ma w drzewie.
     "proj.manifest_dropped": {
         "pl": "  manifest zapomniał klatek, których plików nie ma w drzewie: {n}",
@@ -4825,9 +4833,10 @@ CATALOG = {
     "proj.obj.btn_manifest_written": {"pl": "Manifest zapisany ✓", "en": "Manifest written ✓"},
     "proj.obj.writing_manifest": {"pl": "Zapisuję manifest wydania → {root}",
                                   "en": "Writing the release manifest → {root}"},
-    # Zamknięcie okna w biegu zapisu manifestu: zapis jednego pliku jest nieprzerywalny.
-    "proj.obj.closing_after_manifest": {"pl": "zapisuję manifest - okno zamknie się po zakończeniu zapisu",
-                                        "en": "writing the manifest - the window closes when the write ends"},
+    # Zamknięcie okna w biegu zapisu manifestu: zapis jednego pliku jest nieprzerywalny. Wiersz panelu
+    # raportu pod `proj.obj.writing_manifest` (AR-262) - raport mówi już, że zapis trwa.
+    "proj.obj.closing_after_manifest": {"pl": "Okno zamknie się samo po zakończeniu zapisu manifestu.",
+                                        "en": "The window closes by itself when the manifest write ends."},
     "proj.obj.manifest_written": {"pl": "Zapisano manifest wydania", "en": "Release manifest written"},
     "proj.obj.manifest_current": {"pl": "Manifest już opisuje komplet w celu - nic do zapisu",
                                   "en": "The manifest already describes the complete target - "
@@ -4962,6 +4971,9 @@ CATALOG = {
         "en": "Choose the archive (Intake source) - the masters and stacks go there.",
     },
     "harvest.missing_dir": {"pl": "Katalog nie istnieje: {path}", "en": "Folder does not exist: {path}"},
+    # Wyjście wydania z listy bez folderu `out` (AR-262) - stan „czeka na WBPP”, nie awaria.
+    "harvest.out_waiting": {"pl": "WBPP jeszcze nie zapisał wyników - folderu wyjścia nie ma: {path}",
+                            "en": "WBPP has not written results yet - the output folder does not exist: {path}"},
     "harvest.empty": {"pl": "Brak masterów i stosów w {path}", "en": "No masters or stacks in {path}"},
     # Plan bez zawartości katalogów, których spacer wyjścia nie przeczytał (AR-222) - ścieżki względem wyjścia.
     "harvest.unread_dirs": {
@@ -5340,11 +5352,27 @@ CATALOG = {
     # Przegląd śladów cofnięcia bez werdyktu przy montażu Porządków (AR-231): porażka mówi klasą błędu
     # w wierszu pasywnym nad listą, przycisk ponawia przegląd (bez okna).
     "tasks.traces_failed": {
-        "pl": "Sprawdzenie plików zostawionych obok ścieżki przez przerwane cofnięcia nie powiodło się: "
-              "{msg}",
-        "en": "Checking the files left next to the path by interrupted undos failed: {msg}",
+        "pl": "Sprawdzenie plików zostawionych obok ścieżki przez przerwane zapisy i cofnięcia nie powiodło "
+              "się: {msg}",
+        "en": "Checking the files left next to the path by interrupted writes and undos failed: {msg}",
     },
     "tasks.traces_retry": {"pl": "Ponów sprawdzenie", "en": "Retry the check"},
+    # Przegląd w biegu ponad próg (AR-252) i przegląd zakończony odczytem „nie wiem” (stan dysku nieznany) -
+    # wiersz pasywny nad listą; `stat` zerwanego udziału wisi do powrotu udziału i nie da się go przerwać.
+    "tasks.traces_pending": {
+        "pl": "Sprawdzanie plików zostawionych obok ścieżki jeszcze trwa - przy udziale, który nie odpowiada, "
+              "potrwa do jego powrotu. Do końca sprawdzania wiersz Kopie zostawione do oka pokazuje każdą "
+              "kopię, której brak nie został dowiedziony w tym sprawdzaniu.",
+        "en": "Checking the files left next to the path is still running - on a share that does not respond "
+              "it lasts until the share is back. Until it finishes, the Copies kept for review row shows "
+              "every copy whose absence this check has not proven.",
+    },
+    "tasks.traces_unknown": {
+        "pl": "Części plików zostawionych obok ścieżki nie dało się sprawdzić (brak dostępu albo udział nie "
+              "odpowiada); ponów sprawdzenie, gdy udział wróci.",
+        "en": "Some files left next to the path could not be checked (no access or the share is not "
+              "responding); retry the check when the share is back.",
+    },
     "tasks.back": {"pl": "← Porządki", "en": "← Housekeeping"},
     "tasks.telescope_axis": {"pl": "Oś teleskopu", "en": "Telescope axis"},
     "tasks.observatory_axis": {"pl": "Oś obserwatorium", "en": "Observatory axis"},
@@ -5983,11 +6011,12 @@ CATALOG = {
     "tasks.kept_copy_tip": {
         "pl": "Przerwany zapis zostawił kopie pliku obok ścieżki (*.horreum-kopia, *.tmp) - stanu nie "
               "dało się dowieść.\nPorównaj je z plikiem (ścieżki w dzienniku zdarzeń lokacji) "
-              "i usuń zbędne; wiersz znika, gdy ich nie ma.",
+              "i usuń zbędne; wiersz znika po sprawdzeniu, które rusza przy wejściu w Porządki, gdy ich "
+              "już nie ma.",
         "en": "An interrupted write left copies of the file next to its path (*.horreum-kopia, "
               "*.tmp) - their state could not be proven.\nCompare them with the file (paths in the "
-              "location's event log) and delete the unneeded ones; the row disappears when they "
-              "are gone."},
+              "location's event log) and delete the unneeded ones; the row disappears after the check "
+              "that runs on entering Housekeeping, once they are gone."},
     "tasks.withheld_testimony_tip": {
         "pl": "Plik kopii zapisany, ale klatka mówi głosem innej kopii.\nW Zbiorach: prawy klik na "
               "klatce → „{lead}” i zapisana kopia - zapis się dokończy. Albo „Cofnij” zapisu.",
@@ -6767,11 +6796,6 @@ CATALOG = {
               "konwencji tego pliku NIE ROZUMIEM, więc jej nie ruszam",
         "en": "property {prop} = {current}, but card {keyword}={card} gives {derived} - I do NOT "
               "UNDERSTAND this file's convention, so I leave it alone"},
-    "objchg.item.xisf_card_exists": {
-        "pl": "karta {keyword} już istnieje - 'add' dopisałby drugą; zmiana wartości idzie przez "
-              "'set'",
-        "en": "card {keyword} already exists - 'add' would write a second one; changing the value "
-              "goes through 'set'"},
     "objchg.item.xisf_prop_without_card": {
         "pl": "plik nie ma karty {keyword}, ale ma własność {prop} - dopisanie karty mogłoby mu "
               "zaprzeczyć, a bramki zrozumienia nie ma na czym postawić",
@@ -6961,9 +6985,6 @@ CATALOG = {
     "objchg.item.fb_not_text_card": {
         "pl": "karta {keyword} nie jest zwykłą kartą tekstową",
         "en": "card {keyword} is not an ordinary text card"},
-    "objchg.item.fb_card_present": {
-        "pl": "karta {keyword} już jest w nagłówku - dopisanie rozstrzyga droga atomowa",
-        "en": "card {keyword} is already in the header - the atomic route decides the addition"},
     "objchg.item.fb_card_count": {
         "pl": "karta {keyword} występuje {n} razy",
         "en": "card {keyword} occurs {n} times"},
@@ -7468,6 +7489,10 @@ CATALOG = {
     "objchg.item.macro_type_mismatch": {
         "pl": "wartość '{value}' nie pasuje do typu '{value_type}'",
         "en": "value '{value}' does not match type '{value_type}'"},
+    # Bramka zakresu `idx` podglądu makra i pisarza karty FITS (AR-256) - jedno zdanie w obu miejscach.
+    "objchg.item.card_idx_missing": {
+        "pl": "karta '{keyword}' nie ma wystąpienia [{idx}] - w nagłówku jest ich {n}",
+        "en": "card '{keyword}' has no occurrence [{idx}] - the header has {n}"},
     "objchg.item.macro_manual_many": {
         "pl": "keyword '{keyword}' ma wiele wystąpień -- edycja ręczna poza krokiem 4",
         "en": "keyword '{keyword}' occurs more than once - manual editing is outside step 4"},
@@ -7587,20 +7612,18 @@ CATALOG = {
               "zapisuje się wyłącznie nad kompletem - najpierw wydaj brakujące pozycje",
         "en": "the release tree is not complete - plan items without a file in the target: {n}; the "
               "manifest is written only over a complete tree - release the missing items first"},
+    # Odmowy kroku manifestu (AR-251): fakt i rada wspólna dla każdej powierzchni - gest ponowienia
+    # dokłada okno (`proj.manifest_retry`, `proj.manifest_busy_retry`) albo CLI (wiersz polecenia).
     "objchg.item.proj_manifest_damaged": {
         "pl": "manifest wydania (_PROJEKCJA.json) leży w folderze, ale nie jest poprawnym zeznaniem "
-              "({detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
-              "i „Zapisz manifest”",
+              "({detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie",
         "en": "the release manifest (_PROJEKCJA.json) is in the folder, but it is not a valid record "
-              "({detail}) - it is not overwritten; check it or delete it by hand, then “Refresh "
-              "preview” and “Write manifest”"},
+              "({detail}) - it is not overwritten; check it or delete it by hand"},
     "objchg.item.proj_manifest_foreign": {
         "pl": "manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania (sprzeczne pole: "
-              "{detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
-              "i „Zapisz manifest”",
+              "{detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie",
         "en": "the release manifest (_PROJEKCJA.json) in the folder belongs to another release "
-              "(conflicting field: {detail}) - it is not overwritten; check it or delete it by hand, "
-              "then “Refresh preview” and “Write manifest”"},
+              "(conflicting field: {detail}) - it is not overwritten; check it or delete it by hand"},
     "objchg.item.proj_manifest_changed": {
         "pl": "manifest wydania (_PROJEKCJA.json) zmienił się w trakcie zapisu - inny zapis był "
               "szybszy; nic nie zapisano, odśwież podgląd",
@@ -7608,9 +7631,9 @@ CATALOG = {
               "faster; nothing was written, refresh the preview"},
     "objchg.item.proj_manifest_busy": {
         "pl": "obok manifestu leży plik roboczy innego zapisu ({path}) - gdy żaden zapis nie trwa, "
-              "skasuj go ręcznie, potem ponów wydanie albo „Odśwież podgląd”",
+              "skasuj go ręcznie",
         "en": "a working file of another write lies next to the manifest ({path}) - when no write is "
-              "running, delete it by hand, then release again or “Refresh preview”"},
+              "running, delete it by hand"},
     "objchg.item.proj_manifest_unreadable": {
         "pl": "manifestu wydania (_PROJEKCJA.json) nie da się odczytać - nie nadpisuję go: {inner}",
         "en": "the release manifest (_PROJEKCJA.json) cannot be read - it is not overwritten: {inner}"},
@@ -7971,6 +7994,19 @@ CATALOG = {
         "pl": " · cały plik przepisany: {n} (karty nie dało się wpisać w samym nagłówku)",
         "en": " · whole file rewritten: {n} (the card could not be written into the header "
               "alone)"},
+    # Podpowiedź spadku (AR-261, `wb_worker.podpowiedz_spadku`): pliki przepisane w całości ponad limit
+    # wierszy i jeden wiersz o dowiązaniach - warunkowy, bo liczby dowiązań przez SMB nie widać.
+    "wb.fallback_more": {
+        "pl": {"one": "… i jeszcze {n} plik", "few": "… i jeszcze {n} pliki",
+               "many": "… i jeszcze {n} plików"},
+        "en": {"one": "… and {n} more file", "other": "… and {n} more files"}},
+    "wb.fallback_links": {
+        "pl": "Plik przepisany w całości dostaje nowy węzeł: jeśli miał dowiązanie twarde (np. "
+              "w wydaniu _WBPP), dowiązanie zostało przy starej treści, a ponowne wydanie pokaże je "
+              "jako konflikt.",
+        "en": "A wholly rewritten file gets a new node: if it had a hard link (e.g. in a _WBPP "
+              "release), the link kept the old content, and releasing again will show it as a "
+              "conflict."},
     # Dom: gest zmiany obiektu przenosi pliki, a nie przemianowuje (relokacja z powodem gestu).
     "home.gest.object_relocated": {
         "pl": {"one": "przeniesiono {n} plik do folderu obiektu",

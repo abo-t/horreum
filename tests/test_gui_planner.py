@@ -935,3 +935,57 @@ def test_planer_blad_programu_rdzenia_zdanie_w_jezyku_UI_szczegol_techniczny(vie
             assert not set(zdanie) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), zdanie
     finally:
         i18n.set_lang("pl")
+
+
+# ============================================================ AR-253 - bezpiecznik pętli z miejscem w kodzie
+
+
+def test_brak_stanowiska_przy_obecnym_stanowisku_szczegol_z_miejscem_rdzenia(qapp, tmp_path, monkeypatch):
+    """AR-253: bezpiecznik pętli (`no_site` przy stanowisku, które ekran widzi) na PRAWDZIWYM wątku tła
+    i prawdziwym rdzeniu - `targets.plan` rzuca `BrakStanowiska`, bo w wątku workera `sky.default_site`
+    stanowiska nie widzi (rozjazd predykatów), a w wątku ekranu widzi. Po ponowieniu błąd idzie na ekran
+    błędem programu, a szczegół niesie miejsce w kodzie: linię rdzenia, która rzuciła (powód liczony
+    w handlerze wątku, pełny ślad). Falsyfikator: wyjątek sygnałem bez śladu (`with_traceback(None)`)
+    i powód liczony dopiero w slocie - szczegół bez miejsca."""
+    import re
+    import threading
+    import time
+    from pathlib import Path
+
+    import horreum
+    from horreum import sky
+    from horreum.gui import i18n
+    path = str(tmp_path / "rozjazd.db")
+    con = _seed(path)
+    prawdziwa = sky.default_site
+    wolania = []
+
+    def _rozjazd(c):
+        w_watku = threading.current_thread() is not threading.main_thread()
+        wolania.append(w_watku)
+        return None if w_watku else prawdziwa(c)
+    monkeypatch.setattr(sky, "default_site", _rozjazd)
+    view = PlannerView(con, db_path=path)
+    try:
+        view.replan()
+        assert view._thread is not None                                  # bieg w wątku tła
+        koniec = time.monotonic() + 30
+        while not (view._thread is None and view.night_label.szczegol()):
+            assert time.monotonic() < koniec, "bezpiecznik 30 s: błąd bezpiecznika z wątku tła"
+            QApplication.processEvents()
+            time.sleep(0.005)
+        assert True in wolania and False in wolania, wolania             # obie strony rozjazdu
+        assert view.night_label.text() == i18n.t("objchg.item.prog_error") and not view.bez_stanowiska
+        glowa = i18n.t("objchg.st.detail_tip", detail="BrakStanowiska: ")
+        miejsce = re.fullmatch(re.escape(glowa) + r".+ @ (horreum/[\w/]+\.py):(\d+)", view.night_label.szczegol())
+        assert miejsce, view.night_label.szczegol()
+        plik, nr = miejsce.group(1), int(miejsce.group(2))
+        linia = (Path(horreum.__file__).parent.parent / plik).read_text(encoding="utf-8").splitlines()[nr - 1]
+        assert plik == "horreum/targets.py" and "raise BrakStanowiska(" in linia, (plik, linia)
+    finally:
+        koniec = time.monotonic() + 30
+        while view._thread is not None and time.monotonic() < koniec:
+            QApplication.processEvents()
+            time.sleep(0.005)
+        view.close()
+        con.close()

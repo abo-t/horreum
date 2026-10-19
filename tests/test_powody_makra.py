@@ -78,6 +78,11 @@ _DROGI = [
     ("_evaluate_change wiele wystąpień", lambda: _makro("HISTORY", "set", "'x'", _HISTORIA),
      "macro_idx_required", "keyword 'HISTORY' ma wiele wystąpień -- wymagany jawny idx",
      "keyword 'HISTORY' occurs more than once - an explicit idx is required"),
+    ("_evaluate_change wystąpienie spoza nagłówka", lambda: macro.run_macro(
+        macro.MacroDef(assign=macro.Assign(keyword="HISTORY", op="set", expr="'x'", idx=2)), [1],
+        targets_fn=lambda ids: [_cel()], cards_fn=lambda fid: _HISTORIA).skipped[0].reason,
+     "card_idx_missing", "karta 'HISTORY' nie ma wystąpienia [2] - w nagłówku jest ich 2",
+     "card 'HISTORY' has no occurrence [2] - the header has 2"),
     ("_evaluate_change add na istniejącej", lambda: _makro("FOCALLEN", "add", "800", _OGNISKOWA),
      "macro_add_exists", "karta 'FOCALLEN' już istnieje (użyj set)",
      "card 'FOCALLEN' already exists (use set)"),

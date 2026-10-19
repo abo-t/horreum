@@ -1087,17 +1087,27 @@ def test_klinga_werdyktu_cas_kanoniczny_zdarzenie_i_walidacja(tmp_path):
 @pytest.mark.parametrize("polowa", ["zamiar_0038", "slad_0045"])
 def test_porzadki_czytelnik_trojstanowy_i_totalny(tmp_path, monkeypatch, polowa):
     """Wiersz Porządków obu połów (zamiar podmiany 0038, ślad cofnięcia 0045) - nazwa znika
-    WYŁĄCZNIE po dowiedzionym braku (`path_gone` → `True`), „nie wiem” zostaje widoczne; elementy
-    spoza niepustych tekstów (CHECK ich nie widzi) są pomijane bez wywrócenia Porządków. Falsyfikator:
-    `None` jak brak → wiersz znika przy zerwanym udziale; czytelnik bez filtra → `TypeError`."""
+    WYŁĄCZNIE po dowiedzionym braku (ostatni odczyt przeglądu tła w pamięci obecności → `True`), „nie wiem”
+    i nazwa jeszcze niesprawdzona zostają widoczne; elementy spoza niepustych tekstów (CHECK ich nie widzi)
+    są pomijane bez wywrócenia Porządków. Czytelnik NIE dotyka dysku (AR-246) - `scan.path_gone` niewołane.
+    Falsyfikatory: `None` jak brak → wiersz znika przy zerwanym udziale; czytelnik bez filtra →
+    `TypeError`; czytelnik statujący dysk."""
     con, p, _zmiana, cid, _n = _commit(tmp_path, "fits")
     b = con.execute("SELECT id FROM header_backups").fetchone()[0]
     jest = tmp_path / "a.fits.0000abcd.horreum-kopia"
     jest.write_bytes(b"k")
     brak = str(tmp_path / "a.fits.0000abce.horreum-kopia")
     niepewna = str(tmp_path / "a.fits.0000abcf.horreum-kopia")
-    prawdziwa = scan.path_gone
-    monkeypatch.setattr(scan, "path_gone", lambda x: None if x == niepewna else prawdziwa(x))
+    queries.zapomnij_obecnosc()
+    for nazwa, odczyt in ((str(jest), scan.path_gone(str(jest))), (brak, scan.path_gone(brak)),
+                          (niepewna, None)):
+        queries.zapamietaj_obecnosc(nazwa, queries.bilet_obecnosci(), odczyt)
+    assert queries.obecnosc_kopii([str(jest), brak, niepewna, "X:/L/nigdy"]) == {
+        str(jest): False, brak: True, niepewna: None}
+
+    def _stat(x):
+        raise AssertionError(f"czytelnik Porządków statuje dysk: {x}")
+    monkeypatch.setattr(scan, "path_gone", _stat)
     if polowa == "slad_0045":
         s = "a" * 40
         u = repo.record_atomic_undo(con, backup_id=b, result_sha1=s, result_size=1, result_hash=s,
@@ -1114,10 +1124,13 @@ def test_porzadki_czytelnik_trojstanowy_i_totalny(tmp_path, monkeypatch, polowa)
                         (sciezki, b))
             con.commit()
     fid = _klatka(con)
+    nigdy = str(tmp_path / "a.fits.0000abd0.horreum-kopia")         # niesprawdzona w tym procesie
     for sciezki, widoczny in (('[null, 1, {}, ""]', False), (json.dumps([brak]), False),
-                              (json.dumps([niepewna]), True), (json.dumps([None, str(jest)]), True)):
+                              (json.dumps([niepewna]), True), (json.dumps([None, str(jest)]), True),
+                              (json.dumps([brak, nigdy]), True)):
         _wpisz(sciezki)
         assert (queries.kept_copy_frame_ids(con) == {fid}) is widoczny, sciezki
+    queries.zapomnij_obecnosc()
     con.close()
 
 
@@ -1308,8 +1321,10 @@ def test_przeglad_sladow_wszystkie_lokacje_tylko_kept(tmp_path, monkeypatch):
     """AR-231: przegląd śladów bez werdyktu WSZYSTKICH lokacji tym samym obserwatorem co bramka - plik
     tymczasowy martwej próby jest na dysku → `kept` z trzema nazwami, zdarzenie i wiersz Porządków bez
     dotyku lokacji; obok ścieżki nic → ślad BEZ werdyktu (`clean` pisze wyłącznie właściciel); „nie wiem”
-    → bez werdyktu. Pliki P/K/Z/T nietknięte (sha1 i `mtime`).
-    Falsyfikatory: przegląd zapisuje `clean` po trzech „nie ma”; przegląd jednej lokacji."""
+    → bez werdyktu, ale osobno (`nie_wiem` - stan dysku nieznany, Porządki mówią o nim zdaniem). Pliki
+    P/K/Z/T nietknięte (sha1 i `mtime`).
+    Falsyfikatory: przegląd zapisuje `clean` po trzech „nie ma”; przegląd jednej lokacji; „nie wiem” liczone
+    jak trzy braki."""
     con, pliki, slady = _slady_trzech_lokacji(tmp_path)
     nazwy = [_nazwy(s) for s in _slady(con)]
     with open(nazwy[0][2], "wb") as fh:                            # T martwej próby lokacji 0
@@ -1321,7 +1336,8 @@ def test_przeglad_sladow_wszystkie_lokacje_tylko_kept(tmp_path, monkeypatch):
     przed = _odcisk_plikow(wszystkie)
     wynik = writeback.przejrzyj_slady_cofniecia(con, now=NOW)
     monkeypatch.undo()
-    assert wynik == writeback.PrzegladSladow(kept=(slady[0],), bez_werdyktu=(slady[1], slady[2])), wynik
+    assert wynik == writeback.PrzegladSladow(kept=(slady[0],), bez_werdyktu=(slady[1],),
+                                             nie_wiem=(slady[2],), nie_wiem_nazwy=(niepewna,)), wynik
     assert _werdykt(con, slady[0]) == ("kept", list(nazwy[0]), NOW)
     assert _werdykt(con, slady[1]) == (None, [], None) and _werdykt(con, slady[2]) == (None, [], None)
     assert con.execute("SELECT count(*) FROM event WHERE verb = 'location.displaced_kept'"

@@ -854,10 +854,12 @@ class _OdmowaStarego(Exception):
 def _odmowa_zajetego(part):
     """Powód „plik roboczy manifestu zajęty” (`proj_manifest_busy`) - jedno zdanie dla kroku
     manifestu wydania i dla naprawy manifestu: obaj pisarze zakładają `.part` wyłącznie (`x`),
-    więc cudzy `.part` znaczy zapis w toku albo resztkę po przerwanym. Rada pasuje do obu dróg."""
+    więc cudzy `.part` znaczy zapis w toku albo resztkę po przerwanym. Zdanie mówi fakt i radę
+    wspólną dla każdej powierzchni; gest ponowienia dokłada powierzchnia (okno - przyciski, CLI -
+    polecenie, AR-251)."""
     return PowodPozycji(
         f"obok manifestu leży plik roboczy innego zapisu ({part}) - gdy żaden zapis nie trwa, skasuj "
-        f"go ręcznie, potem ponów wydanie albo „Odśwież podgląd”", "proj_manifest_busy", path=part)
+        f"go ręcznie", "proj_manifest_busy", path=part)
 
 
 def _powod_odczytu(inner):
@@ -1378,11 +1380,11 @@ def _obce_pole(stary, manifest, root):
 
 def _odmowa_obcego(pole):
     """Odmowa nad manifestem, który zeznaje o INNYM wydaniu (`proj_manifest_foreign`, sprzeczne pole
-    w `detail`) - jedno zdanie dla naprawy (`_obce_pole`) i kroku manifestu wydania (`_odmowa_starego`)."""
+    w `detail`) - jedno zdanie dla naprawy (`_obce_pole`) i kroku manifestu wydania (`_odmowa_starego`).
+    Fakt i rada wspólna; gest ponowienia dokłada powierzchnia (AR-251)."""
     return PowodPozycji(
         f"manifest wydania ({MANIFEST_NAME}) w folderze należy do innego wydania (sprzeczne pole: "
-        f"{pole}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
-        f"i „Zapisz manifest”", "proj_manifest_foreign", detail=pole)
+        f"{pole}) - nie nadpisuję go; sprawdź go albo usuń ręcznie", "proj_manifest_foreign", detail=pole)
 
 
 def _odmowa_starego(stary, path, *, layout, object_id=None):
@@ -1460,11 +1462,11 @@ def _odmowa_uszkodzonego(detail, path):
     """Odmowa nad manifestem uszkodzonym (`proj_manifest_damaged`) - jedno zdanie dla naprawy
     (`_odczyt_scisly`), kroku manifestu wydania (`_write_manifest`, AR-234) i żniw (`read_manifest`
     z `errors_out`). `detail` - pole albo warstwa, która padła; `path` - ścieżka manifestu (szczegół
-    okna, nie zdanie)."""
+    okna, nie zdanie). Fakt i rada wspólna; gest ponowienia dokłada powierzchnia (AR-251)."""
     return PowodPozycji(
         f"manifest wydania ({MANIFEST_NAME}) leży w folderze, ale nie jest poprawnym zeznaniem "
-        f"({detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
-        f"i „Zapisz manifest”", "proj_manifest_damaged", detail=detail, path=path)
+        f"({detail}) - nie nadpisuję go; sprawdź go albo usuń ręcznie", "proj_manifest_damaged",
+        detail=detail, path=path)
 
 
 def _sonda_kompletu(projection, root, copy, sonda):

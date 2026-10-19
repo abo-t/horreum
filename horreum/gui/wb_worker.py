@@ -33,7 +33,7 @@ from PySide6.QtWidgets import QLabel, QMenu
 from horreum import db, lead_copy, writeback
 from horreum.gui import i18n
 from horreum.item_reasons import (SYSTEM_REASON_CODES, PowodPozycji,   # powód z kodem (AR-141)
-                                  blad_systemu, param_ok, powod_systemu)
+                                  param_ok, powod_okna)
 from horreum.gui.i18n_catalog import CATALOG
 
 
@@ -79,8 +79,10 @@ class WritebackWorker(QObject):
 
     progress = Signal(int, int, str, str)   # done, total, path, status — MID-commit (Qt-wolny callback rdzenia)
     done = Signal(str, object)              # op, result (CommitResult|UndoResult|InplaceGestureResult|ObjectChangeResult) - niemutowany po zwrocie rdzenia
-    # op, zdanie, podpowiedź - wyjątek → sygnał, NIE crash apki; podpowiedź = wiersz szczegółu
-    # systemu (`wiersz_systemu`, AR-185) albo "" przy wyjątku spoza klas błędu systemu
+    # op, zdanie, podpowiedź - wyjątek → sygnał, NIE crash apki; podpowiedź = `wiersz_systemu` powodu
+    # z `powod_okna`: szczegół systemu przy błędzie systemu albo bazy klasą (AR-185), „Szczegół
+    # techniczny” z `Typ: opis @ horreum/<plik>.py:<linia>` przy błędzie programu (AR-263), "" przy
+    # powodzie bez klasy i bez szczegółu (tekst systemu, odmowa z kodem bez błędu systemu w drzewie)
     failed = Signal(str, str, str)
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
@@ -91,19 +93,15 @@ class WritebackWorker(QObject):
     # Zwolnienie ręką niesie też POWÓD człowieka, więc jego cel to `{"ops": [...], "reason": ...}`;
     # idzie tym uchwytem, bo rdzeń bierze blokadę pliku (`writeback.release_isolation`) i może na
     # nią czekać - w wątku okna byłoby to zamrożenie, a poza uchwytem - drugi pisarz obok zapisu.
-    # Trzy wpisy fali zmiany obiektu (AR-17 krok 3, AR-117) - ta sama sygnatura pętli po plikach:
-    # `commit_inplace` to karta zapisana W MIEJSCU (spadek na drogę atomową z powodem w
-    # `FileResult.reason`), bo pełne przepisanie pliku po SMB zrywa dowiązania `_WBPP`; `object_change`
-    # i `undo_object_change` to JEDNA operacja gestu (przeniesienie + karta + baza per pozycja), bo
-    # dwa starty uchwytu zwalniałyby między sobą mutex „zapis → Dostawa". Cel wszystkich trzech:
-    # `run_id` przebiegu ze stagingu.
-    # SZUFLADA ZBIORÓW TEŻ PISZE W MIEJSCU (AR-161): `commit` (szuflada) i
-    # `commit_inplace` (okna kart, `app.py`) to JEDEN wołacz - przepisanie całego pliku zostaje wyłącznie
-    # spadkiem z powodem. Dwie nazwy jednej operacji do ujednolicenia (rejestr): `commit` niesie zdanie
-    # porażki szuflady (`grid.wb.op.commit`), `commit_inplace` - regułę zdania okien.
+    # Zapis kart i dwa wpisy fali zmiany obiektu (AR-17 krok 3, AR-117) - ta sama sygnatura pętli po
+    # plikach: `commit` to karta zapisana W MIEJSCU (spadek na drogę atomową z powodem w
+    # `FileResult.reason`), bo pełne przepisanie pliku po SMB zrywa dowiązania `_WBPP` - JEDNA operacja
+    # szuflady Zbiorów i okien kart (AR-161, AR-258: dawny alias `commit_inplace` okien zniknął);
+    # `object_change` i `undo_object_change` to JEDNA operacja gestu (przeniesienie + karta + baza per
+    # pozycja), bo dwa starty uchwytu zwalniałyby między sobą mutex „zapis → Dostawa”. Cel wszystkich
+    # trzech: `run_id` przebiegu ze stagingu.
     _OPS = {
         "commit":        _zapis_kart,
-        "commit_inplace": _zapis_kart,
         "object_change": lambda con, t, now, pr, sc: writeback.commit_object_change(
             con, t, now=now, progress=pr, should_cancel=sc),
         "undo_object_change": lambda con, t, now, pr, sc: writeback.undo_object_change(
@@ -151,12 +149,15 @@ class WritebackWorker(QObject):
             result = self._OPS[self._op](con, self._target_id, self._now(),
                                          self._emit_progress, self._cancel.is_set)
         except Exception as exc:                # błąd → sygnał, NIE crash
-            # Błąd systemu klasą, zdaniem w języku UI (AR-168) - nie surowy `PermissionError: […]`
-            # z komunikatem w języku systemu; inny wyjątek zostaje tekstem `Typ: opis`. Surowy tekst
-            # systemu jedzie trzecim argumentem do podpowiedzi odbiorcy (AR-185). Odmowa klingi z kodem
-            # (`OdmowaZPowodem.powod`) mówi swoim kodem - ucieka np. z gestu kopii wiodącej przez
-            # pochodne (`derive.run_derived` → resolver → `repo.upsert_object`), bez handlera po drodze.
-            powod = powod_systemu(exc) or getattr(exc, "powod", None) or blad_systemu(exc)
+            # JEDNA reguła wyjątku okna (`item_reasons.powod_okna`, AR-263) - ta sama co w planerze,
+            # wydaniu i zmianie obiektu: odmowa klingi z kodem (`OdmowaZPowodem.powod` - ucieka np.
+            # z gestu kopii wiodącej przez pochodne, `derive.run_derived` → resolver →
+            # `repo.upsert_object`) mówi swoim kodem; błąd systemu i bazy - klasą w języku UI (AR-168),
+            # surowy tekst systemu trzecim argumentem do podpowiedzi odbiorcy (AR-185); każdy inny
+            # wyjątek (EXPECT rdzenia, `KeyError`, API bazy wbrew kontraktowi) - błąd programu
+            # w języku UI, a `Typ: opis @ horreum/<plik>.py:<linia>` w podpowiedzi (AR-237). Dawniej
+            # szedł surowym `ValueError: …` w zdaniu, po polsku także w UI EN (wizytacja natywna).
+            powod = powod_okna(exc)
             error, podpowiedz = tekst_powodu(powod), wiersz_systemu(powod)
         finally:
             if con is not None:
@@ -729,14 +730,32 @@ def zdanie_drogi_zapisu(res):
     return czlon
 
 
+# Ile plików przepisanych w całości podpowiedź wymienia z nazwy - reszta liczbą (`wb.fallback_more`).
+_SPADKI_W_PODPOWIEDZI = 10
+
+
 def podpowiedz_spadku(res):
-    """Podpowiedź zdania wyniku okna piszącego karty: szczegół rdzenia pierwszego spadku na drogę
-    atomową (każdy status, `_spadki`) - zdanie mówi go językiem człowieka (`zdanie_drogi_zapisu`),
-    więc szczegół nie ginie, tylko schodzi pod kursor - albo `""`."""
+    """Podpowiedź zdania wyniku okna piszącego karty (okna kart i szuflada Zbiorów): KAŻDY plik
+    przepisany drogą atomową po odmowie zapisu w miejscu (każdy status, `_spadki`) wierszem „nazwa:
+    szczegół rdzenia” w języku UI - najwyżej `_SPADKI_W_PODPOWIEDZI`, reszta liczbą - i na końcu
+    wiersz o dowiązaniach (`wb.fallback_links`, AR-261): przepisany plik dostaje nowy węzeł, a jego
+    dowiązanie twarde (wydanie `_WBPP`) zostaje przy starej treści. Zdanie warunkowe - liczby
+    dowiązań przez SMB stwierdzić się nie da (udział podaje 1 także dla pliku z dowiązaniem). Zdanie
+    główne mówi spadek liczbą (`zdanie_drogi_zapisu`); bez spadku `""`."""
+    from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
     spadki = _spadki(res)
     if not spadki:
         return ""
-    return i18n.t("objchg.st.detail_tip", detail=podziel_powod_spadku(spadki[0][1])[0])
+    # Szczegół z kodem jest już w języku UI (`podziel_powod_spadku` → `tekst_powodu`); proza bez kodu
+    # (wiersz bazy sprzed 0041) przechodzi `czytelny_powod` - plik zajęty słowami okna, ścieżki bez `repr`.
+    wiersze = [i18n.t("objchg.st.detail_tip",
+                      detail=i18n.t("wb.reason_line", file=_ogon_sciezki(fr.path),
+                                    reason=czytelny_powod(podziel_powod_spadku(fragment)[0])))
+               for fr, fragment in spadki[:_SPADKI_W_PODPOWIEDZI]]
+    if len(spadki) > _SPADKI_W_PODPOWIEDZI:
+        wiersze.append(i18n.t_plural("wb.fallback_more", len(spadki) - _SPADKI_W_PODPOWIEDZI))
+    wiersze.append(i18n.t("wb.fallback_links"))
+    return "\n".join(wiersze)
 
 
 def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
@@ -863,20 +882,20 @@ def _zdanie_z_kodu(powod):
     return "; ".join([tekst, *(tekst_powodu(u) for u in uwagi)])
 
 
-def zdanie_commitu_kart(res, applied_key, *, w_miejscu=False):
+def zdanie_commitu_kart(res, applied_key):
     """Zdanie commitu okna piszącego karty → `(tekst, commit_id do cofnięcia | None)`: zdanie
-    wyniku + nota przerwania + `commit_id` (po zamknięciu okna to jedyny uchwyt do cofnięcia).
-    `w_miejscu` = commit szedł zapisem w miejscu (`commit_inplace`) - zdanie dokłada wtedy człon
-    o spadku na drogę atomową (`zdanie_drogi_zapisu`); przy zwykłym commicie drogą atomową jest
-    każdy plik i taki człon byłby fałszem.
+    wyniku + człon o spadku na drogę atomową (`zdanie_drogi_zapisu` - pusty, gdy wszystko poszło
+    w miejscu) + nota przerwania + `commit_id` (po zamknięciu okna to jedyny uchwyt do cofnięcia).
+    Okna kart piszą jedną operacją z szufladą (`commit`, zapis w miejscu ze spadkiem - AR-258), więc
+    flaga drogi zniknęła: spadek rozpoznaje rdzeń po kodzie, a wynik zwykłego commitu atomowego
+    spadku nie niesie.
 
     Okna kart nie mają listy pozycji: przy różnych powodach pozostałe stoją w podpowiedzi zdania
     (`podpowiedz_powodow`), a zdanie mówi, gdzie ich szukać (`wb.reasons_tip`)."""
     summary = zdanie_wyniku_zapisu(res, applied_key)
     if len(_rozne_powody(res)) > 1:
         summary += i18n.t("wb.reasons_tip")
-    if w_miejscu:
-        summary += zdanie_drogi_zapisu(res)
+    summary += zdanie_drogi_zapisu(res)
     if res.cancelled:
         summary += i18n.t("wb.cancelled_note")
     cofnij = commit_do_cofniecia(res)

@@ -79,6 +79,8 @@ from .item_reasons import (ITEM_REASON_CODES,   # powód z kodem (AR-141, AR-148
 # Błędy systemu klasą - właściciel `item_reasons` (AR-168, AR-184); nazwy modułu zostają dla miejsc pisarza.
 from .item_reasons import (blad_systemu as _blad_systemu, proza_z_diagnoza as _proza_z_diagnoza,
                            szczegoly_systemu as _szczegoly_systemu)
+# Błąd Windows z kodem i ścieżką - jedna konstrukcja u właściciela (AR-259); nazwa modułu zostaje.
+from .item_reasons import blad_windows as _blad_windows
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
 # ============================================================ WRITER (port dawcy fits_io)
@@ -303,15 +305,6 @@ def _rozjazd_odcisku(sciezka: str, odcisk: _Odcisk, *, z_mtime: bool = True) -> 
         (_CECHA_MTIME, not z_mtime or st.st_mtime_ns == odcisk.mtime_ns),
         (_CECHA_NAGLOWEK, region == odcisk.region), (_CECHA_PROBKA, probka == odcisk.probka))
         if not zgodne]
-
-
-def _blad_windows(err: int, path: str) -> OSError:
-    """Błąd wywołania Windows (`GetLastError`) jako `OSError` z kodem i ŚCIEŻKĄ pliku (AR-242) - wzór
-    `scan.canonize_root` (AR-212). `ctypes.WinError(err)` dawało `[WinError 5] Odmowa dostępu.` bez
-    nazwy pliku, więc przy wsadzie szczegół nie mówił, który plik padł. Podklasę i `errno` CPython
-    wylicza z `winerror` tak samo jak dla `ctypes.WinError` (klasa `powod_systemu` bez zmian); tekst
-    systemu bez kropki końcowej, jak w wyjątkach CPythona, za nim `: 'ścieżka'`."""
-    return OSError(None, ctypes.FormatError(err).rstrip(" .\r\n"), path, err)
 
 
 def _replace_file_w(path: str, tmp: str, kopia: str) -> None:
@@ -754,10 +747,17 @@ def _zloz_plik_tymczasowy(path: str, fh, czesci, *, oryginal_region: bytes | Non
 
 
 def _coerce(value, value_type: str):
-    if value_type == "int":
-        return int(value)
-    if value_type == "float":
-        return float(value)
+    """Wartość wpisu stagingu (tekst) w typie karty. Tekst, który nie jest liczbą typu karty, to ODMOWA
+    łaty z kodem bliźniaczym podglądu (`macro_type_mismatch`, AR-256) - plik nietknięty; dawniej goły
+    `ValueError` z `int()` dawał 'failed' prozą. W produkcie zatrzymuje to wcześniej podgląd makra."""
+    if value_type in ("int", "float"):
+        try:
+            return int(value) if value_type == "int" else float(value)
+        except (TypeError, ValueError) as exc:
+            tekst = str(value)
+            raise OdmowaZPowodem(PowodPozycji(
+                f"wartość '{tekst}' nie pasuje do typu '{value_type}'", "macro_type_mismatch",
+                value=tekst, value_type=value_type)) from exc
     if value_type == "bool":
         if isinstance(value, bool):
             return value
@@ -767,6 +767,30 @@ def _coerce(value, value_type: str):
 
 def _count_keyword(hdr, keyword: str) -> int:
     return sum(1 for c in hdr.cards if c.keyword == keyword)
+
+
+# ODMOWY ŁATY Z KODEM PODGLĄDU (AR-232, AR-256): pisarz odmawia tych samych łat co podgląd makra
+# (`macro._evaluate_change`) i tymi samymi zdaniami - wołający bez kotwicy stagingu (API) dostaje
+# 'blocked' z kodem, plik nietknięty. Obie drogi FITS (atomowa i plan w miejscu - przebieg próbny
+# `_apply_op`) i XISF mówią „karta już jest” jednym kodem.
+def _karta_juz_jest(keyword: str) -> PowodPozycji:
+    """`add` karty, która już jest - JEDNO zdanie i kod dla FITS i XISF (bliźniak podglądu makra)."""
+    return PowodPozycji(f"karta '{keyword}' już istnieje (użyj set)", "macro_add_exists",
+                        keyword=keyword)
+
+
+def _wymagany_idx(keyword: str) -> PowodPozycji:
+    """`set` bez `idx` na karcie powtórzonej - bliźniak podglądu makra; dawniej pisarz zapisywał po
+    cichu PIERWSZE wystąpienie (FITS i XISF)."""
+    return PowodPozycji(f"keyword '{keyword}' ma wiele wystąpień -- wymagany jawny idx",
+                        "macro_idx_required", keyword=keyword)
+
+
+def _brak_wystapienia(keyword: str, idx: int, ile: int) -> PowodPozycji:
+    """`set` wystąpienia `idx`, którego w nagłówku nie ma (`ile` wystąpień) - ta sama odmowa co
+    bramka zakresu podglądu makra."""
+    return PowodPozycji(f"karta '{keyword}' nie ma wystąpienia [{idx}] - w nagłówku jest ich {ile}",
+                        "card_idx_missing", keyword=keyword, idx=idx, n=ile)
 
 
 def _set_nth(hdr, keyword: str, n: int, value, comment: str | None) -> None:
@@ -779,7 +803,7 @@ def _set_nth(hdr, keyword: str, n: int, value, comment: str | None) -> None:
                 if comment is not None:
                     card.comment = comment
                 return
-    raise KeyError(f"{keyword}[{n}] nie istnieje w naglowku")
+    raise OdmowaZPowodem(_brak_wystapienia(keyword, n, seen + 1))
 
 
 def _apply_op(hdr, op: WriteOp) -> None:
@@ -790,11 +814,12 @@ def _apply_op(hdr, op: WriteOp) -> None:
         # (`macro_add_exists`, AR-232), plik nietknięty. W produkcie ten stan zatrzymuje wcześniej
         # kotwica `header_hash` stagingu (nowa karta zmienia nagłówek); tu dochodzi wołający bez kotwicy.
         if _count_keyword(hdr, op.keyword) > 0:
-            raise OdmowaZPowodem(PowodPozycji(f"karta '{op.keyword}' już istnieje (użyj set)",
-                                              "macro_add_exists", keyword=op.keyword))
+            raise OdmowaZPowodem(_karta_juz_jest(op.keyword))
         hdr[op.keyword] = (value, op.comment) if op.comment is not None else value
         return
     if op.op == "set":
+        if op.idx is None and _count_keyword(hdr, op.keyword) > 1:
+            raise OdmowaZPowodem(_wymagany_idx(op.keyword))
         if (op.idx in (None, 0)) and _count_keyword(hdr, op.keyword) <= 1:
             hdr[op.keyword] = (value, op.comment) if op.comment is not None else value
         else:
@@ -831,7 +856,7 @@ def _fits_comment_loss(hdr, przed: dict) -> str | None:
     astropy układa zmienioną kartę w stałym formacie (pole wartości od kolumny 11 do co najmniej
     30) i komentarz, który się nie zmieści, UCINA po cichu - dawniej wynik 'applied' z komentarzem
     62 → 47 znaków. To ta sama kontrola, którą droga w miejscu robi round-tripem obrazu karty
-    (`_fits_card_image`): obraz po zmianie, przeczytany z powrotem, ma nieść ten sam komentarz.
+    (`_obraz_karty`): obraz po zmianie, przeczytany z powrotem, ma nieść ten sam komentarz.
 
     Zapis TOŻSAMOŚCIOWY (obraz karty bez zmian - astropy nie przekłada karty, której wartość się
     nie zmieniła) jest poza kontrolą: nie zmienia ani bajtu karty, więc niczego nie ucina, a jego
@@ -1416,9 +1441,7 @@ def _xisf_add_patch(meta, keyword: str, new_text: str, comment) -> tuple[int, in
     except scan.XisfTargetMissing:
         pass
     else:
-        raise _XisfRefusal(PowodPozycji(
-            f"karta {keyword} już istnieje - 'add' dopisałby drugą; zmiana wartości idzie przez "
-            f"'set'", "xisf_card_exists", keyword=keyword))
+        raise _XisfRefusal(_karta_juz_jest(keyword))       # ten sam kod co FITS i podgląd (AR-256)
     target = _XISF_PROPERTY_TARGETS.get(keyword)
     if target is not None:
         try:
@@ -1467,9 +1490,15 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
         if op.op == "add":
             patches.append(_xisf_add_patch(meta, keyword, new_text, op.comment))
             continue
+        ile = sum(1 for c in meta.cards if c.keyword == keyword)
+        if op.idx is None and ile > 1:
+            raise _XisfRefusal(_wymagany_idx(keyword))        # jak FITS i podgląd (AR-256)
         try:
             span = scan.locate_value_span(xml, keyword=keyword, idx=idx)
         except scan.XisfTargetMissing as exc:
+            if ile and not 0 <= idx < ile:     # karta jest, wystąpienia `idx` nie - jak FITS i podgląd;
+                # wystąpienie, które JEST, a nie ma atrybutu `value=`, zostaje przy powodzie czytnika
+                raise _XisfRefusal(_brak_wystapienia(keyword, idx, ile)) from exc
             brak = powod_wyjatku(exc)          # zdanie czytnika `scan` z kodem (AR-158)
             raise _XisfRefusal(PowodPozycji(
                 f"{brak} - 'set' nie zakłada karty; dopisanie idzie przez 'add' (P6d)",
@@ -1756,18 +1785,20 @@ def write_xisf_full_header(path, header_text: str, expected_hash: str | None) ->
 #
 # SPADEK NA DROGĘ DOTYCHCZASOWĄ (`Fallback`) wyłącznie PRZED jakimkolwiek zapisem i backupem:
 # FITS, gdy łata nie mieści się w jednym 80-bajtowym rekordzie, gdy karta `set` występuje więcej
-# niż raz, gdy `add` dopisuje kartę, która już jest, gdy dopisanie nie ma w nagłówku miejsca
-# (pusta karta na końcu albo wolny rekord za `END` w ostatnim bloku 2880 B) albo gdy wartość jest
-# nietekstowa. FITS z kartą `CHECKSUM`/`DATASUM` to ODMOWA ('blocked'), nie spadek: zapis
-# unieważniłby sumę, a pisarz jej nie przelicza - ta sama odmowa stoi na drodze atomowej
-# (`_odmowa_sumy`, AR-166), więc spadek niczego by nie zmienił. XISF spadku NIE MA: region
+# niż raz, gdy dopisanie nie ma w nagłówku miejsca (pusta karta na końcu albo wolny rekord za `END`
+# w ostatnim bloku 2880 B) albo gdy zapis zmieniłby RODZAJ wartości karty (tekst, logika, liczba;
+# karta liczbowa i logiczna tego samego rodzaju idzie w miejscu - AR-261). FITS z kartą
+# `CHECKSUM`/`DATASUM` to ODMOWA ('blocked'), nie spadek: zapis unieważniłby sumę, a pisarz jej nie
+# przelicza - ta sama odmowa stoi na drodze atomowej (`_odmowa_sumy`, AR-166), więc spadek niczego
+# by nie zmienił. Tak samo odmowa ŁATY (`add` karty, która już jest, typ, wystąpienie - AR-256,
+# AR-257): przebieg próbny `_apply_op` w planie odmawia od razu tym samym powodem. XISF spadku NIE MA: region
 # nagłówka XISF ma stały rozmiar w obu drogach, więc brak rezerwy odmawia tak samo tu, jak w pliku
 # tymczasowym.
 
 _PROBE_BYTES = 1 << 16    # próbka: przed regionem, początek danych, koniec pliku (po 64 KiB)
 # Karty układu danych FITS (+ `NAXISn`): przywrócenie w miejscu wymaga, żeby były TE SAME - inaczej
-# te same bajty danych znaczyłyby co innego. Zapis w miejscu ich nie łata w ogóle (tylko wartości
-# tekstowe), więc dla commitu to asercja, a dla undo - bramka.
+# te same bajty danych znaczyłyby co innego. Zapis w miejscu ich nie łata w ogóle (tylko karty
+# zwykłe), więc dla commitu to asercja, a dla undo - bramka.
 _FITS_LAYOUT_KEYWORDS = frozenset({"SIMPLE", "XTENSION", "BITPIX", "NAXIS", "EXTEND", "PCOUNT",
                                    "GCOUNT", "GROUPS", "BZERO", "BSCALE", "BLANK"})
 # Karty bez wartości albo z wartością, której układ nie jest „keyword = 'tekst' / komentarz".
@@ -2033,21 +2064,49 @@ def _fits_region_checked(fh, start: int, data_start: int, expected_hash: str | N
     return raw, biezacy
 
 
-def _fits_card_image(keyword: str, value: str, comment: str) -> tuple[bytes | None, str | None]:
-    """Obraz 80 bajtów karty tekstowej `keyword = 'value' / comment` w układzie astropy (pole
-    wartości stałego formatu, §4.2) albo `(None, powód)`. Round-trip: karta odczytana z obrazu
-    ma dać tę samą nazwę, wartość i komentarz - astropy przy za długim komentarzu UCINA go po cichu
-    (ostrzeżenie), a przy za długiej wartości składa CONTINUE; oba przypadki łapie ta kontrola."""
+def _rodzaj(value) -> str:
+    """Rodzaj wartości karty dla zapisu w miejscu (AR-261): `tekst`, `logika`, `liczba` (int i float
+    to jeden rodzaj) albo `inny` (wartość nieokreślona, zespolona). `bool` PRZED `int` - podklasa."""
+    if isinstance(value, bool):
+        return "logika"
+    if isinstance(value, (int, float)):
+        return "liczba"
+    return "tekst" if isinstance(value, str) else "inny"
+
+
+def _obraz_karty(karta, keyword: str, value, comment: str) -> tuple[bytes | None, str | None]:
+    """Obraz 80 bajtów karty astropy `karta` (`keyword = wartość / comment`) albo `(None, powód)` -
+    JEDNA reguła mieszczenia się karty w rekordzie dla pisarza w miejscu (karta po przebiegu próbnym
+    `_apply_op`) i podglądu drogi (`_fits_card_image`, świeża karta). Round-trip: karta odczytana
+    z obrazu ma dać tę samą nazwę i komentarz, a tekst - tę samą wartość: astropy przy za długim
+    komentarzu UCINA go po cichu (ostrzeżenie), a przy za długiej wartości tekstowej składa CONTINUE;
+    oba przypadki łapie ta kontrola. Wartości liczby nie porównujemy: liczba nie składa CONTINUE,
+    a obraz, którego astropy nie odtworzy co do bitu (float dłuższy niż pole), zapisuje tak samo
+    droga atomowa."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        image = fits.Card(keyword, value, comment).image
+        image = karta.image
         back = fits.Card.fromstring(image)
         zgodna = (len(image) == _FITS_RECORD and back.keyword == keyword
-                  and back.value == value.rstrip() and (back.comment or "") == (comment or ""))
+                  and (not isinstance(value, str) or back.value == value.rstrip())
+                  and (back.comment or "") == (comment or ""))
     if not zgodna:
         return None, PowodPozycji(f"karta {keyword} z zastanym komentarzem nie mieści się w jednym "
                                   f"rekordzie 80 znaków", "fb_card_too_long", keyword=keyword)
-    return image.encode("ascii"), None
+    return image.encode("latin-1"), None
+
+
+def _fits_card_image(keyword: str, value, comment: str) -> tuple[bytes | None, str | None]:
+    """Obraz ŚWIEŻEJ karty `keyword = wartość / comment` w układzie astropy (pole wartości stałego
+    formatu, §4.2) albo `(None, powód)` - reguła `_obraz_karty` dla podglądu drogi bez pliku
+    (`inplace_route`). `value` w typie karty: tekst albo - od AR-261 - liczba i logika (`_coerce`).
+    Pisarz w miejscu bierze obraz karty Z PLIKU po przebiegu próbnym (`_fits_inplace_plan`): przy
+    zmianie samego komentarza astropy zachowuje zastany format wartości (tekst dopełniony
+    w apostrofach, `1.0E+00`), którego świeża karta nie ma."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        karta = fits.Card(keyword, value, comment)
+    return _obraz_karty(karta, keyword, value, comment)
 
 
 def _fits_hdu_bounds(path: str, expected_hash: str | None):
@@ -2120,6 +2179,14 @@ def _fits_zloz_region(raw: bytes, ops: list[WriteOp], obrazy: dict[str, bytes]):
         nowe = []
         for c in wyrocznia.cards:
             if c.keyword in obrazy:
+                # Droga atomowa zapisuje `Card.image` wyroczni (`writeto`), a obraz planu to ta sama
+                # karta z przebiegu próbnego (`_fits_inplace_plan`, AR-261): przełożona - z zastanym
+                # formatem wartości przy zmianie samego komentarza; nieprzełożona (wartość równa
+                # zastanej wg reguły astropy, np. `-0.0` na `0.0`) - bajty pliku. Rozjazd znaczy, że
+                # plan nie jest drogą atomową (EXPECT).
+                if c.image.encode("latin-1") != obrazy[c.keyword]:
+                    raise ValueError(f"FITS: obraz karty {c.keyword!r} w miejscu inny niż karta "
+                                     f"drogi atomowej")
                 nowe.append(obrazy[c.keyword])
             elif id(c) in zrodlo:
                 nowe.append(zrodlo[id(c)])
@@ -2141,10 +2208,14 @@ def _fits_zloz_region(raw: bytes, ops: list[WriteOp], obrazy: dict[str, bytes]):
 def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | None):
     """Plan zapisu w miejscu dla FITS (pod blokadą) → `_InplacePlan` | `Fallback` | `WriteResult`.
 
-    Kwalifikują się operacje na WARTOŚCI TEKSTOWEJ zwykłej karty (nie komentarzowej, nie układu
-    danych): `set` karty tekstowej występującej dokładnie raz i `add` karty, której w nagłówku nie
-    ma (AR-118). Obraz karty (`_fits_card_image`) niesie komentarz jak u `_apply_op`: z operacji,
-    a przy `set` bez komentarza - ZASTANY (tu komentarz nie ginie); karta, która się nie mieści
+    Kwalifikują się operacje na WARTOŚCI zwykłej karty (nie komentarzowej, nie układu danych):
+    `set` karty występującej dokładnie raz, z wartością tego samego rodzaju co zastana (tekst,
+    logika, liczba - AR-261), i `add` karty, której w nagłówku nie ma (AR-118). Odmowy łaty
+    (karta już jest, typ, wystąpienie, brak `idx`) daje przebieg próbny `_apply_op` przed
+    kwalifikacją - te same co droga atomowa, bez spadku (AR-257). Obraz karty to karta Z TEGO
+    przebiegu (`_obraz_karty`) - rekord, który zapisze droga atomowa, z komentarzem z operacji,
+    a przy `set` bez komentarza - ZASTANYM (tu komentarz nie ginie), i z zastanym formatem wartości
+    przy zmianie samego komentarza; karta, która się nie mieści
     w jednym rekordzie, spada na drogę atomową, a tam odmawia `_fits_comment_loss` (AR-7). Region
     składa `_fits_zloz_region`: `set` w TYM SAMYM slocie, `add` tam, gdzie postawiłby ją astropy,
     w zapasie nagłówka (pusta karta na końcu albo wolny rekord za `END`) - liczba bloków 2880 B
@@ -2160,35 +2231,52 @@ def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | N
     powod = _odmowa_sumy(hdr)
     if powod is not None:
         return WriteResult("blocked", powod, None)
+    # PRZEBIEG PRÓBNY ŁATY (AR-257): `_apply_op` - ta sama funkcja i kolejność co droga atomowa - na
+    # JEDNEJ kopii nagłówka, po kolei (operacja widzi skutek poprzednich). Odmowa łaty (karta już jest,
+    # typ, wystąpienie, brak `idx` - AR-256) zapada więc TU tym samym powodem, zamiast spadku, po
+    # którym droga atomowa i tak by odmówiła; oryginał `hdr` nietknięty. Inny wyjątek (np. `nan`
+    # z astropy) leci dalej jak w drodze atomowej - 'failed' bez zapisu (`_pod_blokada`).
+    try:
+        proba = hdr.copy()
+        for op in ops:
+            _apply_op(proba, op)
+    except OdmowaZPowodem as exc:
+        return WriteResult("blocked", exc.powod, None)
     obrazy: dict[str, bytes] = {}
     podmieniane: list[str] = []
     for op in ops:
         kw = op.keyword.strip().upper()
-        if op.op not in ("set", "add") or op.value_type != "str":
+        if op.op not in ("set", "add"):
             return Fallback(PowodPozycji(
                 f"operacja {op.op}/{op.value_type} na {kw} - układ karty zostaje przy astropy",
                 "fb_op_kind", op=op.op, value_type=op.value_type, keyword=kw))
         if kw in _FITS_NOT_INPLACE or kw in _FITS_LAYOUT_KEYWORDS or kw in obrazy:
             return Fallback(PowodPozycji(f"karta {kw} nie jest zwykłą kartą tekstową",
                                          "fb_not_text_card", keyword=kw))
+        wartosc = _coerce(op.value, op.value_type)          # po przebiegu próbnym - bez odmowy
         ile = _count_keyword(hdr, kw)
         if op.op == "add":
-            if ile:
-                return Fallback(PowodPozycji(
-                    f"karta {kw} już jest w nagłówku - dopisanie rozstrzyga droga atomowa",
-                    "fb_card_present", keyword=kw))
             komentarz = op.comment or ""
         else:
             if ile != 1 or op.idx not in (None, 0):
                 return Fallback(PowodPozycji(f"karta {kw} występuje {ile} razy", "fb_card_count",
                                              keyword=kw, n=ile))
             card = hdr.cards[kw]
-            if not isinstance(card.value, str):
-                return Fallback(PowodPozycji(f"zastana wartość {kw} nie jest tekstem",
-                                             "fb_value_not_text", keyword=kw))
+            # Karta liczbowa i logiczna W MIEJSCU (AR-261) wyłącznie przy ZGODNYM rodzaju wartości
+            # zastanej i zapisu - zmiana rodzaju karty zostaje przy astropy (droga atomowa).
+            if _rodzaj(card.value) != _rodzaj(wartosc):
+                if isinstance(wartosc, str):
+                    return Fallback(PowodPozycji(f"zastana wartość {kw} nie jest tekstem",
+                                                 "fb_value_not_text", keyword=kw))
+                return Fallback(PowodPozycji(
+                    f"operacja {op.op}/{op.value_type} na {kw} - układ karty zostaje przy astropy",
+                    "fb_op_kind", op=op.op, value_type=op.value_type, keyword=kw))
             komentarz = op.comment if op.comment is not None else card.comment
             podmieniane.append(kw)
-        image, powod = _fits_card_image(kw, str(op.value), komentarz)
+        # Obraz = karta Z PRZEBIEGU PRÓBNEGO (kopia nagłówka po `_apply_op`) - to, co zapisze droga
+        # atomowa (`writeto` bierze `Card.image`), także zastany format wartości przy zmianie samego
+        # komentarza; nie świeża `fits.Card` (inny obraz tekstu dopełnionego, `1.0E+00`, `600.`).
+        image, powod = _obraz_karty(proba.cards[kw], kw, wartosc, komentarz)
         if image is None:
             return Fallback(powod)
         obrazy[kw] = image
@@ -2427,12 +2515,18 @@ def _verify_inplace(plan: _InplacePlan, size: int, probka, backup_text) -> Write
 
 def inplace_route(filetype, keyword: str, value: str, value_type, comment, *,
                   op: str = "set", cards=None) -> PowodPozycji | None:
-    """PRZEWIDYWANIE drogi zapisu jednej karty tekstowej z faktów bazy, bez otwierania pliku
-    (podgląd planu): `None` = w miejscu, `PowodPozycji` = powód drogi dotychczasowej (kod czyta
-    okno - `fb_no_room`, `route_depends`). Reguła mieszczenia się
-    karty FITS jest TA SAMA, której używa pisarz (`_fits_card_image`), więc podgląd i zapis nie mogą
-    się rozjechać co do rekordu 80 znaków; resztę (liczba kart, CONTINUE, sumy kontrolne)
-    rozstrzyga pisarz na pliku. XISF → `None`: brak rezerwy odmawia tak samo w obu drogach.
+    """PRZEWIDYWANIE drogi zapisu jednej karty (tekst, liczba, logika - AR-261) z faktów bazy, bez
+    otwierania pliku (podgląd planu): `None` = w miejscu, `PowodPozycji` = powód drogi dotychczasowej
+    (kod czyta okno - `fb_no_room`, `route_depends`). Reguła mieszczenia się
+    karty FITS jest TA SAMA, której używa pisarz (`_obraz_karty` - tu na świeżej karcie,
+    `_fits_card_image`), więc podgląd i zapis nie mogą się rozjechać co do rekordu 80 znaków; resztę
+    (liczba kart, rodzaj i format zastanej wartości, CONTINUE, sumy kontrolne) rozstrzyga pisarz na
+    pliku. XISF → `None`: brak rezerwy odmawia tak samo w obu drogach.
+
+    Wartość niezgodna z `value_type` (tekst, który nie jest liczbą typu) → `OdmowaZPowodem`
+    (`macro_type_mismatch`) z `_coerce`, nie powód drogi - dotyczy wyłącznie wołającego API spoza
+    produktu: wołający produktu podają tekst (`object_change_dialog`), a podgląd makra odsiewa typ
+    wcześniej.
 
     `op="add"` (AR-118): FITS dopisuje kartę w miejscu wyłącznie w zapasie nagłówka (pusta karta na
     końcu albo wolny rekord za `END` w ostatnim bloku 2880 B). `cards` (AR-155) = lustro kart
@@ -2444,14 +2538,7 @@ def inplace_route(filetype, keyword: str, value: str, value_type, comment, *,
     pliku”, nie `None`, który obiecałby zapis w miejscu."""
     if filetype == "xisf":
         return None
-    if value_type != "str":
-        if op == "add":
-            return PowodPozycji(f"operacja {op}/{value_type} na {keyword} - układ karty zostaje "
-                                f"przy astropy", "fb_op_kind", op=op, value_type=value_type,
-                                keyword=keyword)
-        return PowodPozycji(f"zastana wartość {keyword} nie jest tekstem", "fb_value_not_text",
-                            keyword=keyword)
-    powod = _fits_card_image(keyword, value, comment or "")[1]
+    powod = _fits_card_image(keyword, _coerce(value, value_type), comment or "")[1]
     if powod is None and op == "add":
         zapas = _zapas_z_lustra(cards) if cards else None
         if zapas == "free":
@@ -2520,7 +2607,7 @@ def _zapas_z_lustra(cards) -> str | None:
 def comment_loss_route(filetype, keyword: str, value: str, comment) -> str | None:
     """PRZEWIDYWANIE odmowy AR-7 dla `set` karty BEZ komentarza z faktów bazy (podgląd planu,
     AR-47): powód, gdy zastany komentarz nie przeżyje układu astropy przy nowej wartości, inaczej
-    `None`. Odmawiają wtedy OBIE drogi - w miejscu `_fits_card_image` daje spadek, a droga
+    `None`. Odmawiają wtedy OBIE drogi - w miejscu `_obraz_karty` daje spadek, a droga
     atomowa `_fits_comment_loss` - więc plan ma taką klatkę pominąć, a nie liczyć jako spadek.
     Ta sama karta astropy co pisarz; XISF i karta bez komentarza → `None`. Fakty powodu:
     `comment_loss_lengths`."""
@@ -4653,8 +4740,8 @@ def _slad_pary(con, backup_id, sha1, naglowek):
 
 
 def _nazwy_sladu(displaced_path: str, prepared_path: str) -> tuple[str, str, str]:
-    """Nazwy plików, które ślad cofnięcia może zostawić obok ścieżki: K, Z, T - w tej kolejności, bo
-    w tej kolejności pliki powstają i znikają w oknie podmiany."""
+    """Nazwy plików, które ślad cofnięcia może zostawić obok ścieżki: K, Z, T - kolejność listy werdyktu
+    (`atomic_undo.kept_paths`), nie kolejność powstawania (T powstaje pierwsze, jeszcze przed śladem)."""
     return displaced_path, _nazwa_zwrotna(displaced_path), prepared_path
 
 
@@ -4681,10 +4768,13 @@ def _rekoncyliuj_slady(con, loc, *, now) -> PowodPozycji | None:
 class _WerdyktSladu:
     """Rozstrzygnięcie JEDNEGO śladu przez obserwatora (`_rozstrzygnij_slad`): `wynik` = werdykt
     z WIERSZA KANONICZNEGO klingi (`kept`, `clean` - przegrany CAS bierze werdykt zwycięzcy), `bez_werdyktu`
-    (same „nie ma” albo „nie wiem”) albo `padl` (baza, wyjątek odczytu); `powod` - zdanie blokady bramki
-    (`undo_cut_kept` przy kanonicznym `kept`, `undo_reconcile_failed` przy porażce) albo None."""
+    (trzy dowiedzione „nie ma”), `nie_wiem` (któreś „nie wiem”, żadne „jest” - stan dysku nieznany, ponowienie
+    ma sens) albo `padl` (baza, wyjątek odczytu); `powod` - zdanie blokady bramki
+    (`undo_cut_kept` przy kanonicznym `kept`, `undo_reconcile_failed` przy porażce) albo None; `nazwy` - przy
+    `nie_wiem` nazwy z odczytem „nie wiem” (dla zdania Porządków)."""
     wynik: str
     powod: PowodPozycji | None = None
+    nazwy: tuple = ()
 
 
 def _rozstrzygnij_slad(con, s, *, now) -> _WerdyktSladu:
@@ -4696,7 +4786,8 @@ def _rozstrzygnij_slad(con, s, *, now) -> _WerdyktSladu:
     try:
         stan = {x: scan.path_gone(x) for x in nazwy}
         if not any(v is False for v in stan.values()):
-            return _WerdyktSladu("bez_werdyktu")
+            nie_wiem = tuple(x for x, v in stan.items() if v is None)
+            return _WerdyktSladu("nie_wiem", nazwy=nie_wiem) if nie_wiem else _WerdyktSladu("bez_werdyktu")
         kanon = repo.settle_atomic_undo(con, undo_id=s["id"], outcome="kept", kept_paths=nazwy,
                                         now=now)
     except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
@@ -4716,13 +4807,16 @@ def _rozstrzygnij_slad(con, s, *, now) -> _WerdyktSladu:
 class PrzegladSladow:
     """Wynik przeglądu śladów cofnięcia bez werdyktu (`przejrzyj_slady_cofniecia`, AR-231): id śladów wg
     werdyktu z WIERSZA KANONICZNEGO - `kept` (obok ścieżki widziano plik: wiersz Porządków), `clean`
-    (przegrany CAS - właściciel zdążył), `bez_werdyktu` (same „nie ma” albo „nie wiem”), `padly` (porażka
-    bazy albo odczytu) - i powód pierwszej porażki albo None."""
+    (przegrany CAS - właściciel zdążył), `bez_werdyktu` (trzy dowiedzione „nie ma”), `nie_wiem` (stan dysku
+    nieznany - `scan.path_gone` → `None`; ich nazwy z tym odczytem w `nie_wiem_nazwy`), `padly` (porażka bazy
+    albo odczytu) - i powód pierwszej porażki albo None."""
     kept: tuple = ()
     clean: tuple = ()
     bez_werdyktu: tuple = ()
+    nie_wiem: tuple = ()
     padly: tuple = ()
     powod: PowodPozycji | None = None
+    nie_wiem_nazwy: tuple = ()
 
 
 def przejrzyj_slady_cofniecia(con, *, now) -> PrzegladSladow:
@@ -4731,15 +4825,17 @@ def przejrzyj_slady_cofniecia(con, *, now) -> PrzegladSladow:
     bez dotyku lokacji; ślad bez resztek zostaje bez werdyktu (`clean` wyłącznie właściciel). Porażka
     jednego śladu nie przerywa przeglądu. Pliki NIGDY nie są ruszane. Wyjątek odczytu listy śladów (baza)
     leci do wołającego."""
-    wyniki = {"kept": [], "clean": [], "bez_werdyktu": [], "padl": []}
-    powod = None
+    wyniki = {"kept": [], "clean": [], "bez_werdyktu": [], "nie_wiem": [], "padl": []}
+    powod, nie_wiem_nazwy = None, []
     for s in sorted(repo.unsettled_atomic_undos(con), key=lambda r: r["id"]):
         werdykt = _rozstrzygnij_slad(con, s, now=now)
         wyniki[werdykt.wynik].append(s["id"])
+        nie_wiem_nazwy.extend(werdykt.nazwy)
         if werdykt.wynik == "padl" and powod is None:
             powod = werdykt.powod
-    return PrzegladSladow(tuple(wyniki["kept"]), tuple(wyniki["clean"]),
-                          tuple(wyniki["bez_werdyktu"]), tuple(wyniki["padl"]), powod)
+    return PrzegladSladow(kept=tuple(wyniki["kept"]), clean=tuple(wyniki["clean"]),
+                          bez_werdyktu=tuple(wyniki["bez_werdyktu"]), nie_wiem=tuple(wyniki["nie_wiem"]),
+                          padly=tuple(wyniki["padl"]), powod=powod, nie_wiem_nazwy=tuple(nie_wiem_nazwy))
 
 
 def _werdykt_wlasciciela(con, undo_id, nazwy, *, commit_id, now,

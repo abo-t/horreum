@@ -67,7 +67,7 @@ def test_zdanie_okna_kart_na_prawdziwej_odmowie_pisarza(en, tmp_path):
         res = writeback.commit(con, "R", now=NOW, inplace=inplace)
         (fr,) = res.blocked
         assert fr.reason.code == "header_hash_mismatch", fr.reason
-        zdanie, _ = zdanie_commitu_kart(res, "path.cards_applied", w_miejscu=inplace)
+        zdanie, _ = zdanie_commitu_kart(res, "path.cards_applied")
         assert "header_hash mismatch" in zdanie and _bez_polskiego(zdanie), zdanie
         con.close()
 
@@ -480,8 +480,9 @@ def test_szuflada_po_cofnieciu_niesie_szczegol_systemu(en, widok, ogon):
 def test_awaria_calej_operacji_mowi_bledem_systemu_w_jezyku_UI(en, tmp_path, monkeypatch):
     """AR-168: wyjątek całej operacji zapisu (`WritebackWorker.run`) nie idzie już surowym
     `PermissionError: [WinError 5] Odmowa dostępu.` - zdanie klasy w języku UI; wyjątek spoza
-    klas zostaje tekstem `Typ: opis`. Sygnał niesie trzy argumenty (op, zdanie, podpowiedź ze
-    szczegółem systemu, AR-185) - odbiorca przyjmuje wszystkie trzy, asercja dotyczy zdania.
+    klas to błąd programu, też w języku UI (`powod_okna`, AR-263 - dawniej `Typ: opis` po polsku
+    w zdaniu EN). Sygnał niesie trzy argumenty (op, zdanie, podpowiedź ze szczegółem systemu,
+    AR-185) - odbiorca przyjmuje wszystkie trzy, asercja dotyczy zdania.
     Falsyfikator: `run` z `f"{type(exc).__name__}: {exc}"` → polski komunikat systemu w EN."""
     from horreum.gui.wb_worker import WritebackWorker
     sciezka = str(tmp_path / "w.db")
@@ -489,7 +490,7 @@ def test_awaria_calej_operacji_mowi_bledem_systemu_w_jezyku_UI(en, tmp_path, mon
     bledy = []
     for wyjatek, oczek in ((OSError(None, "Odmowa dostępu.", None, 5),
                             "access to the file denied (WinError 5)"),
-                           (RuntimeError("w połowie"), "RuntimeError: w połowie")):
+                           (RuntimeError("w połowie"), "a program error - details in the tooltip")):
         def _pada(c, t, now, pr, sc, wyjatek=wyjatek):
             raise wyjatek
         monkeypatch.setitem(WritebackWorker._OPS, "commit", _pada)

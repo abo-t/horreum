@@ -141,7 +141,8 @@ class PipelineWorker(QObject):
         except Exception as exc:                       # błąd etapu → sygnał, NIE crash apki
             # Błąd systemu albo bazy KLASĄ (AR-198): zerwany udział mówił surowym tekstem systemu
             # po polsku także w UI EN. Odmowa klingi z kodem (`OdmowaZPowodem` - resolver woła
-            # `repo.upsert_object` bez handlera) mówi swoim kodem, jak w `WritebackWorker.run`.
+            # `repo.upsert_object` bez handlera) mówi swoim kodem; błąd programu - jeszcze tekstem
+            # `Typ: opis` (okna zapisu mówią go regułą okna `powod_okna`, AR-263).
             self.failed.emit(self._etap or self._stage or "?",
                              getattr(exc, "powod", None) or blad_systemu(exc))
         finally:

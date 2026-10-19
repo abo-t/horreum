@@ -55,7 +55,9 @@ def jezyk():
 
 def test_awaria_calej_operacji_niesie_szczegol_trzecim_argumentem(tmp_path, monkeypatch):
     """`WritebackWorker.run`: wyjątek klasy błędu systemu → `(op, zdanie UI, wiersz szczegółu)`;
-    wyjątek spoza klas → podpowiedź pusta (nic nie zmyślamy). Falsyfikator: emisja bez podpowiedzi."""
+    wyjątek spoza klas (błąd programu, AR-263) → zdanie błędu programu w języku UI, a `Typ: opis`
+    z miejscem w kodzie w wierszu szczegółu technicznego - reguła wyjątku okna (`powod_okna`).
+    Falsyfikator: emisja bez podpowiedzi; dawna klasyfikacja (`RuntimeError: …` w zdaniu, szczegół pusty)."""
     sciezka = str(tmp_path / "w.db")
     db.open_db(sciezka).close()
     bledy = []
@@ -66,8 +68,12 @@ def test_awaria_calej_operacji_niesie_szczegol_trzecim_argumentem(tmp_path, monk
         w = WritebackWorker(sciezka, "commit", "R", now_fn=lambda: NOW)
         w.failed.connect(lambda op, msg, tip: bledy.append((op, msg, tip)))
         w.run()
-    assert bledy == [("commit", i18n.t("objchg.item.os_denied", os_code="WinError 5"), _tip()),
-                     ("commit", "RuntimeError: w połowie", "")]
+    assert bledy[0] == ("commit", i18n.t("objchg.item.os_denied", os_code="WinError 5"), _tip())
+    op, zdanie, szczegol = bledy[1]
+    assert (op, zdanie) == ("commit", i18n.t("objchg.item.prog_error"))
+    # Miejsce: atrapa rzuca spoza pakietu, więc najgłębsza ramka pakietu to wołanie operacji w workerze.
+    assert re.fullmatch(re.escape(i18n.t("objchg.st.detail_tip", detail="RuntimeError: w połowie @ "))
+                        + r"horreum/gui/wb_worker\.py:\d+", szczegol), szczegol
 
 
 def test_etykieta_bledu_zdejmuje_podpowiedz_z_nowym_zdaniem(qapp):
@@ -112,7 +118,7 @@ def test_okna_kart_po_awarii_operacji_szczegol_w_podpowiedzi(qapp, tmp_path, jez
         v, con, _pliki, _fid = request.getfixturevalue("sciezka_karty")
         dlg = _okno_sciezki(v, con)
         przycisk = dlg.confirm_btn
-    monkeypatch.setitem(WritebackWorker._OPS, "commit_inplace", _odmowa)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", _odmowa)      # zapis kart okien (AR-258)
     assert isinstance(dlg.error, EtykietaBledu)
     dlg.show()
     _klik(przycisk)
@@ -392,8 +398,9 @@ def test_szuflada_awaria_cofniecia_przy_zywym_Cofnij_zostawia_Zatwierdzono(qapp,
                                                                          monkeypatch):
     """Klik „Cofnij” po prawdziwym commicie, cofnięcie pada wyjątkiem całej operacji: etykieta szuflady
     zostaje „Zatwierdzono…” (dawne `set_count(0, …)` nadpisywało ją pustostanem), Zatwierdź/Odrzuć
-    schowane (jedyną akcją jest „Cofnij”), wynik = zdanie błędu, podpowiedź = zdanie + szczegół
-    systemu. Falsyfikator: `set_count` przed `_refresh_drawer` albo brak `set_commit_actions_visible`."""
+    schowane (jedyną akcją jest „Cofnij”), wynik = zdanie błędu z identyfikatorem commitu (etykieta go
+    nie niesie, AR-255), podpowiedź = zdanie + szczegół systemu. Falsyfikator: `set_count` przed
+    `_refresh_drawer` albo brak `set_commit_actions_visible`."""
     from test_gui_powody_pisarza import _widok_nad
     jezyk(lang)
     view, con, _p = _widok_nad(qapp, tmp_path)
@@ -405,11 +412,12 @@ def test_szuflada_awaria_cofniecia_przy_zywym_Cofnij_zostawia_Zatwierdzono(qapp,
     bar._emit_stage()
     _klik(view.drawer.btn_commit)                             # prawdziwy commit - „Cofnij” żyje
     assert view._undo_mode == "macro"
-    etykieta = i18n.t("grid.wb.committed_label", n=1, id=view._undo_commit_id)
+    etykieta = i18n.t("grid.wb.committed_label", n=1)
     assert view.drawer.label.text() == etykieta
     monkeypatch.setitem(WritebackWorker._OPS, "undo", _odmowa)
     _klik(view._undo_btn)
-    blad = i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+    blad = (i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+            + i18n.t("grid.wb.commit_id", id=view._undo_commit_id))
     assert view.drawer.label.text() == etykieta
     assert view.drawer.btn_commit.isHidden() and view.drawer.btn_reject.isHidden()
     assert view._undo_btn.isVisible()
@@ -650,11 +658,15 @@ def _wolania_zdan_gui():
     """Każdy parametr wołania `i18n.t`/`t_plural` w modułach `horreum/gui` RAZEM z podkatalogami
     (`_moduly_gui`): `(plik, nazwa funkcji, parametr, węzeł wartości, opakowana?, nazwy z except)`.
     Nazwa funkcji kwalifikowana (`_nazwa_kwalifikowana`). Opakowana = wołanie `tekst_powodu`/
-    `czytelny_powod`/`t`/`t_plural`. Nazwy z except = nazwy związane przez `except ... as <nazwa>`
-    w najbliższej obejmującej funkcji."""
+    `czytelny_powod`/`t`/`t_plural`, a w module okna wydania także `zdanie_odmowy` (`tekst_powodu` + gest
+    okna, AR-251) - WYŁĄCZNIE tam, bo zapadka rozpoznaje opakowanie po nazwie: lokalna funkcja o tej
+    samej nazwie gdzie indziej nie jest dowodem opakowania. Nazwy z except = nazwy związane przez
+    `except ... as <nazwa>` w najbliższej obejmującej funkcji."""
     import ast
-    opakowania = {"tekst_powodu", "czytelny_powod", "t", "t_plural"}
+    opakowania_wszedzie = {"tekst_powodu", "czytelny_powod", "t", "t_plural"}
+    opakowania_modulu = {"projection_dialog.py": {"zdanie_odmowy"}}
     for plik, drzewo, _rodzic, przodkowie in _moduly_gui():
+        opakowania = opakowania_wszedzie | opakowania_modulu.get(plik, set())
 
         def _funkcja(w, przodkowie=przodkowie):
             return next((p for p in przodkowie(w) if not isinstance(p, ast.ClassDef)), None)
@@ -673,6 +685,35 @@ def _wolania_zdan_gui():
                 opakowana = isinstance(v, ast.Call) and (
                     v.func.attr if isinstance(v.func, ast.Attribute) else getattr(v.func, "id", None)) in opakowania
                 yield plik, nazwa, k.arg, v, opakowana, z_wyjatku.get(_funkcja(w), set())
+
+
+def test_opakowanie_zdanie_odmowy_wylacznie_w_module_okna_wydania(monkeypatch):
+    """AR-251: `zdanie_odmowy` jest opakowaniem zdania wyłącznie w `projection_dialog.py` - to samo
+    wołanie w innym module (lokalna funkcja o tej nazwie) zostaje surowe dla zapadek. Moduły syntetyczne
+    podane zamiast `horreum/gui` (`_moduly_gui`). Falsyfikator: `zdanie_odmowy` w zbiorze opakowań
+    wszystkich modułów."""
+    import ast
+    import sys
+    zrodlo = ("def gest(exc):\n"
+              "    try:\n"
+              "        pass\n"
+              "    except Exception as exc2:\n"
+              "        return i18n.t('k', msg=zdanie_odmowy(exc2))\n")
+
+    def _syntetyczne():
+        for plik in ("projection_dialog.py", "inne_okno.py"):
+            drzewo = ast.parse(zrodlo)
+            rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+
+            def _przodkowie(w, rodzic=rodzic):
+                while w in rodzic:
+                    w = rodzic[w]
+                    if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        yield w
+            yield plik, drzewo, rodzic, _przodkowie
+    monkeypatch.setattr(sys.modules[__name__], "_moduly_gui", _syntetyczne)
+    wynik = {plik: opakowana for plik, _n, arg, _v, opakowana, _w in _wolania_zdan_gui() if arg == "msg"}
+    assert wynik == {"projection_dialog.py": True, "inne_okno.py": False}, wynik
 
 
 def test_zapadka_msg_err_e_w_zdaniach_GUI():
@@ -858,12 +899,79 @@ def _okno_zmiany(tmp_path, monkeypatch, _ustawienia, rzut):
     return wynik, lambda zdanie: i18n.t("objchg.err.plan", msg=zdanie)
 
 
+def _okno_szuflady(tmp_path, monkeypatch, _ustawienia, rzut):
+    """Szuflada Zbiorów: klik „Zatwierdź” stagingu makra, operacja zapisu (`WritebackWorker`) pada -
+    zdanie szuflady i jego szczegół (AR-263)."""
+    from test_gui_powody_pisarza import _widok_nad
+    view, con, _p = _widok_nad(QApplication.instance(), tmp_path)
+    view.show()
+    bar = view.macro_bar
+    bar.asg_kw.setCurrentText("TELESCOP")
+    bar.asg_op.setCurrentIndex(0)
+    bar.asg_expr.setText("EQ6")
+    bar._emit_stage()
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", lambda *_a: rzut())
+    _klik(view.drawer.btn_commit)
+    wynik = view.drawer.result.text(), view.drawer.result.szczegol()
+    view.close()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("grid.wb.error", msg=zdanie)
+
+
+def _okno_naprawy_kart(tmp_path, monkeypatch, _ustawienia, rzut):
+    """„Napraw nagłówek…”: klik „Zapisz”, operacja zapisu kart pada - pole błędu i jego szczegół."""
+    from test_gui_object_change import _lighty, _okno_naprawy
+    con = db.open_db(str(tmp_path / "naprawa.db"))
+    _lighty(tmp_path / "ASTRO_", con, "NGC7635", 1, baza=7)
+    dlg = _okno_naprawy(con)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", lambda *_a: rzut())
+    dlg.show()
+    _klik(dlg.save_btn)
+    wynik = dlg.error.text(), dlg.error.szczegol()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("grid.wb.error", msg=zdanie)
+
+
+def _okno_sciezki_kart(tmp_path, monkeypatch, _ustawienia, rzut):
+    """„Zatwierdź ze ścieżki…”: klik „Zatwierdź” nad propozycją `NGC7635` (stan fikstury
+    `sciezka_karty` - fikstura-generator nie da się wołać z wnętrza macierzy, więc to samo wprost:
+    klatka RAW pod `LIGHTS` daje korzeń archiwum, bez niego propozycji nie ma), operacja zapisu kart
+    pada - pole błędu i jego szczegół."""
+    from horreum import repo, scan
+    from test_gui_app_object import NOW_O3, ObjectAxisView, _okno_sciezki, _stos_fits
+    con = db.open_db(str(tmp_path / "sciezka.db"))
+    for i, (nazwa, karta) in enumerate((("a", None), ("b", ""), ("c", None)), start=1):
+        plik = _stos_fits(tmp_path, "NGC7635", f"NGC7635_Ha_{nazwa}.fits", seed=i, object_card=karta)
+        scan.ingest_record(con, scan.scan_file(str(plik)), volume="V", now=NOW_O3,
+                           summary=scan.ScanSummary())
+    raw, _ = repo.upsert_frame(con, sha1_data="sha-o3-raw", kind="light", filetype="raw",
+                               camera_id=None, now=NOW_O3)
+    repo.record_header(con, frame_id=raw, raw_json="{}", object_raw=None, now=NOW_O3)
+    repo.add_location(con, frame_id=raw, volume="V", header_hash="h-raw", now=NOW_O3,
+                      path=str(tmp_path / "LIGHTS" / "NGC7635" / "A7R3" / "_7R38821.ARW"))
+    v = ObjectAxisView(con, now_fn=lambda: NOW_O3)
+    dlg = _okno_sciezki(v, con)
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", lambda *_a: rzut())
+    dlg.show()
+    _klik(dlg.confirm_btn)
+    wynik = dlg.error.text(), dlg.error.szczegol()
+    dlg.reject()
+    v.close()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("grid.wb.error", msg=zdanie)
+
+
 _OKNA_WORKEROW = {"planer": _okno_planera, "sonda": _okno_sondy, "wydanie": _okno_wydania,
-                  "manifest": _okno_manifestu, "zmiana": _okno_zmiany}
+                  "manifest": _okno_manifestu, "zmiana": _okno_zmiany,
+                  # okna zapisu plików przez `WritebackWorker` (AR-263)
+                  "szuflada": _okno_szuflady, "naprawa": _okno_naprawy_kart, "sciezka": _okno_sciezki_kart}
 # Plik pakietu, którego linia woła rdzeń podmieniony w oknie - miejsce w kodzie szczegółu (AR-237).
+# Okna zapisu: atrapa operacji leży poza pakietem, więc najgłębsza ramka pakietu to wołanie `_OPS`.
 _MIEJSCE_WORKERA = {"planer": "gui/planner.py", "sonda": "gui/projection_dialog.py",
                     "wydanie": "gui/projection_dialog.py", "manifest": "gui/projection_dialog.py",
-                    "zmiana": "gui/object_change_dialog.py"}
+                    "zmiana": "gui/object_change_dialog.py", "szuflada": "gui/wb_worker.py",
+                    "naprawa": "gui/wb_worker.py", "sciezka": "gui/wb_worker.py"}
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
@@ -871,8 +979,9 @@ _MIEJSCE_WORKERA = {"planer": "gui/planner.py", "sonda": "gui/projection_dialog.
 @pytest.mark.parametrize("okno", list(_OKNA_WORKEROW))
 def test_cztery_workery_jedna_regula_wyjatku_okna(qapp, tmp_path, ustawienia, monkeypatch, jezyk,
                                                   okno, rodzaj, lang):
-    """AR-209, AR-214: wyjątek workera planera, sondy i biegu wydania oraz planu zmiany obiektu
-    mówi JEDNĄ regułą (`item_reasons.powod_okna`): błąd systemu i bazy - klasą w języku UI ze
+    """AR-209, AR-214: wyjątek workera planera, sondy i biegu wydania, planu zmiany obiektu oraz
+    operacji zapisu plików (`WritebackWorker` - szuflada, „Napraw nagłówek…”, „Zatwierdź ze ścieżki…”,
+    AR-263) mówi JEDNĄ regułą (`item_reasons.powod_okna`): błąd systemu i bazy - klasą w języku UI ze
     szczegółem pod kursorem; goły EXPECT rdzenia, wyjątek biblioteki i `KeyError` - zdaniem błędu
     programu w języku UI (nic po polsku w EN), a nie prozą rdzenia albo `Typ: opis` w zdaniu.
     Falsyfikator: gałąź `ValueError` planera z `str(exc)`, sonda z `powod_wyjatku(exc)`, plan
@@ -894,8 +1003,9 @@ def test_cztery_workery_jedna_regula_wyjatku_okna(qapp, tmp_path, ustawienia, mo
 def test_cztery_workery_blad_programu_szczegol_techniczny_z_typem(qapp, tmp_path, ustawienia,
                                                                    monkeypatch, jezyk, okno, rodzaj,
                                                                    lang):
-    """Błąd programu w czterech oknach - goły EXPECT rdzenia i API bazy wbrew kontraktowi
-    (`sqlite3.ProgrammingError` na zamkniętym połączeniu - nie stan bazy): proza z typem wyjątku stoi
+    """Błąd programu w oknach workerów (także zapisu plików, AR-263) - goły EXPECT rdzenia i API bazy
+    wbrew kontraktowi (`sqlite3.ProgrammingError` na zamkniętym połączeniu - nie stan bazy): proza
+    z typem wyjątku stoi
     WYŁĄCZNIE w szczególe technicznym pod kursorem (`objchg.st.detail_tip`), zdanie okna mówi błąd
     programu w języku UI. Falsyfikator: `prog_error` bez wiersza szczegółu; `ProgrammingError`
     klasą przez `blad_systemu` - angielski tekst SQLite w zdaniu."""

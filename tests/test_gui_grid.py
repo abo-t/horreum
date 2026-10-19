@@ -6605,10 +6605,10 @@ def test_szuflada_zapisuje_w_miejscu_dowiazanie_twarde_widzi_karte(wb_view):
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
 def test_szuflada_spadek_na_droge_atomowa_mowi_zdaniem_okien(qapp, tmp_path, lang):
-    """AR-161: karta, której nie da się wpisać w samym nagłówku (wartość liczbowa - układ karty
-    zostaje przy astropy), idzie drogą atomową z powodem, a szuflada i pasek mówią to TYM SAMYM
-    członem co okna kart (`zdanie_drogi_zapisu`, jedna reguła); szczegół spadku - powód odmowy zapisu
-    w miejscu (`fb_op_kind`) w języku UI - stoi w podpowiedzi.
+    """AR-161: karta, której nie da się wpisać w samym nagłówku (dopisanie bez zapasu - `END` na
+    ostatnim rekordzie bloku), idzie drogą atomową z powodem, a szuflada i pasek mówią to TYM SAMYM
+    członem co okna kart (`zdanie_drogi_zapisu`, jedna reguła); szczegół spadku - nazwa pliku i powód
+    odmowy zapisu w miejscu (`fb_no_room`) w języku UI (AR-261) - stoi w podpowiedzi.
 
     Falsyfikatory: `_after_commit` bez członu drogi → zdanie bez „cały plik przepisany”; pusty
     szczegół w `podpowiedz_spadku` → podpowiedź bez powodu odmowy."""
@@ -6622,7 +6622,10 @@ def test_szuflada_spadek_na_droge_atomowa_mowi_zdaniem_okien(qapp, tmp_path, lan
     hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16))
     hdu.header["TELESCOP"] = "RC8"
     hdu.header["IMAGETYP"] = "Light"
-    hdu.header["FOCALLEN"] = 800
+    i = 0
+    while (len(hdu.header) + 1) % 36:                # karty + END = pełny blok, bez zapasu
+        hdu.header[f"PAD{i}"] = i
+        i += 1
     hdu.writeto(str(p))
     con = db.open_db(str(tmp_path / "f.db"))
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
@@ -6633,20 +6636,25 @@ def test_szuflada_spadek_na_droge_atomowa_mowi_zdaniem_okien(qapp, tmp_path, lan
         wyniki = _wynik_przechwycony(view, "_after_commit")
         komunikaty = []
         view.status_message.connect(komunikaty.append)
-        _stage_makra(view, "FOCALLEN", "1000")
+        view.macro_bar.asg_kw.setCurrentText("OBSERVER")
+        view.macro_bar.asg_op.setCurrentIndex(1)            # add
+        view.macro_bar.asg_expr.setText("Zdzin")
+        view.macro_bar._emit_stage()
         assert view._pending_count() == 1
         view._on_commit()
         (res,) = wyniki
-        assert str(fits.getheader(str(p))["FOCALLEN"]) == "1000"
+        assert fits.getheader(str(p))["OBSERVER"] == "Zdzin"
         droga = zdanie_drogi_zapisu(res)
         assert droga == i18n.t("wb.inplace_fallback", n=1), droga
         assert droga in view.drawer.result.text(), view.drawer.result.text()
         (fr,) = res.applied
         odmowa = dict(fr.reason.params)["detail"]          # powód odmowy zapisu w miejscu
-        assert fr.reason.code == "inplace_fallback" and odmowa.code == "fb_op_kind", fr.reason
-        szczegol = i18n.t("objchg.st.detail_tip", detail=tekst_powodu(odmowa))
-        assert "FOCALLEN" in szczegol and szczegol in view.drawer.result.toolTip(), \
+        assert fr.reason.code == "inplace_fallback" and odmowa.code == "fb_no_room", fr.reason
+        szczegol = i18n.t("objchg.st.detail_tip", detail=i18n.t(
+            "wb.reason_line", file="f.fits", reason=tekst_powodu(odmowa)))
+        assert "END" in szczegol and szczegol in view.drawer.result.toolTip(), \
             view.drawer.result.toolTip()
+        assert i18n.t("wb.fallback_links") in view.drawer.result.toolTip()
         assert any(droga in str(k) for k in komunikaty), komunikaty
         assert _operacje(con) == []                         # spadek przed dziennikiem
     finally:
@@ -6710,7 +6718,8 @@ def test_szuflada_zapis_rozdarty_widac_w_Porzadkach_z_droga_odzysku(wb_view, mon
 
 
 def _plik_z_ogniskowa(path):
-    """FITS z kartą liczbową `FOCALLEN` - jej zmiana nie mieści się w zapisie w miejscu (`fb_op_kind`)."""
+    """FITS z kartą liczbową `FOCALLEN` - zapis TEKSTU na niej zmienia rodzaj karty, więc spada na
+    drogę atomową (`fb_value_not_text`, AR-261: liczba na liczbie idzie w miejscu)."""
     import numpy as np
     from astropy.io import fits
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -6734,7 +6743,7 @@ def _spadek_po_podmianie(tmp_path, monkeypatch, stan):
     scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary())
     lok = con.execute("SELECT id, header_hash FROM location").fetchone()
     repo.stage_pending(con, run_id="R", location_id=lok["id"], keyword="FOCALLEN", idx=0, op="set",
-                       old_value="800", new_value="1000", new_type="int", new_comment=None,
+                       old_value="800", new_value="1000", new_type="str", new_comment=None,
                        expected_header_hash=lok["header_hash"])
     if stan == "withheld":
         M = tmp_path / "B" / "a.fits"
@@ -6760,9 +6769,9 @@ def test_spadek_na_droge_atomowa_liczy_sie_niezaleznie_od_statusu(wb_view, tmp_p
                                                                    stan, lang):
     """AR-161: spadek na drogę atomową to fakt o pliku, NIE o statusie - plik przepisany w całości
     i zakończony zapisem wstrzymanym albo błędem po podmianie liczy się w członie drogi zdania
-    (`zdanie_drogi_zapisu`: szuflada i okna kart), a powód odmowy zapisu w miejscu (`fb_op_kind`)
-    stoi w podpowiedzi (`podpowiedz_spadku`). Prawdziwy rdzeń; dawniej człon liczył wyłącznie
-    `applied`, a przy 'failed' rdzeń gubił informację o drodze.
+    (`zdanie_drogi_zapisu`: szuflada i okna kart), a nazwa pliku i powód odmowy zapisu w miejscu
+    (`fb_value_not_text`) stoją w podpowiedzi (`podpowiedz_spadku`, AR-261). Prawdziwy rdzeń;
+    dawniej człon liczył wyłącznie `applied`, a przy 'failed' rdzeń gubił informację o drodze.
 
     Falsyfikatory: człon liczy tylko `applied` → zdanie bez „cały plik przepisany”; rdzeń bez uwagi
     drogi przy 'failed' po podmianie → to samo dla 'failed'."""
@@ -6777,12 +6786,14 @@ def test_spadek_na_droge_atomowa_liczy_sie_niezaleznie_od_statusu(wb_view, tmp_p
         assert str(fits.getheader(str(L))["FOCALLEN"]) == "1000"        # plik PRZEPISANY
         (uwaga,) = [n for n in dict(fr.reason.params)["notes"] if n.code == "inplace_fallback"]
         odmowa = dict(uwaga.params)["detail"]
-        assert odmowa.code == "fb_op_kind", odmowa
+        assert odmowa.code == "fb_value_not_text", odmowa
         i18n.set_lang(lang)
         droga = zdanie_drogi_zapisu(res)
         assert droga == i18n.t("wb.inplace_fallback", n=1), droga
-        assert droga in zdanie_commitu_kart(res, "grid.wb.applied", w_miejscu=True)[0]
-        assert podpowiedz_spadku(res) == i18n.t("objchg.st.detail_tip", detail=tekst_powodu(odmowa))
+        assert droga in zdanie_commitu_kart(res, "grid.wb.applied")[0]
+        assert podpowiedz_spadku(res) == i18n.t("objchg.st.detail_tip", detail=i18n.t(
+            "wb.reason_line", file="a.fits", reason=tekst_powodu(odmowa))) + "\n" + i18n.t(
+            "wb.fallback_links")
         view, _con, _p = wb_view
         view._after_commit("commit", res)                      # szuflada: to samo zdanie
         assert droga in view.drawer.result.text(), view.drawer.result.text()
@@ -6793,18 +6804,337 @@ def test_spadek_na_droge_atomowa_liczy_sie_niezaleznie_od_statusu(wb_view, tmp_p
 
 def test_spadek_odmowiony_nie_jest_przepisanym_plikiem(tmp_path):
     """Spadek, po którym droga atomowa ODMÓWIŁA (plik nietknięty, 'blocked'), nie liczy się w członie
-    drogi - przepisanego pliku nie ma. Falsyfikator: człon liczy też `blocked`."""
+    drogi - przepisanego pliku nie ma: zastany komentarz 47 znaków nie mieści się przy nowej wartości
+    (w miejscu `fb_card_too_long`, atomowo odmowa `comment_cut`, AR-7). Falsyfikator: człon liczy
+    też `blocked`."""
+    import numpy as np
+    from astropy.io import fits
     from horreum import repo, scan
     from horreum.gui.wb_worker import podpowiedz_spadku, zdanie_drogi_zapisu
     con = db.open_db(str(tmp_path / "b.db"))
-    L = _plik_z_ogniskowa(tmp_path / "a.fits")
+    L = tmp_path / "a.fits"
+    hdu = fits.PrimaryHDU(data=np.arange(16, dtype=np.int16).reshape(4, 4))
+    hdu.header["IMAGETYP"] = "Light"
+    hdu.header["OBJECT"] = ("M31", "k" * 47)
+    hdu.writeto(str(L))
     scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary())
-    lok = con.execute("SELECT id FROM location").fetchone()
-    repo.stage_pending(con, run_id="R", location_id=lok["id"], keyword="FOCALLEN", idx=None,
-                       op="add", old_value=None, new_value="1000", new_type="int",
-                       new_comment=None, expected_header_hash=None)
+    lok = con.execute("SELECT id, header_hash FROM location").fetchone()
+    repo.stage_pending(con, run_id="R", location_id=lok["id"], keyword="OBJECT", idx=0, op="set",
+                       old_value="M31", new_value="V" * 20, new_type="str", new_comment=None,
+                       expected_header_hash=lok["header_hash"])
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     (fr,) = res.blocked
-    assert fr.reason.code == "macro_add_exists", fr.reason
+    assert fr.reason.code == "comment_cut", fr.reason
     assert zdanie_drogi_zapisu(res) == "" and podpowiedz_spadku(res) == ""
     con.close()
+
+
+# ---------- AR-263 (1): wyjątek operacji zapisu jedną regułą okna (`powod_okna`) ----------
+
+from horreum.gui import i18n  # noqa: E402
+
+
+def _widok_jednego_pliku(tmp_path):
+    """FramesView nad jednym FITS (`TELESCOP` = RC8), zapis inline - wzór `test_gui_powody_pisarza._widok_nad`
+    (import stamtąd zamknąłby cykl: tamten moduł importuje fiksturę z tego)."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    p = tmp_path / "wb.fits"
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16))
+    hdu.header["TELESCOP"] = "RC8"
+    hdu.header["IMAGETYP"] = "Light"
+    hdu.writeto(str(p), overwrite=True)
+    con = db.open_db(str(tmp_path / "wb.db"))
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    v = grid_mod.FramesView(con, now_fn=lambda: NOW)
+    v._writeback_async = False
+    return v, con
+
+
+def _rzut_operacji_zapisu(rodzaj, tmp_path):
+    """Wyjątek operacji zapisu: EXPECT rdzenia, API bazy wbrew kontraktowi, błąd systemu klasą, PRAWDZIWY
+    błąd SQLite z kodem (CANTOPEN), odmowa klingi z kodem."""
+    import sqlite3
+    from horreum.item_reasons import OdmowaZPowodem, powod_systemu
+    if rodzaj == "rdzen":
+        raise ValueError("złamany inwariant planu zapisu")
+    if rodzaj == "zamkniete":
+        c = sqlite3.connect(":memory:")
+        c.close()
+        c.execute("SELECT 1")
+    if rodzaj == "system":
+        raise OSError(None, "Odmowa dostępu.", r"X:\L\a.fits", 5)
+    if rodzaj == "baza":
+        sqlite3.connect(str(tmp_path / "brak" / "x.db"))
+    raise OdmowaZPowodem(powod_systemu(OSError(None, "Nie można odnaleźć pliku.", r"X:\L\b.fits", 2)))
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("rodzaj", ["rdzen", "zamkniete", "system", "baza", "odmowa"])
+def test_writeback_worker_jedna_regula_wyjatku_okna(tmp_path, monkeypatch, rodzaj, lang):
+    """`WritebackWorker.run` klasyfikuje wyjątek regułą okna (`item_reasons.powod_okna`, AR-263 - jak
+    planer, wydanie, zmiana obiektu): EXPECT rdzenia i `sqlite3.ProgrammingError` to błąd programu
+    w języku UI, a `Typ: opis @ horreum/<plik>.py:<linia>` stoi w szczególe technicznym (dawniej surowe
+    `ValueError: …` w zdaniu, po polsku także w UI EN - wizytacja natywna). Klasy systemu i bazy oraz
+    odmowa z kodem - bez zmian (pin). Prawdziwy `run`, atrapa tylko operacji `_OPS`. Falsyfikator: dawna
+    klasyfikacja `powod_systemu or powod or blad_systemu` (zdanie `ValueError: …`, szczegół pusty)."""
+    import re
+    from horreum.gui.wb_worker import WritebackWorker
+    from horreum.item_reasons import powod_systemu
+    i18n.set_lang(lang)
+    sciezka = str(tmp_path / "w.db")
+    db.open_db(sciezka).close()
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", lambda *_a: _rzut_operacji_zapisu(rodzaj, tmp_path))
+    w = WritebackWorker(sciezka, "commit", "R", now_fn=lambda: NOW)
+    bledy = []
+    w.failed.connect(lambda op, zdanie, szczegol: bledy.append((op, zdanie, szczegol)))
+    w.run()
+    ((op, zdanie, szczegol),) = bledy
+    assert op == "commit"
+    if rodzaj in ("rdzen", "zamkniete"):
+        typ, opis = (("ValueError", "złamany inwariant planu zapisu") if rodzaj == "rdzen"
+                     else ("ProgrammingError", "Cannot operate on a closed database."))
+        assert zdanie == i18n.t("objchg.item.prog_error")
+        assert re.fullmatch(re.escape(i18n.t("objchg.st.detail_tip", detail=f"{typ}: {opis} @ "))
+                            + r"horreum/gui/wb_worker\.py:\d+", szczegol), szczegol
+    elif rodzaj == "system":
+        assert zdanie == i18n.t("objchg.item.os_denied", os_code="WinError 5")
+        assert szczegol.startswith(i18n.t("wb.os_detail_tip", detail="PermissionError: [WinError 5]"))
+    elif rodzaj == "baza":
+        assert zdanie == i18n.t("objchg.item.db_unavailable", db_code="SQLITE_CANTOPEN")
+        assert szczegol == i18n.t("wb.os_detail_tip", detail="OperationalError: unable to open database file")
+    else:
+        powod = powod_systemu(OSError(None, "Nie można odnaleźć pliku.", r"X:\L\b.fits", 2))
+        assert zdanie == i18n.t("objchg.item.os_missing", os_code="WinError 2"), powod
+    if lang == "en":
+        assert not set(zdanie) & set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ„"), zdanie
+
+
+# ---------- AR-263 (3): pasek zbioru nie podnosi podłogi okna przy długim liczniku ----------
+
+def _do_stabilnej(qapp, odcisk, s=3.0):
+    """Pętla zdarzeń, aż `odcisk()` przestanie się zmieniać (trzy obroty z rzędu) - przełożenie rzędów
+    paska i resize etykiet idą `LayoutRequest`-em, jeden `processEvents()` mierzyłby stan pośredni."""
+    import time
+    koniec = time.monotonic() + s
+    poprzedni, stale = None, 0
+    while stale < 3:
+        assert time.monotonic() < koniec, "układ się nie ustalił"
+        qapp.processEvents()
+        teraz = odcisk()
+        stale = stale + 1 if teraz == poprzedni else 0
+        poprzedni = teraz
+        time.sleep(0.01)
+
+
+def _odcisk_paska(bar):
+    return (bar.width(), bar._tryb, bar.count_label.geometry().getRect(),
+            bar.criteria_label.geometry().getRect(), bar.minimumSizeHint().width())
+
+
+def _pasek_zbioru(qapp, licznik, kryteria=""):
+    from horreum.gui.grid_selection import SelectionBar
+    bar = SelectionBar()
+    bar.count_label.setText(licznik)
+    bar.set_criteria(kryteria)
+    bar.show()
+    _do_stabilnej(qapp, lambda: _odcisk_paska(bar))
+    return bar
+
+
+_DLUGI_LICZNIK = "16998 klatek  ·  16998 zaznaczonych"
+
+
+def test_minimum_paska_nie_rosnie_z_licznikiem_zaznaczenia(qapp):
+    """Minimum szerokości paska zbioru nie zależy od członu zaznaczenia licznika: „12 klatek” i „12 klatek
+    · 16998 zaznaczonych” dają to samo minimum (zwykły `QLabel` zgłaszał minimum całego tekstu - natywnie
+    podłoga Zbiorów 1 433 → 1 564 px przy ×1,0, 1 845 → 2 053 px przy ×1,6). Relacja, nie piksele.
+    Porównanie W JEDNYM RZĘDZIE (tryb 0): długi licznik w pasku przy krótkiej szerokości schodzi do
+    rzędu zbioru (tryb 2) i minimum paska przestaje czytać minimum licznika - test nic by nie mierzył.
+    Falsyfikator: licznik jako zwykły `QLabel` (minimum rośnie o człon zaznaczenia)."""
+    bar = _pasek_zbioru(qapp, "12 klatek", "Obiekt: NGC1976")
+    try:
+        bar.resize(bar.width() + 2000, bar.height())
+        _do_stabilnej(qapp, lambda: _odcisk_paska(bar))
+        assert bar._tryb == 0
+        krotki = bar.minimumSizeHint().width()
+        dlugi = "12 klatek  ·  16998 zaznaczonych"
+        bar.count_label.setText(dlugi)
+        _do_stabilnej(qapp, lambda: _odcisk_paska(bar))
+        assert bar._tryb == 0 and bar._lay.indexOf(bar.count_label) >= 0
+        lic = bar.count_label
+        assert lic.minimumSizeHint().width() < lic.fontMetrics().horizontalAdvance(dlugi)
+        assert bar.minimumSizeHint().width() <= krotki
+        assert lic.text() == dlugi                                              # treść pełna
+    finally:
+        bar.close()
+
+
+def test_dlugi_licznik_schodzi_z_kryteriami_do_drugiego_rzedu_w_calosci(qapp):
+    """Pasek na swojej podłodze z długim licznikiem: licznik i kryteria schodzą do rzędu pod przyciskami
+    (rząd zbioru), licznik w całości (szerokość ≥ tekst, bez podpowiedzi elizji); pasek szeroki - wszystko
+    wraca do jednego rzędu. Falsyfikator: decyzja bez trzeciego trybu (licznik zostaje obok przycisków
+    i elidowany)."""
+    bar = _pasek_zbioru(qapp, _DLUGI_LICZNIK, "Obiekt: NGC1976 · Teleskop: RC8")
+    try:
+        bar.resize(bar.minimumSizeHint().width(), bar.height())
+        _do_stabilnej(qapp, lambda: _odcisk_paska(bar))
+        assert bar._tryb == 2 and bar._kryteria_pod
+        assert bar._lay.indexOf(bar.count_label) == -1 and bar._dol.indexOf(bar.count_label) >= 0
+        assert bar.count_label.width() >= bar.count_label.fontMetrics().horizontalAdvance(_DLUGI_LICZNIK)
+        assert bar.count_label.toolTip() == ""
+        bar.resize(bar.width() + 2000, bar.height())
+        _do_stabilnej(qapp, lambda: _odcisk_paska(bar))
+        assert bar._tryb == 0 and bar._lay.indexOf(bar.count_label) >= 0
+    finally:
+        bar.close()
+
+
+def test_licznik_elidowany_ma_pelny_tekst_w_podpowiedzi(qapp):
+    """Bezpiecznik skrajnie wąskiego licznika (`_Licznik`): render elidowany, `text()` pełny, pełny tekst
+    w podpowiedzi - zdjęty, gdy licznik znów się mieści. Falsyfikator: bez `_sync_podpowiedzi`."""
+    from horreum.gui.grid_selection import _Licznik
+    lic = _Licznik("")
+    lic.setText(_DLUGI_LICZNIK)
+    lic.resize(40, 20)
+    lic.show()
+    try:
+        _do_stabilnej(qapp, lambda: (lic.width(), lic.toolTip()))
+        assert lic.text() == _DLUGI_LICZNIK and lic.toolTip() == _DLUGI_LICZNIK
+        lic.resize(lic.fontMetrics().horizontalAdvance(_DLUGI_LICZNIK) + 40, 20)
+        _do_stabilnej(qapp, lambda: (lic.width(), lic.toolTip()))
+        assert lic.toolTip() == ""
+    finally:
+        lic.close()
+
+
+@pytest.mark.parametrize("prezentacja", ["klasyczna", "znajdz"])
+def test_podloga_widoku_ta_sama_od_pustego_do_pelnego_zaznaczenia(qapp, tmp_path, prezentacja):
+    """Widok Zbiorów (i prezentacja Znajdź) nad 300 klatkami: zaznaczenie puste → częściowe (klik,
+    Ctrl+klik) → pełne (Ctrl+A klawiszem) → puste - minimum szerokości widoku nie rośnie ponad stan
+    pustego zaznaczenia (bywa niższe: dłuższy licznik spycha kryteria albo cały rząd zbioru pod przyciski),
+    a ściśnięty do podłogi przy pełnym zaznaczeniu widok pokazuje cały licznik (rząd zbioru). Relacja,
+    nie piksele (offscreen ma inne metryki). Falsyfikator: licznik jako zwykły `QLabel` (podłoga przy
+    pełnym zaznaczeniu wyższa o człon zaznaczenia)."""
+    from PySide6.QtTest import QTest
+    from test_gui_zaznaczenie_przebudowy import NOW as NOW_Z, _baza_dluga
+    con = db.connect(_baza_dluga(tmp_path, 300))
+    view = grid_mod.FramesView(con, now_fn=lambda: NOW_Z)
+    try:
+        view.resize(1600, 800)
+        view.show()
+        if prezentacja == "znajdz":
+            view.set_presentation(grid_mod.PREZENTACJA_ZNAJDZ)
+
+        def odcisk():
+            return (view.minimumSizeHint().width(), view.count_label.text(), _odcisk_paska(view.sel_bar))
+        _do_stabilnej(qapp, odcisk)
+        podlogi = [view.minimumSizeHint().width()]
+        t = view.table
+        for wiersz, mod in ((1, Qt.NoModifier), (4, Qt.ControlModifier)):
+            QTest.mouseClick(t.viewport(), Qt.LeftButton, mod, t.visualRect(view.model.index(wiersz, 1)).center())
+        _do_stabilnej(qapp, odcisk)
+        podlogi.append(view.minimumSizeHint().width())
+        t.setFocus()
+        QTest.keyClick(t, Qt.Key_A, Qt.ControlModifier)
+        _do_stabilnej(qapp, odcisk)
+        assert view.count_label.text().endswith(i18n.t_plural("grid.selected", 300))
+        podlogi.append(view.minimumSizeHint().width())
+        view.resize(view.minimumSizeHint().width(), 800)
+        _do_stabilnej(qapp, odcisk)
+        lic = view.count_label
+        assert lic.width() >= lic.fontMetrics().horizontalAdvance(lic.text()), (lic.width(), lic.text())
+        view.resize(1600, 800)
+        t.clearSelection()
+        _do_stabilnej(qapp, odcisk)
+        podlogi.append(view.minimumSizeHint().width())
+        assert all(p <= podlogi[0] for p in podlogi), podlogi
+    finally:
+        view.close()
+        con.close()
+
+
+# ---------- AR-255: identyfikator commitu raz w wierszu szuflady; cudzysłów EN notki kart ----------
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wiersz_szuflady_po_zapisie_mowi_commit_raz(qapp, tmp_path, lang):
+    """Po zapisie szuflady wiersz mówił `Zatwierdzono: 1 (commit 1)` obok zdania wyniku `… (commit 1)`
+    (wizytacja natywna). Identyfikator commitu raz - w zdaniu wyniku; etykieta liczy zatwierdzone.
+    Prawdziwy zapis (staging makra, klik „Zatwierdź”). Falsyfikator: etykieta z `(commit {id})`."""
+    i18n.set_lang(lang)
+    view, con = _widok_jednego_pliku(tmp_path)
+    try:
+        view.show()
+        bar = view.macro_bar
+        bar.asg_kw.setCurrentText("TELESCOP")
+        bar.asg_op.setCurrentIndex(0)
+        bar.asg_expr.setText("EQ6")
+        bar._emit_stage()
+        from PySide6.QtTest import QTest
+        QTest.mouseClick(view.drawer.btn_commit, Qt.LeftButton)
+        QApplication.processEvents()
+        cid = view._undo_commit_id
+        assert cid is not None
+        etykieta, wynik = view.drawer.label.text(), view.drawer.result.text()
+        assert etykieta == i18n.t("grid.wb.committed_label", n=1)
+        assert (etykieta + " " + wynik).count(f"commit {cid})") == 1
+        assert wynik.endswith(i18n.t("grid.wb.commit_id", id=cid))
+    finally:
+        view.close()
+        con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("cofniecie", ["niedomkniete", "blad_operacji"])
+def test_wiersz_szuflady_po_nieudanym_cofnieciu_mowi_commit_raz(qapp, tmp_path, monkeypatch, cofniecie, lang):
+    """Zdanie wyniku commitu niesie identyfikator (kotwica `header-fix --undo`), a etykieta „Zatwierdzono…”
+    nie (AR-255). Gdy przy żywym „Cofnij” zdanie zastępuje cofnięcie niedomknięte (przerwane - „Cofnij”
+    zostaje) albo błąd całej operacji, identyfikator stoi w nowym zdaniu - w wierszu szuflady dokładnie
+    raz. Prawdziwy zapis i prawdziwy klik „Cofnij”; atrapa tylko operacji `undo` uchwytu. Falsyfikatory:
+    zdanie niedomkniętego cofnięcia albo zdanie błędu bez identyfikatora (zero wystąpień w wierszu)."""
+    from PySide6.QtTest import QTest
+    from horreum import writeback
+    from horreum.gui.wb_worker import WritebackWorker
+    i18n.set_lang(lang)
+    view, con = _widok_jednego_pliku(tmp_path)
+    try:
+        view.show()
+        bar = view.macro_bar
+        bar.asg_kw.setCurrentText("TELESCOP")
+        bar.asg_op.setCurrentIndex(0)
+        bar.asg_expr.setText("EQ6")
+        bar._emit_stage()
+        QTest.mouseClick(view.drawer.btn_commit, Qt.LeftButton)
+        QApplication.processEvents()
+        cid = view._undo_commit_id
+        assert cid is not None and view._undo_mode == "macro"
+        if cofniecie == "niedomkniete":
+            monkeypatch.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
+                c, t, now=now, progress=pr, should_cancel=lambda: True))
+        else:
+            def _pada(*_a):
+                raise ValueError("złamany inwariant cofnięcia")
+            monkeypatch.setitem(WritebackWorker._OPS, "undo", _pada)
+        QTest.mouseClick(view._undo_btn, Qt.LeftButton)
+        QApplication.processEvents()
+        assert view._undo_mode == "macro" and view._undo_btn.isVisible() and view._undo_commit_id == cid
+        etykieta, wynik = view.drawer.label.text(), view.drawer.result.text()
+        assert etykieta == i18n.t("grid.wb.committed_label", n=1)
+        assert (etykieta + " " + wynik).count(f"commit {cid})") == 1, (etykieta, wynik)
+        assert wynik.endswith(i18n.t("grid.wb.commit_id", id=cid))
+        if cofniecie == "niedomkniete":
+            assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in wynik, wynik
+        else:
+            assert wynik.startswith(i18n.t("grid.wb.error", msg=i18n.t("objchg.item.prog_error"))), wynik
+    finally:
+        view.close()
+        con.close()
+
+
+def test_EN_notka_cofniecia_kart_mowi_angielskim_cudzyslowem():
+    """EN `path.cards_restored_note` mówił „Confirm” polskim cudzysłowem (AR-255); bramka całego
+    katalogu stoi w `tests/test_i18n.py`. Falsyfikator: przywrócone „Confirm”."""
+    i18n.set_lang("en")
+    tekst = i18n.t("path.cards_restored_note")
+    assert "\u201e" not in tekst and "\u201cConfirm\u201d" in tekst

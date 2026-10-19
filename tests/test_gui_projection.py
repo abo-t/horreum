@@ -2559,7 +2559,7 @@ def test_zajety_plik_roboczy_manifestu_w_wydaniu_tez_sonduje(qapp, tmp_path, ust
     root.mkdir(parents=True)
     part.write_bytes(b"cudzy")
     _klik(dlg.btn_apply)
-    zdanie = i18n.t("objchg.item.proj_manifest_busy", path=str(part))
+    zdanie = i18n.t("proj.manifest_busy_retry", msg=i18n.t("objchg.item.proj_manifest_busy", path=str(part)))
     raport = dlg.report.toPlainText()
     assert raport.startswith(i18n.t("proj.manifest_error_head", msg=zdanie)), raport
     assert i18n.t("proj.obj.manifest_refused", msg=zdanie) in raport.split("\n"), raport
@@ -2589,15 +2589,15 @@ def test_komplet_bez_oferty_zapisu_manifestu(qapp, tmp_path, ustawienia, monkeyp
     linia = None
     if przypadek == "uszkodzony":
         sciezka.write_bytes(b"{")
-        linia = i18n.t("proj.obj.manifest_refused", msg=i18n.t("objchg.item.proj_manifest_damaged",
-                                                               detail="JSON"))
+        linia = i18n.t("proj.obj.manifest_refused", msg=i18n.t(
+            "proj.manifest_retry", msg=i18n.t("objchg.item.proj_manifest_damaged", detail="JSON")))
     elif przypadek in ("obcy", "rozjazd"):
         m = _manifest_okna(root)
         m.update({"object_id": 999} if przypadek == "obcy" else {"segments": [["inny"]]})
         sciezka.write_text(json.dumps(m), encoding="utf-8")
         if przypadek == "obcy":
-            linia = i18n.t("proj.obj.manifest_refused", msg=i18n.t("objchg.item.proj_manifest_foreign",
-                                                                   detail="object_id"))
+            linia = i18n.t("proj.obj.manifest_refused", msg=i18n.t(
+                "proj.manifest_retry", msg=i18n.t("objchg.item.proj_manifest_foreign", detail="object_id")))
     elif przypadek == "bez_nazw_z_obcym":
         m = _manifest_okna(root)
         del m["zestawy"]["RC8_ASI2600MM"]["names"]
@@ -2826,7 +2826,13 @@ def test_esc_w_biegu_zapisu_manifestu_zamyka_okno_po_zapisie(qapp, tmp_path, ust
     _klik(dlg.btn_apply)
     assert isinstance(dlg._apply_worker, pd_mod.ManifestWorker)
     QTest.keyClick(dlg, Qt.Key_Escape)
-    assert dlg.isVisible() and dlg.progress_note.full_text() == i18n.t("proj.obj.closing_after_manifest")
+    # Notka w PANELU RAPORTU pod raportem biegu, cała (AR-262) - nie w elidowanej nocie postępu; drugie
+    # Esc nie dopisuje jej drugi raz.
+    raport = (i18n.t("proj.obj.writing_manifest", root=str(root)) + "\n\n"
+              + i18n.t("proj.obj.closing_after_manifest"))
+    assert dlg.isVisible() and dlg.report.toPlainText() == raport and dlg.progress_note.full_text() == ""
+    QTest.keyClick(dlg, Qt.Key_Escape)
+    assert dlg.isVisible() and dlg.report.toPlainText() == raport
     assert not (root / projection.MANIFEST_NAME).exists()
     puszczony.set()
     assert _czekaj(lambda: not dlg.isVisible())
@@ -2937,7 +2943,8 @@ def test_esc_w_biegu_zapisu_manifestu_zamyka_okno_takze_po_odmowie(qapp, tmp_pat
     _klik(dlg.btn_apply)
     assert isinstance(dlg._apply_worker, pd_mod.ManifestWorker)
     QTest.keyClick(dlg, Qt.Key_Escape)
-    assert dlg.isVisible() and dlg.progress_note.full_text() == i18n.t("proj.obj.closing_after_manifest")
+    assert dlg.isVisible() and dlg.progress_note.full_text() == "" and dlg.report.toPlainText() == (
+        i18n.t("proj.obj.writing_manifest", root=str(root)) + "\n\n" + i18n.t("proj.obj.closing_after_manifest"))
     if droga == "odmowa":
         (root / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "lb1.fits").unlink()
     puszczony.set()
@@ -3081,12 +3088,14 @@ def test_wydanie_nad_uszkodzonym_manifestem_odmawia_ze_sciezka_pod_kursorem(qapp
     _klik(dlg.btn_apply)
     sciezka = str(root / projection.MANIFEST_NAME)
     zdanie = i18n.t("objchg.item.proj_manifest_damaged", detail="JSON")
+    okna = i18n.t("proj.manifest_retry", msg=zdanie)                 # żywe okno: zdanie + gest okna (AR-251)
     raport = dlg.report.toPlainText()
-    assert raport.startswith(i18n.t("proj.manifest_error_head", msg=zdanie)), raport
-    assert i18n.t("proj.obj.manifest_refused", msg=zdanie) in raport.split("\n"), raport
+    assert raport.startswith(i18n.t("proj.manifest_error_head", msg=okna)), raport
+    assert i18n.t("proj.obj.manifest_refused", msg=okna) in raport.split("\n"), raport
     assert dlg.report.toolTip() == i18n.t("proj.manifest_path_tip", path=sciezka)
     assert (root / projection.MANIFEST_NAME).read_bytes() == b"{"
     assert (root / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "lb1.fits").exists()
+    # Pasek po zamknięciu okna - samo zdanie, bez przycisków zamkniętego okna.
     assert dlg.summary == i18n.t("proj.obj.status_failed", canon="NGC 6992", msg=zdanie, root=str(root))
     assert dlg.summary.szczegol == i18n.t("proj.manifest_path_tip", path=sciezka)
     dlg.reject()
@@ -3227,3 +3236,114 @@ def test_anulowane_wydanie_na_stol_nie_mowi_wydano_a_bieg_zeruje_zdanie(qapp, tm
     assert dlg.summary == i18n.t("proj.status_cancelled", word=i18n.t("proj.word_link_done"), n=1, total=3,
                                  root=str(root))
     con.close()
+
+
+# ============================================================ AR-251, AR-262 - zdanie odmowy kroku manifestu
+
+_CZESC = "X:\\W\\OBJECTS\\M42\\_PROJEKCJA.json.part"
+_ZLOTE_OKNA = {
+    "pl": ("manifest wydania (_PROJEKCJA.json) leży w folderze, ale nie jest poprawnym zeznaniem (JSON) - "
+           "nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
+           "i „Zapisz manifest”",
+           "manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania (sprzeczne pole: object_id) - "
+           "nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
+           "i „Zapisz manifest”",
+           f"obok manifestu leży plik roboczy innego zapisu ({_CZESC}) - gdy żaden zapis nie trwa, skasuj go "
+           f"ręcznie, potem ponów wydanie albo „Odśwież podgląd”"),
+    "en": ("the release manifest (_PROJEKCJA.json) is in the folder, but it is not a valid record (JSON) - it is "
+           "not overwritten; check it or delete it by hand, then “Refresh preview” and “Write manifest”",
+           "the release manifest (_PROJEKCJA.json) in the folder belongs to another release (conflicting field: "
+           "object_id) - it is not overwritten; check it or delete it by hand, then “Refresh preview” and "
+           "“Write manifest”",
+           f"a working file of another write lies next to the manifest ({_CZESC}) - when no write is running, "
+           f"delete it by hand, then release again or “Refresh preview”"),
+}
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_manifestu_okno_mowi_gestem_okna_a_pasek_bez_gestu(qapp, jezyk, lang):
+    """AR-251: odmowy kroku manifestu z konstruktorów rdzenia (uszkodzony, obcy, cudzy plik roboczy) -
+    ŻYWE okno (`zdanie_odmowy`) mówi znak w znak to, co mówiło przed rozdziałem (PL i EN: zdanie z gestem
+    okna), a zdanie paska po zamknięciu okna (`tekst_powodu`) i proza rdzenia, którą drukuje CLI, nie mają
+    przycisków okna. Falsyfikatory: `zdanie_odmowy` bez gestu; rada okna z powrotem w zdaniu rdzenia."""
+    jezyk(lang)
+    powody = (projection._odmowa_uszkodzonego("JSON", "X:\\W\\OBJECTS\\M42\\_PROJEKCJA.json"),
+              projection._odmowa_obcego("object_id"), projection._odmowa_zajetego(_CZESC))
+    assert tuple(pd_mod.zdanie_odmowy(p) for p in powody) == _ZLOTE_OKNA[lang]
+    gesty = ("Odśwież podgląd", "Zapisz manifest", "Refresh preview", "Write manifest")
+    for p in powody:
+        assert not any(g in pd_mod.tekst_powodu(p) or g in str(p) for g in gesty), p
+    assert pd_mod.zdanie_odmowy(projection.PowodPozycji("x", "proj_manifest_changed")) == \
+        pd_mod.tekst_powodu(projection.PowodPozycji("x", "proj_manifest_changed"))   # tylko trzy kody
+
+
+def test_szczegol_kazdej_odmowy_zapisu_manifestu(qapp):
+    """AR-262: każda odmowa i błąd kroku manifestu niesie szczegół (zdanie paska ze szczegółem nie gaśnie
+    zegarem po zamknięciu okna): cudzy plik roboczy - ten plik; uszkodzony - ścieżka z powodu; obcy,
+    zmieniony w trakcie i niezapisany tekstem spoza klas - plik manifestu korzenia biegu; drzewo
+    niekompletne - folder; błąd klasą - szczegół systemu. Korzeń biegu obowiązkowy - wołanie bez niego to
+    `TypeError`, nie pusty szczegół po cichu. Falsyfikatory: szczegół wyłącznie dla uszkodzonego
+    i niekompletnego (cztery kody bez szczegółu gasły po 5 s); domyślny `root=None`."""
+    from horreum.item_reasons import blad_systemu
+    root = "X:\\W\\OBJECTS\\M42"
+    sciezka = root + "\\" + projection.MANIFEST_NAME
+    sciezka_kopii = "X:\\Inny\\" + projection.MANIFEST_NAME
+    zajety = OSError(None, "Proces nie może uzyskać dostępu do pliku", sciezka, 32)
+    odmowa = OSError(None, "Odmowa dostępu.", sciezka, 5)
+    plik = i18n.t("proj.manifest_path_tip", path=sciezka)
+    oczekiwane = [
+        (projection._odmowa_obcego("layout"), plik),
+        (projection._odmowa_uszkodzonego("JSON", sciezka_kopii),
+         i18n.t("proj.manifest_path_tip", path=sciezka_kopii)),
+        (projection._odmowa_zajetego(_CZESC), i18n.t("proj.manifest_part_tip", path=_CZESC)),
+        (projection.PowodPozycji("x", "proj_manifest_changed"), plik),
+        (projection._powod_manifestu(blad_systemu(zajety)), plik),
+        (projection._powod_manifestu(blad_systemu(odmowa)), pd_mod.wiersz_systemu(blad_systemu(odmowa))),
+        (projection._powod_odczytu(blad_systemu(odmowa)), pd_mod.wiersz_systemu(blad_systemu(odmowa))),
+        (projection.PowodPozycji("x", "proj_manifest_incomplete", n=1, dir=root),
+         i18n.t("proj.manifest_folder_tip", dir=root)),
+    ]
+    for powod, szczegol in oczekiwane:
+        assert szczegol and pd_mod.szczegol_powodu(powod, root=root) == szczegol, (powod.code, szczegol)
+    with pytest.raises(TypeError, match="root"):
+        pd_mod.szczegol_powodu(projection._odmowa_obcego("layout"))
+
+
+def test_odmowa_zapisu_manifestu_po_esc_trwa_na_pasku_gospodarza(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-262: Esc w biegu „Zapisz manifest” na PRAWDZIWYM QThread, a zapis kończy się PRAWDZIWĄ odmową
+    rdzenia - cudzy plik roboczy założony w trakcie (`proj_manifest_busy`). Okno zamyka się samo, zdanie
+    paska niesie szczegół (plik roboczy), a prawdziwy pasek gospodarza (`_flash_grid` → `_flash`) trzyma
+    je bez zegara - do następnego raportu, nie 5 s. Falsyfikator: odmowa bez szczegółu (zegar raportu
+    rusza, zdanie gaśnie przy zamkniętym oknie)."""
+    import threading
+    from horreum.gui.app import MainWindow
+    from horreum.gui.wb_worker import szczegol_zdania
+    con, dlg, root = _oferta_zapisu_na_qthread(tmp_path, ustawienia, monkeypatch)
+    part = root / (projection.MANIFEST_NAME + projection.PART_SUFFIX)
+    puszczony = threading.Event()
+    prawdziwa = projection.repair_manifest
+
+    def _czeka_na_esc(*a, **k):
+        if k.get("do_write"):
+            assert puszczony.wait(10)
+            part.write_bytes(b"cudzy")                               # inny zapis zajął plik roboczy
+        return prawdziwa(*a, **k)
+    monkeypatch.setattr(projection, "repair_manifest", _czeka_na_esc)
+    _klik(dlg.btn_apply)
+    assert isinstance(dlg._apply_worker, pd_mod.ManifestWorker)
+    QTest.keyClick(dlg, Qt.Key_Escape)
+    puszczony.set()
+    assert _czekaj(lambda: not dlg.isVisible())
+    assert dlg._apply_thread is None and dlg.result() == QDialog.Rejected
+    assert part.read_bytes() == b"cudzy" and not (root / projection.MANIFEST_NAME).exists()
+    powod = i18n.t("objchg.item.proj_manifest_busy", path=str(part))
+    assert dlg.summary == i18n.t("proj.obj.status_manifest_failed", canon="NGC 6992", msg=powod, root=str(root))
+    szczegol = i18n.t("proj.manifest_part_tip", path=str(part))
+    assert dlg.summary.szczegol == szczegol
+    win = MainWindow()
+    try:
+        win._flash_grid(dlg.summary)
+        assert szczegol_zdania(win._pelny_komunikat) == szczegol and not win._zegar_raportu.isActive()
+    finally:
+        win.close()
+        con.close()

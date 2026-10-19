@@ -124,8 +124,9 @@ class PlanWorker(QObject):
     done = Signal(int, object)          # (generacja, targets.PlanResult)
     # (generacja, powód) - błąd bazy/systemu klasą (AR-198) albo błąd programu (`powod_okna`, AR-214)
     failed = Signal(int, object)
-    # (generacja, wyjątek) - `targets.BrakStanowiska` (AR-48): zwykły brak stanowiska to STAN, więc
-    # sygnał niesie sam wyjątek; klasą błędu programu mówi go wyłącznie bezpiecznik pętli (slot)
+    # (generacja, powód) - `targets.BrakStanowiska` (AR-48): zwykły brak stanowiska to STAN, więc ekran
+    # mówi go pustym stanem; powód (`powod_okna`, błąd programu z miejscem w kodzie - AR-253) mówi
+    # wyłącznie bezpiecznik pętli (slot), gdy stanowisko jednak jest
     no_site = Signal(int, object)
     finished = Signal()
 
@@ -144,9 +145,10 @@ class PlanWorker(QObject):
             # STAN bazy, nie awaria - osobny sygnał, żeby ekran rozpoznał go po TOŻSAMOŚCI błędu,
             # a nie po stanie bazy w chwili doręczenia (Z2: blokada bazy przy bazie bez stanowiska
             # przebierała się za brak stanowiska i chowała prawdziwy komunikat).
-            # Bez śladu stosu: wyjątek jedzie sygnałem kolejkowanym do wątku GUI, a ślad trzymałby
-            # ramki workera (z jego połączeniem) do chwili doręczenia.
-            self.no_site.emit(self._gen, exc.with_traceback(None))
+            # Powód liczony TU, w handlerze wątku (AR-253): ślad jest pełny, więc szczegół bezpiecznika
+            # niesie miejsce w kodzie (AR-237), a sygnałem jedzie gotowy powód, nie wyjątek - ślad
+            # trzymałby ramki workera (z jego połączeniem) do chwili doręczenia.
+            self.no_site.emit(self._gen, powod_okna(exc))
         except Exception as exc:
             # Planer czyta bazę i dane pakietu - realna awaria to błąd SQLite: klasą bazy w języku
             # UI, surowy tekst w szczególe nagłówka (AR-198). Inny `ValueError` rdzenia (rekord
@@ -1173,8 +1175,10 @@ class PlannerView(QWidget):
                          szczegol=wiersz_systemu(powod))
 
     @Slot(int, object)
-    def _on_no_site(self, gen, exc):
-        """Rachunek padł, bo baza nie zna stanowiska z GPS (`targets.BrakStanowiska`, AR-48).
+    def _on_no_site(self, gen, powod):
+        """Rachunek padł, bo baza nie zna stanowiska z GPS (`targets.BrakStanowiska`, AR-48). `powod` -
+        powód tego wyjątku policzony w wątku workera (`powod_okna`, z miejscem w kodzie - AR-253); mówi
+        go wyłącznie bezpiecznik pętli.
 
         ODWROTNY WYŚCIG (Z8): bieg ruszył bez stanowiska, ale zanim jego błąd tu dotarł, stanowisko
         zostało wskazane na osi obserwatorium. Render tego błędu postawiłby pusty stan nad bazą,
@@ -1191,8 +1195,7 @@ class PlannerView(QWidget):
                 QTimer.singleShot(0, self, self.replan)
                 return
             # Stanowisko jest - nie pusty stan, tylko błąd programu (rozjazd predykatów, EXPECT):
-            # zdanie w języku UI, zdanie rdzenia w szczególe (`powod_okna`, AR-214).
-            powod = powod_okna(exc)
+            # zdanie w języku UI, zdanie rdzenia z miejscem w kodzie w szczególe (AR-214, AR-253).
             self._pokaz_blad(gen, tekst_powodu(powod), bez_stanowiska=False,
                              szczegol=wiersz_systemu(powod))
             return

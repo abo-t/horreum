@@ -866,8 +866,10 @@ def test_brak_stanowiska_przy_OBECNYM_stanowisku_ponawia_RAZ_i_pokazuje_blad(
         for _ in range(5):
             QApplication.processEvents()
         assert len(wolania) == 2, f"bezpiecznik nie zadziałał: {len(wolania)} biegów"
-        assert v.night_label.text() == i18n.t("objchg.item.prog_error") and v.night_label.szczegol() == \
-            i18n.t("objchg.st.detail_tip", detail="BrakStanowiska: rdzeń nie widzi stanowiska")
+        import re
+        glowa = i18n.t("objchg.st.detail_tip", detail="BrakStanowiska: rdzeń nie widzi stanowiska")
+        assert v.night_label.text() == i18n.t("objchg.item.prog_error") and re.fullmatch(
+            re.escape(glowa + " @ horreum/gui/planner.py:") + r"\d+", v.night_label.szczegol())
         assert not v.bez_stanowiska and v.empty_btn.isHidden()
     finally:
         v.close()

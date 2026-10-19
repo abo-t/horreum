@@ -1672,7 +1672,9 @@ def test_ar104_zwykle_zamknij_dostawa_ponowne_okno_oddaje_zbior_dokladny(qapp, t
     assert dlg3.btn_accept.isHidden() and dlg3.btn_archive.isEnabled()
     assert dlg3.rel_done_note.text() == ("Folder wydania możesz skasować - Horreum go już nie potrzebuje; "
                                          "własne pliki obróbki przenieś przed skasowaniem.")
-    assert dlg3.rel_done_note.property("role") == "secondary" and dlg3.btn_apply.isDefault()
+    # „Wciągnij 0 plików” wygaszony - bez wagi i bez Enter (AR-262): okno nie ma roboty
+    assert dlg3.rel_done_note.property("role") == "secondary" and not dlg3.btn_apply.isDefault()
+    assert not dlg3.btn_apply.isEnabled() and not dlg3.btn_apply.font().bold()
     dlg3.btn_open_release.click()
     assert [os.path.normpath(p) for p in otwarte] == [str(root)] and root.is_dir()   # otwiera, nie kasuje
     dlg3.reject()
@@ -3457,3 +3459,79 @@ def test_podglad_wyjscia_pod_manifestem_nieczytelnym_mowi_klase_zamiast_planu(qa
     assert dlg._plan is None and not dlg.btn_apply.isEnabled()
     dlg.reject()
     con.close()
+
+
+# ============================================================ AR-262, AR-251 - waga przycisku, notka wydania bez `out`
+
+
+def _waga(btn):
+    return btn.font().bold(), btn.isDefault(), btn.minimumHeight()
+
+
+def test_waga_tylko_na_aktywnym_przycisku_zniw(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-262: „Wciągnij” waży (bold, wysokość, Enter) WYŁĄCZNIE aktywny - okno bez roboty (bez wyjścia),
+    przycisk wygaszony po biegu z nazwą skutku: bez wagi; plan z plikiem do wciągnięcia: waga. Falsyfikator:
+    waga na „Wciągnij” zawsze, gdy przyjęcie jej nie bierze (wygaszony „Wciągnij 0 plików” gruby
+    i domyślny)."""
+    con, _profile, _flats = _baza(tmp_path)
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, tmp_path / "ARCH")
+    assert not dlg.btn_apply.isEnabled() and _waga(dlg.btn_apply) == (False, False, 0)
+    dlg._set_output(str(out))
+    assert dlg.btn_apply.isEnabled() and _waga(dlg.btn_apply) == (True, True, 34)
+    dlg._on_apply()
+    assert not dlg.btn_apply.isEnabled() and _waga(dlg.btn_apply) == (False, False, 0)
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wydanie_bez_wyjscia_wbpp_notka_bez_roli_bledu(qapp, tmp_path, ustawienia, monkeypatch, jezyk_okna, lang):
+    """AR-262: klik myszą w wiersz wydania „czeka na WBPP” bez folderu `out` - notka mówi, że WBPP jeszcze
+    nie zapisał wyników, rolą drugorzędną (normalny stan, nie awaria); ścieżka spoza listy wydań dalej
+    mówi „Katalog nie istnieje” rolą błędu. Falsyfikator: brak folderu zawsze w roli błędu."""
+    jezyk_okna(lang)
+    con, _profile, _flats = _baza(tmp_path)
+    work = tmp_path / "ASTRO_" / "_WBPP"
+    ic = _wydanie_obiektu(work, "IC1795", ts="2026-10-09T10:00:00+00:00", con=con)
+    czeka = _wydanie_obiektu(work, "NGC7000", ts="2026-10-10T10:00:00+00:00")
+    _wyniki(ic, {"masterFlat_IC.xisf": b"I"})
+    _czytnik(monkeypatch, {"masterFlat_IC.xisf": _flat_cls()})
+    dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work))
+    dlg.show()
+    try:
+        assert _czekaj_az(lambda: dlg.rel_table.rowCount() == 2)
+        assert dlg.rel_table.item(0, 0).text() == "NGC7000" and _stan(dlg, 0) == i18n.t("harvest.rel.waiting")
+        _klik_wiersza(dlg, 0)
+        out = str(czeka / projection.OUTPUT_DIR)
+        assert _czekaj_az(lambda: dlg.notice.text() == i18n.t("harvest.out_waiting", path=out)), dlg.notice.text()
+        assert dlg.notice.property("role") == "secondary" and not os.path.exists(out)
+        if lang == "en":
+            assert not _PL_LITERY.search(dlg.notice.text()), dlg.notice.text()
+        brak = str(tmp_path / "nie_ma" / "out")
+        dlg._set_output(brak)
+        assert dlg.notice.text() == i18n.t("harvest.missing_dir", path=brak)
+        assert dlg.notice.property("role") == "error"
+    finally:
+        dlg.reject()
+        con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdanie_zniw_o_manifescie_innego_wydania_bez_gestu_okna_wydania(jezyk_okna, lang):
+    """AR-251: zdanie żniw o manifeście, którego nie da się przyjąć (`manifest_error_text`), składa
+    `proj_manifest_foreign` zdaniem katalogu - po rozdziale rady i gestu bez przycisków okna wydania
+    („Odśwież podgląd”, „Zapisz manifest”), których okno żniw nie ma. Falsyfikator: gest okna wydania
+    w zdaniu rdzenia albo w katalogu kodu."""
+    from horreum.gui.harvest_dialog import manifest_error_text
+    from horreum.gui.wb_worker import tekst_powodu
+    jezyk_okna(lang)
+    powod = projection._odmowa_obcego("object_id")
+    sciezka = "X:\\W\\OBJECTS\\M42\\" + projection.MANIFEST_NAME
+    zdanie = manifest_error_text(powod, sciezka)
+    assert zdanie == i18n.t("harvest.manifest_unreadable", path=sciezka, msg=tekst_powodu(powod))
+    for gest in ("Odśwież podgląd", "Zapisz manifest", "Refresh preview", "Write manifest"):
+        assert gest not in zdanie, zdanie
+    if lang == "en":
+        assert not _PL_LITERY.search(zdanie), zdanie

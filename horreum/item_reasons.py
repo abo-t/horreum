@@ -32,8 +32,11 @@ dawną nazwą `_blad_systemu`), projekcji i kopii mastera (`projection`), żniw 
 GUI. Tu, bo te moduły nie importują pisarza (astropy, klinga plików), a powód z kodem i tak mieszka tutaj.
 Błąd BAZY (`sqlite3.Error`) ma bliźniaczego właściciela obok (`powod_bazy`, AR-198) - `blad_systemu`
 pyta oba, więc workery odczytu GUI (Dom, Porządki, planer, Pola) mówią klasą także błędem SQLite.
+Tu też jedyna konstrukcja `OSError` z kodem Windows i ścieżką (`blad_windows`, AR-259) - dla pisarza kart,
+drzwi raportu, kanonizacji korzenia skanu i skryptu kontroli pilotażu.
 """
 
+import ctypes
 import errno
 import json
 import os
@@ -81,7 +84,7 @@ ITEM_REASON_CODES = frozenset({
     "undo_semantic", "undo_header_changed",
     # pisarz XISF (`_XisfRefusal`)
     "xisf_unreadable", "xisf_many_images", "xisf_no_identity", "xisf_prop_rule", "xisf_prop_mismatch",
-    "xisf_card_exists", "xisf_prop_without_card", "xisf_bad_op", "xisf_set_missing",
+    "xisf_prop_without_card", "xisf_bad_op", "xisf_set_missing",
     "xisf_attr_missing", "xisf_not_utf8", "xisf_no_roundtrip", "xisf_unreadable_reader",
     # odmowy czytnika i składacza nagłówka XISF (`scan.XisfFormatError`, AR-158) - zdanie rodzi się
     # w `scan`, pisarz przenosi je do okna przez `_XisfRefusal`
@@ -129,7 +132,7 @@ ITEM_REASON_CODES = frozenset({
     # plan zapisu FITS w miejscu: spadek na drogę atomową (`Fallback`), odmowa sumy kontrolnej,
     # przepowiednia drogi w podglądzie (`inplace_route`)
     "fb_card_too_long", "fb_compressed", "checksum_present", "fb_op_kind", "fb_not_text_card",
-    "fb_card_present", "fb_card_count", "fb_value_not_text", "fb_card_records", "fb_continue",
+    "fb_card_count", "fb_value_not_text", "fb_card_records", "fb_continue",
     "fb_no_room", "free_records", "route_depends",
     # --- błędy systemu klasą (AR-168, `blad_systemu` niżej) i bramka sumy kontrolnej z faktów
     # bazy (AR-167, `card_rules.BRAMKA_SUMY`); region sprzed commitu bez dowodu całego pliku (AR-169)
@@ -175,6 +178,10 @@ ITEM_REASON_CODES = frozenset({
     "proj_manifest_incomplete",
     "proj_manifest_damaged", "proj_manifest_foreign", "proj_manifest_changed", "proj_manifest_busy",
     "proj_manifest_unreadable",
+    # --- pisarz karty FITS i bramka zakresu podglądu makra (AR-256, `writeback._set_nth`,
+    # `macro._evaluate_change`): `set` wystąpienia, którego w nagłówku nie ma - jedna odmowa w obu
+    # miejscach; pozostałe odmowy łaty mówią kodami podglądu (`macro_*`)
+    "card_idx_missing",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
@@ -208,7 +215,9 @@ PARAM_KINDS = {
                      # błąd bazy klasą (AR-198): „SQLITE_BUSY” - nazwa błędu SQLite
                      "db_code"), "text"),
     **dict.fromkeys(("n", "tries", "winerror", "op_id", "location", "object_id", "rename_id",
-                     "commit_id", "before", "after", "free", "length", "limit"), "int"),
+                     "commit_id", "before", "after", "free", "length", "limit",
+                     # numer wystąpienia karty (AR-256)
+                     "idx"), "int"),
     **dict.fromkeys(("features", "paths", "sums"), "list"),
 }
 
@@ -553,6 +562,17 @@ def blad_systemu(exc, *, z_typem=True):
     if powod is not None:
         return powod
     return _surowy(exc) if z_typem else str(exc)
+
+
+def blad_windows(err, path):
+    """Błąd wywołania Windows (`GetLastError`) jako `OSError` z kodem i ŚCIEŻKĄ (AR-242, AR-259) -
+    JEDYNA konstrukcja w pakiecie i skryptach (pisarz kart, drzwi raportu, `scan.canonize_root`,
+    kontrola pilotażu). `ctypes.WinError(err)` dawało `[WinError 5] Odmowa dostępu.` bez nazwy pliku,
+    więc przy wsadzie szczegół nie mówił, który plik padł. Podklasę i `errno` CPython wylicza
+    z `winerror` tak samo jak dla `ctypes.WinError` (klasa `powod_systemu` bez zmian); tekst systemu
+    bez kropki końcowej, jak w wyjątkach CPythona, za nim `: 'ścieżka'`. Tylko Windows
+    (`ctypes.FormatError`)."""
+    return OSError(None, ctypes.FormatError(err).rstrip(" .\r\n"), path, err)
 
 
 def powod_okna(exc):

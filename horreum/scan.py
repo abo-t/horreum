@@ -65,6 +65,7 @@ from .hashing import sha1_of, sha1_of_span
 from .item_reasons import OdmowaZPowodem, PowodPozycji   # odmowy XISF z kodem (AR-158) - liść
 from .item_reasons import blad_systemu, proza_z_diagnoza   # błąd systemu klasą w odmowie (AR-198)
 from .item_reasons import powod_systemu    # dowód nieobecności z klasy, nie z podklasy wyjątku (AR-211)
+from .item_reasons import blad_windows     # błąd Windows z kodem i ścieżką korzenia (AR-212, AR-259)
 from .resolve.cameras import camera_identity
 from .resolve.frames import (HISTORY_MASTER_KINDS, kind_from_path, kind_from_testimony,
                              normalize_kind)
@@ -2202,10 +2203,9 @@ def canonize_root(root):
         n = k32.GetLongPathNameW(s, buf, 32768)
         if n == 0:                        # EXPECT: root nie istnieje / niedostępny → abort
             # Kod z `GetLastError` (AR-212) - ten sam, który dałby `os.stat`; tekst systemu bez
-            # kropki końcowej, jak w wyjątkach CPython, i ze ścieżką. Do AR-212 `FileNotFoundError`
-            # z prozą PL bez kodu: klasa ginęła, a zdanie rdzenia szło do UI EN.
-            err = ctypes.get_last_error()
-            raise OSError(None, ctypes.FormatError(err).rstrip(" .\r\n"), s, err)
+            # kropki końcowej, jak w wyjątkach CPython, i ze ścieżką (`blad_windows`, AR-259). Do
+            # AR-212 `FileNotFoundError` z prozą PL bez kodu: klasa ginęła, a zdanie rdzenia szło do UI EN.
+            raise blad_windows(ctypes.get_last_error(), s)
         s = buf.value
         if len(s) >= 2 and s[1] == ":":
             s = s[0].upper() + s[1:]

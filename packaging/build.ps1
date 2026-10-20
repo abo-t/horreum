@@ -8,7 +8,9 @@
 #   powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Onefile   # LOCAL build:
 #                                                                           # dist\horreum-gui.exe
 #   powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Onefile -Release
-#                                                                           # EXTERNAL build (gated)
+#                                                                           # EXTERNAL build (gated);
+#                                                                           # also refreshes the copy
+#                                                                           # behind the desktop icon
 #
 # TWO KINDS OF BUILD, AND THE DIFFERENCE IS A RULE, NOT A HABIT (decision Z. 2026-08-08):
 #
@@ -46,6 +48,21 @@ Set-Location $repo
 
 $venv = Join-Path $repo ".venv-build"
 $py   = Join-Path $venv "Scripts\python.exe"
+
+function Update-InstalledCopy([string]$Asset, [string]$InstallDir) {
+    # Copies the release asset over <InstallDir>\Horreum.exe -- the file the desktop shortcut opens.
+    # The copy it replaces stays as Horreum-poprzednia.exe (one step back, overwritten each release).
+    # Verified by SHA256: a half-written exe behind the icon is worse than a stale one.
+    $target   = Join-Path $InstallDir "Horreum.exe"
+    $previous = Join-Path $InstallDir "Horreum-poprzednia.exe"
+    if (Test-Path $target) { Copy-Item -Path $target -Destination $previous -Force }
+    Copy-Item -Path $Asset -Destination $target -Force
+    $want = (Get-FileHash -Path $Asset -Algorithm SHA256).Hash
+    $got  = (Get-FileHash -Path $target -Algorithm SHA256).Hash
+    if ($want -ne $got) {
+        throw ("Installed copy differs from {0} after copy (SHA256)" -f (Split-Path $Asset -Leaf))
+    }
+}
 
 # 0R. RELEASE GATE -- runs FIRST, before venv work and before PyInstaller. A refusal must cost
 #     seconds, not the two minutes of a freeze that was never allowed to leave the machine.
@@ -251,6 +268,28 @@ if ($Onefile) {
     $asset = Join-Path $repo ("dist\Horreum-{0}-windows-x64.exe" -f $tagVersion)
     if (Test-Path $asset) { Remove-Item $asset -Force }
     Move-Item -Path $exePath -Destination $asset
+
+    # 6R. DESKTOP ICON FOLLOWS THE RELEASE. The owner starts Horreum from a desktop shortcut aimed at
+    #     the copy the old NSIS installer left in InstallDir (HKCU\Software\Horreum). Nothing ever
+    #     refreshed that copy: the icon kept opening 0.5.1 while 0.19.0 was out (measured
+    #     2026-10-20). Step 2 already stopped a running Horreum.exe, so the file is not locked.
+    #     A machine without InstallDir has no such copy -- say so and finish.
+    $installDir = (Get-ItemProperty -Path "HKCU:\Software\Horreum" -Name "InstallDir" `
+                   -ErrorAction SilentlyContinue).InstallDir
+    if ($installDir -and (Test-Path $installDir)) {
+        try { Update-InstalledCopy -Asset $asset -InstallDir $installDir }
+        catch {
+            throw (("Release artifact is READY ({0}), but the desktop copy was NOT refreshed: {1} " +
+                    "-- close Horreum, then: Copy-Item '{2}' '{3}\Horreum.exe' -Force") `
+                   -f (Split-Path $asset -Leaf), $_.Exception.Message, $asset, $installDir)
+        }
+        Write-Host ("OK -> desktop copy refreshed: {0}\Horreum.exe = {1}" -f $installDir, (Split-Path $asset -Leaf)) `
+                   -ForegroundColor Green
+    } else {
+        Write-Host "NOTE -> no InstallDir in HKCU\Software\Horreum -- no desktop copy to refresh" `
+                   -ForegroundColor DarkGray
+    }
+
     Write-Host ("Build complete: {0} (EXTERNAL artifact, built from tag)" -f (Split-Path $asset -Leaf)) `
                -ForegroundColor Green
     exit 0

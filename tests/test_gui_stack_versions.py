@@ -254,7 +254,8 @@ def test_grupy_rodzaje_i_zbior_perspektywy(wcon):
     assert fakty[103]["kind"] == queries.WERSJA_NIEUSTALONA
     # perspektywa: WSZYSCY członkowie grup wersji (także ten bez świadka), nic z pochodnych
     assert queries.stack_version_frame_ids(wcon) == {101, 102, 103, 601, 602}
-    assert queries.tasks_state(wcon)["stack_versions"] == 5, "wiersz liczy to samo, co lista"
+    # wiersz Porządków liczy GRUPY tego zbioru (IC1795, Veil), nie stosy (odbiór 0.19.0 PO13)
+    assert queries.tasks_state(wcon)["stack_versions"] == 2, "wiersz liczy grupy listy"
 
 
 def test_wersja_usunieta_poza_programem_zdejmuje_grupe_z_listy(wcon):
@@ -489,9 +490,11 @@ def test_menu_kontekstowe_tylko_w_perspektywie_wersji_i_poza_paskiem_zbioru(view
 
 def test_wiersz_porzadkow_liczy_do_plakietki_grupy_bez_werdyktu(view, wcon):
     """AR-10: „zostawiam wszystkie" ma od 0026 werdykt w bazie, więc wiersz jest robotą dokładnie
-    grupami BEZ werdyktu. Liczba i lista pod klikiem zostają jednym zbiorem (grupy z werdyktem też -
-    tam się go cofa), a przy częściowym werdykcie wiersz mówi „robota z liczby".
-    Falsyfikator: wróć `stack_versions` do `tasks._BEZ_ROBOTY` - plakietka nie drgnie."""
+    grupami BEZ werdyktu. Liczba i lista pod klikiem czytają jeden predykat grupy (grupy z werdyktem
+    też - tam się go cofa); liczba mówi grupy, lista ich stosy (odbiór 0.19.0 PO13), a przy częściowym
+    werdykcie wiersz mówi „robota z liczby" grup.
+    Falsyfikator: wróć `stack_versions` do `tasks._BEZ_ROBOTY` - plakietka nie drgnie; wróć licznik
+    do stosów - „5  ›" zamiast „2 grupy  ›"."""
     from PySide6.QtCore import Qt
     from horreum.gui import rows, tasks as tasks_mod
     tv = tasks_mod.TasksView(wcon)
@@ -500,17 +503,18 @@ def test_wiersz_porzadkow_liczy_do_plakietki_grupy_bez_werdyktu(view, wcon):
         przed = tv.refresh_counts()
         it = next(tv.tasks.item(i) for i in range(tv.tasks.count())
                   if tv.tasks.item(i).data(Qt.UserRole) == "stack_versions")
-        assert it.text() == "Wersje stosów" and it.data(rows.SECONDARY) == "5  ›"
+        assert it.text() == "Wersje stosów" and it.data(rows.SECONDARY) == "2 grupy  ›"
         assert it.data(rows.STRONG) is True and it.toolTip() == ""
-        # werdykt na IC1795 (3 stosy): robota zostaje w Veil (2) - wiersz dalej żyje
+        # werdykt na IC1795 (grupa 3 stosów): robota zostaje w Veil - wiersz dalej żyje
         repo.keep_stack_versions(wcon, frame_ids=[101, 102, 103], group_key="g-ic", now=NOW)
         assert tv.refresh_counts() == przed
-        assert it.data(rows.SECONDARY) == "2 z 5  ›" and it.data(rows.STRONG) is True
-        assert it.toolTip().startswith("3 stosy stoją w grupach z werdyktem „Zostaw wszystkie wersje”")
+        assert it.data(rows.SECONDARY) == "1 z 2 grup  ›" and it.data(rows.STRONG) is True
+        assert it.toolTip().startswith("1 grupa ma werdykt „Zostaw wszystkie wersje”")
         # werdykt na Veil: zero roboty - wiersz gaśnie, plakietka o jeden mniej, lista dalej pełna
         repo.keep_stack_versions(wcon, frame_ids=[601, 602], group_key="g-veil", now=NOW)
         assert tv.refresh_counts() == przed - 1
-        assert it.data(rows.SECONDARY) == "0 z 5  ›" and it.data(rows.STRONG) is False
+        assert it.data(rows.SECONDARY) == "0 z 2 grup  ›" and it.data(rows.STRONG) is False
+        assert it.toolTip().startswith("2 grupy mają werdykt")
         tv._on_task_clicked(it)
         assert sorted(view._frame_ids) == [101, 102, 103, 601, 602], "werdykt widać i cofa się tam"
         # droga powrotu: cofnięcie przywraca robotę
@@ -777,7 +781,7 @@ def test_werdykt_obejmuje_grupe_tylko_w_calosci_i_jednym_gestem(wcon):
     assert queries.stack_version_frame_ids(wcon) == {101, 102, 103, 601, 602}
     assert queries.stack_version_open_frame_ids(wcon) == {601, 602}
     st = queries.tasks_state(wcon)
-    assert (st["stack_versions"], st["stack_versions_open"]) == (5, 2)
+    assert (st["stack_versions"], st["stack_versions_open"]) == (2, 1)   # grupy (PO13)
     # nowa wersja w grupie: bez wiersza werdyktu - grupa wraca do roboty w całości
     _stos(wcon, 104, kamera=2, obiekt=1, filtr="Ha", exp=600.0, okno=W_A, declared=40,
           pomiary=_pomiary(9e-5))
@@ -943,7 +947,7 @@ def test_liczniki_porzadkow_wersji_z_jednego_przebiegu(wcon, monkeypatch):
     monkeypatch.setattr(queries, "_grupy_wersji", _z_pisarzem_w_tle)
     st = queries.tasks_state(wcon)
     assert st["stack_versions_open"] <= st["stack_versions"]
-    assert (st["stack_versions"], st["stack_versions_open"]) == (5, 5) and len(przebiegi) == 1
+    assert (st["stack_versions"], st["stack_versions_open"]) == (2, 2) and len(przebiegi) == 1
 
 
 def test_data_z_creation_time_gdy_brak_sygnatury_ze_zrodlem(view):
@@ -1021,9 +1025,29 @@ def test_odmiana_liczby_obrazow_i_zrodla_daty_w_katalogu():
                   14: "14 obrazów", 22: "22 obrazy"}
     for zrodlo in ("signature", "created"):
         assert f"grid.version.when.{zrodlo}" in CATALOG
-    for n, forma in ((1, "1 stos stoi"), (3, "3 stosy stoją"), (5, "5 stosów stoi"),
-                     (12, "12 stosów stoi"), (22, "22 stosy stoją")):
+    for n, forma in ((1, "1 grupa ma"), (3, "3 grupy mają"), (5, "5 grup ma"),
+                     (12, "12 grup ma"), (22, "22 grupy mają")):
         assert i18n.t_plural("tasks.stack_versions_kept_tip", n, keep="x").startswith(forma)
+
+
+def test_odmiana_liczby_grup_wiersza_wersji():
+    """Odbiór 0.19.0 PO13: człon liczby „Wersji stosów" mówi grupy. Całość w mianowniku (1 / 2-4 /
+    5+ / 12-14 / 22), „robota z całości" w dopełniaczu - po „z" forma zależy od całości: 1 → „grupy",
+    reszta → „grup". EN: one/other. Falsyfikator: odmiana przez robotę zamiast przez całość -
+    „1 z 5 grupy"."""
+    calosc = {n: i18n.t_plural("tasks.stack_versions_groups", n) for n in (1, 2, 5, 12, 22)}
+    assert calosc == {1: "1 grupa", 2: "2 grupy", 5: "5 grup", 12: "12 grup", 22: "22 grupy"}
+    z_calosci = {n: i18n.t_plural("tasks.stack_versions_groups_of", n, open=1) for n in (1, 2, 5, 12, 22)}
+    assert z_calosci == {1: "1 z 1 grupy", 2: "1 z 2 grup", 5: "1 z 5 grup", 12: "1 z 12 grup",
+                         22: "1 z 22 grup"}
+    i18n.set_lang("en")
+    try:
+        assert i18n.t_plural("tasks.stack_versions_groups", 1) == "1 group"
+        assert i18n.t_plural("tasks.stack_versions_groups", 12) == "12 groups"
+        assert i18n.t_plural("tasks.stack_versions_groups_of", 1, open=0) == "0 of 1 group"
+        assert i18n.t_plural("tasks.stack_versions_groups_of", 22, open=3) == "3 of 22 groups"
+    finally:
+        i18n.set_lang("pl")
 
 
 def test_AR50_kolumna_Wersja_do_wlaczenia_w_Znajdz_poza_perspektywa(view):

@@ -484,10 +484,41 @@ def test_dialog_nazwa_nierozwiazywalna_odrzuca(view):
     dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
     dlg.designation.setText("???")
     assert not dlg.accept_btn.isEnabled()
-    assert "Nie rozpoznaję nazwy" in dlg.error.text()        # live feedback, disabled ma widoczny powód
+    # OB11 (odbiór 0.19.0): w trakcie pisania stan neutralny, czerwień po pauzie -
+    # `zweryfikuj_nazwe` jest deterministyczną drogą końca pauzy (timer woła tę samą metodę).
+    assert dlg.error.text() == "" and dlg._pauza_nazwy.isActive()
+    dlg.zweryfikuj_nazwe()
+    assert "Nie rozpoznaję nazwy" in dlg.error.text()        # disabled ma widoczny powód
     dlg._validate_and_accept()
     assert dlg.selected is None
     assert "Nie rozpoznaję nazwy" in dlg.error.text()
+    dlg.close()
+
+
+def test_dialog_nazwa_w_trakcie_pisania_neutralna_czerwien_po_pauzie_i_wyjsciu_z_pola(view):
+    """Odbiór 0.19.0 OB11: „Nie rozpoznaję nazwy…” stało czerwono przy KAŻDYM znaku. Teraz każdy
+    znak odkłada zdanie (timer `_PAUZA_NAZWY_MS`), koniec pauzy i wyjście z pola (Enter, fokus -
+    `editingFinished`) mówią je od razu, a nazwa rozpoznana odwołuje czekające zdanie. Treść mówi,
+    co zrobić dalej (pisownia, numer katalogowy z przykładem), bez „resolvera”."""
+    from horreum.gui import assign_dialog
+    v, con, ids = view
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    assert dlg._pauza_nazwy.interval() == assign_dialog._PAUZA_NAZWY_MS
+    for czesc in ("N", "NG", "NGX"):                        # pisanie znak po znaku
+        dlg.designation.setText(czesc)
+        assert dlg.error.text() == "", czesc
+    assert dlg._pauza_nazwy.isActive()
+    dlg._pauza_nazwy.timeout.emit()                         # pauza w pisaniu minęła
+    assert dlg.error.text() == i18n.t("assign.unknown_name", text="NGX")
+    assert "resolver" not in dlg.error.text() and "M 31" in dlg.error.text()
+    dlg.designation.setText("NGXY")                         # pisze dalej - znów neutralnie
+    assert dlg.error.text() == ""
+    dlg.designation.editingFinished.emit()                  # Enter albo wyjście z pola
+    assert dlg.error.text() == i18n.t("assign.unknown_name", text="NGXY")
+    dlg.designation.setText("NGC 7000")                     # nazwa rozpoznana odwołuje zdanie
+    assert dlg.error.text() == "" and not dlg._pauza_nazwy.isActive()
+    dlg.zweryfikuj_nazwe()
+    assert dlg.error.text() == "" and dlg.accept_btn.isEnabled()
     dlg.close()
 
 
@@ -1815,6 +1846,7 @@ def test_dialog_przyjmuje_nazwe_spoza_gramatyki_katalogowej(sciezka):
     assert dlg.selected[0] == "Orion"
     dlg.designation.setText("ProbaObiektywu")
     assert not dlg.accept_btn.isEnabled()
+    dlg.zweryfikuj_nazwe()                               # koniec pauzy w pisaniu (OB11)
     assert "Nie rozpoznaję nazwy" in dlg.error.text()
     dlg.close()
 
@@ -2838,7 +2870,8 @@ def test_zdanie_na_zywo_gasnie_dla_nazwy_nierozpoznanej(aliasy):
     assert not dlg.canon_preview.isHidden()
     dlg.designation.setText("???")
     assert dlg.canon_preview.isHidden()
-    assert "Nie rozpoznaję nazwy" in dlg.error.text()   # dzisiejszy komunikat, bez zmian
+    dlg.zweryfikuj_nazwe()                              # koniec pauzy w pisaniu (OB11)
+    assert "Nie rozpoznaję nazwy" in dlg.error.text()
     dlg.designation.setText("")
     assert dlg.canon_preview.isHidden()
     dlg.close()

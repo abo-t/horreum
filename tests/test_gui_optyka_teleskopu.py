@@ -596,12 +596,12 @@ def test_n5_potwierdzenie_wartosci_rownej_plikom_zapisuje_reke(qapp, tmp_path):
     """N5: edytor delegata zatwierdza „1600" w komórce pokazującej 1600 z plików → ręka 1600
     i komunikat; pusty wpis bez ręki → „bez zmian" (pasek nie zostawia starego komunikatu).
     Mutant: porównanie z tekstem komórki zamiast ze stanem ręki."""
-    from PySide6.QtWidgets import QLineEdit
+    from PySide6.QtWidgets import QStyleOptionViewItem
     con, _obce, rc8 = _baza(tmp_path)
     v = TelescopeAxisView(con, now_fn=lambda: NOW)
     msgs = _komunikaty(v)
     idx = v.table.model().index(_wiersz(v, rc8), COL_FOCAL)
-    ed = QLineEdit()
+    ed = v._optyka_delegat.createEditor(v.table.viewport(), QStyleOptionViewItem(), idx)
     v._optyka_delegat.setEditorData(ed, idx)
     assert ed.text() == "1600"
     v._optyka_delegat.setModelData(ed, v.table.model(), idx)
@@ -609,7 +609,7 @@ def test_n5_potwierdzenie_wartosci_rownej_plikom_zapisuje_reke(qapp, tmp_path):
     assert con.execute("SELECT focal_user FROM telescope WHERE id = ?", (rc8,)).fetchone()[0] == 1600.0
     assert msgs[-1] == i18n.t("axis.tel.optics_saved")
     n800 = con.execute("SELECT id FROM telescope WHERE telescop_canon = 'N800'").fetchone()[0]
-    v._on_optics_edited(_wiersz(v, n800), COL_FRATIO, "")
+    v._on_optics_edited(n800, COL_FRATIO, "")
     assert msgs[-1] == i18n.t("axis.tel.optics_unchanged")
     con.close()
 
@@ -624,7 +624,7 @@ def test_n8_zajetosc_osi_odmawia_zapisu_optyki(qapp, tmp_path):
     v.set_busy(True)
     v.table.selectRow(_wiersz(v, rc8))
     assert not v.btn_restore_optics.isEnabled()
-    v._on_optics_edited(_wiersz(v, rc8), COL_FOCAL, "1500")
+    v._on_optics_edited(rc8, COL_FOCAL, "1500")
     v._on_restore_optics()
     assert con.execute("SELECT focal_user FROM telescope WHERE id = ?", (rc8,)).fetchone()[0] == 1580.0
     assert msgs[-1] == i18n.t("axis.tel.optics_busy")

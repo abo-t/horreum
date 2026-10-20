@@ -2677,7 +2677,9 @@ def object_change_rows(con, frame_ids, *, target=None):
         także pusta - wtedy zapis to `set`, nie `add`), `card_comment`, `card_vtype`,
         `header_hash`, `card_applicable` (format z kartą; przy „Uzgodnij” klatka ze źródłem
         `region` dostaje kartę wyłącznie wtedy, gdy forma sama ją do obiektu sprowadzi - inaczej
-        jedzie bez karty jak przed AR-177),
+        jedzie bez karty jak przed AR-177), `card_read_only` (format, do którego Horreum karty
+        nie pisze - RAW z aparatu, `NO_OBJECT_CARD_FILETYPES`; ten sam człon, który gasi
+        `card_applicable` - podgląd mówi z niego, że plik karty nie dostanie, odbiór 0.19.0 OB11),
         `card_form` (forma, którą karta ma mieć: celu albo bieżącego kanonu), `card_skip` (powód
         `object_card_gate` - liczony, gdy karta ma się zmienić; ta sama bramka w obu trybach gestu;
         forma, która TEJ klatki sama nie utrzyma - `resolver.karta_wraca` ze współrzędnymi nagłówka
@@ -2807,6 +2809,7 @@ def object_change_rows(con, frame_ids, *, target=None):
             "card_comment": r["card_comment"],
             "card_vtype": r["vtype"], "header_hash": r["header_hash"],
             "card_applicable": applicable, "card_form": form if applicable else None,
+            "card_read_only": n["filetype"] in NO_OBJECT_CARD_FILETYPES,
             "card_skip": skip, "variant_of": wariant_z.get(fid),
             "stacks": stosy.get(fid, ()), "target_canon": target.canon if target else None,
             "folder_twins": _blizniaki(canon_celu)})
@@ -2973,7 +2976,11 @@ def object_change_run_view(con, run_id):
     (gdzie lokacja stoi w bazie TERAZ), `new_path` (cel przeniesienia albo None), `status`
     i `reason` pozycji (`item_reasons.PowodPozycji` z kodem albo proza wiersza bez kodu, AR-141),
     `card_op`/`card_old`/`card_new` (wpis stagingu karty `OBJECT` tego przebiegu albo None -
-    pozycja bez zmiany karty)."""
+    pozycja bez zmiany karty), `card_read_only` (format bez zapisu karty - RAW, ten sam człon
+    `NO_OBJECT_CARD_FILETYPES` co w `object_change_rows`) i `before_canon` (obiekt klatki z chwili
+    podglądu - zapisany przy stagingu `expected_object_id`; None = klatka bez obiektu): zdanie
+    paska mówi z niego „z X” i „wróciło do X” także przy wznowieniu, gdy baza ma już nowy obiekt
+    (odbiór 0.19.0 OB12)."""
     run = con.execute("SELECT run_id, mode, canon, catalog, kind, alias_norm, card_form, status "
                       "FROM object_change_run WHERE run_id = ?", (run_id,)).fetchone()
     if run is None:
@@ -2984,8 +2991,11 @@ def object_change_run_view(con, run_id):
     items = [dict(r) for r in con.execute(
         "SELECT p.frame_id, p.location_id, p.old_path, l.path, r.new_path, p.status, p.reason, "
         "       p.reason_code, p.reason_args, "
-        "       c.op AS card_op, c.old_value AS card_old, c.new_value AS card_new "
+        "       c.op AS card_op, c.old_value AS card_old, c.new_value AS card_new, "
+        "       f.filetype, o.canon AS before_canon "
         "FROM pending_object_change p JOIN location l ON l.id = p.location_id "
+        "JOIN frame f ON f.id = p.frame_id "
+        "LEFT JOIN object o ON o.id = p.expected_object_id "
         "LEFT JOIN pending_renames r ON r.id = p.rename_id "
         "LEFT JOIN pending_changes c ON c.run_id = p.run_id AND c.location_id = p.location_id "
         "     AND c.keyword = 'OBJECT' "
@@ -2993,6 +3003,7 @@ def object_change_run_view(con, run_id):
     for it in items:            # powód z kodem (0041, AR-141) - okno mówi go w języku UI
         it["reason"] = item_reasons.z_bazy(it["reason"], it.pop("reason_code"),
                                            it.pop("reason_args"))
+        it["card_read_only"] = it.pop("filetype") in NO_OBJECT_CARD_FILETYPES
     staged = run["status"] == "staged"
     pending = sum(1 for it in items if it["status"] == "pending") if staged else 0
     return {"run_id": run["run_id"], "status": run["status"], "target": target,
@@ -3590,7 +3601,8 @@ def stack_version_frame_ids(con):
     `combined_RGB`, `drizzle`) nie jest wersją do sprzątania. Zwraca set[int].
 
     Grupy z werdyktem „zostawiam wszystkie" ZOSTAJĄ w zbiorze: perspektywa jest jedynym miejscem,
-    gdzie werdykt widać i skąd się go cofa. Robotę (plakietkę) liczy `stack_version_open_frame_ids`."""
+    gdzie werdykt widać i skąd się go cofa. Robotę (plakietkę) liczy `tasks_state` grupami bez
+    werdyktu (odbiór 0.19.0 PO13); stosy tych grup daje `stack_version_open_frame_ids`."""
     return _zbiory_wersji(con)[0]
 
 
@@ -3601,19 +3613,24 @@ def stack_version_open_frame_ids(con):
 
 
 def _zbiory_wersji(con):
-    """Oba zbiory wersji - `(wszystkie, otwarte)` - z JEDNEGO przebiegu `_grupy_wersji`, więc
-    otwarte są podzbiorem z konstrukcji. Dwa niezależne przebiegi rozjeżdżały się przy etapie
-    piszącym w tle (Stosy dopisują integracje między nimi): wiersz Porządków mówił „6 z 5",
-    a podpowiedź liczyła ujemną liczbę stosów z werdyktem. `tasks_state` woła to raz."""
+    """Oba zbiory wersji i ich liczby grup - `(wszystkie, otwarte, grupy, grupy_otwarte)` - z JEDNEGO
+    przebiegu `_grupy_wersji`, więc otwarte są podzbiorem z konstrukcji. Dwa niezależne przebiegi
+    rozjeżdżały się przy etapie piszącym w tle (Stosy dopisują integracje między nimi): wiersz
+    Porządków mówił „6 z 5", a podpowiedź liczyła ujemną liczbę z werdyktem. Zbiory (stosy) przycinają
+    perspektywę, liczby grup niesie wiersz Porządków (odbiór 0.19.0 PO13) - ten sam predykat grupy,
+    bez drugiej derywacji. `tasks_state` woła to raz."""
     wszystkie, otwarte = set(), set()
+    grupy = grupy_otwarte = 0
     for _k, _w, _m, czlonkowie, rodzaje in _grupy_wersji(con):
         if _rodzaj_grupy([rodzaje[c["frame_id"]][0] for c in czlonkowie]) != WERSJA_INNA:
             continue
         ids = {c["frame_id"] for c in czlonkowie}
         wszystkie |= ids
+        grupy += 1
         if not _grupa_zostawiona(czlonkowie):
             otwarte |= ids
-    return wszystkie, otwarte
+            grupy_otwarte += 1
+    return wszystkie, otwarte, grupy, grupy_otwarte
 
 
 def stack_version_group_of(con, frame_id):
@@ -4153,7 +4170,7 @@ def tasks_state(con):
     observatories_unnamed = con.execute(
         "SELECT COUNT(*) FROM observatory WHERE name IS NULL AND merged_into IS NULL"
     ).fetchone()[0]
-    wersje, wersje_otwarte = _zbiory_wersji(con)
+    _stosy, _stosy_otwarte, grupy_wersji, grupy_wersji_otwarte = _zbiory_wersji(con)
     return {
         "unresolved_lights": len(review_frame_ids(con)),
         # Nagłówek mówi co innego niż zatwierdzony folder (E5-2) - robota: plik przeczy gestowi
@@ -4194,14 +4211,16 @@ def tasks_state(con):
         # materiał, który wrócił — czyli wnosiłby dokładnie ten defekt, który paczka leczy.
         "retired_frames": len(retired_frame_ids(con)),
         "retired_conflict_frames": len(retired_conflict_frame_ids(con)),
-        # Wersje stosów - liczba STOSÓW perspektywy (ten sam predykat, co trim), nie liczba grup:
-        # wiersz i lista pod klikiem liczą to samo.
-        "stack_versions": len(wersje),
-        # DRUGA LICZBA TEGO SAMEGO WIERSZA (AR-10), nie osobny wiersz: ile z tych stosów stoi
-        # w grupach BEZ werdyktu „zostawiam wszystkie". Ona rozstrzyga, czy wiersz jest robotą
-        # (plakietka, pogrubienie) - lista pod klikiem dalej pokazuje wszystkie, bo tam werdykt
-        # się widzi i cofa. Podzbiór pierwszej z konstrukcji - obie z jednego przebiegu grup.
-        "stack_versions_open": len(wersje_otwarte),
+        # Wersje stosów - liczba GRUP perspektywy, nie stosów (decyzja CEO 2026-10-20, odbiór 0.19.0
+        # PO13): decyzja zapada o grupie („zostawiam wszystkie" albo wybór wersji), a liczba stosów
+        # („53") mówiła w innej jednostce niż robota. Lista pod klikiem dalej pokazuje wszystkie stosy tych
+        # grup (ten sam predykat grupy, co trim), więc wiersz nazywa jednostkę („12 grup").
+        "stack_versions": grupy_wersji,
+        # DRUGA LICZBA TEGO SAMEGO WIERSZA (AR-10), nie osobny wiersz: ile z tych grup NIE ma
+        # werdyktu „zostawiam wszystkie". Ona rozstrzyga, czy wiersz jest robotą (plakietka,
+        # pogrubienie) - lista pod klikiem dalej pokazuje wszystkie, bo tam werdykt się widzi
+        # i cofa. Podzbiór pierwszej z konstrukcji - obie z jednego przebiegu grup.
+        "stack_versions_open": grupy_wersji_otwarte,
     }
 
 

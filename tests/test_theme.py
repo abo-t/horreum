@@ -12,7 +12,8 @@ from horreum.gui import theme
 _THEMES = ("dark", "light")
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 _HEX_IN = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b")   # kolor GDZIEKOLWIEK w stringu
-_SPECS = (theme.palette_spec, theme.grid_colors, theme.facet_colors, theme.accents, theme.map_colors)
+_SPECS = (theme.palette_spec, theme.grid_colors, theme.facet_colors, theme.accents, theme.map_colors,
+          theme.zlota_akcja)
 
 
 def test_default_ciemny():
@@ -226,6 +227,42 @@ def test_zaznaczone_radio_jest_MOCNIEJSZE_od_pustego(name):
     assert "width: 12px; height: 12px;" in regula, "radio skakałoby przy przełączeniu"
     wylaczona = theme.qss(name).split(theme.WSKAZNIK_RADIO_ZAZNACZONY + ":disabled {", 1)[1]
     assert paleta["disabled_text"] in wylaczona.split("}", 1)[0], "wyłączone udawałoby aktywne"
+
+
+@pytest.mark.parametrize("name", _THEMES)
+def test_DO6_zlota_akcja_czytelna_w_kazdym_stanie_i_odcieta_od_okna(name):
+    """Odbiór 0.19.0 DO6: bursztyn złotej akcji Dostawy. Napis ma AA 4,5:1 na tle KAŻDEGO stanu
+    (spoczynek, najechanie, wciśnięcie), ramka co najmniej 3:1 do okna (WCAG 1.4.11) - ciemny
+    bursztyn na ciemnym oknie sam ma 1,89:1. Reguła arkusza niesie te kolory pod selektorem nazwy
+    obiektu, a stan wyłączony bierze `button`/`disabled_text` palety (wygląda na nieaktywny).
+    Falsyfikator: tło najechania `#C07818` (napis 3,53:1) albo ramka w kolorze tła."""
+    z = theme.zlota_akcja(name)
+    paleta = theme.palette_spec(name)
+    assert set(z) == {"bg", "bg_hover", "bg_pressed", "text", "border", "focus"}
+    slabe = {k: round(_kontrast(z["text"], z[k]), 2) for k in ("bg", "bg_hover", "bg_pressed")
+             if _kontrast(z["text"], z[k]) < 4.5}
+    assert not slabe, f"[{name}] napis {z['text']} poniżej AA 4,5:1 na: {slabe}"
+    assert _kontrast(z["border"], paleta["window"]) >= 3.0, name
+    # Z9: fokus klawiatury - ramka innego koloru niż w spoczynku, 3:1 do tła KAŻDEGO stanu (wciśnięcie
+    # myszą daje też fokus) i do okna (WCAG 2.4.7 / 1.4.11).
+    assert z["focus"] != z["border"], name
+    tla = {k: z[k] for k in ("bg", "bg_hover", "bg_pressed")} | {"window": paleta["window"]}
+    slabe = {k: round(_kontrast(z["focus"], v), 2) for k, v in tla.items()
+             if _kontrast(z["focus"], v) < 3.0}
+    assert not slabe, f"[{name}] fokus {z['focus']} poniżej 3:1 na: {slabe}"
+    q = theme.qss(name)
+    sel = f"QPushButton#{theme.ZLOTA_AKCJA_OBJECT_NAME}"
+    regula = q.split(sel + " {", 1)[1].split("}", 1)[0]
+    assert (f"background: {z['bg']}" in regula and f"color: {z['text']}" in regula
+            and f"border: 1px solid {z['border']}" in regula)
+    assert f"background: {z['bg_hover']}" in q.split(sel + ":hover {", 1)[1].split("}", 1)[0]
+    assert f"background: {z['bg_pressed']}" in q.split(sel + ":pressed {", 1)[1].split("}", 1)[0]
+    fokus = q.split(sel + ":focus {", 1)[1].split("}", 1)[0]
+    assert fokus.strip() == f"border-color: {z['focus']};", "fokus rusza wyłącznie kolor ramki"
+    wylaczona = q.split(sel + ":disabled {", 1)[1].split("}", 1)[0]
+    assert paleta["button"] in wylaczona and paleta["disabled_text"] in wylaczona, "udawałaby aktywną"
+    assert f"border-color: {paleta['disabled_text']}" in wylaczona
+    assert q.index(sel + ":focus {") < q.index(sel + ":disabled {"), "wyłączony świeciłby fokusem"
 
 
 def test_warn_jest_osobny_od_gold():

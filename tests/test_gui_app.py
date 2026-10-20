@@ -208,3 +208,236 @@ def test_widget_nie_pisze_do_bazy_z_pominieciem_repo(win):
     w.table.selectRow(_row_of(w, ids["C"]))
     queries.active_telescopes(con)
     assert _events(con) == before
+
+
+# --- sort po kliku nagłówka (polecenie CEO 2026-10-20) ---
+
+@pytest.fixture
+def sort_win(qapp, tmp_path):
+    """Baza §8 dociążona pod sort: C = 9 klatek, D = 10 (liczbowo 9 < 10, tekstowo „10” < „9”);
+    etykiety B = „alfa”, A = „Beta” (wielka litera - sort bez wielkości liter), C i D bez etykiety.
+    Okno pokazane, żeby nagłówek miał geometrię pod realny klik."""
+    from fixture_s8 import NOW as SEED_NOW
+    from horreum import repo
+    con = db.open_db(str(tmp_path / "sort.db"))
+    ids = seed(con)
+    cfg_d, _ = repo.propose_config(con, telescope_id=ids["D"], camera_id=ids["cam2"], now=SEED_NOW)
+    for cfg, ile, znak in ((ids["cfg_c"], 7, "c"), (cfg_d, 10, "d")):
+        for i in range(ile):
+            fid, _ = repo.upsert_frame(con, sha1_data=f"sha-sort-{znak}{i}", kind="light",
+                                       filetype="fits", camera_id=ids["cam2"], now=SEED_NOW)
+            repo.assign_config(con, frame_id=fid, config_id=cfg, now=SEED_NOW)
+    repo.label_telescope(con, telescope_id=ids["B"], label="alfa", now=SEED_NOW)
+    repo.label_telescope(con, telescope_id=ids["A"], label="Beta", now=SEED_NOW)
+    w = TelescopeAxisWindow(con, now_fn=lambda: NOW)
+    w.show()
+    QApplication.processEvents()
+    yield w, con, ids
+    w.close()
+    con.close()
+
+
+def _klik_naglowka(w, col):
+    """Realny klik myszą w sekcję nagłówka - nagłówek sam przełącza kolumnę i kierunek."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    hdr = w.table.horizontalHeader()
+    x = hdr.sectionViewportPosition(col) + hdr.sectionSize(col) // 2
+    QTest.mouseClick(hdr.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(x, hdr.height() // 2))
+
+
+def _kolejnosc(w):
+    return [w.table.item(r, COL_ID).data(0x0100) for r in range(w.table.rowCount())]
+
+
+def test_sort_domyslnie_porzadek_read_modelu_bez_strzalki(sort_win):
+    """Bez kliku tabela stoi w porządku read-modelu, a nagłówek nie pokazuje strzałki.
+    Mutant: domyślny sort po którejś kolumnie przy budowie widoku."""
+    w, con, ids = sort_win
+    assert _kolejnosc(w) == [r["id"] for r in queries.active_telescopes(con)]
+    assert w.table.horizontalHeader().sortIndicatorSection() == -1
+    assert not w.table.isSortingEnabled()
+
+
+def test_sort_klatki_liczbowo_i_odwrocenie(sort_win):
+    """Klik „Klatki” → rosnąco LICZBOWO (9 przed 10), drugi klik → malejąco; strzałka idzie za
+    kierunkiem. Mutant: sort po tekście komórki („10” przed „9”)."""
+    from PySide6.QtCore import Qt
+    w, con, ids = sort_win
+    hdr = w.table.horizontalHeader()
+    _klik_naglowka(w, COL_FRAMES)
+    assert _kolejnosc(w) == [ids["A"], ids["B"], ids["C"], ids["D"]]       # 2, 3, 9, 10
+    assert [w.table.item(r, COL_FRAMES).text() for r in range(4)] == ["2", "3", "9", "10"]
+    assert (hdr.sortIndicatorSection(), hdr.sortIndicatorOrder()) == (COL_FRAMES, Qt.AscendingOrder)
+    _klik_naglowka(w, COL_FRAMES)
+    assert _kolejnosc(w) == [ids["D"], ids["C"], ids["B"], ids["A"]]
+    assert hdr.sortIndicatorOrder() == Qt.DescendingOrder
+
+
+def test_sort_tekst_bez_wielkosci_liter_puste_na_koncu_w_obu_kierunkach(sort_win):
+    """Etykieta: „alfa” < „Beta” mimo wielkiej litery; C i D bez etykiety na końcu rosnąco
+    i malejąco, w porządku read-modelu. Mutanty: porównanie z wielkością liter („Beta” < „alfa”);
+    puste odwracane razem z resztą (na górze malejąco)."""
+    w, con, ids = sort_win
+    _klik_naglowka(w, COL_LABEL)
+    assert _kolejnosc(w) == [ids["B"], ids["A"], ids["C"], ids["D"]]
+    _klik_naglowka(w, COL_LABEL)
+    assert _kolejnosc(w) == [ids["A"], ids["B"], ids["C"], ids["D"]]
+
+
+def test_sort_przezywa_refresh_i_edycje(sort_win):
+    """Porządek i kierunek stoją po `refresh()` (wejście na stronę, scalanie, zapis) i po zapisie
+    etykiety, który sam przeładowuje widok. Mutant: `refresh` układający wiersze z read-modelu."""
+    from PySide6.QtCore import Qt
+    w, con, ids = sort_win
+    _klik_naglowka(w, COL_FRAMES)
+    _klik_naglowka(w, COL_FRAMES)                                             # malejąco
+    w.refresh()
+    assert _kolejnosc(w) == [ids["D"], ids["C"], ids["B"], ids["A"]]
+    w.table.item(_row_of(w, ids["C"]), COL_LABEL).setText("gamma")          # zapis → refresh
+    assert _kolejnosc(w) == [ids["D"], ids["C"], ids["B"], ids["A"]]
+    hdr = w.table.horizontalHeader()
+    assert (hdr.sortIndicatorSection(), hdr.sortIndicatorOrder()) == (COL_FRAMES, Qt.DescendingOrder)
+
+
+def test_sort_zaznaczenie_idzie_za_teleskopem_i_panel_prawy(sort_win):
+    """Zaznaczenie przed sortem zostaje przy TYM SAMYM teleskopie na nowym wierszu, a wiersz
+    zaznaczony po sorcie karmi panel prawy właściwym teleskopem (średnica D: 418 / 4.5).
+    Mutant: zaznaczenie przywracane po numerze wiersza."""
+    from horreum.gui import i18n
+    w, con, ids = sort_win
+    w.table.selectRow(_row_of(w, ids["B"]))
+    _klik_naglowka(w, COL_FRAMES)
+    _klik_naglowka(w, COL_FRAMES)                                             # D, C, B, A
+    assert w._selected_telescope_id() == ids["B"] and _row_of(w, ids["B"]) == 2
+    assert w.table.selectionModel().selectedRows()[0].row() == 2
+    w.table.selectRow(0)
+    assert w._selected_telescope_id() == ids["D"]
+    assert w.aperture.text() == i18n.t("axis.tel.aperture", d="93", focal="418", f="4.5")
+
+
+def test_sort_edycja_etykiety_w_kolumnie_sortu_trafia_wlasciwy_teleskop(sort_win):
+    """Zmiana etykiety w kolumnie, po której stoi sort: zapis idzie do teleskopu z wiersza (baza),
+    a po przeładowaniu wiersz staje na nowym miejscu z zaznaczeniem przy sobie.
+    Mutant: id teleskopu z pozycji w `rows` read-modelu zamiast z kolumny ID wiersza."""
+    w, con, ids = sort_win
+    _klik_naglowka(w, COL_LABEL)                                              # B alfa, A Beta, C, D
+    r = _row_of(w, ids["A"])
+    assert r == 1
+    w.table.selectRow(r)
+    w.table.item(r, COL_LABEL).setText("Aaa")
+    assert con.execute("SELECT label FROM telescope WHERE id=?", (ids["A"],)).fetchone()[0] == "Aaa"
+    assert con.execute("SELECT label FROM telescope WHERE id=?", (ids["B"],)).fetchone()[0] == "alfa"
+    assert _kolejnosc(w) == [ids["A"], ids["B"], ids["C"], ids["D"]]
+    assert w._selected_telescope_id() == ids["A"]
+
+
+def test_sort_wpis_optyki_trafia_teleskop_mimo_przestawienia_w_locie(sort_win):
+    """Wpis edytora optyki idzie po `singleShot(0)`; gdy między zatwierdzeniem a wykonaniem tabela
+    przestawi się (klik nagłówka), ogniskowa ląduje w teleskopie, którego komórkę edytowano.
+    Mutant: delegat kotwiczy wpis numerem wiersza."""
+    from horreum.gui.app import COL_FOCAL
+    w, con, ids = sort_win
+    _klik_naglowka(w, COL_FOCAL)                                              # D 418, A 784, B 794, C 1624
+    idx = w.table.model().index(_row_of(w, ids["A"]), COL_FOCAL)
+    ed = _edytor_optyki(w, idx, "780")
+    w._optyka_delegat.setModelData(ed, w.table.model(), idx)
+    _klik_naglowka(w, COL_FOCAL)                                              # malejąco, zanim wpis wejdzie
+    QApplication.processEvents()
+    ogn = dict(con.execute("SELECT id, focal_user FROM telescope").fetchall())
+    assert ogn[ids["A"]] == 780.0
+    assert [ogn[ids[k]] for k in "BCD"] == [None, None, None]
+
+
+def _edytor_optyki(w, idx, tekst):
+    """Edytor delegata optyki otwarty na `idx` (kotwica z `createEditor`) z wpisanym `tekst`."""
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    ed = w._optyka_delegat.createEditor(w.table.viewport(), QStyleOptionViewItem(), idx)
+    w._optyka_delegat.setEditorData(ed, idx)
+    ed.setText(tekst)
+    return ed
+
+
+def test_edytor_optyki_kotwiczy_teleskop_z_otwarcia_mimo_refresh(sort_win):
+    """Edytor otwarty na A, potem `refresh` w innym porządku (klik nagłówka, przeładowanie z innego
+    widoku), dopiero potem zatwierdzenie z indeksem z chwili otwarcia: wpis trafia do A, nie do
+    teleskopu, który stoi teraz w tym wierszu. Mutant: `setModelData` czyta teleskop z indeksu."""
+    from horreum.gui.app import COL_FOCAL
+    w, con, ids = sort_win
+    _klik_naglowka(w, COL_FOCAL)                                              # D, A, B, C
+    idx = w.table.model().index(_row_of(w, ids["A"]), COL_FOCAL)
+    ed = _edytor_optyki(w, idx, "780")
+    _klik_naglowka(w, COL_FOCAL)                                              # C, B, A, D - w wierszu A stoi B
+    assert w.table.item(idx.row(), COL_ID).data(0x0100) == ids["B"]
+    w._optyka_delegat.setModelData(ed, w.table.model(), idx)
+    QApplication.processEvents()
+    ogn = dict(con.execute("SELECT id, focal_user FROM telescope").fetchall())
+    assert ogn[ids["A"]] == 780.0
+    assert [ogn[ids[k]] for k in "BCD"] == [None, None, None]
+
+
+def test_edytor_optyki_teleskop_zniknal_przed_wpisem_odmowa_bez_wyjatku(sort_win):
+    """Teleskop scalony między otwarciem edytora a wpisem: zero zapisu, zero wyjątku, zdanie odmowy
+    na pasku. Mutant: stan ręki z `_rows[tid]` (KeyError po przeładowaniu bez A)."""
+    from horreum import repo
+    from horreum.gui import i18n
+    from horreum.gui.app import COL_FOCAL
+    w, con, ids = sort_win
+    msgs = []
+    w.status_message.connect(msgs.append)
+    idx = w.table.model().index(_row_of(w, ids["A"]), COL_FOCAL)
+    ed = _edytor_optyki(w, idx, "780")
+    repo.merge_telescope(con, source_id=ids["A"], target_id=ids["B"], now=NOW)
+    w.refresh()
+    przed = _events(con)
+    w._optyka_delegat.setModelData(ed, w.table.model(), idx)
+    QApplication.processEvents()
+    assert _events(con) == przed
+    assert [r[0] for r in con.execute("SELECT focal_user FROM telescope")] == [None] * 4
+    assert msgs[-1] == i18n.t("axis.tel.optics_rejected",
+                              e=i18n.t("axis.tel.optics_gone", tid=ids["A"]))
+    assert ids["A"] not in _kolejnosc(w)
+
+
+def _otworz_edytor_etykiety(w, tid, tekst):
+    """Realny edytor etykiety (`table.edit`) na wierszu `tid` z wpisanym `tekst`."""
+    from PySide6.QtWidgets import QAbstractItemView
+    idx = w.table.model().index(_row_of(w, tid), COL_LABEL)
+    w.table.setCurrentIndex(idx)
+    w.table.edit(idx)
+    QApplication.processEvents()
+    assert w.table.state() == QAbstractItemView.EditingState
+    w.table.focusWidget().setText(tekst)
+
+
+def _etykiety(con):
+    return dict(con.execute("SELECT id, label FROM telescope").fetchall())
+
+
+def test_refresh_z_zewnatrz_przy_otwartym_edytorze_etykiety_nie_pisze_do_sasiada(sort_win):
+    """Edytor etykiety otwarty na A, `refresh` w innym porządku BEZ zmiany fokusu (przeładowanie
+    z innego widoku, koniec etapu): Qt zwalnia edytor usuwanych wierszy bez zatwierdzenia, więc
+    wpis nie trafia do nikogo - ani do A, ani do teleskopu, który stanął w wierszu A.
+    Mutant: `refresh` zatwierdzający otwarty edytor po przebudowie (wpis pod cudzym indeksem)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QAbstractItemView
+    w, con, ids = sort_win
+    przed = _etykiety(con)
+    _otworz_edytor_etykiety(w, ids["A"], "zly-wpis")
+    w._on_sort_changed(COL_FRAMES, Qt.DescendingOrder)                        # D, C, B, A
+    QApplication.processEvents()
+    assert w.table.state() != QAbstractItemView.EditingState
+    assert _etykiety(con) == przed
+
+
+def test_klik_naglowka_przy_otwartym_edytorze_etykiety_zapisuje_w_edytowany(sort_win):
+    """Klik nagłówka przy otwartym edytorze etykiety: wciśnięcie zabiera fokus i zatwierdza wpis
+    PRZED sortem, więc etykieta trafia do teleskopu, na którym edycję zaczęto, a nie do sąsiada
+    z nowego porządku. Mutant: id teleskopu z pozycji w porządku po sorcie."""
+    w, con, ids = sort_win
+    przed = _etykiety(con)
+    _otworz_edytor_etykiety(w, ids["A"], "nowa")
+    _klik_naglowka(w, COL_FRAMES)
+    _klik_naglowka(w, COL_FRAMES)                                             # D, C, B, A
+    QApplication.processEvents()
+    assert _etykiety(con) == {**przed, ids["A"]: "nowa"}

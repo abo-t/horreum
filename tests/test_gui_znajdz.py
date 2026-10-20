@@ -158,17 +158,21 @@ def test_kolumny_Znajdz_mowia_noca_czasem_zestawem_i_uwaga(strona, con):
 
 def test_kolumna_Czas_Znajdz_jedna_precyzja_na_kolumne(strona, con):
     """Kolumna „Czas” idzie regułą kolumny EXPTIME (`grid_model.miejsca_ekspozycji`): najmniej miejsc,
-    które pokazują dokładnie każdą wartość widoku, nie więcej niż trzy. Falsyfikator: format per
-    komórka (`:g`) - „4.0333 s” pod „300 s”."""
+    które pokazują dokładnie każdą wartość widoku, nie więcej niż jedno (odbiór 0.19.0 ZB12); wartość
+    ucięta mówi pełną liczbą w podpowiedzi. Falsyfikator: format per komórka (`:g`) - „4.0333 s” pod
+    „300 s”; dawny sufit trzech miejsc - „300.000 s”."""
     con.execute("UPDATE header SET exptime = 4.03329572835443 WHERE frame_id = 3")
     con.commit()
     v = strona.frames_view
     v.refresh()
     strona.show_find()
     m = v.model
-    czas = {r["frame_id"]: m.data(m.index(i, m.base_col("exptime")), Qt.DisplayRole)
-            for i, r in enumerate(m._rows) if r.get("frame_id") in (1, 3, 5)}
-    assert czas == {1: "300.000 s", 3: "4.033 s", 5: "600.000 s"}
+    wiersz = {r.get("frame_id"): i for i, r in enumerate(m._rows) if r.get("frame_id") in (1, 3, 5)}
+    kol = m.base_col("exptime")
+    czas = {fid: m.data(m.index(i, kol), Qt.DisplayRole) for fid, i in wiersz.items()}
+    assert czas == {1: "300.0 s", 3: "4.0 s", 5: "600.0 s"}
+    assert m.data(m.index(wiersz[3], kol), Qt.ToolTipRole) == "4.03329572835443 s"
+    assert m.data(m.index(wiersz[1], kol), Qt.ToolTipRole) is None
 
 
 def test_etykiety_kolumn_Znajdz_sa_w_katalogu(strona):

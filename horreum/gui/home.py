@@ -64,6 +64,7 @@ TECZKI_NA_DOMU = KOLUMNY_TECZEK * RZEDY_TECZEK
 WIECEJ_ZNIWA = "zniwa"
 WIECEJ_PLANER = "planer"
 WIECEJ_STANOWISKA = "stanowiska"
+WIECEJ_OS_TELESKOPU = "os_teleskopu"
 WIECEJ_NAZWY = "nazwy"
 WIECEJ_MAKRA = "makra"
 WIECEJ_PERSPEKTYWY = "perspektywy"
@@ -326,9 +327,11 @@ class HomeView(QWidget):
         self._zniwa_bieg = False    # dwa powody wygaszenia „Wciągnij z WBPP…” (`_sync_zniwa`)
         self._zniwa_zapis = False
         # Napis żniw z klucza przycisku Dostawy: nazwa gestu ma w katalogu jednego właściciela.
+        # Tak samo „Oś teleskopu" - napis z tytułu podstrony Porządków, do której prowadzi.
         for klucz, tekst in ((WIECEJ_ZNIWA, i18n.t("pipeline.btn.harvest")),
                              (WIECEJ_PLANER, i18n.t("home.more.planner")),
                              (WIECEJ_STANOWISKA, i18n.t("home.more.sites")),
+                             (WIECEJ_OS_TELESKOPU, i18n.t("tasks.telescope_axis")),
                              (WIECEJ_NAZWY, i18n.t("home.more.rename")),
                              (WIECEJ_MAKRA, i18n.t("home.more.macro")),
                              (WIECEJ_PERSPEKTYWY, i18n.t("home.more.perspectives")),
@@ -524,8 +527,14 @@ class HomeView(QWidget):
         if gen != self._gen:
             return
         self._pokazana_gen = gen
-        self.teczki_status.ustaw(i18n.t("home.folders.failed", msg=tekst_powodu(powod)),
-                                 wiersz_systemu(powod))
+        # Zdanie stoi do następnego biegu, a ten rusza dopiero po Dostawie albo geście - przy
+        # kolejnym wejściu na Dom mówi więc o liczeniu sprzed chwil albo godzin. Mówi to wprost
+        # i podaje godzinę porażki (czas lokalny), żeby nie udawało stanu z tej chwili (odbiór
+        # 0.19.0 DO7).
+        godzina = datetime.fromisoformat(self._now()).astimezone().strftime("%H:%M")
+        self.teczki_status.ustaw(
+            i18n.t("home.folders.failed", time=godzina, msg=tekst_powodu(powod)),
+            wiersz_systemu(powod))
         self.teczki_status.setVisible(True)
         self._dopasuj_rzedy()            # komunikat zostaje obok starych kart do następnego biegu
 

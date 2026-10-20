@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, derive, lineage, presence, scan
-from horreum.gui import i18n, queries
+from horreum.gui import i18n, queries, theme
 from horreum.gui.grid import PRESET_LINEAGE, PRESET_VANISHED
 from horreum.gui.grid_lineage import SciezkaLabel
 from horreum.gui.progress import counts_snapshot, should_emit
@@ -664,6 +664,8 @@ class PipelineView(QWidget):
         # przejęta od dawnego „Przetwórz wszystko" (jedna złota akcja na miejsce, wzorzec F3 #3).
         rec = QHBoxLayout()
         self.btn_receive = QPushButton(etykieta_przyjmij_nowe())
+        # Nazwa obiektu = selektor bursztynu złotej akcji w `theme.qss` (odbiór 0.19.0 DO6).
+        self.btn_receive.setObjectName(theme.ZLOTA_AKCJA_OBJECT_NAME)
         _f = self.btn_receive.font()
         _f.setBold(True)
         self.btn_receive.setFont(_f)

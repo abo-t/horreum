@@ -141,7 +141,10 @@ def test_dry_mowi_o_innym_ukladzie_w_korzeniu(qapp, tmp_path, ustawienia, monkey
     """Resztka z recenzji P2: manifest niósł `segments`, ale nikt ich nie czytał. Auto-DRY na
     otwarciu ma powiedzieć, że w korzeniu stoi drzewo o INNYM kształcie — stare pozycje leżą pod
     inną ścieżką, więc `conflict` = 0 i raport bez tej linii wygląda czysto. Ostrzeżenie, nie
-    blokada: „Utwórz" zostaje uzbrojone."""
+    blokada: „Utwórz" zostaje uzbrojone.
+
+    Odbiór 0.19.0 WY7: zdanie mówi słowami, co zastano i czego Horreum oczekuje - bez tokenu
+    układu (`wbpp-feed`) i bez maszynowego zapisu z pionową kreską."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "drift.db"))
     ids = _seed_files(con, tmp_path, 2)
@@ -154,9 +157,69 @@ def test_dry_mowi_o_innym_ukladzie_w_korzeniu(qapp, tmp_path, ustawienia, monkey
     _target(ustawienia, root)
     dlg = _dlg(con, ids)
     rep = dlg.report.toPlainText()
-    assert "innym układzie" in rep and "wbpp-feed" in rep
+    (linia,) = [w for w in rep.splitlines() if "innym układzie" in w]
+    assert ("zastane: WBPP feed (obiekt / nazwa teleskopu albo teleskop z nagłówka / filtr); "
+            "oczekiwane: po obiektach (obiekt / filtr)") in linia, linia
+    assert "wbpp-feed" not in rep and "|" not in rep and "object_canon" not in rep, rep
     assert "do zlinkowania: 2" in rep and dlg.btn_apply.isEnabled()
     con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdanie_rozjazdu_slowami_bez_tokenow(jezyk, lang):
+    """Odbiór 0.19.0 WY7: każdy kształt, jaki rdzeń umie zapisać (`projection._shape` z układów
+    i segmentów wydania obiektu, z historycznym `telescope_label` sprzed P2), wraca w zdaniu
+    rozjazdu słowami - bez „|”, bez tokenu układu (`wbpp-obiekt`) i bez nazw kolumn. Dwa kształty
+    jednego układu różniące się poziomem teleskopu (rozjazd P2) mają różne brzmienie. Parytet
+    mapy poziomów z kształtami rdzenia. Falsyfikator: `proj.drift` z surowym `res.drift`."""
+    from horreum.gui.i18n_catalog import CATALOG
+
+    jezyk(lang)
+    poziomy = {c for spec in [*projection.LAYOUTS.values(), projection.OBJECT_SEGMENTS]
+               for s in spec for c in (s if isinstance(s, tuple) else (s,))} | {"telescope_label"}
+    assert poziomy <= set(pd_mod._SHAPE_LEVEL_KEYS), poziomy - set(pd_mod._SHAPE_LEVEL_KEYS)
+    assert all(k in CATALOG for k in pd_mod._SHAPE_LEVEL_KEYS.values())
+    stary_feed = projection._shape("wbpp-feed", ("object_canon", "telescope_label", "filter_canon"))
+    ksztalty = [stary_feed] + [projection._shape(u, projection.layout_segments(u))
+                               for u in [*projection.LAYOUTS, projection.OBJECT_LAYOUT]]
+    zdania = set()
+    for was in ksztalty:
+        for teraz in [*projection.LAYOUTS, projection.OBJECT_LAYOUT]:
+            zdanie = pd_mod.drift_text(was, teraz)
+            assert "|" not in zdanie and projection.OBJECT_LAYOUT not in zdanie, zdanie
+            # nazwy kolumn i segmentów, które nie są zarazem słowem PL (`zestaw`, `filtr` - są)
+            assert not any(c in zdanie for c in pd_mod._SHAPE_LEVEL_KEYS
+                           if "_" in c or c in ("rola", "relacja")), zdanie
+            assert "—" not in zdanie, zdanie
+            zdania.add(zdanie)
+    assert len(zdania) == len(ksztalty) * (len(projection.LAYOUTS) + 1)   # każda para brzmi inaczej
+    obiekt = pd_mod.drift_text(stary_feed, projection.OBJECT_LAYOUT)
+    assert {"pl": "(zestaw / rodzaj klatki / filtr albo rodzaj kalibracji)",
+            "en": "(rig / frame type / filter or calibration type)"}[lang] in obiekt, obiekt
+    if lang == "en":
+        assert not set(obiekt) & _POLSKIE, obiekt
+
+
+@pytest.mark.parametrize("lang, slowa", [
+    ("pl", ("nieznany układ", "nieznany poziom", "poziomy nieopisane")),
+    ("en", ("unknown layout", "unknown level", "levels not described"))])
+def test_zdanie_rozjazdu_nieznany_ksztalt_slowem_katalogu(jezyk, lang, slowa):
+    """Bramka odbioru 0.19.0 Z10: manifest historyczny, ręcznie zmieniony albo z nowszej wersji
+    niesie dowolne `segments` i `layout` - zdanie rozjazdu mówi o nich słowem katalogu, nie surową
+    wartością, a brak poziomów nie daje pustych nawiasów „()”. Powtórzone słowo w jednym poziomie
+    stoi raz. Falsyfikator: surowa nazwa poziomu albo układu w zdaniu."""
+    jezyk(lang)
+    uklad, poziom, brak = slowa
+    obcy = pd_mod.drift_text("uklad-z-przyszlosci: zestaw/kolumna_x|kolumna_y/noc", projection.OBJECT_LAYOUT)
+    zastane = obcy.split("; ")[0]
+    assert f"{uklad} ({i18n.t('proj.shape.zestaw')} / {poziom} / {poziom})" in zastane, obcy
+    for surowe in ("uklad-z-przyszlosci", "kolumna_x", "kolumna_y", "noc", "|"):
+        assert surowe not in obcy, (surowe, obcy)
+    for pusty in ("wbpp-obiekt: ", "wbpp-obiekt"):
+        zdanie = pd_mod.drift_text(pusty, projection.OBJECT_LAYOUT)
+        assert f"({brak})" in zdanie and "()" not in zdanie, zdanie
+    if lang == "en":
+        assert not set(obcy) & _POLSKIE, obcy
 
 
 def test_dialog_auto_kopia_inny_wolumen(qapp, tmp_path, ustawienia, monkeypatch):
@@ -265,8 +328,9 @@ def test_apply_offthread_postep_i_pasek(qapp, tmp_path, ustawienia, monkeypatch)
     seen = _spy_progress(monkeypatch, hook=lambda n, w: in_run.append(dlg.report.toPlainText()))
     dlg = _dlg(con, ids)
     dlg._on_apply()
-    # P1: przez CAŁY bieg największy panel okna nie może twierdzić „DRY - bez zmian na dysku"
-    assert all("DRY" not in r and "Wydaję na stół" in r and str(root) in r for r in in_run)
+    # P1: przez CAŁY bieg największy panel okna nie może twierdzić „Podgląd - bez zmian na dysku"
+    assert all("bez zmian na dysku" not in r and "Wydaję na stół" in r and str(root) in r
+               for r in in_run)
     assert [s[0] for s in seen] == [1, 2, 3]               # postęp PER PLIK, nie jeden skok na końcu
     assert all(s[1] == 3 and s[2] == "linked" for s in seen)
     assert "zlinkowano: 3" in dlg.report.toPlainText()
@@ -321,17 +385,26 @@ def test_apply_zamraza_parametry_w_biegu(qapp, tmp_path, ustawienia, monkeypatch
 
 def test_apply_abort_sondy_osobnym_sygnalem(qapp, tmp_path, ustawienia, monkeypatch):
     """Sonda pierwszego linku pada (SMB oddał kopię) → `ProjectionAbort` z wątku wraca sygnałem
-    `aborted`: raport ABORT + wynik CZĘŚCIOWY, żadnego crashu, parametry odmrożone."""
+    `aborted`: raport „Wydanie zatrzymane” + wynik CZĘŚCIOWY, żadnego crashu, parametry odmrożone.
+
+    Odbiór 0.19.0 WY5: raport mówi do fotografa - licznik `verify_bad` zdaniem („nie przeszło
+    sprawdzenia”), folder `_UNSET` drzewa planu jako „(brak danych)” (na dysku zostaje `_UNSET`),
+    zamiast „ABORT” zdanie. Falsyfikator: surowy token w tekście raportu."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     monkeypatch.setattr(projection, "_verify_content", lambda src, dst, nbytes=65536: False)
     con = db.open_db(str(tmp_path / "a4.db"))
     ids = _seed_files(con, tmp_path, 3)
-    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    root = tmp_path / "_WBPP" / "feed"
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     dlg._on_apply()
     rep = dlg.report.toPlainText()
-    assert rep.startswith("ABORT:") and "Wynik częściowy" in rep
-    assert "verify_bad: 1" in rep
+    assert rep.startswith("Wydanie zatrzymane:") and "Wynik częściowy" in rep
+    assert "nie przeszło sprawdzenia: 1" in rep
+    assert "    (brak danych)/(brak danych): 3" in rep, rep
+    for surowe in ("verify_bad", "_UNSET", "ABORT", "DRY"):
+        assert surowe not in rep, (surowe, rep)
+    assert (root / "_UNSET" / "_UNSET").is_dir()           # kontrakt drzewa na dysku bez zmian
     assert dlg.btn_apply.text() == "Nie utworzono"
     assert not dlg.btn_apply.isEnabled()
     assert dlg.combo_layout.isEnabled() and dlg.btn_cancel.isHidden()
@@ -711,7 +784,7 @@ def test_dry_komplet_w_celu_mowi_naglowkiem(qapp, tmp_path, ustawienia, monkeypa
     ids = _seed_files(con, tmp_path, 2)
     _target(ustawienia, tmp_path / "_WBPP" / "feed")
     dlg = _dlg(con, ids)
-    assert dlg.report.toPlainText().startswith("DRY - bez zmian na dysku")
+    assert dlg.report.toPlainText().startswith("Podgląd - bez zmian na dysku")
     dlg._on_apply()
     dlg._on_manual_dry()
     rep = dlg.report.toPlainText()
@@ -955,22 +1028,64 @@ def test_tryb_obiektu_wolumen_i_rozmiar_z_pozycji_planu(qapp, tmp_path, ustawien
     con.close()
 
 
-def test_tryb_obiektu_anulowane_wydanie_nie_otwiera_eksploratora(qapp, tmp_path, ustawienia,
-                                                                 monkeypatch):
-    """„Otwórz w Eksploratorze" pojawia się po UDANYM wydaniu - przerwane zostawia raport
-    „Przerwano" i liczbę nietkniętych, a nie zaproszenie do folderu z połową drzewa. Zdanie na
-    statusbar (jedyny ślad po zamknięciu okna) też mówi „Przerwano", nie „Wydano"."""
+def test_tryb_obiektu_anulowane_wydanie_mowi_przerwano_i_prowadzi_do_folderu(qapp, tmp_path, ustawienia,
+                                                                            monkeypatch):
+    """Przerwane wydanie zostawia raport „Przerwano" i liczbę nietkniętych, a zdanie na statusbar
+    (jedyny ślad po zamknięciu okna) też mówi „Przerwano", nie „Wydano".
+
+    Bramka odbioru 0.19.0 Z8 (zmiana wobec wcześniejszego „po anulowaniu bez Eksploratora”): bieg
+    zakłada folder obiektu przed pierwszym plikiem, więc po anulowaniu częściowe drzewo LEŻY,
+    a jego cofnięcie to skasowanie folderu w Eksploratorze (`proj.obj.applying`) - przycisk idzie
+    za stanem dysku jak po sondzie, zamiast chować folder, który istnieje. „Gotowy pod WBPP”
+    nie mówi ani raport, ani pasek. Falsyfikator: przycisk schowany nad istniejącym folderem."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    pulpit = _Pulpit()
+    monkeypatch.setattr(pd_mod, "QDesktopServices", pulpit)
     con, _ids = _obiekt_wydania(tmp_path)
     card = tmp_path / "_WBPP" / "karta"
+    obj_root = card / "OBJECTS" / "NGC_6992"
     _target(ustawienia, card)
     _spy_progress(monkeypatch, hook=lambda n, w: w.request_cancel() if n == 1 else None)
     dlg = _dlg_obj(con)
+    assert dlg.btn_open.isHidden()                         # przed pierwszym wydaniem folderu nie ma
     dlg._on_apply()
     assert dlg.report.toPlainText().startswith("Przerwano")
-    assert dlg.btn_open.isHidden()
+    assert "nietknięte: 10" in dlg.report.toPlainText()
     assert dlg.summary == ("Przerwano wydanie obiektu NGC 6992: zlinkowano 1 z 11, reszta nietknięta "
-                           f"→ {card / 'OBJECTS' / 'NGC_6992'}")
+                           f"→ {obj_root}")
+    assert obj_root.is_dir() and not dlg.btn_open.isHidden()
+    QTest.mouseClick(dlg.btn_open, Qt.LeftButton)
+    assert [os.path.normpath(u.toLocalFile()) for u in pulpit.urls] == [str(obj_root)]
+    con.close()
+
+
+def test_tryb_obiektu_eksplorator_sprawdza_folder_przy_kliknieciu(qapp, tmp_path, ustawienia,
+                                                                monkeypatch):
+    """Bramka odbioru 0.19.0 Z8: stan przycisku to odczyt z końca sondy albo biegu, więc folder
+    skasowany w Eksploratorze PO wydaniu nie może dać kliknięcia w nieistniejącą ścieżkę. Klik
+    sprawdza folder od nowa: przycisk i wiersz wyjścia WBPP znikają, nad raportem staje zdanie
+    z radą (bez systemowego błędu), raport wydania zostaje pod nim, a ścieżka - pod kursorem.
+    Falsyfikator: `openUrl` z folderem, którego nie ma."""
+    import shutil
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    pulpit = _Pulpit()
+    monkeypatch.setattr(pd_mod, "QDesktopServices", pulpit)
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    obj_root = card / "OBJECTS" / "NGC_6992"
+    _target(ustawienia, card)
+    dlg = _dlg_obj(con)
+    dlg._on_apply()
+    raport = dlg.report.toPlainText()
+    assert raport.startswith("Utworzono") and not dlg.btn_open.isHidden()
+    shutil.rmtree(obj_root)
+    QTest.mouseClick(dlg.btn_open, Qt.LeftButton)
+    assert pulpit.urls == []
+    assert dlg.btn_open.isHidden() and dlg.out_box.isHidden() and dlg._released_root is None
+    zdanie = i18n.t("proj.obj.folder_gone", path=str(obj_root))
+    assert dlg.report.toPlainText() == zdanie + "\n\n" + raport
+    assert "„Odśwież podgląd”" in zdanie and dlg.report.toolTip() == str(obj_root)
     con.close()
 
 
@@ -1051,9 +1166,10 @@ def test_tryb_obiektu_eksplorator_zyje_tylko_przy_swoich_parametrach(qapp, tmp_p
 def test_tryb_obiektu_zmiana_zestawu_po_wydaniu_gasi_eksplorator(qapp, tmp_path, ustawienia,
                                                                  monkeypatch):
     """Po wydaniu jednego zestawu zmiana zestawu gasi „Otwórz w Eksploratorze" już na czas nowej
-    sondy (podgląd z wnętrza workera). Wraca wyłącznie wtedy, gdy nowa sonda sama zastanie
-    komplet: „Wszystkie" mają w celu tylko wydany zestaw, więc przycisk zostaje zgaszony; powrót
-    na wydany zestaw zastaje komplet i uzbraja go znowu."""
+    sondy (podgląd z wnętrza workera). Wraca, gdy nowa sonda sama zastanie folder obiektu na dysku
+    (odbiór 0.19.0 WY6; wcześniej - tylko komplet): „Wszystkie" mają w celu tylko wydany zestaw,
+    ale folder obiektu leży, więc przycisk wraca obok „Utwórz", a złota waga zostaje na wydaniu
+    (następny krok); powrót na wydany zestaw zastaje komplet i uzbraja go ze złotem."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con, _ids = _obiekt_wydania(tmp_path)
     _target(ustawienia, tmp_path / "_WBPP" / "karta")
@@ -1071,11 +1187,48 @@ def test_tryb_obiektu_zmiana_zestawu_po_wydaniu_gasi_eksplorator(qapp, tmp_path,
     monkeypatch.setattr(pd_mod, "DryWorker", Szpieg)
     dlg.combo_zestaw.setCurrentIndex(0)                    # Wszystkie: A140R nie leży w celu
     assert "do zlinkowania: 8   istnieje: 3" in dlg.report.toPlainText()
-    assert dlg.btn_open.isHidden()
+    assert not dlg.btn_open.isHidden() and dlg.btn_apply.isEnabled()
+    assert dlg.btn_apply.isDefault() and not dlg.btn_open.isDefault()
     dlg.combo_zestaw.setCurrentIndex(2)                    # z powrotem wydany zestaw
     assert dlg.report.toPlainText().startswith("Komplet już w celu")
-    assert not dlg.btn_open.isHidden()
+    assert not dlg.btn_open.isHidden() and dlg.btn_open.isDefault()
     assert w_biegu == [True, True]                         # w biegu każdej sondy - zgaszony
+    con.close()
+
+
+def test_tryb_obiektu_powrot_do_wydanego_z_nowymi_klatkami_eksplorator(qapp, tmp_path, ustawienia,
+                                                                       monkeypatch):
+    """Odbiór 0.19.0 WY6: powrót (nowe okno) do obiektu wydanego wcześniej, którego folder leży, ale
+    sonda nie zastaje kompletu (wydano jeden zestaw, okno otwiera „Wszystkie" - 8 pozycji do
+    dołożenia): „Otwórz w Eksploratorze" jest od razu i otwiera folder obiektu, a złota waga stoi
+    na „Utwórz" (następny krok). Folder skasowany w Eksploratorze - świeża sonda chowa przycisk,
+    jak przed pierwszym wydaniem. Falsyfikator: przycisk uzbrajany tylko przy komplecie."""
+    import shutil
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    pulpit = _Pulpit()
+    monkeypatch.setattr(pd_mod, "QDesktopServices", pulpit)
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, card)
+    pierwsze = _dlg_obj(con)
+    pierwsze.combo_zestaw.setCurrentIndex(2)               # RC8_ASI2600MM
+    pierwsze._on_apply()
+    obj_root = card / "OBJECTS" / "NGC_6992"
+
+    powrot = _dlg_obj(con)                                 # nowe okno: „Wszystkie"
+    rep = powrot.report.toPlainText()
+    assert rep.startswith("Podgląd") and "do zlinkowania: 8   istnieje: 3" in rep, rep
+    assert not powrot.btn_open.isHidden() and powrot.btn_apply.isEnabled()
+    assert powrot.btn_apply.isDefault() and not powrot.btn_open.isDefault()
+    assert not powrot.out_box.isHidden()                   # wyjście WBPP żyje razem z przyciskiem
+    QTest.mouseClick(powrot.btn_open, Qt.LeftButton)
+    assert [os.path.normpath(u.toLocalFile()) for u in pulpit.urls] == [str(obj_root)]
+
+    shutil.rmtree(obj_root)
+    powrot._on_manual_dry()
+    assert "do zlinkowania: 11" in powrot.report.toPlainText()
+    assert powrot.btn_open.isHidden() and powrot._released_root is None
     con.close()
 
 
@@ -1888,7 +2041,7 @@ def test_raport_zawiniety_wiersz_nie_lamie_slupka(qapp, tmp_path, ustawienia, mo
         "flat_raw_nights": ["2023-05-07"], "lights": list(range(167)), "hours": 1.62,
         "bez_flatu": [], "flat_gaps": {}, "bez_darka": list(range(167)), "pending": []}}}
     wiersze = [w for w, _rola in pd_mod.object_report_lines(info)]
-    tekst = "\n".join(["DRY - bez zmian na dysku (układ obiekt do WBPP, kopie):", *wiersze])
+    tekst = "\n".join(["Podgląd - bez zmian na dysku (układ obiekt do WBPP, kopie):", *wiersze])
     dlg._show_report(tekst)
     qapp.processEvents()
     assert dlg.report.toPlainText() == tekst
@@ -1900,6 +2053,23 @@ def test_raport_zawiniety_wiersz_nie_lamie_slupka(qapp, tmp_path, ustawienia, mo
         assert uklad.lineAt(i).x() == pytest.approx(uklad.lineAt(0).x() + (2 + pd_mod._REPORT_HANG) * znak)
     dlg.close()
     con.close()
+
+
+@pytest.mark.parametrize("lang, nazwa", [
+    ("pl", "  bez zestawu (teleskop × kamera nieprzypisane): 2 lighty"),
+    ("en", "  without a rig (telescope × camera not assigned): 2 lights")])
+def test_zestaw_bez_configu_zdaniem_nie_tokenem(jezyk, lang, nazwa):
+    """Odbiór 0.19.0 WY5: lighty bez configu jadą do folderu `_UNSET` (kontrakt drzewa na dysku),
+    a raport nazywa je słowami kolejki przypisania zestawu - „zestaw _UNSET” / „rig _UNSET” było
+    słowem programisty. Zestaw nazwany - bez zmian. Falsyfikator: `seg` wprost w wierszu."""
+    jezyk(lang)
+    z = {"masters": {}, "flat_raw": [], "flat_raw_nights": [], "lights": [1, 2], "hours": 0.5,
+         "bez_flatu": [], "flat_gaps": {}, "bez_darka": [], "pending": []}
+    info = {"window_days": 30, "zestawy": {projection._UNSET: z, "RC8_ASI2600MM": dict(z)}}
+    wiersze = [w for w, _rola in pd_mod.object_report_lines(info)]
+    assert wiersze[0].startswith(nazwa), wiersze
+    assert wiersze[1].startswith({"pl": "  zestaw RC8_ASI2600MM:", "en": "  rig RC8_ASI2600MM:"}[lang])
+    assert not any("_UNSET" in w for w in wiersze), wiersze
 
 
 def test_luki_w_naglowku_i_raporcie_kolorem_roli_warn(qapp, tmp_path, ustawienia, monkeypatch):
@@ -2029,7 +2199,7 @@ def test_uklad_nazwa_z_katalogu_parytet_i_en(qapp, tmp_path, ustawienia, monkeyp
     _target(ustawienia, tmp_path / "_WBPP" / "karta")
     dlg = _dlg_obj(con)                                    # referencja: tymczasowe okno ginie z dziećmi
     rep = dlg.report.toPlainText()
-    assert rep.startswith("DRY - no disk changes (layout object for WBPP, hardlinks):")
+    assert rep.startswith("Preview - no disk changes (layout object for WBPP, hardlinks):")
     assert "wbpp-obiekt" not in rep
     con.close()
 
@@ -2615,7 +2785,8 @@ def test_komplet_bez_oferty_zapisu_manifestu(qapp, tmp_path, ustawienia, monkeyp
     else:
         assert i18n.t("proj.obj.manifest_refused", msg="").strip() not in raport, raport
         assert i18n.t("proj.obj.manifest_stale").strip() not in raport, raport
-    assert (i18n.t("proj.drift", was="wbpp-obiekt: inny") in raport) == (przypadek == "rozjazd"), raport
+    rozjazd = pd_mod.drift_text("wbpp-obiekt: inny", projection.OBJECT_LAYOUT)
+    assert (rozjazd in raport) == (przypadek == "rozjazd"), raport
     dlg.reject()
     con.close()
 
@@ -2992,9 +3163,11 @@ def test_esc_w_sondzie_przed_swiadkami_nie_czyta_manifestu(qapp, tmp_path, ustaw
 
 def test_brak_zlotej_akcji_na_wygaszonym_przycisku(qapp, tmp_path, ustawienia, monkeypatch):
     """AR-245: złota waga (bold, wysokość, Enter) stoi WYŁĄCZNIE na aktywnym przycisku - po
-    awarii wydania perspektywy, po udanym wydaniu perspektywy („Utworzono ✓” wygaszone) i po
-    anulowanym wydaniu obiektu bez kompletu w celu nie ma jej nigdzie; świeża sonda z robotą stawia
-    ją na „Utwórz”. Falsyfikator: `_waga_akcji` bez pytania o `isEnabled`."""
+    awarii wydania perspektywy i po udanym wydaniu perspektywy („Utworzono ✓” wygaszone) nie ma jej
+    nigdzie; świeża sonda z robotą stawia ją na „Utwórz”. Po anulowanym wydaniu obiektu nie stoi na
+    wygaszonym „Przerwano” - od bramki 0.19.0 Z8 folder z częściowym drzewem uzbraja Eksplorator
+    (aktywny; cofnięcie wydania = skasowanie folderu), więc waga idzie na niego.
+    Falsyfikator: `_waga_akcji` bez pytania o `isEnabled`."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
 
     def waga(b):
@@ -3035,7 +3208,9 @@ def test_brak_zlotej_akcji_na_wygaszonym_przycisku(qapp, tmp_path, ustawienia, m
                   if n == 1 else None)
     _klik(obj.btn_apply)
     assert w_biegu == [True]                             # w biegu nie ma akcji ze złotem
-    assert obj.btn_apply.text() == i18n.t("proj.btn_cancelled") and zadna(obj)
+    assert obj.btn_apply.text() == i18n.t("proj.btn_cancelled")
+    assert waga(obj.btn_apply) == (False, False, False) and not obj.btn_apply.isEnabled()
+    assert not obj.btn_open.isHidden() and waga(obj.btn_open) == (True, True, True)
     obj.reject()
     con.close()
 

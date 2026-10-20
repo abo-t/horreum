@@ -313,11 +313,15 @@ def test_karta_odbita_bramka_zostawia_caly_plik_a_RAW_i_region_jada_bez_karty(ar
     it = _jedna(plan)
     assert it.frame_id == raw and it.card_op is None and it.card_new is None
     assert it.new_path == arch.sciezka(r"LIGHTS\M45\cam\2.ARW")
+    # OB11: pozycja niesie fakt formatu tylko do odczytu (read-model `card_read_only`) - podgląd
+    # mówi z niego, że RAW karty nie dostanie; przeniesienie RAW-a zostaje (ścieżka wyżej).
+    assert it.card_read_only is True
 
     region = arch.klatka(r"LIGHTS\Petla\cam\3.fits", canon="Veil", okind="region", source="region",
                          card=None, date_obs="2022-03-26T00:00:00")
     it = _jedna(arch.plan([region]))
     assert it.card_op is None and it.new_path.startswith(arch.sciezka(r"LIGHTS\Veil\cam"))
+    assert it.card_read_only is False     # bez karty z formy regionu, nie z formatu - FITS piszemy
 
 
 def test_przy_uzgodnij_klatka_bez_formy_karty_pominieta_RAW_nie(arch):

@@ -28,6 +28,7 @@ from horreum import db, object_change as oc, repo, resolver, writeback
 from horreum.gui import i18n, queries
 from horreum.gui import grid as grid_mod
 from horreum.gui.i18n_catalog import CATALOG
+from horreum.gui.wb_worker import szczegol_zdania
 
 NOW = "2026-10-11T12:00:00+00:00"
 KORZEN = r"R:\ASTRO_"
@@ -86,6 +87,24 @@ class _Rdzen:
         self.wynik_commitu = None
         self.wynik_cofniecia = None
         self.opoznienie = 0.0
+        # Trwały stan pozycji przebiegu (location_id → status), jak `pending_object_change` -
+        # zdanie paska liczy z niego, nie z ostatniej tury (OB12, Z2).
+        self.stan_pozycji = {}
+
+    def rozlicz(self, res, *, cofniecie):
+        for klucz, lista in (("applied", res.applied), ("blocked", res.blocked),
+                             ("failed", res.failed), ("skipped", res.skipped)):
+            for fr in lista:
+                self.stan_pozycji[fr.location_id] = (
+                    ("undone" if klucz == "applied" else self.stan_pozycji.get(fr.location_id))
+                    if cofniecie else klucz)
+        return res
+
+    def widok(self, con, run_id):
+        return {"pending": 0, "can_finish": True,
+                "items": [{"location_id": lid, "frame_id": lid - 10, "status": s,
+                           "before_canon": None, "card_read_only": False}
+                          for lid, s in sorted(self.stan_pozycji.items())]}
 
 
 @pytest.fixture
@@ -111,20 +130,20 @@ def rdzen(monkeypatch):
         r.commity.append(run_id)
         if progress is not None:
             progress(1, 3, rf"{NOWY}\f1.fits", "applied")
-        return r.wynik_commitu or _Wynik(run_id, applied=[_fr(11, "applied"), _fr(12, "applied")],
-                                         blocked=[], failed=[], skipped=[], commit_ids=(5,),
-                                         dirs_created=3)
+        return r.rozlicz(r.wynik_commitu or _Wynik(
+            run_id, applied=[_fr(11, "applied"), _fr(12, "applied")], blocked=[], failed=[],
+            skipped=[], commit_ids=(5,), dirs_created=3), cofniecie=False)
 
     def undo(con, run_id, *, now, progress=None, should_cancel=None):
         r.cofniecia.append(run_id)
-        return r.wynik_cofniecia or _Wynik(run_id, applied=[_fr(11, "restored"), _fr(12, "restored")],
-                                           blocked=[], failed=[], skipped=[], dirs_removed=3)
+        return r.rozlicz(r.wynik_cofniecia or _Wynik(
+            run_id, applied=[_fr(11, "restored"), _fr(12, "restored")], blocked=[], failed=[],
+            skipped=[], dirs_removed=3), cofniecie=True)
 
     monkeypatch.setattr(queries, "object_change_rows", wiersze)
     # Staging atrapy nie pisze do bazy, więc stan przebiegu po wyjątku workera też jest atrapą:
     # przebieg `staged` (sterownik domyka go wyłącznie na końcu listy), nic nie czeka.
-    monkeypatch.setattr(queries, "object_change_run_view",
-                        lambda con, run_id: {"pending": 0, "can_finish": True})
+    monkeypatch.setattr(queries, "object_change_run_view", r.widok)
     monkeypatch.setattr(resolver, "library_root_from_db", lambda con: KORZEN)
     monkeypatch.setattr(oc, "plan_object_change", planuj)
     monkeypatch.setattr(repo, "stage_object_change", stage)
@@ -678,13 +697,212 @@ def test_wykonanie_to_staging_TEGO_planu_i_JEDNA_operacja_uchwytu(qapp, con, rdz
     assert rdzen.staging == [plan]                       # podgląd = zapis: ten sam obiekt planu
     assert rdzen.commity == [plan.run_id]                # jedna operacja, cel = run_id
     assert zajetosc == [True, False] and zmiany == [1]
-    assert dlg.summary == dlg.status.text()
-    assert dlg.summary.startswith(i18n.t("objchg.res.applied", n=2))
-    assert i18n.t("objchg.res.dirs", created=3, removed=0) in dlg.summary
-    assert i18n.t("objchg.res.run", run_id=plan.run_id) in dlg.summary   # uchwyt po zamknięciu
+    assert dlg.status.text().startswith(i18n.t("objchg.res.applied", n=2))
+    assert i18n.t("objchg.res.dirs", created=3, removed=0) in dlg.status.text()
+    assert i18n.t("objchg.res.run", run_id=plan.run_id) in dlg.status.text()
+    # Pasek po zamknięciu (OB12): zdanie gestu z liczbą klatek, obiektem i drogą powrotu (CLI -
+    # przebieg domknięty, po zamknięciu okna jedyny uchwyt).
+    assert dlg.summary.startswith(i18n.t_plural("objchg.bar.changed", 2, canon="NGC2632"))
+    assert dlg.summary.endswith(i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_detail")))
+    assert dlg.summary.szczegol == i18n.t("objchg.bar.undo_cli", db=dlg._db_path,
+                                          run_id=plan.run_id)
     assert not dlg.undo_btn.isHidden() and dlg.undo_btn.isEnabled()
     assert not dlg.action_btn.isEnabled()                # drugi zapis nie ma czego robić
     assert dlg.action_btn.text() == i18n.t("objchg.action_change_bare")
+    dlg.reject()
+
+
+def _raw(fid, *, nowa):
+    """Pozycja RAW-a z planu: bez karty (format tylko do odczytu), z przeniesieniem albo bez."""
+    return dataclasses.replace(_pozycja(fid, nowa=nowa, karta=False, stara_karta=None),
+                               card_read_only=True)
+
+
+def test_podglad_RAW_nie_obiecuje_karty_ani_przeniesienia_ktorego_nie_bedzie(qapp, con, rdzen):
+    """Odbiór 0.19.0 OB11: podgląd samych RAW-ów w miejscu mówił „karta OBJECT” i „przeniesienie
+    do folderu”. Zdanie planu (`tekst_planu`) liczy z pól pozycji, które idą do stagingu: zero kart,
+    zero przeniesień, tylko wpis w bazie, plus zdanie o formacie tylko do odczytu; komórka karty
+    mówi to samo, nagłówek nie obiecuje karty. Falsyfikator: stałe „karta i folder” w oknie."""
+    from horreum.gui.object_change_dialog import tekst_planu
+    plan = _plan(items=(_raw(1, nowa=False), _raw(2, nowa=False)), skipped=())
+    rdzen.plany = [plan]
+    dlg = _okno(qapp, con, frame_ids=(1, 2))
+    note = dlg.plan_note.text()
+    assert not dlg.plan_note.isHidden() and note == tekst_planu(plan)
+    assert note == (i18n.t("objchg.plan.head", parts=i18n.t("objchg.plan.db_only", n=2)) + "\n"
+                    + i18n.t("objchg.plan.raw_db", n=2))
+    assert "OBJECT „" not in note and i18n.t("objchg.plan.move", n=2) not in note
+    assert "OBJECT" not in dlg.head.text()
+    assert [w[2] for w in _teksty(dlg.items_tree)] == [i18n.t("objchg.card_read_only")] * 2
+    dlg.reject()
+
+
+def test_podglad_mieszany_rozbija_karty_przeniesienia_i_sam_wpis_w_bazie(qapp, con, rdzen):
+    """Zaznaczenie mieszane (OB11): dwa FITS-y z kartą i przeniesieniem, RAW przeniesiony, RAW
+    w miejscu - zdanie mówi, ile plików dostanie kartę (z formą celu), ile pojedzie, ile zmieni
+    tylko wpis w bazie, a zdanie RAW - ile z nich jedzie bez zmiany treści. Po biegu zapowiedź
+    znika (czas przeszły niesie zdanie wyniku)."""
+    rdzen.plany = [_plan(items=(_pozycja(1), _pozycja(2), _raw(3, nowa=True), _raw(4, nowa=False)),
+                         skipped=())]
+    dlg = _okno(qapp, con, frame_ids=(1, 2, 3, 4))
+    czlony = " · ".join((i18n.t("objchg.plan.card_form", n=2, card="NGC 2632"),
+                         i18n.t("objchg.plan.move", n=3), i18n.t("objchg.plan.db_only", n=1)))
+    assert dlg.plan_note.text() == (i18n.t("objchg.plan.head", parts=czlony) + "\n"
+                                    + i18n.t("objchg.plan.raw_moved", n=2, moved=1))
+    dlg.action_btn.click()
+    assert dlg.plan_note.isHidden()
+    dlg.reject()
+
+
+def test_pasek_po_zapisie_mowi_ile_klatek_na_jaki_obiekt_z_jakiego_i_droge_powrotu(qapp, archiwum):
+    """Odbiór 0.19.0 OB12 na prawdziwym sterowniku: po zapisie `summary` (zdanie, które gospodarz
+    kładzie na pasek po zamknięciu) mówi liczbę klatek, obiekt celu, obiekt sprzed gestu (jeden)
+    i drogę powrotu - CLI po numerze, bo przebieg domknięty nie trafia do Porządków; polecenie ze
+    ścieżką bazy stoi w SZCZEGÓLE pod kursorem, nie w zdaniu (AR-272, Z6). Po pełnym cofnięciu -
+    „wróciło do X” bez drogi powrotu (Z5). Okno zamknięte bez biegu - pasek milczy."""
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", obj="NGC 3034", seed=2,
+                   date="2022-03-26T21:31:00")
+    cel = queries.object_target(a.con, "M 44")
+    nic = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb])
+    nic.reject()
+    assert nic.summary == ""
+    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb])
+    run_id = dlg._plan.run_id
+    dlg.action_btn.click()
+    assert dlg.summary == (i18n.t_plural("objchg.bar.changed_from", 2, old="NGC3034",
+                                         canon=cel.canon)
+                           + i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_detail")))
+    assert a.db_path not in dlg.summary
+    assert dlg.summary.szczegol == i18n.t("objchg.bar.undo_cli", db=a.db_path, run_id=run_id)
+    assert "NGC2632" in dlg.summary and run_id in dlg.status.text()
+    dlg.undo_btn.click()
+    assert dlg.summary == i18n.t_plural("objchg.bar.undone_change_to", 2, canon=cel.canon,
+                                        old="NGC3034")
+    assert szczegol_zdania(dlg.summary) == ""
+    dlg.reject()
+
+
+def test_pasek_przebiegu_przerwanego_prowadzi_do_Porzadkow(qapp, archiwum, monkeypatch):
+    """Przebieg z pozycją w błędzie zostaje w Porządkach („Przerwane zmiany obiektu”) - droga
+    powrotu na pasku prowadzi tam, nie do CLI (ten sam predykat co wiersz Porządków)."""
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
+    dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fa])
+    monkeypatch.setattr(queries, "interrupted_object_change_runs", lambda con: [dlg._plan.run_id])
+    dlg.action_btn.click()
+    assert dlg.summary.endswith(i18n.t("objchg.bar.tasks", nav=i18n.t("nav.porzadki"),
+                                       row=i18n.t("tasks.object_change_interrupted")))
+    dlg.reject()
+
+
+def _droga_porzadki():
+    """Człon drogi powrotu przez Porządki - w języku UI z chwili testu."""
+    return i18n.t("objchg.bar.tasks", nav=i18n.t("nav.porzadki"),
+                  row=i18n.t("tasks.object_change_interrupted"))
+
+
+def _przerwij_po(monkeypatch, n):
+    """Prawdziwy sterownik zapisu przerwany na żądanie po `n` pozycjach (`should_cancel` przed
+    pozycją n+1) - jak „Zatrzymaj” w oknie."""
+    prawdziwy = writeback.commit_object_change
+    licznik = {"pytan": 0}
+
+    def przerwany(con, run_id, *, now, progress=None, should_cancel=None):
+        def stop():
+            licznik["pytan"] += 1
+            return licznik["pytan"] > n
+        return prawdziwy(con, run_id, now=now, progress=progress, should_cancel=stop)
+    monkeypatch.setattr(writeback, "commit_object_change", przerwany)
+    return prawdziwy
+
+
+def test_pasek_Dokoncz_w_dwoch_turach_liczy_SUME_z_bazy(qapp, archiwum, monkeypatch):
+    """Z2: tura przerwana po pierwszej pozycji, potem „Dokończ” - pasek mówi 2 klatki (trwały
+    stan pozycji przebiegu), nie 1 z ostatniej tury."""
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", obj="NGC 3034", seed=2,
+                   date="2022-03-26T21:31:00")
+    cel = queries.object_target(a.con, "M 44")
+    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb])
+    prawdziwy = _przerwij_po(monkeypatch, 1)
+    dlg.action_btn.click()
+    assert dlg.summary.startswith(i18n.t_plural("objchg.bar.changed_from", 1, old="NGC3034",
+                                                canon=cel.canon))
+    assert dlg.summary.endswith(_droga_porzadki())       # przebieg `staged` - w Porządkach
+    monkeypatch.setattr(writeback, "commit_object_change", prawdziwy)
+    assert dlg.action_btn.text() == i18n.t("objchg.finish_btn", n=1)
+    dlg.action_btn.click()
+    assert dlg.summary.startswith(i18n.t_plural("objchg.bar.changed_from", 2, old="NGC3034",
+                                                canon=cel.canon))
+    dlg.reject()
+
+
+def test_pasek_przerwania_PRZED_pierwsza_pozycja_prowadzi_do_Porzadkow(qapp, archiwum,
+                                                                         monkeypatch):
+    """Z3: „Zatrzymaj” przed pierwszym plikiem - nic się nie zmieniło (`_do_cofniecia` fałsz), ale
+    przebieg zostaje `staged` na liście Porządków, więc pasek prowadzi tam."""
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
+    cel = queries.object_target(a.con, "M 44")
+    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa])
+    run_id = dlg._plan.run_id
+    _przerwij_po(monkeypatch, 0)
+    dlg.action_btn.click()
+    assert queries.interrupted_object_change_runs(a.con) == [run_id]
+    assert dlg.summary.startswith(i18n.t_plural("objchg.bar.changed", 0, canon=cel.canon))
+    assert dlg.summary.endswith(_droga_porzadki())
+    dlg.reject()
+
+
+def test_pasek_po_wyjatku_workera_mowi_z_widoku_przebiegu(qapp, archiwum, monkeypatch):
+    """Z4: tura zapisu z jedną pozycją, potem „Dokończ” pada wyjątkiem - zdanie paska nie
+    zostaje z poprzedniej tury, tylko składa się z utrwalonego widoku: 1 klatka zmieniona naprawdę
+    i droga przez Porządki."""
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", obj="NGC 3034", seed=2,
+                   date="2022-03-26T21:31:00")
+    cel = queries.object_target(a.con, "M 44")
+    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb])
+    _przerwij_po(monkeypatch, 1)
+    dlg.action_btn.click()
+    po_pierwszej = str(dlg.summary)
+
+    def padnij(*_a, **_k):
+        raise OSError("udział zniknął")
+    monkeypatch.setattr(writeback, "commit_object_change", padnij)
+    dlg.action_btn.click()
+    assert dlg.error.text()                               # wyjątek workera w polu błędu
+    assert dlg.summary == (i18n.t_plural("objchg.bar.changed_from", 1, old="NGC3034",
+                                         canon=cel.canon) + _droga_porzadki())
+    assert dlg.summary != po_pierwszej                     # bez członów poprzedniej tury
+    dlg.reject()
+
+
+def test_naglowek_wznowienia_bez_karty_a_RAW_oznaczony_na_liscie(qapp, archiwum):
+    """Z1: przerwany przebieg z Porządków - nagłówek nie obiecuje karty (jak zwykły), a pozycja
+    RAW (format bez zapisu karty) mówi „format tylko do odczytu” zamiast pustej komórki."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", obj="NGC 3034", seed=2,
+                   date="2022-03-26T21:31:00")
+    # Klatka b udaje RAW: format decyduje o karcie (planer) i o oznaczeniu (widok przebiegu).
+    a.con.execute("UPDATE frame SET filetype = 'raw' WHERE id = ?", (fb,))
+    a.con.commit()
+    plan, _ = policz_plan(a.con, [fa, fb], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    widok = queries.object_change_run_view(a.con, plan.run_id)
+    assert [it["card_read_only"] for it in widok["items"]] == [False, True]
+    assert [it["before_canon"] for it in widok["items"]] == ["NGC3034", "NGC3034"]
+    dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+    assert dlg.head.text() == i18n.t_plural("objchg.head_resume_change", 2, canon="NGC2632")
+    assert "OBJECT" not in dlg.head.text()
+    karty = [w[2] for w in _teksty(dlg.items_tree)]
+    assert karty == ["'NGC 3034' → 'NGC 2632'", i18n.t("objchg.card_read_only")]
     dlg.reject()
 
 
@@ -1156,6 +1374,21 @@ def test_Zmien_obiekt_wybor_BEZ_zapisu_potem_okno_z_celem_i_zaznaczeniem(widok, 
     assert okno.kw["off_thread"] is False                 # seam testowy widoku idzie do okna
     assert c.execute("SELECT count(*) FROM event").fetchone()[0] == przed   # wybór nic nie pisze
     assert statusy[-1] == "zdanie wyniku"                 # zdanie okna trafia na pasek
+
+
+def test_okno_zamkniete_BEZ_zapisu_pasek_milczy(widok, gest):
+    """OB12: Anuluj (okno bez biegu, `summary` puste) - gospodarz niczego na pasek nie kładzie;
+    pasek nie mówi o zapisie, którego nie było."""
+    v, _ = widok
+    _zaznacz(v, [1])
+    statusy = []
+    v.status_message.connect(statusy.append)
+
+    def anuluj(okno):
+        okno.summary = ""
+    _OknoAtrapa.scenariusz = anuluj
+    v._on_object_change()
+    assert _OknoAtrapa.ostatnie is not None and statusy == []
 
 
 def test_cel_BEZ_formy_karty_odmowa_PRZED_oknem(widok, gest, monkeypatch):

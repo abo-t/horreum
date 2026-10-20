@@ -233,14 +233,15 @@ _TASKS = [
     # Wiersz AKCYJNY, ROBOTA LICZONA PODZBIOREM (AR-10). Wersje stosów to decyzja, którą człowiek
     # ma prawo podjąć „zostawiam wszystkie" i nigdy do niej nie wracać - od 0026 ten wybór ma werdykt
     # w bazie (gest w menu tabeli perspektywy, z drogą powrotu). Liczba i lista pod klikiem czytają
-    # jeden predykat (`queries.stack_version_frame_ids`, także grupy z werdyktem - tam się go widzi
-    # i cofa), a robotą jest podzbiór grup BEZ werdyktu (`_ROBOTA_Z_PODZBIORU`). Do 0026 wiersz stał
+    # jeden predykat grupy (`queries._zbiory_wersji`, także grupy z werdyktem - tam się go widzi
+    # i cofa), a robotą jest podzbiór grup BEZ werdyktu (`_ROBOTA_Z_PODZBIORU`). Liczba mówi GRUPY,
+    # lista pod klikiem ich stosy (odbiór 0.19.0 PO13, `_LICZBA_GRUP`). Do 0026 wiersz stał
     # w `_BEZ_ROBOTY`, bo bez werdyktu świeciłby wiecznie po prawowitej decyzji.
     ("stack_versions", "tasks.stack_versions", PRESET_STACK_VERSIONS),
 ]
 
 # WIERSZE, KTÓRYCH ROBOTA JEST PODZBIOREM LICZBY (AR-10): klucz wiersza → klucz licznika roboty
-# w `queries.tasks_state`. Liczba i lista pod klikiem zostają jednym zbiorem; plakietkę,
+# w `queries.tasks_state`. Liczba i lista pod klikiem czytają jeden predykat; plakietkę,
 # pogrubienie i kolor rozstrzyga podzbiór. Przy podzbiorze mniejszym od całości wiersz mówi
 # „robota z liczby" (`tasks.of_total`), żeby rozjazd liczby z plakietką nie wyglądał na błąd.
 _ROBOTA_Z_PODZBIORU = {"stack_versions": "stack_versions_open",
@@ -257,6 +258,24 @@ def _zdanie_podzbioru(key, n):
     """Zdanie podpowiedzi o `n` pozycjach liczby wiersza `key`, które robotą nie są."""
     klucz, nazwy = _PODPOWIEDZ_PODZBIORU[key]
     return i18n.t_plural(klucz, n, **{k: i18n.t(v) for k, v in nazwy.items()})
+
+# WIERSZE, KTÓRYCH LICZBA MÓWI W INNEJ JEDNOSTCE NIŻ LISTA POD KLIKIEM (odbiór 0.19.0 PO13): klucz
+# wiersza → (zdanie całości, zdanie „robota z całości"), oba w odmianie przez całość. „Wersje stosów"
+# liczą grupy (decyzja zapada o grupie), a perspektywa pokazuje ich stosy - goła liczba „12" obok
+# listy 53 stosów wyglądałaby na błąd, więc człon liczby nazywa jednostkę. Przy robocie równej całości
+# zostaje sama całość z jednostką („12 grup"), jak goła liczba reszty listy: „12 z 12" udawałoby
+# podział, którego nie ma.
+_LICZBA_GRUP = {"stack_versions": ("tasks.stack_versions_groups", "tasks.stack_versions_groups_of")}
+
+
+def _czlon_calosci(key, robota, n):
+    """Człon liczby wiersza `key`: całość albo „robota z całości" (`_ROBOTA_Z_PODZBIORU`), z jednostką
+    tam, gdzie lista pod klikiem liczy co innego (`_LICZBA_GRUP`)."""
+    if key in _LICZBA_GRUP:
+        calosc, z_calosci = _LICZBA_GRUP[key]
+        return (i18n.t_plural(z_calosci, n, open=robota) if robota != n
+                else i18n.t_plural(calosc, n))
+    return i18n.t("tasks.of_total", open=robota, total=n) if robota != n else str(n)
 
 # TRZECI STAN WIERSZA: KLIKALNY, ALE NIE ROBOTA. Do 0809 lista znała dwa — informacyjny (cel `None`,
 # nie prowadzi nigdzie) i akcyjny (cel jest, liczba > 0 znaczy „tu jest robota"). Wiersz „Zastąpione"
@@ -979,7 +998,7 @@ class TasksView(QWidget):
             # Człony liczby SKŁADAJĄ SIĘ, nie wykluczają: „robota z liczby" i dolna granica przy
             # kopiach bez faktów mówią o różnych rzeczach. Gdy gałąź „N+" stała przed „z", wiersz
             # po decyzji ręki był szary (robota 0), a liczba mówiła „1+", jakby robota czekała.
-            calosc = i18n.t("tasks.of_total", open=robota, total=n) if robota != n else str(n)
+            calosc = _czlon_calosci(key, robota, n)
             if niewiadome:
                 liczba = i18n.t_plural("tasks.copies_unread", czeka)
             elif czesciowe:                 # dolna granica: kopie bez faktów nie są w porównaniu
@@ -1059,10 +1078,9 @@ class TasksView(QWidget):
             return
         if isinstance(action, int):
             if action == _PAGE_TELESCOPE:
-                # Wejście na Oś teleskopu czyta bazę od nowa (wizytacja N4) - lustro
-                # `_zaznacz_kubelek`, które przeładowuje kolejkę przeglądu obiektów.
-                self.axis_view.refresh()
-            self.pages.setCurrentIndex(action)         # podstrona osi
+                self.otworz_os_teleskopu()
+            else:
+                self.pages.setCurrentIndex(action)     # podstrona osi
             if key in _KUBELEK_PODSTRONY:
                 self._zaznacz_kubelek(_KUBELEK_PODSTRONY[key])
             elif key == "unresolved_lights":
@@ -1074,6 +1092,13 @@ class TasksView(QWidget):
                 self.observatory_view.wejdz_po_wskazanie()
         else:
             self.open_collection.emit(action)          # Zbiory z perspektywą (np. Duplikaty)
+
+    def otworz_os_teleskopu(self):
+        """Podstrona Osi teleskopu - jedna droga wejścia dla wiersza „Teleskopy bez etykiety" i dla
+        gospodarza (menu „Więcej…" Domu). Wejście czyta bazę od nowa (wizytacja N4) - lustro
+        `_zaznacz_kubelek`, które przeładowuje kolejkę przeglądu obiektów."""
+        self.axis_view.refresh()
+        self.pages.setCurrentIndex(_PAGE_TELESCOPE)
 
     def otworz_stanowiska(self):
         """Podstrona osi obserwatorium - wejście gospodarza (pusty stan planera „bez stanowiska”).

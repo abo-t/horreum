@@ -83,7 +83,7 @@ Po otwarciu bazy widzisz ekran **Dom** z pytaniem **Co chcesz zrobić?** i czter
 | **Co mam:** | ile masz obiektów, lightów, godzin i nocy oraz datę ostatniej nocy |
 | **Teczki - najwięcej godzin** | do osiemnastu kart obiektów z największym dorobkiem; klik w kartę pokazuje klatki tego obiektu w **Znajdź** |
 | **Ostatnio** | Twój ostatni gest (np. przypisanie obiektu, uwaga) i przycisk, który go cofa |
-| **Więcej…** | **Wciągnij z WBPP…**, planer, mapa stanowisk, nazwy plików, makra nagłówków, perspektywy, tryb zaawansowany, **Zbiory klasyczne** |
+| **Więcej…** | **Wciągnij z WBPP…**, planer, mapa stanowisk, **Oś teleskopu**, nazwy plików, makra nagłówków, perspektywy, tryb zaawansowany, **Zbiory klasyczne** |
 
 Karta teczki ma **kropkę stanu kalibracji**: zielona - każdy light ma master flat i master dark,
 bursztynowa - części brakuje, czerwona - żaden light nie ma ani flatu, ani darka. Pod nazwą stoi
@@ -409,8 +409,9 @@ Z podstrony wracasz strzałką **← Porządki**.
 
 ### Nazwij teleskop i stanowisko
 
-1. **Teleskopy bez etykiety ›** otwiera **Oś teleskopu**. Na liście **Aktywne teleskopy (kanoniczne)**
-   dwuklik w kolumnę **Etykieta**, wpisz swoją nazwę (np. `Newton 8"`), Enter.
+1. **Teleskopy bez etykiety ›** (albo na Domu **Więcej… → Oś teleskopu**) otwiera **Oś teleskopu**.
+   Na liście **Aktywne teleskopy (kanoniczne)** dwuklik w kolumnę **Etykieta**, wpisz swoją nazwę
+   (np. `Newton 8"`), Enter. Klik w nagłówek kolumny sortuje listę, drugi klik odwraca kolejność.
 2. Ten sam teleskop pod dwiema technicznymi nazwami: zaznacz wiersz, w **Scal zaznaczony w:** wybierz
    drugi, kliknij **Scal**. Pomyłkę cofnie **Cofnij scalenie**.
 3. **Stanowiska bez nazwy ›** działa tak samo (**Oś obserwatorium**, kolumna **Nazwa**). Dwa zapisy

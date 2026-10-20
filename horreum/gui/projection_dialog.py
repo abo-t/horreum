@@ -413,6 +413,69 @@ def layout_text(token):
     return i18n.t(key) if key else token
 
 
+# Poziom kształtu drzewa (nazwa kolumny układu kolumnowego albo segmentu wydania obiektu, z historią:
+# manifest niesie kształt z dnia wydania - `telescope_label` sprzed coalesce P2) → słowo katalogu.
+# Mapa literałów jak `_LAYOUT_KEYS`; parytet z `projection.LAYOUTS`/`OBJECT_SEGMENTS` pilnuje test.
+_SHAPE_LEVEL_KEYS = {
+    "object_canon": "proj.shape.object_canon",
+    "filter_canon": "proj.shape.filter_canon",
+    "telescope_label": "proj.shape.telescope_label",
+    "telescop_canon": "proj.shape.telescop_canon",
+    "zestaw": "proj.shape.zestaw",
+    "rola": "proj.shape.rola",
+    "filtr": "proj.shape.filtr",
+    "relacja": "proj.shape.relacja",
+}
+
+
+def _shape_text(layout, levels):
+    """Kształt drzewa słowami (Qt-wolne): „obiekt do WBPP (zestaw / rodzaj klatki / filtr albo
+    rodzaj kalibracji)”. `levels` - poziomy od góry, każdy krotką możliwości.
+
+    Manifest historyczny, ręcznie zmieniony albo z nowszej wersji niesie dowolne `segments`
+    (`projection.manifest_drift`), więc to, czego mapy nie znają, mówi słowem katalogu, nie surową
+    wartością (bramka odbioru 0.19.0, Z10): poziom spoza mapy - „nieznany poziom”, układ spoza
+    `_LAYOUT_KEYS` - „nieznany układ”, brak poziomów - „poziomy nieopisane”. Powtórzone słowo
+    w jednym poziomie stoi raz („nieznany poziom albo nieznany poziom” niczego nie mówi). Surowa
+    wartość zostaje w `_PROJEKCJA.json`."""
+    lub = i18n.t("proj.shape_or")
+    poziomy = []
+    for mozliwe in levels:
+        slowa = [i18n.t(_SHAPE_LEVEL_KEYS[c]) if c in _SHAPE_LEVEL_KEYS else i18n.t("proj.shape_unknown")
+                 for c in mozliwe]
+        poziomy.append(lub.join(dict.fromkeys(slowa)))
+    nazwa = layout_text(layout) if layout in _LAYOUT_KEYS else i18n.t("proj.shape_unknown_layout")
+    if not poziomy:
+        return i18n.t("proj.shape_no_levels", layout=nazwa)
+    return i18n.t("proj.shape", layout=nazwa, levels=" / ".join(poziomy))
+
+
+def drift_text(was, layout):
+    """Zdanie rozjazdu układu (Qt-wolne, odbiór 0.19.0 WY7): co zastano w folderze i czego Horreum
+    oczekuje - słowami, nie maszynowym zapisem `projection._shape` („wbpp-obiekt: zestaw/rola/
+    filtr|relacja”, format rdzenia dla powierzchni). `was` - `ApplyResult.drift`, rozbiór odwrotny
+    do `_shape`; oczekiwane z `projection.layout_segments(layout)`, bez przejścia przez napis."""
+    stary_uklad, _, poziomy = was.partition(": ")
+    zastane = [tuple(p.split("|")) for p in poziomy.split("/") if p] if poziomy else []
+    oczekiwane = [s if isinstance(s, tuple) else (s,) for s in projection.layout_segments(layout)]
+    return i18n.t("proj.drift", was=_shape_text(stary_uklad, zastane),
+                  now=_shape_text(layout, oczekiwane))
+
+
+def tree_folder_text(segments):
+    """Folder drzewa planu do raportu (Qt-wolne): segmenty złączone `/`, segment `_UNSET` (folder
+    bez wartości - na dysku zostaje, kontrakt drzewa) jako „(brak danych)” (odbiór 0.19.0 WY5)."""
+    return "/".join(i18n.t("proj.tree_unset") if s == projection._UNSET else s for s in segments)
+
+
+def zestaw_name(seg):
+    """Nazwa zestawu w wierszu raportu (Qt-wolne): „zestaw RC8_ASI2600MM” albo - lighty bez configu
+    (folder `_UNSET`) - „bez zestawu (teleskop × kamera nieprzypisane)” (odbiór 0.19.0 WY5)."""
+    if seg == projection._UNSET:
+        return i18n.t("proj.obj.zestaw_unset")
+    return i18n.t("proj.obj.zestaw_name", seg=seg)
+
+
 # Luki flatu z `lineage.raw_flats_for` → zdanie katalogu. Mapa, nie klucz składany w locie: kolektor
 # kluczy (`test_i18n`) widzi tylko literały w `t(...)`, a parytet tokenów z katalogiem pilnuje test
 # tego okna. `pending` ma tu zdanie, choć do `flat_gaps` planu nie trafia (osobna lista) - linia
@@ -479,7 +542,7 @@ def object_report_lines(info):
         surowe = i18n.t_plural("proj.obj.n_raw_flats", len(z["flat_raw"]))
         if z["flat_raw_nights"]:
             surowe += i18n.t("proj.obj.nights", nights=", ".join(z["flat_raw_nights"]))
-        lines.append((i18n.t("proj.obj.zestaw_line", seg=seg,
+        lines.append((i18n.t("proj.obj.zestaw_line", name=zestaw_name(seg),
                              lights=i18n.t_plural("proj.obj.n_lights", len(z["lights"])),
                              hours=z["hours"], masters=mastery, raw=surowe), None))
         if z["bez_flatu"]:
@@ -588,9 +651,13 @@ class DryWorker(QObject):
         by_frame = {int(r["frame_id"]): r for r in chosen}
         total, missing = size_summary(
             [by_frame[r.frame_id] for r in res.results if r.status == "would-link"])
+        # Folder korzenia na dysku (odbiór 0.19.0 WY6): „Otwórz w Eksploratorze" przy powrocie do
+        # obiektu wydanego wcześniej, także gdy sonda nie zastała kompletu. Odczyt w wątku tła, jak
+        # reszta sondy - korzeń bywa na udziale SMB.
         return {"plan": plan, "res": res, "auto_copy": auto_copy, "copy": eff_copy,
                 "target_serial": target_serial, "size_total": total, "size_missing": missing,
-                "root": root, "manifest": naprawa, "extra_sources": zrodla}
+                "root": root, "manifest": naprawa, "extra_sources": zrodla,
+                "root_exists": os.path.isdir(root)}
 
 
 # ---------------------------------------------------------------- worker apply (wątek tła)
@@ -752,6 +819,7 @@ class ProjectionDialog(QDialog):
         self._object_id = object_id
         self._canon = canon
         self._released_root = None       # folder „Otwórz w Eksploratorze" - zmienia go wyłącznie `_arm_open`
+        self._raport_teraz = ("", ())    # bieżący raport (`_show_report`) - tło zdania znikniętego folderu
         self._out_dir = None             # wyjście WBPP tego folderu (`_arm_open`), źródło schowka
         self._now = now_fn
         self._perspektywa = perspektywa
@@ -928,7 +996,8 @@ class ProjectionDialog(QDialog):
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self._on_cancel_apply)
         # Wydanie obiektu kończy się w Eksploratorze (WBPP wskazuje się folderem), więc droga tam
-        # pojawia się po udanym wydaniu, a nie przed nim - wcześniej nie byłoby czego otwierać.
+        # pojawia się, gdy folder obiektu jest na dysku: po udanym wydaniu albo przy powrocie do
+        # obiektu wydanego wcześniej (odbiór 0.19.0 WY6); przed pierwszym wydaniem - schowana.
         self.btn_open = QPushButton(i18n.t("proj.obj.open_explorer"))
         self.btn_open.setAutoDefault(False)
         self.btn_open.setVisible(False)
@@ -946,22 +1015,21 @@ class ProjectionDialog(QDialog):
 
     def _waga_akcji(self):
         """JEDYNE miejsce, które wybiera przycisk złotej wagi - ze stanu okna, nie z wołającego:
-        oferta zapisu manifestu (`_zapis_manifestu`) przy aktywnym przycisku → „Zapisz manifest”
-        (`btn_apply`; Eksplorator otworzy folder i bez manifestu, ale żniwa bez niego wydania nie
-        zobaczą); inaczej uzbrojony folder (`_released_root`) → „Otwórz w Eksploratorze”; inaczej
-        AKTYWNY `btn_apply`; inaczej ŻADEN (AR-245) - złoto i Enter na wygaszonym „Przerwane błędem”,
+        AKTYWNY `btn_apply` - oferta zapisu manifestu (Eksplorator otworzy folder i bez manifestu,
+        ale żniwa bez niego wydania nie zobaczą) albo „Utwórz” z klatkami do dołożenia do folderu
+        wydanego wcześniej (odbiór 0.19.0 WY6: Eksplorator stoi wtedy obok, ale następnym krokiem
+        jest wydanie); inaczej uzbrojony folder (`_released_root`) → „Otwórz w Eksploratorze”;
+        inaczej ŻADEN (AR-245) - złoto i Enter na wygaszonym „Przerwane błędem”,
         „Przerwano” albo „Utworzono ✓” wskazywały martwy przycisk. Dwóch pisarzy wagi (`_arm_open`
         i sonda nadpisująca ją po nim) zostawiało złoto obok uzbrojonego Eksploratora. Wołają ją
         drogi, które zmieniają stan przycisków: `_arm_open`, koniec sondy, wejście w bieg, koniec
         wydania i ogon błędu. W biegu zapisu (`btn_apply` schowany, `_apply_begin`) - żaden."""
         if self.btn_apply.isHidden():
             self._set_gold(None)
-        elif self._zapis_manifestu and self.btn_apply.isEnabled():
+        elif self.btn_apply.isEnabled():
             self._set_gold(self.btn_apply)
         elif self._released_root is not None:
             self._set_gold(self.btn_open)
-        elif self.btn_apply.isEnabled():
-            self._set_gold(self.btn_apply)
         else:
             self._set_gold(None)
 
@@ -1169,10 +1237,11 @@ class ProjectionDialog(QDialog):
         if self._object_id is not None:
             self._fill_zestawy(payload["plan"].info)
             self._show_object_head(payload["plan"].info)
-            # Komplet zastany w celu to ten sam stan folderu co po udanym wydaniu - droga do
-            # niego od razu, bez „wydania" zera pozycji tylko po to, żeby przycisk się pojawił.
-            # Złotą wagę (oferta zapisu manifestu albo Eksplorator) wybiera `_waga_akcji`.
-            self._arm_open(payload["root"] if dry_complete(payload["res"]) else None)
+            # Folder obiektu zastany na dysku (odbiór 0.19.0 WY6) - wydany wcześniej, w komplecie
+            # albo z nowymi klatkami do dołożenia - to folder, do którego droga ma być od razu, bez
+            # „wydania" tylko po to, żeby przycisk się pojawił. Folderu nie ma - przycisk schowany,
+            # jak przed pierwszym wydaniem (nie ma czego otwierać). Złotą wagę wybiera `_waga_akcji`.
+            self._sync_open(payload["root"], istnieje=payload["root_exists"])
         self._waga_akcji()                           # przycisk właśnie się uzbroił albo zgasł (AR-245)
 
     @Slot(int, object)
@@ -1248,16 +1317,17 @@ class ProjectionDialog(QDialog):
         """Uzbrój „Otwórz w Eksploratorze" (i wiersz „Wyjście WBPP" wydania obiektu) na folderze
         `root` albo zgaś je (`None`) - JEDYNE miejsce, gdzie przycisk i jego folder zmieniają się razem.
 
-        Przycisk żyje wyłącznie przy parametrach, dla których go uzbrojono: udane wydanie
-        (`_on_apply_done`) albo sonda, która zastała komplet (`_on_dry_done`). Każda zmiana
-        parametru (`_invalidate`) i padnięta sonda go gaszą. Folder sprzed zmiany karty, zestawu
-        czy trybu kopii to odpowiedź na pytanie, którego user już nie zadaje: po przejściu na kartę
+        Przycisk żyje wyłącznie przy parametrach, dla których go uzbrojono: koniec sondy albo
+        biegu zapisu, który zastał folder obiektu na dysku (`_sync_open`, odbiór 0.19.0 WY6 i Z8 -
+        wcześniej tylko komplet albo udane wydanie, więc powrót do obiektu z nowymi klatkami
+        i wydanie anulowane nie miały drogi do folderu). Każda zmiana parametru (`_invalidate`) i padnięta sonda go gaszą. Folder
+        sprzed zmiany karty, zestawu czy trybu kopii to odpowiedź na pytanie, którego user już nie
+        zadaje: po przejściu na kartę
         B z „do skopiowania: N" przycisk otwierałby folder z karty A. Samo wydanie niczego nie
         unieważnia, więc zaraz po nim przycisk stoi na właśnie wydanym folderze.
 
-        Waga złotej akcji idzie za stanem (`_waga_akcji`): uzbrojony folder to następny krok,
-        a „Utwórz" stoi wtedy wygaszone - waga na nim wskazywałaby martwy przycisk; wyjątkiem jest
-        oferta zapisu manifestu."""
+        Waga złotej akcji idzie za stanem (`_waga_akcji`): aktywne „Utwórz” (klatki do dołożenia,
+        oferta zapisu manifestu) jest następnym krokiem, inaczej uzbrojony folder."""
         self._released_root = root
         self.btn_open.setVisible(root is not None)
         self._waga_akcji()
@@ -1275,11 +1345,37 @@ class ProjectionDialog(QDialog):
         if self._out_dir:
             QApplication.clipboard().setText(self._out_dir)
 
+    def _sync_open(self, root, istnieje=None):
+        """Przycisk Eksploratora za STANEM DYSKU korzenia `root` wydania obiektu (bramka odbioru
+        0.19.0, Z8) - JEDNA droga dla końca sondy i KAŻDEGO końca biegu zapisu (sukces, anulowanie,
+        błąd, zapis manifestu): folder jest - uzbrojony, nie ma - schowany (`_arm_open`). Bieg zakłada
+        korzeń i `out` przed pierwszym plikiem, więc wydanie anulowane albo przerwane zostawia folder
+        z częściowym drzewem - a jego cofnięcie to skasowanie folderu w Eksploratorze, do którego
+        przycisk właśnie prowadzi. `istnieje` - odczyt z wątku sondy (`root_exists`); bez niego
+        jeden `isdir` tutaj, po biegu, który i tak dotykał dysku. Wydanie perspektywy przycisku
+        nie ma - no-op."""
+        if self._object_id is None:
+            return
+        if istnieje is None:
+            istnieje = bool(root) and os.path.isdir(root)
+        self._arm_open(root if istnieje else None)
+
     def _open_in_explorer(self):
         """Folder uzbrojony przez `_arm_open` - korzeń, który dostał `apply` albo sondował DRY,
-        a nie przeliczony z bieżących kart."""
-        if self._released_root:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self._released_root))
+        a nie przeliczony z bieżących kart. Stan przycisku to odczyt z końca sondy albo biegu, więc
+        klik sprawdza folder od nowa (Z8): skasowany w międzyczasie - przycisk znika, a nad raportem
+        staje zdanie, że folderu nie ma i że „Odśwież podgląd” policzy wydanie od nowa (Eksplorator
+        z nieistniejącą ścieżką otwierałby pusty widok albo błąd systemu)."""
+        root = self._released_root
+        if not root:
+            return
+        if os.path.isdir(root):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(root))
+            return
+        tekst, warn = self._raport_teraz
+        self._arm_open(None)
+        self._show_report(i18n.t("proj.obj.folder_gone", path=root) + "\n\n" + tekst, "error",
+                          warn=warn, tip=root)
 
     def _release_label(self, info):
         """Nazwa wydania: obiekt, a przy jednym zestawie także zestaw (`NGC6992 / RC8_ASI2600MM`).
@@ -1459,6 +1555,7 @@ class ProjectionDialog(QDialog):
         self._zapis_manifestu = False
         self.summary = ZdanieZeSzczegolem(pasek if pasek is not None else self._zdanie_przerwania(powod),
                                           szczegol)
+        self._sync_open(self._apply_root)            # częściowe drzewo leży - droga do folderu (Z8)
         self._waga_akcji()
 
     def _set_params_enabled(self, on):
@@ -1551,7 +1648,10 @@ class ProjectionDialog(QDialog):
         else:
             self.summary = i18n.t("proj.obj.status_summary", canon=self._canon, files=files,
                                   root=self._apply_root)
-            self._arm_open(self._apply_root)
+        # Sukces i anulowanie jedną drogą (Z8): po anulowaniu częściowe drzewo leży w folderze,
+        # a raport mówi „Przerwano” i ile nietkniętych - przycisk prowadzi do folderu, w którym
+        # wydanie się wznawia albo cofa (skasowanie folderu).
+        self._sync_open(self._apply_root)
         self.btn_apply.setEnabled(False)
         # nie głosi akcji, która zaszła (wiz K2) — także wtedy, gdy nie zaszła ŻADNA (#1)
         self.btn_apply.setText(i18n.t("proj.btn_cancelled") if res.cancelled else (
@@ -1621,7 +1721,7 @@ class ProjectionDialog(QDialog):
             przycisk = i18n.t("proj.btn_nothing_new")
         else:                                        # zapis bez `should_cancel` - innych wyników nie ma (EXPECT)
             raise AssertionError(f"nieoczekiwany wynik zapisu manifestu: {res.status!r}")
-        self._arm_open(self._apply_root)
+        self._sync_open(self._apply_root)
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(przycisk)
 
@@ -1650,6 +1750,7 @@ class ProjectionDialog(QDialog):
         Wcięcie WISZĄCE każdego bloku (`leftMargin` + ujemny `textIndent`, też warstwa formatu):
         pierwsza linia stoi, gdzie stała, a zawinięta kontynuacja zaczyna się `_REPORT_HANG` znaków
         głębiej niż własne wcięcie wiersza - zawinięcie nie łamie słupka monospace."""
+        self._raport_teraz = (text, tuple(warn))     # raport pod zdaniem znikniętego folderu (Z8)
         self.report.setPlainText(text)
         self.report.setToolTip(tip)
         znak = QFontMetricsF(self.report.font()).horizontalAdvance(" ")
@@ -1748,12 +1849,12 @@ class ProjectionDialog(QDialog):
             # Rozjazd manifestu PRZED drzewem planu: stare drzewo NIE daje `conflict` (leży pod inną
             # ścieżką), więc liczniki wyżej wyglądają czysto — bez tej linii raport milczy o tym,
             # że korzeń dostanie DRUGIE drzewo obok starego (te same i-węzły, WBPP liczy dwa razy).
-            lines.append(i18n.t("proj.drift", was=res.drift))
+            lines.append(drift_text(res.drift, res.layout))
         if plan.multi_present:
             lines.append(i18n.t("proj.multi_present", n=plan.multi_present))
         folders: dict = {}
         for it in plan.items:
-            key = "/".join(it.segments)
+            key = tree_folder_text(it.segments)
             folders[key] = folders.get(key, 0) + 1
         nf = len(folders)
         # „drzewo PLANU": po anulowaniu/abortcie sekcja niżej dalej opisuje pełen plan, nie stan

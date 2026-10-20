@@ -21,7 +21,7 @@ from horreum import db
 from horreum.gui import i18n
 from horreum.gui.pipeline import PipelineView, PipelineWorker
 
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
 NOW = "2026-06-29T15:00:00"
@@ -254,6 +254,57 @@ def test_gating_przyciskow_wymaga_bazy_i_katalogu(qapp, tmp_path):
     assert not view.btn_cancel.isEnabled()
     view._root = _tree(tmp_path, 1); view._sync_actions()
     assert view.btn_all.isEnabled() and view.btn_scan.isEnabled()           # katalog wskazany
+
+
+def _dominanta(widget):
+    """Najczęstszy kolor piksela przycisku (siatka co 3 px) - tło, nie napis ani ramka."""
+    from collections import Counter
+    img = widget.grab().toImage()
+    return Counter(img.pixelColor(x, y).name() for x in range(0, img.width(), 3)
+                   for y in range(0, img.height(), 3)).most_common(1)[0][0]
+
+
+def _ma_kolor(widget, hex_):
+    """Czy piksel środka lewej krawędzi przycisku (ramka 1 px) ma kolor `hex_`."""
+    img = widget.grab().toImage()
+    return img.pixelColor(0, img.height() // 2).name() == hex_.lower()
+
+
+def test_DO6_zlota_akcja_ma_bursztyn_z_motywu_a_wylaczona_wyglada_na_nieaktywna(qapp, tmp_path):
+    """Odbiór 0.19.0 DO6: „Przyjmij nowe" maluje się ciemnym bursztynem z `theme.zlota_akcja`, w obu
+    motywach, przez regułę arkusza po nazwie obiektu - przełączenie arkusza przemalowuje przycisk.
+    Wyłączony bierze tło przycisku palety, czyli wygląda jak każdy wygaszony przycisk. Waga pisma
+    i wysokość zostają przy widżecie. Arkusz idzie na widok, nie na `QApplication`, żeby nie zmieniać
+    stylu reszcie sesji testów.
+    Falsyfikator: przycisk bez `setObjectName` - tło zostaje szare Fusion."""
+    from horreum.gui import theme
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view.resize(900, 600)
+    view.show()
+    try:
+        btn = view.btn_receive
+        assert btn.objectName() == theme.ZLOTA_AKCJA_OBJECT_NAME
+        for name in ("dark", "light"):
+            view.setStyleSheet(theme.qss(name))
+            btn.setEnabled(True)
+            QApplication.processEvents()
+            assert _dominanta(btn) == theme.zlota_akcja(name)["bg"].lower(), name
+            # Z9: fokus klawiatury zmienia kolor ramki, nie rozmiar.
+            rozmiar = btn.sizeHint()
+            view.activateWindow()
+            btn.setFocus(Qt.TabFocusReason)
+            QApplication.processEvents()
+            assert btn.hasFocus() and btn.sizeHint() == rozmiar, name
+            assert _ma_kolor(btn, theme.zlota_akcja(name)["focus"]), name
+            btn.clearFocus()
+            QApplication.processEvents()
+            assert not _ma_kolor(btn, theme.zlota_akcja(name)["focus"]), name
+            btn.setEnabled(False)
+            QApplication.processEvents()
+            assert _dominanta(btn) == theme.palette_spec(name)["button"].lower(), name
+        assert btn.font().bold() and btn.minimumHeight() == 34
+    finally:
+        view.close()
 
 
 def test_pasek_ukryty_w_spoczynku_blad_w_osobnym_wierszu(qapp, tmp_path):

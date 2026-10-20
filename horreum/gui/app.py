@@ -321,21 +321,32 @@ def _fmt_obs_date(s):
 
 class _OptykaEdycja(QStyledItemDelegate):
     """Edytor komórek f/ i Ogniskowej Osi teleskopu (AR-128, bramka kodu N5): edytor startuje
-    wartością bez znacznika ręki, a zatwierdzenie oddaje WPIS do `on_commit(wiersz, kolumna, tekst)`
-    zawsze - także wtedy, gdy tekst równa się temu, co komórka pokazuje. Model komórki nie jest
+    wartością bez znacznika ręki, a zatwierdzenie oddaje WPIS do `on_commit(telescope_id, kolumna,
+    tekst)` zawsze - także wtedy, gdy tekst równa się temu, co komórka pokazuje. Model komórki nie jest
     zmieniany: po zapisie widok i tak przeładowuje się z bazy. Wpis idzie przez `QTimer.singleShot(0)`:
-    przeładowanie tabeli w środku zamykania edytora usuwałoby komórkę, którą Qt jeszcze obsługuje."""
+    przeładowanie tabeli w środku zamykania edytora usuwałoby komórkę, którą Qt jeszcze obsługuje.
+
+    KOTWICA = TELESKOP I KOLUMNA Z CHWILI OTWARCIA EDYTORA (właściwości edytora z `createEditor`),
+    nie numer wiersza ani indeks z chwili zatwierdzenia: między otwarciem edytora a wykonaniem wpisu
+    tabela mogła się przeładować w innym porządku (klik nagłówka, `refresh` z innego widoku albo
+    z końca etapu Dostawy), a indeks wskazałby wtedy sąsiada. `setModelData` czyta wyłącznie kotwicę."""
 
     def __init__(self, on_commit, parent=None):
         super().__init__(parent)
         self._on_commit = on_commit
 
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        editor.setProperty("telescope_id", index.siblingAtColumn(COL_ID).data(Qt.UserRole))
+        editor.setProperty("kolumna", index.column())
+        return editor
+
     def setEditorData(self, editor, index):
         editor.setText(index.data(Qt.UserRole + 1) or "")
 
     def setModelData(self, editor, model, index):
-        wiersz, kolumna, tekst = index.row(), index.column(), editor.text()
-        QTimer.singleShot(0, lambda: self._on_commit(wiersz, kolumna, tekst))
+        tid, kolumna, tekst = editor.property("telescope_id"), editor.property("kolumna"), editor.text()
+        QTimer.singleShot(0, lambda: self._on_commit(tid, kolumna, tekst))
 
 
 def zdanie_cofniecia_dopisania(wynik, telescope):
@@ -355,6 +366,44 @@ def zdanie_cofniecia_dopisania(wynik, telescope):
     return msg + (i18n.t("object.config_undo_add.retired", telescope=telescope) if wynik.retired
                   else i18n.t("object.config_undo_add.stays", telescope=telescope,
                               reason=powod(wynik.refusal)))
+
+
+# Kolumny tekstowe Osi teleskopu → pole wiersza `active_telescopes`. Pozostałe kolumny są liczbowe.
+_TEL_SORT_TEKST = {COL_CANON: "telescop_canon", COL_LABEL: "label", COL_STATUS: "status"}
+
+
+def _klucz_sortu_teleskopu(row, col):
+    """Klucz sortu wiersza Osi teleskopu po kolumnie `col`; `None` = komórka bez wartości.
+
+    Liczby jako liczby (ID, klatki, ogniskowa i f/ tak, jak je pokazuje komórka: ręka, potem pliki -
+    `queries.telescope_focal`/`telescope_f_ratio`), więc „10” stoi za „9”. Tekst kluczem naturalnym
+    biblioteki (`queries.natural_key`: bez wielkości liter, człony liczbowe jako liczby), z surowym
+    tekstem jako członem następnym dla porządku całkowitego."""
+    if col in _TEL_SORT_TEKST:
+        v = row[_TEL_SORT_TEKST[col]]
+        return (queries.natural_key(v), v) if v else None
+    if col == COL_FOCAL:
+        return queries.telescope_focal(row)
+    if col == COL_FRATIO:
+        return queries.telescope_f_ratio(row)
+    if col == COL_FRAMES:
+        return row["frame_count"]
+    assert col == COL_ID, col
+    return row["id"]
+
+
+def _posortuj_teleskopy(rows, sort):
+    """Wiersze w porządku kliku nagłówka `sort = (kolumna, Qt.SortOrder)`; `None` = porządek
+    read-modelu. Komórki bez wartości zawsze na końcu, w obu kierunkach i w porządku read-modelu -
+    ta sama reguła co MISSING w siatce (`grid_model._sort_key`). Sort stabilny: remis zostaje
+    w porządku read-modelu."""
+    if sort is None:
+        return list(rows)
+    col, order = sort
+    obecne = [r for r in rows if _klucz_sortu_teleskopu(r, col) is not None]
+    puste = [r for r in rows if _klucz_sortu_teleskopu(r, col) is None]
+    return sorted(obecne, key=lambda r: _klucz_sortu_teleskopu(r, col),
+                  reverse=order == Qt.DescendingOrder) + puste
 
 
 class TelescopeAxisView(QWidget):
@@ -379,6 +428,7 @@ class TelescopeAxisView(QWidget):
         self._pliki = {}                     # id → `FilesOptics` (wartość z plików) z ostatniego refresh
         self._busy = False                   # etap Dostawy pisze w tle - gesty optyki odmawiają (N8)
         self._dopisane = set()               # teleskopy z niecofniętym „Dopisz nowy…” (AR-133)
+        self._sort = None                    # (kolumna, Qt.SortOrder) z kliku nagłówka; None = read-model
         self._build_ui()
         self.refresh()
 
@@ -402,6 +452,15 @@ class TelescopeAxisView(QWidget):
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_LABEL, QHeaderView.Stretch)
+        # SORT PO KLIKU NAGŁÓWKA: nagłówek sam przełącza kolumnę i kierunek (strzałka Qt), a widok
+        # układa wiersze PRZED wypełnieniem (`_posortuj_teleskopy` w `refresh`). `setSortingEnabled`
+        # zostaje wyłączone na stałe: sort modelu przestawiałby wiersze w trakcie `_set_cell` po
+        # numerze wiersza i zaraz po zatwierdzeniu edycji, a „puste na końcu w obu kierunkach” wymaga
+        # znajomości kierunku, której porównanie dwóch komórek nie ma. Bez kliku - porządek read-modelu.
+        hdr.setSectionsClickable(True)
+        hdr.setSortIndicatorShown(True)
+        hdr.setSortIndicator(-1, Qt.AscendingOrder)
+        hdr.sortIndicatorChanged.connect(self._on_sort_changed)
         self.table.verticalHeader().setVisible(False)
         self._edit_triggers = self.table.editTriggers()   # przywracane po set_busy(False) (wizytator T3)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
@@ -480,11 +539,13 @@ class TelescopeAxisView(QWidget):
 
     def refresh(self):
         """Przeładuj listę z read-modelu (źródło prawdy = baza; brak własnego cache, §5). Zachowuje
-        zaznaczenie po `telescope_id`, a nie po numerze wiersza (po merge wiersze się przesuwają)."""
+        zaznaczenie po `telescope_id`, a nie po numerze wiersza (po merge i po sorcie wiersze się
+        przesuwają). Porządek z kliku nagłówka (`self._sort`) przeżywa przeładowanie: wiersze są
+        układane przed wypełnieniem, więc numer wiersza w pętli = wiersz na ekranie."""
         prev = self._selected_telescope_id()
         self._loading = True
         try:
-            rows = queries.active_telescopes(self.con)
+            rows = _posortuj_teleskopy(queries.active_telescopes(self.con), self._sort)
             self._rows = {row["id"]: row for row in rows}
             self._dopisane = queries.open_telescope_adds(self.con)
             # jedna derywacja „z plików" (AR-128) - ta sama, którą liczy Dostawa
@@ -516,6 +577,11 @@ class TelescopeAxisView(QWidget):
             # pusty stan ma sensowny komunikat, nie gołe nagłówki (wizytator P3)
             self.status_message.emit(i18n.t("axis.tel.empty_status"))
         self._on_selection_changed()
+
+    def _on_sort_changed(self, col, order):
+        """Klik nagłówka: zapamiętaj kolumnę i kierunek, ułóż listę od nowa (zaznaczenie zostaje)."""
+        self._sort = (col, order)
+        self.refresh()
 
     def _set_cell(self, r, c, text, *, editable=False, data=None, align=None):
         item = QTableWidgetItem(text)
@@ -658,12 +724,12 @@ class TelescopeAxisView(QWidget):
         etykiety poza v1) złapany i pokazany, widok wraca do prawdy bazy (refresh)."""
         if self._loading:
             return
+        tid = self.table.item(item.row(), COL_ID).data(Qt.UserRole)
         if item.column() in (COL_FOCAL, COL_FRATIO):
-            self._on_optics_edited(item.row(), item.column(), item.text())
+            self._on_optics_edited(tid, item.column(), item.text())
             return
         if item.column() != COL_LABEL:
             return
-        tid = self.table.item(item.row(), COL_ID).data(Qt.UserRole)
         try:
             changed = repo.label_telescope(
                 self.con, telescope_id=tid, label=item.text(), now=self._now())
@@ -674,22 +740,30 @@ class TelescopeAxisView(QWidget):
         self._flash(i18n.t("axis.tel.label_saved") if changed else i18n.t("axis.tel.label_unchanged"))
         self.refresh()
 
-    def _on_optics_edited(self, row, col, text):
-        """Wpis w f/ albo Ogniskowej (AR-128) → klinga ręki. Porównanie ze STANEM RĘKI, nie z tekstem
-        komórki (bramka kodu N5): przy braku ręki każda poprawna liczba zapisuje rękę, także równa
-        wartości z plików - to potwierdzenie. Pusty wpis = cofnięcie ręki tego pola; przy braku ręki
-        nic do cofnięcia. Przecinek dziesiętny przyjmujemy (`5,6`). Wartość nieliczbowa albo spoza
-        zakresu → komunikat z klingi i widok wraca do prawdy bazy. Każda droga mówi na pasku - stary
-        komunikat nie zostaje. Pliki nietknięte - to zdanie o teleskopie w bazie. W trakcie etapu
-        (`_busy`) odmowa z komunikatem (N8)."""
-        tid = self.table.item(row, COL_ID).data(Qt.UserRole)
+    def _on_optics_edited(self, tid, col, text):
+        """Wpis w f/ albo Ogniskowej teleskopu `tid` (AR-128) → klinga ręki. Porównanie ze STANEM
+        RĘKI, nie z tekstem komórki (bramka kodu N5): przy braku ręki każda poprawna liczba zapisuje
+        rękę, także równa wartości z plików - to potwierdzenie. Pusty wpis = cofnięcie ręki tego
+        pola; przy braku ręki nic do cofnięcia. Przecinek dziesiętny przyjmujemy (`5,6`). Wartość
+        nieliczbowa albo spoza zakresu → komunikat z klingi i widok wraca do prawdy bazy. Każda droga
+        mówi na pasku - stary komunikat nie zostaje. Pliki nietknięte - to zdanie o teleskopie w bazie.
+        W trakcie etapu (`_busy`) odmowa z komunikatem (N8).
+
+        Stan ręki czytany ze ŚWIEŻEGO read-modelu, nie z `_rows` ostatniego przeładowania: teleskop
+        mógł zejść z osi (scalony, „Cofnij dopisanie”) między otwarciem edytora a wpisem - wtedy
+        wpis przepada ze zdaniem odmowy, bez zapisu i bez wyjątku."""
         if self._busy:
             self._flash(i18n.t("axis.tel.optics_busy"))
             self.refresh()
             return
+        wiersz = next((r for r in queries.active_telescopes(self.con) if r["id"] == tid), None)
+        if wiersz is None:
+            self._flash(i18n.t("axis.tel.optics_rejected", e=i18n.t("axis.tel.optics_gone", tid=tid)))
+            self.refresh()
+            return
         tekst = (text or "").replace(queries.CLEARED_MARK, "").strip().replace(",", ".")
         ogn = col == COL_FOCAL
-        reka = self._rows[tid]["focal_user" if ogn else "f_ratio_user"]
+        reka = wiersz["focal_user" if ogn else "f_ratio_user"]
         try:
             if not tekst:
                 changed = reka is not None and (
@@ -4540,6 +4614,10 @@ class MainWindow(QMainWindow):
             self._show_view(NAV_PLANER)
         elif klucz == home_mod.WIECEJ_STANOWISKA:
             self._on_open_sites()
+        elif klucz == home_mod.WIECEJ_OS_TELESKOPU:
+            # Ta sama droga, co wiersz „Teleskopy bez etykiety" Porządków: tabela od nowa i podstrona.
+            self._show_view(NAV_PORZADKI)
+            self.tasks_view.otworz_os_teleskopu()
         elif klucz in (home_mod.WIECEJ_NAZWY, home_mod.WIECEJ_MAKRA):
             self.show_classic()
             bar = self.grid_view.sel_bar

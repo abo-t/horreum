@@ -1018,8 +1018,8 @@ def test_menu_wiecej_prowadzi_do_istniejacych_drog(qapp, tmp_path):
         h, g = win.home_view, win.grid_view
         akcje = h.akcje_wiecej
         assert [a.text() for a in h.btn_wiecej.menu().actions()] == [
-            "Wciągnij z WBPP…", "Planer", "Mapa stanowisk", "Nazwy plików…", "Makra nagłówków…",
-            "Perspektywy", "Tryb zaawansowany dostawy", "Zbiory klasyczne"]
+            "Wciągnij z WBPP…", "Planer", "Mapa stanowisk", "Oś teleskopu", "Nazwy plików…",
+            "Makra nagłówków…", "Perspektywy", "Tryb zaawansowany dostawy", "Zbiory klasyczne"]
         akcje[home_mod.WIECEJ_PLANER].trigger()
         assert win.stack.currentIndex() == STRONA_PLANER and win.nav.currentRow() == NAV_PLANER
         akcje[home_mod.WIECEJ_STANOWISKA].trigger()
@@ -1042,6 +1042,32 @@ def test_menu_wiecej_prowadzi_do_istniejacych_drog(qapp, tmp_path):
         assert win.nav.currentRow() == NAV_ZBIORY and win.znajdz_view.prezentacja == "klasyczna"
     finally:
         win.close()
+
+
+@pytest.mark.parametrize("lang, napis", [("pl", "Oś teleskopu"), ("en", "Telescope axis")])
+def test_wiecej_os_teleskopu_prowadzi_na_podstrone_z_tabela_od_nowa(qapp, tmp_path, lang, napis):
+    """Odbiór 0.19.0: „Więcej… → Oś teleskopu" na Domu - druga droga na podstronę Porządków, która
+    dotąd była wyłącznie za wierszem „Teleskopy bez etykiety". Ta sama droga wejścia co wiersz
+    (`TasksView.otworz_os_teleskopu`): tabela czyta bazę od nowa, więc teleskop dopisany po
+    zbudowaniu okna już na niej stoi. Napis z tytułu podstrony, w obu językach.
+    Falsyfikatory: trasa bez `axis_view.refresh()` (brak „Nowy" w tabeli); trasa samą stroną
+    Porządków (lista zadań zamiast podstrony)."""
+    from horreum import repo
+    i18n.set_lang(lang)
+    win = _pokazane(MainWindow(_s8(tmp_path)))
+    try:
+        akcja = win.home_view.akcje_wiecej[home_mod.WIECEJ_OS_TELESKOPU]
+        assert akcja.text() == napis and akcja.isEnabled()
+        repo.propose_telescope(win.con, telescop_canon="Nowy", focal_nominal=500, now=NOW)
+        tabela = win.tasks_view.axis_view.table
+        assert "Nowy" not in {tabela.item(r, 1).text() for r in range(tabela.rowCount())}
+        akcja.trigger()
+        assert win.stack.currentIndex() == STRONA_PORZADKI and win.nav.currentRow() == NAV_PORZADKI
+        assert win.tasks_view.pages.currentIndex() == tasks_mod._PAGE_TELESCOPE
+        assert "Nowy" in {tabela.item(r, 1).text() for r in range(tabela.rowCount())}
+    finally:
+        win.close()
+        i18n.set_lang("pl")
 
 
 def test_wiecej_wciagnij_z_wbpp_ta_sama_droga_co_przycisk_Dostawy(qapp, tmp_path, ustawienia, monkeypatch):
@@ -1276,8 +1302,11 @@ def test_teczki_blad_bazy_klasa_w_jezyku_UI_szczegol_w_podpowiedzi(qapp, tmp_pat
     try:
         h.con = zla
         h.odswiez_teczki()
-        zdanie = i18n.t("home.folders.failed",
+        # Odbiór 0.19.0 DO7: zdanie mówi, że to POPRZEDNIE liczenie, i podaje jego godzinę lokalną.
+        godzina = datetime.fromisoformat(DOM_NOW).astimezone().strftime("%H:%M")
+        zdanie = i18n.t("home.folders.failed", time=godzina,
                         msg=i18n.t("objchg.item.db_damaged", db_code="SQLITE_NOTADB"))
+        assert godzina in zdanie and ("Poprzednie" if lang == "pl" else "previous") in zdanie
         assert h.teczki_status.text() == zdanie and not h.teczki_status.isHidden()
         assert h.teczki_status.toolTip() == zdanie + "\n" + i18n.t(
             "wb.os_detail_tip", detail="DatabaseError: file is not a database")

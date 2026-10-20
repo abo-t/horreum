@@ -6327,11 +6327,12 @@ def _model_exptime(qapp, karty):
 def test_kolumna_exptime_jedna_precyzja_na_kolumne(qapp):
     """AR-115: kolumna EXPTIME stawiała zapis karty programu, który ją wpisał („1800.00”, „600.000”,
     „15.000” jeden pod drugim - stosy WBPP). Teraz jedna precyzja na kolumnę: najmniej miejsc, które
-    pokazują dokładnie każdą jej wartość, nie więcej niż trzy (reguła z rozkładu na kopii archiwum,
-    komentarz przy `grid_model.miejsca_ekspozycji`). Wartość ucięta do trzech miejsc mówi pełnym
-    zapisem karty w podpowiedzi; pole edycji i sort zostają przy karcie i liczbie.
+    pokazują dokładnie każdą jej wartość, nie więcej niż jedno (odbiór 0.19.0 ZB12, komentarz przy
+    `grid_model.miejsca_ekspozycji`). Wartość ucięta do jednego miejsca mówi pełnym zapisem karty
+    w podpowiedzi; pole edycji i sort zostają przy karcie i liczbie.
 
-    Falsyfikator: precyzja per komórka (`:g`, surowy zapis) → „0.08” obok „600.000”."""
+    Falsyfikator: precyzja per komórka (`:g`, surowy zapis) → „0.08” obok „600.0”; dawny sufit trzech
+    miejsc → „600.000”."""
     from horreum.gui.grid import BASE_COLS
     from horreum.gui.grid_model import miejsca_ekspozycji
     col = len(BASE_COLS)
@@ -6345,16 +6346,22 @@ def test_kolumna_exptime_jedna_precyzja_na_kolumne(qapp):
                                       (3, "4.03329572835443", 4.03329572835443)])
     z_flatami.sort(col, Qt.AscendingOrder)
     assert [z_flatami.data(z_flatami.index(r, col)) for r in range(3)] == [
-        "0.080", "4.033", "600.000"]
+        "0.1", "4.0", "600.0"]
+    assert z_flatami.data(z_flatami.index(0, col), Qt.ToolTipRole) == "0.08"
     assert z_flatami.data(z_flatami.index(1, col), Qt.ToolTipRole) == "4.03329572835443"
-    assert z_flatami.data(z_flatami.index(0, col), Qt.ToolTipRole) is None
+    assert z_flatami.data(z_flatami.index(2, col), Qt.ToolTipRole) is None
     assert z_flatami.data(z_flatami.index(0, col), Qt.TextAlignmentRole) == int(
         Qt.AlignRight | Qt.AlignVCenter)
 
-    # reguła: 1/160, 1/125, 1/100, 1/80 s przy dwóch miejscach zlałyby się w „0.01”
-    assert miejsca_ekspozycji([0.00625, 0.008, 0.01, 0.0125]) == 3
-    assert len({f"{v:.3f}" for v in (0.00625, 0.008, 0.01, 0.0125)}) == 4
-    assert miejsca_ekspozycji([300.0, 0.5]) == 1 and miejsca_ekspozycji([]) == 0
+    # sufit jednego miejsca: 1/160 s w kolumnie mówi „0.0”, dokładną liczbę niesie podpowiedź
+    migawka = _model_exptime(qapp, [(1, "0.00625", 0.00625), (2, "600.0", 600.0)])
+    migawka.sort(col, Qt.AscendingOrder)
+    assert [migawka.data(migawka.index(r, col)) for r in range(2)] == ["0.0", "600.0"]
+    assert migawka.data(migawka.index(0, col), Qt.ToolTipRole) == "0.00625"
+
+    assert miejsca_ekspozycji([0.00625, 0.008, 0.01, 0.0125]) == 1
+    assert miejsca_ekspozycji([300.0, 0.5]) == 1 and miejsca_ekspozycji([600.0, 1800.0]) == 0
+    assert miejsca_ekspozycji([]) == 0
 
 
 # ---------- szuflada: ogon cofnięcia kart wspólny z oknami kart (AR-160) ----------

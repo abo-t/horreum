@@ -1175,12 +1175,15 @@ CATALOG = {
     },
     # Komunikat MUSI mówić o regule, która realnie odrzuciła nazwę: od S4 bramką jest cała drabina
     # (`resolver.name_resolves`), nie sama gramatyka katalogowa. Dawne „nie rozpoznaję oznaczenia
-    # katalogowego" kłamałoby o przyczynie dla nazwy potocznej i dla wpisu słownika.
+    # katalogowego" kłamałoby o przyczynie dla nazwy potocznej i dla wpisu słownika. Odbiór 0.19.0
+    # OB11: zdanie mówi, co zrobić dalej (pisownia, numer katalogowy z przykładem), bez „resolvera”,
+    # a okno pokazuje je dopiero po pauzie w pisaniu albo po wyjściu z pola (`zweryfikuj_nazwe`).
     "assign.unknown_name": {
-        "pl": "Nie rozpoznaję nazwy „{text}” — resolver nie umie jej rozwiązać. "
-              "Podaj oznaczenie katalogowe, nazwę potoczną albo nazwę ze słownika obiektów własnych.",
-        "en": "Unrecognized name “{text}” - the resolver cannot resolve it. "
-              "Enter a catalog designation, a common name, or a name from the own-objects dictionary.",
+        "pl": "Nie rozpoznaję nazwy „{text}”. Sprawdź pisownię albo wpisz numer katalogowy, "
+              "np. M 31 albo NGC 7000. Zadziała też nazwa potoczna i nazwa ze słownika obiektów "
+              "własnych.",
+        "en": "Unrecognized name “{text}”. Check the spelling or enter a catalog number, e.g. M 31 "
+              "or NGC 7000. A common name or a name from the own-objects dictionary works too.",
     },
     # Słownik obiektów własnych jest plikiem CZŁOWIEKA — literówka w nim ma zostać ZGŁOSZONA, nie
     # wywalić okno tracebackiem. Bliźniak `object.path_proposed_broken` po stronie kolejki.
@@ -1383,7 +1386,8 @@ CATALOG = {
         "pl": "Brak teczek - żaden obiekt nie ma jeszcze aktywnych lightów.",
         "en": "No objects yet - none has active lights."},
     "home.folders.failed": {
-        "pl": "Gotowość się nie policzyła: {msg}", "en": "Readiness could not be computed: {msg}"},
+        "pl": "Poprzednie liczenie gotowości ({time}) nie powiodło się: {msg}",
+        "en": "The previous readiness count ({time}) failed: {msg}"},
     "home.folders.more": {
         "pl": {"one": "… i {n} kolejna - szukaj w Znajdź",
                "few": "… i {n} kolejne - szukaj w Znajdź",
@@ -4511,8 +4515,8 @@ CATALOG = {
         "en": "Force byte copy (advanced — when hardlink over SMB fails)",
     },
     "proj.placeholder": {
-        "pl": "Dodaj lub wybierz cel wydania — podgląd (DRY) policzy się sam.",
-        "en": "Add or pick a target — the preview (DRY) will compute itself.",
+        "pl": "Dodaj lub wybierz cel wydania - podgląd policzy się sam.",
+        "en": "Add or pick a target - the preview will compute itself.",
     },
     "proj.btn_refresh": {"pl": "Odśwież podgląd", "en": "Refresh preview"},
     "proj.btn_create": {"pl": "Utwórz", "en": "Create"},
@@ -4532,7 +4536,8 @@ CATALOG = {
         "pl": "Dodaj lub wybierz cel wydania („+ inny cel…”).",
         "en": "Add or pick a target (“+ another target…”).",
     },
-    "proj.probing": {"pl": "Sonduję cel (DRY)…", "en": "Probing target (DRY)…"},
+    "proj.probing": {"pl": "Sprawdzam cel (podgląd, bez zmian na dysku)…",
+                     "en": "Checking the target (preview, no disk changes)…"},
     "proj.dry_failed": {"pl": "Nie można: {msg}", "en": "Cannot: {msg}"},
     "proj.note_forced_copy": {"pl": "wymuszona kopia bajtów", "en": "forced byte copy"},
     "proj.note_other_vol": {"pl": "inny wolumen → kopia bajtów", "en": "other volume → byte copy"},
@@ -4544,14 +4549,14 @@ CATALOG = {
     # --- apply: nagłówek biegu, przyciski-skutki, błędy ---
     "proj.applying": {
         "pl": "Wydaję na stół → {root}\n\nDysk się ZMIENIA. „Przerwij wydawanie” zatrzyma po bieżącym "
-              "pliku; to, co powstało,\nzostaje na dysku (undo = skasuj folder w Eksploratorze).",
+              "pliku; to, co powstało,\nzostaje na dysku (cofnięcie = skasuj folder w Eksploratorze).",
         "en": "Serving to table → {root}\n\nThe disk is CHANGING. “Stop serving” halts after the current "
               "file; whatever was made\nstays on disk (undo = delete the folder in Explorer).",
     },
     # Bieg wydania OBIEKTU - słownik wydania, nie stołu (tryb obiektu `ProjectionDialog`).
     "proj.obj.applying": {
         "pl": "Wydaję obiekt → {root}\n\nDysk się ZMIENIA. „Przerwij wydawanie” zatrzyma po bieżącym "
-              "pliku; to, co powstało,\nzostaje na dysku (undo = skasuj folder w Eksploratorze).",
+              "pliku; to, co powstało,\nzostaje na dysku (cofnięcie = skasuj folder w Eksploratorze).",
         "en": "Releasing the object → {root}\n\nThe disk is CHANGING. “Stop releasing” halts after the "
               "current file; whatever was made\nstays on disk (undo = delete the folder in Explorer).",
     },
@@ -4584,7 +4589,9 @@ CATALOG = {
         "pl": {"one": "zlinkowano {n} plik", "few": "zlinkowano {n} pliki", "many": "zlinkowano {n} plików"},
         "en": {"one": "linked {n} file", "other": "linked {n} files"},
     },
-    "proj.abort_prefix": {"pl": "ABORT: {msg}\n\n", "en": "ABORT: {msg}\n\n"},
+    # Werdykt sondy pierwszego linku (`_on_apply_aborted`) - zdanie, nie słowo programisty
+    # (odbiór 0.19.0 WY5); „Przerwano” zostaje dla anulowania przez człowieka.
+    "proj.abort_prefix": {"pl": "Wydanie zatrzymane: {msg}\n\n", "en": "Release stopped: {msg}\n\n"},
     "proj.btn_not_created": {"pl": "Nie utworzono", "en": "Not created"},
     "proj.made_before_error": {
         "pl": "\n\nUtworzono {done} z {total} przed błędem — częściowe drzewo zostaje w celu.",
@@ -4608,8 +4615,8 @@ CATALOG = {
     "proj.layout_name.wbpp_feed": {"pl": "WBPP feed", "en": "WBPP feed"},
     "proj.layout_name.object": {"pl": "obiekt do WBPP", "en": "object for WBPP"},
     "proj.dry_head": {
-        "pl": "DRY - bez zmian na dysku (układ {layout}, {mode}):",
-        "en": "DRY - no disk changes (layout {layout}, {mode}):",
+        "pl": "Podgląd - bez zmian na dysku (układ {layout}, {mode}):",
+        "en": "Preview - no disk changes (layout {layout}, {mode}):",
     },
     "proj.dry_counts": {
         "pl": "  {todo}: {would}   istnieje: {exists}   konflikty: {conflict}   pominięto: {skipped}",
@@ -4630,10 +4637,12 @@ CATALOG = {
     "proj.done_head": {
         "pl": "{head} (układ {layout}, {mode}):", "en": "{head} (layout {layout}, {mode}):",
     },
+    # `{vbad}` - status `verify_bad` klingi: link powstał, ale sprawdzenie po nim wykazało inny plik
+    # niż źródło (system zrobił kopię zamiast hardlinka); w raporcie zdanie, nie token (odbiór 0.19.0 WY5).
     "proj.done_counts": {
-        "pl": "  {done}: {linked}   istniało: {exists}   konflikty: {conflict}   verify_bad: {vbad}"
-              "   błędy: {errors}   pominięto: {skipped}",
-        "en": "  {done}: {linked}   existed: {exists}   conflicts: {conflict}   verify_bad: {vbad}"
+        "pl": "  {done}: {linked}   istniało: {exists}   konflikty: {conflict}   nie przeszło sprawdzenia: "
+              "{vbad}   błędy: {errors}   pominięto: {skipped}",
+        "en": "  {done}: {linked}   existed: {exists}   conflicts: {conflict}   failed verification: {vbad}"
               "   errors: {errors}   skipped: {skipped}",
     },
     "proj.untouched": {
@@ -4670,13 +4679,38 @@ CATALOG = {
         "pl": "  wiele obecnych kopii: {n} (użyto pierwszej)",
         "en": "  multiple present copies: {n} (used the first)",
     },
+    # Rozjazd układu (`projection_dialog.drift_text`, odbiór 0.19.0 WY7): `{was}`/`{now}` to kształty
+    # drzewa słowami (`proj.shape`), nie maszynowy zapis `_shape` z tokenem układu i pionową kreską.
     "proj.drift": {
-        "pl": "  ⚠ w korzeniu stoi już drzewo o innym układzie ({was}) — ponowne wydanie dołoży "
-              "drugie obok niego",
-        "en": "  ⚠ the root already holds a tree with a different layout ({was}) — issuing again "
-              "will add a second one next to it",
+        "pl": "  ⚠ folder wydania ma już drzewo o innym układzie, niż Horreum teraz tworzy - zastane: "
+              "{was}; oczekiwane: {now}. Ponowne wydanie dołoży drugie drzewo obok starego, a WBPP "
+              "policzy te same klatki dwa razy",
+        "en": "  ⚠ the release folder already holds a tree in a different layout than Horreum creates "
+              "now - found: {was}; expected: {now}. Releasing again adds a second tree next to the old "
+              "one, and WBPP counts the same frames twice",
     },
+    # Kształt drzewa: nazwa układu i poziomy folderów od góry; poziom z dwiema możliwościami (mastery
+    # w folderze rodzaju kalibracji, lighty w folderze filtra) łączy `proj.shape_or`.
+    "proj.shape": {"pl": "{layout} ({levels})", "en": "{layout} ({levels})"},
+    "proj.shape_or": {"pl": " albo ", "en": " or "},
+    # Kształt spoza znanych nazw (manifest ręcznie zmieniony albo z nowszej wersji, bramka 0.19.0 Z10).
+    "proj.shape_unknown": {"pl": "nieznany poziom", "en": "unknown level"},
+    "proj.shape_unknown_layout": {"pl": "nieznany układ", "en": "unknown layout"},
+    "proj.shape_no_levels": {"pl": "{layout} (poziomy nieopisane)", "en": "{layout} (levels not described)"},
+    # Poziomy kształtu - mapa `projection_dialog._SHAPE_LEVEL_KEYS` (nazwy z `projection.LAYOUTS`
+    # i `OBJECT_SEGMENTS`, także historyczne: manifest niesie kształt z dnia wydania).
+    "proj.shape.object_canon": {"pl": "obiekt", "en": "object"},
+    "proj.shape.filter_canon": {"pl": "filtr", "en": "filter"},
+    "proj.shape.telescope_label": {"pl": "nazwa teleskopu", "en": "telescope name"},
+    "proj.shape.telescop_canon": {"pl": "teleskop z nagłówka", "en": "telescope from the header"},
+    "proj.shape.zestaw": {"pl": "zestaw", "en": "rig"},
+    "proj.shape.rola": {"pl": "rodzaj klatki", "en": "frame type"},
+    "proj.shape.filtr": {"pl": "filtr", "en": "filter"},
+    "proj.shape.relacja": {"pl": "rodzaj kalibracji", "en": "calibration type"},
     "proj.plan_tree": {"pl": "  drzewo planu: {tree}", "en": "  plan tree: {tree}"},
+    # Folder `_UNSET` (segment bez wartości - kontrakt drzewa na dysku) w wierszu drzewa planu:
+    # człowiek czyta, czego brakuje, nie token (odbiór 0.19.0 WY5).
+    "proj.tree_unset": {"pl": "(brak danych)", "en": "(no data)"},
     "proj.more_folders": {
         "pl": "    … (+{n} folderów)", "en": "    … (+{n} more folders)",
     },
@@ -4712,9 +4746,14 @@ CATALOG = {
         "en": {"one": "{seg} ({n} light)", "other": "{seg} ({n} lights)"},
     },
     "proj.obj.zestaw_line": {
-        "pl": "  zestaw {seg}: {lights} · {hours:.2f} h · mastery: {masters} · {raw}",
-        "en": "  rig {seg}: {lights} · {hours:.2f} h · masters: {masters} · {raw}",
+        "pl": "  {name}: {lights} · {hours:.2f} h · mastery: {masters} · {raw}",
+        "en": "  {name}: {lights} · {hours:.2f} h · masters: {masters} · {raw}",
     },
+    # `{name}` wiersza zestawu: zestaw nazwany albo lighty bez configu (folder `_UNSET` na dysku) -
+    # zdaniem z kolejki przypisania zestawu, nie tokenem (odbiór 0.19.0 WY5).
+    "proj.obj.zestaw_name": {"pl": "zestaw {seg}", "en": "rig {seg}"},
+    "proj.obj.zestaw_unset": {"pl": "bez zestawu (teleskop × kamera nieprzypisane)",
+                              "en": "without a rig (telescope × camera not assigned)"},
     "proj.obj.nights": {"pl": " (noce: {nights})", "en": " (nights: {nights})"},
     "proj.obj.no_flat_line": {
         "pl": "    bez flatu: {n} - {why}", "en": "    without flat: {n} - {why}",
@@ -4725,6 +4764,12 @@ CATALOG = {
         "en": "    to recompute in Delivery: {n} - {why}",
     },
     "proj.obj.open_explorer": {"pl": "Otwórz w Eksploratorze", "en": "Open in Explorer"},
+    # Klik w Eksplorator, a folderu wydania już nie ma (skasowany po sondzie - bramka 0.19.0 Z8).
+    "proj.obj.folder_gone": {
+        "pl": "Folderu wydania nie ma już na dysku: {path} - „Odśwież podgląd” policzy wydanie od nowa.",
+        "en": "The release folder is no longer on disk: {path} - “Refresh preview” computes the "
+              "release again.",
+    },
     # Wyjście WBPP wydania: gdzie człowiek ustawia Output Directory i jak miesza wydania bezpiecznie.
     "proj.work_card": {"pl": "Folder roboczy", "en": "Working folder"},
     "proj.obj.out_line": {"pl": "Wyjście WBPP: {path}", "en": "WBPP output: {path}"},
@@ -5898,17 +5943,30 @@ CATALOG = {
                         "of one integration are sometimes saved with different centers too."},
     },
     "tasks.of_total": {"pl": "{open} z {total}", "en": "{open} of {total}"},
+    # Liczba „Wersji stosów" mówi GRUPY (odbiór 0.19.0 PO13), lista pod klikiem ich stosy - człon
+    # liczby nazywa jednostkę. Całość w mianowniku („12 grup"), „robota z całości" w dopełniaczu
+    # („3 z 12 grup", „1 z 1 grupy") - oba w odmianie przez całość.
+    "tasks.stack_versions_groups": {
+        "pl": {"one": "{n} grupa", "few": "{n} grupy", "many": "{n} grup"},
+        "en": {"one": "{n} group", "other": "{n} groups"},
+    },
+    "tasks.stack_versions_groups_of": {
+        "pl": {"one": "{open} z {n} grupy", "few": "{open} z {n} grup", "many": "{open} z {n} grup"},
+        "en": {"one": "{open} of {n} group", "other": "{open} of {n} groups"},
+    },
     "tasks.stack_versions_kept_tip": {
-        "pl": {"one": "{n} stos stoi w grupie z werdyktem „{keep}” - to nie jest robota. Werdykt "
-                      "cofniesz w tej perspektywie, prawym klikiem na stosie.",
-               "few": "{n} stosy stoją w grupach z werdyktem „{keep}” - to nie jest robota. Werdykt "
-                      "cofniesz w tej perspektywie, prawym klikiem na stosie.",
-               "many": "{n} stosów stoi w grupach z werdyktem „{keep}” - to nie jest robota. "
-                       "Werdykt cofniesz w tej perspektywie, prawym klikiem na stosie."},
-        "en": {"one": "{n} stack is in a group with the verdict “{keep}” - that is not work. You "
-                      "withdraw the verdict in this perspective, with a right click on the stack.",
-               "other": "{n} stacks are in groups with the verdict “{keep}” - that is not work. You "
-                        "withdraw the verdict in this perspective, with a right click on the stack."},
+        "pl": {"one": "{n} grupa ma werdykt „{keep}” - to nie jest robota. Jej stosy dalej stoją "
+                      "na liście; werdykt cofniesz w tej perspektywie, prawym klikiem na stosie.",
+               "few": "{n} grupy mają werdykt „{keep}” - to nie jest robota. Ich stosy dalej stoją "
+                      "na liście; werdykt cofniesz w tej perspektywie, prawym klikiem na stosie.",
+               "many": "{n} grup ma werdykt „{keep}” - to nie jest robota. Ich stosy dalej stoją "
+                       "na liście; werdykt cofniesz w tej perspektywie, prawym klikiem na stosie."},
+        "en": {"one": "{n} group has the verdict “{keep}” - that is not work. Its stacks stay on "
+                      "the list; you withdraw the verdict in this perspective, with a right click "
+                      "on a stack.",
+               "other": "{n} groups have the verdict “{keep}” - that is not work. Their stacks stay "
+                        "on the list; you withdraw the verdict in this perspective, with a right "
+                        "click on a stack."},
     },
 
     # --- kopia wiodąca klatki (grid.py, menu prawego kliku; AR-4, AR-23). Gest woła rdzeń
@@ -6236,13 +6294,14 @@ CATALOG = {
     # Okno podglądu i wykonania (`gui/object_change_dialog.py`).
     "objchg.title_change": {"pl": "Zmień obiekt", "en": "Change object"},
     "objchg.title_align": {"pl": "Uzgodnij pliki z obiektem", "en": "Align files with their object"},
+    # Nagłówek nie obiecuje karty (odbiór 0.19.0 OB11: RAW jej nie dostaje) - formę karty i liczbę
+    # plików, które ją dostaną, mówi zdanie planu (`objchg.plan.*`).
     "objchg.head_change": {
-        "pl": {"one": "Zmiana obiektu {n} zaznaczonej klatki na {canon} - karta OBJECT: „{card}”.",
-               "few": "Zmiana obiektu {n} zaznaczonych klatek na {canon} - karta OBJECT: „{card}”.",
-               "many": "Zmiana obiektu {n} zaznaczonych klatek na {canon} - karta OBJECT: „{card}”."},
-        "en": {"one": "Changing the object of {n} selected frame to {canon} - OBJECT card: “{card}”.",
-               "other": "Changing the object of {n} selected frames to {canon} - OBJECT card: "
-                        "“{card}”."}},
+        "pl": {"one": "Zmiana obiektu {n} zaznaczonej klatki na {canon}.",
+               "few": "Zmiana obiektu {n} zaznaczonych klatek na {canon}.",
+               "many": "Zmiana obiektu {n} zaznaczonych klatek na {canon}."},
+        "en": {"one": "Changing the object of {n} selected frame to {canon}.",
+               "other": "Changing the object of {n} selected frames to {canon}."}},
     "objchg.head_align": {
         "pl": {"one": "Uzgodnienie pliku {n} zaznaczonej klatki z obiektem, który już ma.",
                "few": "Uzgodnienie plików {n} zaznaczonych klatek z obiektem, który już mają.",
@@ -6252,11 +6311,90 @@ CATALOG = {
                         "have."}},
     "objchg.explain_change": {
         "pl": "Najpierw baza (obiekt z ręki), potem plik: przeniesienie do folderu obiektu "
-              "i karta OBJECT w pliku - per plik razem albo wcale. „Cofnij” przywraca karty, "
-              "pliki, katalogi i obiekt, dopóki okno jest otwarte.",
+              "i karta OBJECT w pliku tam, gdzie plan je przewiduje. Plik, który odmówi zapisu "
+              "(zajęty, zmieniony od podglądu), wraca ze wszystkimi krokami; awaria w połowie "
+              "pliku zostawia pozycję z błędem, a jej powód mówi drogę naprawy. „Cofnij” "
+              "przywraca karty, pliki, katalogi i obiekt, dopóki okno jest otwarte.",
         "en": "Database first (object set by hand), then the file: a move into the object folder "
-              "and the OBJECT card in the file - per file together or not at all. “Undo” "
-              "restores cards, files, folders and the object while the window is open."},
+              "and the OBJECT card in the file where the plan has them. A file that refuses the "
+              "write (busy, changed since the preview) goes back with all its steps; a failure "
+              "halfway through a file leaves the item with an error whose reason tells the way to "
+              "repair it. “Undo” restores cards, files, folders and the object while the window "
+              "is open."},
+    # Co TEN plan zrobi z plikami (`object_change_dialog.tekst_planu`, odbiór 0.19.0 OB11) - człony
+    # z zerem milczą. RAW (`card_read_only`) karty nie dostaje nigdy; przeniesienie zmienia jego
+    # ścieżkę, nie treść (sterownik przenosi każdy format).
+    "objchg.plan.head": {"pl": "Ten plan: {parts}.", "en": "This plan: {parts}."},
+    "objchg.plan.card_form": {"pl": "karta OBJECT „{card}” w pliku: {n}",
+                              "en": "OBJECT card “{card}” in the file: {n}"},
+    "objchg.plan.card": {"pl": "karta OBJECT w pliku: {n}", "en": "OBJECT card in the file: {n}"},
+    "objchg.plan.move": {"pl": "plik do folderu obiektu albo z nową nazwą: {n}",
+                         "en": "file to the object folder or renamed: {n}"},
+    "objchg.plan.db_only": {"pl": "tylko wpis w bazie Horreum, plik nietknięty: {n}",
+                            "en": "Horreum database entry only, file untouched: {n}"},
+    "objchg.plan.raw_db": {
+        "pl": "RAW z aparatu ({n}): format tylko do odczytu - karty OBJECT nie dopiszemy, plik "
+              "zostaje nietknięty; zmienia się wyłącznie wpis w bazie Horreum.",
+        "en": "Camera RAW ({n}): read-only format - no OBJECT card is written and the file stays "
+              "untouched; only the Horreum database entry changes."},
+    "objchg.plan.raw_moved": {
+        "pl": "RAW z aparatu ({n}): format tylko do odczytu - karty OBJECT nie dopiszemy, treść "
+              "pliku zostaje nietknięta; do folderu obiektu jedzie {moved} z nich (zmienia się "
+              "wyłącznie ścieżka pliku).",
+        "en": "Camera RAW ({n}): read-only format - no OBJECT card is written and the file "
+              "contents stay untouched; {moved} of them move to the object folder (only the file "
+              "path changes)."},
+    # Zdanie PASKA po zamknięciu okna (`object_change_dialog.zdanie_paska`, odbiór 0.19.0 OB12):
+    # ile klatek, na jaki obiekt, z jakiego (jeden obiekt sprzed gestu) i droga powrotu.
+    "objchg.bar.changed": {
+        "pl": {"one": "Zmieniono obiekt {n} klatki na {canon}",
+               "few": "Zmieniono obiekt {n} klatek na {canon}",
+               "many": "Zmieniono obiekt {n} klatek na {canon}"},
+        "en": {"one": "Object of {n} frame changed to {canon}",
+               "other": "Object of {n} frames changed to {canon}"}},
+    "objchg.bar.changed_from": {
+        "pl": {"one": "Zmieniono obiekt {n} klatki z {old} na {canon}",
+               "few": "Zmieniono obiekt {n} klatek z {old} na {canon}",
+               "many": "Zmieniono obiekt {n} klatek z {old} na {canon}"},
+        "en": {"one": "Object of {n} frame changed from {old} to {canon}",
+               "other": "Object of {n} frames changed from {old} to {canon}"}},
+    "objchg.bar.undone_change": {
+        "pl": {"one": "Cofnięto zmianę obiektu na {canon} - wróciła {n} klatka",
+               "few": "Cofnięto zmianę obiektu na {canon} - wróciły {n} klatki",
+               "many": "Cofnięto zmianę obiektu na {canon} - wróciło {n} klatek"},
+        "en": {"one": "Object change to {canon} undone - {n} frame restored",
+               "other": "Object change to {canon} undone - {n} frames restored"}},
+    # Jeden obiekt z chwili podglądu wszystkich cofniętych klatek (`before_canon`, Z5).
+    "objchg.bar.undone_change_to": {
+        "pl": {"one": "Cofnięto zmianę obiektu na {canon} - {n} klatka wróciła do {old}",
+               "few": "Cofnięto zmianę obiektu na {canon} - {n} klatki wróciły do {old}",
+               "many": "Cofnięto zmianę obiektu na {canon} - {n} klatek wróciło do {old}"},
+        "en": {"one": "Object change to {canon} undone - {n} frame returned to {old}",
+               "other": "Object change to {canon} undone - {n} frames returned to {old}"}},
+    "objchg.bar.aligned": {
+        "pl": {"one": "Uzgodniono plik {n} klatki z obiektem w bazie",
+               "few": "Uzgodniono pliki {n} klatek z obiektem w bazie",
+               "many": "Uzgodniono pliki {n} klatek z obiektem w bazie"},
+        "en": {"one": "File of {n} frame aligned with its object in the database",
+               "other": "Files of {n} frames aligned with their object in the database"}},
+    "objchg.bar.undone_align": {
+        "pl": {"one": "Cofnięto uzgodnienie plików - wróciła {n} klatka",
+               "few": "Cofnięto uzgodnienie plików - wróciły {n} klatki",
+               "many": "Cofnięto uzgodnienie plików - wróciło {n} klatek"},
+        "en": {"one": "File alignment undone - {n} frame restored",
+               "other": "File alignment undone - {n} frames restored"}},
+    "objchg.bar.objects": {"pl": " ({objects})", "en": " ({objects})"},
+    # Droga powrotu: przebieg przerwany albo z błędem pozycji - wiersz Porządków; domknięty - CLI
+    # po numerze (jedyny uchwyt po zamknięciu okna, jak polecenie cofnięcia w oknach kart).
+    # Polecenie stoi w SZCZEGÓLE zdania pod kursorem paska, w zdaniu krótki człon (AR-272).
+    "objchg.bar.tasks": {"pl": " · dokończenie albo cofnięcie: {nav} → „{row}”",
+                         "en": " · to finish or undo: {nav} → “{row}”"},
+    "objchg.bar.undo_short": {"pl": " · cofnięcie: polecenie pod kursorem („{copy}”)",
+                              "en": " · to undo: command under the cursor (“{copy}”)"},
+    "objchg.bar.undo_cli": {"pl": "Cofnięcie przebiegu {run_id} po zamknięciu okna (wiersz "
+                                  "poleceń):\nhorreum object-change undo \"{db}\" {run_id}",
+                            "en": "Undo run {run_id} after closing the window (command line):\n"
+                                  "horreum object-change undo \"{db}\" {run_id}"},
     "objchg.explain_align": {
         "pl": "Obiekt w bazie zostaje. Plik jedzie do folderu swojego obiektu, a karta OBJECT "
               "dostaje jego formę - per plik razem albo wcale. „Cofnij” działa, dopóki okno jest "
@@ -6286,17 +6424,13 @@ CATALOG = {
         "en": {"one": " and {n} more", "other": " and {n} more"}},
     # Wejście z Porządków na przerwany przebieg (AR-121): okno bez planu, stan z bazy. Numer
     # przebiegu niesie wiersz stanu pod listą (do zaznaczenia i skopiowania), nie nagłówek.
+    # Bez karty w nagłówku, jak `objchg.head_change` (OB11): kartę per pozycja mówi lista.
     "objchg.head_resume_change": {
-        "pl": {"one": "Przerwany przebieg: zmiana obiektu {n} klatki na {canon} - karta "
-                      "OBJECT: „{card}”.",
-               "few": "Przerwany przebieg: zmiana obiektu {n} klatek na {canon} - karta "
-                      "OBJECT: „{card}”.",
-               "many": "Przerwany przebieg: zmiana obiektu {n} klatek na {canon} - karta "
-                       "OBJECT: „{card}”."},
-        "en": {"one": "Interrupted run: changing the object of {n} frame to {canon} - "
-                      "OBJECT card: “{card}”.",
-               "other": "Interrupted run: changing the object of {n} frames to {canon} - "
-                        "OBJECT card: “{card}”."}},
+        "pl": {"one": "Przerwany przebieg: zmiana obiektu {n} klatki na {canon}.",
+               "few": "Przerwany przebieg: zmiana obiektu {n} klatek na {canon}.",
+               "many": "Przerwany przebieg: zmiana obiektu {n} klatek na {canon}."},
+        "en": {"one": "Interrupted run: changing the object of {n} frame to {canon}.",
+               "other": "Interrupted run: changing the object of {n} frames to {canon}."}},
     "objchg.head_resume_align": {
         "pl": {"one": "Przerwany przebieg: uzgodnienie pliku {n} klatki z obiektem.",
                "few": "Przerwany przebieg: uzgodnienie plików {n} klatek z obiektem.",
@@ -7874,6 +8008,8 @@ CATALOG = {
     "objchg.res.run": {"pl": " · przebieg {run_id}", "en": " · run {run_id}"},
     "objchg.card_kept": {"pl": "{value} (bez zmiany)", "en": "{value} (unchanged)"},
     "objchg.card_none": {"pl": "- (bez karty)", "en": "- (no card)"},
+    "objchg.card_read_only": {"pl": "- (RAW: format tylko do odczytu)",
+                              "en": "- (RAW: read-only format)"},
     "objchg.card_absent": {"pl": "(brak)", "en": "(none)"},
     "objchg.card_change": {"pl": "{old} → {new}", "en": "{old} → {new}"},
     "objchg.finish_btn": {"pl": "Dokończ ({n})", "en": "Finish ({n})"},
@@ -8055,6 +8191,9 @@ CATALOG = {
                                 "en": "Hand value removed - the axis uses the files again."},
     "axis.tel.optics_unchanged": {"pl": "Optyka bez zmian.", "en": "Optics unchanged."},
     "axis.tel.optics_rejected": {"pl": "Nie zapisano: {e}", "en": "Not saved: {e}"},
+    "axis.tel.optics_gone": {
+        "pl": "teleskopu #{tid} nie ma już na osi (scalony albo cofnięty w trakcie edycji) - wpis porzucony.",
+        "en": "telescope #{tid} is no longer on the axis (merged or undone during editing) - entry dropped."},
     "axis.tel.aperture": {"pl": "średnica (wyliczona): {d} mm = {focal} / {f}",
                           "en": "aperture (computed): {d} mm = {focal} / {f}"},
     "axis.tel.aperture_unknown": {"pl": "średnica: brak ogniskowej albo f/ - wpisz, żeby policzyć",

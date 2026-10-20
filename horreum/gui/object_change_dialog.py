@@ -54,7 +54,8 @@ from horreum.gui.i18n_catalog import CATALOG
 # wiersza ze spadkiem na drogę atomową, podział powodu spadku); `grid` importuje go i tak.
 # `wb_worker` ciągnie `writeback` (astropy) już tutaj, więc oba stoją na górze - import w funkcji
 # niczego by nie odłożył.
-from horreum.gui.wb_worker import (EtykietaBledu, WritebackRunner, czytelny_powod,
+from horreum.gui.wb_worker import (EtykietaBledu, WritebackRunner, ZdanieZeSzczegolem,
+                                   czytelny_powod,
                                    podziel_powod_spadku, spadek_na_droge_atomowa, status_pozycji,
                                    tekst_powodu, wiersz_systemu, wiersz_szczegolu,
                                    zdanie_wyniku_zapisu)
@@ -447,6 +448,39 @@ def liczby_planu(plan):
     }
 
 
+def tekst_planu(plan):
+    """Zdanie podglądu mówiące, CO plan zrobi z plikami - per pozycja, z tych samych pól planu,
+    które idą do stagingu (`repo.stage_object_change`: karta tylko przy `card_op`, przeniesienie
+    tylko przy `new_path`), a nie ze stałej obietnicy „karta i folder” (odbiór 0.19.0 OB11: podgląd
+    RAW-ów obiecywał kartę i przeniesienie). Człony z zerem milczą; pusty tekst = plan bez roboty.
+
+    RAW (`card_read_only`, read-model `NO_OBJECT_CARD_FILETYPES`) karty nie dostaje NIGDY - pisarz
+    go nie zapisuje. Przeniesienie RAW-a idzie jak każdego pliku (sterownik `_zmien_pozycje`, krok
+    przeniesienia nie pyta o format), więc zdanie RAW mówi, ile z nich zmieni wyłącznie ścieżkę,
+    a reszta - tylko wpis w bazie."""
+    robota = [it for it in plan.items if ma_robote(it)]
+    karty = sum(1 for it in robota if it.card_op)
+    ruch = sum(1 for it in robota if it.new_path)
+    baza = sum(1 for it in robota if it.object_change and not it.new_path and not it.card_op)
+    czlony = []
+    if karty:
+        czlony.append(i18n.t("objchg.plan.card_form", n=karty, card=plan.target.card_form)
+                      if plan.target is not None else i18n.t("objchg.plan.card", n=karty))
+    if ruch:
+        czlony.append(i18n.t("objchg.plan.move", n=ruch))
+    if baza:
+        czlony.append(i18n.t("objchg.plan.db_only", n=baza))
+    if not czlony:
+        return ""
+    tekst = i18n.t("objchg.plan.head", parts=" · ".join(czlony))
+    raw = [it for it in robota if it.card_read_only]
+    if raw:
+        jedzie = sum(1 for it in raw if it.new_path)
+        tekst += "\n" + (i18n.t("objchg.plan.raw_moved", n=len(raw), moved=jedzie) if jedzie
+                         else i18n.t("objchg.plan.raw_db", n=len(raw)))
+    return tekst
+
+
 def zdanie_wyniku_zmiany(res, *, cofniecie=False):
     """Zdanie wyniku przebiegu (`writeback.ObjectChangeResult`) - wspólna gramatyka powierzchni
     zapisu (`wb_worker.zdanie_wyniku_zapisu`: liczba, blokady, błędy, pominięcia, pierwszy powód)
@@ -494,6 +528,45 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
     return czytelny_powod(msg)
 
 
+def zdanie_paska(res, *, target, n, przed=None, obiekty=(), cofniecie=False, droga=("", "")):
+    """Zdanie PASKA po zamknięciu okna (odbiór 0.19.0 OB12) - jedno zdanie gestu jak u sąsiadów
+    osi obiektu („Przypisz obiekt”, „Cofnij przypisanie”): ile klatek (`n` - z TRWAŁEGO stanu
+    pozycji przebiegu, nie z ostatniej tury: „Dokończ” i ponowione cofnięcie sumują się), na jaki
+    obiekt, z jakiego albo do jakiego wróciły (`przed` - jeden obiekt z chwili podglądu wszystkich
+    liczonych klatek, inaczej None) i droga powrotu (`droga` = (człon zdania, szczegół) - składa ją
+    okno: Porządki albo polecenie CLI w szczególe pod kursorem, AR-272). Zdanie okna
+    (`zdanie_wyniku_zmiany`) mówi pozycjami i numerem przebiegu, a po zamknięciu nie widać już
+    listy, do której się odnosi.
+
+    Rozbicie blokad, błędów i pominięć tury `res` z pierwszym powodem bierze tę samą gramatykę co
+    okno (`zdanie_wyniku_zapisu`) bez jej członu głównego - liczbę niesie głowa zdania. `res=None`
+    (wyjątek workera: wyniku tury nie ma) - sama głowa i droga. `obiekty` = obiekty klatek przy
+    „Uzgodnij” (nagłówek okna, `lista_obiektow`). Ze szczegółem → `ZdanieZeSzczegolem`."""
+    if target is not None and cofniecie:
+        glowa = (i18n.t_plural("objchg.bar.undone_change_to", n, canon=target.canon, old=przed)
+                 if przed and przed != target.canon
+                 else i18n.t_plural("objchg.bar.undone_change", n, canon=target.canon))
+    elif target is not None:
+        glowa = (i18n.t_plural("objchg.bar.changed_from", n, old=przed, canon=target.canon)
+                 if przed and przed != target.canon
+                 else i18n.t_plural("objchg.bar.changed", n, canon=target.canon))
+    else:
+        glowa = i18n.t_plural("objchg.bar.undone_align" if cofniecie else "objchg.bar.aligned", n)
+        if obiekty:
+            glowa += i18n.t("objchg.bar.objects", objects=lista_obiektow(obiekty))
+    msg = glowa
+    if res is not None:
+        klucz = "objchg.res.undone" if cofniecie else "objchg.res.applied"
+        wynik, glowny = zdanie_wyniku_zapisu(res, klucz), i18n.t(klucz, n=len(res.applied))
+        assert wynik.startswith(glowny), (wynik, glowny)
+        msg += wynik[len(glowny):]
+        if res.cancelled:
+            msg += i18n.t("wb.cancelled_note")
+    czlon, szczegol = droga
+    zdanie = czytelny_powod(msg) + czlon
+    return ZdanieZeSzczegolem(zdanie, szczegol) if szczegol else zdanie
+
+
 def zdanie_odmowy_stagingu(exc):
     """Odmowa stagingu planu (`repo.stage_object_change`) → `(zdanie, szczegół)` pola błędu okna
     (AR-200) - ta sama reguła wyjątku okna co plan (`item_reasons.powod_okna`, AR-209). Odmowa
@@ -535,8 +608,10 @@ class ObjectChangeDialog(QDialog):
     asercja: okno z takim celem to błąd kolejności (EXPECT).
 
     `changed` = zapis albo cofnięcie doszło do skutku (gospodarz odświeża zbiór i Porządki);
-    `busy_changed` = okno pisze do plików (mutex drugiej powierzchni, D-PD-3). `summary` = ostatnie
-    zdanie wyniku - po zamknięciu okna gospodarz kładzie je na pasek."""
+    `busy_changed` = okno pisze do plików (mutex drugiej powierzchni, D-PD-3). `summary` = zdanie
+    PASKA ostatniego biegu (`zdanie_paska`: ile klatek, na jaki obiekt, droga powrotu) - po
+    zamknięciu okna gospodarz kładzie je na pasek; zdanie wyniku w oknie (`status`) mówi pozycjami
+    i numerem przebiegu. Okno zamknięte bez biegu zostawia `summary` puste - pasek milczy."""
 
     changed = Signal()
     busy_changed = Signal(bool)
@@ -596,6 +671,7 @@ class ObjectChangeDialog(QDialog):
         self._po_exec = False        # `exec` wrócił - okno do kasacji, gdy wolne (`_zwolnij_gdy_wolne`)
         self._zwolnione = False      # `deleteLater` już zlecone
         self.summary = ""
+        self._przebieg_tury = None   # przebieg ostatniej tury zapisu albo cofnięcia (zdanie paska)
         self._runner = WritebackRunner(self._db_path, now_fn=now_fn, parent=self)
         self._runner.async_ok = off_thread
         self._runner.busy_changed.connect(self.busy_changed)
@@ -627,6 +703,12 @@ class ObjectChangeDialog(QDialog):
         self.opis.setProperty("role", "secondary")
         lay.addWidget(self.opis)
         self._opisz_stan()
+        # Co TEN plan zrobi z plikami (`tekst_planu`, OB11): ile kart, ile przeniesień, ile samych
+        # wpisów w bazie i zdanie o RAW-ach - widoczne przy planie, jak liczby i suma dróg.
+        self.plan_note = QLabel("")
+        self.plan_note.setWordWrap(True)
+        self.plan_note.setVisible(False)
+        lay.addWidget(self.plan_note)
         # Reguła nazwy (D-1011-6 `O2`) - z listy folderów jej nie widać, a decyduje, czy nazwa
         # pliku się zmieni.
         self.name_rule = QLabel(i18n.t("objchg.name_rule"))
@@ -763,21 +845,21 @@ class ObjectChangeDialog(QDialog):
         Nagłówek „Uzgodnij” NAZYWA obiekty klatek (`lista_obiektow`) - bez tego mówił „z obiektem,
         który już mają”, nie mówiąc z jakim. Numer przebiegu (32 znaki) nie stoi w nagłówku: niesie
         go wiersz stanu pod listą, gdzie da się go zaznaczyć i skopiować (uchwyt CLI)."""
+        # Nagłówek „Zmień obiekt…” nie obiecuje karty: o karcie mówi zdanie planu (`tekst_planu`) -
+        # RAW jej nie dostanie (OB11), a forma karty stoi tam przy liczbie plików, które ją dostaną.
         n = len(self._frame_ids)
         obiekty = (i18n.t_plural("objchg.head_objects", len(self._obiekty),
                                  objects=lista_obiektow(self._obiekty))
                    if self._target is None and self._obiekty else "")
         if self._stan_przebiegu is not None:
-            head = (i18n.t_plural("objchg.head_resume_change", n, canon=self._target.canon,
-                                  card=self._target.card_form)
+            head = (i18n.t_plural("objchg.head_resume_change", n, canon=self._target.canon)
                     if self._target is not None
                     else i18n.t_plural("objchg.head_resume_align", n) + obiekty)
             opis = i18n.t({"staged": "objchg.explain_resume",
                            "undoing": "objchg.explain_resume_undoing",
                            "failed": "objchg.explain_resume_failed"}[self._stan_przebiegu])
         elif self._target is not None:
-            head = i18n.t_plural("objchg.head_change", n, canon=self._target.canon,
-                                 card=self._target.card_form)
+            head = i18n.t_plural("objchg.head_change", n, canon=self._target.canon)
             opis = i18n.t("objchg.explain_change")
         else:
             head = i18n.t_plural("objchg.head_align", n) + obiekty
@@ -799,6 +881,7 @@ class ObjectChangeDialog(QDialog):
         self.counts.setText(i18n.t("objchg.planning"))
         self.routes.setVisible(False)              # suma dróg należy do planu, który się liczy
         self.copies_hint.setVisible(False)         # zdanie o kopiach też - mówi o pominięciach planu
+        self.plan_note.setVisible(False)           # i zdanie o tym, co plan zrobi z plikami
         worker = PlanWorker(self._db_path, self._gen, frame_ids=self._frame_ids,
                             target=self._target,
                             con=None if (self._off_thread and self._db_path) else self.con)
@@ -873,10 +956,13 @@ class ObjectChangeDialog(QDialog):
         self._wiersze = {}
         self._status_wiersza = {}       # nowy plan: wiersze bez historii biegu
         self._jest = {it.location_id: it.old_path for it in plan.items}
+        self.plan_note.setText(tekst_planu(plan))
+        self.plan_note.setVisible(bool(self.plan_note.text()))
         for it in plan.items:
             droga = self._drogi.get(it.location_id, _DROGA_NIEZNANA)
             w = QTreeWidgetItem(["", "", self._tekst_karty(it.card_op, it.card_old, it.card_new,
-                                                           it.old_path, droga)])
+                                                           it.old_path, droga,
+                                                           tylko_odczyt=it.card_read_only)])
             ustaw_sciezke(w, _COL_STARA, it.old_path, self._korzen)
             if it.new_path:
                 ustaw_sciezke(w, _COL_NOWA, it.new_path, self._korzen)
@@ -962,8 +1048,10 @@ class ObjectChangeDialog(QDialog):
                 stan = i18n.t(_STATUS_POZYCJI[it["status"]])
             status, tip = status_pozycji(stan, it["reason"], z_bazy=True)
             self._status_wiersza[it["location_id"]] = (status, tip)
+            # RAW mówi „format tylko do odczytu” także na liście przebiegu z Porządków (OB11).
             karta = (self._tekst_karty(it["card_op"], it["card_old"], it["card_new"],
-                                       it["old_path"]) if it["card_op"] else "")
+                                       it["old_path"]) if it["card_op"]
+                     else i18n.t("objchg.card_read_only") if it["card_read_only"] else "")
             w = QTreeWidgetItem(["", "", karta, status])
             ustaw_sciezke(w, _COL_STARA, it["old_path"], self._korzen)
             ustaw_sciezke(w, _COL_NOWA, it["path"], self._korzen)
@@ -976,6 +1064,7 @@ class ObjectChangeDialog(QDialog):
         self._dopasuj_karte()
         self.counts.setVisible(False)
         self.routes.setVisible(False)          # przebieg z bazy mówi stan, nie prognozę
+        self.plan_note.setVisible(False)
         self.status.setText(i18n.t("objchg.res.run", run_id=self._run_id).lstrip(" ·"))
         self._sync_akcji()
 
@@ -1022,6 +1111,7 @@ class ObjectChangeDialog(QDialog):
         self.routes.setVisible(False)         # prognoza dróg też - drogę pliku mówi teraz jego status
         self.warnings.setVisible(False)       # ostrzeżenia planera mówią w czasie przyszłym, jak liczby
         self.card_note.setVisible(False)      # zdanie podglądu; drogę pliku mówi teraz jego status
+        self.plan_note.setVisible(False)      # zapowiedź planu - czas przeszły niesie zdanie wyniku
         pominiete = sum(g.childCount() for g in (self.skipped_tree.topLevelItem(i)
                                                  for i in range(self.skipped_tree.topLevelItemCount())))
         self.skipped_head.setText(i18n.t_plural("objchg.skipped_head_done", pominiete))
@@ -1089,11 +1179,12 @@ class ObjectChangeDialog(QDialog):
         w.setToolTip(_COL_KARTA, tekst)
 
     @staticmethod
-    def _tekst_karty(card_op, card_old, card_new, path, droga=_DROGA_NIEZNANA):
+    def _tekst_karty(card_op, card_old, card_new, path, droga=_DROGA_NIEZNANA, tylko_odczyt=False):
         """Karta `OBJECT` pozycji: stara → nowa, albo stan bez zmiany (karta już w formie albo
-        format bez karty - RAW). DOPISANIE karty do FITS niesie KRÓTKI znacznik drogi zapisu
-        (AR-155) z prognozy pozycji `droga` (`drogi_dopisania`): „w miejscu” (`None` - nagłówek
-        ma wolny rekord za `END`), „cały plik przepisany” (`fb_no_room` - pełny ostatni blok bez
+        format bez karty - RAW, `tylko_odczyt` z pozycji planu: komórka mówi, że format jest tylko
+        do odczytu, a nie gołe „bez karty”). DOPISANIE karty do FITS niesie KRÓTKI znacznik drogi
+        zapisu (AR-155) z prognozy pozycji `droga` (`drogi_dopisania`): „w miejscu” (`None` -
+        nagłówek ma wolny rekord za `END`), „cały plik przepisany” (`fb_no_room` - pełny ostatni blok bez
         pustej karty) albo ogólne „dopisanie karty” (`objchg.card_add_fits_short`), gdy lustro kart
         nie rozstrzyga albo prognozy nie ma (`_DROGA_NIEZNANA` - domyślnie; przebieg z bazy pokazuje
         stan historyczny, nie prognozę). Pełne zdanie stoi w podpowiedzi komórki, a ogólne
@@ -1102,6 +1193,8 @@ class ObjectChangeDialog(QDialog):
         plik naprawdę poszedł, podaje zdanie wyniku. Pełne zdanie w każdym wierszu zabierało
         kolumnie ścieżek szerokość (zmierzone natywnie przy 1100 px okna)."""
         if card_op is None:
+            if tylko_odczyt:            # RAW: karty nie zapisujemy z definicji formatu (OB11)
+                return i18n.t("objchg.card_read_only")
             return (i18n.t("objchg.card_kept", value=repr(card_old)) if card_old
                     else i18n.t("objchg.card_none"))
         stara = repr(card_old) if card_old is not None else i18n.t("objchg.card_absent")
@@ -1202,6 +1295,7 @@ class ObjectChangeDialog(QDialog):
             total = len(self._plan.items)
         self._domkniety = True
         self._w_biegu = total
+        self._zacznij_ture(self._run_id)
         self._begin_progress(total)
         self._runner.start("object_change", self._run_id, on_progress=self._on_progress,
                            on_done=self._after_commit, on_failed=self._on_failed)
@@ -1227,8 +1321,7 @@ class ObjectChangeDialog(QDialog):
         """Wynik przebiegu: lista z wynikiem per wiersz, zdanie, „Cofnij”, gdy cokolwiek się
         zmieniło, i „Dokończ” po przerwaniu (pozycje nieprzetworzone)."""
         self.bar.setVisible(False)
-        self.summary = zdanie_wyniku_zmiany(res)
-        self.status.setText(self.summary)
+        self.status.setText(zdanie_wyniku_zmiany(res))
         self._pokaz_wynik(res, cofniecie=False)
         self._wynik_na_liscie = True
         self._do_cofniecia = self._do_cofniecia or ruszyl_cokolwiek(res)
@@ -1250,8 +1343,46 @@ class ObjectChangeDialog(QDialog):
             # dzisiejszym stanie zamiast martwego przycisku.
             self._run_id = None
             self._domkniety = False
+        self.summary = self._zdanie_paska(res, cofniecie=False)   # po stanie: droga powrotu z niego
         self.changed.emit()
         self._sync_akcji()
+
+    def _zacznij_ture(self, run_id):
+        """Start tury zapisu albo cofnięcia: przebieg tury zapamiętany na zdanie paska (stan okna
+        `_run_id` po turze bywa już zgaszony), a zdanie paska poprzedniej tury zdjęte - tura, która
+        padnie wyjątkiem, nie zostawi na pasku cudzego wyniku (OB12, Z4)."""
+        self._przebieg_tury = run_id
+        self.summary = ""
+
+    def _zdanie_paska(self, res, *, cofniecie):
+        """Zdanie paska po zamknięciu okna (`zdanie_paska`, OB12) z TRWAŁEGO stanu przebiegu tury
+        (`queries.object_change_run_view`), nie z wyniku ostatniej tury: liczba pozycji `applied`
+        (zapis) albo `undone` (cofnięcie) sumuje „Dokończ” i ponowione cofnięcie, a obiekt z chwili
+        podglądu (`before_canon`, zapisany przy stagingu) daje „z X” i „wróciło do X” także przy
+        wznowieniu z Porządków, gdy baza ma już nowy obiekt. `res=None` - wyjątek workera.
+
+        DROGA POWROTU: przebieg na liście Porządków (`interrupted_object_change_runs` - ten sam
+        predykat co ich wiersz: przerwany także przed pierwszą pozycją, cofanie niedomknięte,
+        pozycja w błędzie) → Porządki, bez względu na to, czy tura coś zmieniła. Przebieg domknięty,
+        który zostawił coś do cofnięcia, po zamknięciu okna cofa wyłącznie CLI po numerze -
+        polecenie stoi w SZCZEGÓLE zdania pod kursorem paska (AR-272: pełna ścieżka bazy w pasku ginęła
+        w elizji razem z numerem), a w zdaniu krótki człon."""
+        run_id = self._przebieg_tury
+        widok = queries.object_change_run_view(self.con, run_id)
+        assert widok is not None, f"brak przebiegu zmiany obiektu {run_id!r}"
+        liczone = [it for it in widok["items"]
+                   if it["status"] == ("undone" if cofniecie else "applied")]
+        stare = {it["before_canon"] for it in liczone}
+        przed = next(iter(stare)) if len(stare) == 1 else None
+        droga = ("", "")
+        if run_id in queries.interrupted_object_change_runs(self.con):
+            droga = (i18n.t("objchg.bar.tasks", nav=i18n.t("nav.porzadki"),
+                            row=i18n.t("tasks.object_change_interrupted")), "")
+        elif self._run_id is not None and self._do_cofniecia and self._db_path:
+            droga = (i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_detail")),
+                     i18n.t("objchg.bar.undo_cli", db=self._db_path, run_id=run_id))
+        return zdanie_paska(res, target=self._target, n=len(liczone), przed=przed,
+                            obiekty=self._obiekty, cofniecie=cofniecie, droga=droga)
 
     def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera. Przebieg jest w bazie, więc okno bierze stan stamtąd, nie z pamięci:
@@ -1273,6 +1404,10 @@ class ObjectChangeDialog(QDialog):
         self.error.ustaw(i18n.t("grid.wb.error", msg=czytelny_powod(msg))
                          + (i18n.t("objchg.res.run", run_id=self._run_id) if self._run_id else ""),
                          podpowiedz)
+        if self._przebieg_tury is not None:
+            # Wyniku tury nie ma - pasek mówi z utrwalonego widoku przebiegu: ile pozycji naprawdę
+            # zmienionych (albo cofniętych) i droga przez Porządki (Z4).
+            self.summary = self._zdanie_paska(None, cofniecie=op != "object_change")
         self._sync_akcji()
         self.changed.emit()
 
@@ -1281,6 +1416,7 @@ class ObjectChangeDialog(QDialog):
         if self._run_id is None or not self._wolny():
             return
         self.error.clear()
+        self._zacznij_ture(self._run_id)
         self._begin_progress(0)
         self._runner.start("undo_object_change", self._run_id, on_progress=self._on_progress,
                            on_done=self._after_undo, on_failed=self._on_failed)
@@ -1291,8 +1427,7 @@ class ObjectChangeDialog(QDialog):
         niedomkniętą fazę pozycji (rdzeń). Pełne cofnięcie zużywa przebieg: „ponownie” to świeży
         plan i nowy przebieg („Policz plan ponownie”), nie powtórka starego."""
         self.bar.setVisible(False)
-        self.summary = zdanie_wyniku_zmiany(res, cofniecie=True)
-        self.status.setText(self.summary)
+        self.status.setText(zdanie_wyniku_zmiany(res, cofniecie=True))
         self._pokaz_wynik(res, cofniecie=True)
         self._wynik_na_liscie = True
         niedomkniete = bool(res.blocked or res.failed or res.cancelled)
@@ -1303,6 +1438,7 @@ class ObjectChangeDialog(QDialog):
         if not niedomkniete:
             self._run_id = None
             self._domkniety = False
+        self.summary = self._zdanie_paska(res, cofniecie=True)
         self.changed.emit()
         self._sync_akcji()
 

@@ -7,7 +7,7 @@ drugie wejście ten układ unieważnia (R-S4-9), więc kontrakt przenosi się TU
 """
 import unicodedata
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout,
 )
@@ -24,6 +24,10 @@ from horreum.resolve.solar import solar_form
 # listę na wysokość ekranu (zmierzone: 1778 px przy kilkuset obiektach); `combobox-popup: 0`
 # przełącza go na zwykłą listę z suwakiem, która tę liczbę szanuje.
 _POZYCJI_NARAZ = 10
+# Pauza w pisaniu, po której nazwa nierozpoznana dostaje czerwone zdanie (odbiór 0.19.0 OB11:
+# walidacja na żywo krzyczała przy każdym znaku, zanim człowiek skończył pisać). Wyjście z pola
+# i Enter mówią od razu (`AssignObjectDialog.zweryfikuj_nazwe`).
+_PAUZA_NAZWY_MS = 500
 
 
 def bez_diakrytykow(text):
@@ -350,6 +354,16 @@ class AssignObjectDialog(QDialog):
         self.error.setProperty("role", "error")     # kolor z motywu (P-C) — sztywny #b00020 był ślepy na dark
         self.error.setWordWrap(True)
         lay.addWidget(self.error)
+        # NAZWA NIEROZPOZNANA CZERWIENIEJE PO PAUZIE, NIE PRZY ZNAKU (OB11): w trakcie pisania pole
+        # jest w stanie neutralnym (OK wygaszony - nazwa jeszcze nie prowadzi do obiektu), a zdanie
+        # błędu przychodzi po `_PAUZA_NAZWY_MS` bez klawisza albo od razu po wyjściu z pola
+        # i Enterze.
+        # `_nierozpoznana` = tekst, o którym timer ma powiedzieć; zmiana pola go podmienia.
+        self._nierozpoznana = None
+        self._pauza_nazwy = QTimer(self)
+        self._pauza_nazwy.setSingleShot(True)
+        self._pauza_nazwy.setInterval(_PAUZA_NAZWY_MS)
+        self._pauza_nazwy.timeout.connect(self.zweryfikuj_nazwe)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.accept_btn = buttons.button(QDialogButtonBox.Ok)
@@ -365,6 +379,7 @@ class AssignObjectDialog(QDialog):
         lay.addWidget(buttons)
         self.combo.currentIndexChanged.connect(self._sync_accept_enabled)
         self.designation.textChanged.connect(self._sync_accept_enabled)
+        self.designation.editingFinished.connect(self.zweryfikuj_nazwe)   # wyjście z pola, Enter
         # Edycja RĘKĄ (nie `setText` okna) zabiera polu status frazy przeniesionej.
         self.designation.textEdited.connect(self._on_designation_edited)
         self.combo.activated.connect(self._on_combo_activated)
@@ -499,7 +514,8 @@ class AssignObjectDialog(QDialog):
     _broni_sie_sama = staticmethod(broni_sie_sama)     # funkcja modułowa (R-S2b-12) — jeden właściciel
 
     def _sync_accept_enabled(self):
-        """Akcja wymaga JAWNEGO celu; wpisaną nazwę walidujemy na żywo, żeby disabled miał powód.
+        """Akcja wymaga JAWNEGO celu; wpisaną nazwę walidujemy na żywo, żeby disabled miał powód -
+        zdanie powodu przychodzi po pauzie w pisaniu albo po wyjściu z pola (`zweryfikuj_nazwe`).
 
         Pytamy `resolver.name_resolves` — TĘ SAMĄ bramkę, co okno „Napraw nagłówek…". Dawne
         `catalog_canon` odpowiadało na węższe pytanie („czy to oznaczenie katalogowe") i odrzucało
@@ -522,8 +538,13 @@ class AssignObjectDialog(QDialog):
             self._ustaw_zakladanie(None)
             return self._fail(i18n.t("assign.dictionary_broken"))
         self.accept_btn.setEnabled(valid_name if text else self.combo.currentData() is not None)
-        if text and not valid_name:
-            self._fail(i18n.t("assign.unknown_name", text=text))
+        # Nazwa nierozpoznana: zdanie błędu dopiero po pauzie w pisaniu (`zweryfikuj_nazwe`) -
+        # każdy znak odkłada je od nowa, nazwa rozpoznana albo puste pole je odwołuje.
+        self._nierozpoznana = text if text and not valid_name else None
+        if self._nierozpoznana is not None:
+            self._pauza_nazwy.start()
+        else:
+            self._pauza_nazwy.stop()
         # Zdanie na żywo z TEJ SAMEJ tożsamości, którą zapisze `_validate_and_accept`; warunek na
         # zmiennej lokalnej, nie na `isVisible()` (ta sama lekcja, co przy nocie niżej).
         podglad = ident is not None
@@ -557,6 +578,15 @@ class AssignObjectDialog(QDialog):
             self.canon_preview.setText(i18n.t("assign.xref_redirect", old=wybor[1],
                                               new=cel["canon"]))
         dopasuj_wysokosc(self)          # okno rośnie do zawiniętych zdań (`config_dialog`)
+
+    def zweryfikuj_nazwe(self):
+        """Powiedz TERAZ, że wpisana nazwa jest nierozpoznana - koniec pauzy w pisaniu, wyjście
+        z pola albo Enter (OB11). Bez nazwy nierozpoznanej nic nie robi. Publiczna, bo jest też
+        deterministyczną drogą testu: wpis `setText` + to wołanie zamiast czekania na timer."""
+        self._pauza_nazwy.stop()
+        tekst = self.designation.text().strip()
+        if self._nierozpoznana is not None and self._nierozpoznana == tekst:
+            self._fail(i18n.t("assign.unknown_name", text=self._nierozpoznana))
 
     def showEvent(self, event):
         super().showEvent(event)

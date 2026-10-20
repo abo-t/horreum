@@ -1584,12 +1584,16 @@ def szerokosc_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
 # jeden pod drugim. Reguła z rozkładu na kopii archiwum (pf4, 2026-10-13: 16 888 klatek z EXPTIME,
 # 278 różnych wartości): wartość całkowita 13 743 klatki (81 %), jedno miejsce 647, dwa 2 315, trzy
 # 41, więcej 142 (flaty z automatu, migawka 1/30 i 1/13 s). Przy dwóch miejscach zlewa się 23 z 278
-# różnych wartości (1/160, 1/125, 1/100 i 1/80 s → „0.01”), przy trzech - żadna. Kolumna bierze więc
-# NAJMNIEJ miejsc, które pokazują dokładnie każdą jej wartość, i nie więcej niż trzy: lighty z całymi
-# sekundami mówią „600”, kolumna z flatami „0.080” i „600.000”. Wartość uciętą do trzech miejsc
-# komórka podaje w podpowiedzi pełnym zapisem karty; pole edycji startuje od zapisu karty.
+# różnych wartości (1/160, 1/125, 1/100 i 1/80 s → „0.01”), przy trzech - żadna. Kolumna bierze
+# NAJMNIEJ miejsc, które pokazują dokładnie każdą jej wartość, z sufitem JEDNEGO miejsca (decyzja CEO
+# 2026-10-20, odbiór 0.19.0 ZB12: sufit trzech miejsc stawiał „600.000” pod każdym lightem, gdy w widoku
+# był choć jeden flat z ułamkiem - „zaokrąglij wyświetlanie do 1 miejsca”). Lighty z całymi sekundami
+# mówią dalej „600”, kolumna z ułamkami „600.0” i „0.1”; krótkie migawki (1/160 s) zlewają się w „0.0”
+# świadomie - kolumna mówi skalę czasu, nie zapis karty. Wartość, której jedno miejsce nie pokazuje
+# dokładnie, komórka podaje w podpowiedzi pełnym zapisem karty - to jedyne miejsce, gdzie 0.00625
+# widać wprost; pole edycji startuje od zapisu karty, sort idzie po liczbie.
 _EXPTIME = "EXPTIME"
-_EXPTIME_MAKS_MIEJSC = 3
+_EXPTIME_MAKS_MIEJSC = 1
 
 
 def _dokladnie(v, miejsca):
@@ -2186,13 +2190,16 @@ class GridTableModel(QAbstractTableModel):
         if key == "exptime":
             # Czas ekspozycji Znajdź: jedna precyzja na kolumnę (`miejsca_ekspozycji`, jak EXPTIME) -
             # „300 s" przy samych pełnych sekundach, do prawej jak każda kolumna liczb; sort liczbowy
-            # w `_sort_key`.
+            # w `_sort_key`. Wartość, której sufit jednego miejsca nie pokazuje dokładnie (odbiór
+            # 0.19.0 ZB12: 1/160 s mówi „0.0 s"), podpowiedź podaje pełną liczbą - jak komórka EXPTIME.
             v = row.get("exptime")
             if role == Qt.DisplayRole:
                 return "" if v is None else i18n.t("find.cell.exposure",
                                                    s=f"{float(v):.{self._miejsca_czasu}f}")
             if role == Qt.TextAlignmentRole and v is not None:
                 return int(Qt.AlignRight | Qt.AlignVCenter)
+            if role == Qt.ToolTipRole and v is not None and not _dokladnie(float(v), self._miejsca_czasu):
+                return i18n.t("find.cell.exposure", s=str(float(v)))
             return None
         if key == "note":
             # Uwaga ścięta szerokością kolumny, pełna w tooltipie - kolumna zapowiada, nie czyta.
@@ -2258,7 +2265,8 @@ class GridTableModel(QAbstractTableModel):
                 return i18n.t("grid.cell.no_card_tip")   # w języku UI (AR-181)
             return None
         if kw == _EXPTIME and cell.num is not None:
-            # Jedna precyzja kolumny zamiast zapisu karty (AR-115, reguła przy `miejsca_ekspozycji`).
+            # Jedna precyzja kolumny zamiast zapisu karty (AR-115, sufit jednego miejsca - odbiór
+            # 0.19.0 ZB12; reguła przy `miejsca_ekspozycji`).
             if role == Qt.DisplayRole:
                 return f"{cell.num:.{self._miejsca_exptime}f}"
             if role == Qt.ToolTipRole and not _dokladnie(cell.num, self._miejsca_exptime):

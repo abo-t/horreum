@@ -91,6 +91,29 @@ _MAP = {
 }
 
 
+# Złota akcja Dostawy („Przyjmij nowe", odbiór 0.19.0 DO6): ciemny bursztyn zamiast szarości przycisku
+# Fusion. Tekst biały pod AA 4,5 na KAŻDYM tle stanu (zmierzone: dark 7,48 / 6,33 / 8,95 · light
+# 5,33 / 4,88 / 6,33 dla tła / najechania / wciśnięcia), ramka odcina przycisk od okna co najmniej
+# 3:1 (WCAG 1.4.11; dark 6,23 na `window`, light 9,12). Ciemny bursztyn na ciemnym oknie sam się nie
+# odcina (1,89:1), więc tam granicę niesie złota ramka. Stan wyłączony NIE ma tu kluczy: bierze
+# `button`/`disabled_text` palety jak każdy wygaszony przycisk aplikacji - ma wyglądać na nieaktywny,
+# nie na przygaszony bursztyn. Bramka: `test_theme`.
+# `focus` = ramka fokusu klawiatury (WCAG 2.4.7): arkusz z ramką zdejmuje natywny wskaźnik Fusion.
+# Co najmniej 3:1 do tła KAŻDEGO stanu i do okna (dark biel: 7,48 / 6,33 / 8,95, okno 14,16; light
+# czerń: 3,94 / 4,30 / 3,32, okno 18,43). Dlatego tła jasnego motywu są o stopień jaśniejsze niż
+# `warn`: przy dawnym wciśnięciu `#7A4A00` czerń miała 2,81:1, a jeden kolor ramki nie przejdzie 3:1
+# jednocześnie do ciemnego bursztynu i do jasnego okna inaczej niż czernią na jaśniejszym tle.
+_ZLOTA_AKCJA = {
+    "dark": {"bg": "#7A4A00", "bg_hover": "#8A5300", "bg_pressed": "#6A4000",
+             "text": "#FFFFFF", "border": "#E0A030", "focus": "#FFFFFF"},
+    "light": {"bg": "#9A5D00", "bg_hover": "#A36200", "bg_pressed": "#8A5300",
+              "text": "#FFFFFF", "border": "#5C3800", "focus": "#000000"},
+}
+
+# Nazwa obiektu przycisku złotej akcji Dostawy - selektor jej reguły w `qss`.
+ZLOTA_AKCJA_OBJECT_NAME = "zlota_akcja"
+
+
 def normalize(name):
     """Nazwa motywu z QSettings → znany motyw (nieznana/None → DEFAULT). Granica łagodna."""
     return name if name in _PALETTE else DEFAULT
@@ -126,6 +149,11 @@ def accents(name):
 def map_colors(name):
     """Kolory mapy stanowisk → hex. Klucze: bg/land/site/site_selected/sel_ring/scale (F8)."""
     return _spec(_MAP, name)
+
+
+def zlota_akcja(name):
+    """Kolory złotej akcji Dostawy → hex. Klucze: bg/bg_hover/bg_pressed/text/border/focus (DO6)."""
+    return _spec(_ZLOTA_AKCJA, name)
 
 
 ROLES = {"secondary": "secondary_text", "error": "exclusion_red", "warn": "warn", "ok": "ok_green"}
@@ -226,11 +254,38 @@ def qss(name):
     różnicą, którą ZMIERZONO na 17/255 kanału (średnia 9) — `isChecked()` mówiło `True`, a oko nie
     widziało nic. Ramka w kolorze złota daje sygnał niezależny od tła i od motywu; dotyczy
     WSZYSTKICH przełączników paska zbioru („Rodowód…", „Popraw nagłówki…", „Uporządkuj nazwy…"),
-    bo to jedna klasa kontrolki, nie trzy osobne przypadki."""
+    bo to jedna klasa kontrolki, nie trzy osobne przypadki.
+
+    ZŁOTA AKCJA DOSTAWY (DO6) dostaje kolor reguły po nazwie obiektu, nie arkuszem widżetu: arkusz
+    aplikacji przełącza motyw sam, a waga pisma i wysokość zostają przy widżecie."""
     a = accents(name)
     tekst, tlo = recepta_wygaszona(name)
     return "".join(
         f'QLabel[role="{role}"] {{ color: {a[key]}; }}' for role, key in ROLES.items()
     ) + (f'QPushButton:checked {{ border: 2px solid {a["gold"]}; font-weight: bold; }}') + (
         f'QToolButton#{RECEPTA_OBJECT_NAME}:disabled {{ color: {tekst}; background: {tlo}; '
-        f'border: 1px dashed {tekst}; padding: 2px 4px; }}') + _qss_wskaznikow(name)
+        f'border: 1px dashed {tekst}; padding: 2px 4px; }}') + _qss_zlotej_akcji(name) + (
+        _qss_wskaznikow(name))
+
+
+def _qss_zlotej_akcji(name):
+    """Reguła złotej akcji Dostawy: tło, tekst i ramka z `zlota_akcja`, najechanie i wciśnięcie tym
+    samym bursztynem jaśniej i ciemniej. Wyłączona bierze tło przycisku i `disabled_text` palety -
+    wygląda jak każdy wygaszony przycisk, a nie jak bursztyn, który da się kliknąć. Ramka i wypełnienie
+    nie zmieniają grubości między stanami, więc przycisk nie skacze.
+
+    FOKUS KLAWIATURY ma własną regułę, bo arkusz z ramką zdejmuje natywny wskaźnik Fusion: zmienia
+    WYŁĄCZNIE kolor ramki (ta sama grubość 1 px), więc rozmiar stoi. Kolejność reguł niesie
+    pierwszeństwo przy równej szczegółowości: `:hover`/`:pressed` ruszają tylko tło, `:focus` tylko
+    ramkę, a `:disabled` stoi OSTATNI i nadpisuje ramkę - wyłączony przycisk nie świeci fokusem.
+    Promień 5 px = sylwetka narożnika przycisku Fusion, zmierzona maską pikseli rogu na tle okna."""
+    z = zlota_akcja(name)
+    paleta = palette_spec(name)
+    sel = f"QPushButton#{ZLOTA_AKCJA_OBJECT_NAME}"
+    return (f"{sel} {{ background: {z['bg']}; color: {z['text']}; border: 1px solid {z['border']}; "
+            f"border-radius: 5px; padding: 3px 6px; }}"
+            f"{sel}:hover {{ background: {z['bg_hover']}; }}"
+            f"{sel}:pressed {{ background: {z['bg_pressed']}; }}"
+            f"{sel}:focus {{ border-color: {z['focus']}; }}"
+            f"{sel}:disabled {{ background: {paleta['button']}; color: {paleta['disabled_text']}; "
+            f"border-color: {paleta['disabled_text']}; }}")

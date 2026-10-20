@@ -71,6 +71,9 @@ class ObjectChangeItem:
     expected_mtime: str
     expected_object: tuple
     object_change: bool            # czy baza zmienia obiekt tej klatki
+    # Format, do którego Horreum karty nie pisze (RAW z aparatu, read-model `card_read_only`) -
+    # `card_op` None z definicji; podgląd mówi z tego pola, że plik karty nie dostanie (OB11).
+    card_read_only: bool = False
 
 
 class ZdanieRdzenia(str):
@@ -652,7 +655,8 @@ def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
         expected_header_hash=wiersz[fid]["header_hash"], expected_mtime=wiersz[fid]["mtime"],
         expected_object=(wiersz[fid]["object_id"], wiersz[fid]["object_source"],
                          wiersz[fid]["object_cleared_id"]),
-        object_change=robocze[fid]["object_change"]) for fid in sorted(cele))
+        object_change=robocze[fid]["object_change"],
+        card_read_only=bool(wiersz[fid]["card_read_only"])) for fid in sorted(cele))
     skipped = tuple(ObjectChangeSkip(fid, wiersz[fid]["path"] or "", *pominiete[fid])
                     for fid in sorted(pominiete))
     return ObjectChangePlan(run_id=run_id, target=target, items=items, skipped=skipped,

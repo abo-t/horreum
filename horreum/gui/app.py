@@ -368,6 +368,55 @@ def zdanie_cofniecia_dopisania(wynik, telescope):
                               reason=powod(wynik.refusal)))
 
 
+# ---- wspólne dwóch tabel osi (teleskop, obserwatorium): sort po kliku nagłówka, przerwana edycja
+
+def _klucz_tekstu(v):
+    """Klucz sortu komórki tekstowej osi: klucz naturalny biblioteki (`queries.natural_key`: bez
+    wielkości liter, człony liczbowe jako liczby), surowy tekst jako człon następny dla porządku
+    całkowitego. Pusty tekst = brak wartości (`None`)."""
+    return (queries.natural_key(v), v) if v else None
+
+
+def _posortuj_wiersze(rows, sort, klucz):
+    """Wiersze tabeli osi w porządku kliku nagłówka `sort = (kolumna, Qt.SortOrder)`; `None` =
+    porządek read-modelu. `klucz(row, kolumna)` daje wartość sortu albo `None` (komórka bez
+    wartości). Komórki bez wartości zawsze na końcu, w obu kierunkach i w porządku read-modelu -
+    ta sama reguła co MISSING w siatce (`grid_model._sort_key`). Sort stabilny: remis zostaje
+    w porządku read-modelu."""
+    if sort is None:
+        return list(rows)
+    col, order = sort
+    obecne = [r for r in rows if klucz(r, col) is not None]
+    puste = [r for r in rows if klucz(r, col) is None]
+    return sorted(obecne, key=lambda r: klucz(r, col), reverse=order == Qt.DescendingOrder) + puste
+
+
+def _wlacz_sort_naglowka(hdr, on_change):
+    """Sort po kliku nagłówka tabeli osi: nagłówek sam przełącza kolumnę i kierunek (strzałka Qt),
+    a widok układa wiersze PRZED wypełnieniem (`_posortuj_wiersze` w `refresh`). Start bez strzałki -
+    porządek read-modelu, dopóki człowiek nie kliknie.
+
+    `setSortingEnabled` zostaje wyłączone na stałe: sort modelu przestawiałby wiersze w trakcie
+    `_set_cell` po numerze wiersza i zaraz po zatwierdzeniu edycji, a „puste na końcu w obu
+    kierunkach” wymaga znajomości kierunku, której porównanie dwóch komórek nie ma."""
+    hdr.setSectionsClickable(True)
+    hdr.setSortIndicatorShown(True)
+    hdr.setSortIndicator(-1, Qt.AscendingOrder)
+    hdr.sortIndicatorChanged.connect(on_change)
+
+
+def _zdanie_przerwanej_edycji(table):
+    """Zdanie paska dla `refresh` tabeli osi, który zastał otwarty edytor komórki, albo `None`.
+
+    Przebudowa wierszy (`_przeladuj_wiersze`) każe Qt zamknąć edytor BEZ zatwierdzenia, więc wpis
+    człowieka przepada - bez tego zdania po cichu. Wpisu nie zatwierdzamy na siłę: zapisałby
+    niedokończony tekst. Wołający pyta PRZED przebudową i pomija pytanie, gdy sam przeładowuje się
+    z zatwierdzenia tej komórki (wtedy edytor jest jeszcze otwarty, ale wpis już zapisany)."""
+    if table.state() == QAbstractItemView.EditingState:
+        return i18n.t("axis.edit_interrupted")
+    return None
+
+
 # Kolumny tekstowe Osi teleskopu → pole wiersza `active_telescopes`. Pozostałe kolumny są liczbowe.
 _TEL_SORT_TEKST = {COL_CANON: "telescop_canon", COL_LABEL: "label", COL_STATUS: "status"}
 
@@ -376,12 +425,9 @@ def _klucz_sortu_teleskopu(row, col):
     """Klucz sortu wiersza Osi teleskopu po kolumnie `col`; `None` = komórka bez wartości.
 
     Liczby jako liczby (ID, klatki, ogniskowa i f/ tak, jak je pokazuje komórka: ręka, potem pliki -
-    `queries.telescope_focal`/`telescope_f_ratio`), więc „10” stoi za „9”. Tekst kluczem naturalnym
-    biblioteki (`queries.natural_key`: bez wielkości liter, człony liczbowe jako liczby), z surowym
-    tekstem jako członem następnym dla porządku całkowitego."""
+    `queries.telescope_focal`/`telescope_f_ratio`), więc „10” stoi za „9”. Tekst - `_klucz_tekstu`."""
     if col in _TEL_SORT_TEKST:
-        v = row[_TEL_SORT_TEKST[col]]
-        return (queries.natural_key(v), v) if v else None
+        return _klucz_tekstu(row[_TEL_SORT_TEKST[col]])
     if col == COL_FOCAL:
         return queries.telescope_focal(row)
     if col == COL_FRATIO:
@@ -390,20 +436,6 @@ def _klucz_sortu_teleskopu(row, col):
         return row["frame_count"]
     assert col == COL_ID, col
     return row["id"]
-
-
-def _posortuj_teleskopy(rows, sort):
-    """Wiersze w porządku kliku nagłówka `sort = (kolumna, Qt.SortOrder)`; `None` = porządek
-    read-modelu. Komórki bez wartości zawsze na końcu, w obu kierunkach i w porządku read-modelu -
-    ta sama reguła co MISSING w siatce (`grid_model._sort_key`). Sort stabilny: remis zostaje
-    w porządku read-modelu."""
-    if sort is None:
-        return list(rows)
-    col, order = sort
-    obecne = [r for r in rows if _klucz_sortu_teleskopu(r, col) is not None]
-    puste = [r for r in rows if _klucz_sortu_teleskopu(r, col) is None]
-    return sorted(obecne, key=lambda r: _klucz_sortu_teleskopu(r, col),
-                  reverse=order == Qt.DescendingOrder) + puste
 
 
 class TelescopeAxisView(QWidget):
@@ -429,6 +461,7 @@ class TelescopeAxisView(QWidget):
         self._busy = False                   # etap Dostawy pisze w tle - gesty optyki odmawiają (N8)
         self._dopisane = set()               # teleskopy z niecofniętym „Dopisz nowy…” (AR-133)
         self._sort = None                    # (kolumna, Qt.SortOrder) z kliku nagłówka; None = read-model
+        self._z_zatwierdzenia = False        # refresh z zatwierdzenia komórki - edytor otwarty, wpis zapisany
         self._build_ui()
         self.refresh()
 
@@ -452,15 +485,7 @@ class TelescopeAxisView(QWidget):
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_LABEL, QHeaderView.Stretch)
-        # SORT PO KLIKU NAGŁÓWKA: nagłówek sam przełącza kolumnę i kierunek (strzałka Qt), a widok
-        # układa wiersze PRZED wypełnieniem (`_posortuj_teleskopy` w `refresh`). `setSortingEnabled`
-        # zostaje wyłączone na stałe: sort modelu przestawiałby wiersze w trakcie `_set_cell` po
-        # numerze wiersza i zaraz po zatwierdzeniu edycji, a „puste na końcu w obu kierunkach” wymaga
-        # znajomości kierunku, której porównanie dwóch komórek nie ma. Bez kliku - porządek read-modelu.
-        hdr.setSectionsClickable(True)
-        hdr.setSortIndicatorShown(True)
-        hdr.setSortIndicator(-1, Qt.AscendingOrder)
-        hdr.sortIndicatorChanged.connect(self._on_sort_changed)
+        _wlacz_sort_naglowka(hdr, self._on_sort_changed)
         self.table.verticalHeader().setVisible(False)
         self._edit_triggers = self.table.editTriggers()   # przywracane po set_busy(False) (wizytator T3)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
@@ -541,11 +566,14 @@ class TelescopeAxisView(QWidget):
         """Przeładuj listę z read-modelu (źródło prawdy = baza; brak własnego cache, §5). Zachowuje
         zaznaczenie po `telescope_id`, a nie po numerze wiersza (po merge i po sorcie wiersze się
         przesuwają). Porządek z kliku nagłówka (`self._sort`) przeżywa przeładowanie: wiersze są
-        układane przed wypełnieniem, więc numer wiersza w pętli = wiersz na ekranie."""
+        układane przed wypełnieniem, więc numer wiersza w pętli = wiersz na ekranie. Otwarty edytor
+        komórki przebudowa zamyka bez zapisu - pasek mówi wtedy, że wpis trzeba powtórzyć."""
         prev = self._selected_telescope_id()
+        przerwana = None if self._z_zatwierdzenia else _zdanie_przerwanej_edycji(self.table)
         self._loading = True
         try:
-            rows = _posortuj_teleskopy(queries.active_telescopes(self.con), self._sort)
+            rows = _posortuj_wiersze(queries.active_telescopes(self.con), self._sort,
+                                     _klucz_sortu_teleskopu)
             self._rows = {row["id"]: row for row in rows}
             self._dopisane = queries.open_telescope_adds(self.con)
             # jedna derywacja „z plików" (AR-128) - ta sama, którą liczy Dostawa
@@ -577,6 +605,8 @@ class TelescopeAxisView(QWidget):
             # pusty stan ma sensowny komunikat, nie gołe nagłówki (wizytator P3)
             self.status_message.emit(i18n.t("axis.tel.empty_status"))
         self._on_selection_changed()
+        if przerwana:
+            self._flash(przerwana)
 
     def _on_sort_changed(self, col, order):
         """Klik nagłówka: zapamiętaj kolumnę i kierunek, ułóż listę od nowa (zaznaczenie zostaje)."""
@@ -721,24 +751,31 @@ class TelescopeAxisView(QWidget):
 
     def _on_item_changed(self, item):
         """Edycja in-line etykiety → `repo.label_telescope`. Pusty label → `ValueError` (kasowanie
-        etykiety poza v1) złapany i pokazany, widok wraca do prawdy bazy (refresh)."""
+        etykiety poza v1) złapany i pokazany, widok wraca do prawdy bazy (refresh). Przeładowanie
+        z tej drogi zastaje edytor jeszcze otwarty, ale wpis jest już zapisany - `_z_zatwierdzenia`
+        wycisza zdanie o przerwanej edycji."""
         if self._loading:
             return
-        tid = self.table.item(item.row(), COL_ID).data(Qt.UserRole)
-        if item.column() in (COL_FOCAL, COL_FRATIO):
-            self._on_optics_edited(tid, item.column(), item.text())
-            return
-        if item.column() != COL_LABEL:
-            return
+        self._z_zatwierdzenia = True
         try:
-            changed = repo.label_telescope(
-                self.con, telescope_id=tid, label=item.text(), now=self._now())
-        except ValueError as e:
-            self._flash(i18n.t("axis.tel.label_rejected", e=e))
+            tid = self.table.item(item.row(), COL_ID).data(Qt.UserRole)
+            if item.column() in (COL_FOCAL, COL_FRATIO):
+                self._on_optics_edited(tid, item.column(), item.text())
+                return
+            if item.column() != COL_LABEL:
+                return
+            try:
+                changed = repo.label_telescope(
+                    self.con, telescope_id=tid, label=item.text(), now=self._now())
+            except ValueError as e:
+                self._flash(i18n.t("axis.tel.label_rejected", e=e))
+                self.refresh()
+                return
+            self._flash(i18n.t("axis.tel.label_saved") if changed
+                        else i18n.t("axis.tel.label_unchanged"))
             self.refresh()
-            return
-        self._flash(i18n.t("axis.tel.label_saved") if changed else i18n.t("axis.tel.label_unchanged"))
-        self.refresh()
+        finally:
+            self._z_zatwierdzenia = False
 
     def _on_optics_edited(self, tid, col, text):
         """Wpis w f/ albo Ogniskowej teleskopu `tid` (AR-128) → klinga ręki. Porównanie ze STANEM
@@ -3430,6 +3467,22 @@ def _fmt_coord(v):
     return "" if v is None else f"{v:.4f}"
 
 
+def _klucz_sortu_obserwatorium(row, col):
+    """Klucz sortu wiersza osi OBSERWATORIUM po kolumnie `col`; `None` = komórka bez wartości.
+    Nazwa - `_klucz_tekstu` (nienazwane na końcu); ID, szerokość, długość i klatki jako liczby
+    (współrzędna ujemna przed dodatnią, brak współrzędnej na końcu)."""
+    if col == OBS_COL_NAME:
+        return _klucz_tekstu(row["name"])
+    if col == OBS_COL_LAT:
+        return row["lat"]
+    if col == OBS_COL_LON:
+        return row["lon"]
+    if col == OBS_COL_FRAMES:
+        return row["frame_count"]
+    assert col == OBS_COL_ID, col
+    return row["id"]
+
+
 def _obs_row_label(row):
     """Etykieta stanowiska do listy combo/członków: nazwa usera, a gdy brak (nienazwane — realny
     przypadek: cała oś świeżo `proposed`) — współrzędne z seeda, by pozycja NIE milczała."""
@@ -3454,6 +3507,8 @@ class ObservatoryAxisView(QWidget):
         self._loading = False                # tłumi itemChanged podczas programowego wypełniania
         self._source_mergeable = False       # czy zaznaczony wiersz może być źródłem scalenia
         self._obs_coords = {}                # oid → (lat, lon) z ostatniego refresh (źródło GPS dla OSM)
+        self._sort = None                    # (kolumna, Qt.SortOrder) z kliku nagłówka; None = read-model
+        self._z_zatwierdzenia = False        # refresh z zatwierdzenia nazwy - edytor otwarty, wpis zapisany
         self._build_ui()
         self.refresh()
 
@@ -3477,6 +3532,7 @@ class ObservatoryAxisView(QWidget):
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(OBS_COL_NAME, QHeaderView.Stretch)
+        _wlacz_sort_naglowka(hdr, self._on_sort_changed)
         self.table.verticalHeader().setVisible(False)
         self._edit_triggers = self.table.editTriggers()   # przywracane po set_busy(False) (wizytator T3)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
@@ -3567,11 +3623,19 @@ class ObservatoryAxisView(QWidget):
     def refresh(self):
         """Przeładuj listę z read-modelu (źródło prawdy = baza; brak cache). Zachowuje zaznaczenie po
         `observatory_id` (po merge wiersze się przesuwają). Karmi mapę tymi SAMYMI wierszami (SPOT)
-        i zapamiętuje współrzędne dla linku OSM (F8 F8 — read-model nie jest cache'owany inaczej)."""
+        i zapamiętuje współrzędne dla linku OSM (F8 F8 - read-model nie jest cache'owany inaczej).
+
+        Porządek z kliku nagłówka (`self._sort`) przeżywa przeładowanie - tabela dostaje wiersze
+        ułożone przed wypełnieniem, mapa ten sam zbiór w porządku read-modelu: kolejność rysowania
+        rozstrzyga, który z nakładających się punktów leży na wierzchu i łapie klik, a ten nie może
+        zależeć od sortu tabeli. Otwarty edytor nazwy przebudowa zamyka bez zapisu - pasek mówi wtedy,
+        że wpis trzeba powtórzyć."""
         prev = self._selected_observatory_id()
+        przerwana = None if self._z_zatwierdzenia else _zdanie_przerwanej_edycji(self.table)
         self._loading = True
         try:
-            rows = queries.active_observatories(self.con)
+            sites = queries.active_observatories(self.con)
+            rows = _posortuj_wiersze(sites, self._sort, _klucz_sortu_obserwatorium)
             self._obs_coords = {row["id"]: (row["lat"], row["lon"]) for row in rows}
             _przeladuj_wiersze(self.table, len(rows))
             target_row = -1
@@ -3589,7 +3653,7 @@ class ObservatoryAxisView(QWidget):
         self.obs_empty.setVisible(empty)              # nota odkrywalna w widoku (wizytator #1)
         self.table.setVisible(not empty)
         self.map_box.setVisible(not empty)            # 0 stanowisk → bez martwego pasa mapy (wiz F8 #6)
-        self.map_view.set_sites(rows)                 # mapa dostaje TE SAME wiersze co tabela (F8)
+        self.map_view.set_sites(sites)                # mapa dostaje TE SAME wiersze co tabela (F8)
         # AR-74: przycisk gestu niesie liczbę swojej roboty. TEN SAM predykat co wiersz Porządków
         # „Klatki bez stanowiska" i wejście okna (`queries.observatory_review_frames`, po AR-80 bez
         # darków i biasów) - jedna liczba = jedno wejście gestu, więc przycisk i wiersz nie mogą
@@ -3603,6 +3667,13 @@ class ObservatoryAxisView(QWidget):
         else:
             self.status_message.emit(i18n.t("axis.obs.empty_status"))
         self._on_selection_changed()
+        if przerwana:
+            self._flash(przerwana)
+
+    def _on_sort_changed(self, col, order):
+        """Klik nagłówka: zapamiętaj kolumnę i kierunek, ułóż listę od nowa (zaznaczenie zostaje)."""
+        self._sort = (col, order)
+        self.refresh()
 
     def wejdz_po_wskazanie(self):
         """Wejście z wiersza Porządków „Klatki bez stanowiska" (AR-74) - lustro drogi osi zestawu
@@ -3728,19 +3799,26 @@ class ObservatoryAxisView(QWidget):
 
     def _on_item_changed(self, item):
         """Edycja in-line nazwy → `repo.label_observatory`. Pusta nazwa → `ValueError` (kasowanie poza
-        v1) złapany i pokazany; widok wraca do prawdy bazy (refresh)."""
+        v1) złapany i pokazany; widok wraca do prawdy bazy (refresh). Przeładowanie z tej drogi
+        zastaje edytor jeszcze otwarty, ale wpis jest już zapisany - `_z_zatwierdzenia` wycisza
+        zdanie o przerwanej edycji."""
         if self._loading or item.column() != OBS_COL_NAME:
             return
-        oid = self.table.item(item.row(), OBS_COL_ID).data(Qt.UserRole)
+        self._z_zatwierdzenia = True
         try:
-            changed = repo.label_observatory(
-                self.con, observatory_id=oid, name=item.text(), now=self._now())
-        except ValueError as e:
-            self._flash(i18n.t("axis.obs.name_rejected", e=e))
+            oid = self.table.item(item.row(), OBS_COL_ID).data(Qt.UserRole)
+            try:
+                changed = repo.label_observatory(
+                    self.con, observatory_id=oid, name=item.text(), now=self._now())
+            except ValueError as e:
+                self._flash(i18n.t("axis.obs.name_rejected", e=e))
+                self.refresh()
+                return
+            self._flash(i18n.t("axis.obs.name_saved") if changed
+                        else i18n.t("axis.obs.name_unchanged"))
             self.refresh()
-            return
-        self._flash(i18n.t("axis.obs.name_saved") if changed else i18n.t("axis.obs.name_unchanged"))
-        self.refresh()
+        finally:
+            self._z_zatwierdzenia = False
 
     def _on_merge(self):
         src = self._selected_observatory_id()

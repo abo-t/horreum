@@ -414,8 +414,8 @@ Z podstrony wracasz strzałką **← Porządki**.
    (np. `Newton 8"`), Enter. Klik w nagłówek kolumny sortuje listę, drugi klik odwraca kolejność.
 2. Ten sam teleskop pod dwiema technicznymi nazwami: zaznacz wiersz, w **Scal zaznaczony w:** wybierz
    drugi, kliknij **Scal**. Pomyłkę cofnie **Cofnij scalenie**.
-3. **Stanowiska bez nazwy ›** działa tak samo (**Oś obserwatorium**, kolumna **Nazwa**). Dwa zapisy
-   tego samego miejsca łączysz **Scal**.
+3. **Stanowiska bez nazwy ›** działa tak samo (**Oś obserwatorium**, kolumna **Nazwa**, sortowanie
+   klikiem w nagłówek). Dwa zapisy tego samego miejsca łączysz **Scal**.
 4. Klatki bez GPS: na **Oś obserwatorium** kliknij **Wskaż stanowisko…** - okno grupuje je po folderach.
 
 > Nazwy i scalenia są **odwracalne**, dlatego program nie pyta „czy na pewno?".

@@ -91,6 +91,9 @@ CATALOG = {
     "axis.pick_target": {"pl": "— wybierz cel —", "en": "— pick target —"},
     "axis.merge_failed": {"pl": "Nie scalono: {e}", "en": "Not merged: {e}"},
     "axis.unmerge_failed": {"pl": "Nie cofnięto: {e}", "en": "Not undone: {e}"},
+    "axis.edit_interrupted": {
+        "pl": "Lista odświeżyła się w trakcie wpisywania - wpis nie został zapisany, wpisz go jeszcze raz.",
+        "en": "The list reloaded while you were typing - your entry was not saved, please type it again."},
     "axis.merged": {"pl": "Scalono #{src} → #{tgt}.", "en": "Merged #{src} → #{tgt}."},
     "axis.unmerged": {"pl": "Cofnięto scalenie #{mid}.", "en": "Merge undone #{mid}."},
 

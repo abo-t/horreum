@@ -441,3 +441,110 @@ def test_klik_naglowka_przy_otwartym_edytorze_etykiety_zapisuje_w_edytowany(sort
     _klik_naglowka(w, COL_FRAMES)                                             # D, C, B, A
     QApplication.processEvents()
     assert _etykiety(con) == {**przed, ids["A"]: "nowa"}
+
+
+# --- refresh przy otwartym edytorze mówi na pasku (decyzja CEO 2026-10-20) ---
+
+def test_refresh_przy_otwartym_edytorze_mowi_ze_wpis_przepadl(sort_win):
+    """Edytor etykiety otwarty, przeładowanie z zewnątrz: edytor zamknięty bez zapisu, a pasek mówi,
+    że wpis trzeba powtórzyć. Mutant: `refresh` bez pytania o otwarty edytor."""
+    from horreum.gui import i18n
+    w, con, ids = sort_win
+    msgs = []
+    w.status_message.connect(msgs.append)
+    przed = _etykiety(con)
+    _otworz_edytor_etykiety(w, ids["A"], "w-trakcie")
+    w.refresh()
+    assert msgs[-1] == i18n.t("axis.edit_interrupted")
+    assert _etykiety(con) == przed
+
+
+def test_refresh_bez_edytora_i_z_zatwierdzenia_milczy(sort_win):
+    """Refresh bez otwartego edytora - bez zdania o przerwanej edycji; zatwierdzenie wpisu Enterem
+    (refresh z drogi zapisu zastaje edytor jeszcze otwarty) - pasek mówi „zapisano”, nie „przepadło”.
+    Mutant: zdanie przy każdym refreshu albo bez wyciszenia drogi zatwierdzenia."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from horreum.gui import i18n
+    w, con, ids = sort_win
+    msgs = []
+    w.status_message.connect(msgs.append)
+    w.refresh()
+    assert i18n.t("axis.edit_interrupted") not in msgs
+    _otworz_edytor_etykiety(w, ids["A"], "Enterem")
+    QTest.keyClick(w.table.focusWidget(), Qt.Key_Return)
+    QApplication.processEvents()
+    assert _etykiety(con)[ids["A"]] == "Enterem"
+    assert i18n.t("axis.edit_interrupted") not in msgs
+    assert msgs[-1] == i18n.t("axis.tel.label_saved")
+
+
+def _ogniskowe(con):
+    return dict(con.execute("SELECT id, focal_user FROM telescope").fetchall())
+
+
+@pytest.mark.parametrize("zatwierdzenie", ["enter", "klik_naglowka"])
+def test_realny_edytor_optyki_zapisuje_wlasciwy_teleskop_bez_zdania_o_przerwaniu(sort_win,
+                                                                                 zatwierdzenie):
+    """Prawdziwy edytor ogniskowej (`table.edit`, delegat optyki), zatwierdzony Enterem albo realnym
+    klikiem w nagłówek (zatwierdzenie przy utracie fokusu, potem sort): wpis dochodzi do teleskopu,
+    na którym edycję zaczęto, a pasek nie mówi o przerwanej edycji - wpis optyki przychodzi po
+    `singleShot(0)`, gdy edytor jest już zamknięty. Mutanty: zdanie bez względu na zamknięty edytor;
+    delegat kotwiczący wpis numerem wiersza."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QAbstractItemView
+    from horreum.gui import i18n
+    from horreum.gui.app import COL_FOCAL
+    w, con, ids = sort_win
+    msgs = []
+    w.status_message.connect(msgs.append)
+    _klik_naglowka(w, COL_FOCAL)                                              # D, A, B, C
+    idx = w.table.model().index(_row_of(w, ids["A"]), COL_FOCAL)
+    w.table.setCurrentIndex(idx)
+    w.table.edit(idx)
+    QApplication.processEvents()
+    assert w.table.state() == QAbstractItemView.EditingState
+    w.table.focusWidget().setText("2000")                                     # A wskoczy na koniec
+    if zatwierdzenie == "enter":
+        QTest.keyClick(w.table.focusWidget(), Qt.Key_Return)
+    else:
+        _klik_naglowka(w, COL_FOCAL)                                          # malejąco
+    # Enter zatwierdza w kolejce zdarzeń (delegat Qt), a wpis optyki czeka jeszcze `singleShot(0)` -
+    # jedno `processEvents` nie dociąga obu kroków; `qWait` obraca pętlę, aż oba wejdą.
+    QTest.qWait(50)
+    assert _ogniskowe(con) == {ids["A"]: 2000.0, ids["B"]: None, ids["C"]: None, ids["D"]: None}
+    assert i18n.t("axis.edit_interrupted") not in msgs
+    assert msgs[-1] == i18n.t("axis.tel.optics_saved")
+
+
+# --- stabilność sortu: remis zostaje w porządku read-modelu ---
+
+def test_posortuj_wiersze_remis_w_porzadku_read_modelu_w_obu_kierunkach():
+    """Wspólna reguła obu tabel osi: wiersze o równym niepustym kluczu stoją w porządku read-modelu
+    rosnąco i malejąco, puste na końcu. Mutant: malejąco przez odwrócenie listy rosnącej
+    (`sorted(...)[::-1]` przestawia remis)."""
+    from PySide6.QtCore import Qt
+    from horreum.gui.app import _posortuj_wiersze
+    rows = [{"id": 1, "n": 5}, {"id": 2, "n": 3}, {"id": 3, "n": 5}, {"id": 4, "n": None},
+            {"id": 5, "n": 3}]
+
+    def klucz(r, _col):
+        return r["n"]
+
+    def ids(order):
+        return [r["id"] for r in _posortuj_wiersze(rows, (0, order), klucz)]
+    assert ids(Qt.AscendingOrder) == [2, 5, 1, 3, 4]
+    assert ids(Qt.DescendingOrder) == [1, 3, 2, 5, 4]
+    assert [r["id"] for r in _posortuj_wiersze(rows, None, klucz)] == [1, 2, 3, 4, 5]
+
+
+def test_sort_remis_klatek_w_porzadku_read_modelu(win):
+    """Widok: A i C mają po 2 klatki (baza §8) - A (wcześniej w read-modelu) stoi przed C rosnąco
+    i malejąco. Mutant: remis rozstrzygany odwrotnie przy sortowaniu malejącym."""
+    from PySide6.QtCore import Qt
+    w, con, ids = win
+    w._on_sort_changed(COL_FRAMES, Qt.AscendingOrder)
+    assert _kolejnosc(w) == [ids["D"], ids["A"], ids["C"], ids["B"]]          # 0, 2, 2, 3
+    w._on_sort_changed(COL_FRAMES, Qt.DescendingOrder)
+    assert _kolejnosc(w) == [ids["B"], ids["A"], ids["C"], ids["D"]]

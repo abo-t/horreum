@@ -308,3 +308,186 @@ def test_mapa_hover_render_niejednolity(win):
     img = w.map_view.grab().toImage()
     colors = {img.pixel(x, y) for y in range(0, img.height(), 4) for x in range(0, img.width(), 4)}
     assert len(colors) >= 2
+
+
+# --- sort po kliku nagłówka (decyzja CEO 2026-10-20) ---
+
+@pytest.fixture
+def sort_win(qapp, tmp_path):
+    """Cztery stanowiska pod sort: o1 Dom 53.4/114.4 - 9 klatek, o2 „działka” -33.9/18.4 - 10 klatek
+    (szerokość ujemna; 9 < 10 liczbowo, „10” < „9” tekstowo), o3 bez nazwy 42.1/123.7 - 2 klatki,
+    o4 „Bieszczady” 50.0/-5.0 - 0 klatek. Okno pokazane - nagłówek ma geometrię pod realny klik."""
+    con = db.open_db(str(tmp_path / "sort.db"))
+    oids, n = [], 0
+    for (lat, lon), nazwa, klatki in (((53.4, 114.4), "Dom", 9), ((-33.9, 18.4), "działka", 10),
+                                      ((42.1, 123.7), None, 2), ((50.0, -5.0), "Bieszczady", 0)):
+        oid, _ = repo.propose_observatory(con, lat=lat, lon=lon, now=NOW)
+        oids.append(oid)
+        if nazwa:
+            repo.label_observatory(con, observatory_id=oid, name=nazwa, now=NOW)
+        for _ in range(klatki):
+            fid, _ = repo.upsert_frame(con, sha1_data=f"sort{n}", kind="light", filetype="fits",
+                                       camera_id=None, now=NOW)
+            repo.assign_observatory(con, frame_id=fid, observatory_id=oid, now=NOW)
+            n += 1
+    w = ObservatoryAxisView(con, now_fn=lambda: NOW)
+    w.resize(900, 700)
+    w.show()
+    QApplication.processEvents()
+    yield w, con, oids
+    w.close()
+    con.close()
+
+
+def _klik_naglowka(w, col):
+    """Realny klik myszą w sekcję nagłówka - nagłówek sam przełącza kolumnę i kierunek."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    hdr = w.table.horizontalHeader()
+    x = hdr.sectionViewportPosition(col) + hdr.sectionSize(col) // 2
+    QTest.mouseClick(hdr.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(x, hdr.height() // 2))
+
+
+def _kolejnosc(w):
+    return [w.table.item(r, OBS_COL_ID).data(0x0100) for r in range(w.table.rowCount())]
+
+
+def _nazwy(con):
+    return dict(con.execute("SELECT id, name FROM observatory").fetchall())
+
+
+def test_sort_domyslnie_porzadek_read_modelu(sort_win):
+    """Bez kliku - porządek read-modelu, bez strzałki. Mutant: domyślny sort po kolumnie."""
+    w, con, o = sort_win
+    assert _kolejnosc(w) == [r["id"] for r in queries.active_observatories(con)]
+    assert w.table.horizontalHeader().sortIndicatorSection() == -1
+
+
+def test_sort_klatki_liczbowo_i_odwrocenie(sort_win):
+    """Klik „Klatki” → 0, 2, 9, 10 (liczbowo), drugi klik → odwrotnie, strzałka idzie za kierunkiem.
+    Mutant: sort po tekście komórki („10” przed „9”)."""
+    from PySide6.QtCore import Qt
+    w, con, o = sort_win
+    _klik_naglowka(w, OBS_COL_FRAMES)
+    assert _kolejnosc(w) == [o[3], o[2], o[0], o[1]]
+    _klik_naglowka(w, OBS_COL_FRAMES)
+    assert _kolejnosc(w) == [o[1], o[0], o[2], o[3]]
+    assert w.table.horizontalHeader().sortIndicatorOrder() == Qt.DescendingOrder
+
+
+def test_sort_wspolrzedne_liczbowo(sort_win):
+    """Szerokość: -33.9, 42.1, 50.0, 53.4; długość: -5.0, 18.4, 114.4, 123.7 - liczbowo.
+    Mutant: sort po tekście komórki („114.4000” przed „18.4000”)."""
+    from horreum.gui.app import OBS_COL_LON
+    w, con, o = sort_win
+    _klik_naglowka(w, OBS_COL_LAT)
+    assert _kolejnosc(w) == [o[1], o[2], o[3], o[0]]
+    _klik_naglowka(w, OBS_COL_LON)
+    assert _kolejnosc(w) == [o[3], o[1], o[0], o[2]]
+
+
+def test_sort_nazwa_bez_wielkosci_liter_nienazwane_na_koncu(sort_win):
+    """Nazwa: Bieszczady, Dom, działka (bez wielkości liter), stanowisko bez nazwy na końcu w obu
+    kierunkach. Mutanty: porównanie z wielkością liter; puste odwracane razem z resztą."""
+    w, con, o = sort_win
+    _klik_naglowka(w, OBS_COL_NAME)
+    assert _kolejnosc(w) == [o[3], o[0], o[1], o[2]]
+    _klik_naglowka(w, OBS_COL_NAME)
+    assert _kolejnosc(w) == [o[1], o[0], o[3], o[2]]
+
+
+def test_sort_przezywa_refresh_a_mapa_stoi_w_porzadku_read_modelu(sort_win):
+    """Porządek i kierunek stoją po `refresh()`; mapa dostaje ten sam zbiór stanowisk w porządku
+    read-modelu (kolejność rysowania i klik w nakładające się punkty nie zależą od sortu tabeli).
+    Mutanty: `refresh` bez sortu; mapa karmiona wierszami posortowanymi."""
+    w, con, o = sort_win
+    _klik_naglowka(w, OBS_COL_FRAMES)
+    _klik_naglowka(w, OBS_COL_FRAMES)
+    w.refresh()
+    assert _kolejnosc(w) == [o[1], o[0], o[2], o[3]]
+    assert [s[0] for s in w.map_view._sites] == [r["id"] for r in queries.active_observatories(con)]
+
+
+def test_sort_edycja_nazwy_trafia_wlasciwe_stanowisko_i_zaznaczenie_idzie_za_nim(sort_win):
+    """Po sorcie nazw zmiana nazwy w kolumnie sortu: zapis do stanowiska z wiersza (baza), wiersz
+    staje na nowym miejscu z zaznaczeniem. Mutant: id z pozycji w read-modelu."""
+    w, con, o = sort_win
+    _klik_naglowka(w, OBS_COL_NAME)                                           # o4, o1, o2, o3
+    r = _row_of(w, o[3])
+    assert r == 0
+    w.table.selectRow(r)
+    przed = _nazwy(con)
+    w.table.item(r, OBS_COL_NAME).setText("Zakopane")
+    assert _nazwy(con) == {**przed, o[3]: "Zakopane"}
+    assert _kolejnosc(w) == [o[0], o[1], o[3], o[2]]
+    assert w._selected_observatory_id() == o[3]
+
+
+# --- refresh przy otwartym edytorze mówi na pasku (decyzja CEO 2026-10-20) ---
+
+def _otworz_edytor_nazwy(w, oid, tekst):
+    """Realny edytor nazwy (`table.edit`) na wierszu `oid` z wpisanym `tekst`."""
+    from PySide6.QtWidgets import QAbstractItemView
+    idx = w.table.model().index(_row_of(w, oid), OBS_COL_NAME)
+    w.table.setCurrentIndex(idx)
+    w.table.edit(idx)
+    QApplication.processEvents()
+    assert w.table.state() == QAbstractItemView.EditingState
+    w.table.focusWidget().setText(tekst)
+
+
+def test_refresh_przy_otwartym_edytorze_nazwy_mowi_ze_wpis_przepadl(sort_win):
+    """Edytor nazwy otwarty, przeładowanie z zewnątrz: zero zapisu, zdanie na pasku.
+    Mutant: `refresh` bez pytania o otwarty edytor."""
+    from horreum.gui import i18n
+    w, con, o = sort_win
+    msgs = []
+    w.status_message.connect(msgs.append)
+    przed = _nazwy(con)
+    _otworz_edytor_nazwy(w, o[0], "w-trakcie")
+    w.refresh()
+    assert msgs[-1] == i18n.t("axis.edit_interrupted")
+    assert _nazwy(con) == przed
+
+
+def test_refresh_bez_edytora_i_z_zatwierdzenia_nazwy_milczy(sort_win):
+    """Bez edytora - bez zdania; zatwierdzenie Enterem - „zapisano”, nie „przepadło”.
+    Mutant: zdanie bez wyciszenia drogi zatwierdzenia."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from horreum.gui import i18n
+    w, con, o = sort_win
+    msgs = []
+    w.status_message.connect(msgs.append)
+    w.refresh()
+    assert i18n.t("axis.edit_interrupted") not in msgs
+    _otworz_edytor_nazwy(w, o[0], "Ogród")
+    QTest.keyClick(w.table.focusWidget(), Qt.Key_Return)
+    QApplication.processEvents()
+    assert _nazwy(con)[o[0]] == "Ogród"
+    assert i18n.t("axis.edit_interrupted") not in msgs
+    assert msgs[-1] == i18n.t("axis.obs.name_saved")
+
+
+def test_mapa_i_tabela_sprzezone_po_sorcie(sort_win):
+    """Po sorcie malejącym klik w punkt mapy stanowiska, które zmieniło wiersz (o1: wiersz 0 → 1),
+    zaznacza JEGO wiersz; zaznaczenie, mapa i panel prawy mówią o nim. Potem zaznaczenie innego
+    wiersza tabeli przestawia wyróżnienie mapy. Mutant: mapa→tabela po pozycji w read-modelu
+    (wiersz 0 = o2 po sorcie)."""
+    w, con, o = sort_win
+    assert _row_of(w, o[0]) == 0
+    _klik_naglowka(w, OBS_COL_FRAMES)
+    _klik_naglowka(w, OBS_COL_FRAMES)                                         # o2, o1, o3, o4
+    assert _row_of(w, o[0]) == 1
+    w.map_view.siteClicked.emit(o[0])
+    assert w.table.selectionModel().selectedRows()[0].row() == 1
+    assert w._selected_observatory_id() == o[0]
+    assert w.map_view._selected == o[0]
+    cele = {w.combo_target.itemData(i) for i in range(w.combo_target.count())}
+    assert cele == {None, o[1], o[2], o[3]}                                   # panel: cel ≠ źródło o1
+    assert any("observatory.named" in w.events.item(i).text() for i in range(w.events.count()))
+    w.table.selectRow(_row_of(w, o[2]))
+    assert w.map_view._selected == o[2]
+    assert w._selected_observatory_id() == o[2]
+    assert all("observatory.named" not in w.events.item(i).text()            # o3 bez nazwy
+               for i in range(w.events.count()))

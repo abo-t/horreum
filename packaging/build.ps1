@@ -10,7 +10,9 @@
 #   powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Onefile -Release
 #                                                                           # EXTERNAL build (gated);
 #                                                                           # also refreshes the copy
-#                                                                           # behind the desktop icon
+#                                                                           # in InstallDir (the one
+#                                                                           # the desktop icon opens)
+#   Exit 3 (-Release only): the artifact is READY, only the installed copy was not refreshed (6R).
 #
 # TWO KINDS OF BUILD, AND THE DIFFERENCE IS A RULE, NOT A HABIT (decision Z. 2026-08-08):
 #
@@ -50,17 +52,29 @@ $venv = Join-Path $repo ".venv-build"
 $py   = Join-Path $venv "Scripts\python.exe"
 
 function Update-InstalledCopy([string]$Asset, [string]$InstallDir) {
-    # Copies the release asset over <InstallDir>\Horreum.exe -- the file the desktop shortcut opens.
-    # The copy it replaces stays as Horreum-poprzednia.exe (one step back, overwritten each release).
-    # Verified by SHA256: a half-written exe behind the icon is worse than a stale one.
+    # Puts the release asset at <InstallDir>\Horreum.exe. The asset is first copied to a temp file
+    # NEXT TO the target and verified by SHA256; only then does it take the target's place in one
+    # step (File.Replace, same folder), keeping the replaced copy as Horreum-poprzednia.exe (one step
+    # back, overwritten each release). A failure at any point leaves the old Horreum.exe intact:
+    # a half-written exe behind the icon is worse than a stale one.
     $target   = Join-Path $InstallDir "Horreum.exe"
     $previous = Join-Path $InstallDir "Horreum-poprzednia.exe"
-    if (Test-Path $target) { Copy-Item -Path $target -Destination $previous -Force }
-    Copy-Item -Path $Asset -Destination $target -Force
-    $want = (Get-FileHash -Path $Asset -Algorithm SHA256).Hash
-    $got  = (Get-FileHash -Path $target -Algorithm SHA256).Hash
-    if ($want -ne $got) {
-        throw ("Installed copy differs from {0} after copy (SHA256)" -f (Split-Path $Asset -Leaf))
+    $temp     = Join-Path $InstallDir "Horreum.exe.nowy"
+    try {
+        Copy-Item -Path $Asset -Destination $temp -Force
+        $want = (Get-FileHash -Path $Asset -Algorithm SHA256).Hash
+        $got  = (Get-FileHash -Path $temp -Algorithm SHA256).Hash
+        if ($want -ne $got) {
+            throw ("copy of {0} differs from the asset (SHA256)" -f (Split-Path $Asset -Leaf))
+        }
+        if (Test-Path $target) {
+            [System.IO.File]::Replace($temp, $target, $previous)
+        } else {
+            Move-Item -Path $temp -Destination $target
+        }
+    }
+    finally {
+        Remove-Item -Path $temp -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -269,25 +283,33 @@ if ($Onefile) {
     if (Test-Path $asset) { Remove-Item $asset -Force }
     Move-Item -Path $exePath -Destination $asset
 
-    # 6R. DESKTOP ICON FOLLOWS THE RELEASE. The owner starts Horreum from a desktop shortcut aimed at
-    #     the copy the old NSIS installer left in InstallDir (HKCU\Software\Horreum). Nothing ever
-    #     refreshed that copy: the icon kept opening 0.5.1 while 0.19.0 was out (measured
-    #     2026-10-20). Step 2 already stopped a running Horreum.exe, so the file is not locked.
-    #     A machine without InstallDir has no such copy -- say so and finish.
+    # 6R. INSTALLED COPY FOLLOWS THE RELEASE. On the owner's machine the desktop shortcut opens the
+    #     copy the old NSIS installer left in InstallDir (HKCU\Software\Horreum); nothing ever
+    #     refreshed it, so the icon kept opening 0.5.1 while 0.19.0 was out (measured 2026-10-20).
+    #     The script does not read the shortcut -- it refreshes InstallDir\Horreum.exe and names it.
+    #     Step 2 stopped a running Horreum.exe, but one started again during the build can still
+    #     hold the file: then the refresh fails whole (old copy intact) and the script exits 3 --
+    #     the artifact is READY, only the installed copy is stale. Exit 3 never means a bad build.
     $installDir = (Get-ItemProperty -Path "HKCU:\Software\Horreum" -Name "InstallDir" `
                    -ErrorAction SilentlyContinue).InstallDir
-    if ($installDir -and (Test-Path $installDir)) {
+    if (-not $installDir) {
+        Write-Host "NOTE -> no InstallDir in HKCU\Software\Horreum -- no installed copy to refresh" `
+                   -ForegroundColor DarkGray
+    } elseif (-not (Test-Path $installDir)) {
+        Write-Host ("NOTE -> InstallDir points at a missing folder ({0}) -- no installed copy to refresh" `
+                    -f $installDir) -ForegroundColor DarkGray
+    } else {
         try { Update-InstalledCopy -Asset $asset -InstallDir $installDir }
         catch {
-            throw (("Release artifact is READY ({0}), but the desktop copy was NOT refreshed: {1} " +
-                    "-- close Horreum, then: Copy-Item '{2}' '{3}\Horreum.exe' -Force") `
-                   -f (Split-Path $asset -Leaf), $_.Exception.Message, $asset, $installDir)
+            Write-Host (("Release artifact is READY ({0}), but {1}\Horreum.exe was NOT refreshed " +
+                         "(old copy intact): {2} -- if Horreum is running, close it; otherwise fix the " +
+                         "cause above. Then rerun the copy: Copy-Item '{3}' '{1}\Horreum.exe' -Force") `
+                        -f (Split-Path $asset -Leaf), $installDir, $_.Exception.Message, $asset) `
+                       -ForegroundColor Red
+            exit 3
         }
-        Write-Host ("OK -> desktop copy refreshed: {0}\Horreum.exe = {1}" -f $installDir, (Split-Path $asset -Leaf)) `
-                   -ForegroundColor Green
-    } else {
-        Write-Host "NOTE -> no InstallDir in HKCU\Software\Horreum -- no desktop copy to refresh" `
-                   -ForegroundColor DarkGray
+        Write-Host ("OK -> installed copy refreshed: {0}\Horreum.exe = {1} (previous: Horreum-poprzednia.exe)" `
+                    -f $installDir, (Split-Path $asset -Leaf)) -ForegroundColor Green
     }
 
     Write-Host ("Build complete: {0} (EXTERNAL artifact, built from tag)" -f (Split-Path $asset -Leaf)) `

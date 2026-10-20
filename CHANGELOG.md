@@ -6,6 +6,50 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.19.0] - 2026-10-20
+
+Wydanie o **karcie liczbowej zapisanej w miejscu i Porządkach, które nie czekają na dysk**. Poprawka karty
+liczbowej albo logicznej nagłówka FITS (wartość tego samego rodzaju co zastana) zapisuje się w miejscu, jak karta
+tekstowa - plik nie jest przepisywany w całości, więc klatki wydane dowiązaniem do folderu roboczego WBPP widzą
+poprawkę. Porządki nie sprawdzają plików archiwum w oknie: kopie zostawione obok ścieżki sprawdza przegląd w tle,
+a udział, który nie odpowiada, nie zatrzymuje ani okna, ani zmiany bazy. Shift+klik po sortowaniu, grupowaniu
+i podglądzie zaznacza tak, jakby zaznaczenie nigdy nie było odtwarzane. **Schemat bazy bez zmian (45):** bazę
+otwartą w tej wersji dalej otworzą 0.17.0 i 0.18.0.
+
+### Zmienione
+
+- **Karta liczbowa i logiczna zapisuje się w miejscu** (okna kart i szuflada zmian), bajt w bajt tak, jak zapisałby
+  ją pełny zapis - także przy zmianie samego komentarza karty. Karta o wartości równej zastanej zostaje w pliku
+  nietknięta. Gdy plik trzeba przepisać w całości, podpowiedź wymienia każdy taki plik (do dziesięciu, reszta
+  liczbą) i mówi, że dowiązanie twarde w wydaniu `_WBPP` zostało przy starej treści.
+- **Porządki bez sprawdzania archiwum w oknie:** liczniki i lista nie dotykają plików archiwum. Kopie zostawione
+  do oka sprawdza jeden przegląd w tle na bazę; gdy trwa dłużej niż 3 s, wiersz „Kopie zostawione do oka” mówi,
+  że sprawdzanie trwa, a przy udziale, który nie odpowiada - że części plików nie dało się sprawdzić, z radą
+  ponowienia po powrocie udziału. Nazwa, której brak przegląd dowiódł, znika z listy. Zamknięcie okna i zmiana
+  bazy nie czekają na udział.
+- **Zaznaczenie w Zbiorach:** Shift+klik po sortowaniu, grupowaniu, podglądzie i przeładowaniu dokłada zakres do
+  całego zaznaczenia, a nie tylko do jego części sprzed odtworzenia; bieżąca komórka wraca na swoje miejsce także
+  na wierszu niezaznaczonym.
+- **Prawy klik w tabeli klatek:** na klatce spoza zaznaczenia zaznacza wyłącznie ją i otwiera menu; na klatce
+  zaznaczonej zaznaczenie zostaje; Ctrl i Shift tej reguły nie zmieniają.
+- **Szuflada zmian po zapisie:** zbiór i podgląd zmian odświeżają się jednym przeładowaniem, panel Rodowód zostaje
+  na miejscu. Identyfikator zapisu stoi raz, w zdaniu wyniku (etykieta mówi „Zatwierdzono: N”).
+- **Pasek zbioru** nie poszerza okna przy dużym zaznaczeniu - licznik skraca się zamiast rozpychać pasek (przy
+  powiększeniu ekranu 160% najmniejsza szerokość okna 2053 → 1749 px).
+- **Odmowy zapisu kart mówią zdaniami podglądu makra**, w języku interfejsu: „karta już istnieje (użyj set)” jednym
+  zdaniem dla FITS i XISF, wystąpienie `[idx]` spoza nagłówka z liczbą wystąpień, zmiana rodzaju wartości, `set`
+  bez `idx` na karcie powtórzonej. Dopisanie karty, która już jest, odmawia przed zapisem, bez przebiegu na próżno.
+- **Wydanie obiektu - odmowa manifestu** (uszkodzony, innego wydania, zajęty): otwarte okno wydania mówi, który
+  przycisk nacisnąć; po zamknięciu okna pasek podaje ścieżkę manifestu bez rad o przyciskach okna, którego już nie
+  ma; przy zajętym pliku roboczym szczegół wskazuje ten plik. Polecenie `project` dopisuje wiersz `potem:`
+  z krokiem w terminalu.
+- **Esc w czasie zapisu manifestu:** panel raportu dopisuje, że okno zamknie się samo po zakończeniu zapisu.
+- **Żniwa:** wydanie, którego wyników WBPP jeszcze nie zapisał, mówi to wprost („folderu wyjścia nie ma”) zamiast
+  zgłaszać błąd; przycisk „Wciągnij” jest wyróżniony tylko wtedy, gdy jest co wciągnąć.
+- **Błąd programu** w szufladzie zmian, w oknach kart i w planerze (brak stanowiska) kończy się miejscem w kodzie.
+- **Błędy Windows** podają kod błędu i ścieżkę jednym zdaniem także w skanie (korzeń archiwum).
+- Angielskie komunikaty używają angielskich cudzysłowów zamiast polskich.
+
 ## [0.18.0] - 2026-10-18
 
 Wydanie o **zaznaczeniu bez czekania i zapisie, który niczego nie gubi po cichu**. Gdy w systemie działa klient
@@ -1564,7 +1608,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.18.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/abo-t/horreum/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/abo-t/horreum/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/abo-t/horreum/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/abo-t/horreum/compare/v0.15.0...v0.16.0

@@ -33,6 +33,7 @@ komórki, planu naprawy nagłówków i bramki okien kart (`gui.queries.fits_chec
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 
 from .item_reasons import PowodPozycji     # powód z kodem (AR-158) - liść bez astropy
@@ -140,3 +141,81 @@ def card_violation(keyword, value, comment=None, *, new_card=False) -> CardViola
                                        limit=max(limit, 0)),
                 length=len(comment), limit=max(limit, 0), field="comment")
     return None
+
+
+# ============================================================ LICZBA KARTY (AR-269)
+# Dwie reguły wartości LICZBOWEJ, z jednym zdaniem dla podglądu makra (`macro`) i pisarza
+# (`writeback._apply_op`, `_xisf_patches`):
+# 1. Liczba NIESKOŃCZONA (`nan`, `inf`, `1e400`) - standard karty FITS jej nie zna (§4.2.4), astropy
+#    odmawia angielskim `ValueError` (dawniej 'failed' prozą), a pisarz XISF wpisywał ją tekstem.
+#    Sprawdzana na TEKŚCIE, zanim typ int zrobi z niej `macro_type_mismatch` - ta sama kolejność
+#    w podglądzie i w pisarzu.
+# 2. Liczba, której POLE karty FITS nie odtworzy: astropy układa float zmienionej karty w polu
+#    20 znaków (`astropy/io/fits/card.py` `_format_float`: `str(v)` z wielką literą wykładnika,
+#    dłuższe - ucięta mantysa), więc `-0.0012345678901234567` wraca jako inna liczba
+#    `-0.00123456789012345`. „Ta sama liczba” = ten sam double po odczycie pola. Podgląd liczy to
+#    lustrem (`pole_float_fits`, bez astropy), pisarz - prawdą astropy (obraz karty po łacie); test
+#    pilnuje, że lustro i astropy mówią to samo. Wyłącznie FITS: pisarz XISF wpisuje tekst wartości.
+
+FITS_FLOAT_FIELD = _FITS_FIXED_FIELD    # pole liczby karty FITS: 20 znaków (kolumny 11-30)
+# Karty KOMENTARZOWE (zbiór jak astropy `Card._commentary_keywords` bez `END`): wartość to tekst od
+# kolumny 9, bez pola liczby - astropy zapisuje liczbę jako `str` w pełnych cyfrach, więc reguła 2
+# ich nie dotyczy (odczyt daje tekst, który nigdy nie równa się liczbie).
+KARTY_KOMENTARZOWE = frozenset({"", "COMMENT", "HISTORY"})
+
+
+def liczba_violation(keyword, value) -> PowodPozycji | None:
+    """Powód `card_value_nonfinite`, gdy `value` (tekst stagingu albo liczba) czyta się jako liczba
+    nieskończona, inaczej `None` - także dla tekstu, który liczbą nie jest (to reguła typu, nie
+    tej funkcji). Wołający pyta wyłącznie dla wartości LICZBOWEJ: tekst `nan` w karcie tekstowej
+    jest legalnym tekstem."""
+    try:
+        liczba = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isfinite(liczba):
+        return None
+    # Liczba po odczycie (`nan`, `inf`, `-inf`), nie tekst wejścia: `NaN` i `1e400` z pisarza mówią to
+    # samo co wartość, którą podgląd już przeczytał jako liczbę.
+    name, tekst = str(keyword).strip().upper(), str(liczba)
+    return PowodPozycji(f"wartość karty {name} ({tekst}) nie jest liczbą skończoną - standard karty "
+                        f"FITS (także w XISF) jej nie dopuszcza", "card_value_nonfinite",
+                        keyword=name, value=tekst)
+
+
+def pole_float_fits(value: float) -> str:
+    """Tekst pola liczby, które astropy postawi w karcie FITS dla `value` - lustro `_format_float`
+    (astropy 8.0): `str` z wielką literą wykładnika, dłuższy niż pole - mantysa ucięta tak, żeby
+    wykładnik został; bez wykładnika - ucięcie do pola."""
+    tekst = str(float(value)).replace("e", "E")
+    if len(tekst) > FITS_FLOAT_FIELD:
+        e = tekst.find("E")
+        tekst = (tekst[:FITS_FLOAT_FIELD] if e < 0
+                 else tekst[:FITS_FLOAT_FIELD - (len(tekst) - e)] + tekst[e:])
+    return tekst
+
+
+def powod_cyfr(keyword, value: float) -> PowodPozycji:
+    """Zdanie `card_value_digits` - jedno dla podglądu i pisarza FITS: liczba i to, co da pole."""
+    name, tekst, pole = str(keyword).strip().upper(), repr(float(value)), pole_float_fits(value)
+    return PowodPozycji(f"wartość karty {name} {tekst} nie mieści się w polu liczby karty FITS "
+                        f"(20 znaków) - zapis dałby {pole}, inną liczbę; zaokrąglij wartość",
+                        "card_value_digits", keyword=name, value=tekst, derived=pole)
+
+
+def cyfry_violation(keyword, value: float, zastana_typ=None, zastana_raw=None) -> PowodPozycji | None:
+    """PODGLĄD reguły 2 dla karty FITS typu float: `powod_cyfr`, gdy pole nie odtworzy `value`.
+    `zastana_*` = typ i tekst wartości wystąpienia, które zapis zmienia (`None` przy `add`): float
+    równy zastanemu floatowi astropy zostawia w zastanym formacie (karty nie przekłada), więc
+    liczba nie ginie - jak w pisarzu, który pyta obraz karty. Karta komentarzowa - poza regułą."""
+    if str(keyword).strip().upper() in KARTY_KOMENTARZOWE:
+        return None
+    if zastana_typ == "float" and zastana_raw is not None:
+        try:
+            if float(zastana_raw) == float(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+    if float(pole_float_fits(value)) == float(value):
+        return None
+    return powod_cyfr(keyword, value)

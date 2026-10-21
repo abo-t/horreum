@@ -57,7 +57,7 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_F_RATIO_
 from horreum.gui.grid_model import PRESET_LINEAGE_NEWER, PRESET_XREF_RECONCILE
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
-from horreum.item_reasons import blad_systemu, powod_bazy, powod_okna
+from horreum.item_reasons import powod_bazy, powod_okna
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
 # wewnętrznego stacku (int), nazwa perspektywy Zbiorów (str — sygnał `open_collection`) albo None
@@ -365,7 +365,7 @@ class _LicznikiWorker(QObject):
     wątku (sqlite `check_same_thread`), a slot widoku tylko przykłada wynik do listy."""
 
     done = Signal(int, object)     # generacja, `(liczniki, kandydaci)`
-    failed = Signal(int, object)   # generacja, powód (klasa błędu bazy albo systemu, AR-198)
+    failed = Signal(int, object)   # generacja, powód (`powod_okna`: klasa bazy/systemu albo błąd programu)
     finished = Signal()            # run() wrócił KAŻDĄ drogą → quit wątku
 
     def __init__(self, gen, db_path):
@@ -383,7 +383,9 @@ class _LicznikiWorker(QObject):
                 con.close()                # PRZED emisją - wątek GUI czyta przez swoje połączenie
             self.done.emit(self._gen, wynik)
         except Exception as exc:           # szczerze do widoku, nie cicha śmierć wątku
-            self.failed.emit(self._gen, blad_systemu(exc))
+            # Jedna reguła wyjątku okna (`powod_okna`, AR-264): klasa bazy albo systemu, inaczej
+            # błąd programu z miejscem w kodzie - liczony tu, w wątku, póki ślad jest pełny.
+            self.failed.emit(self._gen, powod_okna(exc))
         finally:
             self.finished.emit()
 
@@ -750,7 +752,9 @@ class TasksView(QWidget):
             odcisk = queries.odcisk_bazy(self.con)
             stan = _stan_licznikow(self.con)
         except (sqlite3.Error, OSError) as exc:
-            powod = blad_systemu(exc)
+            # `powod_okna` (AR-264): `ProgrammingError`/`InterfaceError` (API bazy wbrew kontraktowi)
+            # mówi błędem programu z miejscem w kodzie, nie surowym angielskim tekstem SQLite.
+            powod = powod_okna(exc)
             self.blad_licznikow.ustaw(i18n.t("tasks.counts_failed", msg=tekst_powodu(powod)),
                                       wiersz_systemu(powod))
             self.blad_licznikow.setVisible(True)

@@ -532,6 +532,7 @@ def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypa
     nim) są w bazie. Koniec przebiegu przychodzi w tej drodze tak samo (`_cleanup_thread`), więc
     widoki i plakietka liczą się ze stanu także tu."""
     from horreum import grouper
+    from horreum.gui import i18n
 
     def _pada(con, now):
         raise RuntimeError("etap padł")
@@ -545,7 +546,9 @@ def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypa
         win.pipeline_view.stage_finished.connect(etapy.append)
         _przebieg_w_watku(win, lambda: win.pipeline_view.run_stage("group"))
         assert etapy == [], "etap padł - bez sygnału końca etapu"
-        assert "etap padł" in win.pipeline_view.lbl_error.text()
+        # błąd programu jednym zdaniem w języku UI, surowy tekst wyjątku w szczególe (AR-264)
+        assert i18n.t("objchg.item.prog_error").split(" - ")[0] in win.pipeline_view.lbl_error.text()
+        assert "etap padł" in win.pipeline_view.lbl_error.toolTip()
         assert licznik == {"grid": 1, "obiekt": 1}
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)", "plakietka ze stanu bazy"
     finally:

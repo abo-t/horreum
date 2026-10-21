@@ -1016,3 +1016,421 @@ def test_cztery_workery_blad_programu_szczegol_techniczny_z_typem(qapp, tmp_path
     # Miejsce w kodzie (AR-237): linia pakietu, która wołała podmieniony rdzeń okna.
     assert re.fullmatch(re.escape(_szczegol_programu(rodzaj, tmp_path))
                         + rf" @ horreum/{re.escape(_MIEJSCE_WORKERA[okno])}:\d+", szczegol), szczegol
+
+
+# ============================================================ AR-264: workery odczytu - ta sama reguła okna
+
+def _odczyt_pol(tmp_path, monkeypatch, rzut):
+    """Pola Zbiorów (tryb bez wątku, `PolaWorker` na połączeniu widoku): pokrycie pada w rdzeniu
+    (`pola.odcisk_kart`) - zdanie paska gospodarza i jego szczegół (`ZdanieZeSzczegolem`)."""
+    from horreum.gui import pola as pola_mod
+    from horreum.gui.wb_worker import szczegol_zdania
+    from test_gui_powody_pisarza import _widok_nad
+    view, con, _p = _widok_nad(QApplication.instance(), tmp_path)
+    pasek = []
+    view.status_message.connect(pasek.append)
+    monkeypatch.setattr(pola_mod, "odcisk_kart", lambda *_a, **_k: rzut())
+    view._zamow_pola()
+    (msg,) = pasek
+    view.close()
+    con.close()
+    return (msg, szczegol_zdania(msg)), lambda zdanie: i18n.t("grid.fields.failed_status", msg=zdanie)
+
+
+def _odczyt_zbioru(tmp_path, monkeypatch, rzut):
+    """Skład zbioru (`ZbiorWorker`) na ŚWIEŻEJ bazie - atrapa składu, nie błąd otwarcia bazy.
+    Odbiorca zdania nie pokazuje (ponawia skład), więc szczegółu nie ma dokąd nieść: `None`."""
+    from horreum.gui import grid_workers
+    from test_gui_pipeline import _fresh_db
+    monkeypatch.setattr(grid_workers, "_sklad_zbioru", lambda *_a, **_k: rzut())
+    w = grid_workers.ZbiorWorker(1, None, _fresh_db(tmp_path))
+    bledy = []
+    w.failed.connect(lambda _gen, msg: bledy.append(msg))
+    w.run()
+    (msg,) = bledy
+    return (msg, None), lambda zdanie: zdanie
+
+
+def _odczyt_teczek(tmp_path, monkeypatch, rzut):
+    """Teczki Domu (tryb bez wątku): `queries.release_readiness` pada - pole zdania i szczegół."""
+    from datetime import datetime
+    from horreum.gui.home import HomeView
+    from test_gui_home import DOM_NOW, _baza_domu, _obiekty
+    con = _baza_domu(str(tmp_path / "d.db"), _obiekty(1), extra=False)
+    h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
+    monkeypatch.setattr(queries, "release_readiness", lambda *_a, **_k: rzut())
+    h.odswiez_teczki()
+    wynik = h.teczki_status.text(), h.teczki_status.szczegol()
+    h.close()
+    con.close()
+    godzina = datetime.fromisoformat(DOM_NOW).astimezone().strftime("%H:%M")
+    return wynik, lambda zdanie: i18n.t("home.folders.failed", time=godzina, msg=zdanie)
+
+
+def _odczyt_dostawy(tmp_path, monkeypatch, rzut):
+    """Dostawa: klik „Skanuj”, skan pada w PRAWDZIWYM wątku etapów (`scan_tree`) - pole błędu etapu,
+    jego szczegół, a zapis przebiegu (strona Przyjmij) niesie ten sam szczegół."""
+    from horreum.gui import pipeline as pipeline_mod
+    from horreum.gui.pipeline import PipelineView
+    from test_gui_pipeline import NOW as NOW_P, _fresh_db, _tree
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW_P)
+    view._root = _tree(tmp_path, 1)
+    view._sync_actions()
+    monkeypatch.setattr(pipeline_mod, "scan_tree", lambda *_a, **_k: rzut())
+    view.show()
+    _klik(view.btn_scan)
+    assert _czekaj(lambda: view._thread is None and view.last_run["failed"]), view.last_run
+    wynik = view.lbl_error.text(), view.lbl_error.szczegol()
+    assert view.last_run["failed_tip"] == wynik[1]
+    view.close()
+    etap = pipeline_mod._stage_label("scan")
+    return wynik, lambda zdanie: i18n.t("pipeline.stage_failed_line", stage=etap, msg=zdanie)
+
+
+def _zniwa(tmp_path, monkeypatch):
+    from test_gui_harvest import _baza, _czytnik, _flat_cls, _wyjscie
+    con, _profile, _flats = _baza(tmp_path)
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    return con, out
+
+
+def _odczyt_sondy_zniw(tmp_path, monkeypatch, rzut):
+    """Okno żniw: sonda wyjścia pada w planiście (`harvest.plan`) - notka i jej szczegół."""
+    from test_gui_harvest import _dlg
+    con, out = _zniwa(tmp_path, monkeypatch)
+    dlg = _dlg(con, tmp_path / "ARCH")
+    monkeypatch.setattr(harvest, "plan", lambda *_a, **_k: rzut())
+    dlg._set_output(str(out))
+    wynik = dlg.notice.text(), dlg.notice.szczegol()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("harvest.dry_failed", msg=zdanie)
+
+
+def _odczyt_zniw(tmp_path, monkeypatch, rzut):
+    """Okno żniw: bieg kopii pada wyjątkiem całej operacji (`harvest.apply`) przed pierwszym plikiem."""
+    from test_gui_harvest import _dlg
+    con, out = _zniwa(tmp_path, monkeypatch)
+    dlg = _dlg(con, tmp_path / "ARCH")
+    dlg._set_output(str(out))
+    monkeypatch.setattr(harvest, "apply", lambda *_a, **_k: rzut())
+    dlg._on_apply()
+    wynik = dlg.notice.text(), dlg.notice.szczegol()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("harvest.apply_error", msg=zdanie, made="")
+
+
+def _odczyt_listy_wydan(tmp_path, monkeypatch, rzut):
+    """Okno żniw: lista wydań w PRAWDZIWYM wątku tła pada (`harvest.releases`) - notka listy."""
+    from test_gui_harvest import _dlg
+    con, _out = _zniwa(tmp_path, monkeypatch)
+    karta = tmp_path / "_WBPP"
+    karta.mkdir()
+    monkeypatch.setattr(harvest, "releases", lambda *_a, **_k: rzut())
+    dlg = _dlg(con, tmp_path / "ARCH", release_roots=(str(karta),), off_thread=True)
+    assert _czekaj(lambda: dlg._rel_thread is None and dlg.rel_notice.text()), dlg.rel_notice.text()
+    wynik = dlg.rel_notice.text(), dlg.rel_notice.szczegol()
+    dlg.reject()
+    con.close()
+    return wynik, lambda zdanie: i18n.t("harvest.rel.failed", msg=zdanie)
+
+
+def _odczyt_licznikow(tmp_path, monkeypatch, rzut):
+    """Liczniki Porządków (`_LicznikiWorker`) na ŚWIEŻEJ bazie: rachunek pada - powód z sygnału
+    w zdaniu UI i wierszu szczegółu (slot ponawia rachunek, więc powód sprawdzamy u źródła)."""
+    from horreum.gui import tasks as tasks_mod
+    from horreum.gui.wb_worker import tekst_powodu
+    from test_gui_pipeline import _fresh_db
+    monkeypatch.setattr(tasks_mod, "_stan_licznikow", lambda *_a, **_k: rzut())
+    w = tasks_mod._LicznikiWorker(7, _fresh_db(tmp_path))
+    bledy = []
+    w.failed.connect(lambda _gen, powod: bledy.append(powod))
+    w.run()
+    (powod,) = bledy
+    return (tekst_powodu(powod), wiersz_systemu(powod)), lambda zdanie: zdanie
+
+
+_OKNA_ODCZYTU = {"pola": _odczyt_pol, "zbior": _odczyt_zbioru, "teczki": _odczyt_teczek,
+                 "dostawa": _odczyt_dostawy, "sonda_zniw": _odczyt_sondy_zniw, "zniwa": _odczyt_zniw,
+                 "lista_wydan": _odczyt_listy_wydan, "liczniki": _odczyt_licznikow}
+# Plik pakietu, którego linia woła podmieniony rdzeń - miejsce w kodzie szczegółu (AR-237).
+_MIEJSCE_ODCZYTU = {"pola": "gui/grid_workers.py", "teczki": "gui/home.py", "dostawa": "gui/pipeline.py",
+                    "sonda_zniw": "gui/harvest_dialog.py", "zniwa": "gui/harvest_dialog.py",
+                    "lista_wydan": "gui/harvest_dialog.py", "liczniki": "gui/tasks.py"}
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("rodzaj", ["rdzen", "biblioteka", "klucz", "zamkniete", "system", "baza"])
+@pytest.mark.parametrize("okno", list(_OKNA_ODCZYTU))
+def test_workery_odczytu_jedna_regula_wyjatku_okna(qapp, tmp_path, monkeypatch, jezyk, okno, rodzaj,
+                                                   lang):
+    """AR-264: wyjątek workera Pól, składu zbioru, teczek Domu, etapu Dostawy, sondy, biegu i listy
+    wydań żniw oraz liczników Porządków mówi TĄ SAMĄ regułą co okna zapisu (`powod_okna`): błąd
+    systemu i bazy - klasą w języku UI ze szczegółem; goły EXPECT rdzenia, wyjątek biblioteki,
+    `KeyError` i API bazy wbrew kontraktowi - zdaniem błędu programu w języku UI (nic po polsku
+    w EN), z `Typ: opis @ horreum/…:N` w szczególe. Falsyfikator: handler workera z `blad_systemu`
+    - w zdaniu surowe `ValueError: złamany inwariant…` po polsku także w UI EN."""
+    jezyk(lang)
+    (zdanie, szczegol), glowa = _OKNA_ODCZYTU[okno](tmp_path, monkeypatch, lambda: _rzut(rodzaj, tmp_path))
+    powod, wiersz = _oczekiwane(rodzaj)
+    assert zdanie.startswith(glowa(powod)), zdanie
+    if lang == "en":
+        assert not set(zdanie.split("\n")[0]) & _POLSKIE, zdanie
+    if szczegol is None:                           # skład zbioru: odbiorca nie pokazuje zdania
+        return
+    if wiersz is not None:
+        assert szczegol == wiersz, szczegol
+    else:
+        assert re.fullmatch(re.escape(_szczegol_programu(rodzaj, tmp_path))
+                            + rf" @ horreum/{re.escape(_MIEJSCE_ODCZYTU[okno])}:\d+", szczegol), szczegol
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_nieznany_etap_dostawy_mowi_bledem_programu(qapp, tmp_path, jezyk, lang):
+    """AR-264: nieznany etap `PipelineWorker` to złamany kontrakt wołającego - `failed` niesie etap
+    i powód `prog_error` (zdanie w języku UI, miejsce w kodzie w szczególe), nie zdanie po polsku.
+    Falsyfikator: gałąź `else` z `failed.emit(..., f"nieznany etap: …")`."""
+    from horreum.gui.pipeline import PipelineWorker
+    from horreum.gui.wb_worker import tekst_powodu
+    from test_gui_pipeline import NOW as NOW_P, _fresh_db
+    jezyk(lang)
+    w = PipelineWorker(_fresh_db(tmp_path), now_fn=lambda: NOW_P)
+    w.configure("bogus")
+    bledy = []
+    w.failed.connect(lambda n, p: bledy.append((n, p)))
+    w.run()
+    ((etap, powod),) = bledy
+    assert etap == "bogus" and getattr(powod, "code", None) == "prog_error", (etap, powod)
+    assert re.fullmatch(r"ValueError: nieznany etap: 'bogus' @ horreum/gui/pipeline\.py:\d+",
+                        dict(powod.params)["detail"]), powod.params
+    zdanie = tekst_powodu(powod)
+    assert zdanie == i18n.t("objchg.item.prog_error"), zdanie
+    if lang == "en":
+        assert not set(zdanie) & _POLSKIE, zdanie
+
+
+def _szeroki_handler(h):
+    """Handler łapiący wszystko: `Exception`, `BaseException`, goły `except:` albo krotka z nimi."""
+    import ast
+    if h.type is None:
+        return True
+    typy = h.type.elts if isinstance(h.type, ast.Tuple) else [h.type]
+    return any(isinstance(t, ast.Name) and t.id in ("Exception", "BaseException") for t in typy)
+
+
+def _handlery_workerow():
+    """Szerokie handlery WORKERÓW GUI (`_moduly_gui` - z podkatalogami): w poddrzewie metody `run`
+    klasy albo funkcji podanej jako `target=` wątku (`threading.Thread`), z funkcjami zagnieżdżonymi
+    włącznie. `(plik, korzeń Klasa.run albo funkcja, linia handlera, czy klasyfikuje - `_handler_klasyfikuje`)`. Handler
+    poza takim poddrzewem (gest okna, `__init__` workera) jest poza bramką."""
+    import ast
+    for plik, drzewo, _rodzic, przodkowie in _moduly_gui():
+        funkcje = {}
+        for w in ast.walk(drzewo):
+            if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funkcje.setdefault(w.name, []).append(w)
+        korzenie = [f for kl in ast.walk(drzewo) if isinstance(kl, ast.ClassDef)
+                    for f in kl.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and f.name == "run"]
+        for w in ast.walk(drzewo):
+            if (isinstance(w, ast.Call) and isinstance(w.func, (ast.Attribute, ast.Name))
+                    and (w.func.attr if isinstance(w.func, ast.Attribute) else w.func.id) == "Thread"):
+                for k in w.keywords:
+                    if k.arg == "target":
+                        cel = k.value.attr if isinstance(k.value, ast.Attribute) else getattr(k.value, "id", None)
+                        korzenie += funkcje.get(cel, [])
+        widziane = set()
+        for korzen in korzenie:
+            nazwa = ".".join([*reversed([p.name for p in przodkowie(korzen)]), korzen.name])
+            for h in ast.walk(korzen):
+                if not (isinstance(h, ast.ExceptHandler) and _szeroki_handler(h)) or id(h) in widziane:
+                    continue
+                widziane.add(id(h))
+                yield plik, nazwa, h.lineno, _handler_klasyfikuje(h, korzen)
+
+
+def _bez_zagniezdzen(wezly):
+    """Węzły drzewa od `wezly` w dół BEZ zagnieżdżonych `def`/`lambda`/klas - kod, który handler wykonuje
+    sam, nie kod, który tylko definiuje."""
+    import ast
+    zagniezdzone = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    stos = [w for w in wezly if not isinstance(w, zagniezdzone)]
+    while stos:
+        w = stos.pop()
+        yield w
+        stos += [d for d in ast.iter_child_nodes(w) if not isinstance(d, zagniezdzone)]
+
+
+def _handler_klasyfikuje(h, korzen):
+    """Czy handler `h` KLASYFIKUJE złapany wyjątek regułą okna: w jego ciele (bez zagnieżdżonych definicji)
+    stoi `powod_okna(<złapany wyjątek>)`, a wynik idzie dalej - w argumencie `emit`, w `return` albo
+    w przypisaniu, którego nazwę funkcja-korzeń czyta później. Wywołanie z wynikiem zignorowanym, wywołanie
+    tylko w funkcji zdefiniowanej w handlerze i `blad_systemu(exc)` do sygnału - nie klasyfikują."""
+    import ast
+    if h.name is None:
+        return False
+
+    def _niesie(wezel):
+        return any(isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute))
+                   and (c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id) == "powod_okna"
+                   and any(isinstance(a, ast.Name) and a.id == h.name for a in c.args)
+                   for c in _bez_zagniezdzen([wezel]))
+
+    for w in _bez_zagniezdzen(h.body):
+        if (isinstance(w, ast.Call) and isinstance(w.func, ast.Attribute) and w.func.attr == "emit"
+                and any(_niesie(a) for a in [*w.args, *(k.value for k in w.keywords)])):
+            return True
+        if isinstance(w, ast.Return) and w.value is not None and _niesie(w.value):
+            return True
+        if isinstance(w, (ast.Assign, ast.AnnAssign)) and w.value is not None and _niesie(w.value):
+            cele = w.targets if isinstance(w, ast.Assign) else [w.target]
+            nazwy = {n.id for c in cele for n in ast.walk(c) if isinstance(n, ast.Name)}
+            if any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in nazwy
+                   and (n.lineno, n.col_offset) > (w.lineno, w.col_offset) for n in ast.walk(korzen)):
+                return True
+    return False
+
+
+# Szerokie handlery workerów, które celowo NIE mówią regułą okna - z powodem. Pusta: każdy mówi.
+_WYJATKI_REGULY_OKNA = {}
+
+
+def test_bramka_kazdy_handler_workera_gui_klasyfikuje_powod_okna():
+    """AR-264: każdy szeroki handler workera GUI (`_handlery_workerow`) klasyfikuje wyjątek
+    `powod_okna`, a wynik idzie dalej (`_handler_klasyfikuje`) - błąd programu z miejscem w kodzie, klasa
+    systemu i bazy, odmowa swoim kodem. Nowy
+    worker z `blad_systemu` albo surowym `str(exc)` = czerwień; wyjątek z listy, którego już nie ma,
+    schodzi z niej. Podłoga liczności: predykat widzi co najmniej 15 handlerów (8 workerów odczytu
+    i 7 okien zapisu, planera i przeglądu) - predykat, który oślepł, nie przechodzi po cichu."""
+    handlery = list(_handlery_workerow())
+    assert len(handlery) >= 15, handlery
+    nowe = {(plik, nazwa) for plik, nazwa, _l, klasyfikuje in handlery if not klasyfikuje} - set(_WYJATKI_REGULY_OKNA)
+    stare = set(_WYJATKI_REGULY_OKNA) - {(plik, nazwa) for plik, nazwa, _l, _k in handlery}
+    assert not nowe, f"handler workera GUI bez `powod_okna`: {sorted(nowe)}"
+    assert not stare, f"wyjątek już naprawiony - zdejmij z listy: {sorted(stare)}"
+
+
+def test_predykat_bramki_handlerow_workerow_na_modulach_syntetycznych(monkeypatch):
+    """Predykat bramki AR-264 na modułach syntetycznych (`_moduly_gui` podmienione): `run` z
+    `except Exception` bez `powod_okna`, handler w funkcji ZAGNIEŻDŻONEJ w `run`, `except BaseException`
+    w `run` i krotka `(OSError, Exception)` w funkcji `target=` wątku - naruszenia; tak samo handler,
+    w którym `powod_okna(exc)` stoi z wynikiem zignorowanym, w przypisaniu, którego nikt nie czyta, albo
+    tylko w funkcji zdefiniowanej w handlerze, a do sygnału idzie `blad_systemu(exc)`, oraz `powod_okna`
+    na INNYM wyjątku niż złapany. Klasyfikuje: wynik
+    w argumencie `emit` i w przypisaniu czytanym po handlerze. Poza bramką: wąski `except OSError` w `run`,
+    handler w `__init__` workera i w geście okna. Falsyfikator: predykat bez `target=` wątku, bez
+    zagnieżdżeń albo uznający samo wywołanie `powod_okna` gdziekolwiek w handlerze."""
+    import ast
+    import sys
+    zrodlo = (
+        "import threading\n"
+        "class WorkerBezReguly:\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except Exception as exc:\n            self.failed.emit(blad_systemu(exc))\n"
+        "class WorkerZagniezdzony:\n"
+        "    def run(self):\n"
+        "        def wew():\n"
+        "            try:\n                pass\n"
+        "            except Exception:\n                pass\n"
+        "        wew()\n"
+        "class WorkerBaseException:\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except BaseException:\n            pass\n"
+        "class WorkerInitIWaski:\n"
+        "    def __init__(self):\n"
+        "        try:\n            pass\n"
+        "        except Exception:\n            pass\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except OSError:\n            pass\n"
+        "class WorkerZRegula:\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except Exception as exc:\n            self.failed.emit(powod_okna(exc))\n"
+        "class WorkerPrzypisanieCzytane:\n"
+        "    def run(self):\n"
+        "        powod = None\n"
+        "        try:\n            pass\n"
+        "        except Exception as exc:\n            powod = tekst_powodu(powod_okna(exc))\n"
+        "        if powod is not None:\n            self.failed.emit(powod)\n"
+        "class WorkerWynikZignorowany:\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except Exception as exc:\n"
+        "            powod_okna(exc)\n"
+        "            self.failed.emit(blad_systemu(exc))\n"
+        "class WorkerPrzypisanieNieczytane:\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except Exception as exc:\n"
+        "            powod = powod_okna(exc)\n"
+        "            self.failed.emit(blad_systemu(exc))\n"
+        "class WorkerRegulaWFunkcjiHandlera:\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except Exception as exc:\n"
+        "            def _powod():\n                return powod_okna(exc)\n"
+        "            self.failed.emit(blad_systemu(exc))\n"
+        "class WorkerRegulaNaInnymWyjatku:\n"
+        "    def run(self):\n"
+        "        try:\n            pass\n"
+        "        except Exception as exc:\n"
+        "            self.failed.emit(powod_okna(RuntimeError('padło')))\n"
+        "def cel():\n"
+        "    try:\n        pass\n"
+        "    except (OSError, Exception):\n        pass\n"
+        "def _on_gest():\n"
+        "    try:\n        pass\n"
+        "    except Exception:\n        pass\n"
+        "threading.Thread(target=cel)\n")
+
+    def _syntetyczne():
+        drzewo = ast.parse(zrodlo)
+        rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+
+        def _przodkowie(w, rodzic=rodzic):
+            while w in rodzic:
+                w = rodzic[w]
+                if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    yield w
+        yield "syntetyczny.py", drzewo, rodzic, _przodkowie
+    monkeypatch.setattr(sys.modules[__name__], "_moduly_gui", _syntetyczne)
+    wynik = {nazwa: klasyfikuje for _p, nazwa, _l, klasyfikuje in _handlery_workerow()}
+    assert wynik == {"WorkerBezReguly.run": False, "WorkerZagniezdzony.run": False,
+                     "WorkerBaseException.run": False, "WorkerZRegula.run": True,
+                     "WorkerPrzypisanieCzytane.run": True, "WorkerWynikZignorowany.run": False,
+                     "WorkerPrzypisanieNieczytane.run": False, "WorkerRegulaWFunkcjiHandlera.run": False,
+                     "WorkerRegulaNaInnymWyjatku.run": False, "cel": False}, wynik
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_liczniki_porzadkow_na_zamknietym_polaczeniu_mowia_bledem_programu(qapp, tmp_path, jezyk, lang):
+    """AR-264: rachunek liczników Porządków na wątku GUI (`refresh_counts`) na połączeniu użytym wbrew
+    kontraktowi (zamkniętym - `sqlite3.ProgrammingError`, nie stan bazy) mówi w wierszu błędu zdaniem
+    błędu programu w języku UI, z `Typ: opis @ horreum/…:N` w szczególe - nie surowym angielskim
+    tekstem SQLite w zdaniu. Falsyfikator: handler `refresh_counts` z `blad_systemu`."""
+    import sqlite3
+    from horreum.gui import tasks as tasks_mod
+    jezyk(lang)
+    con = db.open_db(str(tmp_path / "t.db"))
+    tv = tasks_mod.TasksView(con)
+    zamkniete = sqlite3.connect(":memory:")
+    zamkniete.close()
+    prawdziwe, tv.con = tv.con, zamkniete
+    try:
+        assert tv.refresh_counts() is None
+        zdanie = i18n.t("tasks.counts_failed", msg=i18n.t("objchg.item.prog_error"))
+        assert tv.blad_licznikow.text() == zdanie and not tv.blad_licznikow.isHidden()
+        assert re.fullmatch(re.escape(i18n.t("objchg.st.detail_tip", detail="ProgrammingError: "
+                                             "Cannot operate on a closed database."))
+                            + r" @ horreum/gui/\w+\.py:\d+", tv.blad_licznikow.szczegol()), \
+            tv.blad_licznikow.szczegol()
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE, zdanie
+    finally:
+        tv.con = prawdziwe
+        tv.close()
+        con.close()

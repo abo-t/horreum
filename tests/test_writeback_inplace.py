@@ -25,6 +25,7 @@ from astropy.io import fits
 
 from horreum import db, object_change, repo, resolver, scan, writeback
 from horreum.gui import queries
+from horreum.item_reasons import PowodPozycji
 
 NOW = "2026-09-26T00:00:00+00:00"
 KOMENTARZ = "Name of the object of interest"
@@ -68,6 +69,26 @@ def _op(value="NGC 6992"):
 
 def _hash(path):
     return scan.scan_file(str(path)).header_hash
+
+
+# Droga wyjścia z izolacji po KODZIE i parametrze `op_id` (AR-281): zdanie mówi gest z menu, a numer
+# operacji i wywołanie rdzenia jadą parametrem do szczegółu okna.
+_ODZYSK = ("way_restore", "isolated_recover", "isolated_finish")
+_DOKONCZENIE = ("way_finish", "isolated_finish")
+
+
+def _op_drogi(powod, kody):
+    """`op_id` pierwszego powodu z kodem z `kody` w drzewie powodu (parametry, listy) albo None."""
+    if not isinstance(powod, PowodPozycji):
+        return None
+    if powod.code in kody:
+        return dict(powod.params).get("op_id")
+    for _n, w in powod.params:
+        for x in (w if isinstance(w, (list, tuple)) else (w,)):
+            znaleziony = _op_drogi(x, kody)
+            if znaleziony is not None:
+                return znaleziony
+    return None
 
 
 class _Dziennik:
@@ -451,7 +472,7 @@ def test_przerwany_zapis_izoluje_lokacje_a_odzysk_ja_zwalnia(tmp_path, monkeypat
     _psuj_fsync(monkeypatch)
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     monkeypatch.undo()
-    assert len(res.failed) == 1 and "IZOLOWANA" in res.failed[0].reason
+    assert len(res.failed) == 1 and "izolowana od skanu" in res.failed[0].reason
     (op_id, kind, faza), = [tuple(o) for o in _operacje(con)]
     assert (kind, faza) == ("commit", "unverified")
     assert queries.torn_write_frame_ids(con) == {loc["frame_id"]}
@@ -463,7 +484,7 @@ def test_przerwany_zapis_izoluje_lokacje_a_odzysk_ja_zwalnia(tmp_path, monkeypat
     assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1
 
     u = writeback.undo(con, res.commit_id, now=NOW)
-    assert len(u.failed) == 1 and f"recover_torn({op_id})" in u.failed[0].reason
+    assert len(u.failed) == 1 and _op_drogi(u.failed[0].reason, _ODZYSK) == op_id
 
     wynik = writeback.recover_torn(con, op_id, now=NOW)
     assert wynik.status == "restored", wynik
@@ -645,7 +666,7 @@ def test_resync_commitu_i_undo_padly_ponowienie_robi_synchronizacje(tmp_path, mo
     monkeypatch.setattr(writeback.scan, "scan_file",
                         lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
     res = writeback.commit(con, "R", now=NOW, inplace=True)
-    assert len(res.failed) == 1 and "finish_inplace" in res.failed[0].reason
+    assert len(res.failed) == 1 and _op_drogi(res.failed[0].reason, _DOKONCZENIE) is not None
     po_commicie = p.read_bytes()
     u1 = writeback.undo(con, res.commit_id, now=NOW)
     assert len(u1.failed) == 1 and "commit nie jest dokończony" in u1.failed[0].reason
@@ -671,11 +692,11 @@ def test_przerwane_undo_xisf_z_wypelnieniem_przez_odzysk(tmp_path, monkeypatch):
     _psuj_fsync(monkeypatch)
     u1 = writeback.undo(con, res.commit_id, now=NOW)
     monkeypatch.undo()
-    assert len(u1.failed) == 1 and "IZOLOWANA" in u1.failed[0].reason
+    assert len(u1.failed) == 1 and "izolowana od skanu" in u1.failed[0].reason
     op_u = _operacje(con)[-1]
     assert (op_u["kind"], op_u["phase"]) == ("undo", "unverified")
     u2 = writeback.undo(con, res.commit_id, now=NOW)
-    assert len(u2.failed) == 1 and f"recover_torn({op_u['id']})" in u2.failed[0].reason
+    assert len(u2.failed) == 1 and _op_drogi(u2.failed[0].reason, _ODZYSK) == op_u["id"]
     assert writeback.recover_torn(con, op_u["id"], now=NOW).status == "restored"
     assert p.read_bytes() == po_commicie
     u3 = writeback.undo(con, res.commit_id, now=NOW)
@@ -980,7 +1001,7 @@ def test_izolacja_trwa_do_synced_a_finish_inplace_ja_zdejmuje(tmp_path, monkeypa
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     monkeypatch.setattr(writeback.scan, "scan_file", prawdziwy)
     (op_id, _, faza), = [tuple(o) for o in _operacje(con)]
-    assert faza == "written" and f"finish_inplace({op_id})" in res.failed[0].reason
+    assert faza == "written" and _op_drogi(res.failed[0].reason, _DOKONCZENIE) == op_id
     assert scan._isolated(con, str(p))
     for vol in ("V", "?"):
         s = scan.scan_tree(con, str(kat), volume=vol, now=NOW)
@@ -988,7 +1009,7 @@ def test_izolacja_trwa_do_synced_a_finish_inplace_ja_zdejmuje(tmp_path, monkeypa
     assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1
     assert _loc(con, p)["header_hash"] == loc["header_hash"]
     w = writeback.recover_torn(con, op_id, now=NOW)
-    assert w.status == "blocked" and f"finish_inplace({op_id})" in w.reason
+    assert w.status == "blocked" and _op_drogi(w.reason, _DOKONCZENIE) == op_id
 
     f = writeback.finish_inplace(con, op_id, now=NOW)
     assert f.status == "applied", f
@@ -1021,7 +1042,7 @@ def test_odzysk_z_nieudanym_resynciem_zostaje_otwarty_i_da_sie_ponowic(tmp_path,
     _zerwany_udzial(monkeypatch)
     w1 = writeback.recover_torn(con, op["id"], now=NOW)
     monkeypatch.setattr(writeback.scan, "scan_file", prawdziwy)
-    assert w1.status == "failed" and f"recover_torn({op['id']})" in w1.reason
+    assert w1.status == "failed" and _op_drogi(w1.reason, _ODZYSK) == op["id"]
     assert p.read_bytes() == przed and _operacje(con)[0]["phase"] == "unverified"
     assert scan._isolated(con, str(p))
     w2 = writeback.recover_torn(con, op["id"], now=NOW)
@@ -1147,7 +1168,7 @@ def test_nieutrwalona_faza_written_to_operacja_nieukonczona(tmp_path, monkeypatc
     assert not res.applied and len(res.failed) == 1 and "NIEUKOŃCZONA" in res.failed[0].reason
     (op_id, _, faza), = [tuple(o) for o in _operacje(con)]
     assert faza == "writing" and scan._isolated(con, str(p))
-    assert f"recover_torn({op_id})" in res.failed[0].reason
+    assert _op_drogi(res.failed[0].reason, _ODZYSK) == op_id
     assert writeback.recover_torn(con, op_id, now=NOW).status == "restored"
     assert p.read_bytes() == przed
     con.close()
@@ -1225,9 +1246,9 @@ def test_bramka_izolacji_przed_kazda_mutacja_pliku(tmp_path, monkeypatch):
     for run, inplace in (("B", False), ("B2", True)):
         _stage(con, run, loc["id"], "M 42", _hash(p))
         wynik = writeback.commit(con, run, now=NOW, inplace=inplace)
-        assert len(wynik.blocked) == 1 and f"finish_inplace({op_id})" in wynik.blocked[0].reason
+        assert len(wynik.blocked) == 1 and _op_drogi(wynik.blocked[0].reason, _DOKONCZENIE) == op_id
     u = writeback.undo(con, atomowy.commit_id, now=NOW)
-    assert len(u.blocked) == 1 and f"finish_inplace({op_id})" in u.blocked[0].reason
+    assert len(u.blocked) == 1 and _op_drogi(u.blocked[0].reason, _DOKONCZENIE) == op_id
     repo.stage_rename(con, run_id="N", location_id=loc["id"], old_path=str(p),
                       new_path=str(tmp_path / "nowa.fits"),
                       expected_mtime=con.execute("SELECT mtime FROM location WHERE id = ?",
@@ -1336,7 +1357,7 @@ def test_uzupelnienie_xisf_nie_wciaga_pliku_uszkodzonego_a_dokonczenie_mu_nie_uf
     assert _loc(con, p)["header_hash"] is None                     # fakty uszkodzonego NIE weszły
     op_id = _operacje(con)[0]["id"]
     f = writeback.finish_inplace(con, op_id, now=NOW)
-    assert f.status == "failed" and f"recover_torn({op_id})" in f.reason, f
+    assert f.status == "failed" and _op_drogi(f.reason, _ODZYSK) == op_id, f
     assert _operacje(con)[0]["phase"] == "written" and scan._isolated(con, str(p))
     assert [r["status"] for r in writeback.pending_for_run(con, "R")] == ["failed"]
     con.close()
@@ -1455,7 +1476,7 @@ def test_przerwa_po_written_dokonczenie_domyka_staging_i_nagrobek(tmp_path, monk
 
     ponowny = writeback.commit(con, "R", now=NOW, inplace=True)
     assert [f.path for f in ponowny.blocked] == [str(p), str(q)]
-    assert f"finish_inplace({op_id})" in ponowny.blocked[0].reason
+    assert _op_drogi(ponowny.blocked[0].reason, _DOKONCZENIE) == op_id
 
     f = writeback.finish_inplace(con, op_id, now=NOW)
     assert f.status == "applied", f
@@ -1526,7 +1547,7 @@ def test_dryf_przy_tym_samym_mtime_ma_droge_powrotu(tmp_path, monkeypatch):
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     assert len(res.failed) == 1 and "POZA regionem" in res.failed[0].reason, res
     op_id = _operacje(con)[0]["id"]
-    assert f"recover_torn({op_id})" in res.failed[0].reason
+    assert _op_drogi(res.failed[0].reason, _ODZYSK) == op_id
     assert writeback.finish_inplace(con, op_id, now=NOW).status == "failed"
     assert len(writeback.undo(con, res.commit_id, now=NOW).restored) == 0
 
@@ -1562,7 +1583,7 @@ def test_powrot_nie_cofa_poprawnego_zapisu(tmp_path, monkeypatch):
     po_zapisie = p.read_bytes()
     op_id = _operacje(con)[0]["id"]
     w = writeback.recover_torn(con, op_id, now=NOW)
-    assert w.status == "blocked" and f"finish_inplace({op_id})" in w.reason, w
+    assert w.status == "blocked" and _op_drogi(w.reason, _DOKONCZENIE) == op_id, w
     assert p.read_bytes() == po_zapisie and _operacje(con)[0]["phase"] == "written"
     assert writeback.finish_inplace(con, op_id, now=NOW).status == "applied"
     con.close()
@@ -1583,10 +1604,10 @@ def test_przerwany_powrot_da_sie_ponowic(tmp_path, monkeypatch):
     monkeypatch.setattr(writeback.repo, "revert_inplace_op", _pada)
     w1 = writeback.recover_torn(con, op_id, now=NOW)
     monkeypatch.undo()
-    assert w1.status == "failed" and f"recover_torn({op_id})" in w1.reason, w1
+    assert w1.status == "failed" and _op_drogi(w1.reason, _ODZYSK) == op_id, w1
     assert p.read_bytes() == z_dryfem and _operacje(con)[0]["phase"] == "written"
     d = writeback.finish_inplace(con, op_id, now=NOW)
-    assert d.status == "blocked" and f"recover_torn({op_id})" in d.reason, d
+    assert d.status == "blocked" and _op_drogi(d.reason, _ODZYSK) == op_id, d
     assert writeback.recover_torn(con, op_id, now=NOW).status == "restored"
     assert _operacje(con)[0]["phase"] == "recovered" and p.read_bytes() == z_dryfem
     con.close()
@@ -1654,7 +1675,7 @@ def test_commit_atomowy_przeplatany_z_zapisem_w_miejscu(tmp_path, monkeypatch, f
     a = writeback.commit(con, "A", now=NOW)
     monkeypatch.undo()
     assert not a.applied and len(a.blocked) == 1, a
-    assert f"operacja {_operacje(con)[0]['id']}" in a.blocked[0].reason
+    assert dict(a.blocked[0].reason.params)["op_id"] == _operacje(con)[0]["id"], a.blocked[0].reason
     assert p.read_bytes() == stan["po_b"] and fits.getheader(str(p))["OBJECT"] == "NGC 6992"
     assert [x.name for x in tmp_path.iterdir() if x.suffix == ".tmp"] == []
     assert _operacje(con)[0]["phase"] == faza_b
@@ -1677,7 +1698,8 @@ def test_commit_atomowy_przeplatany_z_zapisem_w_miejscu(tmp_path, monkeypatch, f
 def test_dokonczenie_zablokowane_wskazuje_gest_zwolnienia(tmp_path, monkeypatch, powod, recznie):
     """Dokończenie zapisu w miejscu odmówiło ('blocked') - powód commitu wskazuje drogę zwolnienia,
     którą człowiek ma: gest „Zwolnij plik do skanu…" (etykieta z katalogu) albo
-    `writeback.release_isolation` (zwolnienie pod blokadą pliku z CAS fazy), nie klingę bazy
+    `writeback.release_isolation` (wywołanie z numerem operacji jedzie parametrem `op_id` do szczegółu
+    okna, nie w zdaniu - AR-281; zwolnienie pod blokadą pliku z CAS fazy), nie klingę bazy
     `repo.release_inplace_op`. Powód, który już niesie receptę ręczną (`_RECZNA`), nie dostaje jej
     drugi raz.
 
@@ -1692,9 +1714,10 @@ def test_dokonczenie_zablokowane_wskazuje_gest_zwolnienia(tmp_path, monkeypatch,
     (f,) = res.failed
     assert "release_inplace_op" not in f.reason, f.reason
     gest = f"„{CATALOG['grid.inplace.release']['pl']}”"
-    assert f.reason.count(gest) == 1 and f.reason.count("writeback.release_isolation") == 1, f.reason
+    assert f.reason.count(gest) == 1 and "release_isolation" not in f.reason, f.reason   # AR-281
     if recznie:
-        assert f"writeback.release_isolation({_operacje(con)[0]['id']})" in f.reason, f.reason
+        assert (f.reason.code, dict(f.reason.params)["op_id"]) == (
+            "finish_failed_isolated_release", _operacje(con)[0]["id"]), f.reason
     con.close()
 
 

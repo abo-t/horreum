@@ -6720,7 +6720,9 @@ def test_szuflada_zapis_rozdarty_widac_w_Porzadkach_z_droga_odzysku(wb_view, mon
     fid = con.execute("SELECT frame_id FROM location").fetchone()[0]
     assert queries.torn_write_frame_ids(con) == {fid}
     assert view._undo_mode == "macro" and not view._undo_btn.isHidden()
-    assert "recover_torn(" in view.drawer.result.text(), view.drawer.result.text()
+    # AR-281: zdanie mówi gest z menu, wywołanie rdzenia z numerem operacji stoi w szczególe pola.
+    assert f"„{writeback._GEST_PRZYWROC}”" in view.drawer.result.text(), view.drawer.result.text()
+    assert "writeback.recover_torn(" in view.drawer.result.szczegol(), view.drawer.result.szczegol()
     assert emisje
 
 

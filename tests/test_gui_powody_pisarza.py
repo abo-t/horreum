@@ -386,6 +386,10 @@ _ZNANE_SUROWE = {
     ("pipeline.py", "PipelineView._format_presence", "reason", "powod"): (1, "zdania katalogu"),
     ("pipeline.py", "PipelineView._on_source_unreachable", "reason", "powod"): (1, "zdanie katalogu"),
     ("planner_model.py", "header_notes", "reason", "rig.reason"): (1, "planer, nie zapis"),
+    ("grid_model.py", "zdanie_pominiec_makra", "cause", "tekst"):
+        (1, "przyczyna pominięcia makra - `tekst_powodu` w tej funkcji (grupowanie po zdaniu)"),
+    ("grid_model.py", "zdanie_pominiec_makra", "causes", "' · '.join(czlony)"):
+        (1, "człony `grid.drawer.skipped_reason`/`skipped_more` - zdania katalogu"),
     ("flows/przyjmij.py", "PrzyjmijView._render", "reason", "zapis['refused']"):
         (1, "zdanie katalogu - `PipelineView.last_run['refused']` piszą wyłącznie "
             "`pipeline.source.unreachable` i `pipeline.guard.mixed` (`powod_mieszania`)"),
@@ -409,7 +413,7 @@ def _surowe_powody_gui():
     from collections import Counter
     from test_gui_bledy_systemu import _wolania_zdan_gui
     return Counter((plik, nazwa, arg, ast.unparse(v)) for plik, nazwa, arg, v, opakowana, _w
-                   in _wolania_zdan_gui() if arg in ("reason", "reasons") and not opakowana)
+                   in _wolania_zdan_gui() if arg in ("reason", "reasons", "cause", "causes") and not opakowana)
 
 
 def test_zapadka_powodow_w_zdaniach_GUI():

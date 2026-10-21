@@ -359,7 +359,77 @@ def podpowiedz_kart(res):
     systemu (`podpowiedz_systemu`, AR-168) - wiersze, które są; `""`, gdy żadnych. Wspólna dla okien
     kart i szuflady Zbiorów."""
     return "\n".join(p for p in (podpowiedz_spadku(res), podpowiedz_powodow(res),
-                                 podpowiedz_systemu(res)) if p)
+                                 podpowiedz_systemu(res), podpowiedz_operacji(res)) if p)
+
+
+# Wywołania rdzenia, którymi drogę wyjścia z izolacji domyka programista (AR-281): zdanie mówi gest
+# z menu, a numer operacji i wywołanie schodzą do wiersza szczegółu pod kursorem. Kod → funkcje
+# `writeback` wołane z `op_id` z parametrów powodu.
+_WYWOLANIA_DROGI = {
+    "way_finish": ("finish_inplace",), "way_restore": ("recover_torn",),
+    "isolated_recover": ("recover_torn",), "isolated_finish": ("finish_inplace", "recover_torn"),
+    "finish_failed_isolated_release": ("release_isolation",),
+    "undo_commit_unfinished": ("finish_inplace",),
+}
+
+
+def _droga_operacji(powod):
+    """`(kod, op_id)` pierwszego powodu drogi z `_WYWOLANIA_DROGI` w drzewie powodu (parametry-powody,
+    listy, uwagi) albo None. TOTALNE: `op_id`, który nie jest liczbą (zapis spoza kodeka), pomija."""
+    if not isinstance(powod, PowodPozycji):
+        return None
+    op_id = dict(powod.params).get("op_id")
+    if powod.code in _WYWOLANIA_DROGI and isinstance(op_id, int) and not isinstance(op_id, bool):
+        return powod.code, op_id
+    for _nazwa, wartosc in powod.params:
+        for w in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
+            znaleziony = _droga_operacji(w)
+            if znaleziony is not None:
+                return znaleziony
+    return None
+
+
+def wiersz_operacji(powod):
+    """Wiersz szczegółu „Operacja zapisu w miejscu N: writeback.recover_torn(N)” powodu z drogą
+    wyjścia z izolacji (AR-281) albo `""`."""
+    znaleziony = _droga_operacji(powod)
+    if znaleziony is None:
+        return ""
+    kod, op_id = znaleziony
+    wywolanie = ", ".join(f"writeback.{f}({op_id})" for f in _WYWOLANIA_DROGI[kod])
+    return i18n.t("wb.op_detail_tip", op_id=op_id, call=wywolanie)
+
+
+def podpowiedz_operacji(res):
+    """Wiersze `wiersz_operacji` WSZYSTKICH pozycji wyniku z drogą wyjścia, każdy z nazwą pliku
+    (`wb.op_detail_line`) - ta sama kolekcja co zdanie wyniku (`_rozne_powody`: błąd, wstrzymanie, blokada),
+    bez powtórzeń; `""`, gdy żadna. Dwa izolowane pliki to dwa numery operacji - zdanie numerów nie
+    mówi (AR-281), więc pod kursorem nie może zostać tylko pierwszy."""
+    from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
+    zapisane = list(getattr(res, "applied", [])) + list(getattr(res, "restored", []))
+    wstrzymane = [fr for fr in getattr(res, "withheld", []) if fr not in zapisane]
+    wiersze = []
+    for fr in res.failed + wstrzymane + res.blocked:
+        wiersz = wiersz_operacji(fr.reason)
+        if wiersz:
+            linia = i18n.t("wb.op_detail_line", file=_ogon_sciezki(fr.path), detail=wiersz)
+            if linia not in wiersze:
+                wiersze.append(linia)
+    return "\n".join(wiersze)
+
+
+def szczegol_powodu(powod):
+    """Wiersze szczegółu JEDNEGO powodu: surowy tekst systemu (`wiersz_systemu`) i numer operacji
+    zapisu w miejscu z drogą wyjścia (`wiersz_operacji`, AR-281) - te, które są, albo `""`. Dla
+    powierzchni, które dotąd dokładały sam `wiersz_systemu` (pole błędu okna zmiany obiektu, status
+    pozycji)."""
+    return "\n".join(w for w in (wiersz_systemu(powod), wiersz_operacji(powod)) if w)
+
+
+def podpowiedz_cofniecia(res):
+    """Podpowiedź zdania cofnięcia w oknach kart: szczegół systemu (`podpowiedz_systemu`, AR-168)
+    i numery operacji z drogą wyjścia (`podpowiedz_operacji`, AR-281) - wiersze, które są."""
+    return "\n".join(p for p in (podpowiedz_systemu(res), podpowiedz_operacji(res)) if p)
 
 
 def szczegol_systemu(powod):
@@ -770,7 +840,7 @@ def status_pozycji(stan, powod, kod=None, *, z_bazy=False):
     dokłada do podpowiedzi surowy tekst systemu (`szczegol_systemu`)."""
     if not powod:
         return stan, stan
-    systemu = wiersz_systemu(powod)
+    systemu = szczegol_powodu(powod)            # system i numer operacji z drogą wyjścia (AR-281)
     tip_systemu = "\n" + systemu if systemu else ""
     szczegol = None
     if (kod == writeback.CODE_INPLACE_FALLBACK or _spadek_z_kodu(powod)

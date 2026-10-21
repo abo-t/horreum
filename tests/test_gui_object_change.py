@@ -2274,7 +2274,8 @@ def test_odmiana_kluczy_naglowka_i_liczby_wyniku_PL_i_EN():
     # EN bez polskich znaków cudzysłowu i słów w nowych kluczach okna
     for k in ("objchg.st.rewritten", "objchg.st.detail_tip", "objchg.reason.busy",
               "wb.inplace_fallback", "assign.search_moved", "assign.search_to_field",
-              "assign.creates_object", "objchg.head_resume_change", "objchg.head_resume_align"):
+              "assign.creates_object", "objchg.head_resume_change", "objchg.head_resume_align",
+              "assign.restores_object", "assign.restore_btn"):
         tekst = str(CATALOG[k]["en"])
         assert not set(tekst) & set("„ąćęłńóśźż"), k
 
@@ -4031,3 +4032,122 @@ def test_staging_blad_programu_spoza_inwariantu_nie_ucieka_ze_slotu(qapp, con, r
         dlg.reject()
     finally:
         i18n.set_lang("pl")
+
+
+# ═══════════════════════════════════════════════ AR-282: wybierak zna obiekt zdjęty cofnięciem
+
+def _nagrobek_ic405(tmp_path):
+    """IC405 założony gestem „Zmień obiekt…” i zdjęty jego cofnięciem - PRAWDZIWĄ klingą (zapis
+    i cofnięcie przebiegu na plikach, scena `test_object_change_write._Scena`)."""
+    from test_object_change_write import _Scena, _oid
+    s = _Scena(tmp_path)
+    s.stage(s.plan("R1"))
+    writeback.commit_object_change(s.con, "R1", now=NOW)
+    writeback.undo_object_change(s.con, "R1", now=NOW)
+    ic = _oid(s.con, "IC405")
+    assert s.con.execute("SELECT retired_at FROM object WHERE id = ?", (ic,)).fetchone()[0] is not None
+    return s, ic
+
+
+def _wybierak(con, nazwa):
+    """Okno przypisania jako wybierak („Zmień obiekt…”, `grid._on_object_change`) z nazwą wpisaną
+    prawdziwymi klawiszami."""
+    from PySide6.QtTest import QTest
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=3)
+    dlg.accept_btn.setText(i18n.t("grid.sel.object_change_pick_ok"))
+    dlg.show()
+    dlg.designation.setFocus()
+    QTest.keyClicks(dlg.designation, nazwa)
+    return dlg
+
+
+def test_stan_nazwy_obiektu_trzy_stany(qapp, tmp_path):
+    """AR-282: `queries.object_name_state` - obiekt na osi `live`, nagrobek `retired`, kanon spoza
+    bazy `new`; `object_id_by_canon` (pre-check aliasu) dalej widzi id nagrobka. Mutant: stan bez
+    rozróżnienia nagrobka (`live`)."""
+    s, ic = _nagrobek_ic405(tmp_path)
+    assert [queries.object_name_state(s.con, c) for c in ("Sh2-229", "IC405", "NGC2632")] == \
+        ["live", "retired", "new"]
+    assert queries.object_id_by_canon(s.con, "IC405") == ic
+    s.con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wybierak_rozroznia_obiekt_zyjacy_nagrobek_i_nowy(qapp, tmp_path, lang):
+    """AR-282 (odbiór 0.19.0, OB2): po cofnięciu gestu, który założył obiekt, wybierak mówił o nim jak
+    o żywym - bez członu i bez „Załóż”, choć zapis go wskrzesza. Trzy stany nazwy: żywy - samo zdanie;
+    nagrobek - człon „zapis przywróci” i przycisk „Przywróć …”, Enter w szukajce nie zatwierdza; nowy -
+    człon „zapis założy” i „Załóż …”. Mutanty: nagrobek jako `live`; nagrobek z kluczem założenia."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from horreum.resolve.catalog import header_form
+    i18n.set_lang(lang)
+    s, _ic = _nagrobek_ic405(tmp_path)
+    _obiekt_z_klatka(s.con, "NGC3034", "sha-zywy")
+    akcja = i18n.t("grid.sel.object_change_pick_ok")
+    przypadki = (("NGC 3034", "NGC3034", "", akcja),
+                 ("IC 405", "IC405", i18n.t("assign.restores_object"),
+                  i18n.t("assign.restore_btn", canon="IC405", action=akcja)),
+                 ("M 44", "NGC2632", i18n.t("assign.creates_object"),
+                  i18n.t("assign.create_btn", canon="NGC2632", action=akcja)))
+    for nazwa, kanon, czlon, przycisk in przypadki:
+        dlg = _wybierak(s.con, nazwa)
+        assert dlg.canon_preview.text() == i18n.t(
+            "assign.canon_preview", text=nazwa, canon=kanon, header=header_form(kanon)) + czlon, \
+            dlg.canon_preview.text()
+        assert dlg.accept_btn.text() == przycisk
+        dlg.reject()
+    # Fraza nagrobka wpisana w szukajkę przechodzi do pola nazwy (lista go nie zna) - Enter w szukajce
+    # przenosi fokus do pola nazwy, nie zapisuje: wskrzeszenie ma skutek w osi, jak założenie.
+    dlg = _wybierak(s.con, "")
+    dlg.search.setFocus()
+    QTest.keyClicks(dlg.search, "IC 405")
+    assert dlg.designation.text() == "IC 405"
+    QTest.keyClick(dlg.search, Qt.Key_Return)
+    assert dlg.result() != QDialog.Accepted and dlg.selected is None
+    assert dlg.focusWidget() is dlg.designation
+    dlg.reject()
+    s.con.close()
+
+
+def test_zapis_zmiany_obiektu_na_nagrobku_go_przywraca(qapp, tmp_path):
+    """AR-282, szew na prawdziwym rdzeniu: wybór nagrobka w wybieraku → cel gestu „Zmień obiekt…”
+    (`queries.object_target`) → staging i zapis przebiegu (`_override_object_tx`) - obiekt wraca na
+    oś (`retired_at` NULL, `object.unretired`), ten sam wiersz. Zdanie „zapis przywróci” mówi prawdę."""
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    from PySide6.QtTest import QTest
+    s, ic = _nagrobek_ic405(tmp_path)
+    dlg = AssignObjectDialog(s.con, object_raw=None, frame_count=3)
+    QTest.keyClicks(dlg.designation, "IC 405")
+    dlg._validate_and_accept()
+    canon, _catalog, _kind, alias_norm = dlg.selected
+    target = queries.object_target(s.con, canon, alias_norm=alias_norm)
+    assert target.canon == "IC405"
+    plan = oc.ObjectChangePlan(run_id="R2", target=target, items=tuple(s.pozycja(i) for i in range(3)),
+                               skipped=())
+    s.stage(plan)
+    writeback.commit_object_change(s.con, "R2", now=NOW)
+    wiersz = s.con.execute("SELECT id, retired_at FROM object WHERE canon = 'IC405'").fetchone()
+    assert (wiersz[0], wiersz[1]) == (ic, None)
+    assert s.con.execute("SELECT count(*) FROM event WHERE verb = 'object.unretired'").fetchone()[0] == 1
+    s.con.close()
+
+
+def test_przypisanie_obiektu_na_nagrobku_go_przywraca(qapp, tmp_path):
+    """AR-282, drugie wejście tego samego wybieraka („Przypisz obiekt…”): klinga `user_assign_object`
+    z wyborem nagrobka wskrzesza go (`object.unretired`) - ta sama obietnica zdania."""
+    from horreum.gui.assign_dialog import AssignObjectDialog
+    from PySide6.QtTest import QTest
+    s, ic = _nagrobek_ic405(tmp_path)
+    dlg = AssignObjectDialog(s.con, object_raw=None, frame_count=1)
+    QTest.keyClicks(dlg.designation, "IC 405")
+    assert dlg.canon_preview.text().endswith(i18n.t("assign.restores_object"))
+    dlg._validate_and_accept()
+    canon, catalog, kind, alias_norm = dlg.selected
+    fid = s.con.execute("SELECT id FROM frame ORDER BY id LIMIT 1").fetchone()[0]
+    repo.user_assign_object(s.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
+                            frame_ids=[fid], now=NOW)
+    assert s.con.execute("SELECT retired_at FROM object WHERE id = ?", (ic,)).fetchone()[0] is None
+    assert s.con.execute("SELECT count(*) FROM event WHERE verb = 'object.unretired'").fetchone()[0] == 1
+    s.con.close()

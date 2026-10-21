@@ -1363,6 +1363,18 @@ def object_id_by_canon(con, canon):
     return row["id"] if row is not None else None
 
 
+def object_name_state(con, canon):
+    """Stan nazwy w wybieraku obiektu (AR-282) - `"live"` (obiekt na osi), `"retired"` (nagrobek:
+    obiekt zdjęty cofnięciem gestu, który go założył - `repo._retire_orphan_tx`, jedyny pisarz
+    `object.retired_at`) albo `"new"` (bazy go nie zna). Zapis gestu ręki wskrzesza nagrobek
+    (`repo._upsert_object_tx` → `_unretire_object_tx`), więc okno mówi „przywróci”, nie „założy”.
+    Osobno od `object_id_by_canon`: pre-check konfliktu aliasu potrzebuje id także nagrobka."""
+    row = con.execute("SELECT retired_at FROM object WHERE canon = ?", (canon,)).fetchone()
+    if row is None:
+        return "new"
+    return "live" if row["retired_at"] is None else "retired"
+
+
 def alias_target(con, alias_norm):
     """Pre-check konfliktu aliasu w dialogu przypisania (#8, P4): `object_id`, na który wskazuje
     `alias_norm`, albo None (alias nieznany — zapis go utworzy). Ostateczny guard i tak siedzi
@@ -5333,6 +5345,52 @@ def present_copy_card_mirror(con, frame_ids):
             (r["keyword"], r["value_raw"], r["value_type"], r["comment"]))
     return {int(f): (tuple(karty[int(f)]) if int(f) in karty else None)
             for f in json.loads(ids)}
+
+
+# ---- poczekalnia szuflady Zbiorów z poprzedniej sesji (AR-280) ----
+
+def oczekujace_przebiegi_szuflady(con):
+    """Przebiegi szuflady Zbiorów z wpisami czekającymi (`pending`), których bieżąca sesja nie zna -
+    do podjęcia przy otwarciu bazy. Lista od NAJNOWSZEGO (`max(id)` wpisu), klinga po klindze: najpierw
+    karty, potem nazwy. Słownik: `run_id`, `klinga` (`karty`/`nazwy`), `n` (czekające), `przerwany`
+    (przebieg ma wpis rozstrzygnięty albo commit - zapis ruszył i przerwano go; inaczej staging
+    porzucony bez zapisu - oba to zamiar człowieka).
+
+    Poza listą: przebieg zmiany obiektu (`object_change_run` - ma własny wiersz Porządków i okno),
+    CAŁY przebieg kart, którego jakikolwiek wpis jest związany z operacją zapisu w miejscu w fazie
+    izolującej (`repo.INPLACE_ISOLATING_PHASES` - przebieg należy wtedy do `finish_inplace`/odzysku;
+    podjęty pokazywałby i pozwalał edytować kartę, której wiązania potrzebuje dokończenie; operacja
+    domknięta - `synced` - przebiegu nie zatrzymuje: tak kończy się każdy plik zapisu szuflady w miejscu
+    przed przerwaniem anulowaniem), i CAŁY przebieg nazw, którego jakikolwiek
+    wiersz ma otwarty zamiar (`in_flight`): taki przebieg jest właśnie w biegu (inne okno, inny proces)
+    albo czeka na rekoncyliację - dwa zapisy jednego przebiegu to wyścig, nie dokończenie. Przebiegu,
+    który prowadzi żywe inne okno, lista nie odróżnia - to rozstrzyga blokada szuflady widoku."""
+    wynik = [{"run_id": r["run_id"], "klinga": "karty", "n": r["n"], "przerwany": bool(r["przerwany"])}
+             for r in con.execute(
+        "SELECT p.run_id, count(*) AS n, max(p.id) AS ostatni, "
+        "  (EXISTS (SELECT 1 FROM pending_changes q WHERE q.run_id = p.run_id "
+        "           AND q.status <> 'pending') "
+        "   OR EXISTS (SELECT 1 FROM commits c WHERE c.run_id = p.run_id)) AS przerwany "
+        "FROM pending_changes p "
+        "WHERE p.status = 'pending' AND p.inplace_op_id IS NULL "
+        "  AND NOT EXISTS (SELECT 1 FROM pending_changes w JOIN inplace_op io ON io.id = w.inplace_op_id "
+        "                  WHERE w.run_id = p.run_id "
+        "                  AND io.phase IN (SELECT value FROM json_each(?))) "
+        "  AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = p.run_id) "
+        "GROUP BY p.run_id ORDER BY ostatni DESC", (json.dumps(list(INPLACE_ISOLATING_PHASES)),))]
+    wynik += [{"run_id": r["run_id"], "klinga": "nazwy", "n": r["n"], "przerwany": bool(r["przerwany"])}
+              for r in con.execute(
+        "SELECT p.run_id, count(*) AS n, max(p.id) AS ostatni, "
+        "  EXISTS (SELECT 1 FROM pending_renames q WHERE q.run_id = p.run_id "
+        "          AND q.status <> 'pending') AS przerwany "
+        "FROM pending_renames p "
+        "WHERE p.status = 'pending' "
+        "  AND NOT EXISTS (SELECT 1 FROM pending_renames f WHERE f.run_id = p.run_id "
+        "                  AND f.in_flight IS NOT NULL) "
+        "  AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = p.run_id) "
+        "  AND NOT EXISTS (SELECT 1 FROM pending_object_change po WHERE po.rename_id = p.id) "
+        "GROUP BY p.run_id ORDER BY ostatni DESC")]
+    return wynik
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po

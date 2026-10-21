@@ -589,6 +589,12 @@ CATALOG = {
     # Surowy tekst błędu systemu w podpowiedzi okien zapisu (AR-168, `wb_worker.podpowiedz_systemu`)
     # - zdanie mówi klasę i numer w języku UI, komunikat systemu jest w języku systemu.
     "wb.os_detail_tip": {"pl": "Szczegół systemu: {detail}", "en": "System detail: {detail}"},
+    # Wiersz szczegółu drogi wyjścia z izolacji (AR-281, `wb_worker.wiersz_operacji`): numer operacji
+    # i wywołanie rdzenia schodzą ze zdania tutaj; `{call}` składa kod, nie katalog.
+    "wb.op_detail_tip": {"pl": "Operacja zapisu w miejscu {op_id}: {call}",
+                         "en": "In-place write operation {op_id}: {call}"},
+    # Ten wiersz z nazwą pliku w podpowiedzi wyniku wielu plików (`wb_worker.podpowiedz_operacji`).
+    "wb.op_detail_line": {"pl": "{file}: {detail}", "en": "{file}: {detail}"},
     # Pole zdania okien zapisu (AR-204, `wb_worker.EtykietaBledu`): glif przed zdaniem, gdy pod
     # kursorem stoi szczegół, i menu prawego kliku, które go kopiuje.
     "wb.detail_marker": {"pl": "ⓘ", "en": "ⓘ"},
@@ -611,11 +617,18 @@ CATALOG = {
     "wb.undo_cancelled_done": {
         "pl": " · cofnięcie przerwano na żądanie - pozostałe pliki nie wymagają cofnięcia",
         "en": " · undo stopped on request - the remaining files need no undo"},
-    # Droga ponowienia niedokończonego cofnięcia PO ZAMKNIĘCIU okna kart (AR-236): przycisku „Cofnij”
-    # już nie ma, a commit cofa polecenie CLI (`horreum header-fix --undo`, `writeback.undo`) - wpis
-    # wstawiany w miejsce etykiety przycisku w ogonie cofnięcia (`wb_worker.ogon_cofniecia`).
+    # Droga cofnięcia commitu kart PO ZAMKNIĘCIU okna (AR-236, AR-283, AR-272): przycisku „Cofnij”
+    # już nie ma, a commit cofa polecenie CLI (`horreum header-fix --undo`, `writeback.undo`). Zdanie
+    # paska niesie polecenie KRÓTKIE (`wb.undo_cli_short` - po udanym zapisie członem `wb.undo_short`,
+    # po niedokończonym cofnięciu w miejscu etykiety przycisku w `wb_worker.ogon_cofniecia`), pełne
+    # z bazą stoi w szczególe pod kursorem (`wb.undo_cli_tip`) - ścieżka bazy przed numerem commitu
+    # ucinała go w elizji paska.
     "wb.undo_cli": {"pl": "horreum header-fix \"{db}\" --undo {id}",
                     "en": "horreum header-fix \"{db}\" --undo {id}"},
+    "wb.undo_cli_short": {"pl": "header-fix --undo {id}", "en": "header-fix --undo {id}"},
+    "wb.undo_short": {"pl": " - cofnięcie: {cmd}", "en": " - to undo: {cmd}"},
+    "wb.undo_cli_tip": {"pl": "Cofnięcie commitu {id} po zamknięciu okna (wiersz poleceń):\n{cli}",
+                        "en": "Undo commit {id} after closing the window (command line):\n{cli}"},
     # Plik „już cofnięty” w wyniku cofnięcia - stan docelowy, nie blokada (AR-160).
     "wb.undo_already": {
         "pl": {"one": "{n} już cofnięty", "few": "{n} już cofnięte", "many": "{n} już cofniętych"},
@@ -1144,6 +1157,13 @@ CATALOG = {
         "pl": " · nowy obiekt: zapis założy go w bazie",
         "en": " · new object: saving creates it in the database",
     },
+    # Kanon nagrobka (obiekt zdjęty cofnięciem gestu, AR-282): zapis go WSKRZESZA - mówione przed
+    # kliknięciem, jak założenie wyżej.
+    "assign.restores_object": {
+        "pl": " · obiekt zdjęty cofnięciem: zapis przywróci go w bazie",
+        "en": " · object removed by undo: saving restores it in the database",
+    },
+    "assign.restore_btn": {"pl": "Przywróć {canon} · {action}", "en": "Restore {canon} · {action}"},
     # AR-135: wybór z listy starej tożsamości pary katalogowej idzie do celu pary.
     "assign.xref_redirect": {
         "pl": "{old} to dziś {new} (para katalogowa) - klatki pójdą do {new}",
@@ -3123,6 +3143,9 @@ CATALOG = {
         "en": "How many hours was the camera clock ahead of UTC when this material was shot?\n"
               "(Poland in winter: +1 · Poland in summer: +2 · recorded in UTC: 0)",
     },
+    # Przyciski okna odniesienia z katalogu (AR-278) - Qt bez `QTranslator` mówi „Cancel”.
+    "grid.lin.offset_ok": {"pl": "Zapisz", "en": "Save"},
+    "grid.lin.offset_cancel": {"pl": "Anuluj", "en": "Cancel"},
     # TRZY ZDANIA, BO TO TRZY RÓŻNE STANY — a nie odcienie jednego: gest bez gospodarza (nie ma
     # czym przeliczyć), gest domknięty (liczy się już) i gest zapisany przy zajętym silniku.
     # Ostatnie mówi o OBU połówkach: zapis się udał, przeliczenie nie ruszyło i wiadomo dlaczego.
@@ -3290,6 +3313,67 @@ CATALOG = {
                "many": "{n} zmian nazw oczekuje"},
         "en": {"one": "{n} name change pending", "other": "{n} name changes pending"},
     },
+    # AR-280: szuflada podjęła przy otwarciu bazy przebieg, którego bieżąca sesja nie zaczynała.
+    "grid.drawer.pending_prev": {
+        "pl": {"one": "Z poprzedniej sesji czeka {n} zmiana", "few": "Z poprzedniej sesji czekają {n} zmiany",
+               "many": "Z poprzedniej sesji czeka {n} zmian"},
+        "en": {"one": "{n} change waiting from the previous session",
+               "other": "{n} changes waiting from the previous session"}},
+    "grid.drawer.pending_rename_prev": {
+        "pl": {"one": "Z poprzedniej sesji czeka {n} zmiana nazwy",
+               "few": "Z poprzedniej sesji czekają {n} zmiany nazw",
+               "many": "Z poprzedniej sesji czeka {n} zmian nazw"},
+        "en": {"one": "{n} name change waiting from the previous session",
+               "other": "{n} name changes waiting from the previous session"}},
+    "grid.drawer.prev_interrupted": {
+        "pl": "Zapis przerwano w poprzedniej sesji - „{commit}” dokończy pozostałe",
+        "en": "The write was interrupted in the previous session - “{commit}” finishes the rest"},
+    # Starsze przebiegi z wpisami czekającymi wracają przy kolejnych otwarciach bazy, po jednym.
+    "grid.drawer.prev_older": {
+        "pl": {"one": "Czeka jeszcze {n} starszy przebieg - wróci przy kolejnym otwarciu bazy",
+               "few": "Czekają jeszcze {n} starsze przebiegi - wrócą przy kolejnych otwarciach bazy",
+               "many": "Czeka jeszcze {n} starszych przebiegów - wrócą przy kolejnych otwarciach bazy"},
+        "en": {"one": "{n} older run is also waiting - it returns when the database is opened again",
+               "other": "{n} older runs are also waiting - they return when the database is opened again"}},
+    "grid.drawer.prev_macro_blocked": {
+        "pl": {"one": "Makro: w szufladzie czeka {n} zmiana z poprzedniej sesji - zatwierdź albo odrzuć ją "
+                      "przed nowym makrem",
+               "few": "Makro: w szufladzie czekają {n} zmiany z poprzedniej sesji - zatwierdź albo odrzuć je "
+                      "przed nowym makrem",
+               "many": "Makro: w szufladzie czeka {n} zmian z poprzedniej sesji - zatwierdź albo odrzuć je "
+                       "przed nowym makrem"},
+        "en": {"one": "Macro: {n} change from the previous session is waiting in the drawer - commit or "
+                      "discard it before a new macro",
+               "other": "Macro: {n} changes from the previous session are waiting in the drawer - commit or "
+                        "discard them before a new macro"}},
+    # AR-274: przyczyny pominięć stagingu i podglądu makra - „{n}: {cause}” po „; ”, malejąco. `cause` to
+    # już zdanie powodu w języku UI (`tekst_powodu` w `grid_model.zdanie_pominiec_makra`).
+    "grid.drawer.skipped_reasons": {"pl": " - {causes}", "en": " - {causes}"},
+    "grid.drawer.skipped_reason": {"pl": "{n}: {cause}", "en": "{n}: {cause}"},
+    # Ponad trzy przyczyny: reszta jednym członem z liczbą przyczyn i klatek (`frames` = `skipped_frames`).
+    "grid.drawer.skipped_more": {
+        "pl": {"one": "i jeszcze {n} przyczyna ({frames})", "few": "i jeszcze {n} przyczyny ({frames})",
+               "many": "i jeszcze {n} przyczyn ({frames})"},
+        "en": {"one": "and {n} more cause ({frames})", "other": "and {n} more causes ({frames})"}},
+    "grid.drawer.skipped_frames": {
+        "pl": {"one": "{n} klatka", "few": "{n} klatki", "many": "{n} klatek"},
+        "en": {"one": "{n} frame", "other": "{n} frames"}},
+    # AR-280: ponowne makro na zmianach, które nie są ani przebiegiem z poprzedniej sesji w całości, ani
+    # edycjami komórek tej sesji (przebieg podjęty, dokańczany w tej sesji).
+    "grid.drawer.macro_blocked": {
+        "pl": {"one": "Makro: w szufladzie czeka {n} zmiana - zatwierdź albo odrzuć ją przed nowym makrem",
+               "few": "Makro: w szufladzie czekają {n} zmiany - zatwierdź albo odrzuć je przed nowym makrem",
+               "many": "Makro: w szufladzie czeka {n} zmian - zatwierdź albo odrzuć je przed nowym makrem"},
+        "en": {"one": "Macro: {n} change is waiting in the drawer - commit or discard it before a new macro",
+               "other": "Macro: {n} changes are waiting in the drawer - commit or discard them before a new macro"}},
+    # AR-280: szufladę bazy prowadzi jedno okno naraz (blokada pliku obok bazy) - drugie nie podejmuje
+    # ani nie zakłada przebiegu.
+    "grid.drawer.foreign_owner": {
+        "pl": "Szufladę tej bazy prowadzi inne okno programu - zmiany zatwierdź albo odrzuć tam",
+        "en": "Another program window runs the drawer of this database - commit or discard the changes there"},
+    "grid.drawer.lock_error": {
+        "pl": "Nie da się założyć blokady szuflady obok pliku bazy ({detail}) - szuflada nie przyjmuje zmian",
+        "en": "Cannot create the drawer lock next to the database file ({detail}) - the drawer takes no changes"},
     "grid.action.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "grid.action.commit": {"pl": "Zatwierdź", "en": "Commit"},
     "grid.action.reject": {"pl": "Odrzuć", "en": "Discard"},
@@ -4532,6 +4616,9 @@ CATALOG = {
     },
     "proj.dlg.name_title": {"pl": "Nazwa celu", "en": "Target name"},
     "proj.dlg.name_label": {"pl": "Nazwa:", "en": "Name:"},
+    # Przyciski okna nazwy celu z katalogu (AR-278) - Qt bez `QTranslator` mówi „Cancel”.
+    "proj.dlg.name_ok": {"pl": "Dodaj", "en": "Add"},
+    "proj.dlg.name_cancel": {"pl": "Anuluj", "en": "Cancel"},
     "proj.add_failed": {"pl": "Nie można dodać celu: {e}", "en": "Cannot add target: {e}"},
 
     # --- auto-DRY: stany raportu / noty karty ---
@@ -4668,6 +4755,14 @@ CATALOG = {
                             "en": "{msg}, then “Refresh preview” and “Write manifest”"},
     "proj.manifest_busy_retry": {"pl": "{msg}, potem ponów wydanie albo „Odśwież podgląd”",
                                  "en": "{msg}, then release again or “Refresh preview”"},
+    # Gest okna przy wskazówce sondy o manifeście nad drzewem niepełnym (AR-273): „Zapisz manifest”
+    # tam nie istnieje, a „ponów wydanie” przed pierwszym kliknięciem nie ma sensu.
+    "proj.manifest_probe_retry": {"pl": "{msg}, potem „Odśwież podgląd”",
+                                  "en": "{msg}, then “Refresh preview”"},
+    # Gest okna za abortem sondy pierwszego linku (AR-265): nazwa przełącznika = przedrostek
+    # `proj.force_copy` (pilnuje test okna wydania).
+    "proj.first_link_retry": {"pl": "{msg}, potem zaznacz „Wymuś kopię bajtów” - podgląd policzy kopie",
+                              "en": "{msg}, then tick “Force byte copy” - the preview counts the copies"},
     # Scalenie manifestu bez utraty (AR-213): id wcześniejszych wydań, których plików nie ma w drzewie.
     "proj.manifest_dropped": {
         "pl": "  manifest zapomniał klatek, których plików nie ma w drzewie: {n}",
@@ -4874,6 +4969,12 @@ CATALOG = {
     "proj.obj.manifest_refused": {
         "pl": "  manifestu nie da się zapisać: {msg}",
         "en": "  the manifest cannot be written: {msg}",
+    },
+    # WSKAZÓWKA sondy nad drzewem niepełnym (AR-273): stan korzenia teraz, nie obietnica - między
+    # sondą a kliknięciem manifest i plik roboczy mogą się zmienić (bajty chroni krok manifestu).
+    "proj.obj.manifest_hint": {
+        "pl": "  manifestu nie da się teraz zapisać: {msg}",
+        "en": "  the manifest cannot be written right now: {msg}",
     },
     "proj.obj.manifest_error": {"pl": "Nie zapisano manifestu: {msg}\n\n",
                                 "en": "The manifest was not written: {msg}\n\n"},
@@ -6638,21 +6739,18 @@ CATALOG = {
     "objchg.item.undo_refused_earlier": {"pl": "odmówione przy zapisie - nic do cofnięcia",
                                          "en": "refused when writing - nothing to undo"},
     "objchg.item.isolated_recover": {
-        "pl": "lokacja ma nieukończony zapis w miejscu (operacja {op_id}, {op_kind}, faza "
-              "{phase}) - plik jest izolowany; najpierw odzysk: „Przywróć nagłówek sprzed zapisu” "
-              "(`recover_torn({op_id})`)",
-        "en": "the location has an unfinished in-place write (operation {op_id}, {op_kind}, phase "
-              "{phase}) - the file is isolated; first recovery: “Restore the header from before "
-              "the write” (`recover_torn({op_id})`)"},
+        "pl": "lokacja ma nieukończony zapis w miejscu - plik jest izolowany; najpierw odzysk: "
+              "„Przywróć nagłówek sprzed zapisu” z menu prawego kliku w Zbiorach",
+        "en": "the location has an unfinished in-place write - the file is isolated; first "
+              "recovery: “Restore the header from before the write” from the right-click menu in "
+              "Collections"},
     "objchg.item.isolated_finish": {
-        "pl": "lokacja ma nieukończony zapis w miejscu (operacja {op_id}, {op_kind}, faza "
-              "{phase}) - plik jest izolowany; najpierw dokończenie: „Dokończ zapis” "
-              "(`finish_inplace({op_id})`), a gdy kontrola danych nie przechodzi - powrót: "
-              "„Przywróć nagłówek sprzed zapisu” (`recover_torn({op_id})`)",
-        "en": "the location has an unfinished in-place write (operation {op_id}, {op_kind}, phase "
-              "{phase}) - the file is isolated; first finish: “Finish the write” "
-              "(`finish_inplace({op_id})`), and if the data check fails - way back: “Restore the "
-              "header from before the write” (`recover_torn({op_id})`)"},
+        "pl": "lokacja ma nieukończony zapis w miejscu - plik jest izolowany; najpierw dokończenie: "
+              "„Dokończ zapis”, a gdy kontrola danych nie przechodzi - powrót: „Przywróć nagłówek "
+              "sprzed zapisu” (oba z menu prawego kliku w Zbiorach)",
+        "en": "the location has an unfinished in-place write - the file is isolated; first finish: "
+              "“Finish the write”, and if the data check fails - way back: “Restore the header "
+              "from before the write” (both from the right-click menu in Collections)"},
     "objchg.item.inplace_after_gate": {
         "pl": "lokacja dostała zapis w miejscu (operacja {op_id}, {op_kind}, faza {phase}) po "
               "bramce renamu - nagłówek, z którego pochodzi nowa nazwa, mógł się zmienić; renamu "
@@ -6770,18 +6868,17 @@ CATALOG = {
     # Fragmenty powodów: drogi wyjścia z izolacji (gest okna + wywołanie rdzenia; etykiety EN =
     # `grid.inplace.*`) i cechy rozjazdu pliku (lista `features`).
     "objchg.item.way_finish": {
-        "pl": "„Dokończ zapis” (`finish_inplace({op_id})`)",
-        "en": "“Finish the write” (`finish_inplace({op_id})`)"},
+        "pl": "„Dokończ zapis” z menu prawego kliku w Zbiorach",
+        "en": "“Finish the write” from the right-click menu in Collections"},
     "objchg.item.way_restore": {
-        "pl": "„Przywróć nagłówek sprzed zapisu” (`recover_torn({op_id})`)",
-        "en": "“Restore the header from before the write” (`recover_torn({op_id})`)"},
+        "pl": "„Przywróć nagłówek sprzed zapisu” z menu prawego kliku w Zbiorach",
+        "en": "“Restore the header from before the write” from the right-click menu in Collections"},
     "objchg.item.way_manual": {
         "pl": "nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację: w "
-              "Zbiorach zaznacz klatkę i z menu prawego kliku wybierz „Zwolnij plik do skanu…” "
-              "(`writeback.release_isolation`)",
+              "Zbiorach zaznacz klatkę i z menu prawego kliku wybierz „Zwolnij plik do skanu…”",
         "en": "undecidable - restore the file from a full copy by hand, then release the "
               "isolation: in Collections select the frame and pick “Release the file to the "
-              "scan…” from the right-click menu (`writeback.release_isolation`)"},
+              "scan…” from the right-click menu"},
     "objchg.item.way_resume_return": {
         "pl": "przerwany powrót tej operacji - ponów: {way}",
         "en": "an interrupted way back of this operation - retry: {way}"},
@@ -6938,9 +7035,6 @@ CATALOG = {
               "zaprzeczyć, a bramki zrozumienia nie ma na czym postawić",
         "en": "the file has no card {keyword}, but it has property {prop} - adding the card could "
               "contradict it, and there is nothing to base an understanding check on"},
-    "objchg.item.xisf_bad_op": {
-        "pl": "operacja '{op}' na XISF nie istnieje - writeback zna 'set' i 'add'",
-        "en": "operation '{op}' does not exist for XISF - writeback knows 'set' and 'add'"},
     "objchg.item.xisf_set_missing": {
         "pl": "{detail} - 'set' nie zakłada karty; dopisanie idzie przez 'add' (P6d)",
         "en": "{detail} - 'set' does not create a card; adding one goes through 'add' (P6d)"},
@@ -7299,22 +7393,21 @@ CATALOG = {
         "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}",
         "en": "{inner}; the backup for undo is saved in commit {commit_id}"},
     "objchg.item.backup_saved_in_isolated": {
-        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja IZOLOWANA od "
+        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja izolowana od "
               "skanu, odzysk: {way}",
         "en": "{inner}; the backup for undo is saved in commit {commit_id}; the location is "
-              "ISOLATED from the scan, recovery: {way}"},
+              "isolated from the scan, recovery: {way}"},
     "objchg.item.finish_failed_isolated": {
-        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja IZOLOWANA od "
+        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja izolowana od "
               "skanu",
         "en": "{inner}; the backup for undo is saved in commit {commit_id}; the location is "
-              "ISOLATED from the scan"},
+              "isolated from the scan"},
     "objchg.item.finish_failed_isolated_release": {
-        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja IZOLOWANA od "
-              "skanu, zwolnienie ręką: w Zbiorach z menu prawego kliku „Zwolnij plik do skanu…” "
-              "albo writeback.release_isolation({op_id})",
+        "pl": "{inner}; backup do cofnięcia zapisany w commicie {commit_id}; lokacja izolowana od "
+              "skanu, zwolnienie ręką: w Zbiorach z menu prawego kliku „Zwolnij plik do skanu…”",
         "en": "{inner}; the backup for undo is saved in commit {commit_id}; the location is "
-              "ISOLATED from the scan, release by hand: in Collections pick “Release the file to "
-              "the scan…” from the right-click menu, or writeback.release_isolation({op_id})"},
+              "isolated from the scan, release by hand: in Collections pick “Release the file to "
+              "the scan…” from the right-click menu"},
     "objchg.item.resync_failed": {
         "pl": "plik ZMIENIONY, ale re-sync padł - {detail}",
         "en": "file CHANGED, but the re-sync failed - {detail}"},
@@ -7383,12 +7476,12 @@ CATALOG = {
         "en": "header RESTORED, but the re-sync failed - {detail}; another undo will finish only "
               "the database synchronization"},
     "objchg.item.isolated_suffix": {
-        "pl": "{inner}; lokacja IZOLOWANA od skanu",
-        "en": "{inner}; the location is ISOLATED from the scan"},
+        "pl": "{inner}; lokacja izolowana od skanu",
+        "en": "{inner}; the location is isolated from the scan"},
     "objchg.item.undo_finish_failed": {
-        "pl": "nagłówek PRZYWRÓCONY, ale {inner}; lokacja IZOLOWANA od skanu - ponowne undo "
+        "pl": "nagłówek PRZYWRÓCONY, ale {inner}; lokacja izolowana od skanu - ponowne undo "
               "dokończy samą synchronizację",
-        "en": "header RESTORED, but {inner}; the location is ISOLATED from the scan - another "
+        "en": "header RESTORED, but {inner}; the location is isolated from the scan - another "
               "undo will finish only the database synchronization"},
     "objchg.item.undo_not_replaced": {
         "pl": "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na dysku nagłówek sprzed "
@@ -7407,15 +7500,14 @@ CATALOG = {
         "pl": "już cofnięte (operacja cofnięcia zamknięta)",
         "en": "already undone (the undo operation is closed)"},
     "objchg.item.undo_commit_unfinished": {
-        "pl": "commit nie jest dokończony (operacja {op_id}): {inner}; lokacja IZOLOWANA od skanu",
-        "en": "the commit is not finished (operation {op_id}): {inner}; the location is ISOLATED "
-              "from the scan"},
+        "pl": "commit nie jest dokończony: {inner}; lokacja izolowana od skanu",
+        "en": "the commit is not finished: {inner}; the location is isolated from the scan"},
     "objchg.item.backup_envelope_broken": {
         "pl": "uszkodzona koperta backupu: {detail}",
         "en": "damaged backup envelope: {detail}"},
     "objchg.item.undo_partial_isolated": {
-        "pl": "{inner}; lokacja IZOLOWANA od skanu, odzysk: {way}",
-        "en": "{inner}; the location is ISOLATED from the scan, recovery: {way}"},
+        "pl": "{inner}; lokacja izolowana od skanu, odzysk: {way}",
+        "en": "{inner}; the location is isolated from the scan, recovery: {way}"},
     "objchg.item.undo_already": {
         "pl": "już cofnięte - cały plik i baza opisują stan sprzed commitu",
         "en": "already undone - the whole file and the database describe the state from before the "
@@ -7630,6 +7722,26 @@ CATALOG = {
     "objchg.item.card_idx_missing": {
         "pl": "karta '{keyword}' nie ma wystąpienia [{idx}] - w nagłówku jest ich {n}",
         "en": "card '{keyword}' has no occurrence [{idx}] - the header has {n}"},
+    # Pisarz karty: liczba nieskończona i liczba spoza pola FITS (AR-269 - jedno zdanie podglądu
+    # i pisarza), operacja nieznana (FITS i XISF), bajt spoza ASCII w nagłówku (AR-271).
+    "objchg.item.card_value_nonfinite": {
+        "pl": "wartość karty {keyword} ({value}) nie jest liczbą skończoną - standard karty FITS "
+              "(także w XISF) jej nie dopuszcza",
+        "en": "the value of card {keyword} ({value}) is not a finite number - the FITS card "
+              "standard (also in XISF) does not allow it"},
+    "objchg.item.card_value_digits": {
+        "pl": "wartość karty {keyword} {value} nie mieści się w polu liczby karty FITS (20 znaków) "
+              "- zapis dałby {derived}, inną liczbę; zaokrąglij wartość",
+        "en": "the value of card {keyword} {value} does not fit the FITS number field "
+              "(20 characters) - writing would give {derived}, a different number; round the value"},
+    "objchg.item.card_op_unknown": {
+        "pl": "operacja '{op}' nie istnieje - writeback zna 'set' i 'add'",
+        "en": "operation '{op}' does not exist - writeback knows 'set' and 'add'"},
+    "objchg.item.header_nonprintable": {
+        "pl": "karta {keyword} ma w pliku bajt {char} spoza drukowalnego ASCII - Horreum nie "
+              "zapisze tego nagłówka bez zmiany tego bajtu; plik nietknięty",
+        "en": "card {keyword} has byte {char} outside printable ASCII in the file - Horreum "
+              "cannot write this header without changing that byte; file untouched"},
     "objchg.item.macro_manual_many": {
         "pl": "keyword '{keyword}' ma wiele wystąpień -- edycja ręczna poza krokiem 4",
         "en": "keyword '{keyword}' occurs more than once - manual editing is outside step 4"},
@@ -7716,9 +7828,9 @@ CATALOG = {
               "exclusion would come back as scan input"},
     "objchg.item.proj_first_link": {
         "pl": "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) - wolumen nie "
-              "wspiera hardlinków? włącz tryb kopii",
+              "wspiera hardlinków? wydaj ponownie kopiami plików",
         "en": "the first link failed the identity probe (inode/size/content) - does the volume not "
-              "support hard links? turn on copy mode"},
+              "support hard links? release again as file copies"},
     "objchg.item.proj_root_failed": {"pl": "nie założono folderu wydania: {inner}",
                                      "en": "the release folder was not created: {inner}"},
     "objchg.item.proj_out_failed": {
@@ -7767,10 +7879,10 @@ CATALOG = {
         "en": "the release manifest (_PROJEKCJA.json) changed while writing - another write was "
               "faster; nothing was written, refresh the preview"},
     "objchg.item.proj_manifest_busy": {
-        "pl": "obok manifestu leży plik roboczy innego zapisu ({path}) - gdy żaden zapis nie trwa, "
-              "skasuj go ręcznie",
-        "en": "a working file of another write lies next to the manifest ({path}) - when no write is "
-              "running, delete it by hand"},
+        "pl": "obok manifestu leży plik roboczy innego zapisu (_PROJEKCJA.json.part) - gdy żaden zapis "
+              "nie trwa, skasuj go ręcznie",
+        "en": "a working file of another write lies next to the manifest (_PROJEKCJA.json.part) - when "
+              "no write is running, delete it by hand"},
     "objchg.item.proj_manifest_unreadable": {
         "pl": "manifestu wydania (_PROJEKCJA.json) nie da się odczytać - nie nadpisuję go: {inner}",
         "en": "the release manifest (_PROJEKCJA.json) cannot be read - it is not overwritten: {inner}"},
@@ -8268,10 +8380,10 @@ CATALOG = {
     "tasks.f_ratio_mismatch_tip": {
         "pl": "Klatki, których f/ w pliku odbiega od teleskopu o ponad 5 % (np. f/200 zamiast "
               "f/8). Brak f/ w pliku tu nie trafia.\nW Zbiorach: zaznacz klatki, prawy klik → "
-              "„{fix}” - zapis do plików dopiero po „Zapisz” w szufladzie, z cofnięciem.",
+              "„{fix}” - zapis do plików dopiero po „Zatwierdź” w szufladzie, z cofnięciem.",
         "en": "Frames whose f/ in the file differs from the telescope by more than 5 % (e.g. f/200 "
               "instead of f/8). A missing f/ does not land here.\nIn Collections: select frames, "
-              "right-click → “{fix}” - files are written only after “Save” in the drawer, with undo."},
+              "right-click → “{fix}” - files are written only after “Commit” in the drawer, with undo."},
     "perspective.f_ratio_mismatch": {"pl": "f/ niezgodna z teleskopem",
                                      "en": "f/ disagrees with the telescope"},
     "grid.criteria.only_f_ratio_mismatch": {
@@ -8281,9 +8393,9 @@ CATALOG = {
                                "en": "Fix f/ in the files (to match the telescope)…"},
     "grid.optics.fix_tip": {
         "pl": "Wpisy FOCRATIO = f/ teleskopu trafią do szuflady zapisu; pliki zmienią się dopiero "
-              "po „Zapisz”, z cofnięciem.",
+              "po „Zatwierdź”, z cofnięciem.",
         "en": "FOCRATIO = telescope f/ entries go to the write drawer; files change only after "
-              "“Save”, with undo."},
+              "“Commit”, with undo."},
     "grid.optics.staged": {
         "pl": {"one": "W szufladzie: {n} wpis f/.", "few": "W szufladzie: {n} wpisy f/.",
                "many": "W szufladzie: {n} wpisów f/."},

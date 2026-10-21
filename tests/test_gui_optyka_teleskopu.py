@@ -664,3 +664,266 @@ def test_n20_n22_wiersz_ogniskowej_przy_zerze_i_blok_optyki(qapp, tmp_path):
     pozycja = {lay.itemAt(i).widget(): i for i in range(lay.count()) if lay.itemAt(i).widget()}
     assert pozycja[t.aperture] < pozycja[t.btn_restore_optics] < pozycja[t.rigs]
     con.close()
+
+
+# ------------------------------------------------------------ AR-277: recepta perspektywy f/ trwa
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from PySide6.QtCore import QCoreApplication, QEventLoop  # noqa: E402
+
+_BEZPIECZNIK_S = 60
+
+
+def _czekaj(warunek, opis):
+    """Pętla zdarzeń do warunku - `processEvents` + `sleep` (oddaje GIL wątkom tła), z bezpiecznikiem."""
+    koniec = time.monotonic() + _BEZPIECZNIK_S
+    while not warunek():
+        if time.monotonic() > koniec:
+            raise AssertionError(f"bezpiecznik {_BEZPIECZNIK_S} s: {opis}")
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 50)
+        time.sleep(0.005)
+
+
+def _bezczynny(g):
+    return (g._pola is not None and g._pola_thread is None and g._zbior_thread is None
+            and not g._zbior_w_drodze())
+
+
+def _baza_f_w_pliku(tmp_path):
+    """Baza w pliku nad prawdziwymi FITS jak `widok_f` (3× RC8 f/8, 1× f/200) z pięcioma keywordami,
+    które przy równym pokryciu idą przed FOCRATIO alfabetycznie - kolumny domyślne pierwszego wyniku
+    Pól (6 najczęstszych) FOCRATIO nie obejmują, więc wejście w perspektywę musi ją dołożyć."""
+    import numpy as np
+    from astropy.io import fits
+    from horreum import scan
+    path = tmp_path / "f.db"
+    con = db.open_db(str(path))
+    for i, fr in enumerate((8.0, 8.0, 8.0, 200.0)):
+        p = tmp_path / f"f{i}.fits"
+        hdu = fits.PrimaryHDU(data=np.full((4, 4), i, dtype=np.int16))
+        for k, val in (("TELESCOP", "RC8"), ("IMAGETYP", "Light"), ("FOCALLEN", 1600.0),
+                       ("FOCRATIO", fr), ("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+                       ("AIRMASS", 1.2), ("CCD-TEMP", -10.0), ("DATE-OBS", f"2024-03-1{i}T21:00:00"),
+                       ("EXPTIME", 300.0), ("FILTER", "Ha")):
+            hdu.header[k] = val
+        hdu.writeto(str(p), overwrite=True)
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                           summary=scan.ScanSummary())
+    grouper.run_grouper(con, NOW)
+    con.close()
+    return str(path)
+
+
+def _recepta_na_pasku(win):
+    return win.recipe_label.text() if win.recipe_label.isVisible() else ""
+
+
+def test_recepta_optyki_przezywa_przeladowanie_z_kolumna_i_powrot_do_zbiorow(qapp, tmp_path):
+    """AR-277, prawdziwa kolejność w oknie gospodarza (skład zbioru i Pola w wątkach tła): wejście
+    drogą Porządków dokłada FOCRATIO, przeładowanie z kolumną kończy się raportem „Grid: N klatek…”,
+    a recepta „RC8 200 → 8 (1 kl.)” stoi PO nim; po wyjściu na Dom i powrocie do Zbiorów wraca.
+    Falsyfikator: `ponow_recepte` bez recepty perspektywy - raport przeładowania z kolumną ją gasi
+    (natywnie: widoczna 0,42-0,85 s), a po powrocie do Zbiorów nie wraca."""
+    from horreum.gui.app import NAV_DOM, NAV_ZBIORY, MainWindow
+    from horreum.gui.grid_model import PRESET_F_RATIO_MISMATCH
+    win = MainWindow(_baza_f_w_pliku(tmp_path))
+    try:
+        win.resize(1600, 900)
+        win.show()
+        g = win.grid_view
+        _czekaj(lambda: _bezczynny(g), "wątki tła po otwarciu bazy")
+        assert "FOCRATIO" not in g._columns and "FOCRATIO" in g._all_keywords
+        win._on_open_collection(PRESET_F_RATIO_MISMATCH)
+        _czekaj(lambda: _bezczynny(g) and "FOCRATIO" in g._columns, "przeładowanie z kolumną")
+        assert win._pelny_komunikat.startswith("Grid:"), win._pelny_komunikat
+        assert "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win), _recepta_na_pasku(win)
+        win._show_view(NAV_DOM)
+        assert _recepta_na_pasku(win) == ""
+        win._show_view(NAV_ZBIORY)
+        assert "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win), _recepta_na_pasku(win)
+    finally:
+        win.close()
+
+
+def test_recepta_optyki_stoi_w_trakcie_przeladowania_z_kolumna(qapp, tmp_path, monkeypatch):
+    """AR-277: przeładowanie z dołożoną kolumną FOCRATIO trzymane bramą w wątku tła (pivot kart
+    z FOCRATIO) - przez cały skład pasek mówi „Czytam klatki…” RAZEM z receptą, a po przyłożeniu
+    recepta zostaje. Falsyfikator: ogon wejścia bez recepty po zleceniu przeładowania (raport
+    „Czytam klatki…” gasi receptę przyłożenia zbioru perspektywy, pasek bez niej do końca składu)."""
+    from horreum.gui.app import MainWindow
+    from horreum.gui.grid_model import PRESET_F_RATIO_MISMATCH
+    brama, wszedl = threading.Event(), threading.Event()
+    prawdziwe = queries.cards_pivot
+
+    def _cp(con, ids, kws):
+        if "FOCRATIO" in kws:
+            wszedl.set()
+            brama.wait(_BEZPIECZNIK_S)
+        return prawdziwe(con, ids, kws)
+    win = MainWindow(_baza_f_w_pliku(tmp_path))
+    try:
+        win.resize(1600, 900)
+        win.show()
+        g = win.grid_view
+        _czekaj(lambda: _bezczynny(g), "wątki tła po otwarciu bazy")
+        monkeypatch.setattr(queries, "cards_pivot", _cp)
+        win._on_open_collection(PRESET_F_RATIO_MISMATCH)
+        _czekaj(lambda: wszedl.is_set(), "skład z kolumną FOCRATIO w drodze")
+        QApplication.processEvents()
+        assert g._zbior_w_drodze() and win._pelny_komunikat == i18n.t("busy.read_frames")
+        assert "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win), _recepta_na_pasku(win)
+        brama.set()
+        _czekaj(lambda: _bezczynny(g), "przyłożenie przeładowania z kolumną")
+        assert "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win), _recepta_na_pasku(win)
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_wejscie_przed_wynikiem_pol_doklada_focratio_i_recepte(qapp, tmp_path, monkeypatch):
+    """AR-277: wejście w perspektywę, zanim pierwszy wynik Pól doszedł (brama na pokryciu w wątku tła):
+    `_all_keywords` puste, kolumny brak. Wynik Pól dokłada FOCRATIO do kolumn domyślnych, przeładowanie
+    po nim kończy się raportem, a recepta stoi po nim. Falsyfikatory: `_zastosuj_pola` bez kolumny
+    perspektywy (FOCRATIO nie dochodzi); `ponow_recepte` bez recepty perspektywy (raport ją gasi)."""
+    from horreum.gui.app import MainWindow
+    from horreum.gui.grid_model import PRESET_F_RATIO_MISMATCH
+    brama = threading.Event()
+    prawdziwe = queries.keyword_facets
+
+    def _kf(con):
+        brama.wait(_BEZPIECZNIK_S)
+        return prawdziwe(con)
+    monkeypatch.setattr(queries, "keyword_facets", _kf)
+    win = MainWindow(_baza_f_w_pliku(tmp_path))
+    try:
+        win.resize(1600, 900)
+        win.show()
+        g = win.grid_view
+        _czekaj(lambda: g._zbior_thread is None and not g._zbior_w_drodze(), "zbiór startu")
+        assert g._pola is None and not (getattr(g, "_all_keywords", None) or [])
+        win._on_open_collection(PRESET_F_RATIO_MISMATCH)
+        _czekaj(lambda: g._zbior_thread is None and not g._zbior_w_drodze(), "zbiór perspektywy")
+        assert "FOCRATIO" not in g._columns
+        brama.set()
+        _czekaj(lambda: _bezczynny(g) and "FOCRATIO" in g.model._keywords, "wynik Pól i przeładowanie")
+        assert "FOCRATIO" in g._columns and len(g._columns) == 7, g._columns
+        assert win._pelny_komunikat.startswith("Grid:"), win._pelny_komunikat
+        assert "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win), _recepta_na_pasku(win)
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_recepta_optyki_stoi_w_trakcie_przeladowania_po_wyniku_pol(qapp, tmp_path, monkeypatch):
+    """AR-277: wejście przed pierwszym wynikiem Pól; wynik Pól dokłada FOCRATIO i przeładowuje zbiór,
+    a skład z kolumną trzymany bramą (pivot kart z FOCRATIO) - przez cały skład pasek mówi „Czytam
+    klatki…” RAZEM z receptą, bez przerwy, i po przyłożeniu recepta zostaje. Falsyfikator: wynik Pól
+    przeładowuje bez recepty (raport „Czytam klatki…” gasi ją do końca składu - natywnie 0,67 s)."""
+    from horreum.gui.app import MainWindow
+    from horreum.gui.grid_model import PRESET_F_RATIO_MISMATCH
+    pola, sklad, wszedl = threading.Event(), threading.Event(), threading.Event()
+    prawdziwe_kf, prawdziwe_cp = queries.keyword_facets, queries.cards_pivot
+
+    def _kf(con):
+        pola.wait(_BEZPIECZNIK_S)
+        return prawdziwe_kf(con)
+
+    def _cp(con, ids, kws):
+        if "FOCRATIO" in kws:
+            wszedl.set()
+            sklad.wait(_BEZPIECZNIK_S)
+        return prawdziwe_cp(con, ids, kws)
+    monkeypatch.setattr(queries, "keyword_facets", _kf)
+    monkeypatch.setattr(queries, "cards_pivot", _cp)
+    win = MainWindow(_baza_f_w_pliku(tmp_path))
+    try:
+        win.resize(1600, 900)
+        win.show()
+        g = win.grid_view
+        _czekaj(lambda: g._zbior_thread is None and not g._zbior_w_drodze(), "zbiór startu")
+        win._on_open_collection(PRESET_F_RATIO_MISMATCH)
+        _czekaj(lambda: g._zbior_thread is None and not g._zbior_w_drodze(), "zbiór perspektywy")
+        assert g._pola is None and "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win)
+        pola.set()
+        _czekaj(lambda: wszedl.is_set(), "skład z kolumną FOCRATIO po wyniku Pól")
+        QApplication.processEvents()
+        assert g._zbior_w_drodze() and win._pelny_komunikat == i18n.t("busy.read_frames")
+        assert "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win), _recepta_na_pasku(win)
+        sklad.set()
+        _czekaj(lambda: _bezczynny(g) and "FOCRATIO" in g.model._keywords, "przyłożenie składu")
+        assert "RC8 200 → 8 (1 kl.)" in _recepta_na_pasku(win), _recepta_na_pasku(win)
+    finally:
+        pola.set()
+        sklad.set()
+        win.close()
+
+
+def test_zuzyta_recepta_gestu_oddaje_miejsce_recepcie_optyki(widok_f, monkeypatch):
+    """AR-277: w perspektywie f/ gest uwag zostawia receptę „Cofnij uwagi”, potem inna uwaga ręką
+    przykrywa cel gestu (recepta gestu przestaje być prawdą) i PRAWDZIWE przeładowanie składa recepty
+    ze stanu - wraca recepta perspektywy, nie pusta. Falsyfikator: `ponow_recepte` kończy się pustą
+    receptą zużytego gestu."""
+    from horreum.gui import grid as grid_mod
+    from horreum.gui.note_dialog import NoteIntent
+    v, con = widok_f
+
+    class _Okno:
+        def __init__(self, *, current, frame_count, parent=None):
+            self.intent = NoteIntent("set", "chmury")
+
+        def exec(self):
+            return 1
+    monkeypatch.setattr(grid_mod, "NoteDialog", _Okno)
+    recepty = []
+    v.status_recipe.connect(recepty.append)
+    v.apply_perspective(grid_mod.PRESET_F_RATIO_MISMATCH)
+    fid = v.model._rows[0]["frame_id"]
+    v._przywroc_zaznaczenie([fid])
+    v._on_notes()
+    assert recepty[-1].czlony and "200 → 8" not in str(recepty[-1]), recepty[-1]   # recepta gestu
+    repo.set_frame_note(con, frame_ids=[fid], body="inna", now=NOW)
+    recepty.clear()
+    v.refresh()
+    assert recepty and "RC8 200 → 8 (1 kl.)" in str(recepty[-1]), recepty
+
+
+def test_recepta_optyki_nie_wraca_po_gescie_w_szufladzie_i_gasnie_poza_perspektywa(widok_f):
+    """AR-277: „Popraw f/ w plikach…” stawia wpis w szufladzie (plik i `header.focratio_raw` bez zmian
+    do „Zatwierdź”) - następne przeładowanie NIE wskrzesza recepty każącej wykonać ten gest. Zejście do
+    innej perspektywy - przeładowania recepty f/ już nie podają. Falsyfikatory: recepta liczona z samego
+    zbioru (bez stagingu); recepta perspektywy bez warunku flagi."""
+    from horreum.gui import grid as grid_mod
+    v, _con = widok_f
+    recepty = []
+    v.status_recipe.connect(recepty.append)
+    v.apply_perspective(grid_mod.PRESET_F_RATIO_MISMATCH)
+    assert any("RC8 200 → 8 (1 kl.)" in str(r) for r in recepty), recepty
+    v.table.selectRow(0)
+    v._on_fix_optics()
+    assert v._pending_count() == 1
+    recepty.clear()
+    v.refresh()
+    assert not any("200 → 8" in str(r) for r in recepty), recepty
+    v.apply_perspective(grid_mod._PRESET_CZYSTY)            # wszystkie klatki, także f/8 RC8
+    assert len(v._frame_ids) == 4
+    recepty.clear()
+    v.refresh()
+    assert not any("→ f/" in str(r) for r in recepty), recepty
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_podpowiedzi_optyki_nazywaja_przycisk_szuflady(lang):
+    """AR-277: podpowiedź gestu i opis wiersza Porządków mówią słowem przycisku szuflady
+    (`grid.action.commit`), nie „Zapisz”/“Save”, którego w szufladzie nie ma.
+    Falsyfikator: stare słowo w którymkolwiek z dwóch tekstów."""
+    i18n.set_lang(lang)
+    try:
+        przycisk = i18n.t("grid.action.commit")
+        stare = {"pl": "Zapisz", "en": "Save"}[lang]
+        for tekst in (i18n.t("grid.optics.fix_tip"),
+                      i18n.t("tasks.f_ratio_mismatch_tip", fix=i18n.t("grid.optics.fix_action"))):
+            assert przycisk in tekst and stare not in tekst, tekst
+    finally:
+        i18n.set_lang("pl")

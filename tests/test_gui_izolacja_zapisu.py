@@ -892,7 +892,7 @@ def test_recepta_recznego_zwolnienia_wskazuje_gest_okna_i_release_isolation():
 
     Falsyfikator: przywróć w `_RECZNA` `repo.release_inplace_op` → pierwsza asercja pada."""
     assert "release_inplace_op" not in writeback._RECZNA
-    assert "writeback.release_isolation" in writeback._RECZNA
+    assert "release_isolation" not in writeback._RECZNA          # AR-281: gest, nie funkcja rdzenia
     assert f"„{CATALOG['grid.inplace.release']['pl']}”" in writeback._RECZNA
     assert "w Zbiorach" in writeback._RECZNA and "prawego kliku" in writeback._RECZNA
 
@@ -933,18 +933,21 @@ def test_AR30_1_powod_rdzenia_mowi_gestem_okna_i_wywolaniem(tmp_path, monkeypatc
                          (writeback._GEST_PRZYWROC, "grid.inplace.restore"),
                          (writeback._GEST_ZWOLNIJ, "grid.inplace.release")):
         assert stala == CATALOG[klucz]["pl"], klucz
+    # AR-281: zdanie mówi gest z menu, a numer operacji jedzie parametrem `op_id` (szczegół okna
+    # składa z niego wywołanie rdzenia - `wb_worker.wiersz_operacji`).
     otwarta = writeback._powod_izolacji({"id": 7, "kind": "commit", "phase": "unverified"})
-    assert f"„{writeback._GEST_PRZYWROC}” (`recover_torn(7)`)" in otwarta, otwarta
+    assert f"„{writeback._GEST_PRZYWROC}” z menu prawego kliku" in otwarta, otwarta
+    assert dict(otwarta.params)["op_id"] == 7 and "recover_torn" not in otwarta, otwarta
     czeka = writeback._powod_izolacji({"id": 8, "kind": "commit", "phase": "written"})
-    assert f"„{writeback._GEST_DOKONCZ}” (`finish_inplace(8)`)" in czeka, czeka
-    assert f"„{writeback._GEST_PRZYWROC}” (`recover_torn(8)`)" in czeka, czeka
+    assert f"„{writeback._GEST_DOKONCZ}”" in czeka and f"„{writeback._GEST_PRZYWROC}”" in czeka, czeka
+    assert dict(czeka.params)["op_id"] == 8 and "finish_inplace" not in czeka, czeka
 
     con, _ = _baza(tmp_path)
     _commit_written(monkeypatch, con)
     op_id = con.execute("SELECT id FROM inplace_op").fetchone()[0]
     odmowa = writeback.recover_torn(con, op_id, now=NOW)       # zapis poprawny - powrót odmawia
     assert odmowa.status == "blocked"
-    assert f"„{writeback._GEST_DOKONCZ}” (`finish_inplace({op_id})`)" in odmowa.reason, odmowa
+    assert str(writeback._droga_dokoncz(op_id)) in odmowa.reason, odmowa
     con.close()
 
 
@@ -952,7 +955,8 @@ def test_AR30_1_powod_rdzenia_mowi_gestem_okna_i_wywolaniem(tmp_path, monkeypatc
 def test_AR148_drogi_wyjscia_mowia_etykieta_gestu_w_jezyku_UI(lang):
     """AR-148: fragmenty dróg wyjścia z izolacji (`way_finish`, `way_restore`, `way_manual`) mówią
     w oknie nazwą gestu z katalogu `grid.inplace.*` w JĘZYKU UI - w cudzysłowie drukarskim języka -
-    a wywołanie rdzenia zostaje. Zmiana etykiety gestu bez zdania drogi (albo odwrotnie) = czerwień.
+    a wywołania rdzenia w zdaniu już nie ma (AR-281: schodzi do szczegółu okna). Zmiana etykiety
+    gestu bez zdania drogi (albo odwrotnie) = czerwień.
 
     Falsyfikator: literówka w EN `objchg.item.way_restore` → asercja o etykiecie pada."""
     from horreum.gui import i18n
@@ -961,12 +965,12 @@ def test_AR148_drogi_wyjscia_mowia_etykieta_gestu_w_jezyku_UI(lang):
     try:
         cudzyslow = ("„", "”") if lang == "pl" else ("“", "”")
         for powod, klucz, wywolanie in (
-                (writeback._droga_dokoncz(5), "grid.inplace.finish", "`finish_inplace(5)`"),
-                (writeback._droga_przywroc(5), "grid.inplace.restore", "`recover_torn(5)`"),
-                (writeback._RECZNA, "grid.inplace.release", "`writeback.release_isolation`")):
+                (writeback._droga_dokoncz(5), "grid.inplace.finish", "finish_inplace"),
+                (writeback._droga_przywroc(5), "grid.inplace.restore", "recover_torn"),
+                (writeback._RECZNA, "grid.inplace.release", "release_isolation")):
             zdanie = tekst_powodu(powod)
             etykieta = f"{cudzyslow[0]}{CATALOG[klucz][lang]}{cudzyslow[1]}"
-            assert etykieta in zdanie and wywolanie in zdanie, (klucz, zdanie)
+            assert etykieta in zdanie and wywolanie not in zdanie, (klucz, zdanie)
         # KAŻDY wpis powodu, którego PL niesie etykietę gestu `_GEST_*` (także kopie literalne
         # spoza fragmentów `way_*`: `isolated_*`, `finish_failed_isolated_release`), mówi nią
         # w języku UI - zmiana etykiety gestu bez zdania = czerwień.

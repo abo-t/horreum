@@ -82,6 +82,8 @@ from .item_reasons import (blad_systemu as _blad_systemu, proza_z_diagnoza as _p
 # Błąd Windows z kodem i ścieżką - jedna konstrukcja u właściciela (AR-259); nazwa modułu zostaje.
 from .item_reasons import blad_windows as _blad_windows
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
+from .card_rules import (KARTY_KOMENTARZOWE, liczba_violation,   # liczba karty - jedno zdanie
+                         powod_cyfr)                             # z podglądem (AR-269)
 
 # ============================================================ WRITER (port dawcy fits_io)
 
@@ -793,6 +795,43 @@ def _brak_wystapienia(keyword: str, idx: int, ile: int) -> PowodPozycji:
                         "card_idx_missing", keyword=keyword, idx=idx, n=ile)
 
 
+def _nieznana_operacja(op) -> PowodPozycji:
+    """Operacja spoza `set`/`add` - JEDNO zdanie i kod dla FITS (obie drogi) i XISF (AR-269 N3;
+    dawniej FITS 'failed' prozą `ValueError`, XISF `xisf_bad_op`). W produkcie nieosiągalna (CHECK
+    `op IN ('set','add')`, `macro_def_bad_op`) - dotyczy wołającego API."""
+    return PowodPozycji(f"operacja '{op}' nie istnieje - writeback zna 'set' i 'add'",
+                        "card_op_unknown", op=op)
+
+
+def _wartosc_karty(op: WriteOp):
+    """Wartość operacji w typie karty (`_coerce`) albo ODMOWA z kodem: dla typu liczbowego liczba
+    NIESKOŃCZONA (`card_rules.liczba_violation`, AR-269 N2) - sprawdzana na TEKŚCIE przed `int()`,
+    jak w podglądzie makra, więc `inf` przy typie int to ta sama odmowa, a nie `macro_type_mismatch`.
+    Wspólna dla FITS (`_apply_op`) i XISF z typem liczbowym (`_xisf_patches`)."""
+    if op.value_type in ("int", "float"):
+        powod = liczba_violation(op.keyword, op.value)
+        if powod is not None:
+            raise OdmowaZPowodem(powod)
+    return _coerce(op.value, op.value_type)
+
+
+def _odmowa_cyfr(hdr, keyword: str, n: int, value) -> None:
+    """AR-269 N1: float, którego pole karty FITS nie odtworzy, to ODMOWA z kodem - pytamy PRAWDĘ
+    astropy: karta `n`-tego wystąpienia (`_nth_card`, ta, którą łata zmieniła) przeczytana z obrazu
+    ma dać tę samą liczbę. Wartość równa zastanej astropy zostawia w zastanym formacie (karty nie
+    przekłada), więc przechodzi sama. Podgląd liczy to samo lustrem `card_rules.cyfry_violation`.
+    Karta KOMENTARZOWA (`COMMENT`, `HISTORY`, pusta) pola liczby nie ma - astropy pisze liczbę tekstem
+    w pełnych cyfrach - więc poza kontrolą (odczyt tekstu nigdy nie równa się liczbie)."""
+    if not isinstance(value, float) or keyword.strip().upper() in KARTY_KOMENTARZOWE:
+        return
+    karta = _nth_card(hdr, keyword.strip().upper(), n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        odczyt = fits.Card.fromstring(karta.image).value
+    if odczyt != value:
+        raise OdmowaZPowodem(powod_cyfr(keyword, value))
+
+
 def _set_nth(hdr, keyword: str, n: int, value, comment: str | None) -> None:
     seen = -1
     for card in hdr.cards:
@@ -807,7 +846,14 @@ def _set_nth(hdr, keyword: str, n: int, value, comment: str | None) -> None:
 
 
 def _apply_op(hdr, op: WriteOp) -> None:
-    value = _coerce(op.value, op.value_type)
+    """Łata jednej operacji na nagłówku astropy - ta sama funkcja dla drogi atomowej, przebiegu
+    próbnego planu w miejscu i wyroczni regionu. Odmowy z kodem (`OdmowaZPowodem`): operacja nieznana,
+    liczba nieskończona i typ (`_wartosc_karty`), karta już jest / wymagany `idx` / brak wystąpienia,
+    float, którego pole nie odtworzy (`_odmowa_cyfr`, po przypisaniu - nagłówek wołający i tak
+    porzuca)."""
+    if op.op not in ("set", "add"):
+        raise OdmowaZPowodem(_nieznana_operacja(op.op))
+    value = _wartosc_karty(op)
     if op.op == "add":
         # Jawne dodanie BRAKUJACEGO keyworda (astropy dopisuje na koniec). Gdy keyword juz jest, `add`
         # nie nadpisuje cicho (to robi `set`) - odmowa z kodem bliźniaczym podglądu makra
@@ -816,16 +862,14 @@ def _apply_op(hdr, op: WriteOp) -> None:
         if _count_keyword(hdr, op.keyword) > 0:
             raise OdmowaZPowodem(_karta_juz_jest(op.keyword))
         hdr[op.keyword] = (value, op.comment) if op.comment is not None else value
-        return
-    if op.op == "set":
+    else:
         if op.idx is None and _count_keyword(hdr, op.keyword) > 1:
             raise OdmowaZPowodem(_wymagany_idx(op.keyword))
         if (op.idx in (None, 0)) and _count_keyword(hdr, op.keyword) <= 1:
             hdr[op.keyword] = (value, op.comment) if op.comment is not None else value
         else:
             _set_nth(hdr, op.keyword, op.idx or 0, value, op.comment)
-        return
-    raise ValueError(f"nieznana operacja: {op.op!r}")
+    _odmowa_cyfr(hdr, op.keyword, op.idx or 0, value)
 
 
 def _nth_card(hdr, keyword: str, n: int):
@@ -921,7 +965,9 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
     → 'blocked' z powodem, NIE pisze - zamiast angielskiego wyjątku astropy albo cichego CONTINUE,
     ucięcia komentarza czy karty HIERARCH. FITS z kartą `CHECKSUM`/`DATASUM` → 'blocked' tą samą
     odmową co zapis w miejscu (`_odmowa_sumy`, AR-166): pełne przepisanie zostawiłoby sumę
-    niezgodną z plikiem. Zmiana wartości, po której astropy uciąłby ZASTANY
+    niezgodną z plikiem. Bajt spoza drukowalnego ASCII w surowym nagłówku któregokolwiek HDU →
+    'blocked' tą samą odmową co zapis w miejscu i cofnięcie (`_odmowa_bajtow`, AR-271): `writeto`
+    zapisałby `?` w miejscu bajtu człowieka. Zmiana wartości, po której astropy uciąłby ZASTANY
     komentarz karty, też → 'blocked' (`_fits_comment_loss`, AR-7). Plik tymczasowy jest czytany
     PRZED podmianą (plik nieczytelny nie zastąpi oryginału), a jego hash jest kotwicą weryfikacji
     po podmianie (`_after_replace`). Zwraca `post_hash` z zapisanego pliku + `backup_text` - także
@@ -976,6 +1022,10 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
                     return WriteResult("blocked", powod, None)
                 # AR-166: suma kontrolna - ta sama odmowa i to samo miejsce kolejki co w miejscu.
                 powod = _odmowa_sumy(hdr)
+                if powod is not None:
+                    return WriteResult("blocked", powod, None)
+                # AR-271: bajt spoza ASCII w surowym nagłówku - `writeto` zamieniłby go na `?`.
+                powod = _odmowa_bajtow(fh, _odcinki_naglowkow(hdul))
                 if powod is not None:
                     return WriteResult("blocked", powod, None)
                 info = hdul.fileinfo(index)
@@ -1224,7 +1274,12 @@ def _plan_przywrocenia(path: str, fh, env: RegionBackup, expected_hash: str | No
         return granice
     if isinstance(granice, Fallback) or env.fmt != "fits":
         return None
-    hdr, start, data_start, _ = granice
+    hdr, start, data_start, _, odcinki = granice
+    # AR-271: bajt spoza ASCII w pliku zastanym albo w regionie koperty - odmowa z kodem przed plikiem
+    # tymczasowym i śladem cofnięcia (ta sama reguła co zapis; koperta zaczyna się na granicy HDU).
+    powod = _odmowa_bajtow(fh, odcinki) or _bajt_naglowka(env.region)
+    if powod is not None:
+        return WriteResult("blocked", powod, None)
     if start != env.offset:
         return None
     with warnings.catch_warnings():
@@ -1252,6 +1307,12 @@ def _fits_semantyczny(path: str, fh, tekst: str, expected_hash: str | None):
             current = scan._header_hash(hdu.header)
             if expected_hash is not None and current != expected_hash:
                 return WriteResult("blocked", _UNDO_HEADER_CHANGED, None)
+            # AR-271: plik zastany i tekst backupu (region koperty albo stary tekst) - ta sama odmowa
+            # co zapis; dawniej `writeto` kończył 'failed' gołym `VerifyError` albo pisał `?`.
+            powod = (_odmowa_bajtow(fh, _odcinki_naglowkow(hdul))
+                     or _bajt_naglowka(tekst.encode("latin-1", "replace")))
+            if powod is not None:
+                return WriteResult("blocked", powod, None)
             info = hdul.fileinfo(index)
             start, data_start = info["hdrLoc"], info["datLoc"]
             hdu.header = fits.Header.fromstring(tekst)
@@ -1482,11 +1543,17 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
     patches: list[tuple[int, int, bytes]] = []
     for op in ops:
         if op.op not in ("set", "add"):
-            raise _XisfRefusal(PowodPozycji(
-                f"operacja '{op.op}' na XISF nie istnieje - writeback zna 'set' i 'add'",
-                "xisf_bad_op", op=op.op))
+            raise _XisfRefusal(_nieznana_operacja(op.op))      # jedno zdanie z FITS (AR-269 N3)
         keyword, idx = op.keyword.strip().upper(), op.idx or 0
         new_text = str(op.value)
+        if op.value_type in ("int", "float"):
+            # Typ liczbowy (wołający API - karty XISF w produkcie są `str`, D-X-4): liczba
+            # nieskończona i tekst nie-liczba odmawiają jak w FITS (`_wartosc_karty`, AR-269 N2);
+            # do pliku dalej idzie TEKST, więc pole FITS 20 znaków (N1) XISF nie dotyczy.
+            try:
+                _wartosc_karty(op)
+            except OdmowaZPowodem as exc:
+                raise _XisfRefusal(exc.powod) from exc
         if op.op == "add":
             patches.append(_xisf_add_patch(meta, keyword, new_text, op.comment))
             continue
@@ -1503,7 +1570,18 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
             raise _XisfRefusal(PowodPozycji(
                 f"{brak} - 'set' nie zakłada karty; dopisanie idzie przez 'add' (P6d)",
                 "xisf_set_missing", detail=brak)) from exc
-        patches.append((*span, scan.quote_fits(new_text, xml[span[0]:span[1]])))
+        stara = xml[span[0]:span[1]]
+        if op.value_type not in ("int", "float") and not (
+                len(stara) >= 2 and stara.startswith(b"'") and stara.endswith(b"'")):
+            # Tekst na zastanej GOŁEJ wartości (liczba, logika) idzie do pliku goło (`quote_fits`), więc
+            # `nan`/`inf` stałby się liczbą nieskończoną karty - ta sama odmowa co typ liczbowy (AR-269).
+            # Cytowana wartość i `add` (wzorzec w apostrofach) niosą tekst, a `nan` w tekście jest
+            # legalny. Podgląd makra postaci goła/cytowana nie zna (lustro `cards` ma sam tekst), więc
+            # dla karty `str` XISF werdykt wydaje WYŁĄCZNIE pisarz - przy commicie, z kodem.
+            powod = liczba_violation(keyword, new_text)
+            if powod is not None:
+                raise _XisfRefusal(powod)
+        patches.append((*span, scan.quote_fits(new_text, stara)))
         if op.comment is not None:
             try:
                 cspan = scan.locate_value_span(xml, keyword=keyword, idx=idx, attr="comment")
@@ -1817,6 +1895,55 @@ def _odmowa_sumy(hdr) -> PowodPozycji | None:
         return None
     return PowodPozycji(f"FITS z sumą kontrolną ({', '.join(sumy)}) - zapis nagłówka unieważniłby "
                         f"ją, a pisarz jej nie przelicza", "checksum_present", sums=sumy)
+
+
+# BAJT SPOZA DRUKOWALNEGO ASCII W SUROWYM NAGŁÓWKU (AR-271) - jedna reguła dla KAŻDEJ drogi zapisu
+# i cofnięcia FITS. astropy czyta bajt >= 0x80 jako `?` (`astropy/io/fits/util.py` `decode_ascii`),
+# więc droga atomowa (`writeto`) zapisywała `?` w miejscu komentarza człowieka bez słowa, a zapis
+# w miejscu porównywał hash z odczytu astropy z hashem regionu czytanego `latin-1` i mówił fałszywie
+# „nagłówek zmienił się od stagingu”. Bajt sterujący astropy zostawia, a `writeto` odmawia gołym
+# `VerifyError`. Hash z odczytu astropy nie odróżnia też dwóch różnych bajtów (oba to `?`), więc
+# „zachowanie” bajtu nie miałoby kotwicy - odmowa z kodem, plik nietknięty. Patrzymy na rekordy
+# KART (do `END`) wszystkich HDU, z uchwytu blokady: wypełnienie za `END` nie jest treścią karty,
+# a `writeto` przepisuje nagłówki wszystkich HDU. Populacja archiwum: 0 z 15 598 plików na `R:`
+# (2026-10-21, surowy odczyt) - bramka obronna.
+_FITS_DRUKOWALNE = bytes(range(0x20, 0x7F))
+
+
+def _bajt_naglowka(raw: bytes) -> PowodPozycji | None:
+    """Powód `header_nonprintable` dla pierwszego bajtu spoza 0x20-0x7E w rekordach kart regionu
+    nagłówka `raw` (od początku HDU, rekordy po 80 B, do `END`) albo `None`."""
+    for i in range(0, len(raw) - _FITS_RECORD + 1, _FITS_RECORD):
+        rekord = raw[i:i + _FITS_RECORD]
+        if rekord[:8] == _FITS_END_RECORD[:8]:
+            return None
+        if rekord.translate(None, _FITS_DRUKOWALNE):
+            bajt = next(b for b in rekord if not 0x20 <= b <= 0x7E)
+            nazwa = "".join(chr(b) if 0x20 <= b <= 0x7E else "?" for b in rekord[:8]).strip()
+            nazwa, znak = nazwa or "''", f"0x{bajt:02X}"
+            return PowodPozycji(f"karta {nazwa} ma w pliku bajt {znak} spoza drukowalnego ASCII - "
+                                f"Horreum nie zapisze tego nagłówka bez zmiany tego bajtu; plik "
+                                f"nietknięty", "header_nonprintable", keyword=nazwa, char=znak)
+    return None
+
+
+def _odcinki_naglowkow(hdul) -> list[tuple[int, int]]:
+    """`[hdrLoc, datLoc)` nagłówka KAŻDEGO HDU otwartego pliku."""
+    return [(info["hdrLoc"], info["datLoc"]) for info in map(hdul.fileinfo, range(len(hdul)))]
+
+
+def _odmowa_bajtow(fh, odcinki) -> PowodPozycji | None:
+    """ODMOWA BAJTU SPOZA ASCII (AR-271) na surowych bajtach z uchwytu blokady `fh`: regiony
+    `odcinki` (nagłówki HDU) albo `None`. Miejsce w kolejce bramek: po sumie kontrolnej, przed łatą -
+    tak samo w drodze atomowej i w miejscu."""
+    for od, do in odcinki:
+        fh.seek(od)
+        powod = _bajt_naglowka(fh.read(do - od))
+        if powod is not None:
+            return powod
+    return None
+
+
 _FITS_END_RECORD = b"END" + b" " * 77
 # Blokada: przerwy między próbami otwarcia przy błędzie współdzielenia (32) / blokady (33).
 _LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0)
@@ -2080,9 +2207,9 @@ def _obraz_karty(karta, keyword: str, value, comment: str) -> tuple[bytes | None
     `_apply_op`) i podglądu drogi (`_fits_card_image`, świeża karta). Round-trip: karta odczytana
     z obrazu ma dać tę samą nazwę i komentarz, a tekst - tę samą wartość: astropy przy za długim
     komentarzu UCINA go po cichu (ostrzeżenie), a przy za długiej wartości tekstowej składa CONTINUE;
-    oba przypadki łapie ta kontrola. Wartości liczby nie porównujemy: liczba nie składa CONTINUE,
-    a obraz, którego astropy nie odtworzy co do bitu (float dłuższy niż pole), zapisuje tak samo
-    droga atomowa."""
+    oba przypadki łapie ta kontrola. Wartości liczby tu nie porównujemy: liczba nie składa CONTINUE,
+    a float, którego pole nie odtworzy, odmawia wcześniej przebieg próbny `_apply_op` (`_odmowa_cyfr`,
+    AR-269) - tą samą odmową co droga atomowa."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         image = karta.image
@@ -2110,8 +2237,9 @@ def _fits_card_image(keyword: str, value, comment: str) -> tuple[bytes | None, s
 
 
 def _fits_hdu_bounds(path: str, expected_hash: str | None):
-    """Odczyt parserem (pod blokadą wołającego): `(hdr, start, data_start, hash)` albo
-    `WriteResult('blocked')`/`Fallback`. Offsety są tu KANDYDATEM - rozstrzyga `_fits_region_checked`."""
+    """Odczyt parserem (pod blokadą wołającego): `(hdr, start, data_start, hash, odcinki)` albo
+    `WriteResult('blocked')`/`Fallback`. Offsety są tu KANDYDATEM - rozstrzyga `_fits_region_checked`;
+    `odcinki` = nagłówki wszystkich HDU (`_odmowa_bajtow`, AR-271)."""
     with fits.open(path, mode="readonly", memmap=False) as hdul:
         index, hdu = scan._select_hdu(hdul)
         hdr = hdu.header
@@ -2122,7 +2250,7 @@ def _fits_hdu_bounds(path: str, expected_hash: str | None):
             return Fallback(PowodPozycji("skompresowany master - nagłówek kafelkowy układa astropy",
                                          "fb_compressed"))
         info = hdul.fileinfo(index)
-        return hdr, info["hdrLoc"], info["datLoc"], biezacy
+        return hdr, info["hdrLoc"], info["datLoc"], biezacy, _odcinki_naglowkow(hdul)
 
 
 _FITS_WOLNY_REKORD = b" " * _FITS_RECORD
@@ -2224,18 +2352,24 @@ def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | N
     granice = _fits_hdu_bounds(path, expected_hash)
     if not isinstance(granice, tuple):
         return granice
-    hdr, start, data_start, biezacy = granice
+    hdr, start, data_start, biezacy, odcinki = granice
     powod = _ops_violation(ops, lambda op: op.op == "add" or _count_keyword(hdr, op.keyword) == 0)
     if powod is not None:
         return WriteResult("blocked", powod, None)
     powod = _odmowa_sumy(hdr)
     if powod is not None:
         return WriteResult("blocked", powod, None)
+    # AR-271: ta sama odmowa co droga atomowa, PRZED regionem z uchwytu (hash regionu czytanego
+    # `latin-1` różni się od hasha astropy przy takim bajcie).
+    powod = _odmowa_bajtow(fh, odcinki)
+    if powod is not None:
+        return WriteResult("blocked", powod, None)
     # PRZEBIEG PRÓBNY ŁATY (AR-257): `_apply_op` - ta sama funkcja i kolejność co droga atomowa - na
     # JEDNEJ kopii nagłówka, po kolei (operacja widzi skutek poprzednich). Odmowa łaty (karta już jest,
-    # typ, wystąpienie, brak `idx` - AR-256) zapada więc TU tym samym powodem, zamiast spadku, po
-    # którym droga atomowa i tak by odmówiła; oryginał `hdr` nietknięty. Inny wyjątek (np. `nan`
-    # z astropy) leci dalej jak w drodze atomowej - 'failed' bez zapisu (`_pod_blokada`).
+    # typ, wystąpienie, brak `idx` - AR-256; operacja nieznana, liczba nieskończona, float spoza pola -
+    # AR-269) zapada więc TU tym samym powodem, zamiast spadku, po którym droga atomowa i tak by
+    # odmówiła; oryginał `hdr` nietknięty. Inny wyjątek leci dalej jak w drodze atomowej - 'failed'
+    # bez zapisu (`_pod_blokada`).
     try:
         proba = hdr.copy()
         for op in ops:
@@ -2246,10 +2380,6 @@ def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | N
     podmieniane: list[str] = []
     for op in ops:
         kw = op.keyword.strip().upper()
-        if op.op not in ("set", "add"):
-            return Fallback(PowodPozycji(
-                f"operacja {op.op}/{op.value_type} na {kw} - układ karty zostaje przy astropy",
-                "fb_op_kind", op=op.op, value_type=op.value_type, keyword=kw))
         if kw in _FITS_NOT_INPLACE or kw in _FITS_LAYOUT_KEYWORDS or kw in obrazy:
             return Fallback(PowodPozycji(f"karta {kw} nie jest zwykłą kartą tekstową",
                                          "fb_not_text_card", keyword=kw))
@@ -2679,7 +2809,11 @@ def restore_inplace(path, backup: RegionBackup, *, op_new_region: bytes, op_file
     Inny inode/rozmiar → `Fallback` (plik podmieniony od commitu - droga atomowa rozstrzyga po
     hashu); region = stan sprzed commitu → 'blocked' „już cofnięte" z kodem `CODE_REGION_SPRZED`
     (czy cofnięcie jest domknięte, rozstrzyga orkiestracja dowodem całego pliku i bazy, AR-169);
-    inny region → 'blocked'. `anchor` = kotwica bazy jak w `write_changes_inplace`."""
+    inny region → 'blocked'. `anchor` = kotwica bazy jak w `write_changes_inplace`.
+    Bez bramki bajtu spoza ASCII (AR-271, `_odmowa_bajtow`): droga nie parsuje nagłówka i nie zmienia
+    żadnego bajtu poza regionem, a region wraca bajt w bajt z koperty dopiero po dowodzie, że na dysku
+    leży dokładnie region zapisany przez commit - cichej podmiany bajtu, przed którą chroni bramka,
+    tu nie ma."""
     if _is_raw(path):
         return WriteResult("blocked", _RAW_READ_ONLY, None)
     path = os.fspath(path)
@@ -2775,29 +2909,32 @@ _GEST_ZWOLNIJ = "Zwolnij plik do skanu…"
 
 
 def _droga_dokoncz(op_id) -> PowodPozycji:
-    """Droga dalej w powodzie: „Dokończ zapis” (`finish_inplace(N)`) - fragment z kodem
-    (`way_finish`, AR-148): okno mówi nazwą gestu w języku UI."""
-    return PowodPozycji(f"„{_GEST_DOKONCZ}” (`finish_inplace({op_id})`)", "way_finish", op_id=op_id)
+    """Droga dalej w powodzie: gest „Dokończ zapis” - fragment z kodem (`way_finish`, AR-148): okno
+    mówi nazwą gestu w języku UI. Zdanie dla człowieka (AR-281): bez nazwy funkcji rdzenia i numeru
+    operacji - `op_id` zostaje parametrem, a okno składa z niego wiersz szczegółu
+    (`gui.wb_worker.wiersz_operacji`)."""
+    return PowodPozycji(f"„{_GEST_DOKONCZ}” z menu prawego kliku w Zbiorach", "way_finish",
+                        op_id=op_id)
 
 
 def _droga_przywroc(op_id) -> PowodPozycji:
-    """Droga dalej w powodzie: „Przywróć nagłówek sprzed zapisu” (`recover_torn(N)`) - fragment
-    z kodem (`way_restore`)."""
-    return PowodPozycji(f"„{_GEST_PRZYWROC}” (`recover_torn({op_id})`)", "way_restore",
+    """Droga dalej w powodzie: gest „Przywróć nagłówek sprzed zapisu” - fragment z kodem
+    (`way_restore`); `op_id` jak w `_droga_dokoncz`."""
+    return PowodPozycji(f"„{_GEST_PRZYWROC}” z menu prawego kliku w Zbiorach", "way_restore",
                         op_id=op_id)
 
 
 # Recepta ręczna (fragment z kodem `way_manual`): plik, którego odzysk nie rozstrzygnie.
 _RECZNA = PowodPozycji(
     f"nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację: w Zbiorach "
-    f"zaznacz klatkę i z menu prawego kliku wybierz „{_GEST_ZWOLNIJ}” "
-    f"(`writeback.release_isolation`)", "way_manual")
+    f"zaznacz klatkę i z menu prawego kliku wybierz „{_GEST_ZWOLNIJ}”", "way_manual")
 # Kody niosące drogę wyjścia z izolacji (AR-148): wynik, który JUŻ mówi, jak wyjść, nie dostaje
 # drugiej recepty zwolnienia ręką (`_zapisz_lokacje`, `_niesie_droge`). Zbiór JAWNY = kody, których
-# zdanie spełnia DOKŁADNIE predykat dawnego parsera prozy: niesie `recover_torn` albo całą receptę
-# ręczną `_RECZNA`. NIE cała rodzina `way_*` (`way_finish`/`way_retry*` tego nie niosą, a `isolated_*`
-# niosą spoza rodziny) i NIE `finish_failed_isolated_release` (sam wynik tej recepty - niesie
-# `release_isolation(…)`, ale nie całe `_RECZNA`). Równość z katalogiem pilnuje test (`test_powody_pisarza`).
+# zdanie niesie gest odzysku („{_GEST_PRZYWROC}” w cudzysłowie, dawniej `recover_torn`) albo całą
+# receptę ręczną `_RECZNA`. NIE cała rodzina `way_*` (`way_finish`/`way_retry*` tego nie niosą,
+# a `isolated_*` niosą spoza rodziny) i NIE `finish_failed_isolated_release` (sam wynik tej recepty -
+# niesie gest zwolnienia, ale nie całe `_RECZNA`). Równość z katalogiem pilnuje test
+# (`test_powody_pisarza`).
 _KODY_DROGI = frozenset({"way_restore", "way_manual", "isolated_recover", "isolated_finish"})
 _INNY_PLIK = PowodPozycji(f"inny plik niż w chwili zapisu (rozmiar/st_ino); {_RECZNA}",
                           "inplace_other_file", way=_RECZNA)
@@ -3109,18 +3246,17 @@ def _kontrola_danych(rec, expect_sha1_data, kontrola) -> str | None:
 
 def _powod_izolacji(op) -> str:
     """Powód odmowy mutacji pliku lokacji z operacją izolującą - z drogą naprawy właściwą fazie
-    (drogi jak `_droga_*`: „gest okna” (`wywołanie rdzenia`)). Kod drogi dla okna (AR-141)."""
+    (gest okna z menu, jak `_droga_*`). Kod drogi dla okna (AR-141). Operacja (numer, rodzaj, faza)
+    i wywołanie rdzenia jadą parametrami do wiersza szczegółu okna, nie w zdaniu (AR-281)."""
     if op["phase"] in repo.INPLACE_OPEN_PHASES:
         return PowodPozycji(
-            f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
-            f"{op['phase']}) - plik jest izolowany; najpierw odzysk: „{_GEST_PRZYWROC}” "
-            f"(`recover_torn({op['id']})`)", "isolated_recover",
+            f"lokacja ma nieukończony zapis w miejscu - plik jest izolowany; najpierw odzysk: "
+            f"„{_GEST_PRZYWROC}” z menu prawego kliku w Zbiorach", "isolated_recover",
             op_id=op["id"], op_kind=op["kind"], phase=op["phase"])
     return PowodPozycji(
-        f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
-        f"{op['phase']}) - plik jest izolowany; najpierw dokończenie: „{_GEST_DOKONCZ}” "
-        f"(`finish_inplace({op['id']})`), a gdy kontrola danych nie przechodzi - powrót: "
-        f"„{_GEST_PRZYWROC}” (`recover_torn({op['id']})`)", "isolated_finish",
+        f"lokacja ma nieukończony zapis w miejscu - plik jest izolowany; najpierw dokończenie: "
+        f"„{_GEST_DOKONCZ}”, a gdy kontrola danych nie przechodzi - powrót: „{_GEST_PRZYWROC}” "
+        f"(oba z menu prawego kliku w Zbiorach)", "isolated_finish",
         op_id=op["id"], op_kind=op["kind"], phase=op["phase"])
 
 
@@ -3887,7 +4023,7 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         if res.in_place:
             reason = PowodPozycji(
                 f"{res.reason}; backup do cofnięcia zapisany w commicie {stan.commit_id}; lokacja "
-                f"IZOLOWANA od skanu, odzysk: {_droga_przywroc(dziennik.op_id)}",
+                f"izolowana od skanu, odzysk: {_droga_przywroc(dziennik.op_id)}",
                 "backup_saved_in_isolated", inner=res.reason, commit_id=stan.commit_id,
                 way=_droga_przywroc(dziennik.op_id))
         else:
@@ -3910,14 +4046,14 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
             # drugiej nie dostaje - rozpoznanie po KODZIE fragmentu `way_*` (AR-148).
             if koniec.status == "failed" or _niesie_droge(koniec.reason):
                 reason = PowodPozycji(f"{koniec.reason}; backup do cofnięcia zapisany w commicie "
-                                      f"{stan.commit_id}; lokacja IZOLOWANA od skanu",
+                                      f"{stan.commit_id}; lokacja izolowana od skanu",
                                       "finish_failed_isolated", inner=koniec.reason,
                                       commit_id=stan.commit_id)
             else:
                 reason = PowodPozycji(
                     f"{koniec.reason}; backup do cofnięcia zapisany w commicie {stan.commit_id}; "
-                    f"lokacja IZOLOWANA od skanu, zwolnienie ręką: w Zbiorach z menu prawego kliku "
-                    f"„{_GEST_ZWOLNIJ}” albo writeback.release_isolation({dziennik.op_id})",
+                    f"lokacja izolowana od skanu, zwolnienie ręką: w Zbiorach z menu prawego kliku "
+                    f"„{_GEST_ZWOLNIJ}”",
                     "finish_failed_isolated_release", inner=koniec.reason,
                     commit_id=stan.commit_id, op_id=dziennik.op_id)
             _mark(rows, "failed", reason)
@@ -5012,10 +5148,10 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         if wynik.status == "applied":
             return _CofniecieLokacji(FileResult(loc["id"], path, "restored", powod))
         if wynik.status == "blocked":
-            return _blok(loc, path, PowodPozycji(f"{wynik.reason}; lokacja IZOLOWANA od skanu",
+            return _blok(loc, path, PowodPozycji(f"{wynik.reason}; lokacja izolowana od skanu",
                                                  "isolated_suffix", inner=wynik.reason))
         return _pad(loc, path, PowodPozycji(
-            f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja IZOLOWANA od skanu - ponowne undo "
+            f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja izolowana od skanu - ponowne undo "
             f"dokończy samą synchronizację", "undo_finish_failed", inner=wynik.reason))
 
     def _blok(loc, path, powod, juz=False, slad=None):
@@ -5146,8 +5282,8 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         koniec = _dokoncz(con, op_c["id"], now=now)
         if koniec.status != "applied":
             return (_pad if koniec.status == "failed" else _blok)(loc, path, PowodPozycji(
-                f"commit nie jest dokończony (operacja {op_c['id']}): {koniec.reason}; lokacja "
-                f"IZOLOWANA od skanu", "undo_commit_unfinished", op_id=op_c["id"],
+                f"commit nie jest dokończony: {koniec.reason}; lokacja izolowana od skanu",
+                "undo_commit_unfinished", op_id=op_c["id"],
                 inner=koniec.reason))
         op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
         loc = _location(con, loc["id"])         # kotwica i mtime po dokończeniu commitu
@@ -5192,7 +5328,7 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
             if not res.in_place:
                 return _pad(loc, path, res.reason)
             return _pad(loc, path, PowodPozycji(
-                f"{res.reason}; lokacja IZOLOWANA od skanu, odzysk: "
+                f"{res.reason}; lokacja izolowana od skanu, odzysk: "
                 f"{_droga_przywroc(dziennik.op_id)}", "undo_partial_isolated", inner=res.reason,
                 way=_droga_przywroc(dziennik.op_id)))
 

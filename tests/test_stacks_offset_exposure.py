@@ -543,3 +543,79 @@ def test_RAW_y_MIESZAJACE_obce_teleskopy_to_telescope_mismatch_nie_offset_unknow
     run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
     assert _integracja(con, m)["unresolved_reason"] == "telescope_mismatch", \
         "werdykt sprzed gestu ma być tym, który przebieg powie po geście"
+
+
+# ============================================================ AR-278 · wariant kadru i tolerancja podpisu
+
+STOS_AUTOCROP = r"R:\ARCHIWUM\RC8R\IC443\WBPP\master\masterLight_IC443_autocrop.xisf"
+
+
+def _para_wariantu(con, *, start_wariantu, offset_oryginalu=None):
+    """Oryginał (okno 20:40:38) i jego autocrop (okno `start_wariantu`) z relacją `stack_variant`
+    przez prawdziwą klingę; RAW obiektu `+1 h` w `mm:ss` oryginału. Rodowód policzony (wiersze
+    `integration`), odniesienie oryginału - gestem człowieka, gdy podane."""
+    m = _master(con)
+    v = _master(con, "m-autocrop", start=start_wariantu, path=STOS_AUTOCROP)
+    _light(con, "s1", date_obs="2019-01-10T21:40:38")
+    repo.link_stack_variant(con, variant_frame_id=v, original_frame_id=m, variant="autocrop",
+                            source="location", now=NOW)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    if offset_oryginalu is not None:
+        repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=offset_oryginalu, now=NOW)
+    return m, v
+
+
+def test_wariant_dziedziczy_odniesienie_wskazane_przy_oryginale(con):
+    """AR-278: autocrop to ten sam materiał, więc i ten sam zegar - odniesienie wskazane ręką przy
+    oryginale (345 min, wartość, której podpis pełnych godzin nie wyprodukuje) idzie do wariantu,
+    choć własne okno wariantu (1 s przed oryginałem) dałoby `+60`. Mutanty: dziedziczenie zdjęte;
+    okno własne przed oryginałem - oba dają 60."""
+    m, v = _para_wariantu(con, start_wariantu="2019-01-10T20:40:37", offset_oryginalu=345)
+    assert stacks_propose(con, v) == 345
+    assert stacks_propose(con, m) == 60          # sam oryginał dalej mówi podpisem okna
+
+
+def test_wariant_dziedziczy_zero_UTC_a_nie_propozycje_okna(con):
+    """AR-278, `0` to werdykt „UTC”, nie brak wiedzy (`repo.set_integration_offset`): oryginał
+    z odniesieniem `0`, którego okno sugeruje `+60` - wariant dostaje dokładnie `0`.
+    Mutant: `wskazane or propozycja` (fałszywe `0` przepuszcza propozycję okna)."""
+    _m, v = _para_wariantu(con, start_wariantu="2019-01-10T20:41:15", offset_oryginalu=0)
+    assert stacks_propose(con, v) == 0
+
+
+def test_wariant_bez_wskazanego_bierze_propozycje_okna_oryginalu(con):
+    """AR-278: oryginał bez odniesienia - wariant bierze propozycję okna ORYGINAŁU, choć jego własne
+    okno (37 s obok podpisu) milczy. Mutant: dziedziczenie zdjęte (wynik `None`)."""
+    m, v = _para_wariantu(con, start_wariantu="2019-01-10T20:41:15")
+    assert stacks_propose(con, m) == 60 and stacks_propose(con, v) == 60
+    con.execute("DELETE FROM stack_variant")
+    assert stacks_propose(con, v) is None        # bez relacji - samo okno wariantu
+
+
+@pytest.mark.parametrize("czas_raw, oczekiwana", [
+    ("2019-01-10T21:40:39", 60),                 # +1 s - autocrop IC443 z kopii `pf4`
+    ("2019-01-10T21:40:40", 60),                 # +2 s - granica tolerancji
+    ("2019-01-10T21:40:36", 60),                 # -2 s - granica z drugiej strony
+    ("2019-01-10T21:40:41", None),               # +3 s - poza tolerancją
+    ("2019-01-10T21:40:35", None),               # -3 s
+])
+def test_tolerancja_podpisu_dwie_sekundy_kazda_granica_osobno(con, czas_raw, oczekiwana):
+    """AR-278: świadek okna z tolerancją ±2 s (`PROPOSAL_SECONDS_TOL`), każdy przypadek na świeżej
+    bazie i z JEDYNYM świadkiem - zbiór różnic nie ukryje świadka poza granicą. Mutanty: tolerancja
+    0 (1 s i 2 s milkną), tolerancja 3 (3 s daje 60)."""
+    m = _master(con)
+    _light(con, "s1", date_obs=czas_raw)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert stacks_propose(con, m) == oczekiwana
+
+
+def test_tolerancja_nie_zmienia_podpisu_zgodnego_co_do_sekundy(con):
+    """AR-278: stos, którego świadkowie zgadzają się co do sekundy, dostaje tę samą propozycję co
+    przed tolerancją, a RAW-y obiektu spoza pasa ±2 s (inne godziny, 3-59 s obok) jej nie ruszają -
+    na kopii `pf4` zmienia się wyłącznie autocrop IC443 (290 integracji, sonda toru)."""
+    m = _master(con)
+    _light(con, "s1", date_obs="2019-01-10T21:40:38")
+    for i, czas in enumerate(("2019-01-10T22:40:41", "2019-01-10T23:41:20", "2019-01-10T22:39:59")):
+        _light(con, f"szum{i}", date_obs=czas)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert stacks_propose(con, m) == 60

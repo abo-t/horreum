@@ -111,7 +111,7 @@ class PrzyjmijView(QWidget):
         # Przebieg, który nie ruszył albo nie doszedł do końca, mówi to PRZED liczbami - zero klatek
         # pod nagłówkiem „Dostawa z …” czytałoby się jak pusta dostawa, a nie jak dostawa, której
         # nie było. Dwie etykiety, bo rola koloru (`theme.ROLES`) jest stałą widżetu.
-        self.lbl_warn = QLabel("")
+        self.lbl_warn = EtykietaBledu("")   # ścieżka źródła w „nie ruszyła” łamie się po `\` (AR-279)
         self.lbl_warn.setProperty("role", "warn")
         self.lbl_warn.setWordWrap(True)
         pv.addWidget(self.lbl_warn)

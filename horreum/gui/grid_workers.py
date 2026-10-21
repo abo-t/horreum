@@ -17,8 +17,9 @@ from horreum.gui import pola as pola_mod
 from horreum.gui import assign_dialog
 from horreum.gui.grid_model import (_adnotuj_rodowod, _adnotuj_wersje, _derive, _dolacz_kopie,
                                     _STANY_RODOWODU)
-from horreum.gui.wb_worker import tekst_powodu       # zdanie błędu w języku UI (AR-198)
-from horreum.item_reasons import blad_systemu
+# Zdanie błędu w języku UI (AR-198) ze szczegółem pod kursorem (AR-218); wyjątek jedną regułą okna (AR-264).
+from horreum.gui.wb_worker import ZdanieZeSzczegolem, tekst_powodu, wiersz_systemu
+from horreum.item_reasons import powod_okna
 
 
 class PolaWorker(QObject):
@@ -36,7 +37,8 @@ class PolaWorker(QObject):
     pilnuje, żeby nie trafiło w połączenie właśnie zamykane."""
 
     done = Signal(int, object, object)   # generacja, odcisk, pola (lista słowników) albo None
-    failed = Signal(int, str)            # generacja, komunikat
+    # generacja, zdanie (`ZdanieZeSzczegolem`) - `object`: `Signal(str)` zgubiłby szczegół (AR-218)
+    failed = Signal(int, object)
     finished = Signal()                  # run() wrócił KAŻDĄ drogą → quit wątku
 
     def __init__(self, gen, poprzedni_odcisk, *, db_path=None, con=None):
@@ -74,11 +76,12 @@ class PolaWorker(QObject):
                         self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
                         self._con = None
         except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
-            # Zdanie w języku UI składane TU, w wątku: odbiorca w `grid.py` bierze tekst. Pokrycie
-            # czyta wyłącznie bazę, więc realna awaria to błąd SQLite - klasą bazy (AR-198);
-            # przerwanie zapytania (stara generacja) zostaje tekstem SQLite. Błąd programu idzie tu
-            # jeszcze tekstem `Typ: opis` - okna zapisu mówią go już regułą okna (`powod_okna`, AR-263).
-            error = tekst_powodu(blad_systemu(exc))
+            # Zdanie w języku UI składane TU, w wątku (ślad wyjątku pełny), jedną regułą okna
+            # (`powod_okna`, AR-264): błąd SQLite klasą bazy (AR-198), błąd programu zdaniem
+            # `prog_error` z `Typ: opis @ horreum/…:N` w szczególe - odbiorca w `grid.py` kładzie zdanie
+            # i szczegół na pasek. Przerwanie zapytania niesie starą generację - odbiorca je odrzuca.
+            powod = powod_okna(exc)
+            error = ZdanieZeSzczegolem(tekst_powodu(powod), wiersz_systemu(powod))
         if error is not None:
             self.failed.emit(self._gen, error)
         else:
@@ -298,10 +301,13 @@ class ZbiorWorker(QObject):
     i liczniki listwy opisują ten sam stan bazy); w slocie zostaje samo przyłożenie do widżetów.
 
     Anulowanie jak w `PolaWorker`: flaga sprawdzana między krokami składu + `Connection.interrupt`
-    z wątku GUI na zapytanie w locie, pod zamkiem, żeby nie trafić w połączenie właśnie zamykane."""
+    z wątku GUI na zapytanie w locie, pod zamkiem, żeby nie trafić w połączenie właśnie zamykane.
+
+    Wyjątek składu mówi tą samą regułą okna co `PolaWorker` (`powod_okna`, AR-264), ale samym zdaniem:
+    odbiorca (`grid.FramesView._on_zbior_failed`) zdania nie pokazuje, tylko ponawia skład na wątku GUI."""
 
     done = Signal(int, object)     # generacja, wynik `_sklad_zbioru`
-    failed = Signal(int, str)      # generacja, komunikat
+    failed = Signal(int, str)      # generacja, zdanie w języku UI
     finished = Signal()            # run() wrócił KAŻDĄ drogą → quit wątku
 
     def __init__(self, gen, stan, db_path):
@@ -338,7 +344,7 @@ class ZbiorWorker(QObject):
                     self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
                     self._con = None
         except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
-            error = tekst_powodu(blad_systemu(exc))    # jak `PolaWorker.run` (AR-198)
+            error = tekst_powodu(powod_okna(exc))      # reguła `PolaWorker.run` (AR-198, AR-264)
         if error is not None:
             self.failed.emit(self._gen, error)
         else:

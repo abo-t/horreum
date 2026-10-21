@@ -2265,3 +2265,105 @@ def test_naprawa_zachowuje_nazwy_nowego_lightu_obok_niepewnego_jak_wydanie(obiek
     indeks = harvest._names_index(harvest._object_witness(z_naprawy))
     assert indeks.hits("lb1_c.xisf") == {("RC8_ASI2600MM", i["lb1"])}
     assert indeks.hits("la5_c.xisf") == {("RC8_ASI2600MM", i["la5"])}
+
+
+# ============================================================ AR-273: wskazówka sondy o manifeście
+
+def _wskazowka(p, root):
+    return projection.manifest_step_refusal(root, layout=p.layout, object_id=p.info["object_id"],
+                                            state=projection.read_manifest_state(root))
+
+
+@pytest.mark.parametrize("przypadek, kod_sondy, kod_kroku", [
+    ("brak", None, None),
+    ("zdrowy", None, None),
+    ("uszkodzony", "proj_manifest_damaged", "proj_manifest_damaged"),
+    ("obcy_obiekt", "proj_manifest_foreign", "proj_manifest_foreign"),
+    ("plik_roboczy", "proj_manifest_busy", "proj_manifest_busy"),
+    # Odczyt pada: przed kliknięciem „nie da się odczytać”, krok po kliknięciu - „nie zapisano”.
+    ("odczyt", "proj_manifest_unreadable", "proj_manifest_failed"),
+])
+def test_wskazowka_sondy_mowi_to_co_krok_manifestu(obiekt, tmp_path, monkeypatch, przypadek, kod_sondy,
+                                                   kod_kroku):
+    """AR-273: `manifest_step_refusal` nad stanem korzenia mówi ten sam kod, który PRAWDZIWY krok
+    manifestu (`apply` z zapisem) daje w `res.error` na tym samym drzewie - wspólny walidator
+    (`_odmowa_nad_starym`), cudzy plik roboczy i błąd odczytu; sonda nie rusza bajtów. Mutanty:
+    sonda bez sprawdzenia `.part`; sonda bez `object_id` (obcy obiekt milknie)."""
+    con, _i = obiekt
+    p = projection.plan_object(con, 1, config_id=20)
+    root = projection.object_root(str(tmp_path / "_WBPP" / "karta"), p)
+    path = os.path.join(root, projection.MANIFEST_NAME)
+    if przypadek != "brak":
+        p, root = _wydany(con, tmp_path)
+    if przypadek == "uszkodzony":
+        with open(path, "wb") as fh:
+            fh.write(b"{")
+    elif przypadek == "obcy_obiekt":
+        m = _manifest(root)
+        m["object_id"] = 999
+        _zapisz(root, m)
+    elif przypadek == "plik_roboczy":
+        with open(path + projection.PART_SUFFIX, "wb") as fh:
+            fh.write(b"cudzy")
+    elif przypadek == "odczyt":
+        _open_pada(monkeypatch, path, _odmowa_odczytu(path))
+    przed = _bajty(root) if przypadek != "brak" else None
+    wskazowka = _wskazowka(p, root)
+    assert getattr(wskazowka, "code", None) == kod_sondy, wskazowka
+    if przypadek == "plik_roboczy":
+        assert dict(wskazowka.params) == {"path": path + projection.PART_SUFFIX}
+    if przypadek != "brak":
+        assert _bajty(root) == przed
+    res = projection.apply(p, root, do_apply=True, now="T2", manifest=projection.object_manifest(p))
+    assert getattr(res.error, "code", None) == kod_kroku, res.error
+    con.close()
+
+
+def test_wskazowka_ukladu_kolumnowego_nad_manifestem_obiektu(obiekt, tmp_path):
+    """AR-273: wskazówka dla wydania innego układu nad zeznaniem wydania obiektu - `proj_manifest_foreign`
+    z polem `layout` (ten sam walidator, którym krok manifestu chroni zeznanie obiektu)."""
+    con, _i = obiekt
+    _p, root = _wydany(con, tmp_path)
+    w = projection.manifest_step_refusal(root, layout="po-obiektach",
+                                         state=projection.read_manifest_state(root))
+    assert (w.code, dict(w.params)) == ("proj_manifest_foreign", {"detail": "layout"})
+    con.close()
+
+
+@pytest.mark.parametrize("zmiana", ["plik_roboczy", "obcy_manifest"])
+def test_wskazowka_to_nie_gwarancja_krok_chroni_bajty_po_zmianie(obiekt, tmp_path, zmiana):
+    """AR-273: sonda widzi zdrowy korzeń (wskazówka None), a między sondą a zapisem inny pisarz zakłada
+    plik roboczy albo podmienia manifest na zeznanie innego obiektu - krok manifestu odmawia
+    (`proj_manifest_busy` / `proj_manifest_foreign`), obce bajty nietknięte. Wskazówka nie zastępuje
+    ochrony kroku."""
+    con, _i = obiekt
+    p, root = _wydany(con, tmp_path)
+    path = os.path.join(root, projection.MANIFEST_NAME)
+    assert _wskazowka(p, root) is None
+    if zmiana == "plik_roboczy":
+        with open(path + projection.PART_SUFFIX, "wb") as fh:
+            fh.write(b"cudzy")
+        oczekiwany, plik = "proj_manifest_busy", path + projection.PART_SUFFIX
+    else:
+        m = _manifest(root)
+        m["object_id"] = 999
+        _zapisz(root, m)
+        oczekiwany, plik = "proj_manifest_foreign", path
+    with open(plik, "rb") as fh:
+        obce = fh.read()
+    res = projection.apply(p, root, do_apply=True, now="T2", manifest=projection.object_manifest(p))
+    assert res.error.code == oczekiwany
+    with open(plik, "rb") as fh:
+        assert fh.read() == obce
+    con.close()
+
+
+def test_odmowa_busy_mowi_nazwe_pliku_roboczego_a_sciezke_parametrem():
+    """AR-273: zdanie `proj_manifest_busy` niesie NAZWĘ pliku roboczego, pełna ścieżka wyłącznie
+    w parametrze `path` (szczegół okna i paska, wiersz CLI). Nieobecność ścieżki sprawdzana jej
+    wartością z parametru, nie frazą. Mutant: ścieżka z powrotem w zdaniu."""
+    part = r"X:\W\OBJECTS\M42\_PROJEKCJA.json.part"
+    powod = projection._odmowa_zajetego(part)
+    assert dict(powod.params) == {"path": part}
+    assert dict(powod.params)["path"] not in str(powod)
+    assert f"({projection.MANIFEST_NAME}{projection.PART_SUFFIX})" in str(powod)

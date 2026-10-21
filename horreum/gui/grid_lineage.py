@@ -734,14 +734,23 @@ class LineageBar(QWidget):
         Krok 0,1 h to 6 minut, więc strefy kwadransowe (Nepal `+5:45`, Chatham `+12:45`) nie dają
         się w tym oknie WYRAZIĆ. Gorsze od braku: przy ponownym otwarciu wartość 345 min pokazałaby
         się jako `5,8`, a samo OK zapisałoby **348** — ciche przepisanie poprawnego zapisu na błędny,
-        bez śladu dla człowieka. Przy dwóch cyfrach `5,75` wraca do 345 co do minuty."""
+        bez śladu dla człowieka. Przy dwóch cyfrach `5,75` wraca do 345 co do minuty.
+
+        PRZYCISKI Z KATALOGU (AR-278): statyczne `QInputDialog.getDouble` dawało „Cancel” w polskim
+        oknie - repo nie wozi `QTranslator`, więc napisy przycisków ustawia się jak w planerze."""
         biezacy = None if self._head is None else self._head["utc_offset_min"]
         wstepna = biezacy if biezacy is not None else (self._offset_hint or 0)
-        godziny, ok = QInputDialog.getDouble(
-            self, i18n.t("grid.lin.offset_title"), i18n.t("grid.lin.offset_prompt"),
-            wstepna / 60.0, -14.0, 14.0, 2)
-        if ok:
-            self.offset_asked.emit(round(godziny * 60))
+        okno = QInputDialog(self)
+        okno.setInputMode(QInputDialog.DoubleInput)
+        okno.setWindowTitle(i18n.t("grid.lin.offset_title"))
+        okno.setLabelText(i18n.t("grid.lin.offset_prompt"))
+        okno.setDoubleRange(-14.0, 14.0)
+        okno.setDoubleDecimals(2)
+        okno.setDoubleValue(wstepna / 60.0)
+        okno.setOkButtonText(i18n.t("grid.lin.offset_ok"))
+        okno.setCancelButtonText(i18n.t("grid.lin.offset_cancel"))
+        if okno.exec() == QDialog.Accepted:
+            self.offset_asked.emit(round(okno.doubleValue() * 60))
 
     def _sync_offset_visible(self):
         """Przycisk odniesienia wchodzi TYLKO tam, gdzie ma co zmienić — a to znaczy: gdy powód

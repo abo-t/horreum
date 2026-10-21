@@ -14,7 +14,8 @@ import os
 from typing import NamedTuple
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QEvent, QItemSelection, QItemSelectionRange, QModelIndex, Qt, qVersion, Signal,
+    QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel, QItemSelectionRange, QModelIndex,
+    QPersistentModelIndex, QRect, Qt, qVersion, Signal,
 )
 from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QContextMenuEvent, QFont, QRegion
 from PySide6.QtWidgets import (
@@ -706,6 +707,41 @@ def zdanie_pominiec(gest, *, nothing_key="grid.sel.object_skip_nothing",
     return "".join(czlony)
 
 
+_PRZYCZYNY_W_ZDANIU = 3
+"""Ile przyczyn pominięć mieści się w zdaniu stagingu, zanim reszta pójdzie jednym członem z liczbą
+przyczyn i klatek (wzorzec `_KANONY_W_ZDANIU`): powód z parametrem per klatka (wartość wyniku, tekst
+wyjątku wyrażenia) daje tyle przyczyn, ile klatek - zdanie zamieniłoby się w listę tysięcy członów."""
+
+
+def zdanie_pominiec_makra(skipped):
+    """Człon zdania stagingu i podglądu makra: pominięte klatki rozbite po PRZYCZYNIE (AR-274) -
+    „ - 3: wartość 'abc' nie pasuje do typu 'float' · 1: wiele obecnych kopii (2) …”. Czysta funkcja;
+    pusty łańcuch bez pominięć. Wzorzec `zdanie_pominiec`: przyczyna stoi w zdaniu, nie wyłącznie
+    w podpowiedzi każdej komórki „(pominięto)” - N najechań, żeby przeczytać to, co jedno zdanie mówi raz.
+
+    Przyczyna = ZDANIE powodu w języku UI (`tekst_powodu`), nie goły kod: kod z różnymi parametrami
+    (dwie albo trzy obecne kopie) to różne przyczyny, a jedno zdanie na kod musiałoby ich zgubić
+    parametry. Malejąco po liczbie, przy remisie alfabetycznie - kolejność nie zależy od kolejności
+    klatek w zbiorze. Najwyżej `_PRZYCZYNY_W_ZDANIU` przyczyn, reszta jednym członem „i jeszcze M
+    przyczyn (P klatek)”. Separator członów „ · ”, nie „; ” - uwagi powodu łączą się już średnikiem
+    (`wb_worker.tekst_powodu`), a człon przyczyny nie może udawać dwóch."""
+    from horreum.gui.wb_worker import tekst_powodu   # powód rdzenia w języku UI (AR-148)
+    licznik = {}
+    for sk in skipped:
+        tekst = tekst_powodu(sk.reason)
+        licznik[tekst] = licznik.get(tekst, 0) + 1
+    if not licznik:
+        return ""
+    przyczyny = sorted(licznik.items(), key=lambda tn: (-tn[1], tn[0]))
+    czlony = [i18n.t("grid.drawer.skipped_reason", n=n, cause=tekst)
+              for tekst, n in przyczyny[:_PRZYCZYNY_W_ZDANIU]]
+    reszta = przyczyny[_PRZYCZYNY_W_ZDANIU:]
+    if reszta:
+        klatki = i18n.t_plural("grid.drawer.skipped_frames", sum(n for _tekst, n in reszta))
+        czlony.append(i18n.t_plural("grid.drawer.skipped_more", len(reszta), frames=klatki))
+    return i18n.t("grid.drawer.skipped_reasons", causes=" · ".join(czlony))
+
+
 class CzlonRecepty(NamedTuple):
     """Jeden człon recepty paska: TEKST i WYKONAWCA (FH-2e).
 
@@ -890,10 +926,13 @@ def _powody_gestu_zapisu(op, res):
 
 def _podpowiedz_gestu_zapisu(op, res):
     """Szczegół zdania gestu izolacji pod kursorem szuflady (AR-204): surowy tekst systemu powodów,
-    które zdanie mówi klasą w języku UI (`wiersz_systemu`), wiersz na powód; `""` bez błędu systemu
-    klasą - zdanie mówi wtedy wszystko. Czysta funkcja."""
-    from horreum.gui.wb_worker import wiersz_systemu   # lazy: `wb_worker` woła ten moduł leniwie
-    return "\n".join(w for w in (wiersz_systemu(p.reason) for p in _powody_gestu_zapisu(op, res)) if w)
+    które zdanie mówi klasą w języku UI (`wiersz_systemu`), i numer operacji zapisu w miejscu z drogą
+    wyjścia (`wiersz_operacji`, AR-281 - zdanie mówi gest z menu, numer i wywołanie rdzenia stoją
+    tutaj); wiersze na powód, puste pomijane; `""` - zdanie mówi wtedy wszystko. Czysta funkcja."""
+    from horreum.gui.wb_worker import (wiersz_operacji,   # lazy: `wb_worker` woła ten moduł leniwie
+                                       wiersz_systemu)
+    return "\n".join(w for p in _powody_gestu_zapisu(op, res)
+                     for w in (wiersz_systemu(p.reason), wiersz_operacji(p.reason)) if w)
 
 
 def _kopia_krotko(path):
@@ -921,15 +960,17 @@ def _zdanie_kopii_wiodacej(res):
     obecna kopia nie mówiła (zeznanie z kopii, której już nie ma), powrotu gestem nie ma i zdanie to
     mówi - poprzednie zeznanie zostaje wyłącznie w dzienniku. Odmowa mówi, że nic nie zapisano,
     i czemu - powodem w języku UI (`tekst_powodu`: błąd systemu klasą z kodem, AR-184), a surowy
-    tekst systemu schodzi do podpowiedzi (`wiersz_systemu`, `""` bez błędu systemu klasą)."""
-    from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu   # lazy: `wb_worker` woła ten moduł
+    tekst systemu schodzi do podpowiedzi (`wiersz_systemu`, `""` bez błędu systemu klasą), a numer
+    operacji zapisu w miejscu z drogą wyjścia - obok (`wiersz_operacji`, AR-281)."""
+    from horreum.gui.wb_worker import (tekst_powodu,   # lazy: `wb_worker` woła ten moduł
+                                       wiersz_operacji, wiersz_systemu)
     msg = i18n.t(_ZDANIA_KOPII_WIODACEJ[res.verdict], copy=_kopia_krotko(res.path),
                  reason=tekst_powodu(res.reason or ""))
     if res.verdict in ("adopted", "confirmed"):
         msg += (i18n.t("grid.lead.back", lead=i18n.t("grid.lead.menu"),
                        copy=_kopia_krotko(res.back[0])) if res.back
                 else i18n.t("grid.lead.no_back"))
-    return msg, wiersz_systemu(res.reason)
+    return msg, "\n".join(w for w in (wiersz_systemu(res.reason), wiersz_operacji(res.reason)) if w)
 
 
 def _kopie_wielokrotne(ops):
@@ -1239,6 +1280,34 @@ class _ElizjaWSrodku(QStyledItemDelegate):
         styl.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
 
 
+class _DelegatBelki(QStyledItemDelegate):
+    """Delegat WIERSZA belki grupy (AR-275) - stawiany przez `FramesView._uloz_belki_i_wersje` razem ze
+    spanem belki (`setItemDelegateForRow`: delegat wiersza ma w Qt pierwszeństwo przed delegatem kolumny).
+
+    Belka to span od kolumny 0 przez wszystkie kolumny, a jej podpis mieszka w kolumnie 0. Qt maluje
+    span nachodzący na kadr także przy kolumnie 0 przewiniętej poza kadr (`QTableViewPrivate::
+    drawAndClipSpans`, Qt 6.9.2) i podaje delegatowi prostokąt całego spanu - z lewą krawędzią ujemną,
+    więc podpis lądował poza kadrem, a belka była pustym paskiem (zmierzone natywnie: krawędź -596 px
+    przy kopii pf4 przewiniętej do końca). Prostokąt zaczyna się tu od lewej krawędzi kadru; część
+    spanu poza nią i tak jest niewidoczna.
+
+    Jedna linia z elizją z prawej (tabela ma `wordWrap`, a belka ma wysokość wiersza). Kolory, czcionka
+    i tło idą z ról modelu (`_COLORS` - tło belki, kursywa i szarość stanu), jak w każdym delegacie siatki;
+    delegat nie ma własnego pióra."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.ElideRight
+        option.features &= ~QStyleOptionViewItem.WrapText
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        prostokat = QRect(opt.rect)
+        prostokat.setLeft(max(prostokat.left(), 0))
+        opt.rect = prostokat
+        super().paint(painter, opt, index)
+
+
 class _EdycjaKomorki(QStyledItemDelegate):
     """Delegat edycji komórki keyworda (AR-61): pole WARTOŚCI i pole KOMENTARZA o znaczeniu pola
     komentarza w `MacroBar` (pusty - karta zachowuje zastany; wpisany - zapis razem z nim, AR-47).
@@ -1446,12 +1515,27 @@ class _TabelaKlatek(QTableView):
     (klawiatura - klawisz Menu, Shift+F10 - albo mysz) tabela podaje na czas `customContextMenuRequested`
     (`menu_z_klawiatury`): menu z klawiatury dotyczy zaznaczenia, nie komórki pod jakimś punktem.
 
+    KOTWICA ZAKRESU SHIFT PRZEŻYWA RESET MODELU (AR-266). Qt trzyma ją prywatnie
+    (`currentSelectionStartIndex`, indeks trwały - reset go unieważnia) i ustawia w trzech miejscach
+    (`qabstractitemview.cpp` 6.9.2): naciśnięcie myszy z poleceniem bez `Current` (kotwica = kliknięty
+    indeks), ruch klawiaturą bez Shift i slot `currentChanged`, który pyta `selectionCommand(bieżąca,
+    nullptr)` - polecenie bez `Current` (modyfikatory aplikacji bez Shift) przestawia kotwicę na nową
+    bieżącą. Odtworzenie zaznaczenia po resecie stawiało więc kotwicę na bieżącej komórce: klik A,
+    Shift+klik B, sort, Shift+klik D - zakres od B zamiast od A (zmierzone 8/8 dróg resetu). Kotwicy nie
+    da się z PySide6 odczytać ani ustawić wprost, więc tabela trzyma jej LUSTRO tą samą regułą
+    (`mousePressEvent` przed metodą Qt, `currentChanged` po niej), a `postaw_biezaca` steruje regułą
+    Qt przez wirtualne `selectionCommand`: krok kotwicy bez `Current` (Qt ustawia kotwicę, także przy
+    wciśniętym Shift), krok bieżącej z `Current` (kotwica zostaje).
+
     Metoda Qt jest pomijana w całości, więc nowa treść `QTableView::selectionChanged` w innej wersji Qt
     przepadłaby po cichu - stąd lista wersji przeczytanych (`_QT_TABELI_KLATEK`): przy innej wersji
     tabela woła metodę Qt (wolniej, ale wiernie), a test pęka, żeby ktoś ją przeczytał od nowa. Ten sam
-    bezpiecznik obejmuje każdą nadpisaną metodę klasy (zdarzenia myszy i menu też)."""
+    bezpiecznik obejmuje każdą nadpisaną metodę klasy (zdarzenia myszy, menu, `selectionCommand`
+    i `currentChanged` też - przy innej wersji bez lustra kotwicy)."""
 
     _menu_z_klawiatury = False
+    _kotwica = None            # lustro kotwicy zakresu Shift (`QPersistentModelIndex`) - AR-266
+    _tryb_kotwicy = None       # None | "ustaw" | "trzymaj" - wyłącznie na czas `postaw_biezaca`
 
     def _dziecko_dostepnosci(self, idx):
         """Numer dziecka komórki w interfejsie dostępności tabeli - nagłówki liczą się jako wiersz
@@ -1504,7 +1588,67 @@ class _TabelaKlatek(QTableView):
         if self._prawy_bez_qt(e):
             e.accept()
             return
+        if qVersion() in _QT_TABELI_KLATEK:
+            # Lustro reguły `QAbstractItemView::mousePressEvent`: polecenie bez `Current` - kotwica =
+            # kliknięty indeks; z `Current` (Shift) - kotwica zostaje, a nieważna bierze bieżącą.
+            idx = self.indexAt(e.position().toPoint())
+            if not (self.selectionCommand(idx, e) & QItemSelectionModel.Current):
+                self._kotwica = QPersistentModelIndex(idx)
+            elif self._kotwica is None or not self._kotwica.isValid():
+                self._kotwica = QPersistentModelIndex(self.currentIndex())
         super().mousePressEvent(e)
+
+    def selectionCommand(self, index, event=None):
+        # Bez zdarzenia (slot `currentChanged`) w trakcie `postaw_biezaca`: „ustaw” - polecenie bez
+        # `Current` (Qt stawia kotwicę na nowej bieżącej), „trzymaj” - z `Current` (kotwica zostaje).
+        if event is None and self._tryb_kotwicy is not None and qVersion() in _QT_TABELI_KLATEK:
+            if self._tryb_kotwicy == "ustaw":
+                return QItemSelectionModel.NoUpdate
+            return QItemSelectionModel.NoUpdate | QItemSelectionModel.Current
+        return super().selectionCommand(index, event)
+
+    def currentChanged(self, current, previous):
+        # Indeks TRWAŁY przed metodą Qt - jak Qt (`qabstractitemview.cpp` 6.9.2: migawka trwała przed
+        # `commitData`, który potrafi przestawić wiersze); `current` po niej bywa nieaktualny.
+        trwaly = QPersistentModelIndex(current)
+        super().currentChanged(current, previous)
+        if qVersion() not in _QT_TABELI_KLATEK:
+            return
+        idx = self.model().index(trwaly.row(), trwaly.column()) if trwaly.isValid() else QModelIndex()
+        if not (self.selectionCommand(idx, None) & QItemSelectionModel.Current):
+            self._kotwica = trwaly
+
+    def kotwica(self):
+        """Indeks kotwicy zakresu Shift (lustro, AR-266) - nieważny po resecie modelu i przy innej
+        wersji Qt."""
+        k = self._kotwica
+        if k is None or not k.isValid():
+            return QModelIndex()
+        return self.model().index(k.row(), k.column())
+
+    def postaw_biezaca(self, biezaca, kotwica=None):
+        """Bieżąca komórka `biezaca` z kotwicą zakresu Shift na `kotwica` (AR-266) - odtworzenie po
+        resecie modelu. Bez kotwicy (albo równej bieżącej) - zwykłe `setCurrentIndex`, jak dotąd. Krok
+        kotwicy bez przewijania (`autoScroll`): kadr ustawia wołający za bieżącą. Dwa sygnały
+        `currentChanged` zamiast jednego - zaznaczenie się nie zmienia (`NoUpdate`)."""
+        sm = self.selectionModel()
+        if (kotwica is None or not kotwica.isValid() or kotwica == biezaca
+                or qVersion() not in _QT_TABELI_KLATEK):
+            sm.setCurrentIndex(biezaca, QItemSelectionModel.NoUpdate)
+            return
+        auto = self.hasAutoScroll()
+        self.setAutoScroll(False)
+        try:
+            self._tryb_kotwicy = "ustaw"
+            sm.setCurrentIndex(kotwica, QItemSelectionModel.NoUpdate)
+        finally:
+            self._tryb_kotwicy = None
+            self.setAutoScroll(auto)
+        self._tryb_kotwicy = "trzymaj"
+        try:
+            sm.setCurrentIndex(biezaca, QItemSelectionModel.NoUpdate)
+        finally:
+            self._tryb_kotwicy = None
 
     def mouseReleaseEvent(self, e):
         if self._prawy_bez_qt(e):

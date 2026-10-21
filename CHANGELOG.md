@@ -6,6 +6,50 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Naprawione
+
+- **Perspektywa „f/ niezgodna z teleskopem”:** podpowiedź z liczbą klatek do poprawy („RC8 200 → 8…”) zostaje na
+  pasku po dołożeniu kolumny FOCRATIO, po przebiegu Dostawy i po powrocie do Zbiorów - dotąd znikała po niecałej
+  sekundzie. Wejście w perspektywę zaraz po otwarciu bazy też dokłada kolumnę FOCRATIO. Klatki z poprawką f/
+  czekającą w szufladzie nie wracają do podpowiedzi. Podpowiedzi gestu i wiersza Porządków nazywają przycisk
+  szuflady jego słowem: „Zatwierdź”.
+- **Pasek po oknach „Napraw nagłówek…” i „Zatwierdź ze ścieżki…”:** wynik udanego zapisu kart zostaje na pasku
+  do następnego komunikatu (dotąd gasł po 5 s) i mówi, jak cofnąć commit z wiersza poleceń
+  („… (commit 11) - cofnięcie: header-fix --undo 11”); pełne polecenie ze ścieżką bazy stoi pod kursorem
+  i kopiuje się przez „Kopiuj szczegół”. Tak samo po nieudanym cofnięciu - zdanie nie niesie już ścieżki bazy,
+  która ucinała numer commitu. Bieg w „Zatwierdź ze ścieżki…” zakończony bez przypisań (odmowa zapisu nazwy
+  na pierwszej pozycji) też trafia na pasek razem z powodem odmowy, a wyniku nie przykrywa już zdanie o pustej
+  bibliotece.
+- **Szuflada zmian po restarcie:** zmiany czekające w szufladzie, gdy program zamknięto (także w połowie zapisu po
+  „Anuluj”), wracają po ponownym otwarciu bazy („Z poprzedniej sesji czeka N zmian”) - „Zatwierdź” dokańcza zapis,
+  „Odrzuć” zdejmuje tylko zmiany czekające, a wpisy już rozstrzygnięte (potrzebne do cofnięcia i do potwierdzenia
+  skanem) zostają. Szufladę jednej bazy prowadzi jedno okno programu - drugie okno na tej samej bazie mówi to
+  i niczego nie podejmuje. Zamknięcie okna w trakcie zapisu do plików nie zamyka już bazy pod pracującym zapisem.
+- **Szuflada przy „0 zmian, N pominięto”:** zdanie stagingu i podglądu podaje przyczyny pominięć (najwyżej trzy,
+  reszta liczbą) bez najeżdżania na komórki; stary wynik nie zostaje obok, a „Cofnij” znika dopiero wtedy, gdy coś
+  naprawdę wchodzi do szuflady. Identyfikator zapisu stoi w zdaniu dokładnie raz także po gestach Dokończ zapis,
+  Przywróć nagłówek, Zwolnij i Ta kopia prowadzi oraz w Nazwach.
+- **Zbiory:** Shift+klik po sortowaniu liczy zakres od pierwszego kliknięcia (dotąd od ostatniego); podpis belki
+  grupy jest widoczny po przewinięciu tabeli w poziomie.
+- **Pisarz kart nie zmienia bajtów bez słowa:** nagłówek FITS z bajtem spoza drukowalnego ASCII (np. polski znak
+  w komentarzu karty) jest odmawiany z nazwą karty i bajtu w każdej drodze zapisu i cofnięcia - dotąd pełny zapis
+  zamieniał taki bajt na `?`, a zapis w miejscu mówił nieprawdę, że „nagłówek zmienił się od stagingu”. Odmowa
+  z kodem także dla liczby, której pole karty FITS nie odtworzy (cyfry ucięte bez słowa), dla `nan`/`inf` i dla
+  nieznanej operacji - jednym zdaniem w FITS i XISF, już w podglądzie makra. Zdania zapisu w miejscu wskazują gest
+  z menu („Przywróć nagłówek sprzed zapisu”) zamiast nazwy funkcji programu; numer operacji stoi pod kursorem.
+- **Błąd programu w oknach Domu, Dostawy, żniw, Pól i Porządków** mówi się jednym zdaniem w języku interfejsu
+  (dotąd surowy tekst wyjątku po polsku także w UI angielskim), miejsce w kodzie stoi pod kursorem.
+- **Dostawa ze źródłem o długiej ścieżce** nie poszerza okna ponad ekran - zdania ze ścieżką się zawijają (przy
+  ścieżce ~200 znaków najmniejsza szerokość okna 2023 → 1424 px).
+- **Odniesienie czasu stosu:** autocrop dziedziczy odniesienie po swoim oryginale (dotąd okno proponowało 0, bo
+  autocrop zaczyna się sekundę wcześniej); przyciski okna odniesienia i okna nazwy celu wydania mówią w języku
+  interfejsu.
+- **„Zmień obiekt…” po cofnięciu gestu, który założył obiekt:** wybierak mówi, że zapis przywróci obiekt zdjęty
+  cofnięciem.
+- **Okno wydania:** przed „Utwórz” mówi, że manifestu nie da się teraz zapisać (uszkodzony, innego wydania, zajęty),
+  także przy niepełnym drzewie; odmowa przy zajętym pliku roboczym podaje jego nazwę raz, pełna ścieżka stoi
+  w szczególe. Polecenie `project` przy pierwszym dowiązaniu odmówionym radzi `--copy` zamiast przełącznika okna.
+
 ## [0.19.0] - 2026-10-20
 
 Wydanie o **karcie liczbowej zapisanej w miejscu i Porządkach, które nie czekają na dysk**. Poprawka karty

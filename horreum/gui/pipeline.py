@@ -30,7 +30,7 @@ from horreum.gui.grid_lineage import SciezkaLabel
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198)
                                    tekst_powodu, wiersz_systemu)
-from horreum.item_reasons import blad_systemu
+from horreum.item_reasons import powod_okna       # wyjątek etapu jedną regułą okna (AR-264)
 from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
 from horreum.volumes import volume_serial
@@ -137,14 +137,15 @@ class PipelineWorker(QObject):
             elif self._stage == "all":
                 self._run_all(con)
             else:
-                self.failed.emit(self._stage or "?", f"nieznany etap: {self._stage!r}")
+                # Nieznany etap to złamany kontrakt wołającego (EXPECT) - mówi go handler niżej
+                # błędem programu z miejscem, nie zdaniem po polsku także w UI EN.
+                raise ValueError(f"nieznany etap: {self._stage!r}")
         except Exception as exc:                       # błąd etapu → sygnał, NIE crash apki
-            # Błąd systemu albo bazy KLASĄ (AR-198): zerwany udział mówił surowym tekstem systemu
-            # po polsku także w UI EN. Odmowa klingi z kodem (`OdmowaZPowodem` - resolver woła
-            # `repo.upsert_object` bez handlera) mówi swoim kodem; błąd programu - jeszcze tekstem
-            # `Typ: opis` (okna zapisu mówią go regułą okna `powod_okna`, AR-263).
-            self.failed.emit(self._etap or self._stage or "?",
-                             getattr(exc, "powod", None) or blad_systemu(exc))
+            # JEDNA reguła wyjątku okna (`powod_okna`, AR-264), liczona TU, w wątku (ślad pełny):
+            # odmowa klingi z kodem (`OdmowaZPowodem` - resolver woła `repo.upsert_object` bez
+            # handlera) mówi swoim kodem, błąd systemu albo bazy - klasą (AR-198), błąd programu -
+            # zdaniem `prog_error` z `Typ: opis @ horreum/…:N` w szczególe.
+            self.failed.emit(self._etap or self._stage or "?", powod_okna(exc))
         finally:
             if con is not None:
                 con.close()
@@ -690,7 +691,10 @@ class PipelineView(QWidget):
         self.lbl_writeback_busy.setWordWrap(True)
         self.lbl_writeback_busy.setVisible(False)
         v.addWidget(self.lbl_writeback_busy)
-        self.lbl_source_memo = QLabel("")          # treść = WYŁĄCZNIE _sync_source_memo (F5R2#6)
+        self.lbl_source_memo = EtykietaBledu("")   # treść = WYŁĄCZNIE _sync_source_memo (F5R2#6)
+        # Pole zdania, nie `QLabel` (AR-279): zapamiętana ścieżka źródła ~220 znaków podnosiła minimum
+        # okna do 1585-1702 px już PRZED biegiem (natywnie, podłoga 1424). Ścieżka łamie się po `\`.
+        self.lbl_source_memo.setWordWrap(True)
         v.addWidget(self.lbl_source_memo)
         v.addWidget(self._hline())
 
@@ -701,7 +705,8 @@ class PipelineView(QWidget):
         self.btn_pick = QPushButton(i18n.t("pipeline.pick_dir"))
         self.btn_pick.clicked.connect(self._on_pick_dir)
         src.addWidget(self.btn_pick)
-        self.lbl_root = QLabel(i18n.t("pipeline.root_none"))
+        self.lbl_root = EtykietaBledu(i18n.t("pipeline.root_none"))   # wskazana ścieżka łamie się po `\` (AR-279)
+        self.lbl_root.setWordWrap(True)
         src.addWidget(self.lbl_root, 1)
         src.addWidget(QLabel(i18n.t("pipeline.tier_label")))
         self.combo_tier = QComboBox()
@@ -810,13 +815,18 @@ class PipelineView(QWidget):
         self.box_vanished = QWidget()
         bv = QHBoxLayout(self.box_vanished)
         bv.setContentsMargins(0, 10, 0, 0)   # oddech: sekcja to WYNIK, nie siódmy przycisk etapu
-        self.lbl_vanished = QLabel("")
-        # BEZ zawijania: zdanie ma ~46 znaków (~300 px), a etykieta z `wordWrap` dostaje od Qt małą
-        # preferowaną szerokość i łamie się na dwie linie mimo wolnego miejsca — wtedy przycisk stoi
-        # przy PIERWSZEJ linii, a reszta zdania wisi pod nim. Cały wiersz (zdanie + 2 przyciski) mieści
-        # się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś **~1424 px** - wiąże ją planer,
-        # `planner._MIN_W` przy 12 kolumnach; wcześniej 1310, a jeszcze wcześniej 1073 zmierzone realnym
-        # fontem; zapis „1146" pochodził z sondy offscreen i był zawyżony).
+        # Pole zdania (`EtykietaBledu`, AR-279): minimum szerokości 0, ścieżka łamie się po `\`
+        # w malowaniu, pełne zdanie w podpowiedzi. Zawijanie ustawia WYŁĄCZNIE `_zdanie_sekcji`:
+        # - zdania znikniętych (~46 znaków, ~300 px) BEZ zawijania - etykieta z `wordWrap` dostaje od Qt
+        #   małą preferowaną szerokość i łamie się na dwie linie mimo wolnego miejsca (zmierzone natywnie:
+        #   138 px, 2 wiersze przy 1424 i 1920), a przycisk stoi przy PIERWSZEJ linii. Cały wiersz mieści
+        #   się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś **~1424 px** - wiąże ją planer,
+        #   `planner._MIN_W` przy 12 kolumnach; wcześniej 1310, a jeszcze wcześniej 1073 zmierzone realnym
+        #   fontem; zapis „1146" pochodził z sondy offscreen i był zawyżony);
+        # - zdanie źródła niedostępnego (`_on_source_unreachable`) niesie ŚCIEŻKĘ i zawija: jednym wierszem
+        #   ścieżka ~240 znaków podnosiła minimum okna do 2023 px (odbiór 0.19.0: 1982 px przy ekranie
+        #   1920); z zawijaniem ~550 px, 4 wiersze, przycisk „Wskaż katalog…” tuż za zdaniem.
+        self.lbl_vanished = EtykietaBledu("")
         self.lbl_vanished.setWordWrap(False)
         _fv = self.lbl_vanished.font()
         _fv.setBold(True)                # to jedyny komunikat Dostawy o UTRACIE — nie może ważyć
@@ -932,7 +942,10 @@ class PipelineView(QWidget):
         self.lbl_summary_head.setProperty("role", "warn")
         self.lbl_summary_head.setVisible(False)
         v.addWidget(self.lbl_summary_head)
-        self.lbl_summary = QLabel("")
+        # Pole zdania (AR-279): wiersz „NIE WYKONANO - źródło niedostępne: <ścieżka>” był najdłuższym
+        # słowem etykiety z `wordWrap` (`\` nie łamie), więc jej minimum = ścieżka (natywnie 1161-1311 px
+        # przy ~220 znakach). Kopia zaznaczenia i menu - bez znaku łamania (`EtykietaBledu`).
+        self.lbl_summary = EtykietaBledu("")
         self.lbl_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_summary.setWordWrap(True)
         v.addWidget(self.lbl_summary)
@@ -1663,13 +1676,20 @@ class PipelineView(QWidget):
         self._append_summary(naglowek_etapu(etap) + i18n.t("pipeline.fmt.not_done", reason=powod))
         zdanie = i18n.t("pipeline.source.unreachable_pick", root=root)
         self._presence_params = None
-        self.lbl_vanished.setText(zdanie)
+        self._zdanie_sekcji(zdanie, sciezka=True)
         self.btn_mark_vanished.setVisible(False)
         self.btn_show_vanished.setVisible(False)
         self.btn_pick_source.setVisible(True)
         self.box_vanished.setVisible(True)
         self._sync_actions()
         self.status_message.emit(zdanie)
+
+    def _zdanie_sekcji(self, zdanie, *, sciezka=False):
+        """JEDYNY właściciel treści wiersza sekcji wyniku obecności (`lbl_vanished`, AR-279): zdanie
+        ze ścieżką zawija się (łamanie po `\\` w polu zdania), zdania znikniętych - bez zawijania, jednym
+        wierszem obok przycisków (powód i pomiary przy budowie wiersza)."""
+        self.lbl_vanished.setWordWrap(sciezka)
+        self.lbl_vanished.setText(zdanie)
 
     @Slot(str)
     def _on_start_refused(self, msg):
@@ -1935,7 +1955,7 @@ class PipelineView(QWidget):
             # obecności, więc „oznaczono 3 kopie" potrafi dać PUSTĄ listę zniknięć (wiz P5 #3).
             klatki = i18n.t_plural("pipeline.frames_lost_last", s.frames_without_copy)
             ogon = klatki if s.frames_without_copy else i18n.t("pipeline.no_frame_lost_last")
-            self.lbl_vanished.setText(i18n.t("pipeline.marked_as_vanished", copies=kopie, tail=ogon))
+            self._zdanie_sekcji(i18n.t("pipeline.marked_as_vanished", copies=kopie, tail=ogon))
             self.btn_mark_vanished.setVisible(False)
             self.btn_show_vanished.setVisible(bool(s.frames_without_copy))   # lista MUSI mieć treść
             self.box_vanished.setVisible(bool(s.vanished))
@@ -1948,7 +1968,7 @@ class PipelineView(QWidget):
                 self._presence_params.update(force=s.confirmed_gone, limit=s.brake_limit,
                                              expected_gone_ids=tuple(sorted(s.gone_ids)))
             n = s.confirmed_gone
-            self.lbl_vanished.setText(i18n.t_plural("pipeline.vanished_still_present", n))
+            self._zdanie_sekcji(i18n.t_plural("pipeline.vanished_still_present", n))
             self.btn_mark_vanished.setVisible(True)
             self.btn_show_vanished.setVisible(False)
             self.box_vanished.setVisible(True)

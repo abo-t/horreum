@@ -446,24 +446,17 @@ def _telescope_rule(okno, telescope_id):
     return [], True
 
 
-def propose_offset_minutes(con, master_frame_id):
-    """PROPOZYCJA odniesienia czasu dla stosu — `minuty | None`. Czysty odczyt, zero zapisu.
+PROPOSAL_SECONDS_TOL = 2
+"""Tolerancja podpisu dwóch zegarów w `propose_offset_minutes` - ile sekund RAW może odstawać od
+pełnej godziny względem początku okna stosu. ZMIERZONE na kopii `pf4` (290 integracji, AR-278):
+autocrop IC443 startuje 1 s przed oryginałem (zaokrąglenie `DATE-OBS` przy przycięciu), a każda
+tolerancja 1-30 s dodaje dokładnie tę jedną propozycję, bez zmiany i bez utraty żadnej innej;
+najbliższy RAW, który zrobiłby podpis niejasnym, stoi 41 s od pełnej godziny (LMC). 2 = zmierzona
+sekunda + sekunda zapasu."""
 
-    Świadkiem jest OKNO MASTERA zestawione z materiałem RAW tego samego obiektu: gdy `mm:ss`
-    kandydata zgadza się z `mm:ss` początku okna, a różnią się PEŁNE GODZINY, to nie jest zbieg
-    okoliczności, tylko dwa zegary tej samej chwili. ZMIERZONE na kopii żywego archiwum (128 stosów,
-    po nadaniu obiektu 7 stosom DSLR): propozycja trafia **7 z 7** — sześć razy `+120` (LMC) i raz
-    `+60` (IC443) — przy **ZERO** trafieniach wśród pozostałych 121, czyli reguła nie strzela
-    w gałąź, której nie dotyczy. Falsyfikatorem był tu drugi człon, nie pierwszy: propozycja, która
-    trafia wszędzie, nie jest świadkiem.
 
-    PROPONUJE, NIE ZAPISUJE — i to jest cała jej rola (lustro szczebla ścieżki S2). Zegar aparatu
-    jest faktem o SPRZĘCIE, którego archiwum nie zna z definicji; maszyna umie go tylko obstawić
-    z kształtu liczb, więc werdykt zostaje przy człowieku, a zapis przy `repo.set_integration_offset`.
-
-    `None` znaczy „nie mam czym obstawić" — brak okna, brak kandydatów RAW albo podpis niejasny
-    (dwie różne różnice godzin wśród kandydatów). Milczenie jest tu uczciwsze niż środek: propozycja
-    wzięta z niezgodnych świadków byłaby zgadywaniem podanym jako pomiar."""
+def _propozycja_z_okna(con, master_frame_id):
+    """Propozycja z OKNA stosu (świadek: RAW obiektu w zgodnym `mm:ss`) - `minuty | None`."""
     row = con.execute(
         "SELECT f.object_id, i.window_start FROM frame f "
         "JOIN integration i ON i.master_frame_id = f.id WHERE f.id = ?",
@@ -479,15 +472,56 @@ def propose_offset_minutes(con, master_frame_id):
             "WHERE f.kind = 'light' AND f.object_id = ? AND f.filetype = 'raw' "
             "AND f.superseded_by IS NULL AND h.date_obs IS NOT NULL", (row["object_id"],)):
         t = header_dt(r["date_obs"])
-        if t is None or (t.minute, t.second) != (start.minute, start.second):
+        if t is None:
             continue
-        delta = round((t - start).total_seconds() / 60.0)
+        sekundy = (t - start).total_seconds()
+        godziny = round(sekundy / 3600.0)
+        if abs(sekundy - godziny * 3600) > PROPOSAL_SECONDS_TOL:
+            continue                                   # `mm:ss` się nie zgadza (± tolerancja)
+        delta = godziny * 60
         # SUFIT ZEGARÓW ŚWIATA odsiewa świadka z INNEJ DOBY (bramka pakietu, zarzut 7): sama
         # podzielność przez 60 przepuszczała np. 1500 minut, czyli klatkę z następnej nocy
         # o trafionym `mm:ss` — jeden przypadkowy zbieg dawał propozycję fałszywą co do doby.
-        if delta % 60 == 0 and abs(delta) <= repo.UTC_OFFSET_MAX_MIN:
+        if abs(delta) <= repo.UTC_OFFSET_MAX_MIN:
             roznice.add(delta)
     return roznice.pop() if len(roznice) == 1 else None
+
+
+def propose_offset_minutes(con, master_frame_id):
+    """PROPOZYCJA odniesienia czasu dla stosu - `minuty | None`. Czysty odczyt, zero zapisu.
+
+    WARIANT KADRU DZIEDZICZY PO ORYGINALE (AR-278): autocrop (`stack_variant`, 0035) to ten sam
+    materiał co oryginał, więc i ten sam zegar aparatu. Odniesienie WSKAZANE przy oryginale
+    (`integration.utc_offset_min`, fakt ręki - także `0` = UTC, `None` = nie wiem) idzie wprost,
+    a gdy go nie ma - propozycja z okna oryginału. Dopiero wariant bez oryginału, oryginał bez
+    obu albo stos bez relacji pytają własne okno.
+
+    Świadkiem okna jest OKNO MASTERA zestawione z materiałem RAW tego samego obiektu: gdy `mm:ss`
+    kandydata zgadza się z `mm:ss` początku okna (± `PROPOSAL_SECONDS_TOL`), a różnią się PEŁNE
+    GODZINY, to nie jest zbieg okoliczności, tylko dwa zegary tej samej chwili. ZMIERZONE na kopii
+    `pf4` (290 integracji): propozycję dostaje 14 stosów (12 × `+120` LMC z wariantami, `+60` IC443
+    i jego autocrop), a żaden spoza materiału DSLR - propozycja, która trafia wszędzie, nie jest
+    świadkiem.
+
+    PROPONUJE, NIE ZAPISUJE - i to jest cała jej rola (lustro szczebla ścieżki S2). Zegar aparatu
+    jest faktem o SPRZĘCIE, którego archiwum nie zna z definicji; maszyna umie go tylko obstawić
+    z kształtu liczb, więc werdykt zostaje przy człowieku, a zapis przy `repo.set_integration_offset`.
+
+    `None` znaczy „nie mam czym obstawić" - brak okna, brak kandydatów RAW albo podpis niejasny
+    (dwie różne różnice godzin wśród kandydatów). Milczenie jest tu uczciwsze niż środek: propozycja
+    wzięta z niezgodnych świadków byłaby zgadywaniem podanym jako pomiar."""
+    para = con.execute("SELECT original_frame_id FROM stack_variant WHERE variant_frame_id = ?",
+                       (master_frame_id,)).fetchone()
+    if para is not None:
+        oryginal = para["original_frame_id"]
+        wskazane = con.execute("SELECT utc_offset_min FROM integration WHERE master_frame_id = ?",
+                               (oryginal,)).fetchone()
+        if wskazane is not None and wskazane["utc_offset_min"] is not None:
+            return wskazane["utc_offset_min"]            # `is not None`: `0` (UTC) to werdykt
+        z_oryginalu = _propozycja_z_okna(con, oryginal)
+        if z_oryginalu is not None:
+            return z_oryginalu
+    return _propozycja_z_okna(con, master_frame_id)
 
 
 # ============================================================ KLATKA NOWSZA NIŻ OBRAZ (AR-150, AR-153)

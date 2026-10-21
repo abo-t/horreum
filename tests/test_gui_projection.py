@@ -2368,7 +2368,9 @@ def test_abort_sondy_pierwszego_linku_w_jezyku_UI(qapp, tmp_path, ustawienia, mo
     dlg.show()
     _klik(dlg.btn_apply)
     raport = dlg.report.toPlainText()
-    assert raport.startswith(i18n.t("proj.abort_prefix", msg=i18n.t("objchg.item.proj_first_link")))
+    # Żywe okno dokłada gest przełącznika kopii (AR-265, `zdanie_odmowy`).
+    assert raport.startswith(i18n.t("proj.abort_prefix", msg=i18n.t(
+        "proj.first_link_retry", msg=i18n.t("objchg.item.proj_first_link"))))
     assert i18n.t("proj.untouched", n=2) in raport, raport
     assert dlg.btn_apply.text() == i18n.t("proj.btn_not_created")
     if lang == "en":
@@ -3423,16 +3425,28 @@ _ZLOTE_OKNA = {
            "manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania (sprzeczne pole: object_id) - "
            "nie nadpisuję go; sprawdź go albo usuń ręcznie, potem „Odśwież podgląd” "
            "i „Zapisz manifest”",
-           f"obok manifestu leży plik roboczy innego zapisu ({_CZESC}) - gdy żaden zapis nie trwa, skasuj go "
-           f"ręcznie, potem ponów wydanie albo „Odśwież podgląd”"),
+           "obok manifestu leży plik roboczy innego zapisu (_PROJEKCJA.json.part) - gdy żaden zapis nie "
+           "trwa, skasuj go ręcznie, potem ponów wydanie albo „Odśwież podgląd”",
+           "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) - wolumen nie wspiera "
+           "hardlinków? wydaj ponownie kopiami plików, potem zaznacz „Wymuś kopię bajtów” - podgląd "
+           "policzy kopie"),
     "en": ("the release manifest (_PROJEKCJA.json) is in the folder, but it is not a valid record (JSON) - it is "
            "not overwritten; check it or delete it by hand, then “Refresh preview” and “Write manifest”",
            "the release manifest (_PROJEKCJA.json) in the folder belongs to another release (conflicting field: "
            "object_id) - it is not overwritten; check it or delete it by hand, then “Refresh preview” and "
            "“Write manifest”",
-           f"a working file of another write lies next to the manifest ({_CZESC}) - when no write is running, "
-           f"delete it by hand, then release again or “Refresh preview”"),
+           "a working file of another write lies next to the manifest (_PROJEKCJA.json.part) - when no write "
+           "is running, delete it by hand, then release again or “Refresh preview”",
+           "the first link failed the identity probe (inode/size/content) - does the volume not support hard "
+           "links? release again as file copies, then tick “Force byte copy” - the preview counts the copies"),
 }
+
+
+def _abort_pierwszego_linku():
+    """Powód abortu sondy pierwszego linku zdaniem PL katalogu - złoty test AST
+    (`test_gui_object_change.py::test_KAZDY_kod_powodu_pozycji_…`) wiąże je ze zdaniem rdzenia."""
+    from horreum.gui.i18n_catalog import CATALOG
+    return projection.PowodPozycji(CATALOG["objchg.item.proj_first_link"]["pl"], "proj_first_link")
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
@@ -3443,13 +3457,15 @@ def test_odmowa_manifestu_okno_mowi_gestem_okna_a_pasek_bez_gestu(qapp, jezyk, l
     przycisków okna. Falsyfikatory: `zdanie_odmowy` bez gestu; rada okna z powrotem w zdaniu rdzenia."""
     jezyk(lang)
     powody = (projection._odmowa_uszkodzonego("JSON", "X:\\W\\OBJECTS\\M42\\_PROJEKCJA.json"),
-              projection._odmowa_obcego("object_id"), projection._odmowa_zajetego(_CZESC))
+              projection._odmowa_obcego("object_id"), projection._odmowa_zajetego(_CZESC),
+              _abort_pierwszego_linku())
     assert tuple(pd_mod.zdanie_odmowy(p) for p in powody) == _ZLOTE_OKNA[lang]
-    gesty = ("Odśwież podgląd", "Zapisz manifest", "Refresh preview", "Write manifest")
+    gesty = ("Odśwież podgląd", "Zapisz manifest", "Refresh preview", "Write manifest",
+             "Wymuś kopię", "Force byte copy", "tryb kopii", "copy mode")
     for p in powody:
         assert not any(g in pd_mod.tekst_powodu(p) or g in str(p) for g in gesty), p
     assert pd_mod.zdanie_odmowy(projection.PowodPozycji("x", "proj_manifest_changed")) == \
-        pd_mod.tekst_powodu(projection.PowodPozycji("x", "proj_manifest_changed"))   # tylko trzy kody
+        pd_mod.tekst_powodu(projection.PowodPozycji("x", "proj_manifest_changed"))   # tylko cztery kody
 
 
 def test_szczegol_kazdej_odmowy_zapisu_manifestu(qapp):
@@ -3522,3 +3538,111 @@ def test_odmowa_zapisu_manifestu_po_esc_trwa_na_pasku_gospodarza(qapp, tmp_path,
     finally:
         win.close()
         con.close()
+
+
+# ============================================================ AR-273, AR-265, AR-278: wydanie - wskazówki i przyciski
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("przypadek", ["zdrowy", "uszkodzony", "obcy", "zajety"])
+def test_sonda_przy_drzewie_niepelnym_mowi_o_manifescie_przed_utworz(qapp, tmp_path, ustawienia, monkeypatch,
+                                                                      jezyk, lang, przypadek):
+    """AR-273: drzewo NIEPEŁNE (jeden light skasowany po wydaniu) nad manifestem uszkodzonym, obcym albo
+    przy cudzym pliku roboczym - sonda stawia WSKAZÓWKĘ „manifestu nie da się teraz zapisać: …” z gestem
+    „Odśwież podgląd” PRZED kliknięciem „Utwórz”, przycisk zostaje uzbrojony (linki są pożądane), plik pod
+    kursorem raportu; zdrowy manifest - bez linii. Bajty manifestu i pliku roboczego po sondzie = przed.
+    Mutant: wskazówka liczona tylko nad kompletem (dawny warunek diagnozy) - linia znika."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    jezyk(lang)
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    _klik(dlg.btn_apply)
+    root = card / "OBJECTS" / "NGC_6992"
+    (root / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "lb1.fits").unlink()       # drzewo niepełne
+    sciezka = root / projection.MANIFEST_NAME
+    part = root / (projection.MANIFEST_NAME + projection.PART_SUFFIX)
+    powod = plik = None
+    if przypadek == "uszkodzony":
+        sciezka.write_bytes(b"{")
+        powod, plik = i18n.t("objchg.item.proj_manifest_damaged", detail="JSON"), \
+            i18n.t("proj.manifest_path_tip", path=str(sciezka))
+    elif przypadek == "obcy":
+        m = _manifest_okna(root)
+        m["object_id"] = 999
+        sciezka.write_text(json.dumps(m), encoding="utf-8")
+        powod, plik = i18n.t("objchg.item.proj_manifest_foreign", detail="object_id"), \
+            i18n.t("proj.manifest_path_tip", path=str(sciezka))
+    elif przypadek == "zajety":
+        part.write_bytes(b"cudzy")
+        powod, plik = i18n.t("objchg.item.proj_manifest_busy"), i18n.t("proj.manifest_part_tip", path=str(part))
+    przed = (sciezka.read_bytes(), part.read_bytes() if part.exists() else None)
+    _klik(dlg.btn_dry)
+    raport = dlg.report.toPlainText()
+    assert (sciezka.read_bytes(), part.read_bytes() if part.exists() else None) == przed
+    assert dlg.btn_apply.isEnabled() and dlg.btn_apply.text() != i18n.t("proj.obj.btn_write_manifest")
+    znacznik = i18n.t("proj.obj.manifest_hint", msg="").strip()
+    if powod is None:
+        assert znacznik not in raport, raport
+    else:
+        linia = i18n.t("proj.obj.manifest_hint", msg=i18n.t("proj.manifest_probe_retry", msg=powod))
+        assert linia in raport.split("\n"), raport
+        assert dlg.report.toolTip() == plik
+        assert str(part) not in linia                       # ścieżka pliku roboczego tylko pod kursorem
+    dlg.reject()
+    con.close()
+
+
+def test_gest_kopii_okna_nazywa_przelacznik_okna(qapp, jezyk):
+    """AR-265: gest okna za abortem sondy pierwszego linku nazywa przełącznik okna jego napisem -
+    fraza gestu jest początkiem napisu `proj.force_copy` w obu językach (jedno brzmienie przełącznika)."""
+    from horreum.gui.i18n_catalog import CATALOG
+    for lang in ("pl", "en"):
+        jezyk(lang)
+        gest = i18n.t("proj.first_link_retry", msg="X")
+        nazwa = gest.split("„" if lang == "pl" else "“")[1].split("”")[0]
+        assert CATALOG["proj.force_copy"][lang].startswith(nazwa + " ("), (lang, nazwa)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_okno_nazwy_celu_mowi_przyciskami_katalogu(qapp, tmp_path, ustawienia, monkeypatch, jezyk, lang):
+    """AR-278 (predykat „Cancel” w plikach okna wydania): „Dodaj cel…” pytało o nazwę statycznym
+    `QInputDialog.getText` - „Cancel” w polskim oknie. Okno nazwy prawdziwe (atrapa tylko systemowego
+    wyboru folderu): przyciski z katalogu, „Anuluj” niczego nie dodaje, „Dodaj” dodaje cel z wpisaną
+    nazwą. Mutant: statyczne `getText`."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QInputDialog, QPushButton
+    jezyk(lang)
+    folder = tmp_path / "_WBPP" / "nowy"
+    folder.mkdir(parents=True)
+    monkeypatch.setattr(pd_mod.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(folder)))
+    con = db.open_db(str(tmp_path / "a.db"))
+    dlg = _dlg(con, [])
+    dlg.show()
+    widziane, dodane = [], []
+    monkeypatch.setattr(dlg, "_add_target_path", lambda p, n: dodane.append((p, n)) or True)
+
+    def _w_oknie(akcja):
+        # BEZPIECZNIK: okno bez przycisku z katalogu zamyka się odrzuceniem - `exec()` nie wisi.
+        okno = QApplication.activeModalWidget()
+        if not isinstance(okno, QInputDialog):
+            widziane.append(None)
+            return
+        przyciski = {b.text(): b for b in okno.findChildren(QPushButton)}
+        widziane.append(sorted(przyciski))
+        okno.setTextValue("Karta X")
+        cel = przyciski.get(i18n.t(f"proj.dlg.name_{akcja}"))
+        if cel is None:
+            okno.reject()
+            return
+        QTest.mouseClick(cel, Qt.LeftButton)
+
+    for akcja in ("cancel", "ok"):
+        QTimer.singleShot(0, lambda a=akcja: _w_oknie(a))
+        dlg._on_add_target()
+    oczekiwane = sorted([i18n.t("proj.dlg.name_ok"), i18n.t("proj.dlg.name_cancel")])
+    assert widziane == [oczekiwane, oczekiwane], widziane
+    assert lang != "pl" or "Cancel" not in widziane[0]
+    assert dodane == [(str(folder), "Karta X")]
+    dlg.reject()
+    con.close()

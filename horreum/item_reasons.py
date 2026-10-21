@@ -84,7 +84,7 @@ ITEM_REASON_CODES = frozenset({
     "undo_semantic", "undo_header_changed",
     # pisarz XISF (`_XisfRefusal`)
     "xisf_unreadable", "xisf_many_images", "xisf_no_identity", "xisf_prop_rule", "xisf_prop_mismatch",
-    "xisf_prop_without_card", "xisf_bad_op", "xisf_set_missing",
+    "xisf_prop_without_card", "xisf_set_missing",
     "xisf_attr_missing", "xisf_not_utf8", "xisf_no_roundtrip", "xisf_unreadable_reader",
     # odmowy czytnika i składacza nagłówka XISF (`scan.XisfFormatError`, AR-158) - zdanie rodzi się
     # w `scan`, pisarz przenosi je do okna przez `_XisfRefusal`
@@ -182,6 +182,10 @@ ITEM_REASON_CODES = frozenset({
     # `macro._evaluate_change`): `set` wystąpienia, którego w nagłówku nie ma - jedna odmowa w obu
     # miejscach; pozostałe odmowy łaty mówią kodami podglądu (`macro_*`)
     "card_idx_missing",
+    # --- pisarz karty: liczba nieskończona i liczba, której pole karty FITS nie odtworzy (AR-269,
+    # `card_rules` - jedno zdanie dla podglądu i pisarza), operacja spoza `set`/`add` w obu formatach,
+    # bajt spoza drukowalnego ASCII w surowym nagłówku FITS (AR-271, każda droga zapisu i cofnięcia)
+    "card_value_nonfinite", "card_value_digits", "card_op_unknown", "header_nonprintable",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie

@@ -723,6 +723,9 @@ def _main(argv=None):
         except projection.ProjectionAbort as exc:
             con.close()
             print(f"Horreum project: ABORT -- {exc}")         # sonda pierwszego linku padla (SMB kopia?)
+            # Gest terminala za zdaniem rdzenia (AR-265): przełącznik kopii jest w oknie, tu - flaga.
+            if getattr(exc.powod, "code", None) == "proj_first_link":
+                print("  potem: ponow z kopiami (horreum project ... --apply --copy)")
             print(_format_project(root, exc.result, proj, limit=args.limit))
             return 1
         except ValueError as exc:                              # korzeń bez segmentu wykluczonego (§0)
@@ -730,6 +733,11 @@ def _main(argv=None):
             print(f"Horreum project: blad -- {exc}")
             return 1
         con.close()
+        # DRY wydania obiektu: co krok manifestu powie po `--apply` przy tym stanie korzenia (AR-273,
+        # wskazówka - plik może się zmienić przed `--apply`, bajty chroni krok manifestu).
+        wskazowka = (projection.manifest_step_refusal(
+            root, layout=proj.layout, state=projection.read_manifest_state(root),
+            object_id=proj.info["object_id"]) if args.object is not None and not args.apply else None)
         print(_format_project(root, res, proj, limit=args.limit))
         if res.error is not None:
             # Krok wydania przerwany błędem systemu (AR-197): wynik z powodem, nie ślad stosu. Zdanie
@@ -737,10 +745,19 @@ def _main(argv=None):
             print(f"Horreum project: blad -- {proza_z_diagnoza(res.error)}")
             # Odmowa kroku manifestu mówi fakt i radę wspólną; gest ponowienia w terminalu to to samo
             # polecenie - okno mówi tu swoje przyciski, CLI ich nie ma (AR-251).
+            if getattr(res.error, "code", None) == "proj_manifest_busy":
+                # Zdanie rdzenia mówi nazwę pliku roboczego (AR-273) - terminal nie ma podpowiedzi,
+                # więc pełna ścieżka idzie własnym wierszem.
+                print(f"  plik roboczy: {dict(res.error.params)['path']}")
             if getattr(res.error, "code", None) in ("proj_manifest_damaged", "proj_manifest_foreign",
                                                     "proj_manifest_busy"):
                 print("  potem: ponow to samo polecenie (horreum project ... --apply)")
             return 1
+        if wskazowka is not None:
+            # DRY wydania obiektu nad manifestem, którego krok nie zapisze (AR-273) - ta sama
+            # wskazówka co okno, z gestem terminala; stan teraz, nie obietnica.
+            print(f"  manifestu nie da sie teraz zapisac: {proza_z_diagnoza(wskazowka)}")
+            print("  potem: ponow to samo polecenie (horreum project ...)")
         return 0
     if args.cmd == "presence":
         from . import presence                            # lazy: astropy dopiero tu (przez scan)

@@ -1846,3 +1846,150 @@ def test_prawy_klik_ta_kopia_prowadzi_cel_z_klatki_pod_kursorem(qapp, widok, wyz
     _odczekaj_debounce()
     assert _header(con, fid)["filter_raw"] == "CLS"
     assert _stan(v) == ([fid], _wiersz(v, fid))
+
+
+# ============================================================ kotwica zakresu Shift po resecie modelu (AR-266)
+
+
+def _shift_strzalka_w_dol(view, n=3):
+    view.table.setFocus()
+    for _ in range(n):
+        QTest.keyClick(view.table, Qt.Key_Down, Qt.ShiftModifier)
+        QApplication.processEvents()
+
+
+def _zakres_od(view, od, do):
+    """frame_id wierszy klatek między wierszem `od` a wierszem `do` (włącznie) w BIEŻĄCYM porządku."""
+    ra, rd = _wiersz(view, od), _wiersz(view, do)
+    return sorted(r["frame_id"] for r in view.model._rows[min(ra, rd):max(ra, rd) + 1] if "_group" not in r)
+
+
+def _klatka_za(view, b, a, krok=3):
+    """Klatka `krok` wierszy klatek za B, w kierunku od A (zakres od A i od B różnią się wtedy)."""
+    kier = 1 if _wiersz(view, a) <= _wiersz(view, b) else -1
+    w, n = _wiersz(view, b), 0
+    while n < krok:
+        w += kier
+        if "_group" not in view.model._rows[w]:
+            n += 1
+    return view.model._rows[w]["frame_id"]
+
+
+def _klik_i_zakres(view, wejscie):
+    """Klik A, potem Shift+klik B (albo Shift+↓ × 3) - zakres z kotwicą na A. Zwraca (A, B)."""
+    view.table.verticalScrollBar().setValue(0)
+    QApplication.processEvents()
+    a = view.model._rows[5]["frame_id"]
+    _klik_komorki(view, a, 1)
+    if wejscie == "mysz":
+        b = view.model._rows[8]["frame_id"]
+        _klik_komorki(view, b, 1, Qt.ShiftModifier)
+    else:
+        _shift_strzalka_w_dol(view)
+        b = view.model._rows[view.table.currentIndex().row()]["frame_id"]
+    assert _zaznaczone(view) == _zakres_od(view, a, b) and len(_zaznaczone(view)) == 4
+    return a, b
+
+
+@pytest.mark.parametrize("wejscie", ["mysz", "klawiatura"])
+@pytest.mark.parametrize("gest", ["sort", "grupowanie", "podglad", "przeladowanie"])
+def test_shift_po_resecie_liczy_zakres_od_kotwicy(dluga, gest, wejscie):
+    """AR-266: klik A, Shift+klik B (albo Shift+↓), gest z resetem modelu, Shift+klik D - zakres od A w nowym
+    porządku, jak bez resetu (7 klatek), nie od B (4). Qt trzyma kotwicę prywatnie, reset ją unieważnia,
+    a odtworzenie bieżącej komórki stawiało ją na B. Człowiek puszcza Shift przed gestem (QTest trzyma
+    modyfikator w stanie aplikacji, więc test puszcza go jawnie). Falsyfikatory: migawka bez kotwicy,
+    tryb „trzymaj” = metoda Qt (krok bieżącej przestawia kotwicę na B)."""
+    view = dluga
+    a, b = _klik_i_zakres(view, wejscie)
+    QTest.keyRelease(view.table, Qt.Key_Shift, Qt.NoModifier)
+    przed = _zaznaczone(view)
+    _gest_resetu(view, gest)
+    assert _zaznaczone(view) == przed
+    d = _klatka_za(view, b, a)
+    _klik_komorki(view, d, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == _zakres_od(view, a, d), (len(_zaznaczone(view)), len(_zakres_od(view, a, d)))
+    assert _zakres_od(view, a, d) != _zakres_od(view, b, d), "od A = od B - test nic by nie mierzył"
+
+
+def test_shift_wcisniety_w_chwili_resetu_dalej_od_kotwicy(dluga):
+    """AR-266: Shift trzymany w chwili przeładowania (stan modyfikatorów aplikacji z Shift) - Qt nie ustawia
+    wtedy kotwicy przy zmianie bieżącej, więc odtworzenie wymusza ją krokiem „ustaw”. Falsyfikator: tryb
+    „ustaw” = metoda Qt (kotwica nieważna, Qt bierze bieżącą B)."""
+    from PySide6.QtGui import QGuiApplication
+    view = dluga
+    a, b = _klik_i_zakres(view, "mysz")
+    assert QGuiApplication.keyboardModifiers() & Qt.ShiftModifier, "Shift puszczony - test nic by nie mierzył"
+    view.przeladuj_z_zaznaczeniem()
+    _odczekaj_debounce()
+    d = _klatka_za(view, b, a)
+    _klik_komorki(view, d, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == _zakres_od(view, a, d)
+
+
+def test_lustro_kotwicy_idzie_za_regula_qt(dluga):
+    """Lustro kotwicy (`_TabelaKlatek.kotwica`) bez resetu: klik - kotwica na klikniętej, Shift+klik - zostaje,
+    Ctrl+klik w BIEŻĄCĄ komórkę - na niej (Qt przestawia kotwicę w naciśnięciu, a `currentChanged` nie
+    przychodzi, bo bieżąca się nie zmienia), Ctrl+klik - na klikniętej, ↓ bez Shift - na nowej bieżącej,
+    Shift+↓ - zostaje. Falsyfikator: lustro bez `mousePressEvent` (po Ctrl+kliku w bieżącą zostaje na A)."""
+    view = dluga
+    view.table.verticalScrollBar().setValue(0)
+    QApplication.processEvents()
+    rows = view.model._rows
+
+    def kotwica():
+        return rows[view.table.kotwica().row()]["frame_id"]
+    a, b, c, d = (rows[w]["frame_id"] for w in (2, 6, 10, 12))
+    _klik_komorki(view, a, 1)
+    assert kotwica() == a
+    _klik_komorki(view, b, 1, Qt.ShiftModifier)
+    assert kotwica() == a and _zaznaczone(view) == _zakres_od(view, a, b)
+    _klik_komorki(view, b, 1, Qt.ControlModifier)
+    assert kotwica() == b
+    _klik_komorki(view, c, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == _zakres_od(view, a, c), "Qt liczy zakres od B"
+    _klik_komorki(view, d, 1, Qt.ControlModifier)
+    assert kotwica() == d
+    view.table.setFocus()
+    QTest.keyClick(view.table, Qt.Key_Down, Qt.NoModifier)
+    QApplication.processEvents()
+    nowa = rows[view.table.currentIndex().row()]["frame_id"]
+    assert kotwica() == nowa
+    _shift_strzalka_w_dol(view, 2)
+    assert kotwica() == nowa and _zaznaczone(view) == _zakres_od(
+        view, nowa, rows[view.table.currentIndex().row()]["frame_id"])
+
+
+def test_inna_wersja_qt_kotwica_jak_qt(dluga, monkeypatch):
+    """Bezpiecznik wersji (`_QT_TABELI_KLATEK`) obejmuje lustro, `selectionCommand` i `postaw_biezaca`: przy
+    innej wersji Qt tabela zachowuje się jak Qt (po sorcie zakres od bieżącej B), bez wyjątku. Bezpieczniki
+    stoją warstwami (każdy z trzech sam wyłącza krok kotwicy), więc falsyfikatorem jest zdjęcie wszystkich
+    trzech naraz - zakres od A."""
+    from horreum.gui import grid_model
+    view = dluga
+    monkeypatch.setattr(grid_model, "qVersion", lambda: "6.10.0")
+    a, b = _klik_i_zakres(view, "mysz")
+    QTest.keyRelease(view.table, Qt.Key_Shift, Qt.NoModifier)
+    _gest_resetu(view, "sort")
+    d = _klatka_za(view, b, a)
+    _klik_komorki(view, d, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == _zakres_od(view, b, d)
+
+
+def test_kotwica_spoza_zbioru_zostawia_biezaca(dluga):
+    """Kotwica, której klatki po przeładowaniu nie ma w zbiorze (prawdziwe przeładowanie nie-nawigacyjne
+    po zniknięciu klatki A z bazy): zaznaczenie wraca bez A, bieżąca wraca na B i jest kotwicą - Shift+klik
+    liczy zakres od B, bez wyjątku. Falsyfikator: kotwica spoza zbioru stawiana na pierwszym wierszu."""
+    view = dluga
+    a, b = _klik_i_zakres(view, "mysz")
+    QTest.keyRelease(view.table, Qt.Key_Shift, Qt.NoModifier)
+    with view.con:
+        view.con.execute("DELETE FROM location WHERE frame_id = ?", (a,))
+        view.con.execute("DELETE FROM frame WHERE id = ?", (a,))
+    view.przeladuj_z_zaznaczeniem()
+    _odczekaj_debounce()
+    assert a not in view._frame_ids and b in _zaznaczone(view)
+    assert view.model._rows[view.table.currentIndex().row()]["frame_id"] == b
+    assert view.model._rows[view.table.kotwica().row()]["frame_id"] == b
+    d = view.model._rows[_wiersz(view, b) + 3]["frame_id"]
+    _klik_komorki(view, d, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == _zakres_od(view, b, d)

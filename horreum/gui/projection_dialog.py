@@ -351,7 +351,8 @@ def szczegol_powodu(powod, *, root):
 def zdanie_odmowy(powod):
     """Zdanie powodu w ŻYWYM oknie wydania (Qt-WOLNE, AR-251): `tekst_powodu`, a za odmową kroku
     manifestu, którą da się ponowić z okna - gest okna (`proj_manifest_damaged`/`_foreign`: „Odśwież
-    podgląd” i „Zapisz manifest”, `proj_manifest_busy`: ponowienie wydania albo „Odśwież podgląd”).
+    podgląd” i „Zapisz manifest”, `proj_manifest_busy`: ponowienie wydania albo „Odśwież podgląd”),
+    a za abortem sondy pierwszego linku (`proj_first_link`, AR-265) - przełącznik kopii okna.
     Zdanie rdzenia mówi fakt i radę wspólną dla każdej powierzchni (CLI drukuje je z własnym gestem);
     pasek gospodarza po zamknięciu okna mówi samym `tekst_powodu` - przycisku zamkniętego okna nie ma."""
     kod = getattr(powod, "code", None)
@@ -359,6 +360,8 @@ def zdanie_odmowy(powod):
         return i18n.t("proj.manifest_retry", msg=tekst_powodu(powod))
     if kod == "proj_manifest_busy":
         return i18n.t("proj.manifest_busy_retry", msg=tekst_powodu(powod))
+    if kod == "proj_first_link":
+        return i18n.t("proj.first_link_retry", msg=tekst_powodu(powod))
     return tekst_powodu(powod)
 
 
@@ -628,9 +631,12 @@ class DryWorker(QObject):
             # komplet leży w celu bez rozjazdu układu - diagnoza manifestu (bez zapisu, na tej sondzie).
             # Obie słuchają anulowania (AR-245): zamknięcie okna w trakcie sondy nie czeka ani na
             # odczyt świadków z bazy i manifestu, ani na świadka drzewa - wyniku nikt nie odbierze.
-            naprawa, zrodla = None, None
+            naprawa, zrodla, blokada = None, None, None
             if self._object_id is not None and not self._cancel:
-                zrodla = projection.manifest_sources(con, root)
+                # JEDEN odczyt manifestu dla świadków scalenia i wskazówki niżej (AR-273) - bez
+                # drugiego odczytu tego samego pliku na udziale SMB.
+                stan = projection.read_manifest_state(root)
+                zrodla = projection.manifest_sources(con, root, stan)
                 if dry_complete(res) and res.drift is None and not self._cancel:
                     # Ten sam czas próby co zapis (`czas_proby_dla`, AR-245): oferta mówi o dacie,
                     # którą zapis postawi.
@@ -641,6 +647,12 @@ class DryWorker(QObject):
                         should_cancel=lambda: self._cancel)
                     if naprawa.status == "cancelled":
                         naprawa = None
+                # Drzewo niepełne (albo rozjazd układu): diagnozy naprawy nie ma, a krok manifestu
+                # po „Utwórz” i tak odmówi nad tym, co leży w korzeniu - WSKAZÓWKA przed kliknięciem
+                # (AR-273), z tego samego odczytu; anulowanie sprawdzane przed `lexists` pliku roboczego.
+                if naprawa is None and not self._cancel:
+                    blokada = projection.manifest_step_refusal(
+                        root, layout=plan.layout, state=stan, object_id=plan.info["object_id"])
         finally:
             if own:
                 con.close()
@@ -656,7 +668,7 @@ class DryWorker(QObject):
         # reszta sondy - korzeń bywa na udziale SMB.
         return {"plan": plan, "res": res, "auto_copy": auto_copy, "copy": eff_copy,
                 "target_serial": target_serial, "size_total": total, "size_missing": missing,
-                "root": root, "manifest": naprawa, "extra_sources": zrodla,
+                "root": root, "manifest": naprawa, "manifest_hint": blokada, "extra_sources": zrodla,
                 "root_exists": os.path.isdir(root)}
 
 
@@ -1105,10 +1117,18 @@ class ProjectionDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, i18n.t("proj.dlg.pick_target"))
         if not path:
             return
-        name, ok = QInputDialog.getText(self, i18n.t("proj.dlg.name_title"),
-                                        i18n.t("proj.dlg.name_label"),
-                                        text=os.path.basename(path) or path)
-        if not ok or not name.strip():
+        # Przyciski z katalogu (AR-278): statyczne `getText` mówiło „Cancel” w polskim oknie.
+        okno = QInputDialog(self)
+        okno.setInputMode(QInputDialog.TextInput)
+        okno.setWindowTitle(i18n.t("proj.dlg.name_title"))
+        okno.setLabelText(i18n.t("proj.dlg.name_label"))
+        okno.setTextValue(os.path.basename(path) or path)
+        okno.setOkButtonText(i18n.t("proj.dlg.name_ok"))
+        okno.setCancelButtonText(i18n.t("proj.dlg.name_cancel"))
+        if okno.exec() != QDialog.Accepted:
+            return
+        name = okno.textValue()
+        if not name.strip():
             return
         self._add_target_path(path, name.strip())
 
@@ -1220,7 +1240,10 @@ class ProjectionDialog(QDialog):
         self._plan = payload["plan"]
         self._dry = payload
         text, warn = self._format(payload["res"], payload["plan"], dry=True, payload=payload)
-        self._pokaz_sonde(text, warn=warn)
+        # Wskazówka o manifeście (AR-273): plik, którego dotyczy, pod kursorem raportu.
+        wskazowka = payload.get("manifest_hint")
+        self._pokaz_sonde(text, warn=warn,
+                          tip=szczegol_powodu(wskazowka, root=payload["root"]) if wskazowka else "")
         n = payload["res"].counts.get("would-link", 0)
         # Komplet w celu z luką manifestu (AR-213): „Utwórz” staje się „Zapisz manifest” - drugie
         # kliknięcie po świeżej sondzie, osobną operacją manifestową (`ManifestWorker`).
@@ -1663,8 +1686,9 @@ class ProjectionDialog(QDialog):
     def _on_apply_aborted(self, powod, partial):
         """Sonda pierwszego linku padła (SMB oddał kopię zamiast hardlinka) - werdykt o wolumenie.
         Powód z kodem (`proj_first_link`, AR-200) mówi w języku UI. „Nie utworzono” - przycisk NIE
-        obiecuje akcji, której raport zabrania (wiz #4)."""
-        self._zakoncz_bledem(i18n.t("proj.abort_prefix", msg=tekst_powodu(powod)), powod,
+        obiecuje akcji, której raport zabrania (wiz #4). Żywe okno dokłada swój gest - przełącznik
+        kopii (`zdanie_odmowy`, AR-265); pasek po zamknięciu mówi samym zdaniem rdzenia."""
+        self._zakoncz_bledem(i18n.t("proj.abort_prefix", msg=zdanie_odmowy(powod)), powod,
                              i18n.t("proj.btn_not_created"), partial)
 
     def _zdanie_przerwania(self, powod):
@@ -1810,6 +1834,14 @@ class ProjectionDialog(QDialog):
                          else [i18n.t("proj.obj.manifest_refused", msg=zdanie_odmowy(naprawa.powod))])
                 lines.extend(linie)
                 warn.extend(linie)
+            wskazowka = payload.get("manifest_hint") if payload is not None else None
+            if naprawa is None and wskazowka is not None:
+                # Drzewo niepełne nad manifestem, którego krok nie zapisze (AR-273) - WSKAZÓWKA
+                # przed „Utwórz” (stan teraz, nie obietnica); przycisk zostaje, linki są pożądane.
+                linia = i18n.t("proj.obj.manifest_hint", msg=i18n.t(
+                    "proj.manifest_probe_retry", msg=tekst_powodu(wskazowka)))
+                lines.append(linia)
+                warn.append(linia)
         else:
             # abort → nie „Utworzono" (wizytator #6); anulowanie nazywa się WPROST (W1) — user ma
             # wiedzieć, że reszta planu jest nietknięta, a nie że wydanie zawiodło. Rozbiór stanów

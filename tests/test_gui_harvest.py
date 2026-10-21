@@ -975,10 +975,17 @@ def test_wyjatek_po_kopiach_prawda_z_postepu(qapp, tmp_path, ustawienia, monkeyp
     dlg._on_apply()
     assert _cel(archive, "CLS").exists() and _cel(archive, "Ha").exists()
     assert [_kol(dlg, r, COL_STATUS) for r in range(2)] == ["wciągnięty", "wciągnięty"]
+    from horreum.gui.wb_worker import szczegol_zdania
     zestaw = _cel(archive).parent.parent
+    # Wyjątek spoza klas systemu i bazy to błąd programu (`powod_okna`, AR-264): zdanie w języku UI,
+    # surowy `Typ: opis` z miejscem w kodzie - w szczególe notki i zdania paska.
     assert dlg.summary == (f"Wciągnięto 2 pliki do archiwum → {zestaw} · "
-                           f"Żniwa przerwane błędem: RuntimeError: po kopiach")
-    assert dlg.notice.text() == "Błąd wciągania: RuntimeError: po kopiach (przetworzono 2 z 2 przed błędem)"
+                           f"Żniwa przerwane błędem: błąd programu - szczegół w podpowiedzi")
+    assert dlg.notice.text() == ("Błąd wciągania: błąd programu - szczegół w podpowiedzi "
+                                 "(przetworzono 2 z 2 przed błędem)")
+    szczegol = r"Szczegół techniczny: RuntimeError: po kopiach @ horreum/gui/harvest_dialog\.py:\d+"
+    assert re.fullmatch(szczegol, dlg.notice.szczegol()), dlg.notice.szczegol()
+    assert re.fullmatch(szczegol, szczegol_zdania(dlg.summary)), szczegol_zdania(dlg.summary)
     dlg.btn_accept.click()
     assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(zestaw)
     con.close()
@@ -2942,8 +2949,9 @@ def test_wyjscie_brak_zostaje_brakiem_a_blad_systemu_mowi_klasa(qapp, tmp_path, 
 @pytest.mark.parametrize("przypadek", ["nazwa_123", "znak_nul"])
 def test_wyjscie_blad_bez_klasy_idzie_porazka_tekstem_systemu(qapp, tmp_path, przypadek):
     """AR-199: błąd sprawdzenia folderu wyjścia bez klasy - nazwa niepoprawna (WinError 123, znak `?`)
-    i znak NUL (`ValueError`) - nie udaje braku: sonda pada (`failed`) z tekstem systemu przez
-    właściciela (`blad_systemu`: „Typ: opis”), jak każdy kod spoza klas. `isdir` mówił o obu „nie ma”.
+    i znak NUL (`ValueError`) - nie udaje braku: sonda pada (`failed`). Kod systemu spoza klas mówi
+    tekstem systemu („Typ: opis”), a `ValueError` - błędem programu (`powod_okna`, AR-264) z surowym
+    tekstem CPythona w szczególe (klasy błędu wejścia jeszcze nie ma). `isdir` mówił o obu „nie ma”.
 
     Falsyfikator: `os.path.isdir` z powrotem albo każdy `OSError` jako brak - sonda oddaje `missing`."""
     sciezka = str(tmp_path / "a?b") if przypadek == "nazwa_123" else str(tmp_path) + "\\a\x00b"
@@ -2957,7 +2965,10 @@ def test_wyjscie_blad_bez_klasy_idzie_porazka_tekstem_systemu(qapp, tmp_path, pr
     if przypadek == "nazwa_123":
         assert msg.startswith("OSError: [WinError 123]") and getattr(msg, "code", None) is None, msg
     else:
-        assert msg.startswith("ValueError: "), msg
+        detail = dict(msg.params)["detail"]
+        assert msg.code == "prog_error", msg
+        assert re.fullmatch(r"ValueError: .*embedded null character.* @ horreum/gui/harvest_dialog\.py:\d+",
+                            detail), detail
 
 
 # ---------------------------------------------------------------- AR-225: rezerwa zdania wiersza wydania

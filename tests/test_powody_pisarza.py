@@ -96,15 +96,16 @@ def test_KAZDY_kod_ma_probke_i_sklada_sie_w_PL_i_EN_a_EN_bez_polskiego():
 def test_droga_wyjscia_rozpoznana_po_KODACH_z_literalem_drogi_nie_po_prozie():
     """Parser „czy powód już niesie drogę wyjścia” (dawniej `"recover_torn" in reason or _RECZNA in
     reason`) idzie po JAWNYM zbiorze kodów, których zdanie niesie literał drogi - rekurencyjnie po
-    parametrach i uwagach. SPOT: zbiór == kody, których PL katalogu spełnia DOKŁADNIE predykat
-    dawnego parsera - zawiera `recover_torn` albo całe `_RECZNA` (nowy taki kod bez wpisu do zbioru
-    = czerwień; `finish_failed_isolated_release` niesie samo `release_isolation(…)`, więc - jak
-    w dawnym parserze - poza zbiorem). `way_finish` literału nie
-    niesie, więc - jak dawny parser - drogi nie daje. Proza z tym samym tekstem bez kodu NIE jest
-    rozpoznawana (rdzeń jej już nie oddaje)."""
+    parametrach i uwagach. SPOT: zbiór == kody, których PL katalogu niesie gest odzysku
+    („Przywróć nagłówek sprzed zapisu” w cudzysłowie - od AR-281 zamiast `recover_torn(N)`) albo całe
+    `_RECZNA` (nowy taki kod bez wpisu do zbioru = czerwień; `finish_failed_isolated_release` niesie
+    sam gest zwolnienia, więc - jak w dawnym parserze - poza zbiorem). `way_finish` gestu odzysku
+    nie niesie, więc - jak dawny parser - drogi nie daje. Proza z tym samym tekstem bez kodu NIE
+    jest rozpoznawana (rdzeń jej już nie oddaje)."""
+    odzysk = f"„{writeback._GEST_PRZYWROC}”"
     literalne = {k for k in ITEM_REASON_CODES
                  if isinstance(CATALOG[f"objchg.item.{k}"]["pl"], str)
-                 and ("recover_torn" in CATALOG[f"objchg.item.{k}"]["pl"]
+                 and (odzysk in CATALOG[f"objchg.item.{k}"]["pl"]
                       or str(writeback._RECZNA) in CATALOG[f"objchg.item.{k}"]["pl"])}
     assert writeback._KODY_DROGI == literalne, writeback._KODY_DROGI ^ literalne
     faza = PowodPozycji("operacja 3 jest w fazie synced, nie czeka na dokończenie",
@@ -121,7 +122,7 @@ def test_droga_wyjscia_rozpoznana_po_KODACH_z_literalem_drogi_nie_po_prozie():
     for nie in (None, faza, writeback._droga_dokoncz(3),
                 PowodPozycji("lokacja ma operację nowszą niż 3 - dokończenie odmawia",
                              "finish_newer_op", op_id=3),
-                str(writeback._INNY_PLIK), f"x (`recover_torn(3)`)"):
+                str(writeback._INNY_PLIK), f"x {odzysk}"):
         assert not writeback._niesie_droge(nie), nie
 
 
@@ -153,8 +154,9 @@ def test_wynik_dokonczenia_dostaje_recepte_zwolnienia_po_KODZIE(tmp_path, monkey
     monkeypatch.undo()
     (f,) = res.failed
     assert f.reason.code == kod and dict(f.reason.params)["inner"] == powod, f.reason
-    assert f.reason.count("writeback.release_isolation") == (
+    assert f.reason.count(f"„{writeback._GEST_ZWOLNIJ}”") == (
         1 if kod == "finish_failed_isolated_release" or powod is writeback._INNY_PLIK else 0)
+    assert "release_isolation" not in f.reason, f.reason               # AR-281: gest, nie funkcja
     (wiersz,) = con.execute("SELECT reason, reason_code FROM pending_changes WHERE run_id = 'R'")
     assert tuple(wiersz) == (str(f.reason), kod)
     con.close()
@@ -1774,3 +1776,402 @@ def test_podpowiedz_spadku_limit_wierszy_i_odmiana():
             "… and 1 more file", "… and 2 more files"]
     finally:
         i18n.set_lang("pl")
+
+
+# ============================================================ AR-269, AR-271, AR-281: liczba karty,
+# operacja nieznana, bajt spoza ASCII - jedno zdanie podglądu i pisarza, zdania bez kodu programisty
+
+_KARTY_XISF = ('\n    <FITSKeyword name="EXPTIME" value="300." comment="sek"/>'
+               '\n    <FITSKeyword name="GAIN" value="100" comment="e"/>'
+               '\n    <FITSKeyword name="OBSERVER" value="\'Abc\'" comment="kom"/>')
+
+
+def _xisf_obie_drogi(tmp_path, op):
+    """`op` na dwóch kopiach XISF (`_KARTY_XISF`): droga atomowa i w miejscu → `(atom, w miejscu)`;
+    po każdej drodze odmowa zostawia plik bajt w bajt."""
+    import shutil
+    from test_card_rules import _xisf
+    from test_writeback_inplace import _Dziennik
+    from horreum import scan
+    a = _xisf(tmp_path, "a.xisf", _KARTY_XISF)
+    b = tmp_path / "b.xisf"
+    shutil.copyfile(a, b)
+    przed, h = a.read_bytes(), scan.read_xisf_meta_full(str(a)).header_hash
+    ra = writeback.write_changes(str(a), [op], h)
+    rw = writeback.write_changes_inplace(str(b), [op], h, journal=_Dziennik())
+    for res, plik in ((ra, a), (rw, b)):
+        if res.status == "blocked":
+            assert plik.read_bytes() == przed, res
+    return ra, rw
+
+
+def _fits_wynik(tmp_path, op):
+    """`op` drogą atomową na FITS z kartami EXPTIME (float), GAIN (int), OBSERVER (tekst)."""
+    from test_writeback_inplace_add import _fits_bez, _hash
+    p = _fits_bez(tmp_path / "f.fits", karty=[("EXPTIME", 300.0), ("GAIN", 100), ("OBSERVER", "Abc")])
+    return writeback.write_changes(str(p), [op], _hash(p))
+
+
+@pytest.mark.parametrize("keyword, tekst, typ", [
+    ("EXPTIME", "nan", "float"), ("EXPTIME", "inf", "float"), ("GAIN", "inf", "int"),
+    ("GAIN", "-inf", "int"), ("GAIN", "NaN", "int")])
+def test_liczba_nieskonczona_jedno_zdanie_podgladu_i_pisarza_FITS_i_XISF(tmp_path, keyword, tekst,
+                                                                         typ):
+    """AR-269 N2: liczba nieskończona przy karcie liczbowej - podgląd (`evaluate_manual_change` na
+    lustrze karty tego typu) i pisarz (FITS i XISF z typem liczbowym, obie drogi XISF) mówią JEDNO
+    zdanie `card_value_nonfinite`, także przy typie int (reguła przed `int()` i przed regułą
+    niecałkowitości podglądu).
+    Falsyfikatory: podgląd bez reguły → wpis do stagingu (int: „wynik niecałkowity”); pisarz XISF
+    bez `_wartosc_karty` → 'applied' z `nan` w pliku."""
+    from horreum import macro
+    karta = {"keyword": keyword, "idx": 0, "value_raw": "300.0" if typ == "float" else "100",
+             "value_num": 300.0, "value_type": typ, "comment": None}
+    podglad = macro.evaluate_manual_change([karta], keyword, tekst)
+    assert not podglad.ok and podglad.reason.code == "card_value_nonfinite", podglad
+    op = writeback.WriteOp(keyword, "set", tekst, typ, idx=0)
+    fits_ = _fits_wynik(tmp_path, op)
+    xa, xw = _xisf_obie_drogi(tmp_path, op)
+    for res in (fits_, xa, xw):
+        assert res.status == "blocked" and str(res.reason) == str(podglad.reason), res
+    assert dict(podglad.reason.params) == {"keyword": keyword, "value": str(float(tekst))}
+
+
+@pytest.mark.parametrize("op, status, kod", [
+    pytest.param(writeback.WriteOp("EXPTIME", "set", "nan", "str", idx=0), "blocked",
+                 "card_value_nonfinite", id="str_set_na_golej"),
+    pytest.param(writeback.WriteOp("OBSERVER", "set", "nan", "str", idx=0), "applied", None,
+                 id="str_set_na_cytowanej"),
+    pytest.param(writeback.WriteOp("NOTE", "add", "inf", "str"), "applied", None, id="str_add"),
+    pytest.param(writeback.WriteOp("CCD-TEMP", "add", "inf", "float"), "blocked",
+                 "card_value_nonfinite", id="float_add"),
+    pytest.param(writeback.WriteOp("EXPTIME", "set", "abc", "float", idx=0), "blocked",
+                 "macro_type_mismatch", id="float_tekst_nie_liczba"),
+    pytest.param(writeback.WriteOp("EXPTIME", "set", repr(-0.0012345678901234567), "float", idx=0),
+                 "applied", None, id="float_dlugi_tekstem_bez_straty"),
+])
+def test_macierz_liczby_XISF_gola_cytowana_add(tmp_path, op, status, kod):
+    """AR-269 (XISF): typ liczbowy odmawia przy `set` i `add`; tekst odmawia WYŁĄCZNIE przy `set` na
+    zastanej GOŁEJ wartości (tam `nan` stałby się liczbą karty) - cytowany `set` i `add` tekstu
+    przechodzą (`nan` w tekście jest legalny); tekst nie-liczba przy typie float odmawia jak FITS
+    (`macro_type_mismatch`); float dłuższy niż pole FITS XISF zapisuje tekstem bez straty. Obie
+    drogi XISF to samo.
+    Falsyfikatory: reguła tekstu bez warunku „goła” → cytowany `set` odmawia; bez reguły tekstu →
+    goły `set` zapisuje `nan`."""
+    from horreum import scan
+    ra, rw = _xisf_obie_drogi(tmp_path, op)
+    for res in (ra, rw):
+        assert res.status == status, res
+        if kod:
+            assert res.reason.code == kod, res
+    if status == "applied" and op.op == "set":
+        karty = {c.keyword: c.value_raw for c in scan.read_xisf_meta_full(
+            str(tmp_path / "a.xisf")).cards}
+        assert karty[op.keyword] == op.value
+
+
+def test_operacja_nieznana_jedno_zdanie_FITS_i_XISF(tmp_path):
+    """AR-269 N3: operacja spoza `set`/`add` - FITS (obie drogi) i XISF (obie drogi) 'blocked' tym
+    samym zdaniem `card_op_unknown` (dawniej FITS 'failed' prozą, XISF `xisf_bad_op`).
+    Falsyfikator: XISF z dawnym kodem → inne zdanie."""
+    from test_writeback_inplace_add import _NieWolno, _fits_bez, _hash
+    op = writeback.WriteOp("EXPTIME", "del", "1", "float", idx=0)
+    p = _fits_bez(tmp_path / "f.fits", karty=[("EXPTIME", 300.0)])
+    wyniki = [writeback.write_changes(str(p), [op], _hash(p)),
+              writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno()),
+              *_xisf_obie_drogi(tmp_path, op)]
+    assert {(r.status, r.reason.code, str(r.reason)) for r in wyniki} == {
+        ("blocked", "card_op_unknown", "operacja 'del' nie istnieje - writeback zna 'set' i 'add'")}
+
+
+def _karta_float(keyword, raw, idx=0):
+    return {"keyword": keyword, "idx": idx, "value_raw": raw, "value_num": float(raw),
+            "value_type": "float", "comment": None}
+
+
+def _cel(**kw):
+    w = {"frame_id": 1, "filetype": "fits", "sha1_data_uncomputable": 0, "location_id": 7,
+         "path": "X:/L/a.fits", "header_hash": "hh", "hdu_index": 0, "compressed": 0, "n_sum": 0}
+    w.update(kw)
+    return w
+
+
+def test_podglad_cyfr_tym_samym_zdaniem_co_pisarz_tylko_FITS(tmp_path):
+    """AR-269 N1: makro, którego wynik (`SITELAT/-3600`) nie zmieści się w polu liczby karty FITS,
+    pomija klatkę FITS tym samym zdaniem, którym odmówiłby pisarz na tej karcie; cel XISF (pisarz
+    pisze tekst) - wpis przechodzi. Edycja komórki (`plan_manual_change`) tak samo.
+    Falsyfikator: `run_macro` bez `_cyfry_zmiany` → wpis do stagingu, który pisarz odrzuci."""
+    from horreum import macro
+    karty = [_karta_float("EXPTIME", "300.0"), _karta_float("SITELAT", "53.3885883333333")]
+    md = macro.MacroDef(assign=macro.Assign("EXPTIME", "set", "SITELAT/-3600"))
+    run = macro.run_macro(md, [1], targets_fn=lambda ids: [_cel()], cards_fn=lambda fid: karty)
+    (s,) = run.skipped
+    wynik = 53.3885883333333 / -3600
+    pisarz = _fits_wynik(tmp_path, writeback.WriteOp("EXPTIME", "set", repr(wynik), "float", idx=0))
+    assert pisarz.status == "blocked" and s.reason.code == "card_value_digits", (s, pisarz)
+    assert str(s.reason) == str(pisarz.reason)
+    run_xisf = macro.run_macro(md, [1], targets_fn=lambda ids: [_cel(filetype="xisf",
+                                                                     path="X:/L/a.xisf")],
+                               cards_fn=lambda fid: karty)
+    assert len(run_xisf.touched) == 1 and not run_xisf.skipped, run_xisf
+    pv, powod = macro.plan_manual_change([_cel()], "EXPTIME", repr(wynik), cards_fn=lambda lid: karty)
+    assert pv is None and str(powod) == str(pisarz.reason), powod
+
+
+@pytest.mark.parametrize("idx, pominiete", [(0, False), (1, True)])
+def test_podglad_cyfr_czyta_wystapienie_idx(idx, pominiete):
+    """AR-269 N1 przy karcie powtórzonej: podgląd porównuje z wartością wystąpienia `idx` zmiany
+    (tylko ona decyduje, czy astropy kartę przełoży) - liczba dłuższa niż pole równa wystąpieniu
+    [0] przechodzi na [0], a na [1] (inna wartość) odmawia - jak pisarz (test bliźniaczy w
+    `test_writeback_inplace_add`).
+    Falsyfikator: wartość zastana z pierwszego wystąpienia → [1] przechodzi."""
+    from horreum import macro
+    dlugi = repr(-0.0012345678901234567)
+    karty = [_karta_float("PEDESTAL", dlugi), _karta_float("PEDESTAL", "1.0", idx=1)]
+    md = macro.MacroDef(assign=macro.Assign("PEDESTAL", "set", dlugi, idx=idx))
+    run = macro.run_macro(md, [1], targets_fn=lambda ids: [_cel()], cards_fn=lambda fid: karty)
+    assert bool(run.skipped) is pominiete, run
+    if pominiete:
+        assert run.skipped[0].reason.code == "card_value_digits"
+
+
+def test_lustro_pola_float_rowne_astropy():
+    """AR-269 N1: lustro podglądu (`card_rules.pole_float_fits`, bez astropy) == pole liczby, które
+    astropy stawia w karcie, a decyzja podglądu („pole nie odtworzy”) == odczyt obrazu karty - na
+    liście brzegowej i 3 000 losowych double (znak, wykładnik, stałe ziarno).
+    Falsyfikator: szerokość pola 21 albo mantysa ucięta bez wykładnika → rozjazd."""
+    import random
+    import struct
+    import warnings
+    from astropy.io import fits
+    from horreum import card_rules
+    los = random.Random(24)
+    liczby = [0.0, -0.0, 1e16, 1.5e-05, -1.2345678901234567e-300, 3.3333333333333333e-06,
+              -0.014830163425925918, -0.0012345678901234567, 12345678901234567890123.0,
+              53.3885883333333, -123.45678901234567, 0.30000000000000004]
+    while len(liczby) < 3012:
+        v = struct.unpack(">d", los.getrandbits(64).to_bytes(8, "big"))[0]
+        if v == v and abs(v) != float("inf"):
+            liczby.append(v)
+            liczby.append(round(v, los.randrange(0, 18)) if abs(v) < 1e300 else v)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for v in liczby:
+            obraz = fits.Card("X", v).image
+            assert card_rules.pole_float_fits(v) == obraz[10:30].strip(), v
+            astropy_traci = fits.Card.fromstring(obraz).value != v
+            assert (card_rules.cyfry_violation("X", v) is not None) == astropy_traci, v
+
+
+def test_zlote_zdania_liczby_operacji_i_bajtu():
+    """Złote PL nowych zdań (AR-269, AR-271) znak w znak - z prawdziwych budowniczych."""
+    from horreum import card_rules
+    assert str(card_rules.liczba_violation("exptime", "1e400")) == (
+        "wartość karty EXPTIME (inf) nie jest liczbą skończoną - standard karty FITS (także "
+        "w XISF) jej nie dopuszcza")
+    assert str(card_rules.powod_cyfr("EXPTIME", -0.0012345678901234567)) == (
+        "wartość karty EXPTIME -0.0012345678901234567 nie mieści się w polu liczby karty FITS "
+        "(20 znaków) - zapis dałby -0.00123456789012345, inną liczbę; zaokrąglij wartość")
+    assert str(writeback._nieznana_operacja("del")) == (
+        "operacja 'del' nie istnieje - writeback zna 'set' i 'add'")
+    rekord = b"OBSERVER= 'Abc     '           / kom \xe9".ljust(80)
+    assert str(writeback._bajt_naglowka(rekord + writeback._FITS_END_RECORD)) == (
+        "karta OBSERVER ma w pliku bajt 0xE9 spoza drukowalnego ASCII - Horreum nie zapisze tego "
+        "nagłówka bez zmiany tego bajtu; plik nietknięty")
+    assert writeback._bajt_naglowka(b" " * 80 + writeback._FITS_END_RECORD + b"\x00" * 80) is None
+
+
+def test_meta_odmowa_bajtu_i_operacji_jednym_literalem():
+    """SPOT (AR-269, AR-271): zdanie bajtu spoza ASCII i operacji nieznanej rodzi się w `writeback`
+    raz - wszystkie drogi (atom, w miejscu, cofnięcie, XISF) wołają jednego budowniczego.
+    Falsyfikator: kopia literału w drugiej drodze."""
+    zrodlo = inspect.getsource(writeback)
+    assert zrodlo.count('"header_nonprintable"') == 1 and zrodlo.count('"card_op_unknown"') == 1
+    assert '"xisf_bad_op"' not in zrodlo and "xisf_bad_op" not in ITEM_REASON_CODES
+
+
+# Predykat AR-281: wywołanie rdzenia w zdaniu dla człowieka - identyfikator z `_` albo `.` tuż przed
+# `(`, albo nazwa w odwrotnych apostrofach, która jest WYWOŁYWALNYM atrybutem modułu `horreum`.
+_WYWOLANIE = re.compile(r"[A-Za-z_][\w]*(?:\.[A-Za-z_]\w*)*\(")
+_APOSTROFY = re.compile(r"`([^`]+)`")
+
+
+def _nazwa_funkcji_rdzenia(tekst):
+    import importlib
+    trafienia = [m.group(0) for m in _WYWOLANIE.finditer(tekst)
+                 if "_" in m.group(0) or "." in m.group(0)]
+    for m in _APOSTROFY.finditer(tekst):
+        nazwa = m.group(1).split("(")[0]
+        modul, _, atrybut = nazwa.rpartition(".")
+        try:
+            obiekt = getattr(importlib.import_module(f"horreum.{modul or 'writeback'}"), atrybut)
+        except (ImportError, AttributeError, ValueError):
+            continue
+        if callable(obiekt):
+            trafienia.append(m.group(0))
+    return trafienia
+
+
+def test_katalog_bez_nazw_funkcji_rdzenia_w_zdaniach():
+    """AR-281: żadne zdanie katalogu (PL i EN, każda forma wpisu mnogiego) nie mówi człowiekowi
+    wywołaniem rdzenia (`recover_torn(N)`, `writeback.release_isolation`) - drogi wskazują gest
+    z menu, a numer operacji i wywołanie schodzą do wiersza szczegółu (`wb.op_detail_tip`, `{call}`
+    składa kod). Predykat po KSZTAŁCIE (identyfikator z `_`/`.` przed nawiasem) i po SEMANTYCE (nazwa
+    w odwrotnych apostrofach, która jest wywoływalnym atrybutem modułu `horreum`), bez listy
+    wyjątków - `masterLight*.xisf` i `horreum park --add` przechodzą. Do tego „IZOLOWANA” wersalikami
+    nie wraca.
+    Falsyfikator: przywrócony stary wpis `objchg.item.way_restore` → trafienie."""
+    zle = []
+    for klucz, wpis in CATALOG.items():
+        if not isinstance(wpis, dict):
+            continue
+        for jezyk in ("pl", "en"):
+            tekst = wpis.get(jezyk)
+            for forma in (tekst.values() if isinstance(tekst, dict) else [tekst]):
+                if isinstance(forma, str) and (_nazwa_funkcji_rdzenia(forma)
+                                               or "IZOLOWAN" in forma or "ISOLATED" in forma):
+                    zle.append((klucz, jezyk, forma))
+    assert not zle, zle
+    assert _nazwa_funkcji_rdzenia("„Przywróć” (`recover_torn(7)`)")
+    assert _nazwa_funkcji_rdzenia("menu (`writeback.release_isolation`)")
+    assert not _nazwa_funkcji_rdzenia("pliki ``masterLight*.xisf`` i `horreum park --add`")
+
+
+def test_szczegol_okna_niesie_numer_operacji_i_wywolanie_rdzenia():
+    """AR-281: zdanie drogi mówi gest, a wiersz szczegółu (`wb_worker.wiersz_operacji`, w podpowiedzi
+    okien kart i szuflady przez `podpowiedz_kart`) - numer operacji i wywołanie rdzenia z parametru
+    `op_id`, także z powodu zagnieżdżonego (`backup_saved_in_isolated` → `way`). Powód bez drogi -
+    bez wiersza.
+    Falsyfikator: `podpowiedz_kart` bez `podpowiedz_operacji` → szczegół bez numeru operacji."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import podpowiedz_kart, wiersz_operacji
+    i18n.set_lang("pl")
+    otwarta = writeback._powod_izolacji({"id": 7, "kind": "commit", "phase": "writing"})
+    czeka = writeback._powod_izolacji({"id": 8, "kind": "commit", "phase": "written"})
+    assert "7" not in str(otwarta) and "recover_torn" not in str(otwarta), otwarta
+    assert wiersz_operacji(otwarta) == "Operacja zapisu w miejscu 7: writeback.recover_torn(7)"
+    assert wiersz_operacji(czeka) == ("Operacja zapisu w miejscu 8: writeback.finish_inplace(8), "
+                                      "writeback.recover_torn(8)")
+    zagniezdzony = PowodPozycji(f"x; backup do cofnięcia zapisany w commicie 3; lokacja izolowana od "
+                                f"skanu, odzysk: {writeback._droga_przywroc(5)}",
+                                "backup_saved_in_isolated", inner="x", commit_id=3,
+                                way=writeback._droga_przywroc(5))
+    assert wiersz_operacji(zagniezdzony) == "Operacja zapisu w miejscu 5: writeback.recover_torn(5)"
+    assert wiersz_operacji(writeback._RECZNA) == "" and wiersz_operacji("proza") == ""
+    fr = writeback.FileResult(1, "X:/L/a.fits", "failed", zagniezdzony)
+    assert "writeback.recover_torn(5)" in podpowiedz_kart(writeback.CommitResult("r", 3, [], [], [fr], []))
+    i18n.set_lang("en")
+    try:
+        assert wiersz_operacji(otwarta) == "In-place write operation 7: writeback.recover_torn(7)"
+    finally:
+        i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("keyword", ["HISTORY", "COMMENT"])
+@pytest.mark.parametrize("liczba", ["1.5", "-0.0012345678901234567"])
+def test_karta_komentarzowa_z_liczba_makro_i_pisarz_bez_odmowy_cyfr(tmp_path, keyword, liczba):
+    """AR-269 N1 - granica reguły: karta KOMENTARZOWA (`HISTORY`, `COMMENT`) nie ma pola liczby, astropy
+    pisze liczbę tekstem w pełnych cyfrach, a odczyt daje tekst. Makro `add` z typem float (krótka
+    i dłuższa niż 20 znaków liczba) przechodzi podgląd, a pisarz zapisuje ją bez odmowy - karta
+    w pliku niesie tekst wpisu stagingu znak w znak (dawniej: „zapis dałby 1.5, inną liczbę”).
+    Falsyfikatory: kontrola cyfr bez wyłączenia kart komentarzowych w pisarzu → 'blocked'; w lustrze
+    podglądu → pominięcie."""
+    from horreum import macro, scan
+    from test_writeback_inplace_add import _fits_bez, _hash
+    karty = [_karta_float("EXPTIME", "300.0")]
+    md = macro.MacroDef(assign=macro.Assign(keyword, "add", liczba, value_type="float"))
+    run = macro.run_macro(md, [1], targets_fn=lambda ids: [_cel()], cards_fn=lambda fid: karty)
+    assert not run.skipped and len(run.touched) == 1, run
+    wpis = run.touched[0]
+    p = _fits_bez(tmp_path / "f.fits", karty=[("EXPTIME", 300.0)])
+    op = writeback.WriteOp(keyword, "add", wpis.new_value, wpis.new_type)
+    res = writeback.write_changes(str(p), [op], _hash(p))
+    assert res.status == "applied", res
+    teksty = [c.value_raw for c in scan.read_fits_meta(str(p)).cards if c.keyword == keyword]
+    assert teksty[-1] == wpis.new_value == repr(float(liczba)), teksty
+
+
+def _izolowane_dwa_pliki():
+    """Dwa pliki z drogą wyjścia z izolacji o różnych numerach operacji: nieukończony commit (11)
+    i przerwane cofnięcie w miejscu z drogą odzysku (12)."""
+    pierwszy = PowodPozycji("commit nie jest dokończony: x; lokacja izolowana od skanu",
+                            "undo_commit_unfinished", op_id=11, inner="x")
+    droga = writeback._droga_przywroc(12)
+    drugi = PowodPozycji(f"y; lokacja izolowana od skanu, odzysk: {droga}", "undo_partial_isolated",
+                         inner="y", way=droga)
+    return [writeback.FileResult(1, "X:/L/a.fits", "failed", pierwszy),
+            writeback.FileResult(2, "X:/L/b.fits", "failed", drugi)]
+
+
+def test_okna_kart_po_cofnieciu_niosa_numery_operacji_wszystkich_plikow(tmp_path):
+    """AR-281: oba okna kart („Napraw nagłówek…”, „Zatwierdź ze ścieżki…”) po cofnięciu, które
+    zostawiło dwa pliki izolowane, mają w szczególe pola zdania numer operacji i wywołanie rdzenia
+    KAŻDEGO pliku z nazwą pliku (zdanie mówi gest, numerów nie mówi) - dawniej szczegół cofnięcia
+    niósł sam tekst systemu.
+    Falsyfikatory: `_after_undo` z samym `podpowiedz_systemu` → szczegół bez numerów;
+    `podpowiedz_operacji` po pierwszej pozycji → brak drugiego numeru."""
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    from horreum import db, resolver
+    from horreum.gui import i18n, queries
+    from horreum.gui.app import ConfirmPathObjectsDialog
+    from test_gui_object_change import _lighty, _okno_naprawy
+    QApplication.instance() or QApplication([])
+    i18n.set_lang("pl")
+    con = db.open_db(str(tmp_path / "k.db"))
+    _lighty(tmp_path / "ASTRO_", con, "NGC7635", 1, baza=7)
+    res = writeback.UndoResult(1, [], [], _izolowane_dwa_pliki())
+    naprawa = _okno_naprawy(con)
+    sciezka = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                       now_fn=lambda: NOW, db_path=queries.db_path_of(con))
+    try:
+        for dlg in (naprawa, sciezka):
+            dlg._after_undo("undo", res)
+            szczegol = dlg.status.szczegol()
+            assert "a.fits: Operacja zapisu w miejscu 11: writeback.finish_inplace(11)" in szczegol, (
+                type(dlg).__name__, szczegol)
+            assert "b.fits: Operacja zapisu w miejscu 12: writeback.recover_torn(12)" in szczegol, (
+                type(dlg).__name__, szczegol)
+            assert "recover_torn" not in dlg.status.text()
+            dlg.reject()
+    finally:
+        con.close()
+
+
+def test_wynik_zapisu_szczegol_operacji_kazdego_pliku_takze_wstrzymanego():
+    """AR-281: podpowiedź wyniku zapisu (`podpowiedz_kart` - okna kart i szuflada) zbiera numery
+    operacji WSZYSTKICH pozycji z drogą wyjścia, z nazwą pliku, po tej samej kolekcji co zdanie
+    wyniku - błąd, zapis wstrzymany poza zapisanymi, blokada.
+    Falsyfikator: kolekcja bez wstrzymanych → numer pliku wstrzymanego ginie."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import podpowiedz_kart
+    i18n.set_lang("pl")
+    blad, blokada = _izolowane_dwa_pliki()
+    wstrzymany = writeback.FileResult(3, "X:/L/c.fits", "withheld", writeback._powod_izolacji(
+        {"id": 13, "kind": "commit", "phase": "writing"}))
+    res = writeback.CommitResult("r", 1, [], [blokada], [blad], [], withheld=[wstrzymany])
+    podpowiedz = podpowiedz_kart(res)
+    for plik, wywolanie in (("a.fits", "finish_inplace(11)"), ("b.fits", "recover_torn(12)"),
+                            ("c.fits", "recover_torn(13)")):
+        assert f"{plik}: Operacja zapisu w miejscu" in podpowiedz and wywolanie in podpowiedz, (
+            plik, podpowiedz)
+
+
+def test_okno_zmiany_obiektu_szczegol_operacji_w_statusie_i_odmowie():
+    """AR-281: okno „Zmień obiekt…” - status pozycji (`status_pozycji`) i pole błędu odmowy stagingu
+    (`zdanie_odmowy_stagingu`) dokładają do szczegółu numer operacji z drogą wyjścia obok tekstu
+    systemu; zdanie mówi gest.
+    Falsyfikatory: `status_pozycji` z samym `wiersz_systemu`; odmowa stagingu bez `szczegol_powodu`."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.object_change_dialog import zdanie_odmowy_stagingu
+    from horreum.gui.wb_worker import status_pozycji
+    from horreum.item_reasons import OdmowaZPowodem
+    i18n.set_lang("pl")
+    izolacja = writeback._powod_izolacji({"id": 21, "kind": "commit", "phase": "writing"})
+    status, podpowiedz = status_pozycji("zablokowana", izolacja)
+    assert "writeback.recover_torn(21)" in podpowiedz and "recover_torn" not in status, podpowiedz
+    zdanie, szczegol = zdanie_odmowy_stagingu(OdmowaZPowodem(izolacja))
+    assert szczegol == "Operacja zapisu w miejscu 21: writeback.recover_torn(21)", szczegol
+    assert "recover_torn" not in zdanie, zdanie

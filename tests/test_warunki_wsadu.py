@@ -102,7 +102,12 @@ def test_rename_po_bramce_izolacji_odbija_zapis_w_miejscu(tmp_path, monkeypatch,
     monkeypatch.undo()
     op_id = _operacje(con)[0]["id"]
     assert not rn.applied and len(rn.blocked) == 1, rn
-    assert f"operacja {op_id}" in rn.blocked[0].reason
+    powod = rn.blocked[0].reason
+    if powod.code in ("isolated_finish", "isolated_recover"):
+        # izolacja: numer operacji w parametrach powodu (szczegół okna), nie w zdaniu (AR-281)
+        assert dict(powod.params)["op_id"] == op_id and f"operacja {op_id}" not in powod
+    else:
+        assert powod.code == "inplace_after_gate" and f"operacja {op_id}" in powod
     assert p.read_bytes() == stan["po_zapisie"] and not nowa.exists()
     assert _loc(con, p)["id"] == loc["id"]
     assert con.execute("SELECT count(*) FROM event WHERE verb = 'location.renamed'"

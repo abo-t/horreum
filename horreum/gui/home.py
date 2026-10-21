@@ -49,7 +49,7 @@ from horreum.gui.grid import Recepta
 # Role są nazwami ról QSS (`theme.ROLES`), więc kropka bierze kolor z motywu, nie z literału.
 from horreum.gui.projection_dialog import _STATE_ROLES, _STATE_TIPS
 from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
-from horreum.item_reasons import blad_systemu
+from horreum.item_reasons import powod_okna       # wyjątek workera jedną regułą okna (AR-264)
 
 # Teczki Domu: trzy kolumny, do sześciu rzędów - a rzędów tyle, ile mieści wysokość okna
 # (`_dopasuj_rzedy`). Reszta jest o jedno zapytanie dalej, w Znajdź (stopka to mówi).
@@ -215,8 +215,9 @@ class TeczkiWorker(QObject):
             self.done.emit(self._gen, self._compute())
         except Exception as exc:        # szczerze na ekran, nie cicha śmierć wątku
             # Teczki czytają WYŁĄCZNIE bazę (zmierzone: 0 wywołań systemu plików), więc realną
-            # awarią jest błąd SQLite - klasą bazy w języku UI, surowy tekst w szczególe (AR-198).
-            self.failed.emit(self._gen, blad_systemu(exc))
+            # awarią jest błąd SQLite - klasą bazy w języku UI, surowy tekst w szczególe (AR-198);
+            # błąd programu zdaniem `prog_error` z miejscem w kodzie w szczególe (`powod_okna`, AR-264).
+            self.failed.emit(self._gen, powod_okna(exc))
         finally:
             self.finished.emit()
 

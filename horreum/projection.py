@@ -674,6 +674,47 @@ def manifest_drift(root, layout):
 
 
 @dataclasses.dataclass(frozen=True)
+class ManifestState:
+    """JEDEN odczyt `_PROJEKCJA.json` korzenia dla sondy wydania obiektu (AR-273): treść
+    tolerancyjnie (`payload` - to, co dałby `read_manifest` bez `errors_out`), uszkodzenie pliku
+    (`uszkodzenie` - pole, jak w `_manifest_z_pliku`) i błąd systemu odczytu (`blad` - `OSError`,
+    „nie wiem”, nie „nie ma”). Świadkowie scalenia (`manifest_sources`) i wskazówka o manifeście
+    (`manifest_step_refusal`) czytają ten sam stan - bez drugiego odczytu tego samego pliku, który
+    bywa na udziale SMB."""
+    payload: dict | None = None
+    uszkodzenie: str | None = None
+    blad: OSError | None = None
+
+
+def read_manifest_state(root):
+    """`ManifestState` korzenia - jeden odczyt pliku, zero zapisu (`_manifest_z_pliku`)."""
+    try:
+        payload, uszkodzenie = _manifest_z_pliku(root)
+    except OSError as exc:
+        return ManifestState(blad=exc)
+    return ManifestState(payload=payload, uszkodzenie=uszkodzenie)
+
+
+def manifest_step_refusal(root, *, layout, state, object_id=None):
+    """WSKAZÓWKA sondy (AR-273): odmowa, którą krok manifestu wydania dałby PRZY TYM stanie korzenia
+    (`state` - `read_manifest_state` sondy), albo None. Cudzy plik roboczy (`os.path.lexists`) -
+    `proj_manifest_busy`; manifest, którego nie da się odczytać - `proj_manifest_unreadable` (przed
+    kliknięciem uczciwiej „nie da się odczytać” niż „nie zapisano”); uszkodzony albo obcy - ten sam
+    walidator co krok (`_odmowa_nad_starym`). Czysty odczyt.
+
+    TO NIE JEST GWARANCJA: między sondą a kliknięciem plik roboczy i manifest mogą się zmienić -
+    bajty chroni dopiero krok manifestu (`.part` zakładany wyłącznie, stary manifest czytany pod nim,
+    `_write_manifest`). Sonda mówi, co widzi teraz."""
+    part = os.path.join(root, MANIFEST_NAME + PART_SUFFIX)
+    if os.path.lexists(part):
+        return _odmowa_zajetego(part)
+    if state.blad is not None:
+        return _powod_odczytu(blad_systemu(state.blad))
+    return _odmowa_nad_starym(state.payload, state.uszkodzenie, os.path.join(root, MANIFEST_NAME),
+                              layout=layout, object_id=object_id)
+
+
+@dataclasses.dataclass(frozen=True)
 class ApplyResult:
     root: str
     layout: str
@@ -787,9 +828,11 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None, ex
             if zly:
                 results.append(LinkResult(item.frame_id, item.src, dst, "verify_bad",
                                           reason or "sonda pierwszego linku: cel nie jest hardlinkiem (i-węzeł/treść)"))
+                # Fakt i rada wspólna dla każdej powierzchni (AR-265): przełącznik trybu kopii jest
+                # gestem okna, flaga `--copy` - terminala; każda dokłada swój (AR-251).
                 abort = PowodPozycji(
                     "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) - "
-                    "wolumen nie wspiera hardlinków? włącz tryb kopii", "proj_first_link")
+                    "wolumen nie wspiera hardlinków? wydaj ponownie kopiami plików", "proj_first_link")
                 partial = ApplyResult(root, projection.layout, do_apply, copy,
                                       _z_kwarantanna(results, projection), cancelled, drift, abort)
                 raise ProjectionAbort(abort, partial)
@@ -856,10 +899,12 @@ def _odmowa_zajetego(part):
     manifestu wydania i dla naprawy manifestu: obaj pisarze zakładają `.part` wyłącznie (`x`),
     więc cudzy `.part` znaczy zapis w toku albo resztkę po przerwanym. Zdanie mówi fakt i radę
     wspólną dla każdej powierzchni; gest ponowienia dokłada powierzchnia (okno - przyciski, CLI -
-    polecenie, AR-251)."""
+    polecenie, AR-251). Zdanie mówi NAZWĘ pliku roboczego, pełna ścieżka idzie wyłącznie parametrem
+    `path` - szczegół pod kursorem okna i paska, osobny wiersz CLI (AR-273: pasek niósł ją dwa razy,
+    a rada „skasuj go ręcznie” ginęła w elizji)."""
     return PowodPozycji(
-        f"obok manifestu leży plik roboczy innego zapisu ({part}) - gdy żaden zapis nie trwa, skasuj "
-        f"go ręcznie", "proj_manifest_busy", path=part)
+        f"obok manifestu leży plik roboczy innego zapisu ({MANIFEST_NAME}{PART_SUFFIX}) - gdy żaden "
+        f"zapis nie trwa, skasuj go ręcznie", "proj_manifest_busy", path=part)
 
 
 def _powod_odczytu(inner):
@@ -929,10 +974,8 @@ def _write_manifest(root, result: ApplyResult, *, now, manifest, extra_sources=N
     try:
         with fh:
             stary, uszkodzenie = _manifest_z_pliku(root)
-            odmowa = (_odmowa_uszkodzonego(uszkodzenie, path) if uszkodzenie is not None
-                      else _odmowa_starego(stary, path, layout=result.layout,
-                                           object_id=(manifest or {}).get("object_id"))
-                      if stary is not None else None)
+            odmowa = _odmowa_nad_starym(stary, uszkodzenie, path, layout=result.layout,
+                                        object_id=(manifest or {}).get("object_id"))
             if odmowa is not None:
                 raise _OdmowaStarego(odmowa)
             if manifest:
@@ -1125,11 +1168,14 @@ def _obecne_kopie(con, ids):
     return out
 
 
-def manifest_sources(con, root):
+def manifest_sources(con, root, state=None):
     """Obecne kopie (`_obecne_kopie`) każdej klatki, którą wymienia manifest JUŻ leżący w korzeniu
     wydania obiektu (`read_manifest`, tolerancyjnie) - `extra_sources` dla `apply`: świadkowie
-    scalenia bez utraty (AR-213). Brak manifestu → `{}`. Odczyt bazy i manifestu, zero zapisu."""
-    return _obecne_kopie(con, _ids_manifestu(read_manifest(root)))
+    scalenia bez utraty (AR-213). Brak manifestu → `{}`. Odczyt bazy i manifestu, zero zapisu.
+    `state` (`read_manifest_state` wołającego, AR-273) - treść z odczytu, który wołający już zrobił,
+    zamiast drugiego odczytu pliku."""
+    payload = read_manifest(root) if state is None else state.payload
+    return _obecne_kopie(con, _ids_manifestu(payload))
 
 
 class _SwiadekDrzewa:
@@ -1410,6 +1456,18 @@ def _odmowa_starego(stary, path, *, layout, object_id=None):
     if object_id is not None and stary["object_id"] != object_id:
         return _odmowa_obcego("object_id")
     return None
+
+
+def _odmowa_nad_starym(stary, uszkodzenie, path, *, layout, object_id=None):
+    """Odmowa kroku manifestu nad tym, co leży w korzeniu (wynik `_manifest_z_pliku`) albo None -
+    JEDNO miejsce dla kroku manifestu wydania (`_write_manifest`) i wskazówki sondy
+    (`manifest_step_refusal`, AR-273): plik uszkodzony - `proj_manifest_damaged`, zeznanie, którego
+    zapis nie może zastąpić - `_odmowa_starego`, brak pliku - None."""
+    if uszkodzenie is not None:
+        return _odmowa_uszkodzonego(uszkodzenie, path)
+    if stary is None:
+        return None
+    return _odmowa_starego(stary, path, layout=layout, object_id=object_id)
 
 
 def _podpis(path):

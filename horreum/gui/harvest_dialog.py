@@ -91,7 +91,7 @@ from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.projection_dialog import _COLORS, _elide_path
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # błąd systemu w języku UI
                                    tekst_powodu, wiersz_systemu)       # (AR-184), szczegół na pasek (AR-218)
-from horreum.item_reasons import blad_systemu, powod_systemu
+from horreum.item_reasons import powod_okna, powod_systemu   # wyjątek workera jedną regułą okna (AR-264)
 
 # Ile poziomów nad wyjściem WBPP szukać manifestu wydania: WBPP pisze `master/` (i `calibrated/`)
 # wewnątrz katalogu roboczego, który wydanie obiektu kładzie pod `<karta>/OBJECTS/<obiekt>` -
@@ -580,7 +580,7 @@ class HarvestDryWorker(QObject):
         except harvest.HarvestCancelled:
             pass                                     # porzucona sonda - wynik nikomu niepotrzebny
         except Exception as exc:                     # sonda pada szczerze, nie cichą śmiercią wątku
-            self.failed.emit(self._gen, blad_systemu(exc))
+            self.failed.emit(self._gen, powod_okna(exc))
         else:
             self.done.emit(self._gen, payload)
         finally:
@@ -647,7 +647,7 @@ class HarvestApplyWorker(QObject):
             res = harvest.apply(self._plan, now=self._now, progress=self._emit_progress,
                                 should_cancel=self._cancel.is_set)
         except Exception as exc:
-            self.failed.emit(blad_systemu(exc))
+            self.failed.emit(powod_okna(exc))
         else:
             self.done.emit(res)
         finally:
@@ -701,7 +701,7 @@ class HarvestReleasesWorker(QObject):
             widziane = {karta for karta, _powod in brak}
             brak += tuple(p for p in nieczytelne if p[0] not in widziane)
         except Exception as exc:                     # lista pada szczerze, nie cichą śmiercią wątku
-            self.failed.emit(self._gen, blad_systemu(exc))
+            self.failed.emit(self._gen, powod_okna(exc))
         else:
             self.missing.emit(self._gen, brak)
             self.done.emit(self._gen, rows)

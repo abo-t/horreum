@@ -2039,3 +2039,113 @@ def test_slot_sygnalu_z_object_ma_object_na_tej_pozycji():
     assert {("PipelineWorker", "failed"), ("TeczkiWorker", "failed"), ("_LicznikiWorker", "failed"),
             ("PlanWorker", "failed"), ("DryWorker", "failed"), ("ApplyWorker", "aborted"),
             ("ApplyWorker", "failed")} <= sprawdzone, sorted(sprawdzone)
+
+
+# ============================================================ AR-279: ścieżka źródła nie rozpycha okna
+
+# Ścieżka ~250 znaków z segmentami po `\` (bez `-` i spacji): pole zdania łamie ją WYŁĄCZNIE po `\`
+# (`EtykietaBledu`, AR-221) - segmentacja jest częścią mechanizmu, jeden segment na 250 znaków byłby
+# jednym słowem dłuższym od strony także po naprawie. Natywnie taka ścieżka podnosiła minimum okna
+# z 1424 do 1923-2023 px (odbiór 0.19.0: 1982 px).
+_DLUGIE_ZRODLO = "R:\\ASTRO_\\LIGHTS\\" + "\\".join(f"katalog_zrodla_dostawy_{i:02d}" for i in range(9))
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zrodlo_niedostepne_z_dluga_sciezka_nie_rozpycha_strony(qapp, tmp_path, lang):
+    """Zdanie „Źródło niedostępne: <ścieżka> - wskaż katalog.” w wierszu sekcji wyniku i wiersz logu
+    „NIE WYKONANO - źródło niedostępne: …” nie podnoszą minimum szerokości strony Dostawy w obu językach
+    UI: oba pola łamią ścieżkę po `\\`, zdanie sekcji zawija się, a podpowiedź niesie pełne zdanie ze
+    ścieżką. Falsyfikator: `lbl_vanished` albo `lbl_summary` jako `QLabel` - minimum = ścieżka."""
+    i18n.set_lang(lang)
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        bez = view.minimumSizeHint()
+        view._on_source_unreachable("all", _DLUGIE_ZRODLO)
+        qapp.processEvents()
+        zdanie = i18n.t("pipeline.source.unreachable_pick", root=_DLUGIE_ZRODLO)
+        assert view.lbl_vanished.text() == zdanie and not view.box_vanished.isHidden()
+        assert view.lbl_vanished.wordWrap() and zdanie in view.lbl_vanished.toolTip()
+        assert _DLUGIE_ZRODLO in view.lbl_summary.text()
+        assert view.minimumSizeHint().width() == bez.width(), (bez, view.minimumSizeHint())
+    finally:
+        view.close()
+        i18n.set_lang("pl")
+
+
+def test_zapamietane_zrodlo_i_wskazany_katalog_nie_rozpychaja_strony(qapp, tmp_path, ustawienia):
+    """Memo „ostatnie źródło: <ścieżka>” (`_sync_source_memo`) i wskazany katalog (`_show_root`) z długą
+    ścieżką nie podnoszą minimum szerokości strony - memo stało szeroko już PRZED biegiem (natywnie okno
+    1585-1702 px przy ~220 znakach). Falsyfikator: `lbl_source_memo` albo `lbl_root` jako `QLabel`."""
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        bez = view.minimumSizeHint()
+        ustawienia.setValue("pipeline/last_source", _DLUGIE_ZRODLO)
+        view._sync_source_memo()
+        qapp.processEvents()
+        assert view.lbl_source_memo.text() == i18n.t("pipeline.source_last", source=_DLUGIE_ZRODLO)
+        assert view.minimumSizeHint().width() == bez.width(), (bez, view.minimumSizeHint())
+        # Wskazany katalog stoi w wierszu bez przedrostka zdania, więc ścieżka DWA razy dłuższa: przy
+        # ~250 znakach wiersz mieści się w minimum, które trzyma reszta strony w metrykach offscreen.
+        wskazany = _DLUGIE_ZRODLO + "\\" + "\\".join(f"dalszy_poziom_katalogu_{i:02d}" for i in range(9))
+        view._show_root(wskazany, None)
+        qapp.processEvents()
+        assert view.lbl_root.text() == wskazany
+        assert view.minimumSizeHint().width() == bez.width(), (bez, view.minimumSizeHint())
+        # Offscreen układ wiersza „Wskaż katalog…” nie przenosi minimum etykiety na stronę (zmierzone:
+        # `QLabel` z tą ścieżką - minimum 5808 px, strona bez zmian), natywnie przenosi (okno do 1856 px
+        # przy ~240 znakach) - więc pole pilnujemy też wprost: nie żąda więcej niż strona bez ścieżki.
+        assert view.lbl_root.minimumSizeHint().width() <= bez.width(), view.lbl_root.minimumSizeHint()
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdanie_znikniecia_po_zdaniu_zrodla_zostaje_jednym_wierszem(qapp, tmp_path, lang):
+    """Wiersz sekcji wyniku zawija WYŁĄCZNIE zdanie ze ścieżką: po zdaniu źródła wynik obecności
+    z potwierdzonym zniknięciem mówi krótkim zdaniem jednym wierszem obok „Oznacz zniknięte” w obu
+    językach UI (z `wordWrap` Qt łamał je na dwa wiersze mimo wolnego miejsca - natywnie 138 px PL,
+    280 px EN). Jeden wiersz = wysokość podpowiedzi rozmiaru pola równa polu z jednym znakiem tym samym
+    fontem. Falsyfikator: zawijanie na stałe albo `_zdanie_sekcji` bez `setWordWrap`."""
+    from types import SimpleNamespace
+    from horreum.gui.wb_worker import EtykietaBledu
+    i18n.set_lang(lang)
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view._on_source_unreachable("all", _DLUGIE_ZRODLO)
+        view._root = r"X:\L"
+        view._update_vanished_box(SimpleNamespace(run_id=None, confirmed_gone=3, aborted=None,
+                                                  cancelled=False, brake_limit=None, volume="V"))
+        qapp.processEvents()
+        lv = view.lbl_vanished
+        assert lv.text() == i18n.t_plural("pipeline.vanished_still_present", 3)
+        assert not view.btn_mark_vanished.isHidden() and view.btn_pick_source.isHidden()
+        wzor = EtykietaBledu("X")
+        wzor.setFont(lv.font())
+        assert not lv.wordWrap() and lv.sizeHint().height() == wzor.sizeHint().height(), (
+            lv.sizeHint(), wzor.sizeHint())
+    finally:
+        view.close()
+        i18n.set_lang("pl")
+
+
+def test_strona_przyjmij_przebieg_bez_zrodla_nie_rozpycha_strony(qapp, tmp_path):
+    """Raport „Co przyszło” przebiegu, który nie ruszył (źródło niedostępne z długą ścieżką): zdanie
+    „Dostawa nie ruszyła: …” łamie ścieżkę po `\\` i nie podnosi minimum strony (natywnie trzymało okno
+    na 1517 px przy ~220 znakach bez `-`). Falsyfikator: `PrzyjmijView.lbl_warn` jako `QLabel`."""
+    from horreum.gui.flows.przyjmij import PrzyjmijView
+    db_path = _fresh_db(tmp_path)
+    con = db.open_db(db_path)
+    pv = PipelineView(db_path, now_fn=lambda: NOW)
+    widok = PrzyjmijView(con, pv, now_fn=lambda: NOW)
+    try:
+        bez = widok.minimumSizeHint()
+        powod = i18n.t("pipeline.source.unreachable", root=_DLUGIE_ZRODLO)
+        zapis = dict(pv._pusty_zapis_przebiegu(), stage="all", since=NOW, refused=powod)
+        widok._on_run_finished(zapis)
+        qapp.processEvents()
+        assert widok.lbl_warn.text() == i18n.t("intake.refused", reason=powod)
+        assert not widok.lbl_warn.isHidden()
+        assert widok.minimumSizeHint().width() == bez.width(), (bez, widok.minimumSizeHint())
+    finally:
+        widok.close()
+        con.close()

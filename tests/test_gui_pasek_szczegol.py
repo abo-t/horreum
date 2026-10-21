@@ -1014,7 +1014,8 @@ def test_okno_sciezki_udane_ponowienie_nie_niesie_starej_awarii(sciezka_karty, m
     QTest.mouseClick(v.confirm_path_btn, Qt.LeftButton)
     dlg = okna[-1]
     assert dlg.error.text() == "" and dlg.error.szczegol() == ""
-    assert zdania[-1] == dlg.status.text() and _tip() not in szczegol_zdania(zdania[-1])
+    assert zdania[-1] == dlg.status.text() + _czlon_cofniecia(dlg._commit_id)
+    assert _tip() not in szczegol_zdania(zdania[-1])
 
 
 # ============================================================ AR-235, AR-243 - pole zdania: tekst zwykły, menu
@@ -1222,8 +1223,9 @@ def test_okno_naprawy_po_zamknieciu_wynik_na_pasku(repair, monkeypatch):
     zdania.clear()
     _select_review_tag(v, "nameless")
     QTest.mouseClick(v.repair_btn, Qt.LeftButton)
-    assert zdania == [okna[-1].status.text()] and "commit" in zdania[0]
-    assert szczegol_zdania(zdania[0]) == ""
+    dlg = okna[-1]
+    assert zdania == [dlg.status.text() + _czlon_cofniecia(dlg._commit_id)] and "commit" in zdania[0]
+    assert szczegol_zdania(zdania[0]) == _szczegol_polecenia(_con, dlg._commit_id)     # AR-283
 
 
 def test_wynik_okna_naprawy_na_pasku_przezywa_nawigacje_i_zegar(qapp, tmp_path, monkeypatch, pola_inline):
@@ -1434,9 +1436,10 @@ def _tylko_do_odczytu(pliki, tak):
 def test_naprawa_cofniecie_niedokonczone_pasek_po_zamknieciu_bez_przycisku_cofnij(repair, monkeypatch):
     """AR-236: „Napraw nagłówek…” - prawdziwy zapis kart, pliki tylko do odczytu, prawdziwy klik
     „Cofnij”: cofnięcie niedokończone, okno mówi „„Cofnij” ponowi…”. Po zamknięciu okna przycisku
-    nie ma - zdanie paska to ten sam ogon z poleceniem CLI ponowienia tego commitu w miejscu etykiety
-    przycisku. Falsyfikatory: pasek ze zdaniem pola okna (obietnica martwego „Cofnij”); wariant bez
-    numeru commitu."""
+    nie ma - zdanie paska to ten sam ogon z KRÓTKIM poleceniem CLI ponowienia tego commitu w miejscu
+    etykiety przycisku, pełne polecenie ze ścieżką bazy w szczególe (AR-272). Falsyfikatory: pasek ze
+    zdaniem pola okna (obietnica martwego „Cofnij”); wariant bez numeru commitu; ścieżka bazy
+    w zdaniu."""
     v, con, files, _open = repair
     v.resize(1200, 800)
     v.show()
@@ -1456,9 +1459,11 @@ def test_naprawa_cofniecie_niedokonczone_pasek_po_zamknieciu_bez_przycisku_cofni
     QTest.mouseClick(v.repair_btn, Qt.LeftButton)
     dlg = okna[-1]
     assert cofnij in dlg.status.text() and not dlg.undo_btn.isHidden()      # okno: „Cofnij” zostaje
-    polecenie = i18n.t("wb.undo_cli", db=queries.db_path_of(con), id=dlg._commit_id)
+    polecenie = i18n.t("wb.undo_cli_short", id=dlg._commit_id)
     assert zdania[-1] == dlg.status.text().replace(cofnij, f"„{polecenie}”")
     assert cofnij not in zdania[-1] and f"--undo {dlg._commit_id}" in zdania[-1]
+    assert queries.db_path_of(con) not in zdania[-1]                                   # AR-272
+    assert szczegol_zdania(zdania[-1]).endswith(_szczegol_polecenia(con, dlg._commit_id))
 
 
 @pytest.mark.parametrize("niedokonczone", [True, False])
@@ -1496,10 +1501,159 @@ def test_sciezka_cofniecie_kart_pasek_po_zamknieciu_bez_martwych_przyciskow(scie
     if niedokonczone:
         przycisk = "„" + i18n.t("path.undo_cards_btn") + "”"
         assert przycisk in dlg.status.text()
-        polecenie = i18n.t("wb.undo_cli", db=queries.db_path_of(con), id=dlg._commit_id)
+        polecenie = i18n.t("wb.undo_cli_short", id=dlg._commit_id)
         assert zdania[-1] == dlg.status.text().replace(przycisk, f"„{polecenie}”")
+        assert queries.db_path_of(con) not in zdania[-1]                               # AR-272
+        assert szczegol_zdania(zdania[-1]).endswith(_szczegol_polecenia(con, dlg._commit_id))
     else:
         nota_okna = i18n.t("path.cards_restored_note")
         assert dlg.status.text().endswith(nota_okna)
         assert zdania[-1] == dlg.status.text().replace(nota_okna, i18n.t("path.cards_restored_closed_note"))
         assert nota_okna not in zdania[-1]
+
+
+# ============================================================ AR-283, AR-272 - pasek po oknach kart: commit i polecenie
+
+
+def _czlon_cofniecia(commit_id):
+    """Krótki człon cofnięcia w zdaniu paska po udanym zapisie kart (bez ścieżki bazy)."""
+    return i18n.t("wb.undo_short", cmd=i18n.t("wb.undo_cli_short", id=commit_id))
+
+
+def _szczegol_polecenia(con, commit_id):
+    """Szczegół paska: pełne polecenie CLI cofnięcia commitu ze ścieżką bazy."""
+    return i18n.t("wb.undo_cli_tip", id=commit_id,
+                  cli=i18n.t("wb.undo_cli", db=queries.db_path_of(con), id=commit_id))
+
+
+def test_udany_zapis_naprawy_zdanie_trwa_a_polecenie_kopiuje_sie_ze_szczegolu(qapp, tmp_path, monkeypatch,
+                                                                              pola_inline):
+    """AR-283, gospodarz: prawdziwy zapis kart w „Napraw nagłówek…” i zamknięcie okna - zdanie paska
+    niesie numer commitu i krótkie polecenie cofnięcia, pełne polecenie ze ścieżką bazy stoi w szczególe,
+    raport NIE gaśnie zegarem (do następnego raportu), a prawy klik → „Kopiuj szczegół” daje polecenie.
+    Falsyfikatory: wariant paska bez szczegółu (zegar 5 s, jak przed AR-283); zdanie z pełną ścieżką."""
+    path = tmp_path / "naprawa.db"
+    con = db.open_db(str(path))
+    for p in _nameless_tree(tmp_path):
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
+                           summary=scan.ScanSummary())
+    con.close()
+    okna = _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
+    win = MainWindow(str(path))
+    try:
+        win.resize(1400, 900)
+        win.show()
+        win._show_view(NAV_PORZADKI)
+        from horreum.gui import tasks as tasks_mod
+        win.tasks_view.pages.setCurrentIndex(tasks_mod._PAGE_OBJECTS)
+        os_ = win.object_view
+        os_.refresh()
+        QApplication.processEvents()
+        _select_review_tag(os_, "nameless")
+        QTest.mouseClick(os_.repair_btn, Qt.LeftButton)
+        dlg = okna[-1]
+        assert dlg._commit_id is not None
+        assert win._pelny_komunikat == dlg.status.text() + _czlon_cofniecia(dlg._commit_id)
+        assert queries.db_path_of(win.con) not in win._pelny_komunikat
+        assert win.report_label.szczegol() == _szczegol_polecenia(win.con, dlg._commit_id)
+        assert not win._zegar_raportu.isActive() and win._miejsce_komunikatu is None
+        prawy_klik(win.report_label)
+        pozycje = menu_pola_otwarte(win.report_label)
+        pozycje[i18n.t("wb.copy_detail")].trigger()
+        schowek = QGuiApplication.clipboard().text()
+        assert schowek.endswith(i18n.t("wb.undo_cli", db=queries.db_path_of(win.con), id=dlg._commit_id))
+        win.report_label._menu.hide()
+    finally:
+        win.close()
+
+
+def _okno_sciezki_reka(monkeypatch, akcja):
+    """`ConfirmPathObjectsDialog.exec` prowadzony ręką testu (zapis inline) - lista okien."""
+    from horreum.gui import app as app_mod
+    okna = []
+
+    def _exec(dlg):
+        okna.append(dlg)
+        dlg._runner.async_ok = False
+        dlg.show()
+        akcja(dlg)
+        return QDialog.Accepted
+    monkeypatch.setattr(app_mod.ConfirmPathObjectsDialog, "exec", _exec)
+    return okna
+
+
+def _klik_okna_sciezki(v):
+    from horreum.gui import app as app_mod
+    wiersz = next(r for r in range(v.review.count())
+                  if v.review.item(r).data(app_mod._REVIEW_PAYLOAD) == app_mod.PATH_STACKS_PAYLOAD)
+    v.review.setCurrentRow(wiersz)
+    QTest.mouseClick(v.confirm_path_btn, Qt.LeftButton)
+
+
+def test_wynik_okna_sciezki_po_odswiezeniu_nie_ginie_pod_pusta_biblioteka(sciezka_karty, monkeypatch):
+    """AR-283: biblioteka osi z aktywnym filtrem, który nie wpuszcza nazwanego obiektu - odświeżenie po
+    zamknięciu okna mówi „brak obiektów”, a wynik zapisu kart z numerem commitu i poleceniem stoi PO nim
+    (ostatnie słowo paska). Falsyfikator: zdanie wyniku przed odświeżeniem (kolejność sprzed AR-283)."""
+    v, con, _pliki, _fid = sciezka_karty
+    v.resize(1200, 800)
+    v.show()
+    v.combo_filter.addItem("OIII", "OIII")              # filtr bez klatek obiektu propozycji
+    v.combo_filter.setCurrentIndex(v.combo_filter.count() - 1)
+    okna = _okno_sciezki_reka(monkeypatch, lambda dlg: QTest.mouseClick(dlg.confirm_btn, Qt.LeftButton))
+    zdania = _komunikaty(v)
+    _klik_okna_sciezki(v)
+    dlg = okna[-1]
+    assert dlg._commit_id is not None and v.objects.rowCount() == 0
+    assert i18n.t("object.empty_status") in zdania
+    assert zdania[-1] == dlg.status.text() + _czlon_cofniecia(dlg._commit_id)
+    assert szczegol_zdania(zdania[-1]).endswith(_szczegol_polecenia(con, dlg._commit_id))
+
+
+def test_bieg_okna_sciezki_bez_przypisan_mowi_na_pasku(sciezka_karty, monkeypatch):
+    """AR-283: bieg w oknie „Zatwierdź ze ścieżki…”, który nie przypisał nic (klinga odmawia pierwszej
+    pozycji - konflikt aliasu), po zamknięciu okna mówi na pasku zdanie wyniku i powód odmowy; dawniej
+    pasek mówił tylko przy `assigned` > 0 i odmowa znikała z oknem. Okno bez biegu dalej milczy.
+    Falsyfikator: warunek emisji samo `dlg.assigned`."""
+    from horreum import repo
+    v, _con, _pliki, _fid = sciezka_karty
+    v.resize(1200, 800)
+    v.show()
+
+    def _konflikt(*_a, **_k):
+        raise ValueError("alias „x” należy już do innego obiektu")
+    monkeypatch.setattr(repo, "user_assign_object", _konflikt)
+    okna = _okno_sciezki_reka(monkeypatch, lambda dlg: QTest.mouseClick(dlg.confirm_btn, Qt.LeftButton))
+    zdania = _komunikaty(v)
+    _klik_okna_sciezki(v)
+    dlg = okna[-1]
+    assert dlg.assigned == 0 and dlg.error.text()
+    assert zdania and zdania[-1] == dlg.status.text() + " - " + dlg.error.text()
+    ile = len(zdania)
+    _okno_sciezki_reka(monkeypatch, lambda dlg: None)
+    _klik_okna_sciezki(v)
+    assert len(zdania) == ile                                            # bez biegu - cisza
+
+
+def test_bieg_okna_sciezki_bez_przypisan_nie_rusza_zaznaczenia_biblioteki(sciezka_karty, monkeypatch):
+    """AR-283: biblioteka osi z obiektem, bez zaznaczonego wiersza; bieg w oknie „Zatwierdź ze
+    ścieżki…” bez przypisań (odmowa klingi) odświeża bibliotekę przed zdaniem, ale zaznaczenia nie
+    stawia - nic się w bibliotece nie zmieniło. Falsyfikator: odświeżenie z `select_first=True` także
+    przy `assigned` = 0 (pierwszy wiersz zaznaczony za człowieka)."""
+    from horreum import repo
+    v, con, _pliki, fid = sciezka_karty
+    repo.user_assign_object(con, alias_norm=None, canon="M42", catalog="M", kind="deep_sky",
+                            frame_ids=[fid["raw"]], now=NOW, object_source="user")
+    v.resize(1200, 800)
+    v.show()
+    v.refresh()
+    v.objects.clearSelection()
+    assert v.objects.rowCount() == 1 and not v.objects.selectionModel().selectedRows()
+
+    def _konflikt(*_a, **_k):
+        raise ValueError("alias „x” należy już do innego obiektu")
+    monkeypatch.setattr(repo, "user_assign_object", _konflikt)
+    okna = _okno_sciezki_reka(monkeypatch, lambda dlg: QTest.mouseClick(dlg.confirm_btn, Qt.LeftButton))
+    zdania = _komunikaty(v)
+    _klik_okna_sciezki(v)
+    assert okna[-1].assigned == 0 and zdania
+    assert not v.objects.selectionModel().selectedRows()

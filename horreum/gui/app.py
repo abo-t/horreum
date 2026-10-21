@@ -1044,6 +1044,18 @@ def plan_kart_sciezki(con, canon, frame_ids):
     return value, list(run.touched), [(s.frame_id, s.path, s.reason) for s in run.skipped] + z_suma
 
 
+def _wariant_paska_kart(zdanie_pola, zdanie_paska, db_path, commit_id):
+    """`po_zamknieciu` okna piszącego karty (AR-283, AR-272): (zdanie pola, zdanie paska, szczegół
+    paska). Po zamknięciu okna jedynym uchwytem cofnięcia commitu jest CLI - zdanie paska niesie
+    krótkie polecenie bez ścieżki bazy (pełna ścieżka przed numerem commitu ginęła w elizji), pełne
+    polecenie stoi w szczególe pod kursorem („Kopiuj szczegół”, wzór `objchg.bar.undo_cli`). Szczegół
+    trzyma też zdanie na pasku do następnego raportu (`MainWindow._flash`, AR-236) - zdanie bez niego
+    gasło po 5 s razem z numerem commitu."""
+    return (zdanie_pola, zdanie_paska,
+            i18n.t("wb.undo_cli_tip", id=commit_id,
+                   cli=i18n.t("wb.undo_cli", db=db_path, id=commit_id)))
+
+
 class ConfirmPathObjectsDialog(QDialog):
     """„Zatwierdź ze ścieżki…" — POWIERZCHNIA POTWIERDZANIA propozycji szczebla ścieżki (S2,
     D-OW-2/**B**). To jest cena wariantu B i bez niej segment nie istnieje: przebieg resolvera
@@ -1095,8 +1107,9 @@ class ConfirmPathObjectsDialog(QDialog):
         self.assigned = 0
         self._domkniety = False   # gest zapisał bazę i karty - drugi klik nie ma czego robić
         self._db_path = db_path if db_path is not None else queries.db_path_of(con)
-        # (zdanie pola `status`, jego wariant dla paska po zamknięciu okna) - bez przycisków okna
-        # (AR-236, `ObjectAxisView._zdanie_okna_kart`); None = zdanie pola jest dobre i po zamknięciu
+        # (zdanie pola `status`, jego wariant dla paska po zamknięciu okna, szczegół paska) - bez
+        # przycisków okna, z poleceniem CLI cofnięcia (AR-236, AR-283, `_wariant_paska_kart`,
+        # `ObjectAxisView._zdanie_okna_kart`); None = zdanie pola jest dobre i po zamknięciu
         self.po_zamknieciu = None
         self._runner = WritebackRunner(self._db_path, now_fn=now_fn, parent=self)
         self._runner.busy_changed.connect(self.busy_changed)
@@ -1367,6 +1380,11 @@ class ConfirmPathObjectsDialog(QDialog):
         # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
         # razem z pozostałymi powodami (okno nie ma listy pozycji) - protokół pola (AR-204).
         self.status.ustaw(self.status.text() + "\n" + summary, podpowiedz_kart(res))
+        if cofnij is not None:                   # pasek po zamknięciu: polecenie cofnięcia (AR-283)
+            self.po_zamknieciu = _wariant_paska_kart(
+                self.status.text(), self.status.text() + i18n.t(
+                    "wb.undo_short", cmd=i18n.t("wb.undo_cli_short", id=cofnij)),
+                self._db_path, cofnij)
         self._end_progress()
         dopasuj_wysokosc(self)                   # zdanie bazy + zdanie plików (`config_dialog`)
         self.changed.emit()
@@ -1383,8 +1401,10 @@ class ConfirmPathObjectsDialog(QDialog):
         self.changed.emit()
 
     def _porzuc_staging(self):
+        # Schodzą wyłącznie wpisy CZEKAJĄCE: rozstrzygnięte przerwanym zapisem (`failed` drogi atomowej -
+        # na nich stoi potwierdzenie skanem, `applied`) zostają - reguła szuflady (`repo.clear_waiting_staging`).
         if self._run_id is not None:
-            repo.clear_pending_for_run(self.con, self._run_id)
+            repo.clear_waiting_staging(self.con, run_id=self._run_id, klinga="karty")
             self._run_id = None
 
     def _on_undo(self):
@@ -1410,18 +1430,22 @@ class ConfirmPathObjectsDialog(QDialog):
         o zapisie, nie o cofnięciu - schodzi."""
         msg, ponow = ogon_cofniecia(res, i18n.t("path.undo_cards_btn"))
         # Pasek po zamknięciu okna (AR-236): bez przycisków okna - niedokończone cofnięcie ponawia
-        # polecenie CLI tego commitu, cofnięcie domknięte mówi sam stan, bez obietnicy „Zatwierdź”.
-        zamkniete = (ogon_cofniecia(res, i18n.t("wb.undo_cli", db=self._db_path, id=self._commit_id))[0]
-                     if ponow else msg + i18n.t("path.cards_restored_closed_note"))
+        # polecenie CLI tego commitu (krótkie w zdaniu, pełne w szczególe - AR-272), cofnięcie
+        # domknięte mówi sam stan, bez obietnicy „Zatwierdź”.
+        self.po_zamknieciu = (_wariant_paska_kart(
+            msg, ogon_cofniecia(res, i18n.t("wb.undo_cli_short", id=self._commit_id))[0],
+            self._db_path, self._commit_id) if ponow
+            else (msg + i18n.t("path.cards_restored_note"),
+                  msg + i18n.t("path.cards_restored_closed_note"), ""))
         if not ponow:
             msg += i18n.t("path.cards_restored_note")
             self.undo_btn.setVisible(False)
             self.resolve_btn.setVisible(False)
             self._commit_id = None
             self._domkniety = False
-        from horreum.gui.wb_worker import podpowiedz_systemu   # szczegół systemu cofnięcia (AR-168)
-        self.status.ustaw(msg, podpowiedz_systemu(res))
-        self.po_zamknieciu = (msg, zamkniete)
+        # Szczegół cofnięcia: system (AR-168) i numery operacji z drogą wyjścia (AR-281).
+        from horreum.gui.wb_worker import podpowiedz_cofniecia
+        self.status.ustaw(msg, podpowiedz_cofniecia(res))
         self._end_progress()
         # Okno rośnie do zawiniętego zdania z receptą (AR-160, wspólny pomocnik `config_dialog`),
         # a cofnięcie to zapis - gospodarz odświeża kolejkę. Emisja stała dotąd w pomocniku
@@ -2044,6 +2068,10 @@ class RepairHeaderDialog(QDialog):
         # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
         # razem z pozostałymi powodami (okno nie ma listy pozycji) - protokół pola (AR-204).
         self.status.ustaw(summary, podpowiedz_kart(res))
+        if cofnij is not None:                   # pasek po zamknięciu: polecenie cofnięcia (AR-283)
+            self.po_zamknieciu = _wariant_paska_kart(
+                summary, summary + i18n.t("wb.undo_short", cmd=i18n.t("wb.undo_cli_short", id=cofnij)),
+                self._db_path, cofnij)
         # STATUS UCINAŁ SIĘ (AR-176, zmierzone natywnie): przy jednej grupie zdanie z trzema powodami
         # dostawało 44 px przy potrzebnych 64 - okno nie rosło. Wysokość PRZED emisją `changed`
         # (gospodarz odświeża po niej kolejkę).
@@ -2064,8 +2092,10 @@ class RepairHeaderDialog(QDialog):
         self.changed.emit()
 
     def _porzuc_staging(self):
+        # Schodzą wyłącznie wpisy CZEKAJĄCE: rozstrzygnięte przerwanym zapisem (`failed` drogi atomowej -
+        # na nich stoi potwierdzenie skanem, `applied`) zostają - reguła szuflady (`repo.clear_waiting_staging`).
         if self._run_id is not None:
-            repo.clear_pending_for_run(self.con, self._run_id)
+            repo.clear_waiting_staging(self.con, run_id=self._run_id, klinga="karty")
             self._run_id = None
 
     # ---------------------------------------------------------------- cofanie (OKNO do zamknięcia)
@@ -2084,9 +2114,11 @@ class RepairHeaderDialog(QDialog):
         self.bar.setVisible(False)
         msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
         # Pasek po zamknięciu okna (AR-236): „Cofnij” już nie ma - niedokończone cofnięcie ponawia
-        # polecenie CLI tego commitu (ten sam ogon, polecenie w miejscu etykiety przycisku).
-        zamkniete = (ogon_cofniecia(res, i18n.t("wb.undo_cli", db=self._db_path, id=self._commit_id))[0]
-                     if ponow else msg)
+        # polecenie CLI tego commitu (ten sam ogon, krótkie polecenie w miejscu etykiety przycisku,
+        # pełne w szczególe - AR-272).
+        self.po_zamknieciu = (_wariant_paska_kart(
+            msg, ogon_cofniecia(res, i18n.t("wb.undo_cli_short", id=self._commit_id))[0],
+            self._db_path, self._commit_id) if ponow else (msg, msg, ""))
         if not ponow:
             self.undo_btn.setVisible(False)      # commit ZUŻYTY - drugi undo nie ma czego cofać
             self.resolve_btn.setVisible(False)
@@ -2095,10 +2127,10 @@ class RepairHeaderDialog(QDialog):
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
         self._sync_preview()
-        # Szczegół spadku mówił o zapisie - zostaje szczegół systemu cofnięcia (AR-168) albo nic.
-        from horreum.gui.wb_worker import podpowiedz_systemu
-        self.status.ustaw(msg, podpowiedz_systemu(res))
-        self.po_zamknieciu = (msg, zamkniete)
+        # Szczegół spadku mówił o zapisie - zostaje szczegół systemu cofnięcia (AR-168) i numery operacji
+        # z drogą wyjścia (AR-281) albo nic.
+        from horreum.gui.wb_worker import podpowiedz_cofniecia
+        self.status.ustaw(msg, podpowiedz_cofniecia(res))
         dopasuj_wysokosc(self)                   # zdanie z receptą zawija (AR-176), przed `changed`
         self.changed.emit()
 
@@ -2181,6 +2213,7 @@ class ObjectAxisView(QWidget):
         # (modalne - poza zasięgiem `set_busy`, więc bieg pipeline'u przekazujemy mu wprost).
         self._repair_dlg = None
         self._naprawa_zmienila = False        # okno naprawy zgłosiło koniec biegu (`changed`, AR-236)
+        self._sciezka_zmienila = False        # …i okno „Zatwierdź ze ścieżki…” (AR-283)
         # Takt 3 (`Rozwiąż`) należy do Dostawy: gospodarz wstrzykuje wywołanie ISTNIEJĄCEJ,
         # bramkowanej drogi (`PipelineView.run_stage`). None = widok bez gospodarza (testy samego
         # widoku) → okno naprawy powie wprost, że taktu 3 nie ma stąd jak uruchomić.
@@ -3164,13 +3197,19 @@ class ObjectAxisView(QWidget):
         # pipeline'u, co okno „Napraw nagłówek…" (`_repair_dlg` = otwarte okno piszące do plików).
         dlg.busy_changed.connect(self.writeback_busy)
         self._repair_dlg = dlg
+        self._sciezka_zmienila = False
         try:
             dlg.exec()
         finally:
             self._repair_dlg = None
-        if dlg.assigned:
+        # PO KAŻDYM BIEGU W OKNIE, nie tylko przy nowych przypisaniach (AR-283): bieg zakończony odmową
+        # klingi na pierwszej pozycji (`assigned` = 0) zostawiał pasek bez słowa, a powód odmowy znikał
+        # z oknem. ODŚWIEŻENIE PRZED ZDANIEM: pusta biblioteka (filtr) mówi przy odświeżeniu
+        # `object.empty_status`, który przykrywał wynik zapisu. Bez przypisań odświeżenie NIE stawia
+        # pierwszego wiersza - zaznaczenie w bibliotece zostaje, bo nic się w niej nie zmieniło.
+        if dlg.assigned or self._sciezka_zmienila:
+            self.refresh(select_first=bool(dlg.assigned))
             self.status_message.emit(self._zdanie_okna_kart(dlg))
-            self.refresh(select_first=True)
 
     @staticmethod
     def _zdanie_okna_kart(dlg):
@@ -3181,16 +3220,22 @@ class ObjectAxisView(QWidget):
 
         BEZ PRZYCISKÓW OKNA: zdanie `status` po cofnięciu mówi „„Cofnij” ponowi…” albo „„Zatwierdź”
         dopisze…” - po zamknięciu takiego przycisku nie ma. Okno trzyma wtedy wariant dla paska
-        (`po_zamknieciu`: zdanie pola i wariant - polecenie CLI ponowienia commitu, sam stan); wariant
+        (`po_zamknieciu`, `_wariant_paska_kart`: zdanie pola, wariant - krótkie polecenie CLI cofnięcia
+        commitu po zapisie albo jego ponowienia, sam stan - i szczegół z pełnym poleceniem); wariant
         idzie tylko, gdy pole wciąż mówi to zdanie, z którym go złożono."""
-        okno, pasek = dlg.po_zamknieciu or (None, None)
-        status = pasek if okno is not None and okno == dlg.status.text() else dlg.status.text()
-        return zlacz_zdania(" - ", (ZdanieZeSzczegolem(status, dlg.status.szczegol()),
+        okno, pasek, polecenie = dlg.po_zamknieciu or (None, None, "")
+        status = ZdanieZeSzczegolem(dlg.status.text(), dlg.status.szczegol())
+        if okno is not None and okno == dlg.status.text():
+            status = ZdanieZeSzczegolem(pasek, "\n".join(
+                x for x in (dlg.status.szczegol(), polecenie) if x))
+        return zlacz_zdania(" - ", (status,
                                     ZdanieZeSzczegolem(dlg.error.text(), dlg.error.szczegol())))
 
     def _on_confirm_path_changed(self):
         """Zapis w oknie potwierdzania → kolejka mówi świeżą prawdę JUŻ przy otwartym oknie
-        (częściowy zapis przerwany odmową klingi nie zostawia ekranu z nieaktualnym licznikiem)."""
+        (częściowy zapis przerwany odmową klingi nie zostawia ekranu z nieaktualnym licznikiem).
+        Znacznik końca biegu czyta `_on_confirm_path` po zamknięciu okna (wynik na pasek, AR-283)."""
+        self._sciezka_zmienila = True
         self._load_review()
         self._sync_assign_enabled()
 
@@ -5606,6 +5651,16 @@ class MainWindow(QMainWindow):
         return fm.elidedText(msg, Qt.ElideRight, zapas)
 
     def closeEvent(self, event):
+        # ZAPIS DO PLIKÓW W TOKU (szuflada Zbiorów) - okno ZOSTAJE, zamknięcie = żądanie anulowania po
+        # bieżącym pliku (`WritebackRunner.refuse_close`, jak w oknach kart), drugie zamknięcie po biegu
+        # zamyka (AR-280). Zmierzone: okno znikało w biegu, połączenie zamykało się pod wątkiem, który
+        # pisał dalej, a ogon zapisu padał `ProgrammingError` na zamkniętej bazie. Bez otwartej bazy
+        # widoku Zbiorów nie ma (`_mount_views`) - i nie ma czego pilnować. Poczekalnia bez zapisu w toku
+        # NIE pyta: wraca w szufladzie przy następnym otwarciu tej bazy.
+        grid = getattr(self, "grid_view", None)
+        if self.con is not None and grid is not None and grid._wb.refuse_close(self._flash):
+            event.ignore()
+            return
         # Top-level apka jest właścicielem połączenia - zamyka je przy zamknięciu okna. Wątki tła
         # widoków PRZED połączeniem: wynik doręczony po zamknięciu nie ma prawa go dotknąć.
         self._zatrzymaj_watki_widokow()

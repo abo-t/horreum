@@ -553,13 +553,17 @@ class AssignObjectDialog(QDialog):
         # przed kliknięciem. Id po kanonie tą samą frazą co pre-check i klinga
         # (`queries.object_id_by_canon`), nie z listy: obiekt bez klatek jest w bazie, choć lista
         # (`library_objects`, `JOIN frame`) go nie pokazuje.
-        nowy = podglad and queries.object_id_by_canon(self.con, ident.canon) is None
+        # TRZY STANY NAZWY (AR-282): nagrobek (obiekt zdjęty cofnięciem) liczył się jak żywy, więc
+        # okno milczało, a zapis go wskrzesza - zdanie i przycisk mówią „przywróci”, nie „założy”.
+        stan = queries.object_name_state(self.con, ident.canon) if podglad else "live"
         self.canon_preview.setText(
             i18n.t("assign.canon_preview", text=text, canon=ident.canon,
                    header=header_form(ident.canon))
-            + (i18n.t("assign.creates_object") if nowy else "")
+            + {"new": i18n.t("assign.creates_object"), "retired": i18n.t("assign.restores_object"),
+               "live": ""}[stan]
             if podglad else "")
-        self._ustaw_zakladanie(ident.canon if nowy else None)
+        self._ustaw_zakladanie(ident.canon if stan != "live" else None,
+                               przywroci=stan == "retired")
         # Nota po RODZAJU, nie po pustym katalogu: `catalog IS NULL` mają też obiekty z REGIONU
         # (`Veil`), a nazwanie ich „obiektem własnym" byłoby nieprawdą o pochodzeniu kanonu.
         wlasny = ident is not None and ident.kind == "own"
@@ -592,15 +596,17 @@ class AssignObjectDialog(QDialog):
         super().showEvent(event)
         dopasuj_wysokosc(self)
 
-    def _ustaw_zakladanie(self, canon):
+    def _ustaw_zakladanie(self, canon, *, przywroci=False):
         """Przycisk akcji mówi WPROST, że zapis założy obiekt `canon` („Załóż NGC1952 · Przypisz
-        2 klatki”, w wybieraku „… · Dalej - podgląd…”); `None` przywraca napis wołającego."""
+        2 klatki”, w wybieraku „… · Dalej - podgląd…”) albo - `przywroci` - wskrzesi obiekt zdjęty
+        cofnięciem („Przywróć …”, AR-282); `None` przywraca napis wołającego. Oba stany mają skutek
+        w osi obiektów, więc Enter w szukajce nie zatwierdza ani jednego (`_zalozy`, `eventFilter`)."""
         self._zalozy = canon is not None
         if canon is not None:
             if self._tekst_akcji is None:
                 self._tekst_akcji = self.accept_btn.text()
-            self.accept_btn.setText(i18n.t("assign.create_btn", canon=canon,
-                                           action=self._tekst_akcji))
+            self.accept_btn.setText(i18n.t("assign.restore_btn" if przywroci else "assign.create_btn",
+                                           canon=canon, action=self._tekst_akcji))
         elif self._tekst_akcji is not None:
             self.accept_btn.setText(self._tekst_akcji)
             self._tekst_akcji = None

@@ -415,8 +415,8 @@ def test_cli_odmowa_manifestu_mowi_krokiem_terminala(tmp_path, capsys, przypadek
                   "object_id) - nie nadpisuję go; sprawdź go albo usuń ręcznie")
     else:
         part.write_bytes(b"cudzy")
-        zdanie = (f"obok manifestu leży plik roboczy innego zapisu ({part}) - gdy żaden zapis nie trwa, "
-                  f"skasuj go ręcznie")
+        zdanie = ("obok manifestu leży plik roboczy innego zapisu (_PROJEKCJA.json.part) - gdy żaden zapis "
+                  "nie trwa, skasuj go ręcznie")
     przed = man.read_bytes()
     capsys.readouterr()
     assert cli.main(argv) == 1
@@ -424,7 +424,67 @@ def test_cli_odmowa_manifestu_mowi_krokiem_terminala(tmp_path, capsys, przypadek
     out.encode("cp1250")
     wiersze = out.splitlines()
     i = wiersze.index(f"Horreum project: blad -- {zdanie}")
+    if przypadek == "zajety":
+        # AR-273: zdanie mówi nazwę pliku roboczego, pełna ścieżka - własnym wierszem terminala.
+        assert wiersze[i + 1] == f"  plik roboczy: {part}", wiersze[i:]
+        i += 1
     assert wiersze[i + 1] == "  potem: ponow to samo polecenie (horreum project ... --apply)", wiersze[i:]
     assert "Odśwież podgląd" not in out and "Zapisz manifest" not in out, out
     assert "Traceback" not in out and man.read_bytes() == przed
     assert przypadek != "zajety" or part.read_bytes() == b"cudzy"
+
+
+# ============================================================ AR-265, AR-273: gesty terminala
+
+def test_cli_abort_pierwszego_linku_mowi_flaga_kopii(tmp_path, capsys, monkeypatch):
+    """AR-265: sonda pierwszego linku padła (`proj_first_link`) - `project --apply` kończy kodem 1,
+    wiersz `ABORT --` ze złotym zdaniem rdzenia (fakt i rada wspólna, bez przełącznika okna) i wiersz
+    `potem:` z flagą `--copy`; wydruk koduje się w cp1250. Mutanty: stare zdanie z „włącz tryb kopii”;
+    brak wiersza `potem:`."""
+    dbp = _seed_obiekt(tmp_path)
+    monkeypatch.setattr(projection, "_verify_content", lambda *a, **k: False)
+    root = tmp_path / "_WBPP" / "karta"
+    assert cli.main(["project", str(dbp), "--root", str(root), "--object", "IC1795", "--apply"]) == 1
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    wiersze = out.splitlines()
+    zdanie = ("pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) - wolumen nie wspiera "
+              "hardlinków? wydaj ponownie kopiami plików")
+    i = wiersze.index(f"Horreum project: ABORT -- {zdanie}")
+    assert wiersze[i + 1] == "  potem: ponow z kopiami (horreum project ... --apply --copy)", wiersze[i:]
+    assert "tryb kopii" not in out and "Wymuś" not in out and "Traceback" not in out, out
+
+
+@pytest.mark.parametrize("przypadek", ["zdrowy", "uszkodzony", "zajety"])
+def test_cli_dry_mowi_wskazowke_o_manifescie(tmp_path, capsys, przypadek):
+    """AR-273: `project --object` bez `--apply` nad manifestem uszkodzonym albo przy cudzym pliku
+    roboczym drukuje tę samą wskazówkę co okno („manifestu nie da sie teraz zapisac: …”) z gestem
+    terminala; zdrowy manifest - bez wiersza. Kod 0 (DRY), bajty nietknięte, cp1250."""
+    dbp = _seed_obiekt(tmp_path)
+    root = tmp_path / "_WBPP" / "karta"
+    argv = ["project", str(dbp), "--root", str(root), "--object", "IC1795"]
+    assert cli.main(argv + ["--apply"]) == 0
+    obj_root = root / "OBJECTS" / "IC1795"
+    man = obj_root / projection.MANIFEST_NAME
+    part = obj_root / (projection.MANIFEST_NAME + projection.PART_SUFFIX)
+    zdanie = None
+    if przypadek == "uszkodzony":
+        man.write_bytes(b"{")
+        zdanie = ("manifest wydania (_PROJEKCJA.json) leży w folderze, ale nie jest poprawnym zeznaniem "
+                  "(JSON) - nie nadpisuję go; sprawdź go albo usuń ręcznie")
+    elif przypadek == "zajety":
+        part.write_bytes(b"cudzy")
+        zdanie = ("obok manifestu leży plik roboczy innego zapisu (_PROJEKCJA.json.part) - gdy żaden zapis "
+                  "nie trwa, skasuj go ręcznie")
+    przed = man.read_bytes()
+    capsys.readouterr()
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    wiersze = out.splitlines()
+    if zdanie is None:
+        assert not any("manifestu nie da sie" in w for w in wiersze), out
+    else:
+        i = wiersze.index(f"  manifestu nie da sie teraz zapisac: {zdanie}")
+        assert wiersze[i + 1] == "  potem: ponow to samo polecenie (horreum project ...)", wiersze[i:]
+    assert man.read_bytes() == przed and (przypadek != "zajety" or part.read_bytes() == b"cudzy")

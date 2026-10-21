@@ -4526,6 +4526,43 @@ def clear_pending_for_run(con, run_id):
                     (run_id,))
 
 
+def _zdejmij_oczekujace_tx(con, run_id, klinga):
+    """Skasuj WYŁĄCZNIE wpisy czekające (`pending`) przebiegu szuflady Zbiorów, klinga `karty`
+    (`pending_changes`) albo `nazwy` (`pending_renames`) - pod transakcją wołającego.
+    Zwraca ich liczbę. Wpisy rozstrzygnięte zapisem przerwanym zostają: na `failed` kart stoi
+    potwierdzenie skanem (`confirm_failed_commit_by_scan`), na `applied` nazw - cofnięcie przebiegu
+    (`writeback.undo_renames`). Wpis związany z operacją w miejscu (`inplace_op_id`) i wiersz nazwy
+    z otwartym zamiarem (`in_flight`) też zostają - jak w `clear_pending_for_run`/`clear_renames_for_run`."""
+    if klinga == "karty":
+        return con.execute("DELETE FROM pending_changes WHERE run_id = ? AND status = 'pending' "
+                           "AND inplace_op_id IS NULL", (run_id,)).rowcount
+    if klinga == "nazwy":
+        return con.execute("DELETE FROM pending_renames WHERE run_id = ? AND status = 'pending' "
+                           "AND in_flight IS NULL", (run_id,)).rowcount
+    raise ValueError(f"nieznana klinga szuflady: {klinga!r}")
+
+
+def clear_waiting_staging(con, *, run_id, klinga):
+    """Ponowny staging i „Odrzuć” szuflady Zbiorów (AR-280): zdejmuje czekające wpisy przebiegu,
+    rozstrzygnięte przez zapis przerwany zostają (`_zdejmij_oczekujace_tx`). `clear_pending_for_run`
+    kasował także `applied`/`failed` - ponowny staging po przerwanym zapisie nazw odbierał przebiegowi
+    jego cofnięcie, a kart - potwierdzenie skanem. Transient - bez eventu. Zwraca liczbę zdjętych."""
+    with con:
+        return _zdejmij_oczekujace_tx(con, run_id, klinga)
+
+
+def discard_staging(con, *, run_id, klinga, now, actor="user:local"):
+    """„Odrzuć” przebiegu szuflady PODJĘTEGO z poprzedniej sesji (AR-280): czekające wpisy znikają
+    (reguła `clear_waiting_staging`), a odrzucenie zostaje w dzienniku (`staging.discarded`) - zamiar
+    przeżył zamknięcie programu, więc jego porzucenie jest decyzją człowieka, nie sprzątaniem stagingu
+    bieżącej sesji (ten zostaje transient). Event w tej samej transakcji. Zwraca liczbę zdjętych."""
+    with con:
+        n = _zdejmij_oczekujace_tx(con, run_id, klinga)
+        emit_event(con, actor=actor, verb="staging.discarded", target=f"run:{run_id}", now=now,
+                   payload={"n": n, "klinga": klinga}, reason="ręka odrzuciła zmiany z poprzedniej sesji")
+    return n
+
+
 def insert_commit(con, *, run_id, now, summary=None):
     """Utwórz wiersz `commits` (grupuje przebieg do undo). Zwraca commit_id. Transient — wskaźnik
     grupujący, nie event (mutacje plików niosą eventy re-syncu)."""

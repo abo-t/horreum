@@ -467,13 +467,13 @@ def test_karta_rozdarta_plik_zostaje_a_cofniecie_czeka_na_odzysk(tmp_path, monke
     monkeypatch.setattr(writeback.os, "fsync", _fsync)
     wynik = writeback.commit_object_change(con, run, now=NOW)
     monkeypatch.undo()
-    assert len(wynik.failed) == 1 and "recover_torn" in wynik.failed[0].reason
+    assert len(wynik.failed) == 1 and f"„{writeback._GEST_PRZYWROC}”" in wynik.failed[0].reason
     assert wynik.failed[0].reason.startswith("karta zapisana częściowo")
     assert s.nowe[0].exists() and _pozycje(con)[0]["status"] == "failed"
     assert _wiersz(con, s.nowe[0])["object_source"] == "user"         # baza zostaje przy pliku
 
     stop = writeback.undo_object_change(con, run, now=NOW)
-    assert len(stop.failed) == 1 and "recover_torn" in stop.failed[0].reason
+    assert len(stop.failed) == 1 and f"„{writeback._GEST_PRZYWROC}”" in stop.failed[0].reason
     assert s.nowe[0].exists() and _pozycje(con)[0]["undo_phase"] is None
     assert con.execute("SELECT status FROM object_change_run").fetchone()[0] == "undoing"
     with pytest.raises(ValueError, match="cofany"):

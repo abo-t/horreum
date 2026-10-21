@@ -307,6 +307,12 @@ def _evaluate_change(
 
     value_type = base_type or _infer_type(value)
 
+    if value_type in ("int", "float"):
+        # Liczba nieskończona PRZED regułą int (AR-269): ta sama odmowa i kolejność co pisarz
+        # (`writeback._wartosc_karty`), dawniej `inf` przy int mówił „wynik niecałkowity”.
+        powod = card_rules.liczba_violation(kw, value)
+        if powod is not None:
+            return None, powod
     if value_type == "int" and isinstance(value, float) and not value.is_integer():
         return None, PowodPozycji(f"wynik niecałkowity ({repr(value)}) dla keyworda '{kw}' typu int",
                                   "macro_not_int", value=repr(value), keyword=kw)
@@ -378,6 +384,22 @@ def resolve_target(rows) -> tuple[dict | None, str | None]:
     return target, None
 
 
+def _cyfry_zmiany(change, cards, filetype):
+    """Bramka pola liczby karty FITS (AR-269 N1) dla zmiany podglądu: float, którego pole 20 znaków
+    nie odtworzy, to pominięcie z TYM SAMYM kodem i zdaniem co odmowa pisarza
+    (`card_rules.cyfry_violation`). Wartość zastana = wystąpienie `idx` zmiany (nie pierwsze), bo
+    tylko ono decyduje, czy astropy kartę przełoży. XISF poza bramką: pisarz XISF wpisuje tekst.
+    Bramka siedzi u wołającego cel (`run_macro`, `plan_manual_change`), bo tylko on zna `filetype`."""
+    if filetype != "fits" or change["new_type"] != "float":
+        return None
+    n = change["idx"] or 0
+    zastana = None if change["op"] == "add" else next(
+        (c for c in cards if c["keyword"] == change["keyword"] and int(c["idx"]) == n), None)
+    return card_rules.cyfry_violation(change["keyword"], float(change["new_value"]),
+                                      zastana["value_type"] if zastana is not None else None,
+                                      zastana["value_raw"] if zastana is not None else None)
+
+
 def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> MacroRun:
     """Uruchamia makro nad `frame_ids` (widocznymi w gridzie). CZYSTY silnik: dane przez wstrzykiwane
     `targets_fn(frame_ids)->rows` (topologia present-location, `queries.writeback_frame_targets`) i
@@ -423,9 +445,14 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
         if suma is not None:                     # pisarz odmówi - pominięcie w podglądzie
             skipped.append(SkippedFrame(fid, target["path"], suma))
             continue
-        change, reason = _evaluate_change(md, computes, assign_expr, cards_fn(fid))
+        karty = cards_fn(fid)
+        change, reason = _evaluate_change(md, computes, assign_expr, karty)
         if change is None:
             skipped.append(SkippedFrame(fid, target["path"], reason or ""))
+            continue
+        reason = _cyfry_zmiany(change, karty, target["filetype"])          # AR-269
+        if reason is not None:
+            skipped.append(SkippedFrame(fid, target["path"], reason))
             continue
         touched.append(PendingPreview(
             location_id=int(target["location_id"]), path=target["path"],
@@ -479,6 +506,10 @@ def evaluate_manual_change(cards, keyword: str, new_text: str,
         if value_type is None:
             value_type = _infer_type(value)
 
+    if value_type in ("int", "float"):
+        powod = card_rules.liczba_violation(keyword, value)    # przed regułą int, jak makro (AR-269)
+        if powod is not None:
+            return ManualResult(False, powod)
     if value_type == "int" and isinstance(value, float) and not value.is_integer():
         return ManualResult(False, PowodPozycji(
             f"wynik niecałkowity ({repr(value)}) dla keyworda typu int", "macro_manual_not_int",
@@ -520,10 +551,15 @@ def plan_manual_change(rows, keyword: str, new_text: str, *, cards_fn,
     suma = card_rules.bramka_sumy(target["filetype"], target["n_sum"])       # AR-166
     if suma is not None:
         return None, suma
-    res = evaluate_manual_change(cards_fn(int(target["location_id"])), keyword, new_text,
-                                 comment=comment)
+    karty = cards_fn(int(target["location_id"]))
+    res = evaluate_manual_change(karty, keyword, new_text, comment=comment)
     if not res.ok:
         return None, res.reason
+    powod = _cyfry_zmiany({"keyword": keyword, "idx": res.idx, "op": res.op,
+                           "new_value": res.new_value, "new_type": res.new_type},
+                          karty, target["filetype"])                           # AR-269
+    if powod is not None:
+        return None, powod
     return PendingPreview(
         location_id=int(target["location_id"]), path=target["path"], keyword=keyword,
         idx=res.idx, op=res.op, old_value=res.old_value, new_value=res.new_value,

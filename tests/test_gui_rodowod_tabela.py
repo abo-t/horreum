@@ -1432,3 +1432,51 @@ def test_podpowiedz_dokladny_mowi_o_wejsciach_nowszych_a_zbior_liczy_sie_raz(str
     wolania.clear()
     v.apply_perspective("Kalibracja")                            # bez gotowych obrazów
     assert len(wolania) == 0
+
+
+# ---------- AR-278: okno odniesienia czasu mówi przyciskami z katalogu ----------
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_okno_odniesienia_mowi_przyciskami_katalogu(strona, con, lang):
+    """AR-278: „Wskaż odniesienie czasu…” otwierało statyczne `QInputDialog.getDouble` - „Cancel”
+    w polskim oknie (repo nie wozi `QTranslator`). Prawdziwy klik przycisku panelu: okno ma
+    przyciski z katalogu, „Anuluj” nie emituje niczego, wartość 1,5 h + klik „Zapisz” emituje
+    90 minut. Mutant: powrót do statycznego `getDouble` (PL dostaje „Cancel”)."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QInputDialog, QPushButton
+    i18n.set_lang(lang)
+    con.execute("UPDATE integration SET unresolved_reason = 'offset_unknown' WHERE id = 5")
+    con.commit()
+    v = strona.frames_view
+    _zaznacz(v, [10])
+    v._toggle_panel("lineage")
+    bar = v.lineage_bar
+    assert bar.btn_offset.isVisible()
+    emisje, widziane = [], []
+    bar.offset_asked.connect(emisje.append)
+
+    def _w_oknie(akcja):
+        # BEZPIECZNIK: okno, którego nie umiemy kliknąć (przycisk spoza katalogu), zamyka się
+        # odrzuceniem - modalne `exec()` nie może zawiesić testu; asercje niżej mówią, co zobaczono.
+        okno = QApplication.activeModalWidget()
+        if not isinstance(okno, QInputDialog):
+            widziane.append(None)
+            return
+        przyciski = {b.text(): b for b in okno.findChildren(QPushButton)}
+        widziane.append(sorted(przyciski))
+        if akcja == "ok":
+            okno.setDoubleValue(1.5)
+        cel = przyciski.get(i18n.t(f"grid.lin.offset_{akcja}"))
+        if cel is None:
+            okno.reject()
+            return
+        QTest.mouseClick(cel, Qt.LeftButton)
+
+    for akcja in ("cancel", "ok"):
+        QTimer.singleShot(0, lambda a=akcja: _w_oknie(a))
+        QTest.mouseClick(bar.btn_offset, Qt.LeftButton)
+    oczekiwane = sorted([i18n.t("grid.lin.offset_ok"), i18n.t("grid.lin.offset_cancel")])
+    assert widziane == [oczekiwane, oczekiwane], widziane
+    if lang == "pl":
+        assert "Cancel" not in widziane[0]
+    assert emisje == [90]

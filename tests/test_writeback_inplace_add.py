@@ -26,8 +26,8 @@ from astropy.io import fits
 
 from horreum import cli, db, repo, scan, writeback
 from test_header_fix import _archiwum, _cli, _karty, _plan
-from test_writeback_inplace import (NOW, _Dziennik, _NieWolno, _Przerwa, _hash, _loc, _operacje,
-                                    _psuj_fsync, _scan_in, _zerwany_udzial)
+from test_writeback_inplace import (NOW, _DOKONCZENIE, _Dziennik, _NieWolno, _Przerwa, _hash, _loc,
+                                    _op_drogi, _operacje, _psuj_fsync, _scan_in, _zerwany_udzial)
 
 SKALA = ("BSCALE", "BZERO")
 OBOWIAZKOWE = ("SIMPLE  =                    T", "BITPIX  =                   16",
@@ -355,7 +355,7 @@ def test_add_written_dokonczenie_finish_inplace(tmp_path, monkeypatch):
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     monkeypatch.undo()
     (op_id, _, faza), = [tuple(o) for o in _operacje(con)]
-    assert faza == "written" and f"finish_inplace({op_id})" in res.failed[0].reason
+    assert faza == "written" and _op_drogi(res.failed[0].reason, _DOKONCZENIE) == op_id
     assert writeback.finish_inplace(con, op_id, now=NOW).status == "applied"
     assert _operacje(con)[0]["phase"] == "synced" and not scan._isolated(con, str(p))
     assert [r["status"] for r in writeback.pending_for_run(con, "R")] == ["applied"]
@@ -677,8 +677,6 @@ def _op(kw, op, wartosc, typ, comment=None):
     pytest.param(_op("EXPTIME", "set", "-0.0", "float"), id="float_minus_zero"),
     pytest.param(_op("GAIN", "set", "-0.0", "float"), id="minus_zero_na_int_zero"),
     pytest.param(_op("SETTEMP", "set", "-0.0", "float"), id="minus_zero_na_float_zero"),
-    pytest.param(_op("EXPTIME", "set", repr(-1.2345678901234567e-300), "float"),
-                 id="float_dluzszy_niz_pole"),
     pytest.param(_op("FLIPPED", "set", "F", "bool"), id="bool"),
     pytest.param(_op("FOCALLEN", "set", "1000", "int", comment="nowy komentarz"), id="komentarz"),
     pytest.param(_op("FOCALLEN", "set", "800", "int"), id="ta_sama_wartosc"),
@@ -695,7 +693,7 @@ def test_karta_liczbowa_w_miejscu_bajt_w_bajt_jak_droga_atomowa(tmp_path, op):
     `set` - jeden rekord (karta wartości równej zastanej wg reguły astropy, np. `-0.0` na `0.0`,
     `800` na `800` - zero; `-0.0` na int `0` to zmiana typu); `add` - ciąg od miejsca wstawienia do
     przesuniętego `END`, reszta nietknięta.
-    Float dłuższy niż pole karty traci cyfry w OBU drogach jednakowo (znalezisko poza tym punktem).
+    Float dłuższy niż pole karty - odmowa z kodem w obu drogach (AR-269, test na końcu pliku).
     Falsyfikatory: `value_type != "str"` z powrotem w spadku → `Fallback`; obraz z `fits.Card` dla
     karty, której astropy nie przełożył → `-0.0`/ta sama wartość różnią się od atomu."""
     p = _fits_bez(tmp_path / "n.fits", karty=_LICZBOWE)
@@ -746,19 +744,20 @@ def test_zapis_innego_rodzaju_niz_zastana_karta_spada_na_droge_atomowa(tmp_path,
 
 
 @pytest.mark.parametrize("wartosc", ["nan", "inf"])
-def test_nan_i_inf_ta_sama_porazka_obu_drog_bez_zmiany_pliku(tmp_path, wartosc):
-    """AR-261: wartości, której karta FITS nie zniesie (`nan`, `inf` - astropy rzuca), obie drogi
-    odmawiają TĄ SAMĄ porażką ('failed' z tekstem astropy) przed jakimkolwiek zapisem: plik bajt
-    w bajt, bez pliku tymczasowego, dziennik nieotwarty. Falsyfikator: obraz liczony bez przebiegu
-    próbnego w innym miejscu niż droga atomowa → inny tekst albo zapis."""
+def test_nan_i_inf_ta_sama_odmowa_obu_drog_bez_zmiany_pliku(tmp_path, wartosc):
+    """AR-261, AR-269: wartości, której karta FITS nie zniesie (`nan`, `inf`), obie drogi odmawiają
+    TĄ SAMĄ odmową z kodem (`card_value_nonfinite`, dawniej 'failed' z tekstem astropy) przed
+    jakimkolwiek zapisem: plik bajt w bajt, bez pliku tymczasowego, dziennik nieotwarty.
+    Falsyfikator: obraz liczony bez przebiegu próbnego w innym miejscu niż droga atomowa → inny
+    tekst albo zapis."""
     p = _fits_bez(tmp_path / "x.fits", karty=_LICZBOWE)
     przed = p.read_bytes()
     op = _op("EXPTIME", "set", wartosc, "float")
     rw = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
     ra = writeback.write_changes(str(p), [op], _hash(p))
-    assert (rw.status, ra.status) == ("failed", "failed") and str(rw.reason) == str(ra.reason), (
+    assert (rw.status, ra.status) == ("blocked", "blocked") and str(rw.reason) == str(ra.reason), (
         rw, ra)
-    assert "not allowed in FITS headers" in str(rw.reason)
+    assert rw.reason.code == "card_value_nonfinite", rw
     assert p.read_bytes() == przed and sorted(x.name for x in tmp_path.iterdir()) == ["x.fits"]
 
 
@@ -825,3 +824,260 @@ def test_karta_o_zastanym_formacie_wartosci_w_miejscu_bajt_w_bajt_jak_droga_atom
     if format_zostaje:
         assert nowe[6][:30] == stare[6][:30], nowe[6]                     # format wartości zostaje
     assert fits.getheader(str(wm)).comments[op.keyword] == (op.comment or "stary komentarz")
+
+
+# ============================================================ AR-269, AR-271: pisarz kart nie gubi
+# cyfr ani bajtów bez słowa - odmowa z kodem w obu drogach zapisu i w cofnięciu
+
+
+def _bez_plikow_roboczych(katalog, *zostaja):
+    """Katalog bez pliku tymczasowego i kopii pliku wypartego - tylko `zostaja` (baza z plikami
+    WAL `h.db*` się nie liczy)."""
+    return sorted(x.name for x in katalog.iterdir()
+                  if not x.name.startswith("h.db")) == sorted(z for z in zostaja if z != "h.db")
+
+
+@pytest.mark.parametrize("op", [
+    pytest.param(_op("EXPTIME", "set", repr(-1.2345678901234567e-300), "float"), id="wykladnik"),
+    pytest.param(_op("EXPTIME", "set", repr(3.3333333333333333e-06), "float"), id="tretina_z_makra"),
+    pytest.param(_op("EXPTIME", "set", repr(-0.014830163425925918), "float"), id="sitelat_z_makra"),
+    pytest.param(_op("EXPTIME", "set", repr(-0.0012345678901234567), "float"), id="bez_wykladnika"),
+    pytest.param(_op("CCD-TEMP", "add", repr(-0.0012345678901234567), "float"), id="add"),
+])
+def test_float_dluzszy_niz_pole_odmowa_z_kodem_obu_drog(tmp_path, op):
+    """AR-269 N1: float, którego pole 20 znaków karty FITS nie odtworzy (astropy ucina mantysę), to
+    w OBU drogach 'blocked' z kodem `card_value_digits` i parametrami liczby i pola - dawniej obie
+    drogi 'applied' z inną liczbą bez słowa. Plik bajt w bajt, bez pliku tymczasowego, dziennik
+    nieotwarty; zdanie == budowniczy z `card_rules` (to samo mówi podgląd).
+    Falsyfikator: `_apply_op` bez `_odmowa_cyfr` → 'applied'."""
+    p = _fits_bez(tmp_path / "f.fits", karty=_LICZBOWE)
+    przed = p.read_bytes()
+    rw = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
+    ra = writeback.write_changes(str(p), [op], _hash(p))
+    from horreum import card_rules
+    wartosc = float(op.value)
+    oczekiwany = card_rules.powod_cyfr(op.keyword, wartosc)
+    for res in (rw, ra):
+        assert isinstance(res, writeback.WriteResult) and res.status == "blocked", res
+        assert res.reason.code == "card_value_digits" and str(res.reason) == str(oczekiwany), res
+        assert dict(res.reason.params) == {"keyword": op.keyword, "value": repr(wartosc),
+                                           "derived": card_rules.pole_float_fits(wartosc)}
+        assert float(dict(res.reason.params)["derived"]) != wartosc
+    assert p.read_bytes() == przed and _bez_plikow_roboczych(tmp_path, "f.fits")
+
+
+def test_float_rowny_zastanemu_przechodzi_bez_przelozenia(tmp_path):
+    """AR-269 N1: zastana karta z liczbą dłuższą niż pole (wolny format w pliku) i `set` tej samej
+    liczby - astropy karty nie przekłada (wartość równa), więc liczba nie ginie: obie drogi
+    'applied', rekord karty bajt w bajt. Pisarz pyta PRAWDĘ astropy (obraz karty po łacie), nie
+    samą długość liczby.
+    Falsyfikator: kontrola z samego `pole_float_fits` zamiast obrazu karty → 'blocked'."""
+    p = _fits_z_bajtow(tmp_path / "f.fits", ["IMAGETYP= 'Light   '",
+                                             "EXPTIME = -0.0012345678901234567 / s"])
+    op = _op("EXPTIME", "set", repr(-0.0012345678901234567), "float")
+    ra, rw, atom, wm, _ino = _dwie_drogi(p, [op])
+    assert ra.status == "applied" and rw.status == "applied", (ra, rw)
+    rekord = _rekordy_naglowka(p.read_bytes())[6]
+    assert _rekordy_naglowka(wm.read_bytes())[6] == rekord
+    assert _rekordy_naglowka(atom.read_bytes())[6] == rekord
+
+
+@pytest.mark.parametrize("idx, status", [(0, "applied"), (1, "blocked")])
+def test_cyfry_licza_wystapienie_idx_nie_pierwsze(tmp_path, idx, status):
+    """AR-269 N1 przy karcie powtórzonej: kontrola obrazu czyta DOKŁADNIE wystąpienie `idx` łaty
+    (`_nth_card`). Ta sama liczba (dłuższa niż pole) zapisana na wystąpienie [0], które ją już niesie,
+    przechodzi; na wystąpienie [1] (inna wartość) - odmowa. Droga atomowa (w miejscu karta powtórzona
+    spada, a przebieg próbny odmawia tak samo - wystąpienie [1]).
+    Falsyfikator: kontrola zawsze na wystąpieniu [0] → [1] przechodzi z inną liczbą."""
+    p = _fits_z_bajtow(tmp_path / "f.fits", ["IMAGETYP= 'Light   '",
+                                             "PEDESTAL= -0.0012345678901234567 / a",
+                                             "PEDESTAL=                  1.0 / b"])
+    op = writeback.WriteOp("PEDESTAL", "set", repr(-0.0012345678901234567), "float", idx=idx)
+    ra = writeback.write_changes(str(p), [op], _hash(p))
+    assert ra.status == status, ra
+    if status == "blocked":
+        assert ra.reason.code == "card_value_digits", ra
+        rw = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
+        assert (rw.status, rw.reason.code) == ("blocked", "card_value_digits"), rw
+
+
+@pytest.mark.parametrize("op", [
+    pytest.param(_op("GAIN", "set", "inf", "int"), id="int_set"),
+    pytest.param(_op("XBINNING", "add", "nan", "int"), id="int_add"),
+    pytest.param(_op("EXPTIME", "set", "-inf", "float"), id="float_set"),
+    pytest.param(_op("CCD-TEMP", "add", "1e400", "float"), id="float_add_przepelnienie"),
+])
+def test_liczba_nieskonczona_przed_rzutem_int_obie_drogi(tmp_path, op):
+    """AR-269 N2: liczba nieskończona przy typie liczbowym - także `int` (sprawdzana na TEKŚCIE
+    przed `int()`, inaczej `macro_type_mismatch`) i `add` - to w obu drogach ta sama odmowa
+    `card_value_nonfinite`, plik nietknięty.
+    Falsyfikator: kontrola po `_coerce` → int dostaje `macro_type_mismatch`."""
+    p = _fits_bez(tmp_path / "f.fits", karty=_LICZBOWE)
+    przed = p.read_bytes()
+    rw = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
+    ra = writeback.write_changes(str(p), [op], _hash(p))
+    assert (rw.status, ra.status) == ("blocked", "blocked") and str(rw.reason) == str(ra.reason)
+    assert ra.reason.code == "card_value_nonfinite", ra
+    assert p.read_bytes() == przed and _bez_plikow_roboczych(tmp_path, "f.fits")
+
+
+def test_operacja_nieznana_obie_drogi_FITS_odmowa_z_kodem(tmp_path):
+    """AR-269 N3: operacja spoza `set`/`add` - obie drogi FITS 'blocked' `card_op_unknown` (dawniej
+    'failed' prozą `ValueError`), plik nietknięty.
+    Falsyfikator: `_apply_op` z gołym `ValueError` → 'failed'."""
+    p = _fits_bez(tmp_path / "f.fits", karty=_LICZBOWE)
+    przed = p.read_bytes()
+    op = writeback.WriteOp("EXPTIME", "del", "1", "float", idx=0)
+    rw = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
+    ra = writeback.write_changes(str(p), [op], _hash(p))
+    for res in (rw, ra):
+        assert res.status == "blocked" and res.reason.code == "card_op_unknown", res
+        assert dict(res.reason.params) == {"op": "del"}
+    assert p.read_bytes() == przed
+
+
+def _z_bajtem(path, bajt, *, karta="OBSERVER= 'Abc     '           / kom X"):
+    """FITS z bajtem `bajt` w zastanym komentarzu karty OBSERVER (zamiast `X`)."""
+    p = _fits_z_bajtow(path, ["IMAGETYP= 'Light   '", karta, "EXPTIME =                300.0 / sek"])
+    raw = bytearray(p.read_bytes())
+    raw[raw.index(b"kom X") + 4] = bajt
+    p.write_bytes(bytes(raw))
+    return p
+
+
+@pytest.mark.parametrize("bajt", [0xE9, 0xB0, 0x07, 0x7F])
+@pytest.mark.parametrize("kotwica", [True, False])
+def test_bajt_spoza_ascii_odmowa_z_kodem_w_obu_drogach(tmp_path, bajt, kotwica):
+    """AR-271: bajt spoza drukowalnego ASCII w zastanym komentarzu karty, której zapis nie dotyczy.
+    Dawniej droga atomowa zapisywała `?` w miejscu komentarza człowieka ('applied', 0xE9) albo
+    padała gołym `VerifyError` (bajt sterujący), a w miejscu mówiła fałszywie „nagłówek zmienił się
+    od stagingu” - także bez kotwicy. Teraz obie drogi: 'blocked' `header_nonprintable` z nazwą karty
+    i bajtem, jedno zdanie, plik bajt w bajt, bez pliku tymczasowego.
+    Falsyfikatory: bramka zdjęta z drogi atomowej → 'applied' z `?` / 'failed'; zdjęta z planu w
+    miejscu → `header_hash_mismatch` (bajt >= 0x80) albo 'applied' (sterujący)."""
+    p = _z_bajtem(tmp_path / "f.fits", bajt)
+    przed = p.read_bytes()
+    op = _op("EXPTIME", "set", "600.0", "float")
+    oczekiwany = _hash(p) if kotwica else None
+    rw = writeback.write_changes_inplace(str(p), [op], oczekiwany, journal=_NieWolno())
+    ra = writeback.write_changes(str(p), [op], oczekiwany)
+    for res in (rw, ra):
+        assert isinstance(res, writeback.WriteResult) and res.status == "blocked", res
+        assert res.reason.code == "header_nonprintable", res
+        assert dict(res.reason.params) == {"keyword": "OBSERVER", "char": f"0x{bajt:02X}"}
+    assert str(rw.reason) == str(ra.reason)
+    assert "stagingu" not in str(rw.reason)
+    assert p.read_bytes() == przed and _bez_plikow_roboczych(tmp_path, "f.fits")
+
+
+def test_bajt_w_naglowku_drugiego_HDU_odmowa_w_obu_drogach(tmp_path):
+    """AR-271: `writeto` przepisuje nagłówki WSZYSTKICH HDU, więc bajt w nagłówku rozszerzenia (HDU
+    niewybranego) też zamieniłby się w `?` - bramka czyta nagłówki każdego HDU, w obu drogach.
+    Falsyfikator: bramka na samym regionie wybranego HDU → atom 'applied' z `?` w rozszerzeniu."""
+    pierwszy = fits.PrimaryHDU(data=np.arange(16, dtype=">i2").reshape(4, 4))
+    pierwszy.header["IMAGETYP"] = "Light"
+    drugi = fits.ImageHDU(data=np.zeros((2, 2), dtype=">i2"))
+    drugi.header["EXTCOM"] = ("a", "kom X")
+    p = tmp_path / "f.fits"
+    fits.HDUList([pierwszy, drugi]).writeto(p)
+    raw = bytearray(p.read_bytes())
+    raw[raw.index(b"kom X") + 4] = 0xE9
+    p.write_bytes(bytes(raw))
+    przed = p.read_bytes()
+    op = _op("IMAGETYP", "set", "Dark", "str")
+    rw = writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_NieWolno())
+    ra = writeback.write_changes(str(p), [op], _hash(p))
+    for res in (rw, ra):
+        assert res.status == "blocked" and res.reason.code == "header_nonprintable", res
+        assert dict(res.reason.params)["keyword"] == "EXTCOM", res
+    assert p.read_bytes() == przed
+
+
+@pytest.mark.parametrize("inplace", [True, False])
+def test_podmiana_bajtu_po_skanie_przy_tym_samym_mtime_odmowa(tmp_path, inplace):
+    """AR-271: plik z 0xE9 zeskanowany (baza ma `?`), wpis w stagingu, potem obcy pisarz zmienia
+    0xE9 na 0xB0 z zachowanym `mtime` - hash z odczytu astropy jest dla obu bajtów ten sam, więc
+    tylko bramka surowego nagłówka zatrzymuje zapis. `commit` w obu drogach: wpis 'blocked'
+    `header_nonprintable` (też w bazie), plik z 0xB0 bajt w bajt.
+    Falsyfikator: zachowanie bajtu w miejscu z hashem po normalizacji → zapis przechodzi."""
+    p = _z_bajtem(tmp_path / "f.fits", 0xE9)
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    loc = _loc(con, p)
+    repo.stage_pending(con, run_id="R", location_id=loc["id"], keyword="EXPTIME", idx=0, op="set",
+                       old_value="300.0", new_value="600.0", new_type="float", new_comment=None,
+                       expected_header_hash=loc["header_hash"])
+    st = os.stat(p)
+    raw = bytearray(p.read_bytes())
+    raw[raw.index(b"kom \xe9") + 4] = 0xB0
+    p.write_bytes(bytes(raw))
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    przed = p.read_bytes()
+    res = writeback.commit(con, "R", now=NOW, inplace=inplace)
+    assert not res.applied and len(res.blocked) == 1, res
+    assert res.blocked[0].reason.code == "header_nonprintable", res.blocked[0].reason
+    assert dict(res.blocked[0].reason.params)["char"] == "0xB0"
+    (kod,) = con.execute("SELECT reason_code FROM pending_changes WHERE run_id = 'R'").fetchone()
+    assert kod == "header_nonprintable"
+    assert p.read_bytes() == przed and _bez_plikow_roboczych(tmp_path, "f.fits", "h.db")
+    con.close()
+
+
+def test_cofniecie_bajtowe_odmawia_bajtu_wniesionego_po_commicie(tmp_path):
+    """AR-271 (cofnięcie bajtowe): commit drogą atomową, potem bajt 0xE9 w miejscu znaku `?`
+    zastanego komentarza (hash z odczytu astropy ten sam, `mtime` zachowany) - cofnięcie odmawia
+    `header_nonprintable` przed plikiem tymczasowym i śladem cofnięcia: plik bajt w bajt, region
+    w `header_backups` bez zmian, żadnej kopii wypartej ani pliku tymczasowego, zero śladów
+    `atomic_undo`.
+    Falsyfikator: bramka zdjęta z `_plan_przywrocenia` → plik wraca do stanu sprzed commitu, a bajt
+    znika bez słowa."""
+    from test_writeback_inplace import _baza_z_plikiem, _fits
+    p = _fits(tmp_path / "f.fits", comment="kom ?")
+    con, _loc_ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW)
+    assert len(res.applied) == 1, res
+    (tekst,) = con.execute("SELECT header_text FROM header_backups").fetchone()
+    st = os.stat(p)
+    raw = bytearray(p.read_bytes())
+    raw[raw.index(b"kom ?") + 4] = 0xE9
+    p.write_bytes(bytes(raw))
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    przed = p.read_bytes()
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    assert not u.restored and len(u.blocked) == 1, u
+    assert u.blocked[0].reason.code == "header_nonprintable", u.blocked[0].reason
+    assert p.read_bytes() == przed and _bez_plikow_roboczych(tmp_path, "f.fits", "h.db")
+    assert con.execute("SELECT header_text FROM header_backups").fetchone()[0] == tekst
+    assert con.execute("SELECT count(*) FROM atomic_undo").fetchone()[0] == 0
+    con.close()
+
+
+def test_cofniecie_semantyczne_odmawia_bajtu_w_pliku(tmp_path):
+    """AR-271 (cofnięcie semantyczne): backup tekstowy (droga semantyczna - nagłówek z treści,
+    `writeto`) na pliku z bajtem 0xE9 - 'blocked' `header_nonprintable` zamiast `writeto` z `?`
+    albo gołego `VerifyError`; plik bajt w bajt, bez pliku tymczasowego.
+    Falsyfikator: bramka zdjęta z `_fits_semantyczny` → 'applied' z `?`."""
+    p = _z_bajtem(tmp_path / "f.fits", 0xE9)
+    przed = p.read_bytes()
+    tekst = fits.getheader(str(p)).tostring()
+    res = writeback.write_full_header(str(p), tekst, _hash(p))
+    assert res.status == "blocked" and res.reason.code == "header_nonprintable", res
+    assert p.read_bytes() == przed and _bez_plikow_roboczych(tmp_path, "f.fits")
+
+
+def test_cofniecie_bajtowe_odmawia_bajtu_w_kopercie_backupu(tmp_path):
+    """AR-271 (cofnięcie bajtowe, region koperty): czysty plik, a region koperty backupu niesie 0xE9 -
+    przywrócenie wpisałoby bajt, którego astropy nie odróżni od `?`; odmowa z kodem, plik nietknięty.
+    Falsyfikator: bramka na samym pliku zastanym (bez regionu koperty) → 'applied' z 0xE9."""
+    p = _fits_z_bajtow(tmp_path / "f.fits", ["IMAGETYP= 'Light   '",
+                                             "OBSERVER= 'Abc     '           / kom X"])
+    przed = p.read_bytes()
+    region = bytearray(przed[:2880])
+    region[region.index(b"kom X") + 4] = 0xE9
+    hdr_kopii = fits.Header.fromstring(bytes(region).decode("ascii", "replace").replace("�", "?"))
+    st = os.stat(p)
+    env = writeback.RegionBackup("fits", 0, bytes(region), st.st_size, st.st_ino,
+                                 scan._header_hash(hdr_kopii), None).encode()
+    res = writeback.write_full_header(str(p), env, _hash(p))
+    assert res.status == "blocked" and res.reason.code == "header_nonprintable", res
+    assert p.read_bytes() == przed and _bez_plikow_roboczych(tmp_path, "f.fits")

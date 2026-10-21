@@ -57,7 +57,7 @@ from horreum.gui.i18n_catalog import CATALOG
 from horreum.gui.wb_worker import (EtykietaBledu, WritebackRunner, ZdanieZeSzczegolem,
                                    czytelny_powod,
                                    podziel_powod_spadku, spadek_na_droge_atomowa, status_pozycji,
-                                   tekst_powodu, wiersz_systemu, wiersz_szczegolu,
+                                   szczegol_powodu, tekst_powodu, wiersz_szczegolu,
                                    zdanie_wyniku_zapisu)
 # Wyjątek planu i odmowa stagingu - jedna reguła wyjątku okna (`powod_okna`): powód klingi z kodem
 # (AR-200), błąd systemu albo bazy klasą (AR-184, AR-198), EXPECT rdzenia - błąd programu (AR-209).
@@ -579,8 +579,9 @@ def zdanie_odmowy_stagingu(exc):
     powod = powod_okna(exc)
     if getattr(powod, "code", None) == "prog_error" and isinstance(exc, ValueError):
         return (i18n.t("objchg.err.stage", msg=i18n.t("objchg.err.stage_plan")),
-                wiersz_systemu(powod))
-    return i18n.t("objchg.err.stage", msg=tekst_powodu(powod)), wiersz_systemu(powod)
+                szczegol_powodu(powod))
+    # Szczegół: system i numer operacji z drogą wyjścia (AR-281 - zdanie mówi gest, nie numer).
+    return i18n.t("objchg.err.stage", msg=tekst_powodu(powod)), szczegol_powodu(powod)
 
 
 def ruszyl_cokolwiek(res):
@@ -936,7 +937,8 @@ class ObjectChangeDialog(QDialog):
         if gen != self._gen:
             return
         self.counts.setText("")
-        self.error.ustaw(i18n.t("objchg.err.plan", msg=tekst_powodu(powod)), wiersz_systemu(powod))
+        self.error.ustaw(i18n.t("objchg.err.plan", msg=tekst_powodu(powod)),
+                         szczegol_powodu(powod))          # system + numer operacji (AR-281)
         self._sync_akcji()
 
     def _kolumna_po_zmianie(self, sciezki):

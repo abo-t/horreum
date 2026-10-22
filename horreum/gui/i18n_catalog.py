@@ -619,6 +619,59 @@ CATALOG = {
     "wb.undo_cancelled_done": {
         "pl": " · cofnięcie przerwano na żądanie - pozostałe pliki nie wymagają cofnięcia",
         "en": " · undo stopped on request - the remaining files need no undo"},
+    # Przerwanie z FAKTEM RDZENIA (AR-318, `UndoResult.untouched`): pliki nietknięte - bez śladu próby
+    # cofnięcia i bez nowszego zapisu, baza opisuje wynik commitu - zostają w stanie po zapisie;
+    # reszta (`remaining - untouched`) wymaga sprawdzenia; ostatni człon mówi, co dokończy cofnięcie.
+    "wb.undo_cancelled_untouched": {
+        "pl": {"one": " · cofnięcie przerwano na żądanie - {n} nietknięty plik zostaje w stanie po "
+                      "zapisie",
+               "few": " · cofnięcie przerwano na żądanie - {n} nietknięte pliki zostają w stanie po "
+                      "zapisie",
+               "many": " · cofnięcie przerwano na żądanie - {n} nietkniętych plików zostaje w stanie po "
+                       "zapisie"},
+        "en": {"one": " · undo stopped on request - {n} untouched file stays as written",
+               "other": " · undo stopped on request - {n} untouched files stay as written"}},
+    "wb.undo_cancelled_also_check": {
+        "pl": {"one": ", {n} wymaga sprawdzenia", "few": ", {n} wymagają sprawdzenia",
+               "many": ", {n} wymaga sprawdzenia"},
+        "en": {"one": ", {n} needs checking", "other": ", {n} need checking"}},
+    "wb.undo_cancelled_finish": {"pl": "; „{undo}” dokończy cofnięcie",
+                                 "en": "; “{undo}” finishes the undo"},
+    # Stan OBIEKTU klatek po cofnięciu karty `OBJECT`, którą „Rozwiąż” zamienił w przypisanie (AR-311,
+    # `UndoResult.objects_restored`/`objects_kept`) - człony zdania wyniku każdej powierzchni cofnięcia.
+    "wb.undo_objects_restored": {
+        "pl": {"one": "{n} klatka ma obiekt sprzed zapisu", "few": "{n} klatki mają obiekt sprzed zapisu",
+               "many": "{n} klatek ma obiekt sprzed zapisu"},
+        "en": {"one": "{n} frame has its object from before the write",
+               "other": "{n} frames have their object from before the write"}},
+    "wb.undo_objects_kept": {
+        "pl": {"one": "{n} klatka zostaje przy obiekcie zmienionym po zapisie",
+               "few": "{n} klatki zostają przy obiekcie zmienionym po zapisie",
+               "many": "{n} klatek zostaje przy obiekcie zmienionym po zapisie"},
+        "en": {"one": "{n} frame keeps the object changed after the write",
+               "other": "{n} frames keep the object changed after the write"}},
+    # Droga powrotu ze STANU (AR-318): wiersz Porządków „Niedokończone cofnięcia zapisu kart” stawia
+    # receptę dokończenia (`ObjectAxisView.podaj_dokonczenie_cofniecia`); zdanie liczy pliki czekające.
+    "wb.undo_finish_recipe": {"pl": "Dokończ cofnięcie (commit {id})",
+                              "en": "Finish the undo (commit {id})"},
+    "wb.undo_unfinished": {
+        "pl": {"one": "Cofnięcie zapisu (commit {id}) nie doszło do końca - {n} plik czeka; "
+                      "„{finish}” dokończy cofnięcie.",
+               "few": "Cofnięcie zapisu (commit {id}) nie doszło do końca - {n} pliki czekają; "
+                      "„{finish}” dokończy cofnięcie.",
+               "many": "Cofnięcie zapisu (commit {id}) nie doszło do końca - {n} plików czeka; "
+                       "„{finish}” dokończy cofnięcie."},
+        "en": {"one": "Undoing the write (commit {id}) did not finish - {n} file is waiting; "
+                      "“{finish}” finishes the undo.",
+               "other": "Undoing the write (commit {id}) did not finish - {n} files are waiting; "
+                        "“{finish}” finishes the undo."}},
+    # Dokończenie cofnięcia podejmuje stan poprzedniej sesji, więc bierze wyłączność szuflady bazy
+    # (`<baza>.szuflada.lock`): trzyma ją inne okno Horreum - odmowa, recepta zostaje.
+    "wb.undo_finish_foreign_owner": {
+        "pl": "Dokończenie cofnięcia (commit {id}) czeka - tę bazę trzyma inne okno Horreum (proces "
+              "{pid}); dokończ tam albo po jego zamknięciu.",
+        "en": "Finishing the undo (commit {id}) waits - another Horreum window holds this database "
+              "(process {pid}); finish it there or after that window closes."},
     # Droga cofnięcia commitu kart PO ZAMKNIĘCIU okna (AR-236, AR-283, AR-272): przycisku „Cofnij”
     # już nie ma, a commit cofa polecenie CLI (`horreum header-fix --undo`, `writeback.undo`). Zdanie
     # paska niesie polecenie KRÓTKIE (`wb.undo_cli_short` - po udanym zapisie członem `wb.undo_short`,
@@ -633,16 +686,18 @@ CATALOG = {
                         "en": "Undo commit {id} after closing the window (command line):\n{cli}"},
     # Recepta paska po zamknięciu okna kart (AR-296): cofnięcie commitu jednym kliknięciem z Porządków.
     "wb.undo_recipe": {"pl": "Cofnij zapis (commit {id})", "en": "Undo the write (commit {id})"},
+    # Odłożenie recepty osi (AR-296, AR-310): kolejka żyje w widoku tej bazy - zdanie nie obiecuje
+    # powrotu po przełączeniu bazy ani po zamknięciu programu.
     "wb.undo_recipe_busy": {
         "pl": "Cofnięcie zapisu (commit {id}) czeka, aż skończy się etap Dostawy - po nim recepta wróci "
-              "w Porządkach.",
+              "na pasek, dopóki ta baza jest otwarta.",
         "en": "Undoing the write (commit {id}) waits for the Intake stage to finish - the recipe comes back "
-              "in Housekeeping after it."},
+              "on the status bar after it, while this database stays open."},
     "wb.undo_recipe_foreign": {
         "pl": "Cofnięcie zapisu (commit {id}) czeka, aż skończy się zapis do plików w Zbiorach - po nim "
-              "recepta wróci w Porządkach.",
+              "recepta wróci na pasek, dopóki ta baza jest otwarta.",
         "en": "Undoing the write (commit {id}) waits for the file write in Collections to finish - the "
-              "recipe comes back in Housekeeping after it."},
+              "recipe comes back on the status bar after it, while this database stays open."},
     "wb.undo_recipe_ready": {
         "pl": "Cofnięcie zapisu (commit {id}) znów możliwe - recepta stoi w Porządkach.",
         "en": "Undoing the write (commit {id}) is possible again - the recipe is in Housekeeping."},
@@ -651,10 +706,6 @@ CATALOG = {
                                 "en": "Undoing the write (commit {id}): {done}/{total}"},
     # Wynik niedomknięty pada też poza Porządkami - zdanie mówi, gdzie stoi przycisk, który nazywa.
     "wb.undo_recipe_place": {"pl": " (w Porządkach)", "en": " (in Housekeeping)"},
-    # Po zapisie kart przeszło „Rozwiąż” - obiekt z karty zostaje w bazie po jej cofnięciu (AR-296).
-    "wb.undo_recipe_object_note": {
-        "pl": " · obiekt z cofniętej karty zostaje w bazie (klatki: {n})",
-        "en": " · the object from the undone card stays in the database (frames: {n})"},
     "wb.undo_recipe_tip_busy": {
         "pl": "Cofnięcie zapisu z paska właśnie pisze do plików - poczekaj na jego koniec.",
         "en": "Undoing the write from the status bar is writing to files right now - wait for it to finish."},
@@ -1379,7 +1430,10 @@ CATALOG = {
                "other": "{n} stacks not undone - their object changed after the gesture"},
     },
     "menu.view": {"pl": "&Widok", "en": "&View"},
-    "menu.theme.dark": {"pl": "Ciemny", "en": "Dark"},
+    # Menu Pomoc (AR-312) - „&Plik” zajmuje Alt+P, więc mnemonik na „m”.
+    "menu.help": {"pl": "Po&moc", "en": "&Help"},
+    "menu.open_error_log": {"pl": "Otwórz dziennik błędów", "en": "Open error log"},
+    "menu.theme.dark":{"pl": "Ciemny", "en": "Dark"},
     "menu.theme.light": {"pl": "Jasny", "en": "Light"},
     "nav.dostawa": {"pl": "Dostawa", "en": "Intake"},
     # Wiersz klasycznej prezentacji strony zbiorów; ta sama nazwa pada w podpowiedziach zadań
@@ -1813,6 +1867,20 @@ CATALOG = {
     # AR-146: pusty wynik dla nazwy, którą katalog zna. `{name}` = `find_as` albo `find_self`.
     "planner.find_as": {"pl": "„{needle}” = {canon}", "en": "“{needle}” = {canon}"},
     "planner.find_self": {"pl": "„{needle}”", "en": "“{needle}”"},
+    # Trafienie szukajki nie-kanonem (AR-175): wiersz mówi nazwę, którą trafił - „NGC1976 (M 42)”.
+    "planner.find_via": {"pl": "{canon} ({via})", "en": "{canon} ({via})"},
+    # Nazwa znana katalogowi, a lista ma same trafienia podciągu (AR-175) - pierwsza linia not.
+    "planner.find_hits_outside": {
+        "pl": "{name}, poza celami planera - lista to cele, których nazwa zawiera „{needle}”.",
+        "en": "{name}, not among the planner targets - the list shows targets whose name "
+              "contains “{needle}”.",
+    },
+    "planner.find_hits_layer": {
+        "pl": "{name} ({type}) - cel spoza wczytanych warstw: zaznacz „{layer}”, żeby go zobaczyć; "
+              "lista to cele, których nazwa zawiera „{needle}”.",
+        "en": "{name} ({type}) - a target outside the loaded layers: tick “{layer}” to see it; "
+              "the list shows targets whose name contains “{needle}”.",
+    },
     "planner.empty_find_outside": {
         "pl": "{name}, poza celami planera.",
         "en": "{name}, not among the planner targets.",
@@ -2051,6 +2119,23 @@ CATALOG = {
     },
     "main.prog_error.copy": {"pl": "Kopiuj szczegół", "en": "Copy details"},
     "main.prog_error.close": {"pl": "Zamknij", "en": "Close"},
+    # Dziennik błędów programu (AR-312): linia okna błędu (gdzie zapisano albo dlaczego nie), przycisk
+    # i zdania „Pomoc → Otwórz dziennik błędów”. `{msg}` = `tekst_powodu` porażki zapisu.
+    "main.prog_error.log_saved": {"pl": "Zapisano w dzienniku błędów: {path}",
+                                  "en": "Saved in the error log: {path}"},
+    "main.prog_error.log_failed": {"pl": "Dziennika błędów nie zapisano: {msg}.",
+                                   "en": "The error log was not written: {msg}."},
+    "main.prog_error.log_no_dir": {
+        "pl": "Dziennika błędów nie ma gdzie zapisać - system nie podał katalogu danych programu.",
+        "en": "There is nowhere to write the error log - the system gave no program data folder.",
+    },
+    "main.prog_error.log_empty": {
+        "pl": "Dziennik błędów jeszcze nie powstał - program nie zgłosił błędu ({path}).",
+        "en": "There is no error log yet - the program has reported no error ({path}).",
+    },
+    "main.prog_error.log_open_failed": {"pl": "Nie udało się otworzyć dziennika błędów: {path}",
+                                        "en": "Could not open the error log: {path}"},
+    "main.prog_error.open_log": {"pl": "Otwórz dziennik", "en": "Open log"},
     # AR-69: baza zapisana nowszym Horreum - odmowa, zanim program cokolwiek w niej zmieni.
     "main.db_too_new": {
         "pl": "Baza {name} pochodzi z nowszej wersji Horreum (schemat v{found}), a ten program "
@@ -2075,6 +2160,8 @@ CATALOG = {
     "busy.open_db": {"pl": "Otwieram bazę: {name}…", "en": "Opening database: {name}…"},
     "busy.mount_views": {"pl": "Buduję widoki…", "en": "Building views…"},
     "busy.refresh_views": {"pl": "Odświeżam widoki po etapie…", "en": "Refreshing views after stage…"},
+    # Faza TŁA (AR-175): liczniki Porządków montażu w wątku tła - okno żyje, plakietka czeka na liczbę.
+    "busy.counting_tasks": {"pl": "Liczę Porządki…", "en": "Counting Housekeeping…"},
     "busy.read_frames": {"pl": "Czytam klatki…", "en": "Reading frames…"},
     "busy.read_queue": {"pl": "Czytam bibliotekę i kolejkę przeglądu…",
                         "en": "Reading library and review queue…"},
@@ -3465,7 +3552,7 @@ CATALOG = {
         "pl": "Nie da się założyć blokady szuflady obok pliku bazy ({detail}) - szuflada nie przyjmuje zmian",
         "en": "Cannot create the drawer lock next to the database file ({detail}) - the drawer takes no changes"},
     # AR-308: przebieg zatrzymany izolacją zapisu w miejscu - pusta szuflada mówi, ile zmian czeka i co je
-    # zwolni (`FramesView._zdanie_izolacji`); gest, który zamknie ostatnią izolację, podejmie je w tej sesji.
+    # zwolni (`FramesView._zdanie_wylaczonych`); gest, który zamknie ostatnią izolację, podejmie je w tej sesji.
     "grid.drawer.pending_isolated": {
         "pl": {"one": "{n} zmiana czeka, aż rozstrzygniesz zapis w miejscu",
                "few": "{n} zmiany czekają, aż rozstrzygniesz zapis w miejscu",
@@ -3498,6 +3585,40 @@ CATALOG = {
         "pl": {"one": "{n} zmiana czeka na podjęcie", "few": "{n} zmiany czekają na podjęcie",
                "many": "{n} zmian czeka na podjęcie"},
         "en": {"one": "{n} change waiting to be picked up", "other": "{n} changes waiting to be picked up"}},
+    # AR-316: przebieg nazw wyłączony z podjęcia otwartym zamiarem (`in_flight` - zapis nazw w biegu
+    # w innym oknie albo przerwany i czekający na rekoncyliację) - lustro zdań izolacji kart.
+    "grid.drawer.pending_names_held": {
+        "pl": {"one": "{n} zmiana nazwy czeka, aż rozstrzygnie się zapis nazw",
+               "few": "{n} zmiany nazw czekają, aż rozstrzygnie się zapis nazw",
+               "many": "{n} zmian nazw czeka, aż rozstrzygnie się zapis nazw"},
+        "en": {"one": "{n} name change waits for a name write to be settled",
+               "other": "{n} name changes wait for a name write to be settled"}},
+    "grid.drawer.names_held_way": {
+        "pl": "zapis nazw w innym oknie skończy się sam; przerwany rozstrzygnie „{receive}” na archiwum "
+              "({nav}) albo kolejny zapis nazw - potem szuflada sama je podejmie",
+        "en": "a name write in another window finishes by itself; an interrupted one is settled by "
+              "“{receive}” on the archive ({nav}) or the next name write - then the drawer picks them up "
+              "by itself"},
+    "grid.drawer.names_held_more": {
+        "pl": {"one": "czeka też {n} zmiana nazwy zatrzymana zapisem nazw",
+               "few": "czekają też {n} zmiany nazw zatrzymane zapisem nazw",
+               "many": "czeka też {n} zmian nazw zatrzymanych zapisem nazw"},
+        "en": {"one": "{n} more name change held by a name write is also waiting",
+               "other": "{n} more name changes held by a name write are also waiting"}},
+    "grid.drawer.names_held_ready": {
+        "pl": {"one": "{n} zmiana nazwy zwolniona z zapisu nazw czeka - szuflada podejmie ją, gdy się zwolni",
+               "few": "{n} zmiany nazw zwolnione z zapisu nazw czekają - szuflada podejmie je, gdy się zwolni",
+               "many": "{n} zmian nazw zwolnionych z zapisu nazw czeka - szuflada podejmie je, gdy się zwolni"},
+        "en": {"one": "{n} name change released from the name write is waiting - the drawer picks it up "
+                      "once it is free",
+               "other": "{n} name changes released from the name write are waiting - the drawer picks them "
+                        "up once it is free"}},
+    # AR-316: podpowiedź kropki „◌” - zmiany czekają poza tą szufladą (zatrzymane albo zwolnione, a szuflada
+    # ich jeszcze nie podjęła); zdanie obok mówi, co je zwolni.
+    "grid.drawer.dot_held_tip": {
+        "pl": "Zmiany czekają, ale szuflada nie może ich jeszcze zatwierdzić - co je zwolni, mówi zdanie obok",
+        "en": "Changes are waiting, but the drawer cannot commit them yet - the sentence next to it says "
+              "what releases them"},
     "grid.action.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "grid.action.commit": {"pl": "Zatwierdź", "en": "Commit"},
     "grid.action.reject": {"pl": "Odrzuć", "en": "Discard"},
@@ -3859,6 +3980,15 @@ CATALOG = {
     "pipeline.fmt.copy_facts.written": {
         "pl": "uzupełniono {n} z {rows}", "en": "filled in {n} of {rows}",
     },
+    # Druga robota etapu (AR-315): jednorazowe zbadanie bajtu spoza ASCII w nagłówkach kopii FITS
+    # (AR-299) - osobno od faktów, z resztą, która czeka na dalszy HDU.
+    "pipeline.fmt.copy_facts.bytes": {
+        "pl": "sprawdzono bajty nagłówka {n} z {rows}", "en": "header bytes checked {n} of {rows}",
+    },
+    "pipeline.fmt.copy_facts.bytes_unchecked": {
+        "pl": "bajtów nie sprawdzono {n} (dalszy HDU nie do doczytania - czeka)",
+        "en": "bytes not checked {n} (a further HDU cannot be read - waiting)",
+    },
     "pipeline.fmt.copy_facts.stale": {
         "pl": "zmienione na dysku od skanu {n} (dogoni je skan)",
         "en": "changed on disk since the scan {n} (the scan will catch up)",
@@ -3873,9 +4003,10 @@ CATALOG = {
         "en": "file missing {n} - “{check}” → “{mark}” (appears when the check confirms the file "
               "is gone)",
     },
-    # Fakty dociągnięte w trakcie przebiegu inną drogą (re-sync pisarza, skan) - nic nie czeka.
+    # Robota kopii (fakty albo zbadanie bajtów) domknięta w trakcie przebiegu inną drogą (re-sync
+    # pisarza, skan, druga instancja) - nic nie czeka. Słowo neutralne: dotyczy obu robót (AR-315).
     "pipeline.fmt.copy_facts.elsewhere": {
-        "pl": "zebrane równolegle {n}", "en": "collected elsewhere {n}",
+        "pl": "domknięte równolegle {n}", "en": "done elsewhere {n}",
     },
     # Zapis nagłówka w miejscu trwał przy obu próbach odczytu - plik zdrowy, kopia czeka.
     "pipeline.fmt.copy_facts.raced": {
@@ -3884,10 +4015,14 @@ CATALOG = {
     },
     "pipeline.fmt.copy_facts.failed": {"pl": "nieczytelne {n}", "en": "unreadable {n}"},
     "pipeline.fmt.copy_facts.remaining": {"pl": "czeka {n}", "en": "waiting {n}"},
+    # `{eta}` = `pipeline.eta.*` (AR-315): etap na całym archiwum po aktualizacji trwa minuty.
     "pipeline.counts_copy_facts": {
-        "pl": "Nagłówki kopii {done}/{total} · uzupełnione {written} · {tail}",
-        "en": "Copy headers {done}/{total} · filled in {written} · {tail}",
+        "pl": "Nagłówki kopii {done}/{total} · uzupełnione {written} · zostało {eta} · {tail}",
+        "en": "Copy headers {done}/{total} · filled in {written} · {eta} left · {tail}",
     },
+    # Szacunek czasu etapu faktów kopii (`pipeline.zdanie_czasu`) - skrót „min” bez odmiany.
+    "pipeline.eta.minutes": {"pl": "ok. {n} min", "en": "about {n} min"},
+    "pipeline.eta.under_minute": {"pl": "poniżej minuty", "en": "under a minute"},
 
     # --- powody przeglądu w raporcie delty: _REVIEW_REASONS trzyma KLUCZE ---
     "pipeline.reason.no_config": {"pl": "bez konfiguracji", "en": "no config"},
@@ -3915,43 +4050,76 @@ CATALOG = {
     # akcji bez skanu. Liczba w nawiasie nie odmienia rzeczownika - odmiana żyje w podpowiedzi
     # i w linii powodu.
     "pipeline.btn.copy_facts": {"pl": "Zbierz fakty kopii ({n})", "en": "Collect copy facts ({n})"},
+    # AR-315: ten sam gest, gdy kopie czekają WYŁĄCZNIE na jednorazowe sprawdzenie bajtów nagłówka
+    # (po aktualizacji programu) albo na obie roboty - napis mówi, co gest zrobi.
+    "pipeline.btn.copy_bytes": {"pl": "Sprawdź bajty nagłówków ({n})", "en": "Check header bytes ({n})"},
+    "pipeline.btn.copy_both": {
+        "pl": "Zbierz fakty kopii ({fakty}) i sprawdź bajty ({bajty})",
+        "en": "Collect copy facts ({fakty}) and check bytes ({bajty})",
+    },
+    # Podpowiedź gestu z członów (`PipelineView._sync_copy_facts`): fakty (gdy czekają), same bajty
+    # (gdy czekają), na końcu zawsze `tip.copy_how` - co gest robi i ile potrwa.
     "pipeline.tip.copy_facts": {
-        "pl": {"one": "{n} kopia czeka na fakty (liczba obrazów, zeznanie nagłówka). Gest czyta "
-                      "same nagłówki i przejmuje zeznanie ocalałej kopii, a po przejęciu przelicza "
-                      "pochodne - te same etapy co w „Przyjmij nowe”, bez skanu i bez pytania "
-                      "o katalog, w całym archiwum.",
-               "few": "{n} kopie czekają na fakty (liczba obrazów, zeznanie nagłówka). Gest czyta "
-                      "same nagłówki i przejmuje zeznanie ocalałej kopii, a po przejęciu przelicza "
-                      "pochodne - te same etapy co w „Przyjmij nowe”, bez skanu i bez pytania "
-                      "o katalog, w całym archiwum.",
-               "many": "{n} kopii czeka na fakty (liczba obrazów, zeznanie nagłówka). Gest czyta "
-                       "same nagłówki i przejmuje zeznanie ocalałej kopii, a po przejęciu "
-                       "przelicza pochodne - te same etapy co w „Przyjmij nowe”, bez skanu i bez "
-                       "pytania o katalog, w całym archiwum."},
-        "en": {"one": "{n} copy is waiting for its facts (image count, header testimony). This "
-                      "reads headers only and adopts the surviving copy's testimony, then "
-                      "recomputes what derives from it - the same stages as in “Receive new”, with "
-                      "no scan and no folder prompt, across the whole archive.",
-               "other": "{n} copies are waiting for their facts (image count, header testimony). "
-                        "This reads headers only and adopts the surviving copy's testimony, then "
-                        "recomputes what derives from it - the same stages as in “Receive new”, "
-                        "with no scan and no folder prompt, across the whole archive."},
+        "pl": {"one": "{n} kopia czeka na fakty (liczba obrazów, zeznanie nagłówka).",
+               "few": "{n} kopie czekają na fakty (liczba obrazów, zeznanie nagłówka).",
+               "many": "{n} kopii czeka na fakty (liczba obrazów, zeznanie nagłówka)."},
+        "en": {"one": "{n} copy is waiting for its facts (image count, header testimony).",
+               "other": "{n} copies are waiting for their facts (image count, header testimony)."},
+    },
+    # `{n}` = WSZYSTKIE kopie FITS czekające na bajty, także te, które czekają i na fakty (bez „tylko”).
+    "pipeline.tip.copy_bytes": {
+        "pl": {"one": "{n} kopia FITS czeka na jednorazowe sprawdzenie bajtów nagłówka - po "
+                      "aktualizacji programu Horreum sprawdza tak raz każdą starszą kopię.",
+               "few": "{n} kopie FITS czekają na jednorazowe sprawdzenie bajtów nagłówka - po "
+                      "aktualizacji programu Horreum sprawdza tak raz każdą starszą kopię.",
+               "many": "{n} kopii FITS czeka na jednorazowe sprawdzenie bajtów nagłówka - po "
+                       "aktualizacji programu Horreum sprawdza tak raz każdą starszą kopię."},
+        "en": {"one": "{n} FITS copy is waiting for a one-time check of its header bytes - "
+                      "after a program update Horreum checks every older copy once.",
+               "other": "{n} FITS copies are waiting for a one-time check of their header "
+                        "bytes - after a program update Horreum checks every older copy once."},
+    },
+    "pipeline.tip.copy_how": {
+        "pl": "Gest czyta same nagłówki ({czas}) i przejmuje zeznanie ocalałej kopii, a po przejęciu "
+              "przelicza pochodne - te same etapy co w „Przyjmij nowe”, bez skanu i bez pytania "
+              "o katalog, w całym archiwum.",
+        "en": "This reads headers only ({czas}) and adopts the surviving copy's testimony, then "
+              "recomputes what derives from it - the same stages as in “Receive new”, with no scan "
+              "and no folder prompt, across the whole archive.",
     },
     # Linia nad akcjami, gdy do Dostawy przyprowadził klik w wiersz „?" Porządków
-    # (`PipelineView.show_reason`): po co człowiek tu jest i która akcja to załatwia.
+    # (`PipelineView.show_reason`): po co człowiek tu jest i która akcja to załatwia. Z członów jak
+    # podpowiedź: fakty, same bajty (`{wiersz}` = nazwa wiersza Porządków), na końcu gest i czas.
     "pipeline.why.copy_facts": {
         "pl": {"one": "Zebrać fakty kopii: {n} kopia czeka - bez jej zeznania wiersze „?” "
-                      "w Porządkach nie mają czego porównać. „{gest}” zbierze je bez skanu.",
+                      "w Porządkach nie mają czego porównać.",
                "few": "Zebrać fakty kopii: {n} kopie czekają - bez ich zeznań wiersze „?” "
-                      "w Porządkach nie mają czego porównać. „{gest}” zbierze je bez skanu.",
+                      "w Porządkach nie mają czego porównać.",
                "many": "Zebrać fakty kopii: {n} kopii czeka - bez ich zeznań wiersze „?” "
-                       "w Porządkach nie mają czego porównać. „{gest}” zbierze je bez skanu."},
+                       "w Porządkach nie mają czego porównać."},
         "en": {"one": "Collect copy facts: {n} copy is waiting - without its testimony the “?” "
-                      "rows in Housekeeping have nothing to compare. “{gest}” collects it with "
-                      "no scan.",
+                      "rows in Housekeeping have nothing to compare.",
                "other": "Collect copy facts: {n} copies are waiting - without their testimony "
-                        "the “?” rows in Housekeeping have nothing to compare. “{gest}” collects "
-                        "them with no scan."},
+                        "the “?” rows in Housekeeping have nothing to compare."},
+    },
+    "pipeline.why.copy_bytes": {
+        "pl": {"one": "Sprawdzić bajty nagłówków: {n} kopia FITS czeka na jednorazowe sprawdzenie po "
+                      "aktualizacji programu - do tego czasu wiersz „{wiersz}” w Porządkach mówi „?”.",
+               "few": "Sprawdzić bajty nagłówków: {n} kopie FITS czekają na jednorazowe sprawdzenie "
+                      "po aktualizacji programu - do tego czasu wiersz „{wiersz}” w Porządkach mówi "
+                      "„?”.",
+               "many": "Sprawdzić bajty nagłówków: {n} kopii FITS czeka na jednorazowe sprawdzenie "
+                       "po aktualizacji programu - do tego czasu wiersz „{wiersz}” w Porządkach mówi "
+                       "„?”."},
+        "en": {"one": "Check header bytes: {n} FITS copy is waiting for a one-time check after the "
+                      "program update - until then the “{wiersz}” row in Housekeeping shows “?”.",
+               "other": "Check header bytes: {n} FITS copies are waiting for a one-time check after "
+                        "the program update - until then the “{wiersz}” row in Housekeeping shows "
+                        "“?”."},
+    },
+    "pipeline.why.copy_gest": {
+        "pl": "„{gest}” zrobi to bez skanu ({czas}).",
+        "en": "“{gest}” does it with no scan ({czas}).",
     },
     "pipeline.source_last": {"pl": "ostatnie źródło: {source}", "en": "last source: {source}"},
     "pipeline.source_first": {
@@ -7813,6 +7981,10 @@ CATALOG = {
         "en": "the header region is already the state from before the commit, but the whole file "
               "cannot be confirmed ({inner}) - rescan the file; a change outside the header is for "
               "a person to decide"},
+    # Cofnięcie odmawia lokacji z nowszym, niecofniętym zapisem (AR-318, `writeback._nowszy_zywy_zapis`).
+    "objchg.item.undo_newer_write": {
+        "pl": "lokacja ma nowszy zapis (commit {commit_id}) - cofnij najpierw jego",
+        "en": "the location has a newer write (commit {commit_id}) - undo that one first"},
     # Bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
     # `evaluate_manual_change`) i powody wyrażenia (`expr.eval_for`, parametr `inner` powodów
     # `macro_compute`/`macro_assign`). PL = zdanie rdzenia znak w znak (polskie znaki od AR-228,
@@ -8363,6 +8535,17 @@ CATALOG = {
         "en": "“Change object…” or “Align files…” did not finish (interrupted, crashed or an item "
               "failed). A click opens the oldest run: “Finish” writes the items that are waiting, "
               "“Undo” returns to the state before the gesture."},
+    # AR-318: commity kart, których cofnięcie się zaczęło i nie skończyło (`queries.niedokonczone_
+    # cofniecia_kart`) - liczba to commity, klik stawia receptę dokończenia najstarszego.
+    "tasks.undo_unfinished": {"pl": "Niedokończone cofnięcia zapisu kart",
+                              "en": "Unfinished undos of card writes"},
+    "tasks.undo_unfinished_tip": {
+        "pl": "Cofnięcie zapisu kart nie doszło do końca (zamknięcie okna w biegu, awaria albo plik "
+              "zajęty). Klik stawia na pasku receptę najstarszego commitu: „Dokończ cofnięcie” cofnie "
+              "pliki, które wciąż są w stanie po zapisie.",
+        "en": "Undoing a card write did not finish (window closed during the run, a crash or a busy "
+              "file). A click puts the oldest commit's recipe on the status bar: “Finish the undo” "
+              "undoes the files that are still as written."},
     "perspective.file_object_mismatch": {"pl": "Plik nie zgadza się z obiektem",
                                          "en": "File disagrees with its object"},
     "grid.criteria.only_file_object_mismatch": {
@@ -8601,8 +8784,10 @@ CATALOG = {
     "grid.optics.recipe_line": {"pl": "{telescope} {file} → {target} ({n} kl.)",
                                 "en": "{telescope} {file} → {target} ({n} fr.)"},
     "axis.tel.optics_header": {"pl": "Optyka:", "en": "Optics:"},
-    "axis.tel.optics_busy": {"pl": "Trwa etap Dostawy - optyka teleskopu poczeka na jego koniec.",
-                             "en": "An Intake stage is running - telescope optics wait for it to end."},
+    # Wpis odmówiony w biegu etapu przepada (oś wraca do bazy, `TelescopeAxisView`) - nic nie czeka.
+    "axis.tel.optics_busy": {"pl": "Trwa etap Dostawy - optykę teleskopu zmienisz po jego końcu.",
+                             "en": "An Intake stage is running - you can change the telescope optics after "
+                                   "it finishes."},
     "axis.tel.optics_earlier_tip": {
         "pl": "Pliki nie zeznają tej wartości - zapisano ją wcześniej (np. przy powołaniu "
               "teleskopu).\n{files}\nDwuklik: potwierdź albo wpisz własną.",
@@ -8659,9 +8844,20 @@ CATALOG = {
     "object.config_undo_add.refused": {
         "pl": "Nie cofnięto dopisania „{telescope}”: {reason}",
         "en": "Adding “{telescope}” not undone: {reason}"},
+    # Gałąź obronna Osi teleskopu (przycisk gaśnie w biegu) - nic nie czeka, zdanie mówi, kiedy można.
     "object.config_undo_add.busy": {
-        "pl": "Trwa etap Dostawy - cofnięcie dopisania poczeka na jego koniec.",
-        "en": "A Delivery stage is running - undoing the addition waits for it to finish."},
+        "pl": "Trwa etap Dostawy - cofnięcie dopisania zrobisz po jego końcu.",
+        "en": "An Intake stage is running - you can undo the addition after it finishes."},
+    # Recepta „Cofnij dopisanie” z paska odmówiona w biegu Dostawy (AR-310): oś ODKŁADA ją do końca
+    # etapu (kolejka recept osi, `ObjectAxisView._podaj_odlozone`) - tylko w tej otwartej bazie.
+    "object.config_undo_add.deferred": {
+        "pl": "Cofnięcie dopisania „{telescope}” czeka, aż skończy się etap Dostawy - po nim recepta "
+              "wróci na pasek, dopóki ta baza jest otwarta.",
+        "en": "Undoing the addition of “{telescope}” waits for the Intake stage to finish - the recipe "
+              "comes back on the status bar after it, while this database stays open."},
+    "object.config_undo_add.ready": {
+        "pl": "Cofnięcie dopisania „{telescope}” znów możliwe - recepta stoi w Porządkach.",
+        "en": "Undoing the addition of “{telescope}” is possible again - the recipe is in Housekeeping."},
     "object.config_undo_add.refused.frames": {
         "pl": "ma klatki przypisane poza gestem",
         "en": "it has frames assigned outside the gesture"},

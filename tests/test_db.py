@@ -48,7 +48,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0044 atomic_undo (ślad własnego cofnięcia drogi atomowej, AR-182)
     # + 0045 atomic_undo.outcome/kept_paths/settled_at (pliki obok ścieżki po cofnięciu, AR-127)
     # + 0046 location.nonprintable_hash/_keyword/_char (zbadanie bajtu spoza ASCII kopii FITS, AR-299)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 46
+    # + 0047 migration_log (chwila zastosowania migracji w tej bazie, AR-318)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 47
     con.close()
 
 

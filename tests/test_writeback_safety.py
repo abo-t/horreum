@@ -32,7 +32,11 @@ PKG = Path(horreum.__file__).parent
 # Domy mutacji plików: `writeback.py` (druga klinga - nagłówki+rename, KROK 4), `projection.py`
 # (trzecia klinga - link/kopia/katalog, KROK 6) oraz `raport.py` (czwarte drzwi - katalog raportu
 # śladów i kopia klatki dla ASTAP, `MT-2`). Pętla pomija wszystkie (brief PLAN_projekcje §0).
-DOORS = {PKG / "writeback.py", PKG / "projection.py", PKG / "raport.py"}
+# Piąte drzwi - `gui/dziennik_bledow.py` (AR-312): plik PROGRAMU, nie archiwum - dziennik błędów straży
+# w katalogu danych programu użytkownika (wydanie okienkowe nie ma `stderr`). Dopisek, obrót po progu
+# i założenie katalogu, wyłącznie pod katalogiem od wołającego; mapa mutacji przypięta niżej
+# (`_DZIENNIK_MUTACJE`), a test modułu sprawdza w biegu, że poza katalogiem dziennika nic się nie zmienia.
+DOORS = {PKG / "writeback.py", PKG / "projection.py", PKG / "raport.py", PKG / "gui" / "dziennik_bledow.py"}
 
 # os.<attr> — mutacje pliku (kwalifikowane przez moduł `os`, nie goły attr). `link`/`symlink`/`mkdir`/
 # `makedirs` doszły z projekcją (KROK 6): tworzenie linków/katalogów to mutacja filesystemu.
@@ -357,6 +361,44 @@ def test_mutacja_pathlib_w_nowej_funkcji_raportu_przewraca_bramke(cialo, opis):
     zrodlo = (PKG / "raport.py").read_text(encoding="utf-8")
     found = _mapa_mutacji(zrodlo + f"\n\ndef _wyciek(p, q):\n    {cialo}\n")
     assert found != _RAPORT_MUTACJE and found["_wyciek"] == {opis}
+
+
+# Gdzie w piątych drzwiach WOLNO mutować plik (AR-312): trzy funkcje modułu, każda z jedną mutacją -
+# założenie katalogu dziennika, obrót plików dziennika w obrębie katalogu i dopisek. Klasa `Dziennik`
+# nie mutuje sama (woła te funkcje); nowe miejsce mutacji przewraca test i wymaga dopisania tutaj.
+_DZIENNIK_MUTACJE = {
+    "_utworz_katalog": {"os.makedirs(...)"},
+    "_obroc": {"os.replace(...)"},
+    "_dopisz": {"open(..., <tryb pisania>)"},
+}
+
+
+def test_drzwi_dziennika_mutuja_tylko_w_dozwolonych_funkcjach():
+    """Piąte drzwi (`gui/dziennik_bledow.py`) mutują wyłącznie w funkcjach z `_DZIENNIK_MUTACJE`, a plik
+    otwierają do zapisu WYŁĄCZNIE w trybie dopisku (`a`) - żadnego nadpisania (`w`) ani `+`."""
+    zrodlo = (PKG / "gui" / "dziennik_bledow.py").read_text(encoding="utf-8")
+    tree = ast.parse(zrodlo)
+    assert _mapa_mutacji(zrodlo) == _DZIENNIK_MUTACJE
+    tryby = {_tryb(c, 1) for _, c in _wywolania_w_funkcjach(tree)
+             if isinstance(c.func, ast.Name) and c.func.id == "open" and _mode_arg(c, 1) is not None}
+    assert tryby == {"a"}, tryby
+
+
+@pytest.mark.parametrize("cialo, opis", [
+    ("os.remove(p)", "os.remove(...)"),
+    ("open(p, 'w')", "open(..., <tryb pisania>)"),
+    ("Path(p).unlink()", ".unlink(...)"),
+])
+def test_mutacja_w_nowej_funkcji_dziennika_przewraca_bramke(cialo, opis):
+    """Negatywny dowód bramki piątych drzwi na KOPII żywego źródła w pamięci: mutacja dopisana w nowej
+    funkcji modułu (także w metodzie klasy - przypisana klasie, `test_mutatory_po_funkcjach_widzi_metode_klasy`)
+    zmienia mapę, więc `== _DZIENNIK_MUTACJE` czerwienieje."""
+    zrodlo = (PKG / "gui" / "dziennik_bledow.py").read_text(encoding="utf-8")
+    found = _mapa_mutacji(zrodlo + f"\n\ndef _wyciek(p):\n    {cialo}\n")
+    assert found != _DZIENNIK_MUTACJE and found["_wyciek"] == {opis}
+    w_klasie = _mapa_mutacji(zrodlo.replace("    def zapisz(self,", f"    def _wyciek(self, p):\n        {cialo}\n\n"
+                                                                    "    def zapisz(self,"))
+    assert w_klasie != _DZIENNIK_MUTACJE and w_klasie["Dziennik"] == {opis}
 
 
 def test_dopasowanie_nie_lapie_str_list_methods():

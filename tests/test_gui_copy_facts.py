@@ -212,15 +212,16 @@ def test_linia_raportu_faktow_kopii(qapp, tmp_path):
     db.open_db(path).close()
     v = PipelineView(path, now_fn=lambda: NOW)
     try:
-        czysto = v._format_result("copy_facts", scan.CopyFactsSummary(rows=5, read=5, written=5))
+        czysto = v._format_result("copy_facts", scan.CopyFactsSummary(
+            rows=5, read=5, written=5, rows_facts=5, facts_written=5))
         assert czysto == "[fakty kopii] uzupełniono 5 z 5"     # nagłówek `[etap]` (AR-115)
         brudno = v._format_result("copy_facts", scan.CopyFactsSummary(
-            rows=5, read=4, written=3, stale=1, failed=1, remaining=2))
+            rows=5, read=4, written=3, stale=1, failed=1, remaining=2, rows_facts=5, facts_written=3))
         assert "zmienione na dysku od skanu 1" in brudno and "nieczytelne 1" in brudno
         assert "czeka 2" in brudno and "brak pliku" not in brudno
         # Kopia skasowana z dysku nie udaje „nieczytelnej" - linia mówi, co z nią zrobić.
         skasowane = v._format_result("copy_facts", scan.CopyFactsSummary(
-            rows=550, read=548, written=548, missing=2, remaining=2))
+            rows=550, read=548, written=548, missing=2, remaining=2, rows_facts=550, facts_written=548))
         # Dwa kroki z nazwami z katalogu: „Oznacz zniknięte” pojawia się dopiero pod wynikiem
         # „Sprawdź obecność”, i to tylko po potwierdzonym zniknięciu (bliźniak `pipeline.tip.presence`).
         assert skasowane == (
@@ -230,15 +231,16 @@ def test_linia_raportu_faktow_kopii(qapp, tmp_path):
         assert "nieczytelne" not in skasowane
         # Fakty dociągnięte równolegle i zapis nagłówka w toku to nie „zmienione na dysku od skanu”.
         rownolegle = v._format_result("copy_facts", scan.CopyFactsSummary(
-            rows=3, read=3, written=1, elsewhere=1, raced=1, remaining=1))
+            rows=3, read=3, written=1, elsewhere=1, raced=1, remaining=1, rows_facts=3, facts_written=1))
         assert "zmienione na dysku" not in rownolegle, rownolegle
-        assert "zebrane równolegle 1" in rownolegle and "zapis nagłówka w toku 1" in rownolegle
+        assert "domknięte równolegle 1" in rownolegle and "zapis nagłówka w toku 1" in rownolegle
         i18n.set_lang("en")
         en = v._format_result("copy_facts", scan.CopyFactsSummary(
-            rows=3, read=3, written=1, missing=1, elsewhere=1, raced=1, remaining=2))
+            rows=3, read=3, written=1, missing=1, elsewhere=1, raced=1, remaining=2, rows_facts=3,
+            facts_written=1))
         assert "file missing 1 - “Check presence” → “Mark vanished” (appears when the check " \
                "confirms the file is gone)" in en, en
-        assert "collected elsewhere 1" in en and "header write in progress 1" in en, en
+        assert "done elsewhere 1" in en and "header write in progress 1" in en, en
     finally:
         i18n.set_lang("pl")
         v.close()

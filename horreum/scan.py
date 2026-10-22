@@ -1952,11 +1952,13 @@ def _record_stack_history(con, rec, *, location_id, kind, now, actor):
 
 
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
-                  actor="scan", inplace_gen=None):
+                  actor="scan", inplace_gen=None, zapis_commitu=None):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
     (`scan_tree`) i importu z dawcy (rekord pochodzi z nagłówka pliku ALBO z cache'owanego
     źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj). `actor` idzie do
     KAŻDEGO eventu tej ścieżki (import z dawcy podaje `import:fitsmirror`, brief §4.2).
+    `zapis_commitu` = `(commit_id, location_id)` re-syncu zapisu commitu kart (`writeback._resync`) -
+    przekazywane bez zmian do `repo.refresh_location` (dowód pochodzenia zeznania, AR-311).
 
     TOŻSAMOŚĆ (brief §2): frame po `sha1_data` (odcisk sekcji danych); nieobliczalny →
     DEGENERACJA (sha1 całego pliku + `sha1_data_uncomputable=1`) — legalna WYŁĄCZNIE dla ścieżki
@@ -2022,11 +2024,13 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     rekord = ScanSummary()
     with repo.atomic(con):
         _ingest_in_tx(con, rec, volume=volume, drive_letter=drive_letter, tier=tier, now=now,
-                      summary=rekord, actor=actor, inplace_gen=inplace_gen)
+                      summary=rekord, actor=actor, inplace_gen=inplace_gen,
+                      zapis_commitu=zapis_commitu)
     _dolicz_probe(summary, rekord)
 
 
-def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, inplace_gen):
+def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, inplace_gen,
+                  zapis_commitu=None):
     """Ciało `ingest_record` - wołane WYŁĄCZNIE w jego zakresie `repo.atomic` (kontrakt tam)."""
     readable = rec.header is not None
     copy_facts = copy_header_facts(rec.header, rec.header_hash, rec.image_roles)
@@ -2149,7 +2153,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
         unreadable_kind=kind_after, unreadable_reason=reason_after,
         present=1, now=now, actor=actor, raw_json=raw_json, cards=cards, hot_fields=hot,
         camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen,
-        nonprintable=rec.nonprintable)
+        nonprintable=rec.nonprintable, zapis_commitu=zapis_commitu)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
     _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
@@ -2401,18 +2405,25 @@ class CopyFactsSummary:
     byłoby raportem, który zataja, dlaczego reszta czeka."""
     rows: int = 0             # kopie wybrane sterownikiem (kandydaci pod korzeniem)
     read: int = 0             # nagłówek przeczytany
-    written: int = 0          # fakty zapisane (`repo.record_copy_facts` → True)
+    written: int = 0          # kopie z zapisaną robotą: fakty (`repo.record_copy_facts` → True)
+                              # albo zbadanie bajtu (AR-299) - postęp etapu liczy nim zrobione
     stale: int = 0            # nagłówek na dysku ≠ znany odcisk kopii → ZERO zapisu (dogoni skan)
     missing: int = 0          # pliku nie ma, a korzeń przebiegu stoi (skasowany) → ZERO zapisu;
                               # robota passa obecności („Oznacz zniknięte"), nie „nieczytelne"
     failed: int = 0           # odczyt nagłówka padł (albo korzeń nieosiągalny) → ZERO zapisu
-    elsewhere: int = 0        # fakty dociągnął w międzyczasie ktoś inny (re-sync pisarza, skan) →
+    elsewhere: int = 0        # robotę kopii (fakty, zbadanie bajtów) domknął w międzyczasie ktoś inny →
                               # ZERO zapisu, nic nie czeka; bez ścieżek - to nie jest fakt o pliku
     raced: int = 0            # drugi konflikt generacji z rzędu (zapis w miejscu w toku) → ZERO
                               # zapisu, plik zdrowy, kopia czeka na następną dostawę; bez ścieżek
     remaining: int = 0        # kandydaci PO przebiegu (0 = komplet)
     bytes_checked: int = 0    # kopie FITS, którym przebieg zapisał zbadanie bajtu spoza ASCII (AR-299)
     bytes_unchecked: int = 0  # kopie FITS z dalszym HDU nie do doczytania - zbadanie niepełne, czekają
+    # AR-315: dwie roboty jednego etapu osobno - raport mówi „uzupełniono fakty N z M” i „sprawdzono
+    # bajty N z M”, a nie jedno „uzupełniono 15598 z 15598”, gdy faktów nie czekała żadna kopia.
+    # Kopia, która czeka na obie, liczy się w obu `rows_*`.
+    rows_facts: int = 0       # z `rows`: kopie z klasy faktów (`_kandydaci_faktow`)
+    rows_bytes: int = 0       # z `rows`: kopie FITS niezbadane (`_niezbadane_do_odczytu`)
+    facts_written: int = 0    # fakty zapisane (`repo.record_copy_facts` → True)
     cancelled: bool = False
     failed_paths: list = field(default_factory=list)
     stale_paths: list = field(default_factory=list)
@@ -2481,16 +2492,20 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
     predykatu i licznika „niesprawdzone” w Porządkach), z tymi samymi bramkami (obecna, z odciskiem,
     czytelna, nie izolowana). Sterownik zbada je tym samym odczytem nagłówka - to jedyna droga, którą
     kopie sprzed migracji (brama przyrostowa je pomija) dostają zbadanie; pierwsza Dostawa korzenia
-    archiwum po migracji czyta tak 15 598 nagłówków FITS na `R:` (~6,5 min, 2026-10-21). Tryb
-    `porownywalne` ich NIE dostaje: liczniki „?” porównań kopii z bajtem nie mają związku."""
-    rows = _kandydaci_faktow(con, porownywalne)
-    if not porownywalne:
-        znane = {r["id"] for r in rows}
-        rows = sorted([*rows, *(r for r in _niezbadane_do_odczytu(con) if r["id"] not in znane)],
-                      key=lambda r: r["id"])
-    if root is None:
-        return rows
-    prefix = canonize_root(root).rstrip("\\/") + os.sep
+    archiwum po migracji czyta tak 15 598 nagłówków FITS na `R:` - zmierzone 2026-10-22 prawdziwym
+    przebiegiem na kopii bazy: 27,2-30,5 ms na kopię (odczyt nagłówka po SMB i zapis), czyli 7,1-7,9
+    min. Tryb `porownywalne` ich NIE dostaje: liczniki „?” porównań kopii z bajtem nie mają związku.
+
+    Podział tej sumy na dwie roboty (fakty / samo zbadanie bajtów) liczy `_dwie_roboty` - to samo
+    złożenie, z którego bierze się ta lista, więc przycisk Dostawy i jego podpowiedź (AR-315,
+    `copy_facts_waiting`) nie mają drugiego licznika obok."""
+    rows = _kandydaci_faktow(con, True) if porownywalne else _unia(*_dwie_roboty(con))
+    return rows if root is None else _pod_korzeniem(rows, canonize_root(root))
+
+
+def _pod_korzeniem(rows, korzen):
+    """Wiersze kopii pod korzeniem już skanonizowanym (`canonize_root`)."""
+    prefix = korzen.rstrip("\\/") + os.sep
     return [r for r in rows if _under(r["path"], prefix)]
 
 
@@ -2500,6 +2515,41 @@ def _niezbadane_do_odczytu(con):
     from . import resolver                # leniwie - jak `queries` niżej
     return [r for r in resolver.nonprintable_unread_locations(con)
             if r["unreadable_since"] is None and not r["izolowana"]]
+
+
+def _dwie_roboty(con):
+    """`(fakty, bajty)` trybu domyślnego `copy_facts_candidates` - JEDNO złożenie (AR-315): kandydaci
+    faktów (`_kandydaci_faktow`) i WSZYSTKIE kopie FITS niezbadane (`_niezbadane_do_odczytu`). Kopia,
+    która czeka na obie roboty, stoi w obu listach; lista etapu to ich unia (`_unia`). Z tej jednej
+    pary biorą się lista przebiegu i jej klasyfikacja (`backfill_copy_facts`) oraz liczby przycisku
+    (`copy_facts_waiting`) - osobny SELECT po wyborze listy rozjeżdżał mianowniki z listą, gdy robotę
+    domknął w międzyczasie ktoś inny."""
+    return _kandydaci_faktow(con, False), _niezbadane_do_odczytu(con)
+
+
+def _unia(fakty, bajty):
+    """Kopie z obu robót, każda raz, po `id` (wiersz kandydata faktów, gdy kopia jest w obu)."""
+    po_id = {r["id"]: r for r in bajty}
+    po_id.update((r["id"], r) for r in fakty)
+    return [po_id[k] for k in sorted(po_id)]
+
+
+@dataclass(frozen=True)
+class CopyFactsWaiting:
+    """Ile roboty czeka na etap faktów kopii (AR-315): `facts` - kopie czekające na fakty, `bytes` -
+    WSZYSTKIE kopie FITS czekające na jednorazowe zbadanie bajtów nagłówka (także te, które czekają
+    i na fakty), `copies` - kopie do przeczytania (unia; `== len(copy_facts_candidates(con))`).
+    Teksty mówią o robotach (`facts`, `bytes`), widoczność gestu i czas - o kopiach (`copies`)."""
+    facts: int = 0
+    bytes: int = 0
+    copies: int = 0
+
+
+def copy_facts_waiting(con):
+    """`CopyFactsWaiting` całego archiwum (bez korzenia - slot okna nie dotyka dysku, AR-31 (3)) z tego
+    samego złożenia co `copy_facts_candidates` (`_dwie_roboty`)."""
+    fakty, bajty = _dwie_roboty(con)
+    return CopyFactsWaiting(facts=len(fakty), bytes=len(bajty), copies=len(_unia(fakty, bajty)))
 
 
 def _kandydaci_faktow(con, porownywalne):
@@ -2605,13 +2655,21 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     bieżącym odcisku dostaje zbadanie (`repo.record_nonprintable`, ta sama kotwica odcisku), a kopia,
     która potrzebuje obu - fakty i zbadanie w JEDNEJ transakcji (`repo.atomic`), żeby przerwanie nie
     zostawiło połowy. Dalszy HDU nie do doczytania → `bytes_unchecked`, kopia czeka (zostaje kandydatem
-    przy każdej Dostawie)."""
-    rows = copy_facts_candidates(con, root)
-    do_faktow = {r["id"] for r in _kandydaci_faktow(con, False)}
-    do_zbadania = {r["id"] for r in _niezbadane_do_odczytu(con)}
-    s = CopyFactsSummary(rows=len(rows))
-    total = len(rows)
+    przy każdej Dostawie). Raport liczy obie roboty osobno (AR-315): `rows_facts`/`facts_written`
+    i `rows_bytes`/`bytes_checked`; `written` to kopie z którąkolwiek zapisaną. Lista przebiegu i jej
+    klasyfikacja pochodzą z JEDNEGO złożenia (`_dwie_roboty`), więc każda kopia `rows` stoi w swoim
+    mianowniku; robota domknięta przez kogoś innego po wyborze listy to `elsewhere`, nie zniknięty
+    mianownik."""
     korzen = None if root is None else canonize_root(root)
+    fakty_rows, bajty_rows = _dwie_roboty(con)
+    rows = _unia(fakty_rows, bajty_rows)
+    if korzen is not None:
+        rows = _pod_korzeniem(rows, korzen)
+    do_faktow = {r["id"] for r in fakty_rows}
+    do_zbadania = {r["id"] for r in bajty_rows}
+    s = CopyFactsSummary(rows=len(rows), rows_facts=sum(r["id"] in do_faktow for r in rows),
+                         rows_bytes=sum(r["id"] in do_zbadania for r in rows))
+    total = len(rows)
 
     def swiadek_zyje(path):
         """Czy świadek skasowania stoi (docstring): korzeń przebiegu albo - bez korzenia -
@@ -2714,6 +2772,7 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                 s.bytes_unchecked += 1
             if zapisane or zbadana:
                 s.written += 1
+                s.facts_written += zapisane
                 s.bytes_checked += zbadana
             elif header_hash != _odcisk_lokacji(con, lid):
                 # Odcisk pliku ≠ odcisk wiersza: kopia zmieniona od skanu - `stale` także wtedy, gdy
@@ -2738,10 +2797,7 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     # `remaining` po korzeniu skanonizowanym NA STARCIE: udział zerwany w trakcie wysadziłby ponowne
     # `canonize_root` już po zapisanych faktach, a raport z kubełkiem `failed` by przepadł.
     reszta = copy_facts_candidates(con)
-    if korzen is not None:
-        prefix = korzen.rstrip("\\/") + os.sep
-        reszta = [r for r in reszta if _under(r["path"], prefix)]
-    s.remaining = len(reszta)
+    s.remaining = len(reszta if korzen is None else _pod_korzeniem(reszta, korzen))
     # Ślad przebiegu ZBIORCZO (AR-32) obok per-lokacyjnych `location.refreshed`: te same liczby,
     # które dostaje raport, w jednym zdarzeniu (`repo.flag_copy_facts_summary`).
     repo.flag_copy_facts_summary(con, {f.name: getattr(s, f.name) for f in fields(s)},

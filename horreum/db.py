@@ -162,6 +162,8 @@ from importlib import resources
 # 0046 to PRZYROST (ADD COLUMN + indeks częściowy, AR-299): zbadanie bajtu spoza ASCII w surowym
 # nagłówku kopii FITS (`location.nonprintable_hash/_keyword/_char`) z kotwicą odcisku - pusta kolumna
 # znaczy „nie zbadano”, nie „czysto”. Kopie sprzed migracji bada etap Dostawy `scan.backfill_copy_facts`.
+# 0047 to PRZYROST (nowa tabela, AR-318): `migration_log` - chwila zastosowania migracji w TEJ bazie.
+# Granica „nietkniętych” plików przerwanego cofnięcia to chwila 0044 tej bazy (gdy brak - chwila 0047).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -208,7 +210,11 @@ MIGRATIONS = [
     (44, "0044_atomic_undo.sql"),
     (45, "0045_atomic_undo_settled.sql"),
     (46, "0046_location_nonprintable.sql"),
+    (47, "0047_migration_log.sql"),
 ]
+# Od tej wersji istnieje `migration_log` (0047): każda zastosowana migracja dopisuje w nim wiersz w swojej
+# transakcji, a 0047 - także za migracje zastosowane przed nią w tym samym przebiegu (`migrate`).
+_DZIENNIK_MIGRACJI_OD = 47
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})
 
@@ -281,14 +287,19 @@ def migrate(con):
         raise RuntimeError(
             f"baza w wersji v{current} sprzed przejścia fitsmirror — brak ścieżki migracji; "
             f"utwórz świeżą bazę (horreum init) i zasil ją ponownie")
+    do_dziennika = []                 # migracje tego przebiegu jeszcze bez wiersza `migration_log`
     for version, filename in MIGRATIONS:
         if version > current:
-            _apply_migration(con, version, _migration_sql(filename))
+            do_dziennika.append(version)
+            wpisy = tuple(do_dziennika) if version >= _DZIENNIK_MIGRACJI_OD else ()
+            _apply_migration(con, version, _migration_sql(filename), dziennik=wpisy)
+            if wpisy:
+                do_dziennika = []
             current = version
     return current
 
 
-def _apply_migration(con, version, sql):
+def _apply_migration(con, version, sql, dziennik=()):
     """Jedna migracja RAZEM z podniesieniem `user_version` - w JEDNEJ transakcji.
 
     DLACZEGO: goły `executescript` zatwierdza każdą instrukcję osobno, a `user_version` szło
@@ -308,8 +319,18 @@ def _apply_migration(con, version, sql):
     Średnik na osobnym wierszu domyka ostatnią instrukcję skryptu, gdyby plik kończył się bez niego
     (pusta instrukcja jest dla SQLite no-opem). PRAGMA nie przyjmuje bindowania - f-string z literału
     int (version z MIGRATIONS). Wyjątek: `ROLLBACK`, gdy transakcja jeszcze stoi, i rzut dalej
-    (EXPECT - wołający dostaje błąd migracji, baza zostaje w wersji sprzed niej)."""
-    script = f"BEGIN IMMEDIATE;\n{sql}\n;\nPRAGMA user_version = {int(version)};\nCOMMIT;\n"
+    (EXPECT - wołający dostaje błąd migracji, baza zostaje w wersji sprzed niej).
+
+    `dziennik` (0047, AR-318): wersje, którym ta transakcja dopisuje wiersz `migration_log` - jednym
+    poleceniem, więc jedną chwilą zegara SQLite (UTC); od 0047 sama migracja, a przy 0047 także migracje
+    tego przebiegu sprzed niej (ten sam moment). Infrastruktura jak `user_version`, nie zapis domenowy:
+    wiersz wchodzi razem z migracją albo wcale. Wersje to int z `MIGRATIONS` (literał jak w PRAGMA)."""
+    wpis = ""
+    if dziennik:
+        wersje = ",".join(str(int(v)) for v in dziennik)
+        wpis = (f"INSERT INTO migration_log (version, applied_at) "
+                f"SELECT value, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM json_each('[{wersje}]');\n")
+    script = f"BEGIN IMMEDIATE;\n{sql}\n;\n{wpis}PRAGMA user_version = {int(version)};\nCOMMIT;\n"
     try:
         con.executescript(script)
     except BaseException:

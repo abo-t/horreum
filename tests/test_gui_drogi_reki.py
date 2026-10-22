@@ -629,3 +629,37 @@ def test_commit_edycji_zapisuje_plik_a_cel_cofniecia_lapie_commit(wb_view):
     assert view._undo_commit_id == view._last_commit_id != pierwszy
     view._dispatch_undo()
     assert fits.getheader(str(p))["TELESCOP"] == "EQ6"
+
+
+def _pompuj_z_kasowaniem(qapp, n=10):
+    """Pętla z doręczeniem `deleteLater` (`DeferredDelete`) i zegarów `singleShot(0)` - tak jak w programie
+    po zamknięciu widoku, a nie jeden `processEvents` (ten nie kasuje obiektów)."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for _ in range(n):
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        qapp.processEvents()
+
+
+@pytest.mark.parametrize("droga", ["przelaczenie", "zamkniecie", "skasowanie"])
+def test_edytor_domkniety_przez_koniec_widoku_nie_siega_do_skasowanej_tabeli(qapp, tmp_path, droga):
+    """AR-316: zamknięcie edytora komórki woła odłożone przyłożenie (`QTimer.singleShot(0,
+    _przyloz_odlozony)`) - także wtedy, gdy edytor domknęło przełączenie bazy albo zamknięcie okna.
+    Widok jest już zatrzymany, a jego tabela C++ skasowana: odłożone wołanie nie może po nią sięgnąć
+    (`RuntimeError: Internal C++ object already deleted` w pętli następnego okna).
+    Mutant: `_edytor_otwarty()` przed sprawdzeniem, czy jest cokolwiek odłożonego - czerwony."""
+    import shiboken6
+    path = _baza_z_fitsem(tmp_path, "stara")
+    win, view = _okno_z_edycja(qapp, path)
+    if droga == "przelaczenie":
+        win._open_path(_baza_z_fitsem(tmp_path, "nowa"))
+        shiboken6.delete(view)          # stary widok skasowany, zanim pętla doręczy zegar
+        _pompuj_z_kasowaniem(qapp)
+        win.close()
+    elif droga == "zamkniecie":
+        win.close()
+        shiboken6.delete(win)           # okno zebrane, zanim pętla doręczy zegar (koniec testu / programu)
+    else:
+        win.grid_view.zatrzymaj_pola = lambda: None    # sprzątanie bez zatrzymania: edytor zostaje otwarty
+        win.close()
+        shiboken6.delete(win)           # tabela kasowana z otwartym edytorem emituje `closeEditor`
+    _pompuj_z_kasowaniem(qapp)

@@ -138,6 +138,7 @@ ITEM_REASON_CODES = frozenset({
     # bazy (AR-167, `card_rules.BRAMKA_SUMY`); region sprzed commitu bez dowodu całego pliku (AR-169)
     "os_denied", "os_missing", "os_no_space", "os_share_lost", "fits_checksum",
     "undo_region_unproven",
+    "undo_newer_write",   # lokacja ma nowszy, niecofnięty zapis - cofnięcie odmawia (AR-318)
     # --- bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
     # `evaluate_manual_change`, `run_macro`/`plan_manual_change`) i powody wyrażenia (`expr.eval_for`)
     "macro_raw", "macro_no_present_copy", "macro_many_copies", "macro_compressed",

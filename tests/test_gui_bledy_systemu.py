@@ -1758,7 +1758,7 @@ def test_wyjatek_w_oknie_bledu_nie_zapetla_strazy(qapp, monkeypatch, ustawienia)
     poprzedni = []
     monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: poprzedni.append(typ.__name__))
 
-    def _rzuca(self, powod):
+    def _rzuca(self, powod, zapis):
         raise RuntimeError("okno błędu nie powstało")
     monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _rzuca)
     wynik = {}
@@ -1842,7 +1842,7 @@ def test_okno_bledu_padlo_bez_konsoli_kazdy_kolejny_blad_ma_okno_zastepcze(qapp,
     monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: poprzedni.append(typ.__name__))
     monkeypatch.setattr(sys, "stderr", None)
 
-    def _rzuca(self, powod):
+    def _rzuca(self, powod, zapis):
         raise RuntimeError("okno błędu nie powstało")
     monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _rzuca)
     teksty = []
@@ -2050,7 +2050,7 @@ def test_seria_przy_stojacym_oknie_zastepczym_podbija_jego_licznik(qapp, monkeyp
     monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: None)
     monkeypatch.setattr(sys, "stderr", None)
 
-    def _rzuca(self, powod):
+    def _rzuca(self, powod, zapis):
         raise RuntimeError("okno błędu nie powstało")
     monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _rzuca)
     wynik = {}
@@ -2095,7 +2095,7 @@ def test_zgloszenie_w_trakcie_budowy_okna_idzie_do_okna_zastepczego(qapp, monkey
                 sys.excepthook(type(exc), exc, exc.__traceback__)
             super().show()
 
-    def _zbuduj(self, powod):
+    def _zbuduj(self, powod, zapis):
         okno = _OknoMalujaceBlad()
         okno.setWindowTitle(i18n.t("main.prog_error.title"))
         zbudowane.append(okno)
@@ -2157,3 +2157,279 @@ def test_brak_pliku_tlumacza_qt_nie_zatrzymuje_startu(qapp, monkeypatch, ustawie
         _main_z_petla(monkeypatch, lambda _straz: wynik.update(menu=_menu_pola()))
     assert "Undo" in wynik["menu"], wynik["menu"]
     assert any("qtbase_pl" in r.getMessage() for r in caplog.records), caplog.records
+
+
+# ============================================================ AR-312: dziennik błędów programu
+# Katalog danych programu podmienia `conftest._izoluj_dane_programu` (katalog tego testu) - prawdziwy
+# `%LOCALAPPDATA%` nietknięty, pilnuje `conftest._straznik_dziennika_usera`.
+
+def _plik_dziennika():
+    from horreum.gui import app as app_mod
+    from horreum.gui import dziennik_bledow
+    return dziennik_bledow.sciezka(app_mod.katalog_dziennika_bledow())
+
+
+def _czytaj(sciezka):
+    with open(sciezka, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _wpisy(tresc):
+    """Wiersze nagłówkowe wpisów dziennika (`==== czas | Horreum wersja | pid | wątek`)."""
+    return [w for w in tresc.splitlines() if w.startswith("==== ")]
+
+
+@pytest.mark.zmienia_motyw
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_blad_w_slocie_zostaje_w_dzienniku_a_okno_mowi_gdzie(qapp, monkeypatch, ustawienia, jezyk, lang):
+    """Błąd programu ze slotu po starcie: plik dziennika w katalogu danych programu (`…\\Horreum\\bledy.log`)
+    ma czas, wersję programu, wątek, `Typ: opis @ horreum/…:N` i pełny ślad; okno mówi, gdzie zapisano,
+    i ma „Otwórz dziennik”. Falsyfikator: straż bez zapisu do dziennika."""
+    from PySide6.QtCore import QTimer
+    import horreum
+    ustawienia.setValue("ui/lang", lang)
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            wynik.update(linia=straz.okno.lbl_dziennik.text(), przycisk=straz.okno.btn_dziennik.text(),
+                         widoczny=not straz.okno.btn_dziennik.isHidden())
+        finally:
+            _zamknij_okno(straz)
+    _main_z_petla(monkeypatch, _scenariusz)
+    plik = _plik_dziennika()
+    assert plik.endswith(os.path.join("Horreum", "bledy.log")), plik
+    tresc = _czytaj(plik)
+    naglowki = _wpisy(tresc)
+    assert len(naglowki) == 1, tresc
+    assert re.match(r"==== \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d \| Horreum " + re.escape(horreum.__version__)
+                    + r" \| pid \d+ \| MainThread$", naglowki[0]), naglowki
+    assert re.search(r"^ValueError: .*" + _MIEJSCE_PAKIETU + "$", tresc, re.M), tresc
+    assert "Traceback (most recent call last):" in tresc and "_blad_programu_w_pakiecie" in tresc
+    assert wynik["linia"] == i18n.t("main.prog_error.log_saved", path=plik), wynik
+    assert wynik["przycisk"] == i18n.t("main.prog_error.open_log") and wynik["widoczny"], wynik
+    if lang == "en":
+        assert not set(wynik["linia"].replace(plik, "") + wynik["przycisk"]) & _POLSKIE, wynik
+
+
+@pytest.mark.zmienia_motyw
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")   # wyjątek celowy
+def test_blad_z_watku_tla_zostaje_w_dzienniku(qapp, monkeypatch, ustawienia):
+    """Wyjątek w `threading.Thread` (hak `threading.excepthook`) i w slocie obiektu w `QThread` (hak
+    `sys.excepthook` w wątku tła) - każdy ma wpis z nazwą swojego wątku; okno powstaje w wątku GUI."""
+    import threading
+    from PySide6.QtCore import QObject, QThread, QTimer, Slot
+
+    class Pracownik(QObject):
+        @Slot()
+        def run(self):
+            _blad_programu_w_pakiecie(1)          # inny ślad niż wątek Pythona - nie krótki wiersz powtórzenia
+
+    wynik = {}
+
+    def _scenariusz(straz):
+        watek, pracownik = QThread(), Pracownik()
+        pracownik.moveToThread(watek)
+        watek.started.connect(pracownik.run)
+        try:
+            t = threading.Thread(target=_blad_programu_w_pakiecie, name="WatekTla")
+            t.start()
+            t.join(5)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            QTimer.singleShot(0, watek.start)
+            assert _pompuj_az(lambda: straz._kolejne == 1), "drugie zgłoszenie nie doszło"
+            wynik.update(watek_okna=straz.okno.thread())
+        finally:
+            _zamknij_okno(straz)
+            watek.quit()
+            watek.wait(5000)
+    _main_z_petla(monkeypatch, _scenariusz)
+    naglowki = _wpisy(_czytaj(_plik_dziennika()))
+    assert len(naglowki) == 2, naglowki
+    assert naglowki[0].endswith(" | WatekTla"), naglowki
+    assert not naglowki[1].endswith((" | MainThread", " | WatekTla")) and "powtórzenie" not in naglowki[1], naglowki
+    assert wynik["watek_okna"] is QApplication.instance().thread()
+
+
+@pytest.mark.zmienia_motyw
+def test_blad_startu_zostaje_w_dzienniku(qapp, monkeypatch, ustawienia):
+    """Błąd synchroniczny startu (konstruktor okna głównego, wydanie bez konsoli): wpis w dzienniku, okno
+    błędu startu z linią dziennika; `main` kończy się kodem błędu."""
+    import sys
+    from PySide6.QtCore import QTimer
+    from horreum.gui import app as app_mod
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(app_mod.MainWindow, "__init__", lambda self, *a, **kw: _blad_programu_w_pakiecie())
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda _self: 0)
+    widziane = []
+
+    def _zamknij_gdy_jest():
+        for w in _okna_bledu_widoczne():
+            widziane.append((w.pole.text(), w.lbl_dziennik.text()))
+            w.close()
+    bezpiecznik = QTimer()
+    bezpiecznik.timeout.connect(_zamknij_gdy_jest)
+    bezpiecznik.start(100)
+    try:
+        kod = app_mod.main([])
+    finally:
+        bezpiecznik.stop()
+        for w in _okna_bledu_widoczne():
+            w.close()
+    plik = _plik_dziennika()
+    assert kod != 0
+    assert widziane == [(i18n.t("main.prog_error.text_start", msg=i18n.t("main.prog_error.what")),
+                         i18n.t("main.prog_error.log_saved", path=plik))], widziane
+    tresc = _czytaj(plik)
+    assert len(_wpisy(tresc)) == 1 and re.search(_MIEJSCE_PAKIETU + "$", tresc, re.M), tresc
+
+
+@pytest.mark.zmienia_motyw
+def test_okno_zastepcze_mowi_o_dzienniku(qapp, monkeypatch, ustawienia):
+    """Własne okno padło - okno zastępcze mówi zdanie, linię dziennika i szczegół (miejsce na końcu)."""
+    import sys
+    from horreum.gui import app as app_mod
+    from PySide6.QtCore import QTimer
+    monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    def _rzuca(self, powod, zapis):
+        raise RuntimeError("okno błędu nie powstało")
+    monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _rzuca)
+    teksty = []
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: any(o.isVisible() for o in straz.zastepcze)), "brak okna zastępczego"
+            teksty.extend(o.text() for o in straz.zastepcze if o.isVisible())
+        finally:
+            for o in straz.zastepcze:
+                o.close()
+    _main_z_petla(monkeypatch, _scenariusz)
+    czesci = teksty[0].split("\n\n")
+    assert czesci[:2] == [i18n.t("main.prog_error.text", msg=i18n.t("main.prog_error.what")),
+                          i18n.t("main.prog_error.log_saved", path=_plik_dziennika())], czesci
+    assert re.search(_MIEJSCE_PAKIETU + "$", czesci[-1]), czesci
+
+
+def _plik_w_miejscu_katalogu():
+    """Plik `Horreum` tam, gdzie straż zakłada katalog dziennika - `makedirs` pada (`FileExistsError`)."""
+    from horreum.gui import app as app_mod
+    with open(app_mod.katalog_dziennika_bledow(), "wb"):
+        pass
+
+
+def _plik_tylko_do_odczytu():
+    """Dziennik poniżej progu obrotu z atrybutem tylko-do-odczytu - dopisek pada (`PermissionError`);
+    obrót takiego pliku by przeszedł (zmierzone), więc wpis musi być mały."""
+    import stat
+    from horreum.gui import app as app_mod
+    os.makedirs(app_mod.katalog_dziennika_bledow())
+    plik = _plik_dziennika()
+    with open(plik, "w", encoding="utf-8") as fh:
+        fh.write("stary wpis\n")
+    os.chmod(plik, stat.S_IREAD)
+    return plik
+
+
+@pytest.mark.zmienia_motyw
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("zepsuj", ["plik_tylko_do_odczytu", "plik_w_miejscu_katalogu"])
+def test_porazka_zapisu_dziennika_okno_stoi_ze_zdaniem(qapp, monkeypatch, ustawienia, jezyk, lang, zepsuj):
+    """Dziennika nie da się zapisać: okno błędu i tak stoi, a jego linia mówi, że dziennika nie zapisano -
+    zdaniem klasy błędu systemu, ze szczegółem pod kursorem; „Otwórz dziennik” schowany. Porażka zapisu
+    nie jest ciszą ani nie zdejmuje okna. Falsyfikator: wyjątek dziennika wychodzi z haka (bez okna)."""
+    import stat
+    from PySide6.QtCore import QTimer
+    ustawienia.setValue("ui/lang", lang)
+    plik = _plik_tylko_do_odczytu() if zepsuj == "plik_tylko_do_odczytu" else None
+    if plik is None:
+        _plik_w_miejscu_katalogu()
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            okno = straz.okno
+            wynik.update(linia=okno.lbl_dziennik.text(), szczegol=okno.lbl_dziennik.szczegol(),
+                         przycisk=okno.btn_dziennik.isHidden(), zdanie=okno.pole.text())
+        finally:
+            _zamknij_okno(straz)
+    try:
+        _main_z_petla(monkeypatch, _scenariusz)
+    finally:
+        if plik is not None:
+            os.chmod(plik, stat.S_IREAD | stat.S_IWRITE)
+    assert wynik["zdanie"] == i18n.t("main.prog_error.text", msg=i18n.t("main.prog_error.what")), wynik
+    poczatek, koniec = i18n.t("main.prog_error.log_failed", msg="\0").split("\0")
+    assert wynik["linia"].startswith(poczatek) and wynik["linia"].endswith(koniec), wynik
+    assert len(wynik["linia"]) > len(poczatek + koniec) and wynik["przycisk"], wynik
+    if plik is not None:
+        # Klasa błędu systemu (brak dostępu): zdanie klasy, surowy tekst systemu pod kursorem.
+        assert wynik["szczegol"], wynik
+        assert _czytaj(plik) == "stary wpis\n"
+    else:
+        # Błąd spoza klas systemu: surowy `Typ: opis` w zdaniu, bez wymyślonego szczegółu (`wiersz_systemu`).
+        assert "FileExistsError" in wynik["linia"], wynik
+    if lang == "en":
+        assert not set(poczatek + koniec + (wynik["linia"] if plik is not None else "")) & _POLSKIE, wynik
+
+
+@pytest.mark.zmienia_motyw
+def test_kolejne_zgloszenie_przy_stojacym_oknie_dopisuje_dziennik_i_odswieza_linie(qapp, monkeypatch, ustawienia):
+    """Kolejne zgłoszenia przy stojącym oknie też idą do dziennika: identyczne - krótkim wierszem
+    powtórzenia; a gdy zapis następnego padnie (plik tylko do odczytu), linia stojącego okna mówi
+    o porażce zamiast zostać przy „zapisano”. Falsyfikator: zgłoszenie przy stojącym oknie tylko podbija
+    licznik - drugiego wiersza nie ma, a linia kłamie „zapisano”."""
+    import stat
+    from PySide6.QtCore import QTimer
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz._kolejne == 1), "drugie zgłoszenie nie doszło"
+            wynik.update(po_drugim=straz.okno.lbl_dziennik.text(), tresc=_czytaj(_plik_dziennika()))
+            os.chmod(_plik_dziennika(), stat.S_IREAD)
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz._kolejne == 2), "trzecie zgłoszenie nie doszło"
+            wynik.update(po_trzecim=straz.okno.lbl_dziennik.text(),
+                         przycisk=straz.okno.btn_dziennik.isHidden())
+        finally:
+            os.chmod(_plik_dziennika(), stat.S_IREAD | stat.S_IWRITE)
+            _zamknij_okno(straz)
+    _main_z_petla(monkeypatch, _scenariusz)
+    naglowki = _wpisy(wynik["tresc"])
+    assert len(naglowki) == 2 and " | powtórzenie 1: ValueError: " in naglowki[1], wynik["tresc"]
+    assert wynik["po_drugim"] == i18n.t("main.prog_error.log_saved", path=_plik_dziennika())
+    poczatek = i18n.t("main.prog_error.log_failed", msg="\0").split("\0")[0]
+    assert wynik["po_trzecim"].startswith(poczatek) and wynik["przycisk"], wynik
+
+
+@pytest.mark.zmienia_motyw
+def test_przycisk_okna_otwiera_dziennik(qapp, monkeypatch, ustawienia):
+    """Prawdziwy klik „Otwórz dziennik” w oknie błędu otwiera plik dziennika programem systemu (atrapa
+    `QDesktopServices.openUrl` - test nie otwiera Notatnika). Falsyfikator: przycisk niepodpięty."""
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtTest import QTest
+    from horreum.gui import app as app_mod
+    otwarte = []
+    monkeypatch.setattr(app_mod.QDesktopServices, "openUrl",
+                        staticmethod(lambda url: otwarte.append(url.toLocalFile()) or True))
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            QTest.mouseClick(straz.okno.btn_dziennik, Qt.LeftButton)
+        finally:
+            _zamknij_okno(straz)
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert [os.path.normcase(os.path.normpath(p)) for p in otwarte] == [
+        os.path.normcase(_plik_dziennika())], otwarte

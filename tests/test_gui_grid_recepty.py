@@ -649,7 +649,7 @@ def test_recepta_odlozona_wraca_po_prawdziwym_koncu_zapisu_zbiorow(qapp, tmp_pat
 
 def test_zamkniecie_okna_w_biegu_cofniecia_z_paska_odmawia_i_anuluje(qapp, tmp_path, bez_watkow, brama):
     """AR-296: zamknięcie okna gospodarza w biegu cofnięcia z paska - okno zostaje, połączenie żyje,
-    cofnięcie dostaje anulowanie po bieżącym pliku; wynik przerwany mówi, ile wymaga sprawdzenia, recepta
+    cofnięcie dostaje anulowanie po bieżącym pliku; wynik przerwany mówi, ile plików zostało, recepta
     wraca; drugie zamknięcie zamyka. Falsyfikator: straż zamknięcia bez uchwytu osi (abort wątku)."""
     win, path, pliki = _okno_naprawy(tmp_path, n=3)
     try:
@@ -938,22 +938,30 @@ def test_start_cofniecia_zdejmuje_recepte_i_drugi_klik_nie_rusza_drugiego_biegu(
 
 
 def test_wynik_cofniecia_mowi_o_obiekcie_z_cofnietej_karty(qapp, tmp_path, bez_watkow):
-    """AR-296: po zapisie kart przeszło „Rozwiąż” (obiekt z karty w bazie) - cofnięcie z paska zdejmuje
-    kartę z plików, a obiekt zostaje w bazie (zmierzone na rdzeniu); zdanie wyniku to mówi. Bez
-    „Rozwiąż” noty nie ma. Falsyfikator: zdanie bez noty przy obiekcie z cofniętej karty."""
+    """AR-311 (wariant A): po zapisie kart przeszło „Rozwiąż” (obiekt z karty w bazie) - cofnięcie z paska
+    zdejmuje kartę z plików I przywraca stan obiektu sprzed zapisu: klatki znów bez obiektu, a kolejka osi
+    znów ma kubełek bezimiennych; zdanie wyniku mówi liczbę z rdzenia. Falsyfikator: zdanie bez członu
+    obiektów (`zdanie_undo_kart`) albo klatki z obiektem z cofniętej karty."""
     from horreum import derive
+    from horreum.gui.app import _REVIEW_TAG
     win, path, pliki = _okno_naprawy(tmp_path)
     try:
-        commit = _naprawa_prawdziwym_exec(win)
+        _naprawa_prawdziwym_exec(win)
         con2 = db.connect(str(path))
         try:
             derive.DERIVED["resolve"](con2, NOW, lambda: False)
-            assert queries.klatki_commitu_z_obiektem_z_naglowka(con2, commit) == 2
+            assert con2.execute("SELECT count(*) FROM frame WHERE object_source = 'header'"
+                                ).fetchone()[0] == 2
         finally:
             con2.close()
         _klik_recepty(win)
         _czekaj_na_cofniecie(win)
-        assert i18n.t("wb.undo_recipe_object_note", n=2) in str(win._pelny_komunikat)
+        assert i18n.t_plural("wb.undo_objects_restored", 2) in str(win._pelny_komunikat)
+        assert win.con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL"
+                               ).fetchone()[0] == 0
+        ov = win.object_view
+        ov.refresh()
+        assert "nameless" in {ov.review.item(i).data(_REVIEW_TAG) for i in range(ov.review.count())}
     finally:
         win.close()
 
@@ -1184,3 +1192,356 @@ def test_recepta_odlozona_przez_etap_dostawy_stoi_po_odswiezeniu_widokow(qapp, t
     finally:
         puszczona.set()
         win.close()
+
+
+# ============================================================ AR-318 - droga powrotu ze STANU; AR-310 - odłożenia osi
+
+
+def _wiersz_zadania(win, klucz):
+    lista = win.tasks_view.tasks
+    return next(lista.item(i) for i in range(lista.count()) if lista.item(i).data(Qt.UserRole) == klucz)
+
+
+def _liczba_wiersza(win, klucz):
+    from horreum.gui import rows as rows_mod
+    return _wiersz_zadania(win, klucz).data(rows_mod.SECONDARY)
+
+
+def _klik_wiersza(win, klucz):
+    """Prawdziwy klik myszą w wiersz listy zadań (widok listy Porządków)."""
+    lista = win.tasks_view.tasks
+    win.tasks_view.pages.setCurrentIndex(tasks_mod._PAGE_LIST)
+    QApplication.processEvents()
+    wiersz = _wiersz_zadania(win, klucz)
+    lista.scrollToItem(wiersz)
+    QTest.mouseClick(lista.viewport(), Qt.LeftButton, pos=lista.visualItemRect(wiersz).center())
+    QApplication.processEvents()
+
+
+def _do_listy_i_liczniki(win, klucz, liczba):
+    win.tasks_view.pages.setCurrentIndex(tasks_mod._PAGE_LIST)
+    win.tasks_view.refresh_counts()
+    _czekaj(lambda: _liczba_wiersza(win, klucz) == liczba,
+            f"wiersz {klucz} = {liczba!r}, jest {_liczba_wiersza(win, klucz)!r}")
+
+
+def _cofnij_czesc(path, commit, n_plikow=1):
+    """Cofnięcie przerwane po `n_plikow` plikach drugim połączeniem (poprzednia sesja, awaria)."""
+    pytania = []
+    con = db.connect(str(path))
+    try:
+        writeback.undo(con, commit, now=NOW,
+                       should_cancel=lambda: (pytania.append(1), len(pytania) > n_plikow)[1])
+    finally:
+        con.close()
+
+
+def _brama_dostawy(monkeypatch):
+    """Etap „Rozwiąż” PRAWDZIWY, wstrzymany bramą do `puszczona.set()` (wzór testu wyżej)."""
+    from horreum import derive
+    puszczona = threading.Event()
+    prawdziwy = derive.DERIVED["resolve"]
+
+    def _czeka(con, now, cancel):
+        puszczona.wait(30)
+        return prawdziwy(con, now, cancel)
+    monkeypatch.setitem(derive.DERIVED, "resolve", _czeka)
+    return puszczona
+
+
+def _etap_start(win):
+    assert win.pipeline_view.run_stage("resolve") is None
+    _czekaj(lambda: win.object_view._busy, "etap w biegu")
+
+
+def _etap_koniec(win, puszczona):
+    puszczona.set()
+    _czekaj(lambda: not win.object_view._busy and win.pipeline_view._thread is None, "koniec przebiegu")
+    for _ in range(20):
+        QApplication.processEvents()
+
+
+def _okno(path):
+    win = MainWindow(str(path))
+    win.resize(1400, 900)
+    win.show()
+    win._show_view(NAV_PORZADKI)
+    QApplication.processEvents()
+    return win
+
+
+def test_zamkniecie_w_biegu_cofniecia_mowi_pliki_nietkniete_a_wiersz_dokancza_po_restarcie(
+        qapp, tmp_path, bez_watkow, brama):
+    """AR-318: zamknięcie okna w biegu cofnięcia z paska (prawdziwy uchwyt, anulowanie po pliku 1 z 3) -
+    zdanie mówi fakt rdzenia: 2 pliki nietknięte zostają w stanie po zapisie, a „Cofnij zapis (commit N)”
+    dokończy; drugie zamknięcie zamyka program. Nowe okno na tej bazie: wiersz „Niedokończone cofnięcia
+    zapisu kart” = 1, prawdziwy klik w wiersz stawia receptę „Dokończ cofnięcie (commit N)” z liczbą plików,
+    klik recepty dokańcza (bajty jak przed zapisem), „← Porządki” - wiersz 0. Falsyfikatory: ogon bez gałęzi
+    nietkniętych (zdanie „wymaga sprawdzenia”); wiersz bez recepty po kliku."""
+    from PySide6.QtWidgets import QPushButton
+    win, path, pliki = _okno_naprawy(tmp_path, n=3)
+    przed = _bajty(pliki)
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        brama.wlaczona = True
+        _klik_recepty(win)
+        _czekaj(brama.doszlo.is_set, "pierwszy plik cofnięcia")
+        assert win.close() is False
+        brama.puszczona.set()
+        _czekaj_na_cofniecie(win)
+        tekst = str(win._pelny_komunikat)
+        assert (i18n.t_plural("wb.undo_cancelled_untouched", 2)
+                + i18n.t("wb.undo_cancelled_finish", undo=i18n.t("wb.undo_recipe", id=commit))) in tekst, tekst
+        assert i18n.t_plural("wb.undo_cancelled_check", 2, undo=i18n.t("wb.undo_recipe", id=commit)) not in tekst
+    finally:
+        brama.puszczona.set()
+        assert win.close() is True
+    brama.wlaczona = False
+    win = _okno(path)
+    try:
+        _do_listy_i_liczniki(win, "undo_unfinished", "1  ›")
+        _klik_wiersza(win, "undo_unfinished")
+        assert win.tasks_view.pages.currentIndex() == tasks_mod._PAGE_OBJECTS
+        dokoncz = i18n.t("wb.undo_finish_recipe", id=commit)
+        assert str(win._pelny_komunikat) == i18n.t_plural("wb.undo_unfinished", 2, id=commit, finish=dokoncz)
+        assert win.recipe_label.isVisible() and win.recipe_label.toolTip() == dokoncz
+        _klik_recepty(win)
+        _czekaj_na_cofniecie(win)
+        assert _bajty(pliki) == przed
+        powrot = next(b for b in win.tasks_view.pages.currentWidget().findChildren(QPushButton)
+                      if b.text() == i18n.t("tasks.back"))
+        QTest.mouseClick(powrot, Qt.LeftButton)
+        _czekaj(lambda: _liczba_wiersza(win, "undo_unfinished") == "0  ›", "wiersz gaśnie")
+    finally:
+        win.close()
+
+
+def test_dokonczenie_z_wiersza_w_biegu_dostawy_odmawia_i_wraca(qapp, tmp_path, bez_watkow, monkeypatch):
+    """AR-318 + AR-310: recepta „Dokończ cofnięcie” z wiersza Porządków wykonana w biegu PRAWDZIWEGO etapu
+    Dostawy odmawia zdaniem (pliki bez zmian), a po końcu etapu wraca z TĄ SAMĄ etykietą i dokańcza.
+    Falsyfikator: odłożenie odbudowuje receptę z etykietą „Cofnij zapis (commit N)”."""
+    win, path, pliki = _okno_naprawy(tmp_path, n=3)
+    przed = _bajty(pliki)
+    puszczona = _brama_dostawy(monkeypatch)
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        _cofnij_czesc(path, commit)
+        po = _bajty(pliki)
+        _do_listy_i_liczniki(win, "undo_unfinished", "1  ›")
+        _klik_wiersza(win, "undo_unfinished")
+        _etap_start(win)
+        win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_busy", id=commit)
+        assert _bajty(pliki) == po, "odmowa ruszyła pliki"
+        _etap_koniec(win, puszczona)
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_ready", id=commit)
+        assert win.recipe_label.toolTip() == i18n.t("wb.undo_finish_recipe", id=commit)
+        _klik_recepty(win)
+        _czekaj_na_cofniecie(win)
+        assert _bajty(pliki) == przed
+    finally:
+        puszczona.set()
+        win.close()
+
+
+_TRZYMAJ_BLOKADE = r'''
+import os, sys, time
+from PySide6.QtCore import QLockFile
+blokada = QLockFile(sys.argv[1])
+blokada.setStaleLockTime(0)
+assert blokada.tryLock(10000)
+with open(sys.argv[2], "w") as fh:
+    fh.write(str(os.getpid()))
+koniec = time.monotonic() + 60
+while not os.path.exists(sys.argv[3]) and time.monotonic() < koniec:
+    time.sleep(0.02)
+blokada.unlock()
+'''
+
+
+def test_dokonczenie_odmawia_gdy_baze_trzyma_inne_okno(qapp, tmp_path, bez_watkow):
+    """AR-318: dokończenie podejmuje stan poprzedniej sesji, więc korzysta z wyłączności szuflady bazy -
+    drugi PROCES trzyma `<baza>.szuflada.lock`: recepta odmawia zdaniem z jego PID-em, pliki bez zmian,
+    recepta zostaje; koniec tamtego procesu - klik dokańcza. Falsyfikator: dokończenie bez sprawdzenia
+    blokady (pliki cofnięte mimo obcego właściciela)."""
+    win, path, pliki = _okno_naprawy(tmp_path, n=3)
+    przed = _bajty(pliki)
+    skrypt, gotowe, zwolnij = tmp_path / "trzymaj.py", tmp_path / "gotowe", tmp_path / "zwolnij"
+    skrypt.write_text(_TRZYMAJ_BLOKADE, encoding="utf-8")
+    proces = None
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        _cofnij_czesc(path, commit)
+        po = _bajty(pliki)
+        proces = subprocess.Popen([sys.executable, str(skrypt), str(path) + ".szuflada.lock",
+                                   str(gotowe), str(zwolnij)])
+        _czekaj(lambda: gotowe.exists() and gotowe.read_text(encoding="utf-8"), "blokada drugiego procesu")
+        pid = int(gotowe.read_text(encoding="utf-8"))      # interpreter, nie wyrzutnia `venv`
+        _do_listy_i_liczniki(win, "undo_unfinished", "1  ›")
+        _klik_wiersza(win, "undo_unfinished")
+        _klik_recepty(win)
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_finish_foreign_owner", id=commit,
+                                                   pid=pid), win._pelny_komunikat
+        assert _bajty(pliki) == po
+        assert win.recipe_label.toolTip() == i18n.t("wb.undo_finish_recipe", id=commit)
+        zwolnij.write_text("", encoding="utf-8")
+        proces.wait(timeout=30)
+        _klik_recepty(win)
+        _czekaj_na_cofniecie(win)
+        assert _bajty(pliki) == przed
+    finally:
+        zwolnij.write_text("", encoding="utf-8")
+        if proces is not None:
+            try:
+                proces.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proces.kill()
+        win.close()
+
+
+def _okno_naprawy_z_kamera(tmp_path, n=2):
+    """`_okno_naprawy` z klatkami, które mają kamerę (`INSTRUME`) i zestaw po grouperze - na nich
+    „Dopisz nowy…” (`repo.user_assign_config_new_telescope`) przypisuje teleskop."""
+    from astropy.io import fits
+    from horreum import grouper
+    path = tmp_path / "naprawa.db"
+    con = db.open_db(str(path))
+    pliki = _nameless_tree(tmp_path, names=tuple(f"NGC7635_20230103_{chr(97 + i)}.fits" for i in range(n)))
+    for p in pliki:
+        fits.setval(str(p), "INSTRUME", value="ZWO ASI2600MC Pro")
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary())
+    grouper.run_grouper(con, NOW_PD)
+    con.close()
+    win = _okno(path)
+    win.tasks_view.pages.setCurrentIndex(tasks_mod._PAGE_OBJECTS)
+    win.object_view.refresh()
+    QApplication.processEvents()
+    return win, path, pliki
+
+
+def test_dwie_recepty_osi_odlozone_naraz_podane_po_kolei(qapp, tmp_path, bez_watkow, monkeypatch):
+    """AR-310: recepta cofnięcia zapisu kart i recepta „Cofnij dopisanie” odmówione w tym samym etapie
+    Dostawy (prawdziwy etap) - kolejka FIFO: po końcu etapu wraca STARSZA (karty); jej klik cofa zapis, a
+    wynik i gotowość drugiej idą jednym zdaniem z receptą dopisania; jej klik zdejmuje teleskop.
+    Falsyfikatory: jedno miejsce odłożenia (nowsza wypiera starszą - po etapie stoi dopisanie); brak
+    przekazania po końcu gestu (druga recepta nie wraca)."""
+    win, path, pliki = _okno_naprawy_z_kamera(tmp_path)
+    przed = _bajty(pliki)
+    ov = win.object_view
+    puszczona = _brama_dostawy(monkeypatch)
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        karty = win._recepta_porzadkow_stan[0]
+        fids = [r[0] for r in win.con.execute("SELECT id FROM frame ORDER BY id")]
+        tid, _g = repo.user_assign_config_new_telescope(win.con, frame_ids=fids, name="RC8 0.5x",
+                                                         focal_mm=800.0, now=NOW)
+        dopisanie = ov._recepta_cofniecia_dopisania(tid, "RC8 0.5x")
+        _etap_start(win)
+        karty.czlony[0].wykonaj()
+        dopisanie.czlony[0].wykonaj()
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.deferred", telescope="RC8 0.5x")
+        _etap_koniec(win, puszczona)
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_ready", id=commit)
+        assert win.recipe_label.toolTip() == i18n.t("wb.undo_recipe", id=commit)
+        _klik_recepty(win)
+        _czekaj_na_cofniecie(win)
+        assert _bajty(pliki) == przed
+        tekst = str(win._pelny_komunikat)
+        assert tekst.endswith(" - " + i18n.t("object.config_undo_add.ready", telescope="RC8 0.5x")), tekst
+        assert tekst.startswith(i18n.t_plural("grid.wb.restored", 2)), tekst
+        assert win.recipe_label.toolTip() == i18n.t("object.config_undo_add", telescope="RC8 0.5x")
+        _klik_recepty(win)
+        assert win.con.execute("SELECT retired_at FROM telescope WHERE id = ?", (tid,)).fetchone()[0]
+    finally:
+        puszczona.set()
+        win.close()
+
+
+@pytest.mark.parametrize("gdzie", ["porzadki", "dom"])
+def test_cofnij_dopisanie_odlozone_przez_etap_dostawy_wraca_po_odswiezeniu(qapp, tmp_path, bez_watkow,
+                                                                          monkeypatch, gdzie):
+    """AR-310: recepta „Cofnij dopisanie” stoi na pasku Porządków; wykonana w biegu PRAWDZIWEGO etapu Dostawy
+    odmawia zdaniem odroczenia (teleskop żyje); koniec przebiegu podaje ją ponownie DOPIERO po odświeżeniu
+    widoków - przy widocznych Porządkach i po powrocie do nich z Domu zdanie gotowości i recepta stoją, także
+    po końcu okna priorytetu raportu etapu; prawdziwy klik zdejmuje teleskop. Falsyfikatory: odmowa
+    z natychmiastową receptą (raport odświeżenia ją gasi); podanie przed odświeżeniem widoków."""
+    win, path, pliki = _okno_naprawy_z_kamera(tmp_path)
+    ov = win.object_view
+    puszczona = _brama_dostawy(monkeypatch)
+    try:
+        fids = [r[0] for r in win.con.execute("SELECT id FROM frame ORDER BY id")]
+        tid, _g = repo.user_assign_config_new_telescope(win.con, frame_ids=fids, name="RC8 0.5x",
+                                                         focal_mm=800.0, now=NOW)
+        ov.status_message.emit("dopisano")
+        ov.status_recipe.emit(ov._recepta_cofniecia_dopisania(tid, "RC8 0.5x"))
+        etykieta = i18n.t("object.config_undo_add", telescope="RC8 0.5x")
+        assert win.recipe_label.toolTip() == etykieta
+        _etap_start(win)
+        win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.deferred", telescope="RC8 0.5x")
+        assert win.con.execute("SELECT retired_at FROM telescope WHERE id = ?", (tid,)).fetchone()[0] is None
+        if gdzie == "dom":
+            win._show_view(NAV_DOM)
+        _etap_koniec(win, puszczona)
+        if gdzie == "dom":
+            win._show_view(NAV_PORZADKI)
+        gotowe = i18n.t("object.config_undo_add.ready", telescope="RC8 0.5x")
+        assert str(win._pelny_komunikat) == gotowe, win._pelny_komunikat
+        assert win.recipe_label.isVisible() and win.recipe_label.toolTip() == etykieta
+        win._wypusc_raport_etapu()
+        assert str(win._pelny_komunikat) == gotowe and win.recipe_label.isVisible()
+        _klik_recepty(win)
+        assert win.con.execute("SELECT retired_at FROM telescope WHERE id = ?", (tid,)).fetchone()[0]
+    finally:
+        puszczona.set()
+        win.close()
+
+
+def test_odlozona_recepta_ginie_z_przelaczeniem_bazy_bez_emisji_na_nowej(qapp, tmp_path, bez_watkow,
+                                                                         monkeypatch):
+    """AR-310: odłożenie żyje w widoku tej bazy - zdanie mówi „dopóki ta baza jest otwarta”. Przełączenie
+    bazy w biegu etapu: po końcu etapu na pasku nowej bazy nie ma zdania gotowości starego wpisu ani
+    recepty, wyjątku na zamkniętym połączeniu też nie ma. Falsyfikator: kolejka przeżywa demontaż widoku
+    (stara recepta na pasku nowej bazy)."""
+    druga = tmp_path / "druga.db"
+    db.open_db(str(druga)).close()
+    win, path, pliki = _okno_naprawy(tmp_path)
+    puszczona = _brama_dostawy(monkeypatch)
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        _etap_start(win)
+        win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
+        assert "dopóki ta baza jest otwarta" in i18n.CATALOG["wb.undo_recipe_busy"]["pl"]
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_busy", id=commit)
+        win._open_path(str(druga))
+        assert win.db_path == str(druga)
+        puszczona.set()
+        _czekaj(lambda: win.pipeline_view._thread is None, "koniec przebiegu starej bazy")
+        for _ in range(20):
+            QApplication.processEvents()
+        assert str(win._pelny_komunikat) != i18n.t("wb.undo_recipe_ready", id=commit)
+        assert win._recepta_porzadkow_stan is None and not win.recipe_label.isVisible()
+    finally:
+        puszczona.set()
+        win.close()
+
+
+def test_os_obiektu_leniwie_czyta_baze_przy_pierwszym_pokazaniu(qapp, tmp_path):
+    """Kontrakt montażu w tle (AR-175): `ObjectAxisView(..., leniwie=True)` nie czyta kolejki w konstruktorze
+    (znacznik `_nieaktualny`), a czyta ją przy pierwszym pokazaniu; domyślnie (widok samodzielny, okna
+    osi, testy) czyta od razu. Falsyfikatory: domyślne `leniwie=True` (pusta kolejka samodzielnego widoku);
+    leniwie bez znacznika (pokazanie nie czyta)."""
+    from horreum.gui.app import ObjectAxisView
+    con = db.open_db(str(tmp_path / "l.db"))
+    for p in _nameless_tree(tmp_path):
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary())
+    od_razu = ObjectAxisView(con)
+    assert od_razu.review.count() > 0 and not od_razu._nieaktualny
+    leniwy = ObjectAxisView(con, leniwie=True)
+    assert leniwy.review.count() == 0 and leniwy._nieaktualny
+    leniwy.show()
+    _czekaj(lambda: leniwy.review.count() == od_razu.review.count(), "odczyt przy pokazaniu")
+    assert not leniwy._nieaktualny
+    leniwy.close()
+    od_razu.close()
+    con.close()

@@ -171,8 +171,9 @@ def test_podjecie_pomija_przebiegi_cudze_i_w_biegu(qapp, tmp_path):
     """Szuflada podejmuje wyłącznie przebieg bez właściciela - nie przebieg zmiany obiektu (`object_change_run`),
     nie wpis związany z operacją zapisu w miejscu (`inplace_op_id`) i nie przebieg nazw z wierszem w locie
     (`in_flight` - inny proces właśnie go pisze). Wszystkie trzy są NOWSZE niż zwykły przebieg `R`, więc
-    podjęty musi być `R`, a zdanie liczy wyłącznie przebiegi do podjęcia. Falsyfikatory: predykat bez
-    któregokolwiek z trzech wykluczeń."""
+    podjęty musi być `R`; zdanie nie liczy ich jako starszych przebiegów, ale mówi o dwóch zmianach nazw
+    zatrzymanych zapisem nazw (AR-316). Falsyfikatory: predykat bez któregokolwiek z trzech wykluczeń;
+    zdanie przebiegu bez członu nazw w locie."""
     from horreum import repo
     path, con, pliki = _baza_szuflady(tmp_path, 3)
     lok = [(r["id"], r["header_hash"], r["path"])
@@ -202,7 +203,7 @@ def test_podjecie_pomija_przebiegi_cudze_i_w_biegu(qapp, tmp_path):
     try:
         assert v._run_id == "R" and v._rename_run_id is None
         assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 1)
-        assert v.drawer.result.text() == ""
+        assert v.drawer.result.text() == i18n.t_plural("grid.drawer.names_held_more", 2)
     finally:
         _zamknij_widok(v)
         con.close()
@@ -1524,5 +1525,905 @@ def test_izolacja_zamknieta_przy_podjetym_innym_przebiegu_mowi_ze_czeka(qapp, tm
         assert v._run_id == "Z"
         assert i18n.t_plural("grid.drawer.isolated_ready", 2) in v.drawer.result.text(), v.drawer.result.text()
     finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+# ============================================================ AR-316 - szuflada mówi o każdym przebiegu
+
+
+def _trzyma_blokade(v):
+    return v._blokada_szuflady is not None and v._blokada_szuflady.isLocked()
+
+
+def _karta_martwego_procesu(path, run_id, wiersz=0):
+    """Przebieg `run_id` z jednym wpisem czekającym, zostawiony przez proces, którego już nie ma (drugie
+    połączenie, bez okna)."""
+    from horreum import repo
+    con = db.connect(path)
+    try:
+        lid, hh = con.execute("SELECT id, header_hash FROM location ORDER BY id LIMIT 1 OFFSET ?",
+                              (wiersz,)).fetchone()
+        repo.stage_pending(con, run_id=run_id, location_id=lid, keyword="FILTER", idx=0, op="set",
+                           old_value="Ha", new_value="OIII", new_type="str", new_comment=None,
+                           expected_header_hash=hh)
+    finally:
+        con.close()
+
+
+def test_ponowne_makro_do_zera_oddaje_blokade_drugie_okno_podejmuje(qapp, tmp_path):
+    """Makro (3 zmiany), potem makro bez żadnej zmiany (same pominięcia) - przebieg wyczyszczony do zera
+    zamyka się jak odrzucony: okno A nie trzyma blokady szuflady, a drugie okno podejmuje przebieg zostawiony
+    przez martwy proces („Z poprzedniej sesji czeka 1 zmiana”). Falsyfikator: ponowne makro bez zamknięcia
+    pustego przebiegu (A trzyma blokadę, B słyszy „szufladę prowadzi inne okno”)."""
+    path, con, _p = _baza_szuflady(tmp_path, 3)
+    a = _widok_szuflady(con, inline=True)
+    con_b = b = None
+    try:
+        _makro_przyciskiem(a, "TELESCOP", "EQ6")
+        assert a._pending_count() == 3 and _trzyma_blokade(a)
+        _makro_przyciskiem(a, "EXPTIME", "abc")          # 3 pominięte - zero zmian
+        assert a._run_id is None and not _trzyma_blokade(a)
+        _karta_martwego_procesu(path, "Y")
+        con_b = db.connect(path)
+        b = _widok_szuflady(con_b, inline=True)
+        assert b._run_id == "Y", b.drawer.result.text()
+        assert b.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 1)
+    finally:
+        if b is not None:
+            _zamknij_widok(b)
+        if con_b is not None:
+            con_b.close()
+        _zamknij_widok(a)
+        con.close()
+
+
+def test_ponowny_staging_nazw_do_zera_oddaje_blokade(qapp, tmp_path):
+    """Staging nazw (3), potem staging wzorem, który nazw nie zmienia (token `orig`) - przebieg nazw
+    wyczyszczony do zera zamyka się, blokada schodzi, a drugie okno przyjmuje swój staging makra.
+    Falsyfikator: ponowny staging nazw bez zamknięcia pustego przebiegu."""
+    path, con, _p = _baza_szuflady(tmp_path, 3)
+    a = _widok_szuflady(con, inline=True)
+    con_b = db.connect(path)
+    b = None
+    try:
+        a._on_rename_stage(_POL)
+        assert a._rename_pending_count() == 3 and _trzyma_blokade(a)
+        a._on_rename_stage({**_POL, "template": [{"t": "orig", "re": ".*"}]})
+        assert a._rename_run_id is None and not _trzyma_blokade(a)
+        b = _widok_szuflady(con_b, inline=True)
+        _makro_przyciskiem(b, "TELESCOP", "AZ-GTI")
+        assert b._run_id is not None and b._pending_count() == 3
+    finally:
+        if b is not None:
+            _zamknij_widok(b)
+        con_b.close()
+        _zamknij_widok(a)
+        con.close()
+
+
+def test_awaria_zapisu_po_rozstrzygnieciu_wszystkich_wpisow_oddaje_blokade(qapp, tmp_path, monkeypatch):
+    """„Zatwierdź”, którego operacja zapisuje wszystkie trzy pliki, a potem rzuca (prawdziwy zapis, atrapa
+    wyłącznie wyjątku): przebieg bez czekających wpisów zamyka się w ogonie awarii, blokada schodzi, drugie
+    okno przyjmuje staging. Falsyfikator: ogon awarii bez zamknięcia pustego przebiegu."""
+    from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
+
+    def _zapisz_i_pada(c, t, now, pr, sc):
+        _zapis_kart(c, t, now, pr, sc)
+        raise ValueError("złamany inwariant po zapisie")
+    path, con, _p = _baza_szuflady(tmp_path, 3)
+    a = _widok_szuflady(con, inline=True)
+    con_b = db.connect(path)
+    b = None
+    try:
+        _makro_przyciskiem(a, "TELESCOP", "EQ6")
+        monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
+        _klik_w(a.drawer.btn_commit)
+        assert a.drawer.result.text().startswith(i18n.t("grid.wb.op.commit", msg="")[:20])
+        assert a._run_id is None and not _trzyma_blokade(a)
+        b = _widok_szuflady(con_b, inline=True)
+        _makro_przyciskiem(b, "TELESCOP", "AZ-GTI")
+        assert b._pending_count() == 3
+    finally:
+        if b is not None:
+            _zamknij_widok(b)
+        con_b.close()
+        _zamknij_widok(a)
+        con.close()
+
+
+def test_przerwane_nazwy_wyczyszczone_do_zera_zamykaja_sie_jak_odrzucone(qapp, tmp_path, monkeypatch):
+    """Zmiana trzech nazw przerwana po pierwszym pliku, potem staging nazw bez żadnej zmiany: przebieg nazw
+    (niezapisany) przy zerze czekających zamyka się jak po „Odrzuć” - wiersz `applied` przerwanego zapisu
+    zostaje w bazie, a cofnięcie przebiegu z rdzenia (droga CLI `rename --undo`) przywraca pierwszy plik.
+    Falsyfikator: zamknięcie także przebiegu ZAPISANEGO (bez warunku `_rename_run_committed`) - czerwone
+    zastane testy żywego „Cofnij” nazw."""
+    from test_gui_pasek_szczegol import _anuluj_w_biegu, _brama_po_pierwszym_pliku
+    path, con, pliki = _baza_szuflady(tmp_path, 3)
+    v = _widok_szuflady(con)
+    try:
+        v._on_rename_stage(_POL)
+        run = v._rename_run_id
+        stary = v.model._preview
+        brama, doszlo = _brama_po_pierwszym_pliku(monkeypatch)
+        _klik_w(v.drawer.btn_commit)
+        _anuluj_w_biegu(v, brama, doszlo, stary)
+        assert v._rename_pending_count() == 2 and not pliki[0].exists()
+        v._on_rename_stage({**_POL, "template": [{"t": "orig", "re": ".*"}]})
+        assert v._rename_run_id is None and not _trzyma_blokade(v)
+        assert [r["status"] for r in writeback.renames_for_run(con, run)] == ["applied"]
+        writeback.undo_renames(con, run, now=NOW)
+        assert pliki[0].exists()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def _nazwy_przerwane_smiercia(tmp_path, monkeypatch, n=3):
+    """Staging `n` nazw w oknie, zamknięcie okna i zapis nazw drugim połączeniem przerwany ŚMIERCIĄ procesu
+    po `os.rename` pierwszego pliku (prawdziwy pisarz, atrapa wyłącznie śmierci - wzór `test_rename.py`):
+    pierwszy plik pod nową nazwą, baza pod starą, `n` wierszy czekających, pierwszy z otwartym zamiarem.
+    Zwraca (ścieżka bazy, pliki, run_id) - połączenie zamknięte."""
+    from horreum import repo
+    from test_rename import _pad_raz
+    path, con, pliki = _baza_szuflady(tmp_path, n)
+    v = _widok_szuflady(con, inline=True)
+    v._on_rename_stage(_POL)
+    run = v._rename_run_id
+    _zamknij_widok(v)
+    with monkeypatch.context() as m:
+        _pad_raz(m, repo, "_apply_relocation", KeyboardInterrupt())
+        with pytest.raises(KeyboardInterrupt):
+            writeback.commit_renames(con, run, now=NOW)
+    con.close()
+    return path, pliki, run
+
+
+def _rekoncyliacja_obok(path):
+    """Rekoncyliacja zamiarów nazw drugim połączeniem (Dostawa, CLI, inne okno)."""
+    con2 = db.connect(path)
+    try:
+        return writeback.reconcile_renames(con2, now=NOW)
+    finally:
+        con2.close()
+
+
+def _droga_nazw():
+    return i18n.t("grid.drawer.names_held_way", receive=i18n.t("pipeline.receive"), nav=i18n.t("nav.dostawa"))
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_nazwy_przerwane_smiercia_mowia_ile_czeka_i_co_zwolni(qapp, tmp_path, monkeypatch, lang):
+    """Restart po zapisie nazw przerwanym śmiercią programu: przebiegu z otwartym zamiarem szuflada nie
+    podejmuje (dwa zapisy jednego przebiegu to wyścig), ale nie mówi „pusta” - etykieta liczy czekające zmiany
+    nazw, wynik mówi, co rozstrzygnie zamiar; Zatwierdź/Odrzuć wygaszone, wiersze nietknięte. Falsyfikatory:
+    zdanie szuflady bez gałęzi nazw (pustostan); zdanie bez drogi nazw."""
+    path, _pliki, _run = _nazwy_przerwane_smiercia(tmp_path, monkeypatch)
+    i18n.set_lang(lang)
+    con, v = _restart(path)
+    try:
+        przed = [tuple(r) for r in con.execute("SELECT status, in_flight FROM pending_renames ORDER BY id")]
+        assert v._rename_run_id is None and v._run_id is None
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_names_held", 3)
+        assert v.drawer.result.text() == _droga_nazw()
+        assert not v.drawer.btn_commit.isEnabled() and not v.drawer.btn_reject.isEnabled()
+        assert [tuple(r) for r in con.execute(
+            "SELECT status, in_flight FROM pending_renames ORDER BY id")] == przed
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_rekoncyliacja_nazw_innym_polaczeniem_odswiezenie_podejmuje_i_cofnij_obejmuje_wszystkie(
+        qapp, tmp_path, monkeypatch):
+    """Zamiar rozstrzyga ktoś inny (rekoncyliacja drugim połączeniem), widok tylko odświeża szufladę: przebieg
+    nazw zapamiętany jako zatrzymany jest już podejmowalny - „Z poprzedniej sesji czekają 2 zmiany nazw”, zapis
+    przerwano; „Zatwierdź” kończy, a „Cofnij” przywraca WSZYSTKIE trzy nazwy (wiersz z rekoncyliacji należy do
+    przebiegu). Falsyfikatory: podjęcie zwolnionych wyłącznie dla kart; pamięć przebiegów bez nazw."""
+    from test_gui_pasek_szczegol import _czekaj
+    path, pliki, run = _nazwy_przerwane_smiercia(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_names_held", 3)
+        assert [f.status for f in _rekoncyliacja_obok(path)] == ["reconciled"]
+        v.set_writeback_busy(True)                       # koniec cudzego zapisu - zwykłe odświeżenie
+        v.set_writeback_busy(False)
+        assert v._rename_run_id == run and v._rename_pending_count() == 2
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_rename_prev", 2)
+        assert i18n.t("grid.drawer.prev_interrupted", commit=i18n.t("grid.action.commit")) in v.drawer.result.text()
+        assert v.drawer.btn_commit.isVisible() and v.drawer.btn_commit.isEnabled()
+        _klik_w(v.drawer.btn_commit)
+        _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "dokończenie nazw")
+        assert not any(p.exists() for p in pliki)
+        _klik_w(v._undo_btn)
+        _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "cofnięcie nazw")
+        assert all(p.exists() for p in pliki), "nazwa z zapisu przerwanego śmiercią nie wróciła"
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_zwolnione_nazwy_przy_zajetej_szufladzie_mowia_ze_czekaja(qapp, tmp_path, monkeypatch):
+    """Szuflada zajęta przebiegiem `Z` podjętym przy otwarciu; obok czekają karty zatrzymane izolacją (`R`) i nazwy
+    z otwartym zamiarem - zdanie przebiegu mówi o obu. Zamiar rozstrzyga drugie połączenie, a „Dokończ zapis”
+    zwalnia `R`: szuflada niczego nie podejmuje, a wynik mówi, że czekają zwolnione karty I zwolnione nazwy -
+    każde swoją liczbą. Falsyfikatory: człon nazw w locie zdjęty ze zdania przebiegu; człon `names_held_ready`
+    zdjęty."""
+    from horreum import repo, scan
+    from test_rename import _pad_raz
+    from test_gui_izolacja_zapisu import _fits
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con = db.connect(path)
+    nazwy = []
+    for i in (3, 4, 5):
+        p = _fits(tmp_path / "arch" / f"n{i}.fits", seed=i)
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        lid, mtime = con.execute("SELECT id, mtime FROM location WHERE path = ?", (str(p),)).fetchone()
+        repo.stage_rename(con, run_id="NF", location_id=lid, old_path=str(p),
+                          new_path=str(tmp_path / "arch" / f"m{i}.fits"), expected_mtime=mtime)
+        nazwy.append(p)
+    with monkeypatch.context() as m:
+        _pad_raz(m, repo, "_apply_relocation", KeyboardInterrupt())
+        with pytest.raises(KeyboardInterrupt):
+            writeback.commit_renames(con, "NF", now=NOW)
+    lid, hh = con.execute("SELECT id, header_hash FROM location ORDER BY id LIMIT 1 OFFSET 2").fetchone()
+    repo.stage_pending(con, run_id="Z", location_id=lid, keyword="TELESCOP", idx=0, op="set",
+                       old_value=None, new_value="EQ6", new_type="str", new_comment=None, expected_header_hash=hh)
+    con.close()
+    con, v = _restart(path)
+    try:
+        assert v._run_id == "Z"
+        assert i18n.t_plural("grid.drawer.names_held_more", 3) in v.drawer.result.text(), v.drawer.result.text()
+        assert [f.status for f in _rekoncyliacja_obok(path)] == ["reconciled"]
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        wynik = v.drawer.result.text()
+        assert v._run_id == "Z" and v._rename_run_id is None
+        assert i18n.t_plural("grid.drawer.isolated_ready", 2) in wynik, wynik
+        assert i18n.t_plural("grid.drawer.names_held_ready", 2) in wynik, wynik
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_odczyt_nazw_szuflady_jeden_predykat_dwie_polowy(tmp_path):
+    """Odczyt przebiegów nazw szuflady: przebieg zwykły w połowie do podjęcia, przebieg z otwartym zamiarem
+    w połowie „w locie” (z liczbą wszystkich czekających wierszy), przebieg zmiany obiektu i wiersz przeniesienia
+    zmiany obiektu w żadnej - także gdy tabela pozycji zmiany obiektu ma wiersz bez przeniesienia
+    (`rename_id IS NULL`). Falsyfikator: `NOT IN` bez `IS NOT NULL` (NULL na liście gasi obie połowy)."""
+    from horreum import repo
+    path, con, _p = _baza_szuflady(tmp_path, 3)
+    lok = [(r["id"], r["frame_id"], r["path"]) for r in con.execute(
+        "SELECT id, frame_id, path FROM location ORDER BY id")]
+
+    def _nazwa(run_id, i):
+        repo.stage_rename(con, run_id=run_id, location_id=lok[i][0], old_path=lok[i][2],
+                          new_path=lok[i][2] + f".{run_id}", expected_mtime=None)
+        return con.execute("SELECT max(id) FROM pending_renames").fetchone()[0]
+    _nazwa("OK", 0)
+    _nazwa("NF", 1)
+    _nazwa("NF", 2)
+    przeniesienie = _nazwa("X", 0)
+    with con:
+        con.execute("UPDATE pending_renames SET in_flight = 'commit' "
+                    "WHERE id = (SELECT min(id) FROM pending_renames WHERE run_id = 'NF')")
+        con.execute("INSERT INTO object_change_run (run_id, mode, created_at) VALUES ('OC', 'align', ?)", (NOW,))
+        con.execute("INSERT INTO pending_object_change (run_id, frame_id, location_id, old_path, object_change, "
+                    "rename_id) VALUES ('OC', ?, ?, ?, 1, NULL)", (lok[1][1], lok[1][0], lok[1][2]))
+        con.execute("INSERT INTO pending_object_change (run_id, frame_id, location_id, old_path, object_change, "
+                    "rename_id) VALUES ('OC', ?, ?, ?, 0, ?)", (lok[0][1], lok[0][0], lok[0][2], przeniesienie))
+    _nazwa("OC", 2)
+    try:
+        assert [(p["run_id"], p["klinga"], p["n"]) for p in queries.oczekujace_przebiegi_szuflady(con)] == [
+            ("OK", "nazwy", 1)]
+        assert queries.przebiegi_nazw_w_locie(con) == [{"run_id": "NF", "n": 2}]
+    finally:
+        con.close()
+
+
+def test_klucze_nazw_zatrzymanych_odmieniaja_liczbe():
+    """Odmiana kluczy zdań nazw zatrzymanych (1, 2, 5, 12, 22) w PL i EN; EN bez polskich znaków i bez „."""
+    i18n.set_lang("pl")
+    assert [i18n.t_plural("grid.drawer.pending_names_held", n).split(",")[0] for n in (1, 2, 5, 12, 22)] == [
+        "1 zmiana nazwy czeka", "2 zmiany nazw czekają", "5 zmian nazw czeka", "12 zmian nazw czeka",
+        "22 zmiany nazw czekają"]
+    assert [i18n.t_plural("grid.drawer.names_held_ready", n).split(" - ")[0] for n in (1, 2, 5, 12, 22)] == [
+        "1 zmiana nazwy zwolniona z zapisu nazw czeka", "2 zmiany nazw zwolnione z zapisu nazw czekają",
+        "5 zmian nazw zwolnionych z zapisu nazw czeka", "12 zmian nazw zwolnionych z zapisu nazw czeka",
+        "22 zmiany nazw zwolnione z zapisu nazw czekają"]
+    assert i18n.t_plural("grid.drawer.names_held_more", 22) == "czekają też 22 zmiany nazw zatrzymane zapisem nazw"
+    assert i18n.t_plural("grid.drawer.names_held_more", 5) == "czeka też 5 zmian nazw zatrzymanych zapisem nazw"
+    assert i18n.t_plural("grid.drawer.names_held_more", 1) == "czeka też 1 zmiana nazwy zatrzymana zapisem nazw"
+    i18n.set_lang("en")
+    assert i18n.t_plural("grid.drawer.pending_names_held", 1) == "1 name change waits for a name write to be settled"
+    assert i18n.t_plural("grid.drawer.pending_names_held", 2) == "2 name changes wait for a name write to be settled"
+    for klucz in ("grid.drawer.pending_names_held", "grid.drawer.names_held_more", "grid.drawer.names_held_ready",
+                  "grid.drawer.names_held_way", "grid.drawer.dot_held_tip"):
+        for n in (1, 2):
+            tekst = (i18n.t_plural(klucz, n) if klucz.endswith(("held", "more", "ready"))
+                     else i18n.t(klucz, receive="R", nav="N"))
+            assert not set(tekst) & set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ„"), tekst
+
+
+def _kropka(v):
+    return v.drawer.dot.text(), v.drawer.dot.property("role"), v.drawer.dot.toolTip()
+
+
+@pytest.mark.parametrize("stan", ["izolacja", "nazwy", "cudza"])
+def test_kropka_mowi_o_zmianach_czekajacych_poza_szuflada(qapp, tmp_path, monkeypatch, stan):
+    """Przy zerze w tej szufladzie, a zmianach czekających POZA nią - zatrzymanych izolacją, nazwach z otwartym
+    zamiarem, zwolnionych przy szufladzie prowadzonej przez inne okno - kropka nie mówi „○” (pusto), tylko
+    „◌” w roli `warn` z podpowiedzią. Po podjęciu „●” bez podpowiedzi, po „Odrzuć” „○” bez podpowiedzi.
+    Falsyfikatory: `set_count` bez stanu „czeka poza szufladą”; podpowiedź kropki niezdejmowana w innych
+    stanach; gałąź zwolnionych niepodjętych bez kropki."""
+    tip = i18n.t("grid.drawer.dot_held_tip")
+    if stan == "nazwy":
+        path, _pliki, _run = _nazwy_przerwane_smiercia(tmp_path, monkeypatch)
+    else:
+        path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    con_a = a = None
+    try:
+        if stan == "cudza":
+            con_a, a = _restart(path)
+            _makro_dodaj(a, "OBSERVER", "obs")           # szufladę prowadzi okno A
+            assert _trzyma_blokade(a)
+            con2 = db.connect(path)
+            try:
+                op_id = con2.execute("SELECT id FROM inplace_op").fetchone()[0]
+                writeback.finish_inplace(con2, op_id, now=NOW)
+            finally:
+                con2.close()
+            v.set_writeback_busy(True)
+            v.set_writeback_busy(False)
+            assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_ready", 2)
+        assert _kropka(v) == ("◌", "warn", tip)
+        if stan == "cudza":
+            return
+        if stan == "izolacja":
+            _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        else:
+            _rekoncyliacja_obok(path)
+            v.set_writeback_busy(True)
+            v.set_writeback_busy(False)
+        assert _kropka(v) == ("●", "warn", ""), v.drawer.label.text()
+        _klik_w(v.drawer.btn_reject)
+        assert _kropka(v) == ("○", "secondary", "")
+    finally:
+        if a is not None:
+            _zamknij_widok(a)
+            con_a.close()
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_kropka_przy_zatwierdzono_zostaje_pusta(qapp, tmp_path):
+    """Stan „Zatwierdzono: N” przy żywym „Cofnij” - poczekalnia pusta, „Cofnij” działa na zapisanym: kropka
+    „○” w roli `secondary`, bez podpowiedzi. Falsyfikator: kropka „czeka poza szufladą” przy etykiecie zapisu."""
+    _path, con, _p = _baza_szuflady(tmp_path, 2)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        _klik_w(v.drawer.btn_commit)
+        assert v._undo_mode == "macro"
+        assert _kropka(v) == ("○", "secondary", "")
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def _zamknij_izolacje_obok(path):
+    """„Dokończ zapis” operacji izolującej drugim połączeniem (CLI, drugie okno) - prawdziwy rdzeń."""
+    con2 = db.connect(path)
+    try:
+        op_id = con2.execute("SELECT id FROM inplace_op").fetchone()[0]
+        assert writeback.finish_inplace(con2, op_id, now=NOW).status == "applied"
+    finally:
+        con2.close()
+
+
+def _aktywuj(okno):
+    """Aktywacja okna jak powrót człowieka z innej aplikacji: drugie okno aktywne, potem to (offscreen
+    doręcza `WindowActivate` widocznym dzieciom)."""
+    from PySide6.QtWidgets import QWidget
+    from test_gui_pasek_szczegol import _czekaj
+    inne = QWidget()
+    inne.resize(200, 100)
+    inne.show()
+    inne.activateWindow()
+    _czekaj(lambda: QApplication.activeWindow() is inne, "drugie okno aktywne")
+    okno.activateWindow()
+    _czekaj(lambda: QApplication.activeWindow() is okno, "okno aktywne")
+    inne.close()
+
+
+def _okno_glowne(path, monkeypatch):
+    from horreum.gui.app import MainWindow
+    from test_gui_pasek_szczegol import _czekaj
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    win = MainWindow(path)
+    win.resize(1400, 900)
+    win.show()
+    _czekaj(lambda: not win.grid_view._zbior_w_drodze(), "pierwszy zbiór")
+    return win
+
+
+def _klik_nav(win, wiersz):
+    from PySide6.QtTest import QTest
+    rect = win.nav.visualItemRect(win.nav.item(wiersz))
+    QTest.mouseClick(win.nav.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    QApplication.processEvents()
+
+
+def test_wejscie_w_zbiory_odswieza_pusta_szuflade_po_izolacji_zamknietej_innym_polaczeniem(qapp, tmp_path,
+                                                                                          monkeypatch):
+    """Szuflada mówi „3 zmiany czekają, aż rozstrzygniesz zapis w miejscu”; człowiek wychodzi na Dom, izolację
+    zamyka drugie połączenie, a wejście w Zbiory klikiem sidebara odświeża pustą szufladę - przebieg podjęty,
+    „Z poprzedniej sesji czekają 2 zmiany” z czynnym „Zatwierdź”, zamiast nieaktualnego „najpierw Dokończ
+    zapis”. Falsyfikator: widok bez odświeżenia przy pokazaniu."""
+    from horreum.gui.app import NAV_DOM, NAV_ZBIORY
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    win = _okno_glowne(path, monkeypatch)
+    g = win.grid_view
+    try:
+        _klik_nav(win, NAV_ZBIORY)
+        assert g.isVisible() and g.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 3)
+        _klik_nav(win, NAV_DOM)
+        _zamknij_izolacje_obok(path)
+        _klik_nav(win, NAV_ZBIORY)
+        assert g._run_id == "R" and g.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 2)
+        assert g.drawer.btn_commit.isVisible() and g.drawer.btn_commit.isEnabled()
+    finally:
+        win.close()
+
+
+def test_aktywacja_okna_odswieza_pusta_szuflade(qapp, tmp_path, monkeypatch):
+    """Zbiory na ekranie, izolację zamyka drugie połączenie, człowiek wraca do okna (aktywacja) - pusta szuflada
+    odświeża się i podejmuje przebieg. Falsyfikator: widok bez odświeżenia przy `WindowActivate`."""
+    from horreum.gui.app import NAV_ZBIORY
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    win = _okno_glowne(path, monkeypatch)
+    g = win.grid_view
+    try:
+        _klik_nav(win, NAV_ZBIORY)
+        assert g.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 3)
+        _zamknij_izolacje_obok(path)
+        _aktywuj(win)
+        assert g._run_id == "R" and g.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 2)
+    finally:
+        win.close()
+
+
+def test_odswiezenie_pustej_szuflady_czeka_na_koniec_etapu_dostawy(qapp, tmp_path, monkeypatch):
+    """PRAWDZIWY etap „Rozwiąż” z bramą; izolację zamyka drugie połączenie, a aktywacja okna w biegu etapu
+    niczego nie podejmuje (Zatwierdź/Odrzuć zostają wygaszone - etap pisze do bazy). Koniec przebiegu odświeża
+    pustą szufladę sam - przebieg podjęty bez kolejnej aktywacji. Falsyfikatory: odświeżenie bez strażnika
+    etapu; koniec etapu bez odświeżenia pustej szuflady."""
+    import threading
+    from horreum import derive
+    from horreum.gui.app import NAV_ZBIORY
+    from test_gui_pasek_szczegol import _czekaj
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    puszczona = threading.Event()
+    prawdziwy = derive.DERIVED["resolve"]
+
+    def _czeka(con, now, cancel):
+        puszczona.wait(30)
+        return prawdziwy(con, now, cancel)
+    monkeypatch.setitem(derive.DERIVED, "resolve", _czeka)
+    win = _okno_glowne(path, monkeypatch)
+    g = win.grid_view
+    try:
+        _klik_nav(win, NAV_ZBIORY)
+        assert win.pipeline_view.run_stage("resolve") is None
+        _czekaj(lambda: g._etap_w_biegu, "etap w biegu")
+        _zamknij_izolacje_obok(path)
+        _aktywuj(win)
+        assert g._run_id is None and not g.drawer.btn_commit.isEnabled() and not g.drawer.btn_reject.isEnabled()
+        puszczona.set()
+        _czekaj(lambda: not g._etap_w_biegu and win.pipeline_view._thread is None, "koniec przebiegu")
+        assert g._run_id == "R" and g.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 2)
+        assert g.drawer.btn_commit.isEnabled()
+    finally:
+        puszczona.set()
+        win.close()
+
+
+def test_aktywacja_przy_zywym_cofnij_nie_podejmuje(qapp, tmp_path, monkeypatch):
+    """Żywe „Cofnij” zapisu tej sesji, izolację zamyka drugie połączenie, aktywacja okna: świeżego „Cofnij”
+    nie zdejmujemy po cichu - etykieta „Zatwierdzono…” i przycisk zostają, przebieg nie podjęty. Falsyfikator:
+    odświeżenie bez strażnika żywego „Cofnij” (etykieta zastąpiona zdaniem o zmianach czekających)."""
+    from test_gui_pasek_szczegol import _czekaj
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        _makro_dodaj(v, "OBSERVER", "obs")
+        _klik_w(v.drawer.btn_commit)
+        _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "zapis tej sesji")
+        assert v._undo_mode == "macro"
+        etykieta = v.drawer.label.text()
+        _zamknij_izolacje_obok(path)
+        _aktywuj(v)
+        assert v._run_id is None and v._undo_mode == "macro" and v._undo_btn.isVisible()
+        assert v.drawer.label.text() == etykieta
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_aktywacja_w_biegu_gestu_izolacji_nie_pokazuje_zatwierdz(qapp, tmp_path, monkeypatch):
+    """„Dokończ zapis” w wątku zapisu stoi na bramie PO zamknięciu operacji (przebieg w bazie już podejmowalny),
+    a człowiek aktywuje okno: szuflada nie podejmuje przebiegu w biegu własnego gestu - pasek postępu zostaje,
+    Zatwierdź/Odrzuć schowane. Po końcu gestu podejmuje go ogon. Falsyfikator: odświeżenie bez strażnika
+    własnego zapisu w biegu."""
+    import threading
+    from test_gui_izolacja_zapisu import _zaznacz
+    from test_gui_pasek_szczegol import _czekaj
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    brama, doszlo = threading.Event(), threading.Event()
+    prawdziwy = writeback.finish_inplace
+
+    def _dokoncz_i_czekaj(c, op_id, *, now):
+        wynik = prawdziwy(c, op_id, now=now)
+        doszlo.set()
+        brama.wait(30)
+        return wynik
+    monkeypatch.setattr(writeback, "finish_inplace", _dokoncz_i_czekaj)
+    try:
+        v.apply_perspective(grid_mod.PRESET_PENDING_FINISH)
+        _czekaj(lambda: not v._zbior_w_drodze(), "perspektywa izolacji")
+        _zaznacz(v, [pliki[0][1]])
+        v._sync_menu_zapisu()
+        v.act_finish_write.trigger()
+        _czekaj(lambda: doszlo.is_set(), "operacja zamknięta w wątku")
+        _aktywuj(v)
+        assert v._wb.is_busy and v._run_id is None
+        assert v.drawer.bar.isVisible() and not v.drawer.btn_commit.isVisible()
+        brama.set()
+        _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "koniec gestu")
+        assert v._run_id == "R"
+    finally:
+        brama.set()
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_aktywacja_w_biegu_skladu_zbioru_czeka_na_przylozenie(qapp, tmp_path, monkeypatch):
+    """Skład zbioru w wątku tła stoi na bramie, izolację zamyka drugie połączenie, człowiek aktywuje okno:
+    szuflada nie podejmuje przebiegu nad zbiorem, który zaraz zniknie (Zatwierdź/Odrzuć niewidoczne i wygaszone).
+    Przyłożenie zbioru podejmuje odświeżenie odłożone. Falsyfikatory: odświeżenie bez strażnika zbioru
+    w drodze; przyłożenie bez podjęcia odłożonego odświeżenia."""
+    from test_gui_pola_w_tle import _brama_na_pivot
+    from test_gui_pasek_szczegol import _czekaj
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con = db.connect(path)
+    v = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
+    v.resize(1400, 800)
+    v.show()
+    brama = None
+    try:
+        _czekaj(lambda: not v._zbior_w_drodze() and v._zbior_worker is None, "pierwszy zbiór")
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 3)
+        brama, wszedl = _brama_na_pivot(monkeypatch)
+        v.refresh(w_tle=True)
+        _czekaj(lambda: wszedl.is_set(), "skład w drodze")
+        _zamknij_izolacje_obok(path)
+        _aktywuj(v)
+        assert v._zbior_w_drodze() and v._run_id is None
+        assert not (v.drawer.btn_commit.isVisible() and v.drawer.btn_commit.isEnabled())
+        brama.set()
+        _czekaj(lambda: not v._zbior_w_drodze() and v._zbior_worker is None, "przyłożenie zbioru")
+        assert v._run_id == "R" and v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 2)
+        assert v.drawer.btn_commit.isVisible() and v.drawer.btn_commit.isEnabled()
+    finally:
+        if brama is not None:
+            brama.set()
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_blad_bazy_przy_odswiezeniu_pustej_szuflady_mowi_zdaniem_okno_zyje(qapp, tmp_path, monkeypatch):
+    """Odczyt pustej szuflady w haczyku aktywacji pada błędem bazy (prawdziwy błąd SQLite z kodem - plik, który
+    nie jest bazą): zdarzenie Qt wraca bez wyjątku, szuflada mówi zdaniem z powodem klasy bazy, a szczegół
+    systemu stoi pod kursorem. Błąd programu (inna klasa) leci dalej. Falsyfikatory: haczyk bez obsługi błędu
+    bazy (wyjątek z `event()`, brak zdania); obsługa łapiąca każdy wyjątek."""
+    import sqlite3
+    from PySide6.QtCore import QEvent
+    zly = tmp_path / "zly.db"
+    zly.write_bytes(b"to nie jest baza" * 64)
+    try:
+        sqlite3.connect(str(zly)).execute("SELECT 1 FROM sqlite_master").fetchall()
+    except sqlite3.DatabaseError as e:
+        blad = e
+    _path, con, _p = _baza_szuflady(tmp_path, 1)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        monkeypatch.setattr(queries, "przebiegi_szuflady_izolowane", lambda c: (_ for _ in ()).throw(blad))
+        QApplication.sendEvent(v, QEvent(QEvent.WindowActivate))
+        zdanie = i18n.t("grid.wb.error", msg=i18n.t("objchg.item.db_damaged", db_code="SQLITE_NOTADB"))
+        assert v.drawer.result.text() == zdanie
+        assert v.drawer.result.szczegol(), "szczegół systemu pod kursorem"
+        monkeypatch.setattr(queries, "przebiegi_szuflady_izolowane",
+                            lambda c: (_ for _ in ()).throw(sqlite3.ProgrammingError("zamknięte połączenie")))
+        with pytest.raises(sqlite3.ProgrammingError):
+            v._odswiez_pusta_szuflade()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def _blad_notadb(tmp_path):
+    """Prawdziwy błąd SQLite z kodem (NOTADB): plik, który nie jest bazą."""
+    import sqlite3
+    zly = tmp_path / "zly.db"
+    zly.write_bytes(b"to nie jest baza" * 64)
+    try:
+        sqlite3.connect(str(zly)).execute("SELECT 1 FROM sqlite_master").fetchall()
+    except sqlite3.DatabaseError as e:
+        return e
+    raise AssertionError("plik śmieci otworzył się jako baza")
+
+
+def test_aktywacja_przy_przebiegu_tej_szuflady_nie_rusza_go(qapp, tmp_path):
+    """Szuflada niesie przebieg tej sesji (makro, 3 zmiany), człowiek aktywuje okno: etykieta i czynne
+    „Zatwierdź” zostają - odświeżenie pustej szuflady nie dotyka szuflady, która nie jest pusta.
+    Falsyfikator: odświeżenie bez strażnika przebiegu tej szuflady (etykieta pustostanu, Zatwierdź wygaszone)."""
+    _path, con, _p = _baza_szuflady(tmp_path, 3)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        _aktywuj(v)
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending", 3)
+        assert v.drawer.btn_commit.isVisible() and v.drawer.btn_commit.isEnabled()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_aktywacja_przy_cudzym_zapisie_czeka_na_jego_koniec(qapp, tmp_path, monkeypatch):
+    """Cudzy zapis plików w biegu (okno naprawy), izolację zamyka drugie połączenie, aktywacja okna: szuflada nie
+    podejmuje przebiegu obok cudzego zapisu (Zatwierdź wygaszone); koniec cudzego zapisu podejmuje go sam.
+    Falsyfikator: odświeżenie bez strażnika cudzego zapisu."""
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        v.set_writeback_busy(True)
+        _zamknij_izolacje_obok(path)
+        _aktywuj(v)
+        assert v._run_id is None and not v.drawer.btn_commit.isEnabled()
+        v.set_writeback_busy(False)
+        assert v._run_id == "R" and v.drawer.btn_commit.isEnabled()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_widok_zatrzymany_nie_podejmuje_przy_zdarzeniu(qapp, tmp_path, monkeypatch):
+    """Widok zatrzymany (zamykany - `zatrzymaj_pola`) dostaje jeszcze zdarzenie aktywacji: niczego nie podejmuje
+    i nie bierze blokady szuflady, którą za chwilę ma oddać. Falsyfikator: odświeżenie bez strażnika widoku
+    zatrzymanego."""
+    from PySide6.QtCore import QEvent
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        _zamknij_izolacje_obok(path)
+        v.zatrzymaj_pola()
+        QApplication.sendEvent(v, QEvent(QEvent.WindowActivate))
+        assert v._run_id is None and not _trzyma_blokade(v)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_okno_zmiany_obiektu_zwalnia_nazwy_zamkniecie_odswieza_szuflade(qapp, tmp_path, monkeypatch):
+    """PRAWDZIWE okno zmiany obiektu (wejście z przerwanego przebiegu, „Dokończ” prawdziwym klikiem, zapis inline):
+    zapis zmiany obiektu rekoncyliuje zamiary nazw, więc przebieg nazw przerwany śmiercią procesu staje się
+    podejmowalny. Aktywacja okna Zbiorów przy otwartym oknie zmiany obiektu niczego nie podejmuje; zamknięcie okna
+    odświeża pustą szufladę - przebieg nazw podjęty. Falsyfikatory: odświeżenie bez strażnika okna zmiany
+    obiektu; zamknięcie okna bez odświeżenia."""
+    from PySide6.QtCore import QEvent, QTimer
+    from PySide6.QtTest import QTest
+    from horreum import repo
+    from test_object_change_write import _Scena, _fits as _fits_oc, _wczytaj
+    from test_rename import _pad_raz
+    s = _Scena(tmp_path)
+    s.stage(s.plan("R1"))
+    con = s.con
+    for i in range(3):
+        p = _fits_oc(tmp_path / "inne" / f"n{i}.fits", seed=20 + i)
+        _wczytaj(con, p)
+        lid, mtime = con.execute("SELECT id, mtime FROM location WHERE path = ?", (str(p),)).fetchone()
+        repo.stage_rename(con, run_id="NF", location_id=lid, old_path=str(p),
+                          new_path=str(tmp_path / "inne" / f"m{i}.fits"), expected_mtime=mtime)
+    with monkeypatch.context() as m:
+        _pad_raz(m, repo, "_apply_relocation", KeyboardInterrupt())
+        with pytest.raises(KeyboardInterrupt):
+            writeback.commit_renames(con, "NF", now=NOW)
+    con.close()
+    con = db.connect(str(tmp_path / "h.db"))
+    v = _widok_szuflady(con, inline=True)
+    w_oknie = []
+
+    def _scenariusz():
+        dlg = v._okno_zmiany_obiektu
+        try:
+            QTest.mouseClick(dlg.action_btn, Qt.LeftButton)
+            QApplication.processEvents()
+            w_oknie.append(con.execute("SELECT count(*) FROM pending_renames WHERE in_flight IS NOT NULL"
+                                       ).fetchone()[0])
+            QApplication.sendEvent(v, QEvent(QEvent.WindowActivate))
+            w_oknie.append(v._rename_run_id)
+        finally:
+            dlg.reject()
+    try:
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_names_held", 3)
+        QTimer.singleShot(0, _scenariusz)
+        v.otworz_przebieg_zmiany_obiektu("R1")
+        assert w_oknie == [0, None], w_oknie
+        assert v._rename_run_id == "NF" and v._rename_pending_count() == 2
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_rename_prev", 2)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_druga_porazka_skladu_podejmuje_odlozone_odswiezenie(qapp, tmp_path, monkeypatch):
+    """Aktywacja okna w biegu składu w tle odkłada odświeżenie pustej szuflady; skład pada dwa razy (pierwsza
+    porażka i ponowienie) - zbiór nie przykłada się, ale stan „w drodze” schodzi i odświeżenie odłożone
+    podejmuje przebieg. Falsyfikator: odłożone odświeżenie konsumowane wyłącznie przy przyłożeniu zbioru."""
+    import sqlite3
+    import threading
+    from test_gui_pasek_szczegol import _czekaj
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con = db.connect(path)
+    v = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
+    v.resize(1400, 800)
+    v.show()
+    brama, wszedl = threading.Event(), threading.Event()
+    porazki = []
+    try:
+        _czekaj(lambda: not v._zbior_w_drodze() and v._zbior_worker is None, "pierwszy zbiór")
+        glowny = threading.get_ident()
+        prawdziwe = queries.cards_pivot
+
+        def _cp(c, ids, kws):
+            if threading.get_ident() == glowny:
+                return prawdziwe(c, ids, kws)
+            wszedl.set()
+            brama.wait(30)
+            porazki.append(1)
+            raise sqlite3.OperationalError("awaria składu w tle")
+        monkeypatch.setattr(queries, "cards_pivot", _cp)
+        v.refresh(w_tle=True)
+        _czekaj(lambda: wszedl.is_set(), "skład w drodze")
+        _zamknij_izolacje_obok(path)
+        _aktywuj(v)
+        assert v._run_id is None
+        brama.set()
+        _czekaj(lambda: len(porazki) == 2 and not v._zbior_w_drodze() and v._zbior_worker is None,
+                "druga porażka składu")
+        assert v._run_id == "R" and v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 2)
+    finally:
+        brama.set()
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_zdanie_bledu_odczytu_schodzi_przy_udanym_odswiezeniu(qapp, tmp_path, monkeypatch):
+    """Odczyt pustej szuflady pada błędem bazy (zdanie w szufladzie), następne odświeżenie się udaje - zdanie
+    błędu schodzi, pustostan bez zdania. Falsyfikator: zdanie błędu niezapamiętane jako zdanie odświeżenia
+    (stoi do następnego gestu)."""
+    from PySide6.QtCore import QEvent
+    blad = _blad_notadb(tmp_path)
+    _path, con, _p = _baza_szuflady(tmp_path, 1)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        prawdziwy = queries.przebiegi_szuflady_izolowane
+        monkeypatch.setattr(queries, "przebiegi_szuflady_izolowane", lambda c: (_ for _ in ()).throw(blad))
+        QApplication.sendEvent(v, QEvent(QEvent.WindowActivate))
+        assert v.drawer.result.text().startswith(i18n.t("grid.wb.error", msg="")[:4])
+        monkeypatch.setattr(queries, "przebiegi_szuflady_izolowane", prawdziwy)
+        QApplication.sendEvent(v, QEvent(QEvent.WindowActivate))
+        assert v.drawer.result.text() == "" and v.drawer.label.text() == i18n.t("grid.drawer.empty")
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_zdanie_cudzej_blokady_schodzi_gdy_juz_nic_nie_czeka(qapp, tmp_path, monkeypatch):
+    """Okno B mówi „szufladę prowadzi inne okno” przy zmianach zwolnionych (gałąź cudzej blokady); okno A
+    podejmuje je i zapisuje. Następne odświeżenie B: nic już nie czeka - zdanie cudzej blokady schodzi razem
+    z etykietą. Falsyfikator: zdanie gałęzi cudzej blokady niezapamiętane jako zdanie odświeżenia."""
+    from test_gui_pasek_szczegol import _czekaj
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con_a, a = _restart(path)
+    con_b = b = None
+    try:
+        _makro_dodaj(a, "OBSERVER", "obs")               # A prowadzi szufladę
+        con_b, b = _restart(path)
+        _zamknij_izolacje_obok(path)
+        b.set_writeback_busy(True)
+        b.set_writeback_busy(False)
+        assert b.drawer.result.text() == i18n.t("grid.drawer.foreign_owner")
+        _klik_w(a.drawer.btn_reject)                     # A odrzuca swój staging i podejmuje zwolnione
+        a.set_writeback_busy(True)
+        a.set_writeback_busy(False)
+        assert a._run_id == "R"
+        _klik_w(a.drawer.btn_commit)
+        _czekaj(lambda: not a._wb.is_busy and not a._zbior_w_drodze(), "zapis w oknie A")
+        b.set_writeback_busy(True)
+        b.set_writeback_busy(False)
+        assert b.drawer.result.text() == "" and b.drawer.label.text() == i18n.t("grid.drawer.empty")
+    finally:
+        if b is not None:
+            _zamknij_widok(b)
+            con_b.close()
+        _zamknij_widok(a)
+        con_a.close()
+
+
+def test_aktywacja_przy_otwartym_edytorze_odklada_podjecie_do_zamkniecia(qapp, tmp_path, monkeypatch):
+    """Przebieg nazw zwolniony rekoncyliacją drugiego połączenia, a w tabeli otwarty edytor komórki: aktywacja
+    okna nie podejmuje przebiegu (podgląd przeładowany pod edytorem), zamknięcie edytora (Escape) - podejmuje.
+    Falsyfikatory: odświeżenie bez odłożenia przy edytorze; zamknięcie edytora bez podjęcia odłożonego."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtTest import QTest
+    from test_gui_drogi_reki import _otworz_edytor
+    from test_gui_pasek_szczegol import _czekaj
+    path, _pliki, run = _nazwy_przerwane_smiercia(tmp_path, monkeypatch)
+    con = db.connect(path)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        _rekoncyliacja_obok(path)
+        idx, ed, _inny = _otworz_edytor(qapp, v, "TELESCOP")
+        QApplication.sendEvent(v, QEvent(QEvent.WindowActivate))
+        assert v.table.indexWidget(idx) is ed and v._rename_run_id is None
+        QTest.keyClick(ed.wartosc, Qt.Key_Escape)
+        _czekaj(lambda: v._rename_run_id is not None, "podjęcie po zamknięciu edytora")
+        assert v._rename_run_id == run and v._rename_pending_count() == 2
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_dokoncz_zapis_rozstrzygajacy_ostatni_wpis_wlasnego_przebiegu_oddaje_blokade(qapp, tmp_path, monkeypatch):
+    """Zapis w miejscu WŁASNEGO przebiegu (jedna karta), którego re-sync pada, a związany wpis zostaje czekający
+    (atrapa stanu pisarza: status związanego wpisu, jak przy śmierci procesu - `_zatrzymany_izolacja`; pisarz
+    dziennika połyka wyjątek zapisu fazy i rozstrzyga wpis jako `failed`, więc sama atrapa wyjątku tego stanu
+    nie daje; reszta prawdziwa): przebieg trzyma blokadę. „Dokończ zapis” (prawdziwy gest) rozstrzyga ten ostatni
+    wpis - przebieg przy zerze zamyka się, blokada schodzi, drugie okno przyjmuje staging. Falsyfikator: ogon gestu
+    izolacji bez zamknięcia pustego przebiegu."""
+    from test_gui_izolacja_zapisu import _baza, _fazy
+    from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
+    con, pliki = _baza(tmp_path, n=1, do_zapisu=())
+    v = _widok_szuflady(con, inline=True)
+    con_b = db.connect(str(tmp_path / "h.db"))
+    b = None
+    try:
+        _makro_dodaj(v, "OBSERVER", "obs")
+        prawdziwy = writeback.scan.scan_file
+
+        def _resync_pada_wpis_czeka(c, t, now, pr, sc):
+            writeback.scan.scan_file = lambda p, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział"))
+            try:
+                wynik = _zapis_kart(c, t, now, pr, sc)
+            finally:
+                writeback.scan.scan_file = prawdziwy
+            with c:
+                c.execute("UPDATE pending_changes SET status = 'pending' WHERE inplace_op_id IS NOT NULL")
+            return wynik
+        monkeypatch.setitem(WritebackWorker._OPS, "commit", _resync_pada_wpis_czeka)
+        _klik_w(v.drawer.btn_commit)
+        monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapis_kart)
+        assert _fazy(con) == ["written"] and v._pending_count() == 1 and _trzyma_blokade(v), _statusy(con)
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        assert v._run_id is None and not _trzyma_blokade(v)
+        b = _widok_szuflady(con_b, inline=True)
+        _makro_dodaj(b, "FILTER", "Ha")
+        assert b._pending_count() == 1, b.drawer.result.text()
+    finally:
+        if b is not None:
+            _zamknij_widok(b)
+        con_b.close()
         _zamknij_widok(v)
         con.close()

@@ -55,7 +55,7 @@ from .gui.queries import (all_frame_ids, integrated_exposure, object_exposure,
                           stack_locations)
 from .resolve._coerce import _to_float, _to_text
 from .resolve._text import norm, norm_alnum
-from .resolve.catalog import catalog_canon, xref, xref_aliases
+from .resolve.catalog import catalog_canon, header_form, xref, xref_aliases
 from .resolve.objects import resolve_object
 
 # ─────────────────────────────────────────────────────── taksonomia (JEDEN właściciel — T3 §3)
@@ -207,7 +207,8 @@ class Target:
         return _FindKeys(catalog=frozenset((self.canon,) + self.catalog_aliases),
                          alnum=frozenset(a for a in alnum if a),
                          hay_fold="\x00".join(names).casefold(),
-                         hay_alnum=hay_alnum, word_starts=frozenset(starts))
+                         hay_alnum=hay_alnum, word_starts=frozenset(starts),
+                         nazwy=names, alnum_nazw=alnum)
 
 
 @dataclass(frozen=True)
@@ -217,6 +218,10 @@ class _FindKeys:
     hay_fold: str
     hay_alnum: str
     word_starts: frozenset = frozenset()
+    # Nazwy rekordu - kanon, potem aliasy - i ich klucze `norm_alnum` w tej samej kolejności: z nich
+    # `find_matches` mówi, KTÓRĄ nazwą rekord trafił (AR-175), bez drugiej kopii dopasowania.
+    nazwy: tuple = ()
+    alnum_nazw: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -335,10 +340,13 @@ class PlanResult:
     max_panels: int | None = None
     rig_filter: str = "off"
     # Tryb `find` (AR-146): kanony trafione DOKŁADNIE (kanon katalogowy albo cała nazwa) - stoją na
-    # liście przed trafieniami podciągu, także pod soczewką ekranu. `find_outside` - odpowiedź na
-    # pusty wynik, gdy wpisaną nazwę zna katalog, a nie pula tego wołania (`find_outside()`).
+    # liście przed trafieniami podciągu, także pod soczewką ekranu. `find_outside` - nazwa znana
+    # katalogowi, a pula tego wołania nie ma jej dokładnie (`find_outside()`): przy pustej liście
+    # i przy samych trafieniach podciągu (AR-175). `find_via` - kanon → nazwa, którą wiersz trafił,
+    # gdy nie kanonem (forma `forma_nazwy_trafienia`; AR-175).
     find_exact: frozenset = frozenset()
     find_outside: object = None
+    find_via: dict = field(default_factory=dict)
     # Przełącznik kandydatek i mimik PN (`DOUBTFUL_PN_STATUSES`): `off` (nie proszono) · `on`
     # (chowa, licznik `counts['hidden_by_pn']`) · `find` (tryb szukania go pomija, jak filtr kadru).
     pn_filter: str = "off"
@@ -500,11 +508,16 @@ def find_matches(pool, needle):
     ekranu.
 
     Wpisany tekst przechodzi resolver RAZ na wołanie, nazwy rekordów RAZ na rekord
-    (`Target.find_keys`)."""
+    (`Target.find_keys`).
+
+    NAZWA TRAFIENIA (AR-175): wynik to `Trafienia` - rozpakowuje się jak dotąd w `(dokładne,
+    podciąg)`, a `przez` mówi, KTÓRĄ nazwą rekord trafił, gdy nie kanonem (`_nazwa_trafienia`, ta sama
+    pętla i te same klucze). „M 4” trafia NGC1976 aliasem `M42` - wiersz bez aliasu mówił samo
+    „NGC1976”, czyli coś, czego nikt nie wpisał."""
     fold = str(needle or "").casefold()
     n = str(needle or "").strip()
     if not n:
-        return (), ()
+        return Trafienia((), ())
     alnum = norm_alnum(n)
     ident = resolve_object(n, split=False)
     key = ident.canon if ident is not None else None
@@ -520,7 +533,68 @@ def find_matches(pool, needle):
     best = min((s for _t, s in tagged if s < 2), default=None)
     rest = [t for t, s in tagged if s != best]
     rest.sort(key=lambda t: _szczebel_podciagu(t.find_keys, fold, alnum))
-    return tuple(t for t, s in tagged if s == best), tuple(rest)
+    wpis_kat = catalog_canon(n, split=False) if any(s == 0 for _t, s in tagged) else None
+    przez = {}
+    for t, s in tagged:
+        nazwa = _nazwa_trafienia(t.find_keys, s, wpis_kat, fold, alnum)
+        if nazwa is not None:
+            przez[t] = nazwa
+    return Trafienia(tuple(t for t, s in tagged if s == best), tuple(rest), przez)
+
+
+@dataclass(frozen=True, eq=False)
+class Trafienia:
+    """Wynik `find_matches`: `dokładne` i `podciąg` (rozłączne krotki rekordów puli) - rozpakowuje się
+    i indeksuje jak dotychczasowa para - oraz `przez`: rekord → nazwa rekordu (alias), którą trafił,
+    WYŁĄCZNIE gdy nie trafił kanonem (AR-175). Brak klucza = kanon."""
+    dokladne: tuple
+    podciag: tuple
+    przez: dict = field(default_factory=dict)
+
+    def __iter__(self):
+        return iter((self.dokladne, self.podciag))
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, i):
+        return (self.dokladne, self.podciag)[i]
+
+
+def _nazwa_trafienia(k, szczebel, wpis_kat, fold, alnum):
+    """Nazwa rekordu (`k.nazwy`: kanon, aliasy), którą `find_matches` go trafiło, albo None, gdy
+    kanonem. Te same szczeble co reguła: (0) klucz katalogowy - nazwa o tej samej formie katalogowej co
+    wpis (`catalog_canon` PRZED `xref`: „M 42” to alias `M42`, choć klucz to NGC1976), inaczej nazwa
+    równa wpisowi po `norm_alnum` (nazwa potoczna resolvera, której asset nie nosi, zostaje kanonem);
+    (1) nazwa równa po `norm_alnum`; (2) podciąg - szczebel `_szczebel_podciagu`: prefiks kanonu to
+    kanon, prefiks aliasu - pierwszy alias z tym prefiksem, początek albo środek słowa - pierwsza nazwa,
+    która wpis zawiera."""
+    nazwy, klucze = k.nazwy, k.alnum_nazw
+    if szczebel == 0 and wpis_kat is not None:
+        i = next((i for i, nz in enumerate(nazwy) if catalog_canon(nz, split=False) == wpis_kat), None)
+        if i is not None:
+            return nazwy[i] if i else None
+    if szczebel in (0, 1):
+        i = next((i for i, a in enumerate(klucze) if alnum and a == alnum), 0)
+        return nazwy[i] if i else None
+    poziom = _szczebel_podciagu(k, fold, alnum)
+    if poziom == 0:
+        return None
+    if poziom == 1:
+        trafia = (lambda i: nazwy[i].casefold().startswith(fold)
+                  or bool(alnum) and klucze[i].startswith(alnum))
+    else:
+        trafia = (lambda i: fold in nazwy[i].casefold() or bool(alnum) and alnum in klucze[i])
+    i = next((i for i in range(len(nazwy)) if trafia(i)), 0)
+    return nazwy[i] if i else None
+
+
+def forma_nazwy_trafienia(nazwa):
+    """Nazwa trafienia (`Trafienia.przez`) do pokazania obok kanonu: alias katalogowy w formie nagłówka
+    (`M42` → `M 42`, `catalog.header_form`), nazwa potoczna bez zmian. JEDNA forma dla ekranu planera
+    i CLI (AR-175)."""
+    kat = catalog_canon(nazwa, split=False)
+    return header_form(kat) if kat else nazwa
 
 
 def _szczebel_podciagu(k, fold, alnum):
@@ -563,7 +637,8 @@ class FindOutside:
 
 def find_outside(needle, layers=DEFAULT_LAYERS):
     """`FindOutside` dla nazwy, którą katalog zna, albo `None` (nazwa nieznana - dotychczasowy
-    pusty stan). `plan` woła ją, gdy szukajka nie trafiła NIC we wczytanych warstwach.
+    pusty stan). `plan` woła ją, gdy szukajka nie trafiła nic DOKŁADNIE we wczytanych warstwach -
+    także przy samych trafieniach podciągu (AR-175).
 
     Dwa świadectwa, w kolejności: (1) dokładne trafienie w PEŁNYM assecie - klucz `find_matches`
     to kanon z resolvera osi obiektu, więc TARCZA jest konstrukcyjna: kanon, który istnieje
@@ -603,13 +678,34 @@ def resolve_plan_canon(needle, layers=ALL_LAYERS):
     Szukamy we WSZYSTKICH warstwach: cel z cirrusu wolno oznaczyć, mając wczytany rdzeń."""
     # Oznaczenie przycina wpis PRZED regułą (jak stara kopia): szukajka trzyma surowy tekst bit w bit,
     # a wpis z samymi znakami spoza `norm_alnum` („ + ”) inaczej nie dostałby najbliższych.
-    exact, rest = find_matches(load_targets(tuple(layers)), str(needle or "").strip())
+    trafienia = find_matches(load_targets(tuple(layers)), str(needle or "").strip())
+    exact, rest = trafienia
     canons = sorted({t.canon for t in exact})
     if len(canons) == 1:
         return canons[0], ()
+    # Kandydat niesie nazwę, którą trafił (AR-175): „M 4” → „NGC1976 (M 42)”, nie gołe „NGC1976”.
+    via = {}
+    for t in exact + rest:
+        if t in trafienia.przez:
+            via.setdefault(t.canon, forma_nazwy_trafienia(trafienia.przez[t]))
     if canons:
-        return None, tuple(canons)
-    return None, tuple(dict.fromkeys(t.canon for t in rest))[:5]
+        return None, tuple(Kandydat(c, via.get(c)) for c in canons)
+    return None, tuple(Kandydat(c, via.get(c)) for c in dict.fromkeys(t.canon for t in rest))[:5]
+
+
+class Kandydat(str):
+    """Kanon kandydata `resolve_plan_canon` - porównuje się i deduplikuje jak `str` (kanon), a `przez`
+    niesie nazwę, którą trafił, w formie do pokazania (`forma_nazwy_trafienia`), albo None przy trafieniu
+    kanonem (AR-175). `opis` = „NGC1976 (M 42)” - jedno zdanie dla każdej powierzchni."""
+
+    def __new__(cls, canon, przez=None):
+        obj = super().__new__(cls, canon)
+        obj.przez = przez
+        return obj
+
+    @property
+    def opis(self):
+        return f"{self} ({self.przez})" if self.przez else str(self)
 
 
 def plan_marks(con):
@@ -1061,13 +1157,20 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     fit = {"min_fill": min_fill, "max_panels": max_panels} if rig_filter == "on" else {}
     pn_filter = "off" if not hide_doubtful_pn else "find" if find else "on"
 
-    exact_canons, outside = frozenset(), None
+    exact_canons, outside, find_via = frozenset(), None, {}
     if find:
-        exact, rest = find_matches(targets, find)
+        trafienia = find_matches(targets, find)
+        exact, rest = trafienia
         exact_canons = frozenset(t.canon for t in exact)
         pool = list(exact + rest)
         after_thresholds = len(pool)
-        if not pool:
+        # Wiersz trafiony nie-kanonem mówi, czym trafił (AR-175) - forma do pokazania, kanon → nazwa.
+        for t in pool:
+            if t in trafienia.przez:
+                find_via.setdefault(t.canon, forma_nazwy_trafienia(trafienia.przez[t]))
+        # Nazwa znana katalogowi, a pula nie ma jej DOKŁADNIE (AR-175): także przy samych trafieniach
+        # podciągu - „M 4” to NGC6121 spoza celów, a lista M42/M43/M49 bez tego zdania udawała odpowiedź.
+        if not exact:
             outside = find_outside(find, layers)
     else:
         pool = [t for t in targets
@@ -1162,7 +1265,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                       park_without_rigs=park_without_rigs,
                       orphan_marks=orphan_marks(con),
                       min_fill=min_fill, max_panels=max_panels, rig_filter=rig_filter,
-                      find_exact=exact_canons, find_outside=outside, pn_filter=pn_filter)
+                      find_exact=exact_canons, find_outside=outside, find_via=find_via,
+                      pn_filter=pn_filter)
 
 
 def _night_moon(site, nw, *, v_zen, k_ext):

@@ -3086,6 +3086,17 @@ class UndoResult:
     # pętla nie przerwana albo wynik bez tej wiedzy (`undo_renames`). Zdanie okna mówi liczbę albo
     # „pozostałe nie wymagają cofnięcia”, nie obietnicę.
     remaining: int | None = None
+    # Przy przerwaniu - ile z `remaining` jest NIETKNIĘTYCH (`_stan_nieprzetworzonego`, AR-318): bez
+    # śladu jakiejkolwiek próby cofnięcia, która musiałaby go zostawić, bez nowszego żywego zapisu
+    # lokacji, a baza opisuje plik jako wynik commitu - plik zostaje w stanie po zapisie i ponowienie
+    # go cofnie. `None` = wynik bez tej wiedzy (pętla nie przerwana, `undo_renames`, atrapy).
+    untouched: int | None = None
+    # Stan OBIEKTU klatek po cofnięciu karty `OBJECT`, którą „Rozwiąż” zamienił w przypisanie (AR-311,
+    # `repo.object_undo_verdict`): `objects_restored` - klatki ze stanem obiektu sprzed zapisu (teraz
+    # albo wcześniejszym biegiem tego cofnięcia; nagrobek ręki AR-38 też), `objects_kept` - klatki,
+    # których oś zmieniła się po przypisaniu z karty, więc zostają. `frame_id` bez powtórzeń.
+    objects_restored: tuple = ()
+    objects_kept: tuple = ()
 
     @property
     def complete(self) -> bool:
@@ -3113,7 +3124,7 @@ def _group_by_location(rows) -> list[tuple[int, list]]:
 
 
 def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None, kontrola=None,
-            w_transakcji=None, przed_wciagnieciem=None) -> "_Resync":
+            w_transakcji=None, przed_wciagnieciem=None, zapis_commitu=None) -> "_Resync":
     """RE-SYNC bazy po mutacji pliku - REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
     (read-only, świeże hasze/nagłówek/karty) → `ingest_record`: `refresh_location` odświeża fakty
     kopii + zeznanie + `cards` + `frame.camera_id/kind` z eventami (actor="user:local"). Wymaga
@@ -3153,6 +3164,12 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     (`repo._settle_withheld_tx`) zobaczyłoby inny nagłówek i nazwało je zastąpionym - a wynik tego
     zamknięcia rozstrzyga, czy cofnięcie bez dowodu zeznania samo zakłada wstrzymanie (B2).
 
+    `zapis_commitu` = `(commit_id, location_id)`, gdy re-sync wciąga WYNIK ZAPISU commitu kart (droga
+    atomowa `_zapisz_lokacje`, dokończenie operacji `commit` w miejscu `_dokoncz`, potwierdzenie
+    podmiany z dysku `_potwierdz_z_dysku`): para idzie do ładunku `header.refreshed` tej transakcji
+    (`repo.refresh_location`) - dowód pochodzenia, po którym cofnięcie commitu znajduje przypisanie
+    „Rozwiąż” z jego karty (AR-311). Cofnięcia i odzysk jej nie podają.
+
     Zwraca `_Resync`: `niezgodne` (kontrola danych - nic nie wciągnięto, `zeznanie` `None`) albo
     `zeznanie`."""
     rec = _skan_kontrolny(path, kontrola)
@@ -3163,7 +3180,8 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
         if przed_wciagnieciem is not None:
             przed_wciagnieciem()
         scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(),
-                           actor=actor)
+                           actor=actor,
+                           **({} if zapis_commitu is None else {"zapis_commitu": zapis_commitu}))
         zeznanie = _dowod_zeznania(con, rec, volume, now=now, actor=actor)
         if w_transakcji is not None:
             w_transakcji(zeznanie)
@@ -3380,7 +3398,10 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
         try:
             wynik = _resync(con, loc["path"], loc["volume"], now=now,
                             expect_sha1_data=loc["sha1_data"], kontrola=kontrola,
-                            przed_wciagnieciem=_przed, w_transakcji=_zamknij)
+                            przed_wciagnieciem=_przed, w_transakcji=_zamknij,
+                            zapis_commitu=((op["commit_id"], op["location_id"])
+                                           if op["kind"] == "commit" and op["commit_id"] is not None
+                                           else None))
         except Exception as exc:  # noqa: BLE001 - wsad idzie dalej, operacja zostaje `written`
             blad = _blad_systemu(exc)
             if padlo_zamkniecie:
@@ -3515,7 +3536,8 @@ def _potwierdz_z_dysku(con, b, loc, *, now, intent_outcome=None) -> str | None:
             withheld_reason=None if zeznanie else repo.withheld_reason(
                 con, location_id=loc["id"], commit_id=b["commit_id"]))
     wynik = _resync(con, loc["path"], loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
-                    przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz)
+                    przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz,
+                    zapis_commitu=(b["commit_id"], loc["id"]))
     if wynik.niezgodne is not None:
         return PowodPozycji(f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na "
                             f"dysku leży wersja tego commitu, ale {wynik.niezgodne}",
@@ -4147,7 +4169,8 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
 
     try:                              # droga atomowa: PLIK→DB (T8); pełny odczyt pliku
         niezgodne = _resync(con, path, loc["volume"], now=now,
-                            expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij).niezgodne
+                            expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij,
+                            zapis_commitu=(stan.commit_id, location_id)).niezgodne
     except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
         # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
         # przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej naprawi ponowny
@@ -4789,6 +4812,20 @@ def undo(con, commit_id, *, now,
     PRZERWANIE (`should_cancel`): `UndoResult.remaining` = ile nieprzetworzonych backupów NIE ma
     trwałego dowodu zakończenia (`_cofniecie_zakonczone`, bez odczytu plików, AR-176) - zdanie okna
     mówi „N wymaga sprawdzenia” albo „pozostałe nie wymagają cofnięcia”, bez obietnicy wyniku.
+    `UndoResult.untouched` (AR-318) = ile z nich jest nietkniętych (`_stan_nieprzetworzonego`): bez
+    śladu próby cofnięcia, która musiałaby go zostawić, bez nowszego żywego zapisu, baza opisuje
+    plik jako wynik commitu - zdanie mówi „zostają w stanie po zapisie”, a resztę „wymaga
+    sprawdzenia”.
+
+    NOWSZY ŻYWY ZAPIS LOKACJI (`_nowszy_zywy_zapis`): lokacja, którą po tym commicie zapisał nowszy,
+    niecofnięty commit (także tą samą kartą - ten sam region i ten sam nagłówek), nie jest cofana -
+    'blocked' z kodem `undo_newer_write` i numerem nowszego commitu, zero zapisu. Bez tej straży
+    porównanie po wartości (region, `post_hash`) cofało nowszą decyzję.
+
+    COFNIĘCIE ODTWARZA STAN OBIEKTU (AR-311, decyzja Zdzinia): klatka, której obiekt przypisał
+    „Rozwiąż” z karty `OBJECT` tego commitu na tym pliku i której oś od tamtej pory się nie zmieniła,
+    wraca do stanu obiektu sprzed zapisu (`repo.restore_object_state`, ta sama transakcja co
+    nagrobek AR-38). Werdykt per klatka - `UndoResult.objects_restored`/`objects_kept`.
 
     „JUŻ COFNIĘTE” ROZLICZA BAZĘ (AR-169): przed uznaniem pliku za cofnięty skutki cofnięcia w bazie
     (nagrobek ręki AR-38, otwarte wstrzymanie commitu) rozlicza ta sama klinga co re-sync -
@@ -4816,6 +4853,8 @@ def undo(con, commit_id, *, now,
     kubly = {"restored": restored, "blocked": blocked, "failed": failed}
     cancelled = False
     remaining = None
+    untouched = None
+    obiekty: dict[int, str] = {}             # frame_id → werdykt obiektu (AR-311), kolejność wyników
     done = 0
 
     def _report(path, status):
@@ -4827,7 +4866,10 @@ def undo(con, commit_id, *, now,
     for i, b in enumerate(backups):
         if should_cancel is not None and should_cancel():
             cancelled = True
-            remaining = sum(1 for r in backups[i:] if not _cofniecie_zakonczone(con, commit_id, r))
+            granica = _granica_sladu(con)
+            stany = [_stan_nieprzetworzonego(con, commit_id, r, granica) for r in backups[i:]]
+            remaining = sum(1 for s in stany if s != "zakonczony")
+            untouched = stany.count("nietkniety")
             break
         cofniecie = _cofnij_lokacje(con, commit_id, b, now=now)
         kubly[cofniecie.wynik.status].append(cofniecie.wynik)
@@ -4837,10 +4879,20 @@ def undo(con, commit_id, *, now,
             withheld.append(cofniecie.wynik)
         if cofniecie.juz:                       # „już cofnięte” - nie ma czego ponawiać (AR-160)
             already.append(cofniecie.wynik)
+        if cofniecie.wynik.status == "restored" or cofniecie.juz:
+            # Stan obiektu klatki ze STANU bazy (AR-311): odtworzony teraz albo wcześniejszym biegiem
+            # tego cofnięcia - ponowienie mówi tę samą liczbę co całość, jak „już cofnięte” plików.
+            fid, werdykt = repo.object_undo_verdict(con, commit_id=commit_id,
+                                                    location_id=int(b["location_id"]))
+            if werdykt is not None:
+                obiekty.setdefault(fid, werdykt)
         _report(cofniecie.wynik.path, cofniecie.wynik.status)
 
     return UndoResult(commit_id, restored, blocked, failed, cancelled, semantic=semantic,
-                      withheld=withheld, already=already, remaining=remaining)
+                      withheld=withheld, already=already, remaining=remaining,
+                      untouched=untouched,
+                      objects_restored=tuple(f for f, w in obiekty.items() if w == "wrocil"),
+                      objects_kept=tuple(f for f, w in obiekty.items() if w == "zostaje"))
 
 
 def _cofniecie_zakonczone(con, commit_id, b) -> bool:
@@ -4858,6 +4910,106 @@ def _cofniecie_zakonczone(con, commit_id, b) -> bool:
     if op_u is not None and op_u["phase"] == "synced":
         return True
     return _wynik_wlasny_w_bazie(con, b) is not None
+
+
+def _granica_sladu(con):
+    """Chwila, od której KAŻDE cofnięcie w TEJ bazie zostawia ślad przed podmianą (`atomic_undo`, 0044)
+    - jeden odczyt dziennika migracji (`migration_log`, 0047): chwila 0044, a gdy baza dostała 0044
+    przed dziennikiem - chwila 0047 (ostrożnie: wszystko wcześniejsze „wymaga sprawdzenia”). Data kodu
+    nie jest tą chwilą: baza zmigrowana później pisała commity po dacie kodu, a ich cofnięcia mogły nie
+    zostawić śladu. `None` = brak wiersza (baza bez dziennika) - nic nie jest „nietknięte”."""
+    return con.execute(
+        "SELECT coalesce((SELECT applied_at FROM migration_log WHERE version = 44), "
+        "                (SELECT applied_at FROM migration_log WHERE version = 47))").fetchone()[0]
+
+
+def _slad_proby_cofniecia(con, commit_id, b) -> bool:
+    """Czy backup `b` ma JAKIKOLWIEK ślad próby cofnięcia (AR-318): operacja `undo` w miejscu w dowolnej
+    fazie (0022, utrwalana przed pierwszym bajtem), ślad drogi atomowej z `synced_at` i bez (0044,
+    utrwalany przed podmianą), wstrzymanie cofnięcia (0037). Bez odczytu pliku."""
+    lid = int(b["location_id"])
+    return (_ostatnia_operacja(con, commit_id, lid, "undo") is not None
+            or con.execute("SELECT 1 FROM atomic_undo WHERE backup_id = ? LIMIT 1",
+                           (b["id"],)).fetchone() is not None
+            or con.execute("SELECT 1 FROM withheld_write WHERE commit_id = ? AND location_id = ? "
+                           "AND kind = 'undo' LIMIT 1", (commit_id, lid)).fetchone() is not None)
+
+
+def _nowszy_zywy_zapis(con, b):
+    """`commit_id` NOWSZEGO, niecofniętego zapisu lokacji backupu `b`, którego wynik baza dziś opisuje -
+    albo `None`. JEDNA reguła dla rdzenia cofnięcia (`_cofnij_lokacje` - odmowa `undo_newer_write`),
+    klasy nieprzetworzonego backupu (`_stan_nieprzetworzonego`) i wiersza Porządków „Dokończ
+    cofnięcie” (`gui.queries.niedokonczone_cofniecia_kart`).
+
+    DLACZEGO: rdzeń rozpoznaje plik po WARTOŚCI (region wyniku commitu w miejscu, `post_hash` drogą
+    atomową). Nowszy commit, który zapisał tę samą kartę (A → B → A), zostawia ten sam region i ten
+    sam nagłówek - bez tej straży cofnięcie starszego commitu cofnęłoby nowszą decyzję.
+
+    Nowszy = backup tej samej lokacji z późniejszego commitu, podmieniony (`unreplaced_at IS NULL`),
+    bez trwałego dowodu zakończenia własnego cofnięcia (`_cofniecie_zakonczone`) i z
+    `location.header_hash = post_hash` nowszego - ostatni warunek gasi wieczną blokadę po nowszym
+    commicie cofniętym atomowo bez śladu (sprzed 0044: baza opisuje wtedy plik sprzed niego).
+    Odczyt kandydatów indeksem pokrywającym `UNIQUE(commit_id, location_id)` (zakres `commit_id`) -
+    na kopii `pf4` 0,31 ms na backup najstarszego commitu; droga po kluczu głównym (`id > ?`) to 33 ms."""
+    lid = int(b["location_id"])
+    commit_b = con.execute("SELECT commit_id FROM header_backups WHERE id = ?",
+                           (b["id"],)).fetchone()[0]
+    nowsze = con.execute(
+        "SELECT id, commit_id FROM header_backups WHERE commit_id > ? AND location_id = ? "
+        "AND id > ? ORDER BY id DESC", (commit_b, lid, b["id"])).fetchall()
+    if not nowsze:
+        return None
+    naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()
+    for n in nowsze:
+        nb = con.execute("SELECT * FROM header_backups WHERE id = ?", (n["id"],)).fetchone()
+        if (nb["unreplaced_at"] is None and naglowek is not None
+                and naglowek[0] == nb["post_hash"]
+                and not _cofniecie_zakonczone(con, nb["commit_id"], nb)):
+            return int(nb["commit_id"])
+    return None
+
+
+def _stan_nieprzetworzonego(con, commit_id, b, granica) -> str:
+    """Klasa backupu, którego przerwane cofnięcie nie dotknęło (AR-318) - fakt RDZENIA dla zdania
+    wyniku, bez odczytu pliku:
+
+      * `"zakonczony"` - trwały dowód zakończenia (`_cofniecie_zakonczone`), nie ma czego cofać;
+      * `"nietkniety"` - plik w stanie po zapisie WIADOMO: brak śladu próby cofnięcia
+        (`_slad_proby_cofniecia`), brak nowszego żywego zapisu (`_nowszy_zywy_zapis`), baza opisuje
+        plik jako wynik commitu (`location.header_hash = post_hash`) ORAZ ślad musiałby powstać - commit
+        zapisany od `granica` (`_granica_sladu` tej bazy; 0022 śladuje każde cofnięcie w miejscu, 0044
+        każde atomowe; porównanie po pierwszych 19 znakach - sufiksy strefy `Z`/`+00:00`).
+        Granica obejmuje TAKŻE commity zapisane w miejscu: ich cofnięcie przy zmianie inode albo rozmiaru
+        pliku idzie drogą atomową (`restore_inplace` → `Fallback` przed dziennikiem), a przed 0044 ta
+        droga śladu nie zostawiała;
+      * `"do_sprawdzenia"` - reszta: ślad bez dowodu zakończenia, nowszy zapis lokacji, baza opisuje
+        inny plik, commit sprzed granicy (cofnięcie sprzed 0044 przerwane między podmianą a re-synciem
+        nie zostawiało w bazie nic) - zdanie nie obiecuje stanu, którego rdzeń nie zna."""
+    if _cofniecie_zakonczone(con, commit_id, b):
+        return "zakonczony"
+    if _slad_proby_cofniecia(con, commit_id, b) or _nowszy_zywy_zapis(con, b) is not None:
+        return "do_sprawdzenia"
+    lid = int(b["location_id"])
+    naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()
+    if naglowek is None or naglowek[0] != b["post_hash"]:
+        return "do_sprawdzenia"
+    zapisany = con.execute("SELECT applied_at FROM commits WHERE id = ?", (commit_id,)).fetchone()
+    if granica and zapisany is not None and zapisany[0] and zapisany[0][:19] >= granica[:19]:
+        return "nietkniety"
+    return "do_sprawdzenia"
+
+
+def _czeka_na_dokonczenie(con, commit_id, b) -> bool:
+    """Czy backup `b` commitu, którego cofnięcie się zaczęło, czeka na dokończenie (wiersz Porządków
+    „Dokończ cofnięcie”, AR-318): bez dowodu zakończenia, bez nowszego żywego zapisu lokacji, a baza
+    opisuje plik jako wynik commitu - ten sam plik, który cofnięcie ma przywrócić. Backup, którego
+    lokację nadpisał nowszy commit, nie jest resztą tego cofnięcia. Najtańszy warunek pierwszy:
+    plik cofnięty do końca ma w bazie nagłówek sprzed commitu."""
+    naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?",
+                           (int(b["location_id"]),)).fetchone()
+    if naglowek is None or naglowek[0] != b["post_hash"]:
+        return False
+    return not _cofniecie_zakonczone(con, commit_id, b) and _nowszy_zywy_zapis(con, b) is None
 
 
 def _wynik_wlasny_w_bazie(con, b):
@@ -5074,15 +5226,17 @@ def _baza_po_przywroceniu_padla(blad) -> PowodPozycji:
 def _rozlicz_cofniecie_w_bazie(con, commit_id, loc, *, now, slad=None) -> None:
     """Skutki cofnięcia commitu w bazie BEZ pliku - ta sama klinga co re-sync cofnięcia (`_sync`):
     otwarte wstrzymanie commitu na tej lokacji → `undone` (`repo.close_withheld_undone`) i nagrobek
-    ręki zgaszony przez ten commit na tym pliku → odtworzony (`repo.restore_object_tombstone`, AR-38).
-    Jedna transakcja; idempotentne (zamyka tylko otwarte, nagrobek raz na parę commit-plik, nowszy
-    werdykt ręki wygrywa). Woła je każde „już cofnięte” (AR-169): skan po zewnętrznym powrocie pliku
-    wyrównuje nagłówek, ale nagrobka nie odtwarza. `slad` = ślad cofnięcia (`atomic_undo.id`), którego
-    wynik leży na dysku i w bazie - oznaczany w tej samej transakcji (AR-182)."""
+    ręki zgaszony przez ten commit na tym pliku → odtworzony (AR-38), a obiekt z karty po „Rozwiąż” →
+    stan sprzed zapisu (AR-311) - `repo.restore_object_state`.
+    Jedna transakcja; idempotentne (zamyka tylko otwarte, nagrobek raz na parę commit-plik, obiekt
+    raz - znacznik `card_undone`, nowszy werdykt ręki wygrywa). Woła je każde „już cofnięte”
+    (AR-169): skan po zewnętrznym powrocie pliku wyrównuje nagłówek, ale stanu obiektu nie odtwarza.
+    `slad` = ślad cofnięcia (`atomic_undo.id`), którego wynik leży na dysku i w bazie - oznaczany
+    w tej samej transakcji (AR-182)."""
     with repo.atomic(con):
         repo.close_withheld_undone(con, commit_id=commit_id, location_id=loc["id"], now=now)
-        repo.restore_object_tombstone(con, frame_id=loc["frame_id"], commit_id=commit_id,
-                                      location_id=loc["id"], now=now)
+        repo.restore_object_state(con, frame_id=loc["frame_id"], commit_id=commit_id,
+                                  location_id=loc["id"], now=now)
         if slad is not None:
             repo.mark_atomic_undo_synced(con, undo_id=slad, now=now)
 
@@ -5144,8 +5298,8 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
                                                         location_id=loc["id"], now=now))
 
         def _nagrobek(zeznanie):
-            repo.restore_object_tombstone(con, frame_id=loc["frame_id"], commit_id=commit_id,
-                                          location_id=loc["id"], now=now)
+            repo.restore_object_state(con, frame_id=loc["frame_id"], commit_id=commit_id,
+                                      location_id=loc["id"], now=now)
             sha1, naglowek = con.execute("SELECT file_sha1, header_hash FROM location WHERE id = ?",
                                          (loc["id"],)).fetchone()
             pasujacy = _slad_pary(con, b["id"], sha1, naglowek)
@@ -5325,6 +5479,14 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
                 inner=koniec.reason))
         op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
         loc = _location(con, loc["id"])         # kotwica i mtime po dokończeniu commitu
+    # NOWSZY ŻYWY ZAPIS (AR-318): po „już cofnięte” z dziennika (cofnięcie zamknięte zostaje
+    # domknięte także po ponownym zapisie lokacji), przed każdą drogą, która pisze albo rozpoznaje plik
+    # po wartości - te same bajty nowszego zapisu tą samą kartą nie są wynikiem TEGO commitu.
+    nowszy = _nowszy_zywy_zapis(con, b)
+    if nowszy is not None:
+        return _blok(loc, path, PowodPozycji(
+            f"lokacja ma nowszy zapis (commit {nowszy}) - cofnij najpierw jego", "undo_newer_write",
+            commit_id=nowszy))
     gen = repo.inplace_generation(con)          # przed bramką - dla straży podmiany atomowej
     izolujaca = repo.isolating_inplace_op(con, loc["id"])
     if izolujaca is not None:                   # nieukończony zapis spoza tego commitu

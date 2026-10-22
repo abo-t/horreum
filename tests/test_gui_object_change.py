@@ -3292,7 +3292,8 @@ def test_Napraw_naglowek_cofniecie_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy
         dlg._on_undo()
     tekst = dlg.status.text()
     assert _liczba("grid.wb.restored", 1) in tekst, tekst
-    # Rdzeń zna resztę (AR-176): 1 nieprzetworzony plik wymaga sprawdzenia - bez obietnicy.
+    # Rdzeń zna resztę (AR-176): commit z datą sprzed granicy śladu cofnięcia (AR-318, `NOW` modułu) -
+    # 1 nieprzetworzony plik wymaga sprawdzenia, bez obietnicy.
     assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in tekst, \
         tekst
     assert dlg.undo_btn.isVisibleTo(dlg) and dlg._commit_id == commit_id

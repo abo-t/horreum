@@ -3530,7 +3530,8 @@ def test_cofniecie_kart_PRZERWANE_zostawia_Cofnij_karty_takze_po_czesci_plikow(
         m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
             c, t, now=now, progress=pr, should_cancel=lambda: True))
         dlg._on_undo()
-    # Rdzeń zna resztę (AR-176): każdy backup nieprzetworzony wymaga sprawdzenia - bez obietnicy.
+    # Rdzeń zna resztę (AR-176): commit z datą sprzed granicy śladu cofnięcia (AR-318, `NOW_PD`) - każdy
+    # backup nieprzetworzony wymaga sprawdzenia, bez obietnicy.
     reszta = len(writeback.backups_for_commit(con, commit_id))
     assert i18n.t_plural("wb.undo_cancelled_check", reszta, undo=i18n.t("path.undo_cards_btn")) \
         in dlg.status.text().splitlines()[-1], dlg.status.text()

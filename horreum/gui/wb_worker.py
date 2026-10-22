@@ -1022,6 +1022,14 @@ def zdanie_undo_kart(res):
         msg += " · " + _liczba("grid.wb.blocked", len(zablokowane))
     if res.failed:
         msg += " · " + _liczba("grid.wb.errors", len(res.failed))
+    # AR-311: stan obiektu klatek z karty `OBJECT` po „Rozwiąż” - fakt RDZENIA (`UndoResult`), ta sama
+    # liczba na każdej powierzchni cofnięcia; wynik bez tej wiedzy (atrapa, `undo_renames`) - bez członu.
+    wrocily = getattr(res, "objects_restored", ())
+    if wrocily:
+        msg += " · " + _liczba("wb.undo_objects_restored", len(wrocily))
+    zostaja = getattr(res, "objects_kept", ())
+    if zostaja:
+        msg += " · " + _liczba("wb.undo_objects_kept", len(zostaja))
     return msg
 
 
@@ -1051,7 +1059,9 @@ def ogon_cofniecia(res, przycisk):
     nieprzetworzonych backupów nie ma trwałego dowodu zakończenia - „N nieprzetworzonych plików
     wymaga sprawdzenia; „Cofnij” ponowi próbę” albo, przy zerze, „pozostałe pliki nie wymagają
     cofnięcia”; wynik bez tej wiedzy (`None`, cofnięcie Nazw) - „„Cofnij” ponowi próbę dla
-    pozostałych plików”. Uchwyt zostaje przy każdym przerwaniu: ponowienie rozstrzyga pliki."""
+    pozostałych plików”. Uchwyt zostaje przy każdym przerwaniu: ponowienie rozstrzyga pliki.
+    Gdy rdzeń zna pliki NIETKNIĘTE (`UndoResult.untouched` > 0, AR-318) - „N nietkniętych plików
+    zostaje w stanie po zapisie, M wymaga sprawdzenia; „Cofnij” dokończy cofnięcie”."""
     from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
     msg = zdanie_undo_kart(res)
     # Powód „już cofnięte” nie mówi niczego, co człon „N już cofniętych” nie powiedział (AR-160).
@@ -1062,8 +1072,16 @@ def ogon_cofniecia(res, przycisk):
                       detail=tekst_powodu(detail.reason))
     if res.cancelled:
         reszta = getattr(res, "remaining", None)
+        nietkniete = getattr(res, "untouched", None) or 0
         if reszta is None:
             msg += i18n.t("wb.undo_cancelled", undo=przycisk)
+        elif nietkniete:
+            # AR-318: rdzeń WIE, że te pliki są w stanie po zapisie - zdanie mówi to, a „wymaga
+            # sprawdzenia” zostaje dla reszty bez tej wiedzy.
+            msg += i18n.t_plural("wb.undo_cancelled_untouched", nietkniete)
+            if reszta > nietkniete:
+                msg += i18n.t_plural("wb.undo_cancelled_also_check", reszta - nietkniete)
+            msg += i18n.t("wb.undo_cancelled_finish", undo=przycisk)
         elif reszta:
             msg += i18n.t_plural("wb.undo_cancelled_check", reszta, undo=przycisk)
         else:

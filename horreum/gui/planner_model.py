@@ -58,6 +58,9 @@ class ViewRow:
     szczegółu i akcji. `visible` zostaje osobno: wiersz niewidoczny ma być WYSZARZONY, nie
     ukryty (D-0731-14 — Księżyc i horyzont wyceniają, nie wycinają)."""
     canon: str
+    # Kolumna „Cel”: kanon, a przy trafieniu szukajki nie-kanonem także nazwa trafienia - „NGC1976
+    # (M 42)” (`PlanResult.find_via`, AR-175). Logika (zaznaczenie, kuratela, panel) zostaje na `canon`.
+    label: str
     type: str
     size: str
     culmination: str
@@ -186,8 +189,10 @@ def _view_row(row, result, rig_name):
     rig, fr = lens(row, result, rig_name)
     channel, reason = recommendation(row, rig)
     t = row.target
+    via = result.find_via.get(t.canon)
     return ViewRow(
         canon=t.canon,
+        label=i18n.t("planner.find_via", canon=t.canon, via=via) if via else t.canon,
         type=type_text(t),
         size=i18n.t("planner.arcmin", n=f"{t.major_arcmin:.0f}"),
         culmination=f"{row.window.max_alt_deg:.0f}°",
@@ -414,6 +419,26 @@ def empty_find_text(result, needle):
     klucz = _LAYER_TOGGLE_KEYS.get(out.target.layer)
     return i18n.t("planner.empty_find_layer", name=name, type=type_text(out.target),
                   layer=i18n.t(klucz) if klucz else out.target.layer)
+
+
+def find_miss_text(result, needle):
+    """Zdanie nad listą trybu `find`, gdy wpisaną nazwę zna katalog, a lista ma WYŁĄCZNIE trafienia
+    podciągu (AR-175; `PlanResult.find_outside` przy niepustej liście): „„M 4” = NGC6121, poza celami
+    planera - lista to cele, których nazwa zawiera „M 4”.” Cel warstwy niewczytanej dostaje typ
+    i przełącznik, jak pusty stan (`empty_find_text`). None - nic do powiedzenia (trafienie dokładne,
+    nazwa nieznana, pusta lista - tę mówi pusty stan)."""
+    out = result.find_outside
+    if out is None or not result.rows or (out.target is not None and out.loaded):
+        return None
+    if norm_alnum(needle) == norm_alnum(out.canon):
+        name = i18n.t("planner.find_self", needle=needle)
+    else:
+        name = i18n.t("planner.find_as", needle=needle, canon=out.canon)
+    if out.target is None:
+        return i18n.t("planner.find_hits_outside", name=name, needle=needle)
+    klucz = _LAYER_TOGGLE_KEYS.get(out.target.layer)
+    return i18n.t("planner.find_hits_layer", name=name, type=type_text(out.target),
+                  layer=i18n.t(klucz) if klucz else out.target.layer, needle=needle)
 
 
 def night_text(result):

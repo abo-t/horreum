@@ -1119,7 +1119,8 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                      hdu_index, compressed, size_bytes, unreadable_since, unreadable_kind,
                      unreadable_reason, present, now,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
-                     kind=None, copy_facts=None, inplace_gen=None, nonprintable=NIE_BADANO):
+                     kind=None, copy_facts=None, inplace_gen=None, nonprintable=NIE_BADANO,
+                     zapis_commitu=None):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
 
@@ -1169,6 +1170,10 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     - **`nonprintable`** (0046, AR-299): zeznanie bajtu spoza ASCII z odczytu (`_marker_bajtu`).
       Domyślne `NIE_BADANO` NIE jest cichym wektorem gaszenia - zostawia stan zbadania wiersza, a ten
       i tak przestaje się liczyć, gdy odcisk nagłówka się zmieni (kotwica `nonprintable_hash`).
+    - **`zapis_commitu`** (AR-311): `(commit_id, location_id)`, gdy wołającym jest re-sync ZAPISU
+      commitu kart (`writeback._resync`). Para trafia do ładunku `header.refreshed` tej transakcji -
+      dowód pochodzenia zeznania z karty, po którym cofnięcie commitu znajduje przypisanie „Rozwiąż”
+      (`_plan_obiektu_z_karty`). `None` (skan, import, cofnięcie) - ładunek jak dotąd.
 
     `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
     POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
@@ -1236,7 +1241,9 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
         result["rederived"] = _rewrite_testimony(
             con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot_fields,
             camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.refreshed",
-            payload={"header_hash_before": row["header_hash"], "header_hash_after": header_hash})
+            payload={"header_hash_before": row["header_hash"], "header_hash_after": header_hash,
+                     **({} if zapis_commitu is None else
+                        {"commit_id": int(zapis_commitu[0]), "location_id": int(zapis_commitu[1])})})
     return result
 
 
@@ -3462,12 +3469,211 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, te
     return commit_id
 
 
-def restore_object_tombstone(con, *, frame_id, commit_id, location_id, now, actor="user:local"):
-    """Odtworzenie nagrobka przy cofnięciu commitu drogą atomową (`writeback.undo`) - wołane w
-    zakresie `atomic` re-syncu cofnięcia, do którego `_immediate` dołącza. Reguły w rdzeniu."""
+def restore_object_state(con, *, frame_id, commit_id, location_id, now, actor="user:local"):
+    """Cofnięcie commitu na pliku `location_id` odtwarza STAN OBIEKTU klatki sprzed zapisu - wołane
+    przez `writeback.undo` w zakresie `atomic` re-syncu cofnięcia (droga atomowa) albo rozliczenia
+    „już cofnięte”, do którego `_immediate` dołącza. Reguły w `_restore_object_state_tx`."""
     with _immediate(con):
-        return _restore_object_tombstone_tx(con, frame_id=frame_id, commit_id=commit_id,
-                                            location_id=location_id, now=now, actor=actor)
+        return _restore_object_state_tx(con, frame_id=frame_id, commit_id=commit_id,
+                                        location_id=location_id, now=now, actor=actor)
+
+
+def _restore_object_state_tx(con, *, frame_id, commit_id, location_id, now, actor="user:local"):
+    """STAN OBIEKTU klatki sprzed zapisu commitu `commit_id` na pliku `location_id` - BEZ własnej
+    transakcji (jak `_restore_object_tombstone_tx`): najpierw nagrobek ręki zgaszony przez ten commit
+    (AR-38), potem obiekt, który „Rozwiąż” przypisał z karty `OBJECT` tego commitu (AR-311, decyzja
+    Zdzinia): „Napraw nagłówek…” → klatka znów bez obiektu, „Zatwierdź ze ścieżki…” → ten sam obiekt
+    ze źródłem `path`. Plan i jego granice - `_plan_obiektu_z_karty`.
+
+    ZAPIS (`odtworz`): `UPDATE frame` z CAS na stanie z ładunku przypisania (zero wierszy = oś drgnęła
+    w międzyczasie - nic), `object.unassigned` ze stanem bieżącym i parą (commit, plik) z powodem
+    `card_undone` (znacznik idempotencji), a przy obiekcie sprzed - `object.assigned` ze stanem
+    sprzed i tym samym powodem (parytet `assigned − unassigned` §5.9 domyka się). Źródłem bieżącym
+    jest zawsze źródło automatu (resolver nie pisze ręki), więc żaden fakt ręki nie znika - `path`
+    wraca. Zwraca `True`, gdy klatka drgnęła (nagrobek albo obiekt)."""
+    if _restore_object_tombstone_tx(con, frame_id=frame_id, commit_id=commit_id,
+                                    location_id=location_id, now=now, actor=actor):
+        return True
+    plan = _plan_obiektu_z_karty(con, frame_id=frame_id, commit_id=commit_id,
+                                 location_id=location_id)
+    if plan is None or plan[0] != "odtworz":
+        return False
+    _, przed, po = plan
+    if con.execute(
+            "UPDATE frame SET object_id = ?, object_source = ? WHERE id = ? AND object_id IS ? "
+            "AND object_source IS ? AND object_cleared_id IS NULL",
+            (przed[0], przed[1], frame_id, po[0], po[1])).rowcount != 1:
+        return False
+    para = {"commit_id": int(commit_id), "location_id": int(location_id)}
+    emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}", now=now,
+               payload={"object_id": po[0], "object_source": po[1], **para}, reason="card_undone")
+    if przed[0] is not None:
+        emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
+                   payload={"object_id": przed[0], "object_source": przed[1], **para},
+                   reason="card_undone")
+    return True
+
+
+# Zdarzenia osi obiektu klatki - każdy pisarz `frame.object_id`/`object_source` emituje jedno z nich
+# (target `frame:<id>`); kolejność id = kolejność zmian osi.
+_OBJECT_AXIS_VERBS = ("object.assigned", "object.unassigned", "object.cleared",
+                      "object.tombstone_cleared", "object.tombstone_restored")
+
+
+def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
+    """Czy cofnięcie commitu `commit_id` na pliku `location_id` ma odtworzyć obiekt klatki sprzed
+    karty (AR-311) - czysty odczyt dziennika, bez zgadywania:
+
+      * `None` - wariant tej klatki nie dotyczy (nic do zrobienia, nic do powiedzenia);
+      * `("wrocil",)` - stan sprzed już odtworzony (znacznik `card_undone` z tą parą);
+      * `("zostaje",)` - przypisanie z karty było, ale oś klatki zmieniła się po nim (ręka, kolejny
+        przebieg z innym źródłem) albo obiekt sprzed jest zdjęty z osi - klatka zostaje;
+      * `("odtworz", (obiekt, źródło) sprzed, (obiekt, źródło) przypisania)`.
+
+    Kolejność warunków:
+      0. lokacja ma nowszy żywy zapis (`writeback._nowszy_zywy_zapis` - ta sama reguła co odmowa
+         cofnięcia): ten commit nie jest ostatnim pisarzem pliku → `None` (A → B → A: kotwicą byłby
+         odcisk nowszego zapisu tą samą kartą);
+      1. znacznik `card_undone` z parą (commit, plik) → `wrocil` (idempotencja ponowienia);
+      2. nagrobek zgaszony przez tę parę → `None` - domena AR-38 (`_restore_object_tombstone_tx`);
+      3. commit nie wpisał karty `OBJECT` w ten plik (`pending_changes` przebiegu) → `None`;
+      4. nagłówek klatki mówi (`header.object_raw`) → `None` - przebieg i tak przeliczy obiekt
+         z zeznania; 4b. INNA obecna kopia klatki ma niepusty `hdr_object` → `None` - karta żyje na
+         innej kopii, a przebieg może nazwać klatkę z niej;
+      5. kotwica = zdarzenie zeznania z DOWODEM POCHODZENIA: `header.refreshed` re-syncu zapisu TEGO
+         commitu na TYM pliku niesie parę `(commit_id, location_id)` w ładunku
+         (`refresh_location(zapis_commitu=)`, wołane przez `writeback._resync`). Ani odcisk nagłówka, ani
+         czas tego nie dowodzą: cofnięcie późniejszego C2 przywraca ten sam odcisk, dwa commity tej
+         samej karty dzielą odcisk i sekundę, commit wieloplikowy ma jedno `applied_at` na wszystkie
+         pliki, a niezwiązane `header.adopted` może nieść ten sam odcisk. Brak zdarzenia z parą (commit
+         zapisany przed tym dowodem, zeznanie z innej kopii) → `None`: klatka zostaje, nic nie
+         zgadujemy. Pierwsze zdarzenie osi po kotwicy musi być przypisaniem RESOLVERA - samo
+         `object.assigned` (stan sprzed: pustka) albo sąsiednia para
+         `object.unassigned` + `object.assigned` (stan sprzed z ładunku odpięcia, `id + 1`, ten sam
+         aktor; na `pf4` 3 521 z 3 521 par) - inaczej `None` (oś zmieniła ręka, nie karta);
+      6. CAS: to przypisanie jest OSTATNIM zdarzeniem osi klatki, stan klatki = jego ładunek (bez
+         pamięci nagrobka), obiekt sprzed nie jest zdjęty z osi (`object.retired_at`) → `odtworz`;
+         inaczej `zostaje`."""
+    from .writeback import _nowszy_zywy_zapis   # import odroczony (cykl repo↔writeback)
+    target = f"frame:{frame_id}"
+    b = con.execute("SELECT id, location_id, post_hash FROM header_backups "
+                    "WHERE commit_id = ? AND location_id = ?",
+                    (int(commit_id), int(location_id))).fetchone()
+    if b is None or _nowszy_zywy_zapis(con, b) is not None:
+        return None
+    if con.execute(
+            "SELECT 1 FROM event WHERE target = ? AND reason = 'card_undone' "
+            "AND verb = 'object.unassigned' AND json_extract(payload, '$.commit_id') = ? "
+            "AND json_extract(payload, '$.location_id') = ? LIMIT 1",
+            (target, int(commit_id), int(location_id))).fetchone() is not None:
+        return ("wrocil",)
+    if con.execute(
+            "SELECT 1 FROM event WHERE target = ? AND verb = 'object.tombstone_cleared' "
+            "AND json_extract(payload, '$.commit_id') = ? "
+            "AND json_extract(payload, '$.location_id') = ? LIMIT 1",
+            (target, int(commit_id), int(location_id))).fetchone() is not None:
+        return None
+    if con.execute(
+            "SELECT 1 FROM pending_changes p JOIN commits c ON c.run_id = p.run_id "
+            "WHERE c.id = ? AND p.location_id = ? AND p.keyword = 'OBJECT' LIMIT 1",
+            (int(commit_id), int(location_id))).fetchone() is None:
+        return None
+    raw = con.execute("SELECT object_raw FROM header WHERE frame_id = ?", (frame_id,)).fetchone()
+    if raw is not None and raw[0] is not None and str(raw[0]).strip():
+        return None
+    if con.execute(
+            "SELECT 1 FROM location WHERE frame_id = ? AND id <> ? AND present = 1 "
+            "AND hdr_object IS NOT NULL AND trim(hdr_object) <> '' LIMIT 1",
+            (frame_id, int(location_id))).fetchone() is not None:
+        return None
+    kotwica = con.execute(
+        "SELECT min(id) FROM event WHERE target = ? "
+        "AND verb IN ('header.refreshed', 'header.adopted') "
+        "AND json_extract(payload, '$.commit_id') = ? "
+        "AND json_extract(payload, '$.location_id') = ?",
+        (target, int(commit_id), int(location_id))).fetchone()[0]
+    if kotwica is None:
+        return None
+    osi = con.execute(
+        "SELECT id, verb, actor, payload FROM event WHERE target = ? AND id > ? "
+        "AND verb IN (SELECT value FROM json_each(?)) ORDER BY id",
+        (target, kotwica, json.dumps(_OBJECT_AXIS_VERBS))).fetchall()
+    if not osi or osi[0]["actor"] != "resolver":
+        return None
+    if osi[0]["verb"] == "object.assigned":
+        przypisanie, przed = osi[0], (None, None)
+    elif (osi[0]["verb"] == "object.unassigned" and len(osi) > 1
+          and osi[1]["id"] == osi[0]["id"] + 1 and osi[1]["verb"] == "object.assigned"
+          and osi[1]["actor"] == "resolver"):
+        przypisanie = osi[1]
+        odpiete = json.loads(osi[0]["payload"])
+        przed = (odpiete["object_id"], odpiete["object_source"])
+    else:
+        return None
+    po_zapisie = json.loads(przypisanie["payload"])
+    po = (po_zapisie["object_id"], po_zapisie["object_source"])
+    fr = con.execute("SELECT object_id, object_source, object_cleared_id FROM frame WHERE id = ?",
+                     (frame_id,)).fetchone()
+    if (osi[-1]["id"] != przypisanie["id"] or fr is None
+            or (fr["object_id"], fr["object_source"]) != po or fr["object_cleared_id"] is not None):
+        return ("zostaje",)
+    if przed[0] is not None and con.execute(
+            "SELECT retired_at FROM object WHERE id = ?", (przed[0],)).fetchone()[0] is not None:
+        return ("zostaje",)
+    return ("odtworz", przed, po)
+
+
+def object_undo_verdict(con, *, commit_id, location_id):
+    """`(frame_id, werdykt)` stanu obiektu klatki pliku `location_id` po cofnięciu commitu - JEDNO
+    miejsce decyzji dla zapisu (`_restore_object_state_tx`) i zdania wyniku (`UndoResult.
+    objects_restored`/`objects_kept`, AR-311): `"wrocil"` - stan obiektu sprzed zapisu odtworzony
+    (karta po „Rozwiąż” albo nagrobek ręki AR-38), `"zostaje"` - oś zmieniła się po zapisie i klatka
+    zostaje (także nagrobek, którego nie odtworzono, bo ręka orzekła nowszy werdykt), `None` - wariant
+    tej klatki nie dotyczy. Czysty odczyt; `frame_id` `None`, gdy lokacji nie ma."""
+    row = con.execute("SELECT frame_id FROM location WHERE id = ?",
+                      (int(location_id),)).fetchone()
+    if row is None:
+        return None, None
+    frame_id = row["frame_id"]
+    nagrobek = _plan_nagrobka(con, frame_id=frame_id, commit_id=commit_id,
+                              location_id=location_id)
+    if nagrobek is not None:
+        return frame_id, {"odtworzony": "wrocil", "reka": "zostaje"}.get(nagrobek[0])
+    plan = _plan_obiektu_z_karty(con, frame_id=frame_id, commit_id=commit_id,
+                                 location_id=location_id)
+    return frame_id, (None if plan is None or plan[0] == "odtworz" else plan[0])
+
+
+def _plan_nagrobka(con, *, frame_id, commit_id, location_id):
+    """Odczyt nagrobka ręki zgaszonego przez commit `commit_id` na pliku `location_id` (AR-38) -
+    wspólny dla odtworzenia (`_restore_object_tombstone_tx`) i werdyktu zdania
+    (`object_undo_verdict`): `None` - brak zgaszenia tej pary (albo zdarzenie bez `cleared_id`,
+    któremu nie ufamy); `("odtworzony",)` - już odtworzony; `("reka",)` - klatka ma źródło ręki,
+    jej nowszy werdykt wygrywa; `("odtworz", zgaszone, klatka)`."""
+    target = f"frame:{frame_id}"
+    zgaszenie = con.execute(
+        "SELECT payload FROM event WHERE target = ? AND verb = 'object.tombstone_cleared' "
+        "AND json_extract(payload, '$.commit_id') = ? "
+        "AND json_extract(payload, '$.location_id') = ? ORDER BY id DESC LIMIT 1",
+        (target, int(commit_id), int(location_id))).fetchone()
+    if zgaszenie is None:
+        return None
+    zgaszone = json.loads(zgaszenie["payload"])
+    if "cleared_id" not in zgaszone:
+        return None
+    if con.execute(
+            "SELECT 1 FROM event WHERE target = ? AND verb = 'object.tombstone_restored' "
+            "AND json_extract(payload, '$.commit_id') = ? "
+            "AND json_extract(payload, '$.location_id') = ? LIMIT 1",
+            (target, int(commit_id), int(location_id))).fetchone() is not None:
+        return ("odtworzony",)
+    fr = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
+                     (frame_id,)).fetchone()
+    if fr is None:
+        return None
+    if fr["object_source"] in STICKY_OBJECT_SOURCES:
+        return ("reka",)
+    return ("odtworz", zgaszone, fr)
 
 
 def _restore_object_tombstone_tx(con, *, frame_id, commit_id, location_id, now,
@@ -3493,27 +3699,10 @@ def _restore_object_tombstone_tx(con, *, frame_id, commit_id, location_id, now,
     Gdy automat (resolver z karty) zdążył przypiąć obiekt, odpięcie emituje `object.unassigned`
     (parytet §5.9), a odtworzenie - `object.tombstone_restored` z pamięcią i parą commitu."""
     target = f"frame:{frame_id}"
-    zgaszenie = con.execute(
-        "SELECT payload FROM event WHERE target = ? AND verb = 'object.tombstone_cleared' "
-        "AND json_extract(payload, '$.commit_id') = ? "
-        "AND json_extract(payload, '$.location_id') = ? ORDER BY id DESC LIMIT 1",
-        (target, int(commit_id), int(location_id))).fetchone()
-    if zgaszenie is None:
+    plan = _plan_nagrobka(con, frame_id=frame_id, commit_id=commit_id, location_id=location_id)
+    if plan is None or plan[0] != "odtworz":
         return False
-    zgaszone = json.loads(zgaszenie["payload"])
-    if "cleared_id" not in zgaszone:
-        return False
-    odtworzone = con.execute(
-        "SELECT 1 FROM event WHERE target = ? AND verb = 'object.tombstone_restored' "
-        "AND json_extract(payload, '$.commit_id') = ? "
-        "AND json_extract(payload, '$.location_id') = ? LIMIT 1",
-        (target, int(commit_id), int(location_id))).fetchone()
-    if odtworzone is not None:
-        return False
-    fr = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
-                     (frame_id,)).fetchone()
-    if fr is None or fr["object_source"] in STICKY_OBJECT_SOURCES:
-        return False
+    _, zgaszone, fr = plan
     if fr["object_id"] is not None:
         emit_event(con, actor=actor, verb="object.unassigned", target=target, now=now,
                    payload={"object_id": fr["object_id"], "object_source": fr["object_source"]},
@@ -5625,8 +5814,8 @@ def finish_inplace_op(con, *, op_id, now, testimony_ok, withheld_reason=None,
     szukało wierszy po statusie 'failed': crash po `written` zostawiał wiersze 'pending' na zawsze.
     Teraz te trzy fakty albo zachodzą razem, albo wcale - i dotyczą DOKŁADNIE wierszy operacji, nie
     wszystkich wierszy przebiegu. Operacja nie w fazie `written` → `ValueError`, zero zapisu.
-    Operacja `undo` w tej samej transakcji ODTWARZA nagrobek zgaszony przez cofany commit
-    (`_restore_object_tombstone_tx`, AR-38).
+    Operacja `undo` w tej samej transakcji ODTWARZA stan obiektu sprzed cofanego commitu - nagrobek
+    (AR-38) i obiekt z karty po „Rozwiąż” (AR-311) - `_restore_object_state_tx`.
     Transient (faza, staging) bez eventu; nagrobek emituje swój. Zwraca `id` założonego
     wstrzymania (AR-82) albo `None`.
 
@@ -5680,12 +5869,13 @@ def finish_inplace_op(con, *, op_id, now, testimony_ok, withheld_reason=None,
                     (op_id,))
         _set_pending_reason_tx(con, [r["id"] for r in rows], uwaga)
         if op["kind"] == "undo" and op["commit_id"] is not None:
-            # Cofnięcie w miejscu odtwarza nagrobek zgaszony przez cofany commit (AR-38) - w tej
-            # samej transakcji co faza `synced`, więc nie wyprzedzi ani nie zgubi dokończenia.
+            # Cofnięcie w miejscu odtwarza stan obiektu sprzed cofanego commitu - nagrobek (AR-38)
+            # i obiekt z karty po „Rozwiąż” (AR-311) - w tej samej transakcji co faza `synced`, więc
+            # nie wyprzedzi ani nie zgubi dokończenia.
             loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
                               (op["location_id"],)).fetchone()
-            _restore_object_tombstone_tx(con, frame_id=loc["frame_id"], commit_id=op["commit_id"],
-                                         location_id=op["location_id"], now=now, actor=actor)
+            _restore_object_state_tx(con, frame_id=loc["frame_id"], commit_id=op["commit_id"],
+                                     location_id=op["location_id"], now=now, actor=actor)
     return wstrzymanie
 
 

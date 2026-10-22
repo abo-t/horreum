@@ -180,17 +180,17 @@ def test_pad_odtworzenia_wycofuje_re_sync(tmp_path, monkeypatch):
     con, _p, lid, fid, cos = _baza_z_nagrobkiem(tmp_path)
     res = _commit_karty(con, lid, "R")
     hh_commitu = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()[0]
-    prawdziwy = repo.restore_object_tombstone
+    prawdziwy = repo.restore_object_state
 
     def _pad(*a, **kw):
         raise RuntimeError("awaria w połowie")
-    monkeypatch.setattr(repo, "restore_object_tombstone", _pad)
+    monkeypatch.setattr(repo, "restore_object_state", _pad)
     ures = writeback.undo(con, res.commit_id, now=NOW)
     assert len(ures.failed) == 1, ures
     assert con.execute("SELECT header_hash FROM location WHERE id = ?",
                        (lid,)).fetchone()[0] == hh_commitu
     assert _stan(con, fid) == (None, None, None)
-    monkeypatch.setattr(repo, "restore_object_tombstone", prawdziwy)
+    monkeypatch.setattr(repo, "restore_object_state", prawdziwy)
 
     ures = writeback.undo(con, res.commit_id, now=NOW)
     assert len(ures.restored) == 1, ures

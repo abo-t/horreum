@@ -70,6 +70,50 @@ def _izoluj_qsettings(tmp_path_factory, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _izoluj_dane_programu(tmp_path_factory, monkeypatch):
+    """Żaden test nie pisze do PRAWDZIWEGO katalogu danych programu usera (Windows: `%LOCALAPPDATA%`) -
+    tam straż błędu programu dopisuje dziennik błędów (AR-312, `app.katalog_dziennika_bledow`), a każdy
+    test straży przez `main()` zgłasza błąd. Bliźniak `_izoluj_qsettings`: podmiana
+    `QStandardPaths.writableLocation` (wołający z Pythona widzą ją - zmierzone 2026-10-22, PySide6 6.9.2)
+    na katalog TEGO testu, poza `tmp_path`. Bramka całej baterii: `_straznik_dziennika_usera`."""
+    try:
+        from PySide6.QtCore import QStandardPaths
+    except ImportError:                 # `.venv` bez Qt - nie ma czego izolować
+        yield
+        return
+    katalog = str(tmp_path_factory.mktemp("dane_programu"))
+    monkeypatch.setattr(QStandardPaths, "writableLocation", staticmethod(lambda _typ: katalog))
+    yield
+
+
+def _dziennik_usera():
+    """{plik: (rozmiar, mtime)} prawdziwych plików dziennika błędów usera (`bledy.log*` w katalogu,
+    który wylicza straż) - przed podmianą `_izoluj_dane_programu`."""
+    try:
+        from PySide6.QtCore import QStandardPaths
+    except ImportError:
+        return {}
+    import os
+    baza = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
+    katalog = os.path.join(baza, "Horreum") if baza else None
+    if not katalog or not os.path.isdir(katalog):
+        return {}
+    return {n: (os.stat(os.path.join(katalog, n)).st_size, os.stat(os.path.join(katalog, n)).st_mtime_ns)
+            for n in sorted(os.listdir(katalog)) if n.startswith("bledy.log")}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _straznik_dziennika_usera():
+    """Strażnik CAŁEJ baterii: prawdziwy dziennik błędów usera po ostatnim teście jest taki jak przed
+    pierwszym (bliźniak `_straznik_rejestru_usera`). Fałszywy alarm: prawdziwy Horreum uruchomiony
+    W TRAKCIE baterii, który zgłosi błąd programu."""
+    przed = _dziennik_usera()
+    yield
+    po = _dziennik_usera()
+    assert przed == po, f"bateria zmieniła prawdziwy dziennik błędów usera (przed, po): {przed}, {po}"
+
+
 def _kolory_modulow():
     """Słowniki kolorów, które `app.apply_theme` stawia przez `use_theme` modułów warstwy widżetów:
     `{moduł: {nazwa: słownik}}`. Spis z `sys.modules`, nie ręczny (AR-136): moduł `horreum.gui.*`

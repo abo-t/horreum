@@ -616,17 +616,31 @@ class StagingDrawer(QFrame):
         self.bar.setVisible(False); self.btn_cancel.setVisible(False)
         self.btn_commit.setVisible(True); self.btn_reject.setVisible(True)
 
-    def set_count(self, n, *, result=None, label=None):
+    def set_count(self, n, *, result=None, label=None, zatrzymane=None):
+        """Licznik szuflady: kropka, etykieta, Zatwierdź/Odrzuć. Kropka ma TRZY kształty (różnią się bez
+        koloru): „●” `warn` - N > 0 zmian czeka w tej szufladzie; „○” `secondary` - pusta albo „Zatwierdzono:
+        N” przy żywym „Cofnij” (poczekalnia pusta, cofnięcie działa na zapisanym); „◌” `warn` z podpowiedzią
+        `zatrzymane` - przy zerze w tej szufladzie zmiany czekają POZA nią (zatrzymane izolacją zapisu
+        w miejscu, nazwy z otwartym zamiarem, zwolnione, a niepodjęte - AR-316): „○” mówiło wtedy „pusto”.
+        Podpowiedź kropki stoi wyłącznie w tym stanie - każde inne wołanie ją zdejmuje."""
         self._n = n
         if n > 0:
             self.dot.setText("●"); _set_role(self.dot, "warn")   # U+25CF: jest w Segoe UI, paruje z „○" (wiz F3 #2)
+            self.dot.setToolTip("")
             # `label` rozróżnia klingę też przy n>0: „N zmian nazw oczekuje" vs domyślne „N zmian
             # oczekuje" (mikro-zmiana §0; call-sites makra bez label → domyślny tekst, R1 #8).
             self.label.setText(label or i18n.t_plural("grid.drawer.pending", n))
             if result is None:
                 self.result.setText("")      # nowy staging: skasuj STALE wynik commitu/odrzucenia (wiz #7)
+        elif zatrzymane:
+            # U+25CC: glif w samym Segoe UI (cmap `segoeui.ttf`, szerokość jak „●”); bursztyn `warn` -
+            # „czeka, ale nie w całości tutaj”. Warianty półpełne („◐”, „◉”) Segoe UI nie ma.
+            self.dot.setText("◌"); _set_role(self.dot, "warn")
+            self.dot.setToolTip(zatrzymane)
+            self.label.setText(label or i18n.t("grid.drawer.empty"))
         else:
             self.dot.setText("○"); _set_role(self.dot, "secondary")
+            self.dot.setToolTip("")
             # `label` nadpisuje domyślny tekst pustego stanu: po commicie „Zatwierdzono…" zamiast
             # pustostanu poczekalni (sprzeczność z wynikiem obok — wizytator D2).
             self.label.setText(label or i18n.t("grid.drawer.empty"))

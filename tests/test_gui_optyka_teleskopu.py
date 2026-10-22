@@ -517,6 +517,7 @@ def test_os_teleskopu_cofa_dopisanie_po_restarcie_prawdziwym_klikiem(qapp, tmp_p
         win._show_view(NAV_PORZADKI)
         win._show_view(NAV_ZBIORY)
         win._show_view(NAV_PORZADKI)
+        win.tasks_view.otworz_os_teleskopu()      # wejście z Porządków czyta oś (montaż leniwy, AR-175)
         v = win.axis_view
         msgs = _komunikaty(v)
         v.table.selectRow(_wiersz(v, rc8))
@@ -556,23 +557,29 @@ def test_zdanie_cofniecia_gdy_zadna_klatka_nie_wrocila(qapp, tmp_path):
 
 
 def test_cofniecie_dopisania_w_biegu_dostawy_czeka_i_oddaje_recepte(qapp, tmp_path):
-    """Klik „Cofnij dopisanie” w trakcie etapu Dostawy: zero zapisu, zdanie o czekaniu, a recepta
-    wraca (raport ją zgasił) - droga powrotu nie przepada razem z odmową.
-    Mutant: brak bramki `_busy` (zapis w trakcie etapu) albo odmowa bez ponownej recepty."""
+    """AR-310: klik recepty „Cofnij dopisanie” w trakcie etapu Dostawy - zero zapisu, zdanie odroczenia
+    kanałem wyniku osi (`wynik_cofniecia`) BEZ recepty, bo teraz nic nie zadziała; koniec etapu
+    (`set_busy(False)`) podaje zdanie gotowości z receptą, a jej wykonanie zdejmuje teleskop.
+    Mutanty: odmowa z natychmiastową receptą (raporty odświeżenia po przebiegu ją gasiły, a zdanie
+    obiecywało czekanie); `set_busy` bez podania odłożonych; brak bramki `_busy`."""
     con, obce, rc8 = _baza(tmp_path)
     tid, _g = repo.user_assign_config_new_telescope(
         con, frame_ids=obce, name="RC8 0.5x", focal_mm=800.0, in_park=1,
         source_telescope_id=rc8, now=NOW)
     v = ObjectAxisView(con, now_fn=lambda: NOW)
-    msgs, recepty = _komunikaty(v), []
+    msgs, recepty, wyniki = _komunikaty(v), [], []
     v.status_recipe.connect(recepty.append)
+    v.wynik_cofniecia.connect(lambda zdanie, recepta: wyniki.append((zdanie, recepta)))
     v.set_busy(True)
     n = con.execute("SELECT count(*) FROM event").fetchone()[0]
     v._recepta_cofniecia_dopisania(tid, "RC8 0.5x").czlony[0].wykonaj()
-    assert msgs == [i18n.t("object.config_undo_add.busy")] and len(recepty) == 1
+    assert wyniki == [(i18n.t("object.config_undo_add.deferred", telescope="RC8 0.5x"), None)]
+    assert msgs == [] and recepty == []
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == n
     v.set_busy(False)
-    recepty[0].czlony[0].wykonaj()
+    [(zdanie, recepta)] = wyniki[1:]
+    assert zdanie == i18n.t("object.config_undo_add.ready", telescope="RC8 0.5x"), zdanie
+    recepta.czlony[0].wykonaj()
     assert con.execute("SELECT retired_at FROM telescope WHERE id = ?", (tid,)).fetchone()[0] == NOW
     con.close()
 

@@ -6385,7 +6385,8 @@ def test_cofniecie_makra_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(wb_view, 
         m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
             c, t, now=now, progress=pr, should_cancel=lambda: True))
         view._dispatch_undo()
-    # Rdzeń zna resztę (AR-176): 1 nieprzetworzony plik wymaga sprawdzenia - bez obietnicy wyniku.
+    # Rdzeń zna resztę (AR-176): commit z datą sprzed granicy śladu cofnięcia (AR-318, `NOW` modułu) -
+    # 1 nieprzetworzony plik wymaga sprawdzenia, bez obietnicy wyniku.
     assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in \
         view.drawer.result.text(), view.drawer.result.text()
     assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
@@ -7125,6 +7126,7 @@ def test_wiersz_szuflady_po_nieudanym_cofnieciu_mowi_commit_raz(qapp, tmp_path, 
         assert (etykieta + " " + wynik).count(f"commit {cid})") == 1, (etykieta, wynik)
         assert wynik.endswith(i18n.t("grid.wb.commit_id", id=cid))
         if cofniecie == "niedomkniete":
+            # AR-318: commit z datą sprzed granicy śladu cofnięcia (`NOW` modułu) - „wymaga sprawdzenia”.
             assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in wynik, wynik
         else:
             assert wynik.startswith(i18n.t("grid.wb.op.undo", msg=i18n.t("objchg.item.prog_error"))), wynik

@@ -1140,8 +1140,11 @@ def _presence_tail(con, root, *, now):
     from . import derive                              # lazy: astropy dopiero tu (przez scan)
     for etap, w in derive.adopt_and_derive(con, root, now):
         if etap == "copy_facts":
-            yield (f"  fakty kopii: zebrane {w.written} z {w.rows} (zmienione na dysku "
-                   f"{w.stale}, brak pliku {w.missing}, blad odczytu {w.failed}, "
+            # Dwie roboty osobno (AR-315): po aktualizacji kopie czekają na same bajty nagłówka,
+            # a „zebrane 15598 z 15598” mówiło o faktach, których nie zebrano.
+            yield (f"  fakty kopii: zebrane {w.facts_written} z {w.rows_facts}, bajty naglowka "
+                   f"sprawdzone {w.bytes_checked} z {w.rows_bytes} (niesprawdzone {w.bytes_unchecked}, "
+                   f"domkniete rownolegle {w.elsewhere}, zmienione na dysku {w.stale}, brak pliku {w.missing}, blad odczytu {w.failed}, "
                    f"zapis w toku {w.raced}); czeka {w.remaining}")
         elif etap == "adopt_testimony":
             yield (f"  przejecie zeznania ocalalej kopii: przejete {w.adopted} z {w.rows} (inna "
@@ -1448,6 +1451,7 @@ def _cmd_target(args):
     tej nazwie, zdejmujemy JEGO i mówimy to wprost, a gdy takiego wiersza nie ma — user dostaje
     listę kandydatów, nie ciche zero."""
     from . import repo, targets
+    from .resolve._text import norm_ascii    # echo wpisu spoza ASCII (cp1250 przy przekierowaniu)
     now = datetime.now(timezone.utc).isoformat()
     con = db.open_db(args.db)
     if args.canon:
@@ -1461,8 +1465,16 @@ def _cmd_target(args):
                 return 0
         if canon is None:
             con.close()
-            hint = (f" Kandydaci: {', '.join(candidates)}" if candidates
+            # Kandydat mówi nazwę, którą trafił (AR-175): „NGC1976 (M 42)”, a nazwa znana katalogowi
+            # spoza celów planera („M 4” = NGC6121) dostaje zdanie - lista podobnych nie jest nią.
+            # Nazwa trafienia z assetu też przez `norm_ascii` (cp1250 przy przekierowaniu, AR-175).
+            hint = (" Kandydaci: " + ", ".join(c.opis if c.opis.isascii() else norm_ascii(c.opis)
+                                               for c in candidates) if candidates
                     else " Brak podobnych w katalogu.")
+            out = targets.find_outside(args.canon, targets.ALL_LAYERS)
+            if out is not None and out.target is None:
+                echo = args.canon if args.canon.isascii() else norm_ascii(args.canon)
+                hint += f" '{echo}' = {out.canon}: znane katalogowi, poza celami planera."
             print(f"Horreum target: {args.canon!r} nie wskazuje jednego celu katalogu.{hint}")
             return 2
         if args.clear:
@@ -1660,6 +1672,27 @@ def _find_empty_text(needle, res):
             f"(--layers {','.join(ALL_LAYERS)})")
 
 
+def _find_miss_text(needle, res):
+    """`--find` z samymi trafieniami podciągu, a wpisaną nazwę zna katalog (`PlanResult.find_outside`
+    przy niepustej liście, AR-175): jedna linia ASCII, że lista to nazwy zawierające wpis, a sama
+    nazwa jest poza celami planera albo w warstwie niewczytanej. `None` - nic do powiedzenia. To samo
+    zdanie co nota ekranu planera (`planner_model.find_miss_text`)."""
+    out = res.find_outside
+    if out is None or (out.target is not None and out.loaded):
+        return None
+    from .resolve._text import norm_alnum, norm_ascii    # lazy, jak w `_find_empty_text`
+    from .targets import ALL_LAYERS, STATUS_MARKS
+    echo = needle if needle.isascii() else norm_ascii(needle)
+    nazwa = (f'"{echo}"' if norm_alnum(needle) == norm_alnum(out.canon)
+             else f'"{echo}" = {out.canon}')
+    lista = f'lista: nazwy zawierajace "{echo}"'
+    if out.target is None:
+        return f"  szukane {nazwa}: znane katalogowi, poza celami planera; {lista}"
+    typ = out.target.type + STATUS_MARKS.get(out.target.status, "")
+    return (f"  szukane {nazwa} ({typ}): cel warstwy {out.target.layer}, poza wczytanymi "
+            f"(--layers {','.join(ALL_LAYERS)}); {lista}")
+
+
 def _format_plan(db_path, res, find=None):
     """Plan nocy do czytelnego ASCII (konsola Windows = cp1250 - bez znaków spoza ASCII).
     `find` = tekst `--find` (do zdania pustego wyniku, `_find_empty_text`)."""
@@ -1703,7 +1736,16 @@ def _format_plan(db_path, res, find=None):
         lines.append(f"  UWAGA: {res.unfiltered_mono} lightow bez filtra na kamerze mono — "
                      f"kubelek RGB moze byc zanieczyszczony")
     lines.append("")
-    lines.append(f"  {'cel':<14}{'typ':<6}{'rozm':>6}{'kulm':>6}{'h>':>5}  {'zestaw':<17}"
+    # Kolumna „cel” w trybie `--find` mówi nazwę trafienia nie-kanonem (AR-175, `PlanResult.find_via`):
+    # „NGC1976 (M 42)” - szerokość z najdłuższej etykiety, inaczej 14 jak dotąd.
+    # Nazwa trafienia pochodzi z assetu - echo przez `norm_ascii` jak wpis usera (cp1250 przy przekierowaniu).
+    from .resolve._text import norm_ascii                # lazy, jak w `_find_empty_text`
+    via = {k: v if v.isascii() else norm_ascii(v) for k, v in res.find_via.items()}
+    etykiety = {r.target.canon: (f"{r.target.canon} ({via[r.target.canon]})"
+                                 if r.target.canon in via else r.target.canon)
+                for r in res.rows}
+    w_cel = max([14] + [len(e) + 1 for e in etykiety.values()])
+    lines.append(f"  {'cel':<{w_cel}}{'typ':<6}{'rozm':>6}{'kulm':>6}{'h>':>5}  {'zestaw':<17}"
                  f"{'wyp':>4}  {'koszt B/D/N':<14}{'rada':<6}{'plan':<10}pokrycie")
     from .targets import STATUS_MARKS                    # lazy, jak `targets` w komendzie `plan`
     for row in res.rows:
@@ -1720,13 +1762,16 @@ def _format_plan(db_path, res, find=None):
         # znaczki z jednego słownika rdzenia (`targets.STATUS_MARKS`, ten sam czyta ekran planera)
         typ = row.target.type + STATUS_MARKS.get(row.target.status, "")
         lines.append(
-            f"  {row.target.canon:<14}{typ:<6}"
+            f"  {etykiety[row.target.canon]:<{w_cel}}{typ:<6}"
             f"{row.target.major_arcmin:>5.0f}'{row.window.max_alt_deg:>6.1f}"
             f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{fill_txt:>4}  {cost_txt:<14}"
             f"{row.recommend or '-':<6}{plan_txt:<10}{_coverage_text(row)}")
     empty = _find_empty_text(find, res) if find and not res.rows else None
     if empty:
         lines.append(empty)
+    pudlo = _find_miss_text(find, res) if find and res.rows else None
+    if pudlo:
+        lines.append(pudlo)
     if res.hidden:
         lines.append(f"  ... {res.hidden} wierszy ukrytych limitem (--all zdejmuje)")
     if res.unmatched:
@@ -1789,8 +1834,10 @@ def _plan_json(res):
     if res.rig_filter != "off":
         out["rig_filter"] = {"state": res.rig_filter, "min_fill": res.min_fill,
                              "max_panels": res.max_panels}
-    # Blok WYŁĄCZNIE przy pustym `--find` dla nazwy znanej katalogowi (AR-146) - poza tym kształt
-    # odpowiedzi bez zmian. `layer`/`type` = rekord celu z warstwy niewczytanej, `null` = poza pulą.
+    # Blok WYŁĄCZNIE przy `--find` dla nazwy znanej katalogowi, której pula nie ma dokładnie (AR-146):
+    # przy pustej liście i - od AR-175 - przy samych trafieniach podciągu („M 4” = NGC6121 obok listy
+    # M42/M43/M49); poza tym kształt odpowiedzi bez zmian. `layer`/`type` = rekord celu z warstwy
+    # niewczytanej, `null` = poza pulą.
     if res.find_outside is not None:
         t = res.find_outside.target
         out["find_outside"] = {"canon": res.find_outside.canon,
@@ -2353,6 +2400,12 @@ def _cmd_header_fix(args):
             if tekstowe:
                 lines.append(f"  juz cofniete {len(tekstowe)} - naglowek i baza opisuja stan sprzed "
                              f"commitu; reszty pliku backup tekstowy nie pozwala sprawdzic")
+            # AR-311: stan obiektu klatek z cofnietej karty `OBJECT` po „Rozwiąż” - wiersz tylko przy
+            # niezerowych liczbach (te same pola `UndoResult`, co zdanie okien i paska).
+            if res.objects_restored or res.objects_kept:
+                lines.append(f"  obiekt z cofnietej karty: klatki ze stanem sprzed zapisu "
+                             f"{len(res.objects_restored)}, zostaja (zmienione po Rozwiaz) "
+                             f"{len(res.objects_kept)}")
             lines += [f"    {fr.status}: {fr.path} - {fr.reason}"
                       for fr in (res.withheld + zablokowane + res.failed)[:args.limit]]
             if res.restored:

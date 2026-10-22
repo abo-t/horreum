@@ -395,9 +395,10 @@ def test_lista_zadan_hugguje_tresc(qapp, tmp_path):
         win.tasks_view.refresh_counts()
         oczekiwana = tasks.sizeHintForRow(0) * tasks.count() + 2 * tasks.frameWidth()
         assert tasks.height() == oczekiwana
-        # treść, nie cały pion strony; sufit podniesiony o dwa wiersze optyki (AR-128/AR-129) -
-        # falsyfikator „lista rośnie z oknem" niżej zostaje bez zmian
-        assert tasks.height() < 340
+        # treść, nie cały pion strony - niezmiennik zamiast liczbowego sufitu (ten rósł z każdym
+        # nowym wierszem: optyka AR-128/AR-129, cofnięcie niedokończone AR-318); falsyfikator
+        # „lista rośnie z oknem" niżej zostaje bez zmian
+        assert tasks.height() < tasks.parentWidget().height()
         win.resize(1400, 1800)                             # dwa razy wyższe okno…
         qapp.processEvents()
         assert tasks.height() == oczekiwana                # …lista tej samej wysokości
@@ -1931,3 +1932,605 @@ def test_folder_roboczy_trafia_do_pipeline_przy_starcie_i_po_wyborze(qapp, tmp_p
         assert win2.pipeline_view._work_root == str(inny)  # pamięć przeżywa okno
     finally:
         win2.close()
+
+
+# ═════════════════════════ AR-175 - OKNO NIE STOI: liczniki montażu w tle, dwa kanały fazy, motyw
+
+from PySide6.QtGui import QColor  # noqa: E402 - blok AR-175 (porównania kolorów motywu)
+
+# Bezpiecznik bram rachunku liczników - test, który zgubił bramę, czerwienieje, zamiast wisieć.
+_BEZPIECZNIK_LICZNIKOW_S = 15
+
+
+def _w_tle(monkeypatch):
+    """Tryb produkcyjny okna (wątki tła) - autouse `_pola_inline` stawia tryb bez wątków."""
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", True)
+
+
+def _brama_rachunku(monkeypatch, *, baza=None, pada=None):
+    """Rachunek liczników Porządków (`tasks._stan_licznikow`) POZA wątkiem GUI czeka na bramę i zapisuje
+    wątek KAŻDEGO wywołania. `baza` - nazwa pliku bazy, której rachunek czeka (inne liczą od razu);
+    `pada` - wyjątek rzucany po bramie zamiast rachunku. Zwraca `(brama, wszedl, watki, glowny)`."""
+    import threading
+    from horreum.gui import tasks as tasks_mod
+    brama, wszedl, watki = threading.Event(), threading.Event(), []
+    glowny = threading.get_ident()
+    prawdziwy = tasks_mod._stan_licznikow
+
+    def _stan(con):
+        watki.append(threading.get_ident())
+        if threading.get_ident() != glowny and (
+                baza is None or os.path.basename(queries.db_path_of(con)) == baza):
+            wszedl.set()
+            brama.wait(_BEZPIECZNIK_LICZNIKOW_S)
+            if pada is not None:
+                raise pada
+        return prawdziwy(con)
+    monkeypatch.setattr(tasks_mod, "_stan_licznikow", _stan)
+    return brama, wszedl, watki, glowny
+
+
+def _czekaj_na(warunek, opis):
+    """Pompuj pętlę zdarzeń (`processEvents` + `sleep`, nie `qWait`), aż `warunek()`; bezpiecznik."""
+    import time
+    from PySide6.QtCore import QCoreApplication, QEventLoop
+    koniec = time.monotonic() + _BEZPIECZNIK_LICZNIKOW_S
+    while not warunek():
+        if time.monotonic() > koniec:
+            raise AssertionError(f"bezpiecznik {_BEZPIECZNIK_LICZNIKOW_S} s: {opis}")
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.005)
+
+
+def _pompuj(n=5):
+    """Kilka obrotów pętli zdarzeń (`processEvents` + `sleep`) - doręcza `singleShot(0)` i sygnały
+    kolejkowane, bez warunku."""
+    import time
+    from PySide6.QtCore import QCoreApplication, QEventLoop
+    for _ in range(n):
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.005)
+
+
+def _po_rachunku(win):
+    """Okno po rachunku montażu: wątek liczników zebrany, faza tła zgasła."""
+    _czekaj_na(lambda: win.tasks_view._liczniki_thread is None and win.phase_label.text() == "",
+               "rachunek montażu nie skończył albo faza tła nie zgasła")
+
+
+def _plakietka(win, n):
+    from horreum.gui import i18n
+    return i18n.t("nav.porzadki") if n == 0 else i18n.t("nav.porzadki_count", n=n)
+
+
+def test_otwarcie_bazy_liczy_Porzadki_w_tle_a_petla_bije(qapp, tmp_path, monkeypatch):
+    """AR-175: rachunek liczników Porządków przy montażu stał na wątku GUI ~1,5 s z ~3 s otwarcia bazy
+    (kopia pf4). Teraz liczy go wątek tła: konstruktor okna wraca, gdy rachunek wciąż czeka na bramie
+    (wątek GUI wolny - ten test biegnie na nim dalej), plakietka i kafel Domu mówią „liczę”, pasek - fazę
+    tła; wynik zdejmuje oba, faza gaśnie.
+    Mutant: `refresh_counts()` bez `w_tle` w `_mount_views` - rachunek na wątku GUI, brama nie łapie."""
+    from horreum.gui import i18n
+    _w_tle(monkeypatch)
+    brama, wszedl, watki, glowny = _brama_rachunku(monkeypatch)
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S), "rachunek montażu nie ruszył w tle"
+        assert not brama.is_set() and win.tasks_view.liczy_w_tle(), "okno wróciło przed końcem rachunku"
+        assert win.nav.item(NAV_PORZADKI).text() == i18n.t("nav.porzadki_count", n="…")
+        assert win.home_view.tile_popraw.text() == i18n.t("home.tile.fix_count", n="…")
+        assert win.home_view.tile_popraw.toolTip() == i18n.t("busy.counting_tasks")
+        assert win.phase_label.text() == i18n.t("busy.counting_tasks")
+        brama.set()
+        _po_rachunku(win)
+        assert watki and glowny not in watki, "liczył wątek tła"
+        n = win.tasks_view.refresh_counts()
+        assert win.nav.item(NAV_PORZADKI).text() == _plakietka(win, n)
+        assert "…" not in win.home_view.tile_popraw.text()
+        assert win.home_view.tile_popraw.toolTip() == i18n.t("home.tile.fix_tip")
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_przelaczenie_bazy_w_trakcie_licznikow_nie_przyklada_starego_wyniku(qapp, tmp_path,
+                                                                          monkeypatch):
+    """AR-175: przełączenie bazy w czasie rachunku montażu - wynik starej bazy nie trafia ani na listę,
+    ani na plakietkę nowej; plakietka i faza mówią o nowej bazie.
+    Bez zegara: rachunek starej bazy liczy wynik PRZED bramą, a bramę zdejmuje pierwsze `request_cancel`
+    (demontaż widoku) - wynik wychodzi z wątku dokładnie wtedy, gdy stary widok już podbił generację.
+    Mutant: `_on_liczniki` bez sprawdzenia generacji - stary widok przykłada wynik po przełączeniu."""
+    import threading
+    from horreum.gui import tasks as tasks_mod
+    _w_tle(monkeypatch)
+    brama, wszedl = threading.Event(), threading.Event()
+    glowny = threading.get_ident()
+    prawdziwy = tasks_mod._stan_licznikow
+
+    def _stan(con):
+        wynik = prawdziwy(con)                       # policzony przed bramą - po niej zero SQL
+        if threading.get_ident() != glowny and os.path.basename(queries.db_path_of(con)) == "a.db":
+            wszedl.set()
+            brama.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        return wynik
+    monkeypatch.setattr(tasks_mod, "_stan_licznikow", _stan)
+    anuluj = tasks_mod._LicznikiWorker.request_cancel
+    monkeypatch.setattr(tasks_mod._LicznikiWorker, "request_cancel",
+                        lambda self: (brama.set(), anuluj(self))[1])
+    druga = _seeded_db(tmp_path, "b.db")
+    win = MainWindow(_seeded_db(tmp_path, "a.db", object_axis=True))
+    try:
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        stary, stare = win.tasks_view, []
+        stary.counts_changed.connect(stare.append)
+        win.open_path(druga)
+        assert win.tasks_view is not stary
+        _po_rachunku(win)
+        assert stare == [], "wynik starej bazy przyłożony po przełączeniu"
+        n = win.tasks_view.refresh_counts()
+        assert win.nav.item(NAV_PORZADKI).text() == _plakietka(win, n)
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_klik_w_wiersz_Porzadkow_przed_pierwszym_rachunkiem_czeka(qapp, tmp_path, monkeypatch):
+    """AR-175: do pierwszego rachunku wiersze akcyjne są wygaszone z podpowiedzią „liczę” - prawdziwy
+    klik niczego nie otwiera (wiersz „?” bez rachunku poszedłby do perspektywy zamiast do Dostawy).
+    Wejście w Porządki w czasie rachunku montażu nie liczy drugi raz na wątku GUI - czeka na bieg
+    w drodze. Klik w czasie rachunku NIE przepada: po wyniku prowadzi sam, bez drugiego kliku.
+    Mutanty: wiersze aktywne od budowy (klik otwiera perspektywę); wejście bez czekania na bieg
+    w drodze (rachunek na wątku GUI); klik czekający zgubiony."""
+    from PySide6.QtTest import QTest
+    from horreum.gui import i18n
+    _w_tle(monkeypatch)
+    brama, wszedl, watki, glowny = _brama_rachunku(monkeypatch)
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        win.resize(1200, 800)
+        win.show()
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        win._show_view(NAV_PORZADKI)
+        tasks = win.tasks_view
+        otwarte = []
+        tasks.open_collection.connect(otwarte.append)
+        it = _task_item(win, "dup_frames")
+        assert it.toolTip() == i18n.t("busy.counting_tasks")
+
+        def _klik():
+            rect = tasks.tasks.visualItemRect(it)
+            QTest.mouseClick(tasks.tasks.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+            _pompuj()
+        _klik()
+        assert otwarte == [] and tasks.pages.currentIndex() == 0
+        assert glowny not in watki, "wejście liczyło na wątku GUI zamiast czekać na bieg w drodze"
+        brama.set()
+        _po_rachunku(win)
+        assert it.toolTip() != i18n.t("busy.counting_tasks")
+        assert otwarte == [PRESET_DUPS], "klik sprzed wyniku wykonany po pierwszym rachunku"
+    finally:
+        brama.set()
+        win.close()
+
+
+def test_porazka_licznikow_montazu_zdejmuje_faze_tla_i_stan_licze(qapp, tmp_path, monkeypatch):
+    """AR-175: rachunek montażu pada dwa razy (ponowienie w tle, AR-302) - faza tła gaśnie, plakietka
+    i kafel nie obiecują liczby („(…)” schodzi), wiersze zapalone, wiersz błędu mówi zdaniem.
+    Mutant: koniec serii bez obsługi w gospodarzu (`liczenie_w_toku(False)`) - faza wisi."""
+    import sqlite3
+    from horreum.gui import i18n
+    _w_tle(monkeypatch)
+    brama, _wsz, watki, glowny = _brama_rachunku(
+        monkeypatch, pada=sqlite3.OperationalError("database is locked"))
+    brama.set()
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        _czekaj_na(lambda: win.tasks_view._liczniki_thread is None, "seria rachunku nie skończyła")
+        _pompuj()
+        assert len([w for w in watki if w != glowny]) == 2, watki
+        assert win.phase_label.text() == ""
+        assert win.nav.item(NAV_PORZADKI).text() == i18n.t("nav.porzadki")
+        assert win.home_view.tile_popraw.text() == i18n.t("home.tile.fix")
+        assert not win.tasks_view.blad_licznikow.isHidden()
+        assert _task_item(win, "dup_frames").flags() & Qt.ItemIsEnabled
+    finally:
+        win.close()
+
+
+def test_faza_tla_odrzuca_koniec_starego_widoku_i_ustepuje_fazie_pierwszego_planu(qapp, tmp_path,
+                                                                                monkeypatch):
+    """AR-175, dwa kanały fazy: spóźnione `liczenie_w_toku(False)` widoku sprzed przełączenia bazy nie
+    gasi fazy tła nowej bazy; koniec tła w czasie fazy pierwszego planu nie zdejmuje jej - etykieta
+    wraca do pustej dopiero po `_end_phase`.
+    Mutanty: slot bez sprawdzenia nadawcy (stary widok gasi fazę nowej); koniec tła pisze etykietę
+    wprost (faza pierwszego planu znika)."""
+    from horreum.gui import i18n
+    _w_tle(monkeypatch)
+    brama, wszedl, _w, _g = _brama_rachunku(monkeypatch, baza="b.db")
+    win = MainWindow(_seeded_db(tmp_path, "a.db", object_axis=True))
+    try:
+        _po_rachunku(win)
+        stary = win.tasks_view
+        seria = stary._seria
+        win.open_path(_seeded_db(tmp_path, "b.db", object_axis=True))
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        assert win.phase_label.text() == i18n.t("busy.counting_tasks")
+        stary.liczenie_w_toku.emit(seria, False)          # spóźniony koniec serii starej bazy
+        assert win.phase_label.text() == i18n.t("busy.counting_tasks")
+        win._say_phase(i18n.t("busy.refresh_views"))
+        assert win.phase_label.text() == i18n.t("busy.refresh_views")   # pierwszy plan przed tłem
+        brama.set()
+        _czekaj_na(lambda: win.tasks_view._liczniki_thread is None, "rachunek nie skończył")
+        _pompuj()
+        assert win.phase_label.text() == i18n.t("busy.refresh_views")
+        win._end_phase()
+        assert win.phase_label.text() == ""
+    finally:
+        brama.set()
+        win.close()
+
+
+@pytest.mark.parametrize("rodzaj", ["nowsza", "zepsuta"])
+def test_start_w_trybie_watkow_z_baza_odmowiona_stoi_bez_fazy(qapp, tmp_path, monkeypatch, rodzaj):
+    """AR-175 (AR-69, AR-124): kanał fazy tła stoi przed pierwszym `_open_path` - konstruktor z bazą
+    nowszą albo uszkodzoną kończy się `_end_phase` bez montażu i bez wyjątku; okno bez bazy, pasek
+    pusty. Mutant: stan fazy tła zakładany dopiero w montażu (wyjątek z konstruktora)."""
+    from PySide6.QtWidgets import QMessageBox
+    from horreum.gui import i18n
+    _w_tle(monkeypatch)
+    ostrzezenia = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: ostrzezenia.append(a[2]))
+    sciezka = _nowsza_baza(tmp_path) if rodzaj == "nowsza" else _zepsute_bazy(tmp_path)[0]
+    win = MainWindow(sciezka)
+    try:
+        assert len(ostrzezenia) == 1
+        assert win.con is None and win.phase_label.text() == ""
+        assert win.empty_note.text() == i18n.t("main.no_db")
+    finally:
+        win.close()
+
+
+_ZAPYTANIE_BEZ_KONCA = ("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) "
+                        "SELECT count(*) FROM c")
+
+
+@pytest.mark.parametrize("droga", ["przelaczenie", "zamkniecie"])
+def test_przelaczenie_i_zamkniecie_przerywaja_rachunek_w_locie(qapp, tmp_path, monkeypatch, droga):
+    """AR-175: przełączenie bazy i zamknięcie okna czekały na koniec rachunku liczników (bez punktu
+    przerwania). Rachunek tu = zapytanie SQLite, które kończy WYŁĄCZNIE `Connection.interrupt`; stróż
+    przerywa je po bezpieczniku, więc regresja daje czerwień (czas), nie zawis.
+    Mutant: `zatrzymaj_pola` bez `request_cancel` - czeka na stróża."""
+    import threading
+    import time
+    from horreum.gui import tasks as tasks_mod
+    _w_tle(monkeypatch)
+    glowny = threading.get_ident()
+    prawdziwy = tasks_mod._stan_licznikow
+    w_locie = threading.Event()
+
+    def _stan(con):
+        if threading.get_ident() == glowny:
+            return prawdziwy(con)
+        stroz = threading.Timer(_BEZPIECZNIK_LICZNIKOW_S, con.interrupt)
+        stroz.start()
+        try:
+            w_locie.set()
+            con.execute(_ZAPYTANIE_BEZ_KONCA).fetchone()
+        finally:
+            stroz.cancel()
+        return prawdziwy(con)
+    monkeypatch.setattr(tasks_mod, "_stan_licznikow", _stan)
+    win = MainWindow(_seeded_db(tmp_path, "a.db", object_axis=True))
+    try:
+        assert w_locie.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        time.sleep(0.2)                                  # zapytanie w biegu, nie przed nim
+        t0 = time.monotonic()
+        if droga == "przelaczenie":
+            monkeypatch.setattr(tasks_mod, "_stan_licznikow", prawdziwy)
+            win.open_path(_seeded_db(tmp_path, "b.db"))
+        else:
+            win.close()
+        trwalo = time.monotonic() - t0
+        assert trwalo < 5, f"{droga} czekało na rachunek {trwalo:.1f} s"
+    finally:
+        win.close()
+
+
+def test_worker_licznikow_anulowany_przed_polaczeniem_nie_liczy(tmp_path):
+    """AR-175: `request_cancel` przed otwarciem połączenia (przełączenie tuż po starcie wątku) - bieg
+    nie liczy: flaga sprawdzana po otwarciu połączenia. Mutant: bez sprawdzenia flagi - pełny rachunek."""
+    from horreum.gui.tasks import _LicznikiWorker
+    w = _LicznikiWorker(3, _seeded_db(tmp_path, object_axis=True))
+    gotowe, bledy = [], []
+    w.done.connect(lambda gen, wynik: gotowe.append(gen))
+    w.failed.connect(lambda gen, powod: bledy.append(gen))
+    w.request_cancel()
+    w.run()
+    assert gotowe == [] and bledy == [3]
+    assert w._con is None
+
+
+def test_osie_porzadkow_w_trybie_watkow_czytaja_baze_przy_pokazaniu(qapp, tmp_path, monkeypatch):
+    """AR-175: w trybie wątków osie teleskopu i obiektu nie czytają bazy w montażu (zmierzone ~0,3 s
+    i ~0,64 s na kopii pf4); pierwsze pokazanie podstrony czyta ją. Widok samodzielny - jak dotąd, od
+    razu.
+    Mutanty: `TasksView` bez `leniwie` (odczyt w montażu); `showEvent` bez odczytu (pusta tabela)."""
+    from horreum.gui import tasks as tasks_mod
+    _w_tle(monkeypatch)
+    odczyty = []
+    prawdziwy = queries.active_telescopes
+    monkeypatch.setattr(queries, "active_telescopes", lambda con: odczyty.append(1) or prawdziwy(con))
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        os_tel = win.axis_view
+        assert odczyty == [] and os_tel._nieaktualny and os_tel.table.rowCount() == 0
+        assert win.object_view._nieaktualny and win.object_view.review.count() == 0   # oś obiektu też
+        win.resize(1200, 800)
+        win.show()
+        win._show_view(NAV_PORZADKI)
+        win.tasks_view.pages.setCurrentIndex(tasks_mod._PAGE_TELESCOPE)
+        _czekaj_na(lambda: odczyty, "pokazanie osi nie przeczytało bazy")
+        assert not os_tel._nieaktualny and os_tel.table.rowCount() > 0
+    finally:
+        win.close()
+    con = db.connect(_seeded_db(tmp_path, "samodzielny.db", object_axis=True))
+    try:
+        sam = TelescopeAxisView(con)
+        assert not sam._nieaktualny and sam.table.rowCount() > 0
+    finally:
+        con.close()
+
+
+# ---- zmiana motywu: kolory wypalone z roli rodzaju, bez rachunku stanu bazy (AR-175) ----
+
+@pytest.mark.zmienia_motyw
+def test_zmiana_motywu_bez_rachunku_stanu_bazy_na_watku_GUI(qapp, tmp_path, monkeypatch):
+    """AR-175: `_on_theme` liczył CAŁY rachunek liczników Porządków i kolejkę osi obiektu na wątku GUI
+    tylko po to, żeby wypalić nową szarość (1,8-3,0 s na kopii pf4). Teraz przemalowuje elementy z roli
+    rodzaju koloru - zero odczytów stanu, także osi teleskopu (`refresh` czyta trzy zapytania).
+    Mutanty: `refresh_counts()` / `_load_review()` / `axis_view.refresh()` w `_on_theme`."""
+    from horreum.gui import theme
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        wolania = []
+        for nazwa in ("tasks_state", "review_queue", "active_telescopes", "optics_from_files",
+                      "open_telescope_adds"):
+            prawdziwa = getattr(queries, nazwa)
+            monkeypatch.setattr(queries, nazwa,
+                                lambda *a, _n=nazwa, _p=prawdziwa, **k: wolania.append(_n) or _p(*a, **k))
+        win._theme_actions["light"].trigger()
+        win._theme_actions["dark"].trigger()
+        assert wolania == []
+        assert win.planner_view.model._dim == QColor(theme.accents("dark")["secondary_text"])
+    finally:
+        win.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_zmiana_motywu_przemalowuje_kazdy_rodzaj_wiersza_Porzadkow(qapp, tmp_path):
+    """AR-175 (rola rodzaju koloru): żywy i „?” w kolorze tekstu, zero i historia - szarością motywu,
+    po ciemny → jasny → ciemny. `rows.STRONG` tego nie odróżnia („?” i zero mają je oba `False`).
+    Mutant: przemalowanie z `rows.STRONG` - „?” szarzeje."""
+    from PySide6.QtGui import QBrush
+    from horreum.gui import tasks as tasks_mod, theme
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        tasks = win.tasks_view
+        stan, _k = tasks_mod._stan_licznikow(win.con)
+        stan = dict(stan, unresolved_lights=3, copy_conflict_frames=0, superseded_frames=5,
+                    dup_frames=0)
+        tasks._przyloz_liczniki(stan, [{"hdr_hash": None, "hdr_rule": None}])
+        oczekiwane = {"unresolved_lights": None, "copy_conflict_frames": None,
+                      "superseded_frames": "secondary_text", "dup_frames": "secondary_text"}
+        for motyw in ("dark", "light", "dark"):
+            win._on_theme(motyw)
+            for klucz, rola in oczekiwane.items():
+                pedzel = _task_item(win, klucz).foreground()
+                if rola is None:
+                    assert pedzel == QBrush(), (motyw, klucz)
+                else:
+                    assert pedzel.color() == QColor(theme.accents(motyw)[rola]), (motyw, klucz)
+    finally:
+        win.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_zmiana_motywu_przemalowuje_kolejke_osi_obiektu_i_optyke_osi_teleskopu(qapp, tmp_path):
+    """AR-175: wiersze informacyjne kolejki przeglądu (szarość) i komórka optyki z ręki osi teleskopu
+    (kolor werdyktu) idą za motywem w obie strony. Oś teleskopu dotąd zostawała w kolorze motywu
+    poprzedniego (~1,9:1 na białej bazie) do najbliższego `refresh`.
+    Mutanty: `_on_theme` bez osi teleskopu; `odswiez_motyw` osi obiektu bez wierszy informacyjnych."""
+    from horreum.gui import theme
+    from horreum.gui.app import COL_FOCAL, ROLA_RODZAJU_KOLORU
+    sciezka = _seeded_db(tmp_path, object_axis=True)
+    con = db.connect(sciezka)
+    tid = con.execute("SELECT id FROM telescope ORDER BY id LIMIT 1").fetchone()[0]
+    repo.set_telescope_focal(con, telescope_id=tid, focal_mm=1234.0, now=NOW)
+    con.close()
+    win = MainWindow(sciezka)
+
+    def _kolory(rodzaj):
+        kolejka, tabela = win.object_view.review, win.axis_view.table
+        info = {kolejka.item(i).foreground().color().name() for i in range(kolejka.count())
+                if kolejka.item(i).data(ROLA_RODZAJU_KOLORU) == rodzaj}
+        reka = {tabela.item(r, COL_FOCAL).foreground().color().name()
+                for r in range(tabela.rowCount())
+                if tabela.item(r, COL_FOCAL).data(ROLA_RODZAJU_KOLORU) == rodzaj}
+        return info, reka
+    try:
+        assert _kolory("szary")[0] and _kolory("werdykt")[1]
+        for motyw in ("light", "dark", "light"):
+            win._on_theme(motyw)
+            a = theme.accents(motyw)
+            assert _kolory("szary")[0] == {QColor(a["secondary_text"]).name()}, motyw
+            assert _kolory("werdykt")[1] == {QColor(a["warn"]).name()}, motyw
+    finally:
+        win._on_theme(theme.DEFAULT)       # przed `close` - zamknięte okno ma zamknięte połączenie
+        win.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_zmiana_motywu_nie_zapisuje_werdyktu_optyki_osi_teleskopu(qapp, tmp_path, monkeypatch):
+    """AR-175: `odswiez_motyw` osi teleskopu przemalowuje komórki optyki - `setForeground` emituje
+    `itemChanged`, a ten w komórce optyki ZAPISUJE werdykt ręki (`_on_item_changed` → `_on_optics_edited`).
+    Komórka ręki i komórka „nieaktualne” (kolumna automatu inna niż moda plików): zmiana motywu tam
+    i z powrotem - zero zapisów optyki, zero odczytów osi, zero komunikatów, zdarzeń `telescope.*_user_set`
+    tyle samo, kolory z motywu. Mutant: `odswiez_motyw` bez `_loading`."""
+    from horreum.gui import theme
+    from horreum.gui.app import COL_FOCAL, ROLA_RODZAJU_KOLORU
+    sciezka = _seeded_db(tmp_path, object_axis=True)
+    con = db.connect(sciezka)
+    repo.set_telescope_focal(con, telescope_id=1, focal_mm=1234.0, now=NOW)
+    con.close()
+    prawdziwe = queries.optics_from_files
+
+    def _pliki(c):                                  # teleskop 2: moda plików 800 mm, kolumna 794 mm
+        out = dict(prawdziwe(c))
+        from horreum.grouper import FilesOptics
+        out[2] = FilesOptics(focal=800.0, focal_n=3, f_ratio=None, f_ratio_n=0, lights=3,
+                                     lights_without_focal=0)
+        return out
+    monkeypatch.setattr(queries, "optics_from_files", _pliki)
+    win = MainWindow(sciezka)
+    tabela = win.axis_view.table
+
+    def _rodzaje():
+        return {tabela.item(r, COL_FOCAL).data(ROLA_RODZAJU_KOLORU): tabela.item(r, COL_FOCAL)
+                for r in range(tabela.rowCount())}
+
+    def _zdarzenia():
+        return win.con.execute("SELECT count(*) FROM event WHERE verb LIKE 'telescope.%_user_set'"
+                               ).fetchone()[0]
+    try:
+        assert {"werdykt", "szary"} <= set(_rodzaje())
+        przed = _zdarzenia()
+        wolania, komunikaty = [], []
+        for modul, nazwa in ((repo, "set_telescope_focal"), (repo, "set_telescope_f_ratio"),
+                             (queries, "active_telescopes")):
+            p = getattr(modul, nazwa)
+            monkeypatch.setattr(modul, nazwa,
+                                lambda *a, _n=nazwa, _p=p, **k: wolania.append(_n) or _p(*a, **k))
+        win.axis_view.status_message.connect(komunikaty.append)
+        for motyw in ("light", "dark"):
+            win._on_theme(motyw)
+            a = theme.accents(motyw)
+            r = _rodzaje()
+            assert r["werdykt"].foreground().color() == QColor(a["warn"]), motyw
+            assert r["szary"].foreground().color() == QColor(a["secondary_text"]), motyw
+        assert wolania == [] and komunikaty == [] and _zdarzenia() == przed
+    finally:
+        win._on_theme(theme.DEFAULT)
+        win.close()
+
+
+def test_powrot_z_podstrony_osi_bez_zmian_nie_liczy_Porzadkow(qapp, tmp_path, monkeypatch):
+    """AR-175: „← Porządki” z podstrony idzie drogą wejścia (`odswiez_przy_wejsciu`) - bez rachunku, gdy
+    odcisk bazy się nie zmienił (rachunek ~0,76 s na kopii pf4). Mutant: `_on_back` z `refresh_counts()`."""
+    from horreum.gui import tasks as tasks_mod
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        tasks = win.tasks_view
+        wolania = []
+        prawdziwy = tasks_mod._stan_licznikow
+        monkeypatch.setattr(tasks_mod, "_stan_licznikow",
+                            lambda con: wolania.append(1) or prawdziwy(con))
+        tasks.pages.setCurrentIndex(tasks_mod._PAGE_TELESCOPE)
+        tasks._on_back()
+        assert tasks.pages.currentIndex() == tasks_mod._PAGE_LIST and wolania == []
+    finally:
+        win.close()
+
+
+def test_wejscie_z_wiersza_czyta_os_teleskopu_raz(qapp, tmp_path, monkeypatch):
+    """AR-175: oś leniwa, wejście z wiersza Porządków (`otworz_os_teleskopu`: `refresh`, potem pokazanie
+    podstrony) czyta bazę RAZ - `refresh` zdejmuje znacznik odłożonego odczytu, więc `showEvent` nie czyta
+    drugi raz. Mutant: `refresh` bez zdjęcia znacznika (dwa odczyty)."""
+    from horreum.gui import tasks as tasks_mod
+    _w_tle(monkeypatch)
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        win.resize(1200, 800)
+        win.show()
+        win._show_view(NAV_PORZADKI)
+        _pompuj()
+        odczyty = []
+        prawdziwy = queries.optics_from_files
+        monkeypatch.setattr(queries, "optics_from_files", lambda c: odczyty.append(1) or prawdziwy(c))
+        win.tasks_view.otworz_os_teleskopu()
+        for _ in range(5):
+            _pompuj()
+        assert win.tasks_view.pages.currentIndex() == tasks_mod._PAGE_TELESCOPE
+        assert odczyty == [1], odczyty
+    finally:
+        win.close()
+
+
+def test_TasksView_samodzielny_czyta_osie_od_razu(qapp, tmp_path):
+    """AR-175: domyślne `TasksView(leniwie=False)` - widok samodzielny (testy, okno osi) czyta osie
+    w konstruktorze, jak przed zmianą. Mutant: domyślne `leniwie=True`."""
+    from horreum.gui.tasks import TasksView
+    con = db.connect(_seeded_db(tmp_path, object_axis=True))
+    try:
+        tv = TasksView(con)
+        assert not tv.axis_view._nieaktualny and tv.axis_view.table.rowCount() > 0
+        assert not tv.object_view._nieaktualny and tv.object_view.review.count() > 0
+        tv.zatrzymaj_pola()
+    finally:
+        con.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_apply_theme_bez_stylu_zmienia_palete_i_arkusz(qapp, monkeypatch):
+    """AR-175: `_on_theme` woła `apply_theme(styl=False)` - Fusion stoi od `main`, a ponowne `setStyle`
+    to zdarzenie stylu do każdego widżetu. Paleta i arkusz motywu MUSZĄ się zmienić mimo to.
+    Mutant: `styl=False` pomija też paletę albo arkusz."""
+    from horreum.gui import app as app_mod, theme
+    style = []
+    monkeypatch.setattr(type(qapp), "setStyle", lambda self, *a: style.append(a))
+    app_mod.apply_theme(qapp, "light", styl=False)
+    assert style == []
+    assert qapp.styleSheet() == theme.qss("light")
+    assert qapp.palette().color(app_mod.QPalette.Window) == QColor(theme.palette_spec("light")["window"])
+    app_mod.apply_theme(qapp, "dark", styl=False)
+    assert qapp.styleSheet() == theme.qss("dark")
+    assert qapp.palette().color(app_mod.QPalette.Window) == QColor(theme.palette_spec("dark")["window"])
+    app_mod.apply_theme(qapp, "dark")
+    assert len(style) == 1, "pełne `apply_theme` (start w `main`) stawia styl jak dotąd"
+
+
+def test_klik_odlozony_przepada_z_porazka_rachunku(qapp, tmp_path, monkeypatch):
+    """AR-175: klik w wygaszony wiersz przed pierwszym rachunkiem czeka na wynik - ale gdy rachunek
+    padnie (druga porażka serii), klik przepada razem z nim. Następny UDANY rachunek nie otwiera
+    perspektywy sam, bez gestu.
+    Mutant: porażka nie czyści odłożonego kliku - perspektywa otwiera się po kolejnym rachunku."""
+    import sqlite3
+    from PySide6.QtTest import QTest
+    from horreum.gui import tasks as tasks_mod
+    prawdziwy = tasks_mod._stan_licznikow
+    _w_tle(monkeypatch)
+    brama, wszedl, _watki, _glowny = _brama_rachunku(
+        monkeypatch, pada=sqlite3.OperationalError("database is locked"))
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        win.resize(1200, 800)
+        win.show()
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        win._show_view(NAV_PORZADKI)
+        tasks = win.tasks_view
+        otwarte = []
+        tasks.open_collection.connect(otwarte.append)
+        it = _task_item(win, "dup_frames")
+        rect = tasks.tasks.visualItemRect(it)
+        QTest.mouseClick(tasks.tasks.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+        _pompuj()
+        brama.set()
+        _czekaj_na(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(),
+                   "seria rachunku nie padła")
+        assert otwarte == []
+        monkeypatch.setattr(tasks_mod, "_stan_licznikow", prawdziwy)
+        tasks.refresh_counts(w_tle=True)
+        _po_rachunku(win)
+        assert otwarte == [], "klik sprzed porażki odpalił się sam przy następnym rachunku"
+        assert tasks.pages.currentIndex() == 0
+    finally:
+        brama.set()
+        win.close()

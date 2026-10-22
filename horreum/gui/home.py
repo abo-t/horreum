@@ -721,9 +721,16 @@ class HomeView(QWidget):
 
     def ustaw_popraw(self, n):
         """Licznik kafla Popraw - ta sama liczba, co plakietka Porządków (gospodarz podaje ją z tego
-        samego sygnału); przy zerze goły czasownik, jak goła plakietka."""
+        samego sygnału); przy zerze goły czasownik, jak goła plakietka. `None` = rachunek liczników
+        jeszcze trwa (montaż z liczeniem w tle, AR-175): „Popraw · …” i podpowiedź, że liczę - goły
+        czasownik znaczy „nic do poprawy”, a tego jeszcze nie wiadomo."""
+        if n is None:
+            self.tile_popraw.setText(i18n.t("home.tile.fix_count", n="…"))
+            self.tile_popraw.setToolTip(i18n.t("busy.counting_tasks"))
+            return
         self.tile_popraw.setText(i18n.t("home.tile.fix") if n == 0
                                  else i18n.t("home.tile.fix_count", n=n))
+        self.tile_popraw.setToolTip(i18n.t("home.tile.fix_tip"))
 
     def pokaz_recepte(self, recepta):
         """Recepta ostatniego gestu ze strumienia Zbiorów (`grid.Recepta`); pusta zdejmuje ją

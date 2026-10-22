@@ -933,8 +933,11 @@ def test_gest_fakty_kopii_widoczny_tylko_gdy_jest_co_zbierac(qapp, tmp_path):
     view = PipelineView(db_path, now_fn=lambda: NOW)
     try:
         assert not view.btn_copy_facts.isHidden() and view.btn_copy_facts.isEnabled()
-        assert view.btn_copy_facts.text() == i18n.t("pipeline.btn.copy_facts", n=2)
-        assert view.btn_copy_facts.toolTip() == i18n.t_plural("pipeline.tip.copy_facts", 2)
+        # Dwie kopie FITS sprzed 0021 i 0046 - czekają i na fakty, i na bajty (AR-315).
+        assert view.btn_copy_facts.text() == i18n.t("pipeline.btn.copy_both", fakty=2, bajty=2)
+        assert view.btn_copy_facts.toolTip() == " ".join((
+            i18n.t_plural("pipeline.tip.copy_facts", 2), i18n.t_plural("pipeline.tip.copy_bytes", 2),
+            i18n.t("pipeline.tip.copy_how", czas=i18n.t("pipeline.eta.under_minute"))))
         view.btn_copy_facts.click()
         _czekaj_na_etap(view)
         assert _bez_faktow(db_path) == 0, (view.lbl_summary.text(), view.lbl_error.text())
@@ -1099,9 +1102,12 @@ def test_powod_wejscia_z_Porzadkow_linia_nad_akcjami(qapp, tmp_path):
     try:
         assert view.lbl_reason.isHidden()
         view.show_reason(REASON_COPY_FACTS)
-        gest = i18n.t("pipeline.btn.copy_facts", n=2)
+        gest = i18n.t("pipeline.btn.copy_both", fakty=2, bajty=2)
         assert not view.lbl_reason.isHidden()
-        assert view.lbl_reason.text() == i18n.t_plural("pipeline.why.copy_facts", 2, gest=gest)
+        assert view.lbl_reason.text() == " ".join((
+            i18n.t_plural("pipeline.why.copy_facts", 2),
+            i18n.t_plural("pipeline.why.copy_bytes", 2, wiersz=i18n.t("tasks.header_nonprintable_frames")),
+            i18n.t("pipeline.why.copy_gest", gest=gest, czas=i18n.t("pipeline.eta.under_minute"))))
         assert view.lbl_reason.text().startswith("Zebrać fakty kopii: 2 kopie czekają")
         view.show_reason(None)
         assert view.lbl_reason.isHidden()
@@ -1193,7 +1199,8 @@ def test_kazda_linia_raportu_ma_naglowek_etapu(qapp, tmp_path):
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     try:
         linie = {
-            "copy_facts": view._format_result("copy_facts", scan_mod.CopyFactsSummary(rows=1, written=1)),
+            "copy_facts": view._format_result("copy_facts", scan_mod.CopyFactsSummary(
+                rows=1, written=1, rows_facts=1, facts_written=1)),
             "adopt_testimony": view._format_result("adopt_testimony",
                                                    scan_mod.AdoptSummary(rows=1, adopted=1)),
             "stack_history": view._format_result("stack_history", scan_mod.StackHistorySummary()),
@@ -1780,7 +1787,7 @@ def test_gest_fakty_kopii_bez_przejecia_mowi_o_kazdym_etapie_uzupelnien(qapp, tm
         view.btn_copy_facts.click()
         _czekaj_na_etap(view)
         assert view.lbl_summary.text().split("\n") == [
-            "[fakty kopii] uzupełniono 2 z 2",
+            "[fakty kopii] uzupełniono 2 z 2 · sprawdzono bajty nagłówka 2 z 2",
             "[przejęcie zeznania] nic do zrobienia",
             "[historia stosów] nic do zrobienia"]
     finally:

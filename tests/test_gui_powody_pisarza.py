@@ -825,3 +825,42 @@ def test_blad_skladni_makra_mowi_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
     assert view.drawer.result.text() == oczek, view.drawer.result.text()
     view.close()
     con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_ogon_przerwanego_cofniecia_mowi_pliki_nietkniete(jezyk, lang):
+    """AR-318: rdzeń zna pliki NIETKNIĘTE (`UndoResult.untouched`) - zdanie mówi, że zostają w stanie po
+    zapisie, resztę (`remaining - untouched`) „wymaga sprawdzenia”, a ostatni człon - co dokończy cofnięcie.
+    `untouched` 0 albo brak - dotychczasowe zdanie bez obietnicy. Odmiana 1/2/5/12/22 obu członów, EN bez
+    polskich znaków. Falsyfikatory: zła forma `few`/`many`; „dokończy” przy `untouched == 0`."""
+    from horreum.gui.wb_worker import ogon_cofniecia
+    jezyk(lang)
+
+    def _ogon(remaining, untouched):
+        return ogon_cofniecia(writeback.UndoResult(1, [], [], [], cancelled=True, remaining=remaining,
+                                                   untouched=untouched), "Cofnij")[0]
+    pocz = {"pl": " · cofnięcie przerwano na żądanie - ", "en": " · undo stopped on request - "}[lang]
+    nietkniete = {"pl": ["1 nietknięty plik zostaje", "2 nietknięte pliki zostają",
+                         "5 nietkniętych plików zostaje", "12 nietkniętych plików zostaje",
+                         "22 nietknięte pliki zostają"],
+                  "en": ["1 untouched file stays", "2 untouched files stay", "5 untouched files stay",
+                         "12 untouched files stay", "22 untouched files stay"]}[lang]
+    po_zapisie = {"pl": " w stanie po zapisie", "en": " as written"}[lang]
+    assert [i18n.t_plural("wb.undo_cancelled_untouched", n) for n in (1, 2, 5, 12, 22)] == \
+        [pocz + w + po_zapisie for w in nietkniete]
+    sprawdzenia = {"pl": [", 1 wymaga sprawdzenia", ", 2 wymagają sprawdzenia", ", 5 wymaga sprawdzenia",
+                          ", 12 wymaga sprawdzenia", ", 22 wymagają sprawdzenia"],
+                   "en": [", 1 needs checking", ", 2 need checking", ", 5 need checking",
+                          ", 12 need checking", ", 22 need checking"]}[lang]
+    assert [i18n.t_plural("wb.undo_cancelled_also_check", n) for n in (1, 2, 5, 12, 22)] == sprawdzenia
+    dokonczy = {"pl": "; „Cofnij” dokończy cofnięcie", "en": "; “Cofnij” finishes the undo"}[lang]
+    same = _ogon(2, 2)
+    assert same.endswith(pocz + nietkniete[1] + po_zapisie + dokonczy), same
+    mieszane = _ogon(3, 2)
+    assert mieszane.endswith(pocz + nietkniete[1] + po_zapisie + sprawdzenia[0] + dokonczy), mieszane
+    for untouched in (0, None):
+        stare = _ogon(3, untouched)
+        assert stare.endswith(i18n.t_plural("wb.undo_cancelled_check", 3, undo="Cofnij")), stare
+        assert "dokończy" not in stare and "finishes" not in stare, stare
+    if lang == "en":
+        assert not set(same + mieszane) & _POLSKIE, (same, mieszane)

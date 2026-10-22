@@ -1089,3 +1089,95 @@ def test_fakty_i_zbadanie_jedna_transakcja(tmp_path, monkeypatch):
     for p in (a, b):
         assert (_loc(con, p)["hdr_hash"], _loc(con, p)["nonprintable_hash"]) == (None, None)
     con.close()
+
+
+# ═════════════════════════ dwie roboty etapu: fakty i jednorazowe zbadanie bajtów (AR-315)
+
+
+def _fakty_i_bajty(tmp_path):
+    """Dwa XISF jednej klatki (fakty), pojedynczy FITS (same bajty - faktów nie ma z czym porównać)
+    i FITS o dwóch kopiach (fakty i bajty). Zwraca (con, xisf_a, xisf_b, pojedynczy, para_a, para_b)."""
+    root, a, b = _dwie_kopie(tmp_path)
+    f1 = _fits(root / "F" / "jeden.fits", "Ha", n=1)
+    f2a = _fits(root / "F" / "dwa_a.fits", "Ha", n=2)
+    f2b = _fits(root / "G" / "dwa_b.fits", "OIII", n=2)
+    return _baza_sprzed_0021(tmp_path, [a, b, f1, f2a, f2b]), a, b, f1, f2a, f2b
+
+
+def test_kandydaci_dziela_sie_na_fakty_i_same_bajty(tmp_path):
+    """Przycisk Dostawy liczy z JEDNEGO złożenia pełne roboty i kopie: `facts` - kandydaci faktów,
+    `bytes` - WSZYSTKIE kopie FITS niezbadane (para FITS czeka na oba i liczy się w obu), `copies` -
+    unia = lista etapu. Falsyfikator: `bytes` bez kopii czekających też na fakty → 1 zamiast 3;
+    `copies` jako suma robót → 7 zamiast 5."""
+    con, a, b, f1, f2a, f2b = _fakty_i_bajty(tmp_path)
+    czeka = scan.copy_facts_waiting(con)
+    assert czeka == scan.CopyFactsWaiting(facts=4, bytes=3, copies=5)
+    assert czeka.copies == len(scan.copy_facts_candidates(con))
+    fakty, bajty = scan._dwie_roboty(con)
+    assert ({r["path"] for r in fakty}, {r["path"] for r in bajty}) == (
+        {str(a), str(b), str(f2a), str(f2b)}, {str(f1), str(f2a), str(f2b)})
+    scan.backfill_copy_facts(con, now=NOW)
+    assert scan.copy_facts_waiting(con) == scan.CopyFactsWaiting(facts=0, bytes=0, copies=0)
+    con.close()
+
+
+def test_przebieg_liczy_fakty_i_bajty_osobno(tmp_path):
+    """Raport przebiegu liczy robotę faktów (`rows_facts`/`facts_written`) osobno od zbadania bajtów
+    (`rows_bytes`/`bytes_checked`); kopia, która czeka na obie, liczy się w obu. Nowe pola jadą bez
+    błędu migawką postępu (`counts_snapshot`) i zdarzeniem zbiorczym dziennika.
+    Falsyfikator: `facts_written` liczony z `written` (fakty albo zbadanie) → 5 zamiast 4."""
+    from dataclasses import asdict
+    from horreum.gui.progress import counts_snapshot
+    con, *_ = _fakty_i_bajty(tmp_path)
+    ev = con.execute("SELECT max(id) FROM event").fetchone()[0]
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.written, s.rows_facts, s.facts_written, s.rows_bytes, s.bytes_checked) == (
+        5, 5, 4, 4, 3, 3)
+    migawka = counts_snapshot(s)
+    assert (migawka["rows_facts"], migawka["facts_written"], migawka["rows_bytes"]) == (4, 4, 3)
+    zbiorcze = con.execute("SELECT payload FROM event WHERE id > ? AND verb = "
+                           "'location.copy_facts_summary'", (ev,)).fetchone()
+    assert json.loads(zbiorcze["payload"]) == asdict(s)
+    con.close()
+
+
+def test_wiersz_cli_ogona_obecnosci_mowi_o_faktach_i_bajtach_osobno(tmp_path):
+    """`presence --apply` (ogon `_presence_tail`) na prawdziwym rdzeniu: wiersz etapu mówi „zebrane
+    4 z 4” o faktach i „sprawdzone 3 z 3” o bajtach nagłówka, nie jedno „zebrane 5 z 5”. ASCII
+    (konsola cp1250). Falsyfikator: wiersz z `written`/`rows` → „zebrane 5 z 5”."""
+    from horreum import cli
+    con, *_ = _fakty_i_bajty(tmp_path)
+    wiersze = list(cli._presence_tail(con, None, now=NOW))
+    con.close()
+    assert wiersze[0] == ("  fakty kopii: zebrane 4 z 4, bajty naglowka sprawdzone 3 z 3 (niesprawdzone 0, "
+                          "domkniete rownolegle 0, zmienione na dysku 0, brak pliku 0, blad odczytu 0, "
+                          "zapis w toku 0); czeka 0")
+    assert wiersze[0].isascii()
+
+
+def test_robota_domknieta_po_wyborze_listy_to_domkniete_rownolegle(tmp_path, monkeypatch):
+    """Lista przebiegu i jej klasyfikacja (mianowniki `rows_facts`/`rows_bytes`) pochodzą z JEDNEGO
+    złożenia: gdy inna instancja domknie jedyną robotę bajtów zaraz po wyborze listy, przebieg mówi
+    „sprawdzone 0 z 1, domknięte równolegle 1” - nie „0 z 0” przy `rows == 1`. Wiersz CLI (ASCII)
+    mówi o tym samym. Falsyfikator: mianowniki z osobnego SELECT-a po wyborze listy → `rows_bytes == 0`."""
+    from horreum import cli
+    root = tmp_path / "ARCH"
+    pojedynczy = _fits(root / "jeden.fits", "Ha", n=1)
+    con = _baza_sprzed_0021(tmp_path, [pojedynczy])
+    prawdziwe = scan._dwie_roboty
+
+    def _wybor_i_rownolegle_domkniecie(c):
+        import sys
+        wynik = prawdziwe(c)
+        if sys._getframe(1).f_code.co_name != "backfill_copy_facts":
+            return wynik                     # pytanie „czy etap ma kandydatów” (`derive`) - bez wtrącenia
+        for r in wynik[1]:                   # druga instancja bada bajty tej kopii po wyborze listy przebiegu
+            repo.record_nonprintable(c, location_id=r["id"], header_hash=r["header_hash"], wynik=None,
+                                     now=NOW, actor="druga:instancja")
+        return wynik
+    monkeypatch.setattr(scan, "_dwie_roboty", _wybor_i_rownolegle_domkniecie)
+    wiersze = list(cli._presence_tail(con, None, now=NOW))
+    con.close()
+    assert wiersze[0] == ("  fakty kopii: zebrane 0 z 0, bajty naglowka sprawdzone 0 z 1 (niesprawdzone 0, "
+                          "domkniete rownolegle 1, zmienione na dysku 0, brak pliku 0, blad odczytu 0, "
+                          "zapis w toku 0); czeka 0"), wiersze

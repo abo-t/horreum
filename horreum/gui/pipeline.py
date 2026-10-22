@@ -14,6 +14,7 @@ emisja przerzedzona (`progress.should_emit`). Anulowanie = `threading.Event` (st
 wątku przyciskiem, czytane w workerze — bezpieczne międzywątkowo)."""
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -457,6 +458,34 @@ _REVIEW_REASONS = [("no_config", "pipeline.reason.no_config"),
 # niesiony sygnałem gospodarza, nie etykieta (wording mieszka w katalogu `pipeline.why.*`).
 REASON_COPY_FACTS = "copy_facts"
 
+# Szacunek czasu etapu faktów kopii (AR-315). Stała = koszt jednej kopii zmierzony 2026-10-22
+# prawdziwym `scan.backfill_copy_facts` na kopii bazy archiwum, pliki na udziale SMB `R:`: 27,2 i 30,5
+# ms na kopię w dwóch przebiegach (odczyt nagłówka ~24-25 ms, reszta - baza, zdarzenia, bramki;
+# ponowny odczyt tych samych plików kosztuje tyle samo - to obrót SMB na plik, nie pamięć podręczna).
+# Przed biegiem i w jego pierwszych `PROG_TEMPA` kopiach szacunek bierze stałą: tempo z kilkudziesięciu
+# kopii myliło się w tym pomiarze o +63 %, po 200 - o najwyżej 17 %. Na dysku lokalnym stała kłamie
+# w górę, ale tylko do progu - potem mówi tempo tego biegu.
+MS_NA_KOPIE = 30
+PROG_TEMPA = 200
+
+
+def sekundy_pozostale(zrobione, wszystkie, uplynelo_s):
+    """Sekundy do końca etapu faktów kopii: do `PROG_TEMPA` zrobionych kopii ze stałej `MS_NA_KOPIE`,
+    od progu z tempa tego biegu (`uplynelo_s / zrobione`)."""
+    reszta = max(wszystkie - zrobione, 0)
+    if zrobione < PROG_TEMPA:
+        return reszta * MS_NA_KOPIE / 1000
+    return reszta * uplynelo_s / zrobione
+
+
+def zdanie_czasu(sekundy):
+    """„ok. N min” albo „poniżej minuty” (zaokrąglenie do pełnych minut, połowa w górę - `round` Pythona
+    zaokrągla połowę do parzystej) - człon podpowiedzi, linii powodu i postępu etapu faktów kopii."""
+    minuty = int(sekundy / 60 + 0.5)
+    if minuty < 1:
+        return i18n.t("pipeline.eta.under_minute")
+    return i18n.t("pipeline.eta.minutes", n=minuty)
+
 
 def powod_mieszania(con, volume):
     """Guard mieszania serialu (F5R#3) - powód wstrzymania skanu albo `None`. Skan `'?'` do bazy
@@ -624,6 +653,7 @@ class PipelineView(QWidget):
         self._presence_params = None       # ZAMROŻONE parametry ostatniego DRY (apply ich nie liczy)
         self._etap_bez_zrodla = None       # etap, którego źródła wątek tła nie zobaczył („Wskaż katalog…")
         self._copy_facts_waiting = 0       # kopie czekające na fakty (`_sync_copy_facts`)
+        self._start_etapu = time.monotonic()   # start bieżącego etapu - tempo postępu (AR-315)
         self._reason = None                # powód wejścia z innej powierzchni (`show_reason`)
         self._parametry_przebiegu = None   # (etap, parametry) przebiegu w toku albo ostatniego
         self._parametry_ponowienia = None  # zamrożone przy liście nieprzeczytanych („Skanuj ponownie”)
@@ -1175,23 +1205,47 @@ class PipelineView(QWidget):
         (`scan.copy_facts_candidates` BEZ korzenia - sam SELECT, bez `canonize_root`), więc slot
         okna nie dotyka drzewa źródła (AR-31 (3)), a „N" na przycisku znaczy dokładnie „etap ma
         N do zrobienia". Krótkie WŁASNE połączenie (F5R2#4: baza już zmigrowana → `db.connect`;
-        finally zamyka - wiszący czytelnik WAL)."""
-        n = 0
+        finally zamyka - wiszący czytelnik WAL).
+
+        DWIE ROBOTY OSOBNO (AR-315): po aktualizacji programu kopie FITS czekają na jednorazowe
+        sprawdzenie bajtów nagłówka, nie na fakty - napis, podpowiedź i linia powodu mówią, ile
+        czeka na które (`scan.copy_facts_waiting`, to samo złożenie co lista etapu) i ile to potrwa
+        (`MS_NA_KOPIE`); „15598 kopii czeka na fakty” było nieprawdą o każdej z nich. Liczby robót
+        (`facts`, `bytes`) są pełne - kopia FITS czekająca na oba liczy się w obu; widoczność gestu
+        i czas liczą kopie do przeczytania (`copies`), bo każdą czyta się raz."""
+        czeka = scan.CopyFactsWaiting()
         if self._db_path is not None:
             con = db.connect(self._db_path)
             try:
-                n = len(scan.copy_facts_candidates(con))
+                czeka = scan.copy_facts_waiting(con)
             finally:
                 con.close()
+        n = czeka.copies
         self._copy_facts_waiting = n
-        self.btn_copy_facts.setText(i18n.t("pipeline.btn.copy_facts", n=n))
-        self.btn_copy_facts.setToolTip(i18n.t_plural("pipeline.tip.copy_facts", n))
+        if czeka.facts and czeka.bytes:
+            gest = i18n.t("pipeline.btn.copy_both", fakty=czeka.facts, bajty=czeka.bytes)
+        elif czeka.bytes:
+            gest = i18n.t("pipeline.btn.copy_bytes", n=czeka.bytes)
+        else:
+            gest = i18n.t("pipeline.btn.copy_facts", n=czeka.facts)
+        czas = zdanie_czasu(n * MS_NA_KOPIE / 1000)
+        tip, why = [], []
+        if czeka.facts:
+            tip.append(i18n.t_plural("pipeline.tip.copy_facts", czeka.facts))
+            why.append(i18n.t_plural("pipeline.why.copy_facts", czeka.facts))
+        if czeka.bytes:
+            tip.append(i18n.t_plural("pipeline.tip.copy_bytes", czeka.bytes))
+            why.append(i18n.t_plural("pipeline.why.copy_bytes", czeka.bytes,
+                                     wiersz=i18n.t("tasks.header_nonprintable_frames")))
+        tip.append(i18n.t("pipeline.tip.copy_how", czas=czas))
+        why.append(i18n.t("pipeline.why.copy_gest", gest=gest, czas=czas))
+        self.btn_copy_facts.setText(gest)
+        self.btn_copy_facts.setToolTip(" ".join(tip))
         self.btn_copy_facts.setVisible(n > 0)
         if n == 0:
             self._reason = None            # robota zrobiona - powód wejścia przestał być prawdą
         if self._reason == REASON_COPY_FACTS:
-            self.lbl_reason.setText(i18n.t_plural(
-                "pipeline.why.copy_facts", n, gest=i18n.t("pipeline.btn.copy_facts", n=n)))
+            self.lbl_reason.setText(" ".join(why))
         else:
             self.lbl_reason.setText("")
         self.lbl_reason.setVisible(self._reason is not None)
@@ -1582,8 +1636,10 @@ class PipelineView(QWidget):
         self.bar.setValue(done)
         tail = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
         if counts.get("etap") == "copy_facts":        # uzupełnienie faktów kopii (0021)
+            # Czas pozostały (AR-315): etap na całym archiwum po aktualizacji trwa minuty.
+            eta = zdanie_czasu(sekundy_pozostale(done, total, time.monotonic() - self._start_etapu))
             self.lbl_counts.setText(i18n.t("pipeline.counts_copy_facts", done=done, total=total,
-                                           written=counts["written"], tail=tail))
+                                           written=counts["written"], eta=eta, tail=tail))
             return
         if counts.get("etap") == "stack_history":     # uzupełnienie historii stosów (0034)
             self.lbl_counts.setText(i18n.t("pipeline.counts_stack_history", done=done, total=total,
@@ -1602,6 +1658,7 @@ class PipelineView(QWidget):
     def _on_stage_started(self, name):
         # skan: pasek nieokreślony do 1. progresu; etap masowy: busy spinner (bez progresu per-wiersz)
         self._domknij_uzupelnienia(name)
+        self._start_etapu = time.monotonic()      # tempo postępu etapu (`sekundy_pozostale`)
         self.bar.setRange(0, 0)
         self.lbl_counts.setText(i18n.t("pipeline.stage_running", stage=_stage_label(name)))
 
@@ -1793,9 +1850,19 @@ class PipelineView(QWidget):
     def _format_copy_facts(self, s):
         """Linia raportu uzupełnienia faktów kopii (0021). Odmowy tylko, gdy są (QUIET), ale gdy są,
         stoją obok liczby uzupełnionych, a `czeka` mówi, ile zostało na następną dostawę - „uzupełniono
-        540 z 550" bez przyczyny reszty byłoby raportem, który zataja, dlaczego reszta czeka."""
-        czesci = [i18n.t("pipeline.fmt.copy_facts.written", n=s.written, rows=s.rows)]
-        if s.elsewhere:                 # fakty zebrane inną drogą w trakcie - nic nie czeka
+        540 z 550" bez przyczyny reszty byłoby raportem, który zataja, dlaczego reszta czeka.
+
+        Dwie roboty osobno (AR-315): fakty („uzupełniono N z M” po kopiach z klasy faktów) i zbadanie
+        bajtów nagłówka („sprawdzono bajty nagłówka N z M”, z resztą `bytes_unchecked`, gdy jest) -
+        przebieg po aktualizacji, który same bajty sprawdził, nie mówi „uzupełniono 15598 z 15598”."""
+        czesci = []
+        if s.rows_facts or not s.rows_bytes:
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.written", n=s.facts_written, rows=s.rows_facts))
+        if s.rows_bytes:
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.bytes", n=s.bytes_checked, rows=s.rows_bytes))
+        if s.bytes_unchecked:           # dalszy HDU nie do doczytania - kopia czeka na każdą Dostawę
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.bytes_unchecked", n=s.bytes_unchecked))
+        if s.elsewhere:                # fakty zebrane inną drogą w trakcie - nic nie czeka
             czesci.append(i18n.t("pipeline.fmt.copy_facts.elsewhere", n=s.elsewhere))
         if s.stale:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.stale", n=s.stale))

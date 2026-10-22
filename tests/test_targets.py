@@ -1056,3 +1056,58 @@ def test_cli_plan_odmawia_na_niezgodnym_schemacie(tmp_path, capsys):
     c = sqlite3.connect(path)
     assert c.execute("PRAGMA user_version").fetchone()[0] == 8
     c.close()
+
+
+def test_cli_plan_find_M_4_linia_pudla_alias_i_blok_json(con, tmp_path, capsys):
+    """AR-175: `plan --find "M 4"` - kolumna celu mówi alias trafienia („NGC1976 (M 42)”), a linia
+    ASCII mówi, że samo M4 to NGC6121 spoza celów i lista to nazwy zawierające wpis; blok `find_outside`
+    w JSON także przy wierszach. Trafienie dokładne („M 27”) - bez linii i bez bloku.
+    Mutanty: linia tylko przy pustej liście; kolumna z gołym kanonem."""
+    from horreum import cli
+    con.commit()
+    path = str(tmp_path / "h.db")
+    noc = ["--night", "2026-08-15"]
+    assert cli.main(["plan", path, *noc, "--find", "M 4"]) == 0
+    linie = capsys.readouterr().out.splitlines()
+    assert any(x.strip().startswith("NGC1976 (M 42)") for x in linie), linie
+    (pudlo,) = [x for x in linie if x.strip().startswith("szukane ")]
+    assert pudlo == ('  szukane "M 4" = NGC6121: znane katalogowi, poza celami planera; '
+                     'lista: nazwy zawierajace "M 4"')
+    "\n".join(linie).encode("cp1250")
+    assert cli.main(["plan", path, *noc, "--json", "--find", "M 4"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["rows"] and out["find_outside"] == {"canon": "NGC6121", "layer": None, "type": None}
+    assert cli.main(["plan", path, *noc, "--find", "M 27"]) == 0
+    assert not [x for x in capsys.readouterr().out.splitlines() if x.strip().startswith("szukane ")]
+
+
+def test_cli_plan_find_cel_warstwy_niewczytanej_przy_wierszach(con, tmp_path, capsys):
+    """AR-175: `plan --find "LBN 1"` - cel cirrusu, a rdzeń ma trafienia podciągu: linia mówi typ, warstwę
+    i flagę, która ją pokaże, oraz że lista to nazwy zawierające wpis. Mutant: gałąź warstwy zgubiona."""
+    from horreum import cli
+    con.commit()
+    path = str(tmp_path / "h.db")
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--find", "LBN 1"]) == 0
+    (linia,) = [x for x in capsys.readouterr().out.splitlines() if x.strip().startswith("szukane ")]
+    assert linia == ('  szukane "LBN 1" (EmN): cel warstwy cirrus, poza wczytanymi (--layers core,cirrus); '
+                     'lista: nazwy zawierajace "LBN 1"')
+
+
+def test_cli_nazwa_trafienia_spoza_ascii_idzie_przez_norm_ascii(con, tmp_path, capsys, monkeypatch):
+    """AR-175: nazwa trafienia pochodzi z assetu - gdyby przyszły asset wniósł nazwę spoza ASCII, wyjście
+    CLI przy przekierowaniu (cp1250) nie może paść: `plan --find` i `target` drukują ją przez `norm_ascii`,
+    jak echo wpisu. Mutant: `find_via` / `opis` drukowane wprost (`encode("cp1250")` pada)."""
+    from horreum import cli
+    nazwa = "Ōrion " + chr(0x2192) + " M42"                     # znaki spoza cp1250
+    monkeypatch.setattr(targets, "forma_nazwy_trafienia", lambda _n: nazwa)
+    con.commit()
+    path = str(tmp_path / "h.db")
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--find", "M 4"]) == 0
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    assert "NGC1976 (ORION" in out
+    sciezka = con.execute("PRAGMA database_list").fetchone()["file"]
+    assert cli.main(["target", sciezka, "M 4", "--status", "planned"]) == 2
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    assert "NGC1976 (ORION" in out

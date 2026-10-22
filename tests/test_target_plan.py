@@ -677,3 +677,51 @@ def test_cli_target_rozroznia_dwa_stany_sieroctwa(capsys, con):
     # Do S0 lista mówiła „poza katalogiem" także o TYM wierszu — czyli o celu, który stoi
     # w katalogu obok, pod swoją nową nazwą.
     assert "[w katalogu jako C9]" in out
+
+
+# ─────────────────────────── AR-175: szukajka mówi nazwę, którą trafiła (alias), i pudło nazwy znanej
+
+def test_find_matches_mowi_nazwe_trafienia():
+    """AR-175 (wizytacja natywna): „M 4” trafiało M42/M43/M49 podciągiem, a wiersz mówił gołe „NGC1976” -
+    nazwę, której nikt nie wpisał. `find_matches` mówi teraz, KTÓRĄ nazwą rekord trafił (ta sama pętla,
+    te same klucze); kanon - bez aliasu. Rozpakowanie `(dokładne, podciąg)` działa jak dotąd.
+    Mutant: `przez` zawsze z kanonu (aliasy znikają)."""
+    pula = targets.load_targets(targets.ALL_LAYERS)
+    traf = targets.find_matches(pula, "M 4")
+    exact, rest = traf
+    assert exact == () and len(traf) == 2 and traf[1] == rest
+    przez = {t.canon: n for t, n in traf.przez.items()}
+    assert {przez[c] for c in ("NGC1976", "NGC1982", "NGC4472")} == {"M42", "M43", "M49"}
+    assert przez["NGC1976"] == "M42" and przez["NGC4472"] == "M49"
+    fe = targets.find_matches(pula, "Fe")
+    assert {t.canon: n for t, n in fe.przez.items()}["ESO351-030"] == "Sculptor Dwarf Elliptical"
+    assert targets.find_matches(pula, "NGC 70").przez == {}            # prefiks kanonu - kanon
+    m42 = targets.find_matches(pula, "M 42")
+    assert [t.canon for t in m42[0]] == ["NGC1976"] and list(m42.przez.values()) == ["M42"]
+    assert targets.find_matches(pula, "NGC 1976").przez == {}          # wpisany kanon
+    assert targets.forma_nazwy_trafienia("M42") == "M 42"
+    assert targets.forma_nazwy_trafienia("Sculptor Dwarf Elliptical") == "Sculptor Dwarf Elliptical"
+
+
+def test_kandydaci_oznaczenia_niosa_alias_i_porownuja_sie_jak_kanon():
+    """AR-175: kandydaci `resolve_plan_canon` niosą nazwę trafienia („NGC1976 (M 42)”), a porównania
+    i deduplikacja zostają na kanonie (`Kandydat` to `str`). Mutant: kandydaci bez `przez`."""
+    canon, kandydaci = targets.resolve_plan_canon("M 4")
+    assert canon is None and kandydaci[:3] == ("NGC1976", "NGC1982", "NGC4472")
+    assert [k.opis for k in kandydaci[:3]] == ["NGC1976 (M 42)", "NGC1982 (M 43)", "NGC4472 (M 49)"]
+    assert targets.resolve_plan_canon("NGC 70")[1][0].opis == "NGC7000"     # kanonem - bez aliasu
+
+
+def test_cli_target_kandydaci_z_aliasem_i_pudlem(tmp_path, capsys, con):
+    """AR-175: `horreum target "M 4"` mówi kandydatów z aliasem, którym trafili, i że samo M4 to NGC6121
+    spoza celów planera; zdanie odmowy i kod 2 bez zmian, wyjście w cp1250.
+    Mutant: kandydaci bez aliasu; brak linii nazwy znanej."""
+    path = con.execute("PRAGMA database_list").fetchone()["file"]
+    assert cli.main(["target", path, "M 4", "--status", "planned"]) == 2
+    out = capsys.readouterr().out
+    assert "nie wskazuje jednego celu katalogu" in out
+    assert "Kandydaci: NGC1976 (M 42), NGC1982 (M 43), NGC4472 (M 49)" in out
+    assert "'M 4' = NGC6121: znane katalogowi, poza celami planera." in out
+    out.encode("cp1250")
+    assert cli.main(["target", path, "Eastern Veil", "--status", "planned"]) == 2
+    assert "NGC6121" not in capsys.readouterr().out                     # tylko przy nazwie znanej

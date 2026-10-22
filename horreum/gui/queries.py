@@ -4518,9 +4518,11 @@ def pending_renames_for_run(con, run_id):
 
 
 def frame_cards(con, frame_id):
-    """Wszystkie karty jednego frame'a (lustro EAV) do budowy `env` makra i reguł set/add. Sort po
-    (keyword, idx) — makro bierze pierwsze wystąpienie jako env, liczy kardynalność. Zwraca:
-    keyword, idx, value_raw, value_num, value_type, comment."""
+    """Wszystkie karty jednego frame'a (lustro EAV) - `cards_fn` makra (`macro.run_macro`) i reguł set/add.
+    Sort po (keyword, idx): makro liczy z nich kardynalność keyworda i operandy wyrażeń (`env`)
+    z PIERWSZEGO wystąpienia (`macro._build_env`), a wartość zastaną i typ zmiany - z wystąpienia `idx`,
+    które zmiana dotyka (AR-300 b: `macro._evaluate_change`, bramka pola liczby `macro._cyfry_zmiany`).
+    Zwraca: keyword, idx, value_raw, value_num, value_type, comment."""
     return con.execute(
         "SELECT keyword, idx, value_raw, value_num, value_type, comment "
         "FROM cards WHERE frame_id = ? ORDER BY keyword, idx",
@@ -5376,22 +5378,49 @@ def oczekujace_przebiegi_szuflady(con):
     Wpis `pending` związany z operacją ZAMKNIĘTĄ (faza spoza izolujących - `released` po „Zwolnij”,
     `recovered` po odzysku otwartego zapisu) liczy się jak każdy czekający: `repo.begin_inplace_commit`
     wiąże go na nowo przy „Zatwierdź”. Przebiegi wyłączone izolacją oddaje osobno
-    `przebiegi_szuflady_izolowane` - ten sam odczyt (`_przebiegi_kart_szuflady`), druga połowa."""
+    `przebiegi_szuflady_izolowane` - ten sam odczyt (`_przebiegi_kart_szuflady`), druga połowa. Przebiegi
+    nazw wyłączone otwartym zamiarem oddaje `przebiegi_nazw_w_locie` - druga połowa `_przebiegi_nazw_szuflady`
+    (AR-316)."""
     wynik = [{"run_id": r["run_id"], "klinga": "karty", "n": r["n"], "przerwany": r["przerwany"]}
              for r in _przebiegi_kart_szuflady(con) if not r["fazy"]]
-    wynik += [{"run_id": r["run_id"], "klinga": "nazwy", "n": r["n"], "przerwany": bool(r["przerwany"])}
-              for r in con.execute(
+    wynik += [{"run_id": r["run_id"], "klinga": "nazwy", "n": r["n"], "przerwany": r["przerwany"]}
+              for r in _przebiegi_nazw_szuflady(con) if not r["w_locie"]]
+    return wynik
+
+
+def _przebiegi_nazw_szuflady(con):
+    """Przebiegi nazw szuflady z wierszami czekającymi (`pending`), bez przebiegów zmiany obiektu - od
+    NAJNOWSZEGO (`max(id)` czekającego wiersza). JEDEN predykat otwartego zamiaru dla dwóch czytelników
+    (`oczekujace_przebiegi_szuflady`, `przebiegi_nazw_w_locie`, AR-316): `w_locie` - JAKIKOLWIEK wiersz
+    przebiegu ma otwarty zamiar (`in_flight`). `n` - czekające wiersze przebiegu, `przerwany` jak w
+    `oczekujace_przebiegi_szuflady`. Wiersz przeniesienia zmiany obiektu odpada NIESKORELOWANYM `NOT IN`
+    (podzapytanie liczone raz): wariant skorelowany skanował `pending_object_change` (bez indeksu na
+    `rename_id`) na każdy czekający wiersz - na kopii pf4 obciążonej 500 wierszami czekającymi 21,2 ms
+    wobec 0,34 ms (mediana z 300). `IS NOT NULL` w podzapytaniu jest obowiązkowe: NULL na liście `NOT IN`
+    daje NULL dla każdego wiersza i gasi cały odczyt."""
+    return [{"run_id": r["run_id"], "n": r["n"], "przerwany": bool(r["przerwany"]),
+             "w_locie": bool(r["w_locie"])}
+            for r in con.execute(
         "SELECT p.run_id, count(*) AS n, max(p.id) AS ostatni, "
         "  EXISTS (SELECT 1 FROM pending_renames q WHERE q.run_id = p.run_id "
-        "          AND q.status <> 'pending') AS przerwany "
+        "          AND q.status <> 'pending') AS przerwany, "
+        "  EXISTS (SELECT 1 FROM pending_renames f WHERE f.run_id = p.run_id "
+        "          AND f.in_flight IS NOT NULL) AS w_locie "
         "FROM pending_renames p "
         "WHERE p.status = 'pending' "
-        "  AND NOT EXISTS (SELECT 1 FROM pending_renames f WHERE f.run_id = p.run_id "
-        "                  AND f.in_flight IS NOT NULL) "
         "  AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = p.run_id) "
-        "  AND NOT EXISTS (SELECT 1 FROM pending_object_change po WHERE po.rename_id = p.id) "
+        "  AND p.id NOT IN (SELECT po.rename_id FROM pending_object_change po "
+        "                   WHERE po.rename_id IS NOT NULL) "
         "GROUP BY p.run_id ORDER BY ostatni DESC")]
-    return wynik
+
+
+def przebiegi_nazw_w_locie(con):
+    """Przebiegi nazw, których szuflada NIE podejmuje, bo jakiś ich wiersz ma otwarty zamiar (`in_flight`,
+    AR-316): zapis nazw w biegu w innym oknie albo przerwany i czekający na rekoncyliację - żeby szuflada
+    mówiła, ile zmian nazw czeka i co je zwolni, zamiast „pusta”. Słowniki `run_id`, `n` (czekające
+    wiersze), od najnowszego. Druga połowa `_przebiegi_nazw_szuflady` - przebieg jest albo tu, albo
+    w `oczekujace_przebiegi_szuflady`."""
+    return [{"run_id": r["run_id"], "n": r["n"]} for r in _przebiegi_nazw_szuflady(con) if r["w_locie"]]
 
 
 def _przebiegi_kart_szuflady(con):
@@ -5467,16 +5496,47 @@ def klatki_w_szufladzie(con, frame_ids, keyword):
         (json.dumps([int(f) for f in frame_ids]), keyword))}
 
 
-def klatki_commitu_z_obiektem_z_naglowka(con, commit_id):
-    """Ile klatek pod plikami commitu kart (`header_backups` podmienione) ma obiekt ze źródłem `header`
-    (AR-296). Okna kart piszą kartę `OBJECT` tylko tam, gdzie nagłówek obiektu nie niósł, więc po
-    cofnięciu takiego commitu obiekt z nagłówka to obiekt z COFNIĘTEJ karty: „Rozwiąż” po zapisie go
-    nadał, a ani cofnięcie, ani kolejne „Rozwiąż” go nie zdejmuje (zmierzone na rdzeniu, 2026-10-21)."""
-    return con.execute(
-        "SELECT count(DISTINCT l.frame_id) FROM header_backups b "
-        "JOIN location l ON l.id = b.location_id JOIN frame f ON f.id = l.frame_id "
-        "WHERE b.commit_id = ? AND b.unreplaced_at IS NULL "
-        "AND f.object_id IS NOT NULL AND f.object_source = 'header'", (commit_id,)).fetchone()[0]
+def niedokonczone_cofniecia_kart(con):
+    """Commity kart z cofnięciem NIEDOKOŃCZONYM (AR-318) - wiersz Porządków „Dokończ cofnięcie”: lista
+    `(commit_id, liczba plików czekających)` od najstarszego. Droga powrotu ze STANU, nie z pamięci osi:
+    recepta paska ginie z programem, a ten odczyt mówi to samo po restarcie.
+
+    Predykat:
+      1. ZACZĘTE - commit ma jakikolwiek ślad próby cofnięcia: para (commit, plik) z więcej niż jedną
+         operacją `inplace_op` (operacja `commit` + `undo` - kształt z indeksu pokrywającego
+         `idx_inplace_op_commit`, bez czytania faz), ślad drogi atomowej (`atomic_undo`, z `synced_at`
+         i bez) albo wstrzymanie cofnięcia; kandydat potwierdzony regułą rdzenia
+         (`writeback._slad_proby_cofniecia` choć jednego backupu - para z dwiema operacjami `commit`
+         nie jest próbą cofnięcia);
+      2. per zaczęty commit - backupy, które czekają (`writeback._czeka_na_dokonczenie`): bez dowodu
+         zakończenia, bez nowszego żywego zapisu lokacji (`_nowszy_zywy_zapis` - lokacja nadpisana
+         nowszym commitem, także tą samą kartą, nie jest resztą tego cofnięcia), baza opisuje plik jako
+         wynik commitu;
+      3. BEZ commitów przebiegów „Zmień obiekt…”/„Uzgodnij pliki…” (`object_change_run`): ich cofnięcie
+         to przebieg karta → plik → baza, a drogą powrotu jest wiersz „Przerwane zmiany obiektu”.
+
+    Granica: commit wyłącznie atomowy cofany przed 0044 i przerwany nie ma śladu „zaczęcia” - wiersza
+    nie dostanie (droga: recepta w sesji, CLI). Na kopii `pf4` (2026-10-22) wynik pusty, kandydaci
+    1,07 ms (sonda fazy planu)."""
+    from horreum import writeback          # lazy: rdzeń pisarza ciągnie astropy (wołający już go ma)
+    kandydaci = [r[0] for r in con.execute(
+        "SELECT c.id FROM commits c "
+        "WHERE c.id IN (SELECT commit_id FROM inplace_op WHERE commit_id IS NOT NULL "
+        "               GROUP BY commit_id, location_id HAVING count(*) > 1 "
+        "               UNION SELECT hb.commit_id FROM atomic_undo au "
+        "               JOIN header_backups hb ON hb.id = au.backup_id "
+        "               UNION SELECT commit_id FROM withheld_write WHERE kind = 'undo') "
+        "AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = c.run_id) "
+        "ORDER BY c.id")]
+    wynik = []
+    for commit_id in kandydaci:
+        backupy = writeback.backups_for_commit(con, commit_id)
+        if not any(writeback._slad_proby_cofniecia(con, commit_id, b) for b in backupy):
+            continue
+        n = sum(1 for b in backupy if writeback._czeka_na_dokonczenie(con, commit_id, b))
+        if n:
+            wynik.append((commit_id, n))
+    return wynik
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po

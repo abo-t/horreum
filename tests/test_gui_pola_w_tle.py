@@ -848,13 +848,13 @@ def test_ogon_gestu_mierzy_poza_widokiem_na_zbiorze_przylozonym(qapp, tmp_path, 
 def test_porazka_skladu_w_tle_czeka_na_edytor_i_nie_zatwierdza_polowy_wpisu(qapp, tmp_path,
                                                                             monkeypatch):
     """AR-83: skład w tle pada RAZ (błąd SQL w workerze), gdy edytor komórki jest otwarty z połową
-    wpisu. Ponowienie (nowy bieg workera, AR-302) czeka na zamknięcie edytora jak wynik udany: edytor
-    żyje, w szufladzie nic, a po dokończeniu wpisu Enterem ląduje pełny wpis i dopiero wtedy zbiór
-    przykłada się z ponowionego biegu - wątek GUI nie liczy składu ani razu.
+    wpisu. Ponowienie (nowy bieg workera, AR-302) rusza od razu, a jego WYNIK czeka na zamknięcie edytora
+    jak każdy wynik udany (AR-313): edytor żyje, w szufladzie nic, a po dokończeniu wpisu Enterem ląduje
+    pełny wpis i dopiero wtedy zbiór przykłada się z ponowionego biegu - wątek GUI nie liczy składu ani razu.
 
-    Falsyfikator: przeładowanie synchroniczne w `_on_zbior_failed` (`refresh()`) - reset modelu domyka
-    edytor z zapisem, w szufladzie „EQ”, a skład liczy wątek GUI. Odłożenie samego zamiaru ponowienia nie
-    jest tu nośne: wynik ponowienia czeka na edytor i tak (`_on_zbior_done`) - zmierzone mutantem."""
+    Falsyfikatory: przeładowanie synchroniczne w `_on_zbior_failed` (`refresh()`) - reset modelu domyka
+    edytor z zapisem, w szufladzie „EQ”, a skład liczy wątek GUI; `_on_zbior_done` bez czekania na edytor -
+    przyłożenie wyniku ponowienia domyka edytor w połowie wpisu."""
     import sqlite3
     from PySide6.QtTest import QTest
     from horreum import writeback
@@ -1165,6 +1165,8 @@ def test_gest_zbiorow_liczy_liczniki_porzadkow_w_tle(qapp, tmp_path, monkeypatch
     try:
         grid, tasks = win.grid_view, win.tasks_view
         _czekaj_na_pola(grid)
+        # Rachunek montażu liczy się w tle (AR-175) - brama nie może złapać jego biegu.
+        _czekaj(lambda: tasks._liczniki_thread is None, "rachunek montażu nie skończył")
         przed = _liczba_wiersza(tasks, "unresolved_lights")
         badge = []
         tasks.counts_changed.connect(badge.append)
@@ -1204,6 +1206,7 @@ def test_koniec_przebiegu_liczy_liczniki_w_tle_a_niewidoczna_os_czeka(qapp, tmp_
     try:
         tasks = win.tasks_view
         _czekaj_na_pola(win.grid_view)
+        _czekaj(lambda: tasks._liczniki_thread is None, "rachunek montażu nie skończył")   # AR-175
         odswiezenia = []
         oryginal = ObjectAxisView.refresh
         monkeypatch.setattr(ObjectAxisView, "refresh",
@@ -1255,6 +1258,7 @@ def test_odczyt_synchroniczny_wyprzedza_wynik_licznikow_w_drodze(qapp, tmp_path,
     try:
         tasks = win.tasks_view
         _czekaj_na_pola(win.grid_view)
+        _czekaj(lambda: tasks._liczniki_thread is None, "rachunek montażu nie skończył")   # AR-175
         przylozenia = []
         oryginal = tasks_mod.TasksView._przyloz_liczniki
         monkeypatch.setattr(tasks_mod.TasksView, "_przyloz_liczniki",
@@ -1284,6 +1288,7 @@ def test_zamkniecie_okna_w_trakcie_licznikow_zbiera_watek(qapp, tmp_path, monkey
     win = MainWindow(_baza_obiektu(tmp_path))
     tasks = win.tasks_view
     _czekaj_na_pola(win.grid_view)
+    _czekaj(lambda: tasks._liczniki_thread is None, "rachunek montażu nie skończył")   # AR-175
     przylozenia = []
     oryginal = tasks_mod.TasksView._przyloz_liczniki
     monkeypatch.setattr(tasks_mod.TasksView, "_przyloz_liczniki",
@@ -1917,6 +1922,7 @@ def test_liczniki_porzadkow_druga_porazka_mowi_klasa_zamiast_wyjatku(qapp, tmp_p
         return prawdziwy_stan(con)
     try:
         _czekaj_na_pola(win.grid_view)
+        _czekaj(lambda: tasks._liczniki_thread is None, "rachunek montażu nie skończył")   # AR-175
         monkeypatch.setattr(tasks_mod, "_stan_licznikow", _stan)
         tasks._db_path = str(tmp_path / "odpiety" / "obj.db")
         tasks.refresh_counts(w_tle=True)
@@ -1971,6 +1977,7 @@ def test_wejscie_w_porzadki_i_gest_w_tle_na_bazie_ktora_nie_jest_baza_mowia_zdan
     prawdziwe = tasks.con
     try:
         _czekaj_na_pola(win.grid_view)
+        _czekaj(lambda: tasks._liczniki_thread is None, "rachunek montażu nie skończył")   # AR-175
         tasks.refresh_counts()                       # odcisk przyłożonego rachunku stoi
         assert tasks._odcisk_licznikow is not None and tasks.blad_licznikow.isHidden()
         zdanie = i18n.t("tasks.counts_failed",
@@ -1999,6 +2006,7 @@ def test_blad_programu_w_rachunku_licznikow_leci_dalej(qapp, tmp_path, monkeypat
     win = MainWindow(_baza_obiektu(tmp_path))
     try:
         _czekaj_na_pola(win.grid_view)
+        _czekaj(lambda: win.tasks_view._liczniki_thread is None, "rachunek montażu nie skończył")   # AR-175
 
         def _pada(con):
             raise RuntimeError("błąd programu")
@@ -2008,3 +2016,46 @@ def test_blad_programu_w_rachunku_licznikow_leci_dalej(qapp, tmp_path, monkeypat
         assert win.tasks_view.blad_licznikow.isHidden()
     finally:
         win.close()
+
+
+def test_porazka_skladu_przy_otwartym_edytorze_ponawia_od_razu_wynik_czeka(qapp, tmp_path, monkeypatch):
+    """AR-313: porażka składu w tle przy otwartym edytorze komórki nie odkłada ZAMIARU ponowienia - ponowienie
+    biegnie od razu w wątku tła, a na edytor czeka już jego WYNIK. Przy wciąż otwartym edytorze: dwa biegi
+    w wątku tła (porażka i ponowienie), wynik odłożony; po Enterze przyłożenie bez trzeciego biegu i bez składu
+    na wątku GUI. Falsyfikator: odłożenie samego zamiaru (ponowienie dopiero po zamknięciu edytora - jeden bieg
+    w tle przed Enterem, odłożony zamiar bez wyniku)."""
+    import sqlite3
+    from PySide6.QtTest import QTest
+    from test_gui_drogi_reki import _baza_z_fitsem, _otworz_edytor
+    view, con = _widok_w_tle(_baza_z_fitsem(tmp_path, "ponowienie"))
+    view._writeback_async = False
+    try:
+        przylozone = _szpieg_przylozen(monkeypatch)
+        glowny = threading.get_ident()
+        prawdziwe = queries.cards_pivot
+        biegi_tla, na_glownym = [], []
+
+        def _cp(c, ids, kws):
+            if threading.get_ident() == glowny:
+                na_glownym.append(1)
+                return prawdziwe(c, ids, kws)
+            biegi_tla.append(1)
+            if len(biegi_tla) == 1:
+                raise sqlite3.OperationalError("awaria składu w tle")
+            return prawdziwe(c, ids, kws)
+        monkeypatch.setattr(queries, "cards_pivot", _cp)
+        idx, ed, _inny = _otworz_edytor(qapp, view, "TELESCOP")
+        ed.wartosc.selectAll()
+        QTest.keyClicks(ed.wartosc, "EQ")
+        view._on_facet_change({})
+        _czekaj(lambda: view._zbior_worker is None and view._zbior_odlozony is not None,
+                "ponowienie w tle nie oddało wyniku przy otwartym edytorze")
+        assert view.table.indexWidget(idx) is ed, "edytor żyje"
+        assert len(biegi_tla) == 2 and view._zbior_odlozony[1] is not None, (biegi_tla, view._zbior_odlozony)
+        assert przylozone == [] and view._pending_count() == 0
+        QTest.keyClicks(ed.wartosc, "6")
+        QTest.keyClick(ed.wartosc, Qt.Key_Return)
+        _czekaj(lambda: not view._zbior_w_drodze() and view._zbior_worker is None, "przyłożenie po Enterze")
+        assert len(przylozone) >= 1 and len(biegi_tla) == 2 and na_glownym == [], (biegi_tla, na_glownym)
+    finally:
+        _zamknij(view, con)

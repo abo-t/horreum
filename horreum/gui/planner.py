@@ -18,16 +18,18 @@ w biegu — każda zmiana to nowa generacja, stary wynik ląduje w koszu.
 """
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timezone
 
-from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QObject, QSettings, Qt,
-                            QThread, QTimer, Signal, Slot)
-from PySide6.QtGui import QColor
+from PySide6.QtCore import (QAbstractTableModel, QDate, QEvent, QModelIndex, QObject, QSettings,
+                            Qt, QThread, QTimer, Signal, Slot)
+from PySide6.QtGui import QColor, QFontMetricsF
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QTableView,
-                               QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
+                               QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QStyle,
+                               QTableView, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
+                               QWidget)
 
 from horreum import db, repo, sky, targets
 from horreum.gui import i18n, planner_model as pm, queries, theme
@@ -42,12 +44,17 @@ _DEBOUNCE_MS = 300
 # Spinbox na „1,00" nie potrzebuje pół ekranu (wiz T5 #12) — kolumna kontrolek ma być kolumną.
 _SPIN_W = 96
 
-# Kolumny listy: (klucz i18n, pole `ViewRow`). Kolumny idą do TREŚCI (`ResizeToContents`), a nadmiar
-# zjada ostatnia — Notatka (wiz T5 #4). Elizji NIE MA i obiecywać jej nie wolno: `ResizeToContents`
-# z definicji nie schodzi poniżej treści, więc `ElideRight` niżej broni tylko komórek przyciętych
-# ręcznie przez usera. Wcześniejszy zapis mówił o „elizji 11 kolumn przy 1146 px" i o stałej
-# `_STRETCH_COL = 6` (pokrycie), której NIC nie czytało — oba były nieprawdą, patrz `_MIN_W`.
-_COLUMNS = (("planner.col_canon", "canon"), ("planner.col_type", "type"),
+# Kolumny listy: (klucz i18n, pole `ViewRow`). Kolumny mają szerokość TREŚCI, a nadmiar zjada ostatnia
+# - Notatka (wiz T5 #4). Szerokość liczy WIDOK, RAZ NA WYNIK, metryką fontu (`szerokosci_kolumn`,
+# `PlannerView._dopasuj_kolumny`), a sekcje są `Fixed` (AR-175): `ResizeToContents` przeliczał je
+# przy każdym zdarzeniu stylu i `dataChanged` przejściem po WSZYSTKICH komórkach - zmiana motywu to
+# było ~341 tys. wywołań `data` i 5,3-5,8 s okna na kopii pf4, także przy planerze niewidocznym.
+# Szerokość nie schodzi poniżej treści, więc elizji nie ma i obiecywać jej nie wolno; `ElideRight`
+# niżej broni tylko komórek, których treść przerosła szerokość (zmiana fontu przed przeliczeniem).
+# Wcześniejszy zapis mówił o „elizji 11 kolumn przy 1146 px" i o stałej `_STRETCH_COL = 6`
+# (pokrycie), której NIC nie czytało - oba były nieprawdą, patrz `_MIN_W`.
+# Kolumna „Cel” czyta `label` - kanon, a przy trafieniu szukajki aliasem także alias (AR-175).
+_COLUMNS = (("planner.col_canon", "label"), ("planner.col_type", "type"),
             ("planner.col_size", "size"), ("planner.col_culmination", "culmination"),
             ("planner.col_window", "window"), ("planner.col_rig", "rig"),
             ("planner.col_fill", "fill"),
@@ -111,6 +118,20 @@ _PARK_UNSAID = "unsaid"
 
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def szerokosci_kolumn(metryka, wiersze, pola, margines, podpowiedzi):
+    """Szerokość każdej kolumny listy planera = najszerszy tekst komórki (`metryka(tekst)` - szerokość
+    w px, sufit) plus `margines` elementu widoku, nie mniej niż `podpowiedzi[c]` (podpowiedź sekcji
+    nagłówka). To ta sama liczba, którą daje `ResizeToContents` (`max(sizeHintForColumn,
+    sectionSizeHint)`) dla komórek z samym tekstem - zmierzone natywnie: 11/11 kolumn równo, PL i EN,
+    485 wierszy kopii pf4; ~30-40 ms wobec ~1,1-1,4 s przejścia Qt. Czysta funkcja: metryka podana
+    z zewnątrz, więc rachunek da się sprawdzić bez okna (AR-175)."""
+    out = []
+    for c, pole in enumerate(pola):
+        tekst = max((metryka(str(getattr(w, pole))) for w in wiersze), default=0)
+        out.append(max(tekst + margines, podpowiedzi[c]))
+    return out
 
 
 class PlanWorker(QObject):
@@ -348,6 +369,7 @@ class PlannerView(QWidget):
     def __init__(self, con, db_path=None, now_fn=_utc_now_iso, parent=None, off_thread=True,
                  theme_name=None):
         super().__init__(parent)
+        self._kolumny_zamowione = False  # przeliczenie szerokości po `FontChange` czeka w kolejce
         self.con = con
         self._db_path = db_path
         self._now = now_fn
@@ -459,7 +481,9 @@ class PlannerView(QWidget):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        # Szerokości liczy `_dopasuj_kolumny` raz na wynik (AR-175, patrz `_COLUMNS`); użytkownik ich
+        # nie przeciąga - jak przy `ResizeToContents`.
+        hh.setSectionResizeMode(QHeaderView.Fixed)
         # Nadmiar szerokości idzie do NOTATKI, nie do pokrycia (wiz T5 #4): pokrycie miało 437 px
         # przy najdłuższej treści 223 px (392/429 wierszy niesie samo „bez klatek"), a notatka —
         # jedyne pole o nieograniczonej długości — dostawała 57 px.
@@ -1244,6 +1268,10 @@ class PlannerView(QWidget):
             (warns if level == "warn" else infos).append(text)
         if find:
             infos.insert(0, i18n.t("planner.find_note"))
+            # Nazwa znana katalogowi, a lista ma same trafienia podciągu (AR-175) - zdanie pierwsze.
+            pudlo = pm.find_miss_text(result, find)
+            if pudlo:
+                infos.insert(0, pudlo)
         self.warn_label.setText("\n".join(f"⚠ {t}" for t in warns))
         self.warn_label.setVisible(bool(warns))
         self.notes_label.setText("\n".join(infos))
@@ -1257,6 +1285,7 @@ class PlannerView(QWidget):
         # razem z kanonem i oddajemy, gdy zaznaczenie wróci na TEN SAM cel.
         typed = (self._keep_canon, self.panel_note.text()) if self.panel_note.isModified() else None
         self.model.set_rows(rows)
+        self._dopasuj_kolumny()
         empty = not rows
         self.empty_note.setText(pm.empty_find_text(self._result, self.find_edit.text().strip())
                                 if self.find_edit.text().strip()
@@ -1277,6 +1306,34 @@ class PlannerView(QWidget):
         if typed is not None and typed[0] == keep and self._selected_canon() == keep:
             self.panel_note.setText(typed[1])
             self.panel_note.setModified(True)
+
+    def _dopasuj_kolumny(self):
+        """Szerokości kolumn listy do treści (`szerokosci_kolumn`, AR-175) - raz na wynik, przy planerze
+        widocznym i niewidocznym (przejście po wierszach metryką fontu, ~30-40 ms na 485 wierszach).
+        Margines elementu widoku to wzór `QCommonStyle` dla komórki z tekstem: 2 × (`PM_FocusFrameHMargin`
+        + 1) i linia siatki. Ostatnia kolumna (Notatka) rozciąga się do reszty szerokości - bez wpisu."""
+        t, hh = self.table, self.table.horizontalHeader()
+        fm = QFontMetricsF(t.font())
+        margines = (2 * (t.style().pixelMetric(QStyle.PM_FocusFrameHMargin, None, t) + 1)
+                    + (1 if t.showGrid() else 0))
+        szer = szerokosci_kolumn(lambda s: math.ceil(fm.horizontalAdvance(s)), self.model._rows,
+                                 [pole for _klucz, pole in _COLUMNS], margines,
+                                 [hh.sectionSizeHint(c) for c in range(len(_COLUMNS))])
+        for c, w in enumerate(szer[:-1]):
+            hh.resizeSection(c, w)
+
+    def changeEvent(self, event):
+        """Zmiana fontu (aplikacji albo widoku) zmienia szerokość tekstu - kolumny liczą się od nowa,
+        RAZ na serię zdarzeń (`QTimer.singleShot(0)`): Qt doręcza `FontChange` każdemu dziecku po
+        kolei, a przeliczenie ma iść po ostatnim, nie przy każdym."""
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange and not self._kolumny_zamowione:
+            self._kolumny_zamowione = True
+            QTimer.singleShot(0, self, self._po_zmianie_fontu)
+
+    def _po_zmianie_fontu(self):
+        self._kolumny_zamowione = False
+        self._dopasuj_kolumny()
 
     # ---------------------------------------------------------------- panel wiersza (ZAPIS)
 

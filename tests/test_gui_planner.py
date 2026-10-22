@@ -989,3 +989,133 @@ def test_brak_stanowiska_przy_obecnym_stanowisku_szczegol_z_miejscem_rdzenia(qap
             time.sleep(0.005)
         view.close()
         con.close()
+
+
+# ───────────────────────── AR-175: szerokości kolumn raz na wynik, trafienie szukajki aliasem
+
+def _pompuj(n=20):
+    from PySide6.QtCore import QCoreApplication, QEventLoop
+    for _ in range(n):
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+
+
+@pytest.fixture
+def licznik_data(monkeypatch):
+    """Licznik wywołań `PlannerTableModel.data` - podmiana metody KLASY przed budową widoku."""
+    from horreum.gui import planner as P
+    licz = [0]
+    prawdziwe = P.PlannerTableModel.data
+
+    def _data(self, *a, **k):
+        licz[0] += 1
+        return prawdziwe(self, *a, **k)
+    monkeypatch.setattr(P.PlannerTableModel, "data", _data)
+    return licz
+
+
+@pytest.fixture
+def widoczny(qapp, tmp_path, ustawienia, licznik_data):
+    """Ekran INLINE pokazany (offscreen) - rysuje komórki, jak ekran na wierzchu."""
+    con = _seed(str(tmp_path / "planer.db"))
+    v = PlannerView(con, db_path=None)
+    v.night_edit.setDate(QDate(2026, 8, 15))
+    v.replan()
+    v.resize(1400, 800)
+    v.show()
+    _pompuj()
+    yield v
+    v.close()
+    con.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_zmiana_motywu_nie_przelicza_szerokosci_kolumn_planera(qapp, widoczny, licznik_data):
+    """AR-175: `ResizeToContents` przeliczał szerokości przejściem po WSZYSTKICH komórkach przy każdym
+    zdarzeniu stylu i `dataChanged` - zmiana motywu to było ~341 tys. wywołań `data` i 5,3-5,8 s okna
+    na kopii pf4. Teraz model pyta się tylko o komórki rysowane - mniej wywołań niż komórek listy.
+    Mutant: `ResizeToContents` z powrotem (pełne przejście, ~7 ról na komórkę)."""
+    from horreum.gui import app as app_mod
+    from horreum.gui import planner as P
+    komorki = widoczny.model.rowCount() * len(P._COLUMNS)
+    assert widoczny.model.rowCount() > 100, "fixture za mała - próg bez sensu"
+    for motyw in ("light", "dark"):
+        licznik_data[0] = 0
+        app_mod.apply_theme(qapp, motyw, styl=False)
+        widoczny.use_theme(motyw)
+        _pompuj()
+        assert licznik_data[0] < komorki, (motyw, licznik_data[0], komorki)
+
+
+def test_przeliczenie_planu_nie_pyta_modelu_o_szerokosci(widoczny, licznik_data):
+    """AR-175: przeliczenie planu przy planerze na wierzchu kosztowało ~1 s przejścia Qt po komórkach;
+    szerokości liczy metryka fontu (`szerokosci_kolumn`). Mutant: `resizeColumnsToContents()`
+    w `_render_rows` (przejście po wszystkich komórkach)."""
+    from horreum.gui import planner as P
+    licznik_data[0] = 0
+    widoczny.min_size.setValue(widoczny.min_size.value() + 1)
+    widoczny.replan()
+    _pompuj()
+    assert 0 < licznik_data[0] < widoczny.model.rowCount() * len(P._COLUMNS), licznik_data[0]
+
+
+def test_szerokosci_kolumn_z_metryka_wstrzyknieta():
+    """AR-175, czysta funkcja szerokości (offscreen nie ma bazy fontów - metryka podana z zewnątrz):
+    najszerszy tekst + margines elementu, nie mniej niż podpowiedź nagłówka; pusta lista - podpowiedź.
+    Mutanty: margines zgubiony; podpowiedź nagłówka zgubiona (wąska kolumna liczb pod szerokim
+    nagłówkiem)."""
+    from types import SimpleNamespace
+
+    from horreum.gui.planner import szerokosci_kolumn
+    wiersze = [SimpleNamespace(a="abc", b="1"), SimpleNamespace(a="abcdef", b="22")]
+    metryka = lambda s: 7 * len(s)                       # noqa: E731 - metryka testowa
+    assert szerokosci_kolumn(metryka, wiersze, ["a", "b"], 5, [10, 40]) == [47, 40]
+    assert szerokosci_kolumn(metryka, [], ["a", "b"], 5, [10, 40]) == [10, 40]
+
+
+def test_zmiana_fontu_przelicza_kolumny_raz_na_serie_zdarzen(widoczny):
+    """AR-175: sekcje `Fixed` nie idą za fontem same - `FontChange` zamawia przeliczenie RAZ na serię
+    zdarzeń (`QTimer.singleShot(0)`), a szerokość kolumny „Cel” rośnie z większym fontem.
+    Mutanty: przeliczenie przy każdym zdarzeniu (dwa); bez obsługi `FontChange` (zero)."""
+    hh = widoczny.table.horizontalHeader()
+    przed = hh.sectionSize(0)
+    wolania = []
+    prawdziwe = widoczny._dopasuj_kolumny
+    widoczny._dopasuj_kolumny = lambda: (wolania.append(1), prawdziwe())
+    f = widoczny.font()
+    f.setPointSizeF(f.pointSizeF() * 1.5)
+    widoczny.setFont(f)
+    f.setPointSizeF(f.pointSizeF() * 1.2)
+    widoczny.setFont(f)
+    _pompuj()
+    assert wolania == [1]
+    assert hh.sectionSize(0) > przed
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_szukanie_M_4_na_ekranie_planera(view, lang):
+    """AR-175 (wizytacja natywna): „M 4” trafia M42/M43/M49 podciągiem - kolumna „Cel” mówi alias, którym
+    trafiło („NGC1976 (M 42)”), a pierwsza nota mówi, że samo M4 (NGC6121) jest poza celami planera.
+    Zaznaczenie i kuratela zostają na kanonie. Prawdziwe pisanie i Enter w polu szukania.
+    Mutant: kolumna czyta `canon` (alias znika)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from horreum.gui import i18n
+    i18n.set_lang(lang)
+    try:
+        QTest.keyClicks(view.find_edit, "M 4")
+        QTest.keyClick(view.find_edit, Qt.Key_Return)
+        etykiety = {view.model.row_at(r).canon: view.model.data(view.model.index(r, 0))
+                    for r in range(view.model.rowCount())}
+        assert etykiety["NGC1976"] == "NGC1976 (M 42)" and etykiety["NGC4472"] == "NGC4472 (M 49)"
+        pierwsza = view.notes_label.text().splitlines()[0]
+        assert "NGC6121" in pierwsza and "M 4" in pierwsza
+        assert pierwsza == i18n.t("planner.find_hits_outside",
+                                  name=i18n.t("planner.find_as", needle="M 4", canon="NGC6121"),
+                                  needle="M 4")
+        r = next(r for r in range(view.model.rowCount()) if view.model.row_at(r).canon == "NGC1976")
+        view.table.selectRow(r)
+        assert view._selected_canon() == "NGC1976"
+        assert view.panel.title() == i18n.t("planner.panel_of", canon="NGC1976")
+    finally:
+        i18n.set_lang("pl")

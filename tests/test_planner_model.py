@@ -524,3 +524,54 @@ def test_park_overview_ten_sam_material_co_cli(con):
     assert by_canon["RC8"]["in_park"] == 1 and by_canon["A140R"]["in_park"] is None
     assert by_canon["A140R"]["lights"] == 4
     assert [r["lights"] for r in rows] == sorted((r["lights"] for r in rows), reverse=True)
+
+
+# ─────────────────────── AR-175: wiersz trafienia mówi alias, pudło nazwy znanej przy samym podciągu
+
+def test_plan_find_mowi_pudlo_przy_samych_trafieniach_podciagu(con):
+    """AR-175: `find_outside` liczony był wyłącznie przy pustej puli - „M 4” dawało trzy wiersze bez
+    zdania, że samo M4 (NGC6121) jest poza celami. Teraz także przy samych trafieniach podciągu;
+    trafienie dokładne - bez. `find_via` niesie alias wierszy trafionych nie-kanonem.
+    Mutant: `find_outside` tylko przy pustej puli."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), find="M 4", limit=None)
+    assert {r.target.canon for r in res.rows} >= {"NGC1976", "NGC1982", "NGC4472"}
+    assert res.find_outside.canon == "NGC6121" and res.find_outside.target is None
+    assert res.find_via["NGC1976"] == "M 42" and res.find_via["NGC4472"] == "M 49"
+    dokladne = targets.plan(con, night=date(2026, 8, 15), find="M 27", limit=None)
+    assert dokladne.find_outside is None and dokladne.find_via.get("NGC6853") == "M 27"
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wiersz_trafienia_mowi_alias_i_zdanie_pudla(con, lang):
+    """AR-175: kolumna „Cel” (`ViewRow.label`) mówi „NGC1976 (M 42)”, a `canon` zostaje kanonem
+    (zaznaczenie, kuratela); zdanie pudła nazwy znanej - PL i EN (EN bez polskich znaków).
+    Mutant: `label` = `canon`."""
+    i18n.set_lang(lang)
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), find="M 4", limit=None)
+    wiersze = {v.canon: v for v in pm.view_rows(res)}
+    assert wiersze["NGC1976"].label == "NGC1976 (M 42)" and wiersze["NGC1976"].canon == "NGC1976"
+    zdanie = pm.find_miss_text(res, "M 4")
+    if lang == "pl":
+        assert zdanie == ("„M 4” = NGC6121, poza celami planera - lista to cele, których nazwa "
+                          "zawiera „M 4”.")
+    else:
+        assert zdanie == ("“M 4” = NGC6121, not among the planner targets - the list shows targets "
+                          "whose name contains “M 4”.")
+        assert not set(zdanie) & set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ„")
+    assert pm.find_miss_text(targets.plan(con, night=date(2026, 8, 15), find="M 27", limit=None),
+                             "M 27") is None
+
+
+def test_zdanie_pudla_cel_warstwy_niewczytanej_przy_trafieniach_podciagu(con):
+    """AR-175: „LBN 1” to cel cirrusu (warstwa niewczytana), a rdzeń ma trafienia podciągu (IC1310…) -
+    zdanie pudła mówi typ i przełącznik warstwy (`planner.find_hits_layer`), nie „poza celami planera”.
+    Mutant: gałąź warstwy zgubiona (zdanie „poza celami”) albo bez typu."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), find="LBN 1", limit=None)
+    assert res.rows and res.find_outside.canon == "LBN1" and res.find_outside.target.layer == "cirrus"
+    assert pm.find_miss_text(res, "LBN 1") == i18n.t(
+        "planner.find_hits_layer", name=i18n.t("planner.find_self", needle="LBN 1"), type="EmN",
+        layer=i18n.t("planner.layer_cirrus"), needle="LBN 1")
+    assert "(EmN)" in pm.find_miss_text(res, "LBN 1")

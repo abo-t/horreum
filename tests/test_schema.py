@@ -107,8 +107,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v46_po_migracji(tmp_path):
-    """0046 podnosi user_version do 46 (świeża baza leci 0002→…→0046 sekwencyjnie; 0025 = wersja
+def test_user_version_v47_po_migracji(tmp_path):
+    """0047 podnosi user_version do 47 (świeża baza leci 0002→…→0047 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -130,13 +130,13 @@ def test_user_version_v46_po_migracji(tmp_path):
     0044 = ślad własnego cofnięcia drogi atomowej `atomic_undo`, AR-182; 0045 = werdykt plików obok
     ścieżki na śladzie cofnięcia `atomic_undo.outcome`/`kept_paths`/`settled_at`, AR-127; 0046 =
     zbadanie bajtu spoza ASCII w surowym nagłówku kopii FITS `location.nonprintable_hash`/`_keyword`/
-    `_char`, AR-299).
+    `_char`, AR-299; 0047 = dziennik migracji tej bazy `migration_log`, AR-318).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 46
-    assert db.SCHEMA_VERSION == 46
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 47
+    assert db.SCHEMA_VERSION == 47
     con.close()
 
 

@@ -958,3 +958,42 @@ def test_perspektywa_w_starym_formacie_nie_udaje_specyfikacji(tmp_path):
                 (NOW,))
     assert queries.perspectives(con) == [("smiec", None), ("stary", None)]
     con.close()
+
+
+# ============================================================ AR-308: odrzucenie wpisu przy operacji zamkniętej
+
+@pytest.mark.parametrize("droga", ["clear", "discard"])
+def test_odrzucenie_zdejmuje_wpis_operacji_zamknietej_a_izolujacej_nie(tmp_path, droga):
+    """AR-308: wpis szuflady związany z operacją zapisu w miejscu ZAMKNIĘTĄ (`released`, `recovered`,
+    `synced`) szuflada podejmuje jak zwykły, więc „Odrzuć” / ponowny staging / „Porzuć” go zdejmuje;
+    wpis przy operacji IZOLUJĄCEJ (`written` - zamiar czeka na dokończenie zapisu) zostaje, zwykły
+    wpis znika.
+    Falsyfikator: dawny warunek `inplace_op_id IS NULL` → wpis po „Zwolnij” zostaje."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    fid, _ = repo.upsert_frame(con, sha1_data="s", kind="light", filetype="fits", camera_id=None,
+                               now=NOW)
+    wpisy = {}
+    for nazwa, faza in (("zwolniona", "released"), ("odzyskana", "recovered"),
+                        ("zapisana", "written"), ("zwykla", None)):
+        lid, _ = repo.add_location(con, frame_id=fid, volume="V", path=f"X:\\L\\{nazwa}.fits", now=NOW)
+        op_id = None
+        if faza is not None:
+            op_id = con.execute(
+                "INSERT INTO inplace_op(location_id, kind, fmt, region_offset, region_length, "
+                "old_region_z, new_region_z, write_start, write_end, file_size, file_ino, pre_hash, "
+                "post_hash, phase, started_at) VALUES (?, 'commit', 'fits', 0, 2, x'00', x'00', 0, 1, "
+                "10, 1, 'a', 'b', ?, ?)", (lid, faza, NOW)).lastrowid
+        wpisy[nazwa] = repo.stage_pending(
+            con, run_id="R", location_id=lid, keyword="OBJECT", idx=0, op="set", old_value=None,
+            new_value="M31", new_type="str", new_comment=None, expected_header_hash="h")
+        if op_id is not None:
+            con.execute("UPDATE pending_changes SET inplace_op_id = ? WHERE id = ?",
+                        (op_id, wpisy[nazwa]))
+    con.commit()
+    if droga == "clear":
+        n = repo.clear_waiting_staging(con, run_id="R", klinga="karty")
+    else:
+        n = repo.discard_staging(con, run_id="R", klinga="karty", now=NOW)
+    zostaly = {r[0] for r in con.execute("SELECT id FROM pending_changes WHERE run_id = 'R'")}
+    assert (n, zostaly) == (3, {wpisy["zapisana"]})
+    con.close()

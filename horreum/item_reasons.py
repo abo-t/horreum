@@ -169,6 +169,9 @@ ITEM_REASON_CODES = frozenset({
     # --- błąd programu w oknie (AR-209, AR-214, `powod_okna` niżej): EXPECT rdzenia na drodze okna
     # wydania, planera albo zmiany obiektu - surowy tekst `Typ: opis` w `detail`, nie w zdaniu
     "prog_error",
+    # --- błąd WEJŚCIA (AR-301, `powod_sciezki_wejscia` niżej): ścieżka wpisana albo wklejona ręką ze
+    # znakiem, którego system plików nie przyjmie - zdanie mówi znak, zanim cokolwiek dotknie dysku
+    "path_bad_char",
     # --- pliki obok ścieżki po przerwanym cofnięciu atomowym (AR-127, 0045,
     # `writeback._rekoncyliuj_slady`, `writeback._werdykt_wlasciciela`)
     "undo_cut_kept", "undo_files_kept", "undo_files_unknown", "undo_reconcile_failed",
@@ -186,6 +189,9 @@ ITEM_REASON_CODES = frozenset({
     # `card_rules` - jedno zdanie dla podglądu i pisarza), operacja spoza `set`/`add` w obu formatach,
     # bajt spoza drukowalnego ASCII w surowym nagłówku FITS (AR-271, każda droga zapisu i cofnięcia)
     "card_value_nonfinite", "card_value_digits", "card_op_unknown", "header_nonprintable",
+    # --- odmowa bajtu spoza ASCII przy commicie, gdy status wpisów nie wszedł do bazy (AR-299,
+    # `writeback._status_nie_zapisany`): nota za `header_nonprintable`, plik nietknięty
+    "pending_status_not_saved",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
@@ -603,6 +609,38 @@ def powod_okna(exc):
     miejsce = _miejsce_w_kodzie(exc)
     detail = _surowy(exc) + (f" @ {miejsce}" if miejsce else "")
     return PowodPozycji("błąd programu - szczegół w podpowiedzi", "prog_error", detail=detail)
+
+
+# Znaki, których ścieżka Windows nie przyjmie (AR-301) - zbiór ZMIERZONY `os.stat` (Python 3.13): NUL daje
+# `ValueError: embedded null character`, U+0001..U+001F i `< > " | ? *` - `OSError` WinError 123 (nazwa
+# niepoprawna). Poza zbiorem: `:` w środku (WinError 3 - brak, zdanie „nie istnieje” jest prawdą), spacja
+# i kropka na końcu, U+007F (brak).
+_ZNAKI_NIEDOZWOLONE = frozenset(map(chr, range(32))) | frozenset('<>"|?*')
+# Przedrostki przestrzeni nazw Win32 (`\\?\C:\…`, `\\.\…`) - ich `?` i `.` to składnia, nie znak nazwy.
+_PRZEDROSTKI_WIN32 = ("\\\\?\\", "\\\\.\\")
+
+
+def powod_sciezki_wejscia(sciezka):
+    """Ścieżka WPISANA ręką (pole okna) ze znakiem spoza `_ZNAKI_NIEDOZWOLONE` → `PowodPozycji`
+    `path_bad_char` (pierwszy taki znak w `char`: drukowalny wprost, sterujący jako `U+0009`), inaczej None.
+
+    DLACZEGO GRANICA WEJŚCIA, A NIE ROZPOZNANIE WYJĄTKU (AR-301): `ValueError` „embedded null character”
+    rzuca każda funkcja `os.*` dla KAŻDEGO tekstu z NUL-em - ścieżki z bazy, z nagłówka, z ustawień - a tam
+    to błąd programu albo danych (`powod_okna` mówi go `prog_error`, EXPECT). Człowiek wprowadza ścieżkę
+    w jedno pole (wyjście żniw - pozostałe przychodzą z okna wyboru systemu), więc pole pyta TU, zanim
+    ścieżka dotknie dysku; NUL, który mimo to doszedł do `os.stat`, to pominięta walidacja, czyli błąd
+    programu. Klawiatura znaku sterującego nie wpisze, wklejenie - tak (zmierzone na `QLineEdit`)."""
+    tresc = sciezka
+    for przedrostek in _PRZEDROSTKI_WIN32:
+        if tresc.startswith(przedrostek):
+            tresc = tresc[len(przedrostek):]
+            break
+    for znak in tresc:
+        if znak in _ZNAKI_NIEDOZWOLONE:
+            pokaz = znak if znak.isprintable() else f"U+{ord(znak):04X}"
+            return PowodPozycji(f"ścieżka zawiera niedozwolony znak: {pokaz}", "path_bad_char",
+                                char=pokaz)
+    return None
 
 
 def szczegoly_systemu(powod) -> list[str]:

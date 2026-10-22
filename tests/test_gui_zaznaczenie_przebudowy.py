@@ -1783,9 +1783,15 @@ def test_prawy_klik_na_komorce_ostatniego_lewego_kliku_bez_gestu_qt(qapp, tmp_pa
 
 
 def _klik_pozycji_menu(menu, akcja):
-    """Prawdziwy klik pozycji menu wyskakującego (otwarte - inaczej pozycji nie ma gdzie kliknąć)."""
+    """Prawdziwy klik pozycji menu wyskakującego (otwarte - inaczej pozycji nie ma gdzie kliknąć).
+
+    Punkt kliku to środek WIDOCZNEJ części pozycji (AR-307): menu szersze niż ekran Qt przycina do
+    ekranu, a pozycja z pełną ścieżką pliku bywa szersza od okna - środek całej pozycji wypadał wtedy
+    poza oknem i klik nie trafiał w nic (zależnie od długości ścieżki katalogu testu)."""
     assert menu.isVisible() and akcja.isVisible() and akcja.isEnabled(), akcja.text()
-    QTest.mouseClick(menu, Qt.LeftButton, Qt.NoModifier, menu.actionGeometry(akcja).center())
+    widoczna = menu.actionGeometry(akcja).intersected(menu.rect())
+    assert not widoczna.isEmpty(), f"pozycja poza kadrem menu: {akcja.text()}"
+    QTest.mouseClick(menu, Qt.LeftButton, Qt.NoModifier, widoczna.center())
     QApplication.processEvents()
 
 
@@ -1993,3 +1999,64 @@ def test_kotwica_spoza_zbioru_zostawia_biezaca(dluga):
     d = view.model._rows[_wiersz(view, b) + 3]["frame_id"]
     _klik_komorki(view, d, 1, Qt.ShiftModifier)
     assert _zaznaczone(view) == _zakres_od(view, b, d)
+
+
+# ============================================================ kotwica Shift+strzałki przy nieważnej kotwicy (AR-305)
+
+
+def _shift_strzalki_bez_biezacej(view):
+    """Puste zaznaczenie i bez bieżącej, sort klikiem (reset modelu - nic do odtworzenia), Shift+↓ dwa razy.
+    Qt: pierwszy ruch zostawia kotwicę nieważną (bieżącej sprzed ruchu nie było), drugi bierze za kotwicę
+    bieżącą sprzed ruchu - klatkę pierwszego ruchu. Zwraca jej `frame_id`."""
+    view.table.verticalScrollBar().setValue(0)
+    view.table.selectionModel().clear()
+    QApplication.processEvents()
+    _gest_resetu(view, "sort")
+    assert not view.table.currentIndex().isValid() and not view.table.kotwica().isValid()
+    _shift_strzalka_w_dol(view, 1)
+    a = view.model._rows[view.table.currentIndex().row()]["frame_id"]
+    _shift_strzalka_w_dol(view, 1)
+    QTest.keyRelease(view.table, Qt.Key_Shift, Qt.NoModifier)
+    return a
+
+
+def test_shift_strzalka_przy_niewaznej_kotwicy_jak_qt(dluga):
+    """AR-305: po resecie bez bieżącej Shift+↓ ×2 - lustro kotwicy stoi tam, gdzie kotwica Qt (klatka pierwszego
+    ruchu, `qabstractitemview.cpp` 6.9.2 `:2453-2454`), Shift+klik D liczy zakres od niej, a po kolejnym sorcie
+    Shift+klik E dalej od tej samej klatki. Dawniej lustro zostawało nieważne i Shift+klik stawiał je na bieżącej
+    - po resecie zakres od klatki o wiersz dalej niż Qt. Falsyfikator: `_TabelaKlatek` bez `keyPressEvent`."""
+    view = dluga
+    a = _shift_strzalki_bez_biezacej(view)
+    assert view.model._rows[view.table.kotwica().row()]["frame_id"] == a
+    d = view.model._rows[_wiersz(view, a) + 6]["frame_id"]
+    _klik_komorki(view, d, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == _zakres_od(view, a, d)
+    QTest.keyRelease(view.table, Qt.Key_Shift, Qt.NoModifier)
+    _gest_resetu(view, "sort")
+    e = _klatka_za(view, d, a)
+    _klik_komorki(view, e, 1, Qt.ShiftModifier)
+    assert _zaznaczone(view) == _zakres_od(view, a, e), (len(_zaznaczone(view)), len(_zakres_od(view, a, e)))
+
+
+def test_shift_strzalka_przy_waznej_kotwicy_lustro_nietkniete(dluga):
+    """Shift+↓ przy WAŻNEJ kotwicy (klik A) nie przestawia lustra - Qt też nie (kotwica zostaje na A).
+    Falsyfikator: lustro w `keyPressEvent` bez warunku nieważnej kotwicy (kotwica na bieżącej sprzed ruchu)."""
+    view = dluga
+    view.table.verticalScrollBar().setValue(0)
+    QApplication.processEvents()
+    a = view.model._rows[4]["frame_id"]
+    _klik_komorki(view, a, 1)
+    _shift_strzalka_w_dol(view, 3)
+    QTest.keyRelease(view.table, Qt.Key_Shift, Qt.NoModifier)
+    assert view.model._rows[view.table.kotwica().row()]["frame_id"] == a
+
+
+def test_inna_wersja_qt_klawiatura_jak_qt(dluga, monkeypatch):
+    """Bezpiecznik wersji (`_QT_TABELI_KLATEK`) obejmuje `keyPressEvent`: przy innej wersji Qt klawiatura idzie
+    metodą Qt bez lustra - kotwica lustra po Shift+↓ ×2 zostaje nieważna, bez wyjątku. Falsyfikator:
+    `keyPressEvent` bez bezpiecznika (lustro ustawione przy obcej wersji)."""
+    from horreum.gui import grid_model
+    view = dluga
+    monkeypatch.setattr(grid_model, "qVersion", lambda: "6.10.0")
+    _shift_strzalki_bez_biezacej(view)
+    assert not view.table.kotwica().isValid()

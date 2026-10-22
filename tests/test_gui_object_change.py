@@ -703,9 +703,9 @@ def test_wykonanie_to_staging_TEGO_planu_i_JEDNA_operacja_uchwytu(qapp, con, rdz
     # Pasek po zamknięciu (OB12): zdanie gestu z liczbą klatek, obiektem i drogą powrotu (CLI -
     # przebieg domknięty, po zamknięciu okna jedyny uchwyt).
     assert dlg.summary.startswith(i18n.t_plural("objchg.bar.changed", 2, canon="NGC2632"))
-    assert dlg.summary.endswith(i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_detail")))
-    assert dlg.summary.szczegol == i18n.t("objchg.bar.undo_cli", db=dlg._db_path,
-                                          run_id=plan.run_id)
+    assert dlg.summary.endswith(i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_command")))
+    assert dlg.summary.szczegol == i18n.t("objchg.bar.undo_cli", run_id=plan.run_id, cli=i18n.t(
+        "objchg.cli_undo", db=dlg._db_path, run_id=plan.run_id))
     assert not dlg.undo_btn.isHidden() and dlg.undo_btn.isEnabled()
     assert not dlg.action_btn.isEnabled()                # drugi zapis nie ma czego robić
     assert dlg.action_btn.text() == i18n.t("objchg.action_change_bare")
@@ -773,9 +773,10 @@ def test_pasek_po_zapisie_mowi_ile_klatek_na_jaki_obiekt_z_jakiego_i_droge_powro
     dlg.action_btn.click()
     assert dlg.summary == (i18n.t_plural("objchg.bar.changed_from", 2, old="NGC3034",
                                          canon=cel.canon)
-                           + i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_detail")))
+                           + i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_command")))
     assert a.db_path not in dlg.summary
-    assert dlg.summary.szczegol == i18n.t("objchg.bar.undo_cli", db=a.db_path, run_id=run_id)
+    assert dlg.summary.szczegol == i18n.t("objchg.bar.undo_cli", run_id=run_id, cli=i18n.t(
+        "objchg.cli_undo", db=a.db_path, run_id=run_id))
     assert "NGC2632" in dlg.summary and run_id in dlg.status.text()
     dlg.undo_btn.click()
     assert dlg.summary == i18n.t_plural("objchg.bar.undone_change_to", 2, canon=cel.canon,
@@ -2603,7 +2604,7 @@ def _powody_pozycji():
                                                   naming, projection)]
     zrodla += [(item_reasons, inspect.getsource(f))
                for f in (item_reasons.powod_systemu, item_reasons.powod_bazy,
-                         item_reasons.powod_okna)]
+                         item_reasons.powod_okna, item_reasons.powod_sciezki_wejscia)]
     for modul, zrodlo in zrodla:
         for w in ast.walk(ast.parse(zrodlo)):
             if not (isinstance(w, ast.Call) and isinstance(w.func, ast.Name)
@@ -4151,3 +4152,34 @@ def test_przypisanie_obiektu_na_nagrobku_go_przywraca(qapp, tmp_path):
     assert s.con.execute("SELECT retired_at FROM object WHERE id = ?", (ic,)).fetchone()[0] is None
     assert s.con.execute("SELECT count(*) FROM event WHERE verb = 'object.unretired'").fetchone()[0] == 1
     s.con.close()
+
+
+# ═══════════════════════════════════════════════ nośnik polecenia cofnięcia przebiegu (AR-309)
+
+
+def test_zdanie_paska_niesie_samo_polecenie_cofniecia_do_kopiowania(qapp, con, rdzen):
+    """AR-309: zdanie paska po zapisie przebiegu niesie w polu polecenia SAMO polecenie cofnięcia
+    (`objchg.cli_undo`), a szczegół składa je parametrem; pole zdania z tym nośnikiem kopiuje je pozycją
+    „Kopiuj polecenie” znak w znak. Falsyfikator: `zdanie_paska` bez `polecenie=` (pole puste, pozycji
+    menu nie ma)."""
+    from prawy_klik import menu_pola_otwarte, prawy_klik
+    from PySide6.QtGui import QGuiApplication
+    from horreum.gui.wb_worker import EtykietaBledu, polecenie_zdania
+    dlg = _okno(qapp, con)
+    dlg.action_btn.click()
+    polecenie = i18n.t("objchg.cli_undo", db=dlg._db_path, run_id=dlg._plan.run_id)
+    assert polecenie_zdania(dlg.summary) == polecenie
+    assert polecenie in szczegol_zdania(dlg.summary)
+    dlg.reject()
+    pole = EtykietaBledu()
+    try:
+        pole.resize(600, 30)
+        pole.show()
+        pole.ustaw(str(dlg.summary), szczegol_zdania(dlg.summary), polecenie=polecenie_zdania(dlg.summary))
+        prawy_klik(pole)
+        pozycje = menu_pola_otwarte(pole)
+        pozycje[i18n.t("wb.copy_command")].trigger()
+        pole._menu.hide()
+        assert QGuiApplication.clipboard().text() == polecenie
+    finally:
+        pole.close()

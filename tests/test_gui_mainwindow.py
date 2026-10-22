@@ -594,7 +594,8 @@ def test_sonda_katalogu_nie_odswieza_ani_nie_wygasza_widokow(qapp, tmp_path, mon
 
         _przebieg_w_watku(win, lambda: pv.run_stage("group"))
         assert odswiezenia == [1], "zwykły przebieg dalej odświeża widoki raz"
-        assert ("grid", True) in zajetosc and zajetosc[-1] == ("planer", False)
+        # Oś obiektu zwalnia się po odświeżeniu widoków (AR-296: recepta odłożona przez etap stoi ostatnia).
+        assert ("grid", True) in zajetosc and zajetosc[-2:] == [("planer", False), ("obiekt", False)], zajetosc
     finally:
         win.close()
 
@@ -614,6 +615,26 @@ def test_wyjatek_w_odswiezeniu_po_przebiegu_gasi_faze(qapp, tmp_path, monkeypatc
             win._odswiez_widoki_po_przebiegu()
         assert not win.phase_label.text(), win.phase_label.text()
         assert win._odswiezam_widoki is False
+    finally:
+        win.close()
+
+
+def test_wyjatek_w_odswiezeniu_po_przebiegu_zwalnia_os_obiektu(qapp, tmp_path, monkeypatch):
+    """Oś obiektu zwalnia się po odświeżeniu widoków (AR-296), ale KAŻDĄ drogą: wyjątek odświeżenia nie zostawia
+    „Przypisz obiekt…” i „Napraw nagłówek…” wygaszonych do następnego przebiegu.
+
+    Falsyfikator: `object_view.set_busy(False)` za odświeżeniem bez `finally` → oś zostaje zajęta."""
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        win._on_pipeline_running(True)
+        assert win.object_view._busy is True
+
+        def _pada(**_kw):
+            raise RuntimeError("odświeżenie padło")
+        monkeypatch.setattr(win.grid_view, "refresh", _pada)
+        with pytest.raises(RuntimeError, match="odświeżenie padło"):
+            win._on_pipeline_running(False)
+        assert win.object_view._busy is False
     finally:
         win.close()
 
@@ -643,6 +664,39 @@ def test_odswiezenie_po_przebiegu_nie_zagniezdza_sie(qapp, tmp_path, monkeypatch
         assert stan["max"] == 1, "odświeżenia nie zagnieżdżają się"
         assert stan["wejscia"] == 2, "prośba z środka dała jeden obrót więcej, po bieżącym"
         assert win._odswiezam_widoki is False and not win.phase_label.text()
+    finally:
+        win.close()
+
+
+def test_koniec_przebiegu_w_srodku_odswiezenia_zwalnia_os_obiektu_po_ostatnim_obrocie(qapp, tmp_path, monkeypatch):
+    """AR-296: koniec przebiegu doręczony W ŚRODKU odświeżenia (nowy krótki przebieg pod `processEvents` fazy)
+    zamawia kolejny obrót, ale osi obiektu NIE zwalnia - zwolnienie (które podaje receptę cofnięcia odłożoną
+    przez etap) przychodzi raz, po ostatnim obrocie; inaczej raporty osi z drugiego obrotu gasiłyby receptę.
+
+    Falsyfikator: `object_view.set_busy(False)` w `finally` bez warunku końca odświeżeń."""
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        grid = win.grid_view
+        oryginal = grid.refresh
+        zdarzenia = []
+        prawdziwe = win.object_view.set_busy
+        monkeypatch.setattr(win.object_view, "set_busy",
+                            lambda b: (zdarzenia.append(("os", b)), prawdziwe(b)))
+
+        def _refresh(**kw):
+            zdarzenia.append(("obrot", None))
+            if zdarzenia.count(("obrot", None)) == 1:
+                win._on_pipeline_running(True)          # nowy krótki przebieg rusza i kończy się
+                win._on_pipeline_running(False)         # w środku pierwszego obrotu
+            oryginal(**kw)
+        monkeypatch.setattr(grid, "refresh", _refresh)
+        win._on_pipeline_running(True)
+        zdarzenia.clear()
+        win._on_pipeline_running(False)
+        assert zdarzenia.count(("obrot", None)) == 2, zdarzenia
+        assert [z for z in zdarzenia if z == ("os", False)] == [("os", False)], zdarzenia
+        assert zdarzenia[-1] == ("os", False), zdarzenia
+        assert win.object_view._busy is False
     finally:
         win.close()
 

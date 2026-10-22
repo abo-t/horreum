@@ -285,3 +285,33 @@ def test_edycja_w_siatce_pyta_tych_samych_regul():
     assert not zla.ok and "rekord FITS" in zla.reason
     dobra = macro.evaluate_manual_change(karty, "TELESCOP", "ED120R")
     assert dobra.ok and dobra.op == "set" and dobra.new_value == "ED120R"
+
+
+# ============================================================ AR-300: literał gołej wartości FITS
+
+@pytest.mark.parametrize("tekst, rodzaj", [
+    ("1", "int"), ("-2", "int"), ("+3", "int"), (" 7 ", "int"), ("1.5", "float"), (".5", "float"),
+    ("5.", "float"), ("1e5", "float"), ("1.5D3", "float"), ("-2.5E-07", "float"), ("T", "bool"),
+    ("F", "bool"), ("1_0", None), ("nan", None), ("NaN", None), ("inf", None), ("Inf", None),
+    ("0x10", None), ("１", None), ("true", None), ("", None), ("1.5.2", None), ("1e", None),
+])
+def test_literal_fits_leksykalny(tekst, rodzaj):
+    """AR-300: rodzaj literału gołej wartości wg FITS 4.0 §4.2 - parser leksykalny, nie `int()`/
+    `float()` Pythona (te przyjmują `1_0`, cyfry pełnej szerokości i `nan`/`inf`, a odrzucają `1.5D3`).
+    Falsyfikator: `float()` zamiast wyrażenia → `1_0` liczbą, `1.5D3` nie."""
+    assert card_rules.literal_fits(tekst) == rodzaj
+
+
+def test_tekst_logiczny_i_regula_golej_wartosci():
+    """AR-300: zbiór tekstów karty logicznej (`abc` → `None`, nie po cichu `F`) i reguła gołej wartości
+    XISF: liczba nieskończona pierwsza (zdanie AR-269), liczba → liczba, `T`/`F` → `T`/`F`, pusta - bez
+    reguły rodzaju; zdanie z jedynego budowniczego `powod_typu`."""
+    assert [card_rules.tekst_logiczny(t) for t in ("T", "true", "1", "YES", "f", "0", "no", "abc")] == [
+        True, True, True, True, False, False, False, None]
+    assert card_rules.gola_wartosc_violation("EXPTIME", "300.0", "nan").code == "card_value_nonfinite"
+    assert card_rules.gola_wartosc_violation("EXPTIME", "300.0", "abc") == card_rules.powod_typu(
+        "abc", "float")
+    assert card_rules.gola_wartosc_violation("GAIN", "100", "1.5D3") is None
+    assert card_rules.gola_wartosc_violation("SIMPLE", "T", "true").code == "macro_type_mismatch"
+    assert card_rules.gola_wartosc_violation("COMMENT", "", "abc") is None
+    assert str(card_rules.powod_typu("abc", "bool")) == "wartość 'abc' nie pasuje do typu 'bool'"

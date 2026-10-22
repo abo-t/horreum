@@ -219,3 +219,101 @@ def cyfry_violation(keyword, value: float, zastana_typ=None, zastana_raw=None) -
     if float(pole_float_fits(value)) == float(value):
         return None
     return powod_cyfr(keyword, value)
+
+
+# ============================================================ BAJT SPOZA DRUKOWALNEGO ASCII (AR-271, AR-299)
+# Surowy nagłówek FITS z bajtem spoza 0x20-0x7E: astropy czyta bajt >= 0x80 jako `?`, a `writeto` go
+# tak zapisuje, więc pisarz odmawia KAŻDEJ drogi zapisu i cofnięcia (`writeback._odmowa_bajtow`).
+# Ten sam predykat zeznaje skan (`scan.read_fits_meta`, marker kopii 0046) - jedno źródło, żeby
+# „Porządki mówią: bajt” i „pisarz odmawia” nie rozjechały się zbiorem bajtów ani nazwą karty.
+# Patrzymy na rekordy KART (po 80 B, do `END`): wypełnienie za `END` nie jest treścią karty.
+_DRUKOWALNE_ASCII = bytes(range(0x20, 0x7F))
+_REKORD_END = b"END" + b" " * 5
+
+
+def bajt_spoza_ascii(raw: bytes) -> tuple[str, str] | None:
+    """Pierwszy bajt spoza 0x20-0x7E w rekordach kart regionu nagłówka `raw` (od początku HDU, rekordy
+    po 80 B, do `END`) → `(nazwa karty, "0xNN")` albo `None`. Nazwa = drukowalne znaki pola nazwy
+    (inne jako `?`), pusta → `''`."""
+    for i in range(0, len(raw) - FITS_RECORD + 1, FITS_RECORD):
+        rekord = raw[i:i + FITS_RECORD]
+        if rekord[:8] == _REKORD_END:
+            return None
+        if rekord.translate(None, _DRUKOWALNE_ASCII):
+            bajt = next(b for b in rekord if not 0x20 <= b <= 0x7E)
+            nazwa = "".join(chr(b) if 0x20 <= b <= 0x7E else "?" for b in rekord[:8]).strip()
+            return nazwa or "''", f"0x{bajt:02X}"
+    return None
+
+
+def powod_bajtu(keyword, char) -> PowodPozycji:
+    """Zdanie `header_nonprintable` - JEDYNY budowniczy (pisarz FITS w każdej drodze; marker skanu
+    mówi tymi samymi parametrami)."""
+    return PowodPozycji(f"karta {keyword} ma w pliku bajt {char} spoza drukowalnego ASCII - Horreum "
+                        f"nie zapisze tego nagłówka bez zmiany tego bajtu; plik nietknięty",
+                        "header_nonprintable", keyword=keyword, char=char)
+
+
+# ============================================================ LITERAŁ WARTOŚCI FITS (AR-300)
+# Goła wartość karty (bez apostrofów) to LITERAŁ FITS 4.0 §4.2: logiczny `T`/`F`, całkowity albo
+# zmiennoprzecinkowy (wykładnik `E` albo `D`). `int()`/`float()` Pythona tego nie sprawdzają:
+# przyjmują `1_0`, cyfry spoza ASCII, `nan`/`inf`, a odrzucają legalne `1.5D3` - stąd parser leksykalny.
+# Pisarz XISF pisze tekst wartości wprost (`scan.quote_fits`), więc tekst nie-literał na zastanej gołej
+# wartości dałby kartę, której FITS nie przeczyta - odmowa `gola_wartosc_violation`. PODGLĄD tej reguły
+# nie zgaduje: lustro `cards` trzyma wartość po `_unquote_fits`, więc `'180.0'` i `180.0` są w nim
+# identyczne (na archiwum 1 karta z 118 152, sonda 2026-10-21) - werdykt wydaje pisarz na bajtach.
+_LITERAL_INT = re.compile(r"[+-]?[0-9]+")
+_LITERAL_FLOAT = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[EeDd][+-]?[0-9]+)?")
+# Teksty, które pole karty logicznej przyjmuje przy zapisie FITS (astropy zapisze `T`/`F`).
+_TEKST_PRAWDA = frozenset({"t", "true", "1", "yes"})
+_TEKST_FALSZ = frozenset({"f", "false", "0", "no"})
+
+
+def literal_fits(text) -> str | None:
+    """Rodzaj literału FITS gołej wartości `text`: `"bool"` (`T`/`F`), `"int"`, `"float"` (kropka albo
+    wykładnik) albo `None`. Spacje ASCII brzegowe nie należą do literału."""
+    t = str(text).strip(" ")
+    if t in ("T", "F"):
+        return "bool"
+    if _LITERAL_INT.fullmatch(t):
+        return "int"
+    if _LITERAL_FLOAT.fullmatch(t):
+        return "float"
+    return None
+
+
+def powod_typu(value, value_type) -> PowodPozycji:
+    """Zdanie `macro_type_mismatch` - JEDYNY budowniczy dla podglądu makra, edycji komórki, pisarza
+    FITS (`writeback._coerce`) i reguły gołej wartości XISF."""
+    tekst = str(value)
+    return PowodPozycji(f"wartość '{tekst}' nie pasuje do typu '{value_type}'", "macro_type_mismatch",
+                        value=tekst, value_type=value_type)
+
+
+def tekst_logiczny(text) -> bool | None:
+    """Tekst wpisany do karty logicznej → `True`/`False` albo `None` (tekst spoza zbioru). Dawniej każdy
+    tekst spoza `t/true/1/yes` był po cichu `F` - także `abc`."""
+    t = str(text).strip().lower()
+    if t in _TEKST_PRAWDA:
+        return True
+    if t in _TEKST_FALSZ:
+        return False
+    return None
+
+
+def gola_wartosc_violation(keyword, zastana, nowa) -> PowodPozycji | None:
+    """Reguła zastanej GOŁEJ wartości karty XISF (`zastana` = tekst wartości po rozwinięciu XML):
+    1) liczba nieskończona (`liczba_violation`) - jak dotąd; 2) goła wartość zostaje literałem swojego
+    rodzaju: liczba (int albo float - XISF pisze tekst, więc rodzaj liczby wolno zmienić) → `nowa` musi
+    być literałem liczbowym; logiczna → `T`/`F`; zastana pusta albo nie-literał → bez reguły rodzaju."""
+    powod = liczba_violation(keyword, nowa)
+    if powod is not None:
+        return powod
+    rodzaj = literal_fits(zastana)
+    if rodzaj in ("int", "float"):
+        return None if literal_fits(nowa) in ("int", "float") else powod_typu(nowa, rodzaj)
+    if rodzaj == "bool":
+        # Ten sam parser co rodzaj zastanej (spacje brzegowe nie należą do literału) - tekst łaty
+        # idzie do pliku bez normalizacji, tak jak go podano.
+        return None if literal_fits(nowa) == "bool" else powod_typu(nowa, "bool")
+    return None

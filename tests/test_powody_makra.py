@@ -325,7 +325,11 @@ def test_zdania_makra_i_wyrazenia_mieszcza_sie_w_cp1250():
     ]
     assert str(powody[-2]) == "wartość 'żółć' nie pasuje do typu 'float'" and str(powody[-1]) == (
         "brak operandu: ŻÓŁW")
-    w_zrodle = {w.args[1].value for m in (expr, macro) for w in ast.walk(ast.parse(inspect.getsource(m)))
+    # Zdanie typu ma jednego budowniczego w `card_rules` (AR-300), którego `macro` woła - jego kod
+    # należy do zbioru dróg makra tak samo jak literał w `macro`.
+    from horreum import card_rules
+    w_zrodle = {w.args[1].value for m in (expr, macro, card_rules.powod_typu)
+                for w in ast.walk(ast.parse(inspect.getsource(m)))
                 if isinstance(w, ast.Call) and getattr(w.func, "id", None) == "PowodPozycji"}
     assert set().union(*(_kody(p) for p in powody)) == w_zrodle
     for zdanie in map(str, powody):

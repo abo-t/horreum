@@ -2951,7 +2951,9 @@ def test_wyjscie_blad_bez_klasy_idzie_porazka_tekstem_systemu(qapp, tmp_path, pr
     """AR-199: błąd sprawdzenia folderu wyjścia bez klasy - nazwa niepoprawna (WinError 123, znak `?`)
     i znak NUL (`ValueError`) - nie udaje braku: sonda pada (`failed`). Kod systemu spoza klas mówi
     tekstem systemu („Typ: opis”), a `ValueError` - błędem programu (`powod_okna`, AR-264) z surowym
-    tekstem CPythona w szczególe (klasy błędu wejścia jeszcze nie ma). `isdir` mówił o obu „nie ma”.
+    tekstem CPythona w szczególe. To pin WORKERA dostającego ścieżkę wprost: z pola okna taka ścieżka
+    do sondy nie dochodzi (błąd wejścia, AR-301), więc NUL tutaj to pominięta walidacja - EXPECT.
+    `isdir` mówił o obu „nie ma”.
 
     Falsyfikator: `os.path.isdir` z powrotem albo każdy `OSError` jako brak - sonda oddaje `missing`."""
     sciezka = str(tmp_path / "a?b") if przypadek == "nazwa_123" else str(tmp_path) + "\\a\x00b"
@@ -3546,3 +3548,76 @@ def test_zdanie_zniw_o_manifescie_innego_wydania_bez_gestu_okna_wydania(jezyk_ok
         assert gest not in zdanie, zdanie
     if lang == "en":
         assert not _PL_LITERY.search(zdanie), zdanie
+
+
+# ---------------------------------------------------------------- AR-301: błąd wejścia w polu wyjścia
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("znak, pokazany", [("\x00", "U+0000"), ("\t", "U+0009"), ("<", "<"), ("?", "?")])
+def test_niedozwolony_znak_w_polu_wyjscia_mowi_bledem_wejscia(qapp, tmp_path, ustawienia, monkeypatch,
+                                                             jezyk_okna, znak, pokazany, lang):
+    """AR-301: ścieżka wyjścia ze znakiem, którego system plików nie przyjmie (NUL i TAB przychodzą
+    wklejeniem - klawiatura ich nie wpisze - a `<`, `?` z klawiatury), po Enterze mówi błędem WEJŚCIA
+    w języku UI: zdanie z czynnością („Nie można policzyć podglądu: ścieżka zawiera niedozwolony znak:
+    U+0000”), rola błędu, a sonda w ogóle nie rusza (dysku nikt nie pyta), plan pusty, pamięć pola nie
+    bierze ścieżki. Do AR-301: NUL mówił „błąd programu”, `<?` i TAB - surowym WinError 123.
+
+    Falsyfikator: walidacja zdjęta z `_trigger_dry` - sonda rusza i mówi `prog_error`/tekstem systemu."""
+    jezyk_okna(lang)
+    con, _profile, _flats = _baza(tmp_path)
+    sondy = []
+    prawdziwy_init = hd_mod.HarvestDryWorker.__init__
+
+    def _init(self, *a, **kw):
+        sondy.append(a)
+        prawdziwy_init(self, *a, **kw)
+    monkeypatch.setattr(hd_mod.HarvestDryWorker, "__init__", _init)
+    dlg = _dlg(con, tmp_path / "ARCH")
+    try:
+        sondy.clear()
+        dlg.edit_output.setText("X:\\WBPP\\a" + znak + "b\\out")
+        QTest.keyClick(dlg.edit_output, Qt.Key_Return)
+        zdanie = dlg.notice.text()
+        assert zdanie == i18n.t("harvest.dry_failed",
+                                msg=i18n.t("objchg.item.path_bad_char", char=pokazany)), zdanie
+        assert dlg.notice.property("role") == "error"
+        assert sondy == [] and dlg._dry_worker is None, sondy
+        assert dlg._plan is None and not dlg.btn_apply.isEnabled() and dlg.table.rowCount() == 0
+        assert str(ustawienia.value("harvest/last_output", "") or "") == ""
+        if lang == "en":
+            assert zdanie.startswith("Cannot compute the preview: the path contains a character"), zdanie
+            assert not _PL_LITERY.search(zdanie), zdanie
+    finally:
+        dlg.reject()
+        con.close()
+
+
+@pytest.mark.parametrize("przedrostek", ["\\\\?\\", "\\\\.\\"])
+def test_przedrostek_win32_nie_jest_znakiem_niedozwolonym(qapp, tmp_path, ustawienia, przedrostek):
+    """AR-301: `?` i `.` przedrostka przestrzeni nazw Win32 (`\\\\?\\X:\\…`, `\\\\.\\…`) to składnia ścieżki,
+    nie znak nazwy - pole nie mówi błędem wejścia, sonda rusza (tu: folderu nie ma). Falsyfikator:
+    walidacja bez pomijania przedrostka - „niedozwolony znak: ?”."""
+    con, _profile, _flats = _baza(tmp_path)
+    dlg = _dlg(con, tmp_path / "ARCH")
+    try:
+        sciezka = przedrostek + str(tmp_path / "nie_ma" / "out")
+        dlg.edit_output.setText(sciezka)
+        QTest.keyClick(dlg.edit_output, Qt.Key_Return)
+        assert "U+" not in dlg.notice.text() and dlg.notice.text() != i18n.t(
+            "harvest.dry_failed", msg=i18n.t("objchg.item.path_bad_char", char="?")), dlg.notice.text()
+        assert dlg.notice.text() == i18n.t("harvest.missing_dir", path=sciezka), dlg.notice.text()
+    finally:
+        dlg.reject()
+        con.close()
+
+
+def test_zdanie_odmowy_sondy_zniw_mowi_czynnosc():
+    """AR-301 (wizytacja natywna): odmowa sondy żniw mówi, CZEGO nie można - w EN „Cannot: a program
+    error…” nie mówiło nic. Zdanie złote w obu językach. Falsyfikator: klucz z powrotem „Nie można: {msg}”."""
+    try:
+        for lang, oczekiwane in (("pl", "Nie można policzyć podglądu: błąd programu - szczegół w podpowiedzi"),
+                                 ("en", "Cannot compute the preview: a program error - details in the tooltip")):
+            i18n.set_lang(lang)
+            assert i18n.t("harvest.dry_failed", msg=i18n.t("objchg.item.prog_error")) == oczekiwane
+    finally:
+        i18n.set_lang("pl")

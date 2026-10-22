@@ -3646,3 +3646,152 @@ def test_okno_nazwy_celu_mowi_przyciskami_katalogu(qapp, tmp_path, ustawienia, m
     assert dodane == [(str(folder), "Karta X")]
     dlg.reject()
     con.close()
+
+
+# ---------- AR-306: wskazówka o manifeście przy wydaniu perspektywy, jeden odczyt manifestu sondy ----------
+
+def _wydanie_obiektu_rdzeniem(con, karta):
+    """Wydanie NGC 6992 (zestaw RC8) prawdziwą klingą do `karta` - korzeń z zeznaniem wydania obiektu."""
+    p = projection.plan_object(con, 1, config_id=20)
+    root = projection.object_root(str(karta), p)
+    projection.apply(p, root, do_apply=True, now=NOW, manifest=projection.object_manifest(p))
+    return root
+
+
+def _otwarcia_manifestu(monkeypatch):
+    """Lista otwarć `_PROJEKCJA.json` (dowolnego korzenia) przez rdzeń wydania (`open` modułu)."""
+    import builtins
+    otwarcia = []
+
+    def _open(p, *a, **kw):
+        if isinstance(p, (str, os.PathLike)) and os.path.basename(os.fspath(p)) == projection.MANIFEST_NAME:
+            otwarcia.append(os.fspath(p))
+        return builtins.open(p, *a, **kw)
+    monkeypatch.setattr(projection, "open", _open, raising=False)
+    return otwarcia
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("przypadek", ["brak", "uszkodzony", "folder_obiektu", "zajety"])
+def test_wskazowka_manifestu_przy_wydaniu_perspektywy(qapp, tmp_path, ustawienia, monkeypatch, jezyk, lang,
+                                                      przypadek):
+    """AR-306: wydanie perspektywy nad korzeniem, w którym krok manifestu po „Utwórz” odmówi (manifest
+    uszkodzony, zeznanie wydania obiektu, cudzy plik roboczy) - sonda stawia tę samą WSKAZÓWKĘ co wydanie
+    obiektu („manifestu nie da się teraz zapisać: …” z gestem „Odśwież podgląd”) PRZED kliknięciem,
+    przycisk zostaje uzbrojony, plik pod kursorem raportu, bajty po sondzie = przed; korzeń bez manifestu -
+    bez linii. Sonda czyta manifest raz. Mutant: wskazówka tylko w wydaniu obiektu (linia znika)."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    jezyk(lang)
+    con, ids = _obiekt_wydania(tmp_path)
+    root = tmp_path / "_WBPP" / "karta"
+    root.mkdir(parents=True)
+    if przypadek == "folder_obiektu":
+        root = type(root)(_wydanie_obiektu_rdzeniem(con, tmp_path / "_WBPP" / "obiekty"))
+    sciezka = root / projection.MANIFEST_NAME
+    part = root / (projection.MANIFEST_NAME + projection.PART_SUFFIX)
+    powod = plik = None
+    if przypadek == "uszkodzony":
+        sciezka.write_bytes(b"{")
+        powod, plik = i18n.t("objchg.item.proj_manifest_damaged", detail="JSON"), \
+            i18n.t("proj.manifest_path_tip", path=str(sciezka))
+    elif przypadek == "folder_obiektu":
+        powod, plik = i18n.t("objchg.item.proj_manifest_foreign", detail="layout"), \
+            i18n.t("proj.manifest_path_tip", path=str(sciezka))
+    elif przypadek == "zajety":
+        part.write_bytes(b"cudzy")
+        powod, plik = i18n.t("objchg.item.proj_manifest_busy"), i18n.t("proj.manifest_part_tip", path=str(part))
+    przed = (sciezka.read_bytes() if sciezka.exists() else None, part.read_bytes() if part.exists() else None)
+    _target(ustawienia, root)
+    otwarcia = _otwarcia_manifestu(monkeypatch)
+    dlg = _dlg(con, [ids["la1"], ids["lb1"]])
+    dlg.show()
+    raport = dlg.report.toPlainText()
+    assert len(otwarcia) == 1, otwarcia
+    assert (sciezka.read_bytes() if sciezka.exists() else None, part.read_bytes() if part.exists() else None) \
+        == przed
+    assert dlg.btn_apply.isEnabled() and dlg._dry["res"].counts.get("would-link") == 2
+    znacznik = i18n.t("proj.obj.manifest_hint", msg="").strip()
+    if powod is None:
+        assert znacznik not in raport, raport
+    else:
+        linia = i18n.t("proj.obj.manifest_hint", msg=i18n.t("proj.manifest_probe_retry", msg=powod))
+        assert linia in raport.split("\n"), raport
+        assert dlg.report.toolTip() == plik
+    dlg.reject()
+    con.close()
+
+
+def test_wskazowka_perspektywy_milczy_nad_kompletem(qapp, tmp_path, ustawienia, monkeypatch, jezyk):
+    """AR-306: perspektywa w komplecie (nic do utworzenia, „Utwórz” wygaszone) nad manifestem uszkodzonym -
+    bez wskazówki: krok manifestu bez kliknięcia nie rusza. Mutant: wskazówka bez warunku pozycji do
+    utworzenia (linia wraca)."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    jezyk("pl")
+    con, ids = _obiekt_wydania(tmp_path)
+    root = tmp_path / "_WBPP" / "karta"
+    plan = projection.plan(con, [ids["la1"], ids["lb1"]], "po-obiektach")
+    projection.apply(plan, str(root), do_apply=True, now=NOW, manifest={"perspektywa": "x"})
+    (root / projection.MANIFEST_NAME).write_bytes(b"{")
+    _target(ustawienia, root)
+    dlg = _dlg(con, [ids["la1"], ids["lb1"]])
+    dlg.show()
+    assert dlg._dry["res"].counts.get("would-link", 0) == 0 and not dlg.btn_apply.isEnabled()
+    assert dlg._dry["manifest_hint"] is None
+    assert i18n.t("proj.obj.manifest_hint", msg="").strip() not in dlg.report.toPlainText()
+    dlg.reject()
+    con.close()
+
+
+def test_sonda_obiektu_czyta_manifest_raz(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-306: sonda wydania obiektu nad drzewem niepełnym czyta manifest RAZ (dawniej dwa: rozjazd
+    w `apply(DRY)` i osobny odczyt świadków i wskazówki) - świadkowie i wskazówka biorą stan z wyniku
+    sondy. Mutant: gałąź obiektu z własnym `read_manifest_state` (dwa otwarcia)."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    dlg = _okno_rc8(con, ustawienia, card)
+    dlg.combo_zestaw.setCurrentIndex(2)
+    _klik(dlg.btn_apply)
+    root = card / "OBJECTS" / "NGC_6992"
+    (root / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "lb1.fits").unlink()       # drzewo niepełne
+    otwarcia = _otwarcia_manifestu(monkeypatch)
+    _klik(dlg.btn_dry)
+    assert len(otwarcia) == 1, otwarcia
+    assert dlg._dry["res"].counts.get("would-link") == 1 and dlg._dry["manifest"] is None
+    dlg.reject()
+    con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_kroku_w_perspektywie_bez_gestu_naprawy_okna(qapp, tmp_path, ustawienia, monkeypatch, jezyk,
+                                                           lang):
+    """AR-306: odmowa kroku manifestu po „Utwórz” w wydaniu PERSPEKTYWY mówi samym zdaniem rdzenia - bez
+    „Odśwież podgląd” i „Zapisz manifest” (naprawa okna liczy się tylko dla wydania obiektu, a po odmowie
+    pliki leżą, więc świeża sonda nie ma czego utworzyć). Wydanie obiektu - gest jak dotąd (złote okna
+    `zdanie_odmowy`). Mutant: gest naprawy okna także w perspektywie."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    jezyk(lang)
+    con, ids = _obiekt_wydania(tmp_path)
+    root = tmp_path / "_WBPP" / "karta"
+    root.mkdir(parents=True)
+    (root / projection.MANIFEST_NAME).write_bytes(b"{")
+    _target(ustawienia, root)
+    dlg = _dlg(con, [ids["la1"], ids["lb1"]])
+    dlg.show()
+    _klik(dlg.btn_apply)
+    zdanie = i18n.t("objchg.item.proj_manifest_damaged", detail="JSON")
+    assert dlg.report.toPlainText().startswith(i18n.t("proj.manifest_error_head", msg=zdanie)), \
+        dlg.report.toPlainText()
+    powod = projection.PowodPozycji("x", "proj_manifest_damaged", detail="JSON")
+    assert pd_mod.zdanie_odmowy(powod) == i18n.t("proj.manifest_retry", msg=zdanie)
+    assert pd_mod.zdanie_odmowy(powod, naprawa_okna=False) == zdanie
+    dlg.reject()
+    con.close()
+
+
+def test_sonda_nie_mowi_czego_nie_mozna_zlote_zdanie():
+    """AR-306 (znalezisko klasy AR-301): porażka sondy okna wydania mówi czynność - „Nie można policzyć
+    podglądu: …” / “Cannot compute the preview: …”, nie gołe „Nie można: …” przed błędem programu."""
+    from horreum.gui.i18n_catalog import CATALOG
+    assert CATALOG["proj.dry_failed"] == {"pl": "Nie można policzyć podglądu: {msg}",
+                                          "en": "Cannot compute the preview: {msg}"}

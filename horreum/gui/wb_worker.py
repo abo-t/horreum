@@ -244,7 +244,7 @@ class WritebackRunner(QObject):
         if self._worker is not None:
             self._worker.request_cancel()
 
-    def refuse_close(self, say):
+    def refuse_close(self, say, *, przerwij=True):
         """Straż zamknięcia OKNA-WŁAŚCICIELA tego uchwytu: `True` = operacja trwa, okno ma ZOSTAĆ.
 
         Uchwyt i jego `QThread` są dziećmi okna, więc zamknięcie okna w biegu niszczyłoby wątek,
@@ -253,10 +253,13 @@ class WritebackRunner(QObject):
         zostaje - czekanie z timeoutem byłoby zakładem o czas jednego pliku po SMB, a raport
         przerwanego zapisu (ile plików zmieniono, `commit_id` do cofnięcia) musi mieć dokąd trafić.
         Drugie zamknięcie, już po biegu, zamyka. `say(tekst)` = gdzie okno mówi, co się dzieje.
-        Jeden kod dla każdego okna z tym uchwytem (SPOT) - nie kopia warunku w każdym `done`."""
+        Jeden kod dla każdego okna z tym uchwytem (SPOT) - nie kopia warunku w każdym `done`.
+        `przerwij=False` - sama odmowa bez anulowania (przełączenie bazy gospodarza, AR-296: zamiar
+        przerwania zapisu wyraża tylko zamknięcie okna); `say` dostaje wtedy ten sam tekst."""
         if self._thread is None:
             return False
-        self.cancel()
+        if przerwij:
+            self.cancel()
         say(i18n.t("wb.close_refused"))
         return True
 
@@ -504,11 +507,17 @@ class ZdanieZeSzczegolem(str):
     Nośnik jedzie sygnałem `Signal(object)`: `Signal(str)` zamienia podklasę na goły `str` i szczegół
     przepada po cichu (zmierzone, PySide6 6.9.2). Para dwóch argumentów (`Signal(str, str)`) odpadła,
     bo odbiorca `list.append` dostaje wtedy `TypeError` wypisany na stderr i nie dostaje zdania.
-    Konkatenacja zwraca goły `str` - zdania ze szczegółem składa `zlacz_zdania`."""
+    Konkatenacja zwraca goły `str` - zdania ze szczegółem składa `zlacz_zdania`.
 
-    def __new__(cls, zdanie, szczegol=""):
+    `polecenie` (AR-309) - samo polecenie wiersza poleceń, które zdanie podaje jako drogę wyjścia
+    (cofnięcie commitu kart, przebiegu zmiany obiektu), albo `""`. Osobne pole, nie wiersz szczegółu
+    do wyłuskania: pole zdania kopiuje je pozycją „Kopiuj polecenie” znak w znak, a parsowanie prozy
+    szczegółu rozjechałoby się z pierwszą zmianą jej brzmienia."""
+
+    def __new__(cls, zdanie, szczegol="", polecenie=""):
         self = super().__new__(cls, zdanie)
         self.szczegol = szczegol or ""
+        self.polecenie = polecenie or ""
         return self
 
 
@@ -518,13 +527,20 @@ def szczegol_zdania(msg):
     return msg.szczegol if isinstance(msg, ZdanieZeSzczegolem) else ""
 
 
+def polecenie_zdania(msg):
+    """Polecenie zdania raportu (`ZdanieZeSzczegolem.polecenie`) albo `""` dla zwykłego `str` -
+    bliźniak `szczegol_zdania`."""
+    return msg.polecenie if isinstance(msg, ZdanieZeSzczegolem) else ""
+
+
 def zlacz_zdania(sep, zdania):
-    """Zdania złączone separatorem, ze szczegółami wszystkich, które je niosą (wiersz pod wierszem)
-    - `" - ".join(...)` zgubiłby szczegół. Puste zdania odpadają. Wejście bywa generatorem, więc
-    materializowane RAZ, zanim zdania i szczegóły zostaną z niego odczytane."""
+    """Zdania złączone separatorem, ze szczegółami i poleceniami wszystkich, które je niosą (wiersz
+    pod wierszem) - `" - ".join(...)` zgubiłby oba. Puste zdania odpadają. Wejście bywa generatorem,
+    więc materializowane RAZ, zanim zdania, szczegóły i polecenia zostaną z niego odczytane."""
     elementy = tuple(z for z in zdania if z)
     return ZdanieZeSzczegolem(sep.join(elementy),
-                              "\n".join(s for s in map(szczegol_zdania, elementy) if s))
+                              "\n".join(s for s in map(szczegol_zdania, elementy) if s),
+                              "\n".join(p for p in map(polecenie_zdania, elementy) if p))
 
 
 class EtykietaBledu(QLabel):
@@ -571,20 +587,28 @@ class EtykietaBledu(QLabel):
         self._zdanie = ""
         self._pelne = ""                # pełne zdanie, gdy pole pokazuje skrót (`ustaw(pelne=)`)
         self._szczegol = ""
+        self._polecenie = ""            # samo polecenie wiersza poleceń ze szczegółu (AR-309)
         self._wciecie = None            # wcięcie sprzed wskaźnika; None = wskaźnik zdjęty
         self._menu = None
         self.setTextFormat(Qt.PlainText)    # zdanie z `<…>` nie jest HTML-em (AR-235)
         self.ustaw(text)
 
-    def ustaw(self, zdanie, szczegol="", *, pelne=None):
+    def ustaw(self, zdanie, szczegol="", *, pelne=None, polecenie=""):
         """Zdanie i jego szczegół (wiersze `wiersz_systemu`/`podpowiedz_*`) - razem albo wcale:
         szczegół bez zdania nie ma do czego należeć. `pelne` - pełne zdanie, gdy pole pokazuje skrót
         (raport paska gospodarza przycięty do zapasu paska, AR-218): podpowiedź i „Kopiuj zdanie”
-        biorą pełne, `text()` - to, co pole pokazuje."""
+        biorą pełne, `text()` - to, co pole pokazuje.
+
+        `polecenie` (AR-309) - SAMO polecenie wiersza poleceń, które szczegół niesie obok prozy
+        (`horreum header-fix "…" --undo N`): menu pola dostaje „Kopiuj polecenie”, bo „Kopiuj szczegół”
+        oddawał prozę z poleceniem, a wklejona do terminala proza pada pierwsza. Nośnik podaje je
+        osobno - pole nie zgaduje, która linia szczegółu jest poleceniem. Jak szczegół: tylko przy
+        niepustym zdaniu, a `setText`/`clear` je zdejmują."""
         zdanie = zdanie or ""
         self._zdanie = zdanie
         self._pelne = (pelne or zdanie) if zdanie else ""
         self._szczegol = (szczegol or "") if zdanie else ""
+        self._polecenie = (polecenie or "") if zdanie else ""
         super().setText(zdanie.replace("\\", "\\" + _LAMANIE))
         self.setToolTip("\n".join(p for p in (self._pelne, self._szczegol) if p))
         self.setAccessibleName(self._pelne)
@@ -601,6 +625,10 @@ class EtykietaBledu(QLabel):
     def szczegol(self):
         """Szczegół BIEŻĄCEGO zdania albo `""`."""
         return self._szczegol
+
+    def polecenie(self):
+        """Polecenie wiersza poleceń BIEŻĄCEGO zdania (`ustaw(polecenie=)`, AR-309) albo `""`."""
+        return self._polecenie
 
     def setText(self, text):
         self.ustaw(text)
@@ -663,7 +691,8 @@ class EtykietaBledu(QLabel):
 
     def contextMenuEvent(self, event):
         zaznaczalne = bool(self.textInteractionFlags() & Qt.TextSelectableByMouse)
-        if not (self._szczegol or _LAMANIE in super().text() or (self._zdanie and not zaznaczalne)):
+        if not (self._szczegol or self._polecenie or _LAMANIE in super().text()
+                or (self._zdanie and not zaznaczalne)):
             super().contextMenuEvent(event)
             return
         if self._menu is not None:
@@ -672,12 +701,15 @@ class EtykietaBledu(QLabel):
         # Treść ZAMROŻONA przy otwarciu menu: pole bywa przepisane, zanim ręka kliknie pozycję (raport
         # paska gaśnie, `setText("")`) - kopia ma oddać to, co człowiek widział przy prawym kliku.
         zaznaczenie, zdanie, szczegol = self.selectedText(), self._pelne, self._szczegol
+        polecenie = self._polecenie
         schowek = QGuiApplication.clipboard()
         if zaznaczenie:
             self._menu.addAction(i18n.t("wb.copy_selection"), lambda: schowek.setText(zaznaczenie))
         self._menu.addAction(i18n.t("wb.copy_sentence"), lambda: schowek.setText(zdanie))
         if szczegol:
             self._menu.addAction(i18n.t("wb.copy_detail"), lambda: schowek.setText(szczegol))
+        if polecenie:                    # samo polecenie - wklejone do terminala wykonuje się od razu
+            self._menu.addAction(i18n.t("wb.copy_command"), lambda: schowek.setText(polecenie))
         self._menu.popup(event.globalPos())
         event.accept()
 

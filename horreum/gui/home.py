@@ -167,6 +167,16 @@ def zdanie_gestu(gest):
     if netto < 0:
         return i18n.t_plural("home.gest.object_relocated_back", -netto)
     verbs = _bez_towarzyszacych(gest["verbs"])
+    odrzucone = gest.get("discarded")
+    if odrzucone and set(verbs) == {"staging.discarded"}:
+        # „Odrzuć” przebiegu z poprzedniej sesji (AR-304): dziennik ma JEDNO zdarzenie na odrzucenie,
+        # a liczba zmian stoi w jego ładunku (`queries.odrzucenia_szuflady`) - zdanie mówi nią.
+        czlony = [i18n.t_plural(klucz, odrzucone[klinga])
+                  for klinga, klucz in (("karty", "home.gest.staging_discarded"),
+                                        ("nazwy", "home.gest.staging_discarded_names"))
+                  if odrzucone.get(klinga)]
+        if czlony:
+            return " · ".join(czlony)
     if len(verbs) == 1:
         (verb, n), = verbs.items()
         klucz = _ZDANIA_GESTU.get(verb)
@@ -735,7 +745,11 @@ class HomeView(QWidget):
         geście w Zbiorach i drugim w Porządkach zdanie opisywało Porządki). Bez recepty albo przy
         recepcie bez znacznika - ostatni gest ręki z dziennika."""
         ts = self._recepta.ts if self._recepta is not None else None
-        return queries.last_hand_gesture(self.con, ts=ts)
+        gest = queries.last_hand_gesture(self.con, ts=ts)
+        if gest is not None and "staging.discarded" in gest["verbs"]:
+            # Liczba odrzuconych zmian z ładunku zdarzeń (AR-304) - `verbs` liczy zdarzenia.
+            gest["discarded"] = queries.odrzucenia_szuflady(self.con, ts=gest["ts"], actor=gest["actor"])
+        return gest
 
     def wstrzymaj_recepte(self, wstrzymana):
         """Blokada po wykonaniu członu (dwuklik to jeden gest) - stan trzyma gospodarz, wspólny

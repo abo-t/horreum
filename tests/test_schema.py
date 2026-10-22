@@ -107,8 +107,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v45_po_migracji(tmp_path):
-    """0045 podnosi user_version do 45 (świeża baza leci 0002→…→0045 sekwencyjnie; 0025 = wersja
+def test_user_version_v46_po_migracji(tmp_path):
+    """0046 podnosi user_version do 46 (świeża baza leci 0002→…→0046 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -128,13 +128,37 @@ def test_user_version_v45_po_migracji(tmp_path):
     warstwy pisarza karty i renamu w `pending_changes`/`pending_renames`/`withheld_write`, AR-148;
     0043 = indeks `frame(object_id)` pod materiał okna stosu i propozycję rodowodu, AR-154;
     0044 = ślad własnego cofnięcia drogi atomowej `atomic_undo`, AR-182; 0045 = werdykt plików obok
-    ścieżki na śladzie cofnięcia `atomic_undo.outcome`/`kept_paths`/`settled_at`, AR-127).
+    ścieżki na śladzie cofnięcia `atomic_undo.outcome`/`kept_paths`/`settled_at`, AR-127; 0046 =
+    zbadanie bajtu spoza ASCII w surowym nagłówku kopii FITS `location.nonprintable_hash`/`_keyword`/
+    `_char`, AR-299).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 45
-    assert db.SCHEMA_VERSION == 45
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 46
+    assert db.SCHEMA_VERSION == 46
+    con.close()
+
+
+def test_0046_stan_zbadania_bajtu_check_i_indeks(tmp_path):
+    """0046 (AR-299): nazwa karty z bajtem tylko przy odcisku zbadania, znak zawsze razem z nazwą
+    i w postaci `0xNN`; indeks częściowy pod kubełek istnieje.
+    Falsyfikator: migracja bez CHECK - złe wiersze wchodzą."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    con.execute("INSERT INTO frame(id, sha1_data, kind, first_seen_at) VALUES (1, 'a', 'light', 't')")
+    con.execute("INSERT INTO location(id, frame_id, volume, path) VALUES (1, 1, 'V', 'X:\\L\\a.fits')")
+    for zly in ("UPDATE location SET nonprintable_keyword = 'OBSERVER', nonprintable_char = '0xE9'",
+                "UPDATE location SET nonprintable_hash = 'h', nonprintable_keyword = 'OBSERVER'",
+                "UPDATE location SET nonprintable_hash = 'h', nonprintable_keyword = 'OBSERVER', "
+                "nonprintable_char = 'E9'"):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(zly)
+    con.execute("UPDATE location SET nonprintable_hash = 'h', nonprintable_keyword = 'OBSERVER', "
+                "nonprintable_char = '0xE9'")
+    con.execute("UPDATE location SET nonprintable_hash = 'h', nonprintable_keyword = NULL, "
+                "nonprintable_char = NULL")
+    assert con.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                       "AND name = 'idx_location_nonprintable'").fetchone() is not None
     con.close()
 
 

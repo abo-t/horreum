@@ -1211,6 +1211,13 @@ def f_ratio_mismatch_frame_ids(con):
     return optics_mismatch_frame_ids(con, "f_ratio")
 
 
+def header_nonprintable_frame_ids(con):
+    """Perspektywa „Bajt spoza ASCII w nagłówku” (AR-299) - zbiór od jedynego właściciela predykatu
+    (`resolver.nonprintable_frame_ids`), ten sam co liczba wiersza Porządków."""
+    from horreum.resolver import nonprintable_frame_ids
+    return nonprintable_frame_ids(con)
+
+
 FIX_REFUSALS = ("no_target", "no_files", "majority")
 """Powody odmowy gestu „Popraw f/ w plikach…" (`optics_fix_targets`) - tokeny zdań
 `grid.optics.refused.<token>` (parytet pinuje test i18n)."""
@@ -5364,20 +5371,14 @@ def oczekujace_przebiegi_szuflady(con):
     przed przerwaniem anulowaniem), i CAŁY przebieg nazw, którego jakikolwiek
     wiersz ma otwarty zamiar (`in_flight`): taki przebieg jest właśnie w biegu (inne okno, inny proces)
     albo czeka na rekoncyliację - dwa zapisy jednego przebiegu to wyścig, nie dokończenie. Przebiegu,
-    który prowadzi żywe inne okno, lista nie odróżnia - to rozstrzyga blokada szuflady widoku."""
-    wynik = [{"run_id": r["run_id"], "klinga": "karty", "n": r["n"], "przerwany": bool(r["przerwany"])}
-             for r in con.execute(
-        "SELECT p.run_id, count(*) AS n, max(p.id) AS ostatni, "
-        "  (EXISTS (SELECT 1 FROM pending_changes q WHERE q.run_id = p.run_id "
-        "           AND q.status <> 'pending') "
-        "   OR EXISTS (SELECT 1 FROM commits c WHERE c.run_id = p.run_id)) AS przerwany "
-        "FROM pending_changes p "
-        "WHERE p.status = 'pending' AND p.inplace_op_id IS NULL "
-        "  AND NOT EXISTS (SELECT 1 FROM pending_changes w JOIN inplace_op io ON io.id = w.inplace_op_id "
-        "                  WHERE w.run_id = p.run_id "
-        "                  AND io.phase IN (SELECT value FROM json_each(?))) "
-        "  AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = p.run_id) "
-        "GROUP BY p.run_id ORDER BY ostatni DESC", (json.dumps(list(INPLACE_ISOLATING_PHASES)),))]
+    który prowadzi żywe inne okno, lista nie odróżnia - to rozstrzyga blokada szuflady widoku.
+
+    Wpis `pending` związany z operacją ZAMKNIĘTĄ (faza spoza izolujących - `released` po „Zwolnij”,
+    `recovered` po odzysku otwartego zapisu) liczy się jak każdy czekający: `repo.begin_inplace_commit`
+    wiąże go na nowo przy „Zatwierdź”. Przebiegi wyłączone izolacją oddaje osobno
+    `przebiegi_szuflady_izolowane` - ten sam odczyt (`_przebiegi_kart_szuflady`), druga połowa."""
+    wynik = [{"run_id": r["run_id"], "klinga": "karty", "n": r["n"], "przerwany": r["przerwany"]}
+             for r in _przebiegi_kart_szuflady(con) if not r["fazy"]]
     wynik += [{"run_id": r["run_id"], "klinga": "nazwy", "n": r["n"], "przerwany": bool(r["przerwany"])}
               for r in con.execute(
         "SELECT p.run_id, count(*) AS n, max(p.id) AS ostatni, "
@@ -5391,6 +5392,91 @@ def oczekujace_przebiegi_szuflady(con):
         "  AND NOT EXISTS (SELECT 1 FROM pending_object_change po WHERE po.rename_id = p.id) "
         "GROUP BY p.run_id ORDER BY ostatni DESC")]
     return wynik
+
+
+def _przebiegi_kart_szuflady(con):
+    """Przebiegi kart szuflady z wpisami czekającymi (`pending`), bez przebiegów zmiany obiektu - od
+    NAJNOWSZEGO (`max(id)` czekającego wpisu). JEDEN predykat izolacji dla dwóch czytelników
+    (`oczekujace_przebiegi_szuflady`, `przebiegi_szuflady_izolowane`): `fazy` = krotka faz izolujących
+    (`repo.INPLACE_ISOLATING_PHASES`) operacji, z którymi związany jest JAKIKOLWIEK wpis przebiegu (pusta =
+    przebieg bez izolacji). `n` - wszystkie czekające wpisy przebiegu, także związany z operacją, która
+    czeka na dokończenie (proces zabity w biegu zapisu w miejscu zostawia go `pending` - AR-308); wpis
+    związany z operacją, której w dzienniku nie ma, nie liczy się nigdzie. `przerwany` jak w
+    `oczekujace_przebiegi_szuflady`. Zmierzone na kopii pf4 (2026-10-21): 0,17 ms (mediana z 50)."""
+    return [{"run_id": r["run_id"], "n": r["n"], "przerwany": bool(r["przerwany"]),
+             "fazy": tuple(sorted(r["fazy"].split(","))) if r["fazy"] else ()}
+            for r in con.execute(
+        "SELECT p.run_id, count(*) AS n, max(p.id) AS ostatni, "
+        "  (EXISTS (SELECT 1 FROM pending_changes q WHERE q.run_id = p.run_id "
+        "           AND q.status <> 'pending') "
+        "   OR EXISTS (SELECT 1 FROM commits c WHERE c.run_id = p.run_id)) AS przerwany, "
+        "  (SELECT group_concat(DISTINCT io.phase) FROM pending_changes w "
+        "     JOIN inplace_op io ON io.id = w.inplace_op_id "
+        "    WHERE w.run_id = p.run_id AND io.phase IN (SELECT value FROM json_each(?))) AS fazy "
+        "FROM pending_changes p "
+        "WHERE p.status = 'pending' "
+        "  AND (p.inplace_op_id IS NULL "
+        "       OR EXISTS (SELECT 1 FROM inplace_op z WHERE z.id = p.inplace_op_id)) "
+        "  AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = p.run_id) "
+        "GROUP BY p.run_id ORDER BY ostatni DESC", (json.dumps(list(INPLACE_ISOLATING_PHASES)),))]
+
+
+def przebiegi_szuflady_izolowane(con):
+    """Przebiegi kart, których szuflada NIE podejmuje, bo ich wpis jest związany z operacją zapisu
+    w miejscu w fazie izolującej (AR-308; przebieg należy wtedy do dokończenia albo odzysku) - żeby
+    szuflada mówiła, ile zmian czeka i co je zwolni, zamiast „pusta”. Słowniki `run_id`, `n`
+    (wszystkie czekające wpisy), `fazy` (krotka faz izolujących), od najnowszego. Druga połowa
+    `_przebiegi_kart_szuflady` - przebieg jest albo tu, albo w `oczekujace_przebiegi_szuflady`."""
+    return [{"run_id": r["run_id"], "n": r["n"], "fazy": r["fazy"]}
+            for r in _przebiegi_kart_szuflady(con) if r["fazy"]]
+
+
+def odrzucenia_szuflady(con, *, ts, actor):
+    """Ile czekających zmian odrzucił gest „Odrzuć” przebiegu z poprzedniej sesji (AR-304) - suma `n`
+    z ładunku zdarzeń `staging.discarded` gestu (`ts` + `actor`, jak `last_hand_gesture`) per klinga:
+    `{"karty": n, "nazwy": n}`, klinga bez zdarzenia - 0. Dziennik liczy zdarzenia (jedno na
+    odrzucenie), a Dom ma mówić liczbą zmian."""
+    wynik = {"karty": 0, "nazwy": 0}
+    for r in con.execute(
+            "SELECT json_extract(payload, '$.klinga') AS klinga, "
+            "       COALESCE(SUM(json_extract(payload, '$.n')), 0) AS n FROM event "
+            "WHERE ts = ? AND actor = ? AND verb = 'staging.discarded' "
+            "GROUP BY json_extract(payload, '$.klinga')", (ts, actor)):
+        if r["klinga"] in wynik:
+            wynik[r["klinga"]] = int(r["n"])
+    return wynik
+
+# ---- recepty paska: wpisy czekające w szufladach (AR-297) ----
+
+def klatki_w_szufladzie(con, frame_ids, keyword):
+    """Klatki zbioru, których KAŻDA obecna kopia (`present=1`) ma czekający wpis stagingu
+    (`pending_changes.status='pending'`) dla `keyword` - z KAŻDEGO przebiegu: bieżącej szuflady,
+    przebiegów z poprzednich sesji, których okno nie podjęło (podejmuje tylko najnowszy, AR-280),
+    przebiegu innego okna i przebiegu wyłączonego izolacją zapisu. Recepta perspektywy liczy klatki,
+    które wciąż są robotą: klatka z wpisem dla jednej z dwóch kopii dalej nią jest. Klatka bez
+    obecnej kopii nie trafia (gest i tak jej odmówi). `frame_ids` jako tablica JSON (jeden param).
+
+    Zmierzone na kopii pf4 (16 998 klatek, 2026-10-21): całe archiwum 40 ms, perspektywa f/ (27
+    klatek) 0,1 ms - po indeksach `idx_location_frame` i `idx_pending_loc`. Zwraca `set[frame_id]`."""
+    return {r[0] for r in con.execute(
+        "SELECT l.frame_id FROM location l "
+        "WHERE l.present = 1 AND l.frame_id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY l.frame_id "
+        "HAVING min(EXISTS (SELECT 1 FROM pending_changes p WHERE p.location_id = l.id "
+        "                   AND p.status = 'pending' AND p.keyword = ?)) = 1",
+        (json.dumps([int(f) for f in frame_ids]), keyword))}
+
+
+def klatki_commitu_z_obiektem_z_naglowka(con, commit_id):
+    """Ile klatek pod plikami commitu kart (`header_backups` podmienione) ma obiekt ze źródłem `header`
+    (AR-296). Okna kart piszą kartę `OBJECT` tylko tam, gdzie nagłówek obiektu nie niósł, więc po
+    cofnięciu takiego commitu obiekt z nagłówka to obiekt z COFNIĘTEJ karty: „Rozwiąż” po zapisie go
+    nadał, a ani cofnięcie, ani kolejne „Rozwiąż” go nie zdejmuje (zmierzone na rdzeniu, 2026-10-21)."""
+    return con.execute(
+        "SELECT count(DISTINCT l.frame_id) FROM header_backups b "
+        "JOIN location l ON l.id = b.location_id JOIN frame f ON f.id = l.frame_id "
+        "WHERE b.commit_id = ? AND b.unreplaced_at IS NULL "
+        "AND f.object_id IS NOT NULL AND f.object_source = 'header'", (commit_id,)).fetchone()[0]
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po

@@ -2149,3 +2149,37 @@ def test_strona_przyjmij_przebieg_bez_zrodla_nie_rozpycha_strony(qapp, tmp_path)
     finally:
         widok.close()
         con.close()
+
+
+# ============================================================ AR-303: ścieżka bazy nie rozpycha okna
+
+# Ścieżka bazy ~250 znaków z TREŚCI (segmenty po `\`, bez `-` i spacji - łamanie po `\` jest mechanizmem
+# pola), nie z długości katalogu testu. Natywnie baza pod 249 znakami podnosiła minimum okna z 1424 do
+# 1704 px (PL) / 1728 px (EN).
+_DLUGA_BAZA = "X:\\Bazy\\" + "\\".join(f"katalog_bazy_horreum_{i:02d}" for i in range(10)) + "\\horreum.db"
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_dluga_sciezka_bazy_nie_rozpycha_strony_dostawy(qapp, tmp_path, monkeypatch, lang):
+    """Pole „Baza: <ścieżka>” na górze Dostawy łamie ścieżkę po `\\` i zawija się: minimum strony z bazą
+    pod długą ścieżką = minimum tej samej strony z bazą pod krótką, pole nie żąda więcej niż strona.
+    Ścieżka syntetyczna nie istnieje, więc `db.connect` widoku trafia (atrapa) w świeżą bazę testu.
+    Falsyfikator: `lbl_db` jako `QLabel` albo bez `setWordWrap`."""
+    i18n.set_lang(lang)
+    krotka = _fresh_db(tmp_path)
+    prawdziwy = db.connect
+    monkeypatch.setattr(db, "connect", lambda p, *a, **kw: prawdziwy(krotka if p == _DLUGA_BAZA else p, *a, **kw))
+    wzor = PipelineView(krotka, now_fn=lambda: NOW)
+    view = PipelineView(_DLUGA_BAZA, now_fn=lambda: NOW)
+    try:
+        qapp.processEvents()
+        assert view.lbl_db.text() == i18n.t("main.db_loaded", path=_DLUGA_BAZA)
+        assert view.lbl_db.wordWrap()
+        bez = wzor.minimumSizeHint().width()
+        assert view.minimumSizeHint().width() == bez, (bez, view.minimumSizeHint())
+        assert view.lbl_db.minimumSizeHint().width() <= bez, view.lbl_db.minimumSizeHint()
+        assert view.lbl_db.heightForWidth(300) > view.lbl_db.heightForWidth(6000), "pole nie zawija"
+    finally:
+        view.close()
+        wzor.close()
+        i18n.set_lang("pl")

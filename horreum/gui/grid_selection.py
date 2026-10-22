@@ -673,6 +673,8 @@ class ReleaseDialog(QDialog):
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.btn_ok = self.buttons.button(QDialogButtonBox.Ok)
         self.btn_ok.setText(i18n.t("grid.inplace.release_ok"))
+        # Tekst z katalogu, nie z Qt (AR-306): bez tłumacza Qt standardowy przycisk mówi „Cancel”.
+        self.buttons.button(QDialogButtonBox.Cancel).setText(i18n.t("grid.inplace.release_cancel"))
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         lay.addWidget(self.buttons)

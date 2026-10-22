@@ -527,7 +527,6 @@ def test_wiersz_porzadkow_liczy_do_plakietki_grupy_bez_werdyktu(view, wcon):
 def test_zapisana_perspektywa_nie_psuje_sie_od_nowej_flagi(view, wcon, monkeypatch):
     """Stary zapis (bez klucza `only_stack_versions`) stosuje się z flagą wyłączoną; nowy zapis
     niesie ją pod kluczem spec-a, a ten build go zna - bez ostrzeżenia o nieznanych warunkach."""
-    from PySide6.QtWidgets import QInputDialog
     from horreum import repo
     from horreum.gui import grid as grid_mod
     repo.save_perspective(wcon, name="stary", spec={"filter": None, "group_by": None,
@@ -536,7 +535,7 @@ def test_zapisana_perspektywa_nie_psuje_sie_od_nowej_flagi(view, wcon, monkeypat
     view.apply_perspective("stary")
     assert not view._perspektywa_wersji() and view.model._version_col() is None
     view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("moje wersje", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "moje wersje")
     view._save_perspective()
     zapis = dict(queries.perspectives(wcon))["moje wersje"]
     assert zapis["only_stack_versions"] is True and zapis["group_by"] == grid_mod._GRUPA_WERSJI

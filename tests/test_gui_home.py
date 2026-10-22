@@ -1320,3 +1320,69 @@ def test_teczki_blad_bazy_klasa_w_jezyku_UI_szczegol_w_podpowiedzi(qapp, tmp_pat
         zla.close()
         con.close()
         i18n.set_lang("pl")
+
+
+# ============================================================ AR-304 - odrzucenie szuflady z poprzedniej sesji
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdanie_domu_odrzucenia_z_poprzedniej_sesji_zloty(lang):
+    """Gest „Odrzuć” przebiegu z poprzedniej sesji to JEDNO zdarzenie `staging.discarded`, a Dom mówi liczbą
+    odrzuconych zmian z jego ładunku (pole `discarded`), z odmianą (1, 2, 5, 12, 22) i klingą. Bez pola -
+    zdanie ogólne jak dotąd. Falsyfikatory: `zdanie_gestu` bez gałęzi odrzucenia („1 zmiana”); klinga nazw
+    mówiona zdaniem kart."""
+    i18n.set_lang(lang)
+    ts = "2026-10-04T12:00:00+00:00"
+
+    def gest(karty, nazwy=0):
+        return {"ts": ts, "actor": "user:local", "verbs": {"staging.discarded": 1}, "n": 1,
+                "discarded": {"karty": karty, "nazwy": nazwy}}
+    karty = [home_mod.zdanie_gestu(gest(n)) for n in (1, 2, 5, 12, 22)]
+    nazwy = [home_mod.zdanie_gestu(gest(0, n)) for n in (1, 2, 5)]
+    if lang == "pl":
+        assert karty == ["odrzucono 1 zmianę z poprzedniej sesji", "odrzucono 2 zmiany z poprzedniej sesji",
+                         "odrzucono 5 zmian z poprzedniej sesji", "odrzucono 12 zmian z poprzedniej sesji",
+                         "odrzucono 22 zmiany z poprzedniej sesji"]
+        assert nazwy == ["odrzucono 1 zmianę nazwy z poprzedniej sesji",
+                         "odrzucono 2 zmiany nazw z poprzedniej sesji", "odrzucono 5 zmian nazw z poprzedniej sesji"]
+        assert home_mod.zdanie_dziennika(gest(3), DOM_NOW) == "Ostatnio (04.10): odrzucono 3 zmiany z poprzedniej sesji"
+    else:
+        assert karty == ["1 change from the previous session discarded",
+                         "2 changes from the previous session discarded",
+                         "5 changes from the previous session discarded",
+                         "12 changes from the previous session discarded",
+                         "22 changes from the previous session discarded"]
+        assert nazwy[0] == "1 name change from the previous session discarded"
+        assert not set("".join(karty + nazwy)) & _POLSKIE
+    bez_pola = {"ts": ts, "actor": "user:local", "verbs": {"staging.discarded": 1}, "n": 1}
+    assert home_mod.zdanie_gestu(bez_pola) == i18n.t_plural("home.gest.many", 1)
+    for klucz in ("home.gest.staging_discarded", "home.gest.staging_discarded_names"):
+        assert set(CATALOG[klucz]["pl"]) == {"one", "few", "many"} and set(CATALOG[klucz]["en"]) == {"one", "other"}
+    i18n.set_lang("pl")
+
+
+def test_odrzucenie_przebiegu_poprzedniej_sesji_dom_mowi_liczbe(qapp, tmp_path):
+    """Prawdziwa droga: staging trzech kart, zamknięcie okna, nowe okno podejmuje przebieg, klik „Odrzuć” -
+    dziennik ma jedno zdarzenie `staging.discarded`, a Dom („Ostatnio”) mówi „odrzucono 3 zmiany z poprzedniej
+    sesji”, nie „1 zmiana”. Falsyfikator: `_gest_ostatnio` bez liczby z ładunku zdarzenia."""
+    from test_gui_grid_szuflada import (_baza_szuflady, _klik_w, _makro_przyciskiem, _restart,
+                                        _widok_szuflady, _zamknij_widok)
+    path, con, _p = _baza_szuflady(tmp_path, 3)
+    v = _widok_szuflady(con)
+    _makro_przyciskiem(v, "TELESCOP", "EQ6")
+    _zamknij_widok(v)
+    con.close()
+    con, v = _restart(path)
+    try:
+        assert v._pending_count() == 3
+        _klik_w(v.drawer.btn_reject)
+    finally:
+        _zamknij_widok(v)
+    h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
+    try:
+        gest = h._gest_ostatnio()
+        assert gest["verbs"] == {"staging.discarded": 1} and gest["discarded"] == {"karty": 3, "nazwy": 0}
+        assert home_mod.zdanie_gestu(gest) == "odrzucono 3 zmiany z poprzedniej sesji"
+    finally:
+        h.close()
+        con.close()

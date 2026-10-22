@@ -84,6 +84,9 @@ from .item_reasons import blad_windows as _blad_windows
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 from .card_rules import (KARTY_KOMENTARZOWE, liczba_violation,   # liczba karty - jedno zdanie
                          powod_cyfr)                             # z podglądem (AR-269)
+from .card_rules import bajt_spoza_ascii, powod_bajtu   # bajt spoza ASCII - predykat skanu (AR-299)
+from .card_rules import (gola_wartosc_violation, powod_typu,   # literał gołej wartości XISF i karta
+                         tekst_logiczny)                       # logiczna FITS (AR-300)
 
 # ============================================================ WRITER (port dawcy fits_io)
 
@@ -751,19 +754,21 @@ def _zloz_plik_tymczasowy(path: str, fh, czesci, *, oryginal_region: bytes | Non
 def _coerce(value, value_type: str):
     """Wartość wpisu stagingu (tekst) w typie karty. Tekst, który nie jest liczbą typu karty, to ODMOWA
     łaty z kodem bliźniaczym podglądu (`macro_type_mismatch`, AR-256) - plik nietknięty; dawniej goły
-    `ValueError` z `int()` dawał 'failed' prozą. W produkcie zatrzymuje to wcześniej podgląd makra."""
+    `ValueError` z `int()` dawał 'failed' prozą. W produkcie zatrzymuje to wcześniej podgląd makra.
+    Karta logiczna: tekst spoza zbioru `card_rules.tekst_logiczny` to ta sama odmowa (AR-300) -
+    dawniej każdy taki tekst (`abc`) zapisywał się po cichu jako `F`."""
     if value_type in ("int", "float"):
         try:
             return int(value) if value_type == "int" else float(value)
         except (TypeError, ValueError) as exc:
-            tekst = str(value)
-            raise OdmowaZPowodem(PowodPozycji(
-                f"wartość '{tekst}' nie pasuje do typu '{value_type}'", "macro_type_mismatch",
-                value=tekst, value_type=value_type)) from exc
+            raise OdmowaZPowodem(powod_typu(value, value_type)) from exc
     if value_type == "bool":
         if isinstance(value, bool):
             return value
-        return str(value).strip().lower() in ("t", "true", "1", "yes")
+        logiczna = tekst_logiczny(value)
+        if logiczna is None:
+            raise OdmowaZPowodem(powod_typu(value, "bool"))
+        return logiczna
     return str(value)
 
 
@@ -1571,14 +1576,18 @@ def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
                 f"{brak} - 'set' nie zakłada karty; dopisanie idzie przez 'add' (P6d)",
                 "xisf_set_missing", detail=brak)) from exc
         stara = xml[span[0]:span[1]]
-        if op.value_type not in ("int", "float") and not (
-                len(stara) >= 2 and stara.startswith(b"'") and stara.endswith(b"'")):
+        if not (len(stara) >= 2 and stara.startswith(b"'") and stara.endswith(b"'")):
             # Tekst na zastanej GOŁEJ wartości (liczba, logika) idzie do pliku goło (`quote_fits`), więc
-            # `nan`/`inf` stałby się liczbą nieskończoną karty - ta sama odmowa co typ liczbowy (AR-269).
-            # Cytowana wartość i `add` (wzorzec w apostrofach) niosą tekst, a `nan` w tekście jest
-            # legalny. Podgląd makra postaci goła/cytowana nie zna (lustro `cards` ma sam tekst), więc
-            # dla karty `str` XISF werdykt wydaje WYŁĄCZNIE pisarz - przy commicie, z kodem.
-            powod = liczba_violation(keyword, new_text)
+            # musi zostać literałem FITS swojego rodzaju (`card_rules.gola_wartosc_violation`: liczba
+            # nieskończona AR-269, liczba → liczba, `T`/`F` → `T`/`F`, AR-300) - także przy typie
+            # liczbowym API (`1_0` przechodzi `float()`, a literałem FITS nie jest). Cytowana wartość
+            # i `add` (wzorzec w apostrofach) niosą tekst, a tam każdy tekst jest legalny. Podgląd makra
+            # tej reguły NIE zgaduje: lustro `cards` trzyma wartość po `_unquote_fits`, więc `'180.0'`
+            # i `180.0` są w nim identyczne - werdykt wydaje WYŁĄCZNIE pisarz, na bajtach, z kodem.
+            # Referencja liczbowa XML (`&#51;`) zostaje surowa (`scan._unescape_xml`) - taki plik
+            # zatrzymuje wcześniej strażnik wycinka (`scan.locate_value_span`).
+            powod = gola_wartosc_violation(
+                keyword, scan._unescape_xml(stara.decode("utf-8", "replace")), new_text)
             if powod is not None:
                 raise _XisfRefusal(powod)
         patches.append((*span, scan.quote_fits(new_text, stara)))
@@ -1906,25 +1915,15 @@ def _odmowa_sumy(hdr) -> PowodPozycji | None:
 # „zachowanie” bajtu nie miałoby kotwicy - odmowa z kodem, plik nietknięty. Patrzymy na rekordy
 # KART (do `END`) wszystkich HDU, z uchwytu blokady: wypełnienie za `END` nie jest treścią karty,
 # a `writeto` przepisuje nagłówki wszystkich HDU. Populacja archiwum: 0 z 15 598 plików na `R:`
-# (2026-10-21, surowy odczyt) - bramka obronna.
-_FITS_DRUKOWALNE = bytes(range(0x20, 0x7F))
+# (2026-10-21, surowy odczyt) - bramka obronna. Predykat i zdanie mają jednego właściciela
+# (`card_rules.bajt_spoza_ascii`, `powod_bajtu`) - ten sam zeznaje skan (marker kopii 0046, AR-299).
 
 
 def _bajt_naglowka(raw: bytes) -> PowodPozycji | None:
     """Powód `header_nonprintable` dla pierwszego bajtu spoza 0x20-0x7E w rekordach kart regionu
     nagłówka `raw` (od początku HDU, rekordy po 80 B, do `END`) albo `None`."""
-    for i in range(0, len(raw) - _FITS_RECORD + 1, _FITS_RECORD):
-        rekord = raw[i:i + _FITS_RECORD]
-        if rekord[:8] == _FITS_END_RECORD[:8]:
-            return None
-        if rekord.translate(None, _FITS_DRUKOWALNE):
-            bajt = next(b for b in rekord if not 0x20 <= b <= 0x7E)
-            nazwa = "".join(chr(b) if 0x20 <= b <= 0x7E else "?" for b in rekord[:8]).strip()
-            nazwa, znak = nazwa or "''", f"0x{bajt:02X}"
-            return PowodPozycji(f"karta {nazwa} ma w pliku bajt {znak} spoza drukowalnego ASCII - "
-                                f"Horreum nie zapisze tego nagłówka bez zmiany tego bajtu; plik "
-                                f"nietknięty", "header_nonprintable", keyword=nazwa, char=znak)
-    return None
+    traf = bajt_spoza_ascii(raw)
+    return None if traf is None else powod_bajtu(*traf)
 
 
 def _odcinki_naglowkow(hdul) -> list[tuple[int, int]]:
@@ -3855,6 +3854,40 @@ class _ZapisLokacji:
     dotknieto: bool = False
 
 
+def _odmowa_bajtu(con, rows, reason, *, location_id, header_hash, now, mark):
+    """Odmowa `header_nonprintable` przy commicie (AR-299): status 'blocked' wpisów i MARKER BAJTU kopii
+    jedną operacją klingi (`repo.block_on_nonprintable`, jeden `atomic`) - plik sprzed 0046 albo
+    zmieniony z zachowanym `mtime` trafia do Porządków przy pierwszej próbie zapisu. Błąd bazy w tej
+    operacji niczego nie zostawia połowicznie; wtedy wpisy dostają odmowę dzisiejszą drogą (`mark`) -
+    z pierwotnym kodem, bez markera. Plik nietknięty w obu gałęziach (odmowa padła przed pierwszym
+    bajtem). `header_hash` = kotwica stagingu: pisarz sprawdził ją z plikiem przed bramką bajtu.
+
+    Gdy i ta droga padnie błędem bazy (blokada trzymana przez inny proces), wyjątek NIE zastępuje
+    odmowy: zwracany powód zostaje `header_nonprintable`, a brak utrwalenia statusu wpisów idzie notą
+    z kodem (`pending_status_not_saved`) - tak jak inne „NIE powstało w bazie” pisarza
+    (`_slad_nie_powstal`). Zwraca powód wyniku pliku."""
+    params = dict(reason.params)
+    try:
+        repo.block_on_nonprintable(
+            con, pending_ids=[r["id"] for r in rows], reason=reason, location_id=location_id,
+            header_hash=header_hash, keyword=params["keyword"], char=params["char"], now=now,
+            actor="user:local")
+    except sqlite3.Error:
+        try:
+            mark(rows, "blocked", reason)
+        except sqlite3.Error as exc:
+            return _dopisz(reason, _status_nie_zapisany(exc))
+    return reason
+
+
+def _status_nie_zapisany(exc) -> PowodPozycji:
+    """Nota wyniku pliku, gdy status wpisów stagingu nie wszedł do bazy (AR-299) - plik nietknięty,
+    a wpisy mogą dalej czekać w szufladzie."""
+    blad = _blad_systemu(exc)
+    return PowodPozycji(f"status wpisów NIE zapisany w bazie (mogą dalej czekać w szufladzie): {blad}",
+                        "pending_status_not_saved", detail=blad)
+
+
 def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> _ZapisLokacji:
     """CIAŁO `commit` DLA JEDNEJ LOKACJI - JEDEN pisarz karty dla `commit` i sterownika zmiany
     obiektu (`commit_object_change`, para przeniesienie → karta). `rows` = oczekujące wpisy stagingu
@@ -4012,7 +4045,12 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
             reason = PowodPozycji(f"{res.reason}; podmiana niepotwierdzona, backup do cofnięcia "
                                   f"zapisany w commicie {stan.commit_id}", "replace_unconfirmed",
                                   inner=res.reason, commit_id=stan.commit_id)
-        _mark(rows, status, reason)
+        if (status == "blocked" and not backup_pliku
+                and getattr(reason, "code", None) == "header_nonprintable"):
+            reason = _odmowa_bajtu(con, rows, reason, location_id=location_id,
+                                   header_hash=expected, now=now, mark=_mark)
+        else:
+            _mark(rows, status, reason)
         return _ZapisLokacji(FileResult(location_id, path, status, reason, code=res.code),
                              dotknieto=bool(backup_pliku) and status == "failed")
     stan.podmieniono = True

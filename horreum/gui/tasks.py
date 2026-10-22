@@ -55,6 +55,7 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_F_RATIO_
                               PRESET_KEPT_COPIES,
                               zdanie_kopii_bez_zeznania)
 from horreum.gui.grid_model import PRESET_LINEAGE_NEWER, PRESET_XREF_RECONCILE
+from horreum.gui.grid_model import PRESET_HEADER_NONPRINTABLE   # bajt spoza ASCII (AR-299)
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import EtykietaBledu, tekst_powodu, wiersz_systemu   # zdanie + szczegół (AR-198)
 from horreum.item_reasons import powod_bazy, powod_okna
@@ -201,6 +202,13 @@ _TASKS = [
     # dokończenie („Dokończ zapis" w Zbiorach). Bez tego wiersza taka lokacja była niewidoczna,
     # a skan ją pomijał. Stoi pod sąsiadem, bo to druga połowa tej samej izolacji.
     ("pending_finish_frames", "tasks.pending_finish_frames", PRESET_PENDING_FINISH),
+    # Wiersz AKCYJNY i ROBOTA (AR-299) - ta sama rodzina co dwa wyżej (zapis nagłówka), inna przyczyna:
+    # kopia FITS ma w surowym nagłówku bajt spoza drukowalnego ASCII, więc pisarz odmawia zapisu
+    # i cofnięcia. Naprawa jest poza Horreum (program, który zapisał plik) - podpowiedź mówi to wprost.
+    # Liczba i perspektywa czytają jeden predykat (`resolver.nonprintable_frame_ids`). Kopie, których
+    # surowych bajtów jeszcze nie zbadano (0046 - stare kopie do pierwszej Dostawy), wiersz mówi „?”
+    # / „N+”, nie zero (`_NIEZBADANE_WIERSZA`).
+    ("header_nonprintable_frames", "tasks.header_nonprintable_frames", PRESET_HEADER_NONPRINTABLE),
     ("vanished_frames", "tasks.vanished_frames", PRESET_VANISHED),
     # Wiersz INFORMACYJNY, nie zadanie: klatka zastąpiona nie ma czego wymagać od użytkownika —
     # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki
@@ -336,6 +344,9 @@ def _liczniki_osi(con):
         # (lista pod klikiem czyta TEN SAM zbiór; poza `total` kolejki przeglądu).
         "focal_mismatch_frames": stan.focal_mismatch,
         "f_ratio_mismatch_frames": stan.f_ratio_mismatch,
+        # AR-299: klatki z bajtem i kopie niezbadane - właściciel `resolver`, ta sama migawka.
+        "header_nonprintable_frames": stan.header_nonprintable,
+        "header_nonprintable_unread": stan.header_nonprintable_unread,
         "observatory_review_frames": len(queries.observatory_review_frames(con)),
         "object_kept_frames": len(supersede.kept_object_facts(con)),
         "copy_conflict_open": len(niezgodne - queries.hand_testimony_frame_ids(con, niezgodne)),
@@ -497,7 +508,16 @@ _PODPOWIEDZI_OSI = {
     "dup_frames": ("tasks.dup_frames_tip", {"persp": "perspective.dups", "place": "nav.dostawa",
                                             "check": "pipeline.btn.presence",
                                             "mark": "pipeline.btn.mark_vanished"}),
+    # AR-299: naprawa poza Horreum - podpowiedź mówi, gdzie i kiedy skan zobaczy plik ponownie.
+    "header_nonprintable_frames": ("tasks.header_nonprintable_tip", {}),
 }
+
+# WIERSZE Z KOPIAMI NIEZBADANYMI (AR-299, 0046): klucz wiersza → klucz licznika kopii, których surowych
+# nagłówków jeszcze nie zbadano (`resolver.nonprintable_unread_locations`). Ta sama zasada co
+# `_CZEKA_NA_FAKTY_KOPII` niżej - zero przy kopiach niezbadanych mówi „?”, liczba niezerowa „N+”, klik
+# w „?” prowadzi do Dostawy (etap uzupełnień bada je tym samym odczytem nagłówka) - ale z WŁASNYM
+# licznikiem i zdaniem: to kopie FITS bez zbadania bajtu, nie kopie bez faktów.
+_NIEZBADANE_WIERSZA = {"header_nonprintable_frames": "header_nonprintable_unread"}
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
 # zeznania kopii, a kopia bez faktów w porównaniu nie bierze udziału - więc przed pierwszą Dostawą
@@ -737,8 +757,9 @@ class TasksView(QWidget):
 
         JEDYNY WŁAŚCICIEL PORAŻKI RACHUNKU (AR-198): błąd bazy albo systemu w odczycie synchronicznym
         stawia wiersz błędu nad listą (lista zostaje przy stanie poprzednim) i zwraca `None` - każda
-        droga (montaż, wejście w Porządki, powrót z podstrony, ponowienie po biegu w tle) mówi zdaniem
-        klasy zamiast wyjątku ze slotu. Błąd programu (inny wyjątek) leci dalej (EXPECT)."""
+        droga (montaż, wejście w Porządki, powrót z podstrony) mówi zdaniem klasy zamiast wyjątku ze
+        slotu; druga porażka biegu w tle mówi tym samym wierszem (`_pokaz_blad_licznikow`, AR-302).
+        Błąd programu (inny wyjątek) leci dalej (EXPECT)."""
         self._liczniki_gen += 1
         if w_tle and self._db_path and not self._liczniki_stop:
             if self._liczniki_thread is not None:
@@ -755,9 +776,7 @@ class TasksView(QWidget):
             # `powod_okna` (AR-264): `ProgrammingError`/`InterfaceError` (API bazy wbrew kontraktowi)
             # mówi błędem programu z miejscem w kodzie, nie surowym angielskim tekstem SQLite.
             powod = powod_okna(exc)
-            self.blad_licznikow.ustaw(i18n.t("tasks.counts_failed", msg=tekst_powodu(powod)),
-                                      wiersz_systemu(powod))
-            self.blad_licznikow.setVisible(True)
+            self._pokaz_blad_licznikow(powod)
             return None
         badge = self._przyloz_liczniki(*stan)
         self._odcisk_licznikow = odcisk
@@ -826,16 +845,35 @@ class TasksView(QWidget):
         self._przyloz_liczniki(*wynik)
         self._odcisk_licznikow = self._odcisk_biegu
 
+    def _pokaz_blad_licznikow(self, powod):
+        """Wiersz błędu nad listą (lista zostaje przy stanie poprzednim): zdanie powodu w języku UI
+        i szczegół pod kursorem - JEDNO miejsce dla rachunku synchronicznego (`refresh_counts`) i drugiej
+        porażki biegu w tle (`_on_liczniki_failed`)."""
+        self.blad_licznikow.ustaw(i18n.t("tasks.counts_failed", msg=tekst_powodu(powod)),
+                                  wiersz_systemu(powod))
+        self.blad_licznikow.setVisible(True)
+
+    # Generacja, której rachunek już raz ponowiono w tle - druga porażka mówi wierszem błędu (AR-302).
+    _liczniki_ponowiony = None
+
     @Slot(int, object)
-    def _on_liczniki_failed(self, gen, _powod):
-        """Bieg w tle padł: drugie podejście na wątku GUI (wzór `FramesView._on_zbior_failed`) -
-        przypadłość wątku znika przy ponowieniu. Błąd trwały (dziś realnie: SQLite - baza
-        zablokowana, niedostępna) padał drugi raz WYJĄTKIEM ZE SLOTU, a plakietka zostawała
-        zamrożona bez słowa; teraz drugą porażkę mówi klasą właściciel - `refresh_counts` (AR-198).
-        Powód pierwszej porażki nie idzie na ekran - mówi o stanie sprzed ponowienia."""
+    def _on_liczniki_failed(self, gen, powod):
+        """Bieg w tle padł (wzór `FramesView._on_zbior_failed`): pierwsza porażka generacji - drugie
+        podejście w NOWYM biegu workera na tej samej generacji (`_sprzataj_liczniki` rusza go po końcu
+        wątku, gałąź `_liczniki_ponow`) - przypadłość połączenia wątku znika przy ponowieniu. Druga
+        porażka mówi swoim powodem w wierszu błędu (`_pokaz_blad_licznikow`) - klasa bazy albo systemu,
+        a błąd programu zdaniem `prog_error` z miejscem w szczególe.
+
+        DO AR-302 drugie podejście szło synchronicznie na wątku GUI (rachunek 557 ms na pf4, AR-84),
+        a błąd programu wychodził wyjątkiem ze slotu - w wydaniu okienkowym bez śladu."""
         if gen != self._liczniki_gen:
             return
-        self.refresh_counts()
+        if self._liczniki_ponowiony == gen:
+            self._liczniki_ponowiony = None
+            self._pokaz_blad_licznikow(powod)
+            return
+        self._liczniki_ponowiony = gen
+        self._liczniki_ponow = True
 
     def _sprzataj_liczniki(self):
         """Koniec wątku liczników. ŚWIĘTA KOLEJNOŚĆ jak w `FramesView._sprzataj_pola` (deadlock AB-BA
@@ -991,7 +1029,10 @@ class TasksView(QWidget):
             # Robota wiersza: ta sama liczba albo jej podzbiór (`_ROBOTA_Z_PODZBIORU`, AR-10).
             robota = state[_ROBOTA_Z_PODZBIORU[key]] if key in _ROBOTA_Z_PODZBIORU else n
             it = self.tasks.item(row)
-            czesciowe = czeka > 0 and key in _CZEKA_NA_FAKTY_KOPII
+            # Kopie niezbadane wiersza z własnym licznikiem (`_NIEZBADANE_WIERSZA`, AR-299) - ta sama
+            # mechanika „?” / „N+” co kopie bez faktów, inna liczba i inne zdanie.
+            niezbadane = state[_NIEZBADANE_WIERSZA[key]] if key in _NIEZBADANE_WIERSZA else 0
+            czesciowe = (czeka > 0 and key in _CZEKA_NA_FAKTY_KOPII) or niezbadane > 0
             niewiadome = czesciowe and n == 0
             if niewiadome:
                 self._niewiadome.add(key)
@@ -1003,7 +1044,11 @@ class TasksView(QWidget):
             # kopiach bez faktów mówią o różnych rzeczach. Gdy gałąź „N+" stała przed „z", wiersz
             # po decyzji ręki był szary (robota 0), a liczba mówiła „1+", jakby robota czekała.
             calosc = _czlon_calosci(key, robota, n)
-            if niewiadome:
+            if niezbadane and niewiadome:
+                liczba = i18n.t_plural("tasks.header_nonprintable_unread", niezbadane)
+            elif niezbadane:                # dolna granica: kopie niezbadane mogą nieść bajt
+                liczba = i18n.t_plural("tasks.header_nonprintable_partial", niezbadane, m=calosc)
+            elif niewiadome:
                 liczba = i18n.t_plural("tasks.copies_unread", czeka)
             elif czesciowe:                 # dolna granica: kopie bez faktów nie są w porównaniu
                 liczba = i18n.t_plural("tasks.copies_partial", czeka, m=calosc)
@@ -1036,7 +1081,11 @@ class TasksView(QWidget):
                              all=i18n.t("grid.lin.reject_newer_all"), undo=i18n.t("grid.lin.undo"))
             if robota != n:                             # część liczby z decyzją - nie robota
                 tip += _zdanie_podzbioru(key, n - robota)
-            if czesciowe:
+            if niezbadane:
+                kopie = i18n.t_plural("tasks.header_nonprintable_unread_tip", niezbadane,
+                                      etap=i18n.t("pipeline.stage.copy_facts"))
+                tip = f"{tip}\n{kopie}" if tip else kopie
+            elif czesciowe:
                 kopie = zdanie_kopii_bez_zeznania(
                     kandydaci, dest=i18n.t("nav.dostawa" if niewiadome else "nav.zbiory"))
                 tip = f"{tip}\n{kopie}" if tip else kopie

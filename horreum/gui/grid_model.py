@@ -382,6 +382,12 @@ PRESET_F_RATIO_MISMATCH = "f/ niezgodna z teleskopem"
 # wiersza Porządków). Predykat `queries.xref_reconcile_frame_ids`, ten sam co liczba wiersza.
 # Stała współdzielona z TasksView po nazwie.
 PRESET_XREF_RECONCILE = "Nazwa katalogowa wskazuje inny obiekt"
+# PRESET_HEADER_NONPRINTABLE - siedemnasty bliźniak (AR-299). Kopia FITS, której surowy nagłówek ma
+# bajt spoza drukowalnego ASCII: pisarz odmawia zapisu i cofnięcia (`header_nonprintable`), a naprawa
+# jest poza Horreum (program, który zapisał plik). Perspektywa pokazuje, których klatek to dotyczy.
+# Predykat `queries.header_nonprintable_frame_ids`, ten sam co liczba wiersza Porządków. Stała
+# współdzielona z TasksView po nazwie.
+PRESET_HEADER_NONPRINTABLE = "Bajt spoza ASCII w nagłówku"
 # PRESET_READY_IMAGES - gotowe obrazy pogrupowane po stanie rodowodu. Bez flagi `only_*`: zbiór
 # niesie ISTNIEJĄCY facet Rodzaj (`master_light`), więc listwa pokazuje go jako wybór, a facet
 # „Rodowód" obok zawęża dalej jednym klikiem. Grupowanie po kolumnie „Rodowód" stawia stosy bez
@@ -422,6 +428,8 @@ PRESETS = {
                                   "only_file_object_mismatch": True},
     PRESET_F_RATIO_MISMATCH: {"filter": None, "group_by": None, "only_f_ratio_mismatch": True},
     PRESET_XREF_RECONCILE: {"filter": None, "group_by": None, "only_xref_reconcile": True},
+    PRESET_HEADER_NONPRINTABLE: {"filter": None, "group_by": None,
+                                 "only_header_nonprintable": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -449,6 +457,7 @@ _PRESET_LABELS = {
     PRESET_FILE_OBJECT_MISMATCH: "perspective.file_object_mismatch",
     PRESET_F_RATIO_MISMATCH: "perspective.f_ratio_mismatch",
     PRESET_XREF_RECONCILE: "perspective.xref_reconcile",
+    PRESET_HEADER_NONPRINTABLE: "perspective.header_nonprintable",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -498,6 +507,7 @@ _TRIMY = (
     ("_only_file_object_mismatch", "file_object_mismatch_frame_ids"),
     ("_only_f_ratio_mismatch", "f_ratio_mismatch_frame_ids"),
     ("_only_xref_reconcile", "xref_reconcile_frame_ids"),
+    ("_only_header_nonprintable", "header_nonprintable_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model
@@ -1525,13 +1535,14 @@ class _TabelaKlatek(QTableView):
     da się z PySide6 odczytać ani ustawić wprost, więc tabela trzyma jej LUSTRO tą samą regułą
     (`mousePressEvent` przed metodą Qt, `currentChanged` po niej), a `postaw_biezaca` steruje regułą
     Qt przez wirtualne `selectionCommand`: krok kotwicy bez `Current` (Qt ustawia kotwicę, także przy
-    wciśniętym Shift), krok bieżącej z `Current` (kotwica zostaje).
+    wciśniętym Shift), krok bieżącej z `Current` (kotwica zostaje). Czwarte miejsce Qt (AR-305): ruch
+    klawiaturą z `Current` przy NIEWAŻNEJ kotwicy bierze bieżącą sprzed ruchu - lustro w `keyPressEvent`.
 
     Metoda Qt jest pomijana w całości, więc nowa treść `QTableView::selectionChanged` w innej wersji Qt
     przepadłaby po cichu - stąd lista wersji przeczytanych (`_QT_TABELI_KLATEK`): przy innej wersji
     tabela woła metodę Qt (wolniej, ale wiernie), a test pęka, żeby ktoś ją przeczytał od nowa. Ten sam
-    bezpiecznik obejmuje każdą nadpisaną metodę klasy (zdarzenia myszy, menu, `selectionCommand`
-    i `currentChanged` też - przy innej wersji bez lustra kotwicy)."""
+    bezpiecznik obejmuje każdą nadpisaną metodę klasy (zdarzenia myszy i klawiatury, menu,
+    `selectionCommand` i `currentChanged` też - przy innej wersji bez lustra kotwicy)."""
 
     _menu_z_klawiatury = False
     _kotwica = None            # lustro kotwicy zakresu Shift (`QPersistentModelIndex`) - AR-266
@@ -1617,6 +1628,30 @@ class _TabelaKlatek(QTableView):
         idx = self.model().index(trwaly.row(), trwaly.column()) if trwaly.isValid() else QModelIndex()
         if not (self.selectionCommand(idx, None) & QItemSelectionModel.Current):
             self._kotwica = trwaly
+
+    # Klawisze ruchu `QAbstractItemView::keyPressEvent` (6.9.2 `:2404-2433`); Tab/Backtab tylko przy
+    # `tabKeyNavigation` - inaczej Qt nie rusza nimi bieżącej.
+    _KLAWISZE_RUCHU = (Qt.Key_Down, Qt.Key_Up, Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End,
+                       Qt.Key_PageUp, Qt.Key_PageDown)
+
+    def keyPressEvent(self, e):
+        # Lustro reguły `QAbstractItemView::keyPressEvent` (6.9.2 `:2451-2454`, AR-305): ruch klawiaturą
+        # z poleceniem `Current` (Shift) przy NIEWAŻNEJ kotwicy Qt bierze za kotwicę bieżącą sprzed ruchu.
+        # Slot `currentChanged` tego nie widzi (Shift trzyma kotwicę), więc lustro zostawało nieważne,
+        # a Shift+klik po nim stawiał je na bieżącej - o wiersz dalej niż Qt (reset bez bieżącej,
+        # Shift+↓ ×2: Qt od wiersza 0, lustro od 1). Ruch bez `Current` łapie slot jak dotąd.
+        if qVersion() not in _QT_TABELI_KLATEK:
+            super().keyPressEvent(e)
+            return
+        stara = QPersistentModelIndex(self.currentIndex())
+        bez_kotwicy = self._kotwica is None or not self._kotwica.isValid()
+        super().keyPressEvent(e)
+        ruch = e.key() in self._KLAWISZE_RUCHU or (
+            e.key() in (Qt.Key_Tab, Qt.Key_Backtab) and self.tabKeyNavigation())
+        nowa = self.currentIndex()
+        if (ruch and bez_kotwicy and nowa.isValid() and QPersistentModelIndex(nowa) != stara
+                and self.selectionCommand(nowa, e) & QItemSelectionModel.Current):
+            self._kotwica = stara
 
     def kotwica(self):
         """Indeks kotwicy zakresu Shift (lustro, AR-266) - nieważny po resecie modelu i przy innej

@@ -645,9 +645,11 @@ class PipelineView(QWidget):
         v = QVBoxLayout(self)
 
         # 1. Baza (wskaźnik; Otwórz/Nowa są w menu Plik okna)
-        self.lbl_db = QLabel()
-        self.lbl_db.setText(i18n.t("main.db_loaded", path=self._db_path)
-                            if self._db_path else i18n.t("pipeline.db_none"))
+        # Pole zdania, nie `QLabel` (AR-303, mechanizm AR-279): baza pod ścieżką 249 znaków podnosiła
+        # minimum okna z 1424 do 1704 px (PL) / 1728 px (EN), natywnie; ścieżka łamie się po `\`.
+        self.lbl_db = EtykietaBledu(i18n.t("main.db_loaded", path=self._db_path)
+                                    if self._db_path else i18n.t("pipeline.db_none"))
+        self.lbl_db.setWordWrap(True)
         v.addWidget(self.lbl_db)
         v.addWidget(self._hline())
 

@@ -847,13 +847,14 @@ def test_ogon_gestu_mierzy_poza_widokiem_na_zbiorze_przylozonym(qapp, tmp_path, 
 
 def test_porazka_skladu_w_tle_czeka_na_edytor_i_nie_zatwierdza_polowy_wpisu(qapp, tmp_path,
                                                                             monkeypatch):
-    """AR-83: skład w tle pada (błąd SQL w workerze), gdy edytor komórki jest otwarty z połową
-    wpisu. Drugie podejście na wątku GUI czeka na zamknięcie edytora jak wynik udany: edytor żyje,
-    w szufladzie nic, a po dokończeniu wpisu Enterem ląduje pełny wpis i dopiero wtedy zbiór
-    przeładowuje się synchronicznie.
+    """AR-83: skład w tle pada RAZ (błąd SQL w workerze), gdy edytor komórki jest otwarty z połową
+    wpisu. Ponowienie (nowy bieg workera, AR-302) czeka na zamknięcie edytora jak wynik udany: edytor
+    żyje, w szufladzie nic, a po dokończeniu wpisu Enterem ląduje pełny wpis i dopiero wtedy zbiór
+    przykłada się z ponowionego biegu - wątek GUI nie liczy składu ani razu.
 
-    Falsyfikator: `self.refresh()` w `_on_zbior_failed` bez pytania o edytor → reset modelu domyka
-    edytor z zapisem, w szufladzie „EQ"."""
+    Falsyfikator: przeładowanie synchroniczne w `_on_zbior_failed` (`refresh()`) - reset modelu domyka
+    edytor z zapisem, w szufladzie „EQ”, a skład liczy wątek GUI. Odłożenie samego zamiaru ponowienia nie
+    jest tu nośne: wynik ponowienia czeka na edytor i tak (`_on_zbior_done`) - zmierzone mutantem."""
     import sqlite3
     from PySide6.QtTest import QTest
     from horreum import writeback
@@ -864,9 +865,13 @@ def test_porazka_skladu_w_tle_czeka_na_edytor_i_nie_zatwierdza_polowy_wpisu(qapp
         przylozone = _szpieg_przylozen(monkeypatch)
         glowny = threading.get_ident()
         prawdziwe = queries.cards_pivot
+        porazki, na_glownym = [], []
 
         def _cp(c, ids, kws):
-            if threading.get_ident() != glowny:
+            if threading.get_ident() == glowny:
+                na_glownym.append(1)
+            elif not porazki:
+                porazki.append(1)
                 raise sqlite3.OperationalError("awaria składu w tle")
             return prawdziwe(c, ids, kws)
         monkeypatch.setattr(queries, "cards_pivot", _cp)
@@ -874,7 +879,7 @@ def test_porazka_skladu_w_tle_czeka_na_edytor_i_nie_zatwierdza_polowy_wpisu(qapp
         ed.wartosc.selectAll()
         QTest.keyClicks(ed.wartosc, "EQ")
         view._on_facet_change({})
-        _czekaj(lambda: view._zbior_worker is None, "skład w tle nie skończył")
+        _czekaj(lambda: view._zbior_worker is None and porazki, "skład w tle nie skończył")
         for _ in range(5):
             QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
         assert view.table.indexWidget(idx) is ed, "edytor żyje mimo porażki składu"
@@ -882,11 +887,11 @@ def test_porazka_skladu_w_tle_czeka_na_edytor_i_nie_zatwierdza_polowy_wpisu(qapp
         assert view._pending_count() == 0, "nic nie zatwierdzone w połowie"
         QTest.keyClicks(ed.wartosc, "6")
         QTest.keyClick(ed.wartosc, Qt.Key_Return)
-        for _ in range(5):
-            QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        _czekaj(lambda: not view._zbior_w_drodze() and view._zbior_worker is None,
+                "ponowienie po zamknięciu edytora nie przyłożyło zbioru")
         (w,) = writeback.pending_for_run(con, view._run_id)
         assert (w["keyword"], w["new_value"]) == ("TELESCOP", "EQ6")
-        assert len(przylozone) == 1 and not view._zbior_w_drodze(), "przeładowanie po zamknięciu"
+        assert len(przylozone) >= 1 and na_glownym == [], (przylozone, na_glownym)
     finally:
         _zamknij(view, con)
 
@@ -1721,17 +1726,20 @@ def test_dostawa_potem_zmiana_filtra_stare_zaznaczenie_nie_wraca(qapp, tmp_path,
 
 
 def test_porazka_skladu_po_wyniku_pol_nie_gubi_zaznaczenia(qapp, tmp_path, monkeypatch):
-    """Skład w tle po wyniku Pól pada - ponowienie TEGO SAMEGO zlecenia na wątku GUI
-    (`_on_zbior_failed`) podbija generację; znacznik przechodzi na nią, więc zaznaczenie wraca jak
-    po udanym składzie (dawniej gubiła je i AR-164).
+    """Skład w tle po wyniku Pól pada RAZ - ponowienie TEGO SAMEGO zlecenia w nowym biegu workera
+    (`_on_zbior_failed` → `_ponow_zbior`, AR-302) zostaje na tej samej generacji, więc znacznik
+    przeładowania nie-nawigacyjnego pasuje i zaznaczenie wraca jak po udanym składzie (dawniej gubiła
+    je i AR-164).
 
-    Falsyfikator: zdejmij przeniesienie znacznika z `_ponow_synchronicznie` → zaznaczenie puste."""
+    Falsyfikator: ponowienie, które podbija generację (nowe zlecenie `refresh`) bez przeniesienia
+    znacznika → zaznaczenie puste."""
     view, con, brama, _ = _widok_z_zaznaczeniem_przed_polami(tmp_path, monkeypatch)
-    glowny = threading.get_ident()
     prawdziwe = queries.base_rows
+    porazki = []
 
     def _pada_w_tle(c, ids):
-        if threading.get_ident() != glowny:
+        if not porazki:
+            porazki.append(1)
             raise RuntimeError("awaria składu w tle")
         return prawdziwe(c, ids)
     monkeypatch.setattr(queries, "base_rows", _pada_w_tle)
@@ -1740,6 +1748,7 @@ def test_porazka_skladu_po_wyniku_pol_nie_gubi_zaznaczenia(qapp, tmp_path, monke
         brama.set()
         _czekaj_na_pola(view)
         _czekaj(lambda: not view._zbior_w_drodze(), "ponowienie nie przyłożyło zbioru")
+        assert porazki == [1], "skład padł raz i został ponowiony"
         assert view.model.columnCount() == len(grid_mod.BASE_COLS) + 3, "zbiór z kolumnami Pól"
         assert _zaznaczone(view) == [3, 10]
         assert _biezaca(view) == przed_biezaca
@@ -1884,30 +1893,39 @@ def test_pola_i_sklad_zbioru_mowia_klasa_bazy_w_jezyku_UI(qapp, tmp_path, lang):
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
-def test_liczniki_porzadkow_druga_porazka_mowi_klasa_zamiast_wyjatku(qapp, tmp_path, lang):
-    """Liczniki Porządków w tle padają (plik bazy niedostępny), slot ponawia rachunek na wątku GUI
-    i ten też pada PRAWDZIWYM błędem SQLite (plik nie jest bazą): zamiast wyjątku ze slotu i
-    plakietki zamrożonej bez słowa - wiersz błędu nad listą mówi klasą w języku UI, ze szczegółem;
-    udany rachunek go gasi. Droga produkcyjna: `refresh_counts(w_tle=True)` → `QThread` → sygnał →
-    slot. Falsyfikator: `_on_liczniki_failed` bez `try` - wyjątek ze slotu, wiersz schowany."""
-    import sqlite3
+def test_liczniki_porzadkow_druga_porazka_mowi_klasa_zamiast_wyjatku(qapp, tmp_path, lang, monkeypatch):
+    """Liczniki Porządków w tle padają (plik bazy niedostępny), slot ponawia rachunek w NOWYM biegu
+    workera (AR-302) i ten też pada PRAWDZIWYM błędem SQLite (plik nie jest bazą): zamiast wyjątku ze
+    slotu i plakietki zamrożonej bez słowa - wiersz błędu nad listą mówi klasą DRUGIEJ porażki w języku
+    UI, ze szczegółem; udany rachunek go gasi. Wątek GUI nie liczy liczników ani razu. Droga
+    produkcyjna: `refresh_counts(w_tle=True)` → `QThread` → sygnał → slot → nowy bieg.
+    Falsyfikator: ponowienie synchroniczne (`refresh_counts()` w slocie) - rachunek na wątku GUI."""
+    from horreum.gui import tasks as tasks_mod
     i18n.set_lang(lang)
     win = MainWindow(_baza_obiektu(tmp_path))
     smieci = tmp_path / "smieci.db"
     smieci.write_bytes(b"to nie jest baza" * 512)
-    zla = sqlite3.connect(str(smieci))
     tasks = win.tasks_view
-    prawdziwa_sciezka, prawdziwe = tasks._db_path, tasks.con
+    prawdziwa_sciezka = tasks._db_path
+    glowny = threading.get_ident()
+    na_glownym = []
+    prawdziwy_stan = tasks_mod._stan_licznikow
+
+    def _stan(con):
+        if threading.get_ident() == glowny:
+            na_glownym.append(1)
+        return prawdziwy_stan(con)
     try:
         _czekaj_na_pola(win.grid_view)
+        monkeypatch.setattr(tasks_mod, "_stan_licznikow", _stan)
         tasks._db_path = str(tmp_path / "odpiety" / "obj.db")
         tasks.refresh_counts(w_tle=True)
         assert tasks._liczniki_thread is not None
-        # Porażka wątku dochodzi do slotu kolejką, czyli dopiero w `processEvents` niżej - podmiana
-        # połączenia GUI teraz trafia w ponowienie ze slotu, nie w start biegu.
-        tasks.con = zla
+        # Pierwszy bieg zna już ścieżkę odpiętą; ponowienie weźmie ścieżkę z chwili startu - plik śmieci.
+        tasks._db_path = str(smieci)
         _czekaj(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(),
                 "druga porażka liczników nie doszła do wiersza błędu")
+        assert na_glownym == [], "rachunek liczników na wątku GUI"
         zdanie = i18n.t("tasks.counts_failed",
                         msg=i18n.t("objchg.item.db_damaged", db_code="SQLITE_NOTADB"))
         assert tasks.blad_licznikow.text() == zdanie
@@ -1915,13 +1933,12 @@ def test_liczniki_porzadkow_druga_porazka_mowi_klasa_zamiast_wyjatku(qapp, tmp_p
             "wb.os_detail_tip", detail="DatabaseError: file is not a database")
         if lang == "en":
             assert not set(zdanie) & _POLSKIE, zdanie
-        tasks._db_path, tasks.con = prawdziwa_sciezka, prawdziwe
+        tasks._db_path = prawdziwa_sciezka
         tasks.refresh_counts()
         assert tasks.blad_licznikow.isHidden() and tasks.blad_licznikow.text() == ""
     finally:
-        tasks._db_path, tasks.con = prawdziwa_sciezka, prawdziwe
+        tasks._db_path = prawdziwa_sciezka
         win.close()
-        zla.close()
         i18n.set_lang("pl")
 
 

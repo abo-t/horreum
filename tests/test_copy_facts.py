@@ -249,8 +249,9 @@ def _baza_sprzed_0021(tmp_path, pliki):
 
 
 def test_uzupelnienie_czyta_same_naglowki_i_jest_idempotentne(tmp_path):
-    """Kandydaci = XISF wszystkie + każda kopia klatki z >1 obecną kopią (FITS też); pojedynczy FITS
-    NIE (nie ma z czym porównać, a 15 tys. odczytów nie kupuje niczego). Drugie wywołanie: zero
+    """Kandydaci FAKTÓW = XISF wszystkie + każda kopia klatki z >1 obecną kopią (FITS też); pojedynczy
+    FITS faktów NIE dostaje (nie ma z czym porównać), ale jako kopia sprzed 0046 jest niezbadana
+    (AR-299) - sterownik czyta jego nagłówek i zapisuje samo zbadanie bajtu. Drugie wywołanie: zero
     kandydatów, zero odczytu, zero zdarzeń. Zeznania `header` klatki uzupełnienie nie rusza."""
     root, a, b = _dwie_kopie(tmp_path)
     f1 = _fits(root / "F" / "jeden.fits", "Ha", n=1)
@@ -258,12 +259,16 @@ def test_uzupelnienie_czyta_same_naglowki_i_jest_idempotentne(tmp_path):
     f2b = _fits(root / "G" / "dwa_b.fits", "OIII", n=2)          # ta sama treść, inny FILTER
     con = _baza_sprzed_0021(tmp_path, [a, b, f1, f2a, f2b])
     kand = {r["path"] for r in scan.copy_facts_candidates(con)}
-    assert kand == {str(a), str(b), str(f2a), str(f2b)}
+    assert kand == {str(a), str(b), str(f1), str(f2a), str(f2b)}
+    assert {r["path"] for r in scan._kandydaci_faktow(con, False)} == {str(a), str(b), str(f2a),
+                                                                       str(f2b)}
     s = scan.backfill_copy_facts(con, now=NOW)
-    assert (s.rows, s.read, s.written, s.stale, s.failed, s.remaining) == (4, 4, 4, 0, 0, 0)
+    assert (s.rows, s.read, s.written, s.stale, s.failed, s.remaining) == (5, 5, 5, 0, 0, 0)
+    assert (s.bytes_checked, s.bytes_unchecked) == (3, 0)
     assert (_loc(con, a)["image_count"], _loc(con, b)["image_count"]) == (3, 1)
     assert (_loc(con, f2a)["image_count"], _loc(con, f2a)["hdr_filter"]) == (None, "Ha")
     assert _loc(con, f1)["hdr_hash"] is None
+    assert _loc(con, f1)["nonprintable_hash"] == _loc(con, f1)["header_hash"]
     assert con.execute("SELECT count(*) FROM header").fetchone()[0] == 0
     ev = con.execute("SELECT max(id) FROM event").fetchone()[0]
     s2 = scan.backfill_copy_facts(con, now=NOW)
@@ -341,7 +346,12 @@ def test_klasa_kandydata_jeden_literal_dla_dostawy_i_komorki_obrazy(tmp_path):
     fazy = json.dumps(list(repo.INPLACE_ISOLATING_PHASES))
     for por in (False, True):
         dawni = [r[0] for r in con.execute(_KANDYDACI_DAWNI, (fazy, int(por)))]
-        assert [r["id"] for r in scan.copy_facts_candidates(con, porownywalne=por)] == dawni
+        assert [r["id"] for r in scan._kandydaci_faktow(con, por)] == dawni
+    # AR-299: tryb licznika bez zmian; tryb Dostawy dokłada obecne kopie FITS niezbadane (tu: wszystkie
+    # obecne FITS, bo wiersze wstawione bez zbadania) - kopia 2 (jedyna, FITS) tylko z tego powodu.
+    assert [r["id"] for r in scan.copy_facts_candidates(con, porownywalne=True)] == [
+        r[0] for r in con.execute(_KANDYDACI_DAWNI, (fazy, 1))]
+    assert [r["id"] for r in scan.copy_facts_candidates(con)] == [1, 2, 3, 5, 6, 7, 8]
     con.close()
 
 
@@ -1015,4 +1025,67 @@ def test_odswiezenie_lokacji_nie_cofa_faktow_nowszej_reguly(tmp_path):
     po = _loc(con, a)
     assert po["header_hash"] != przed["header_hash"] and po["hdr_hash"] == po["header_hash"]
     assert (po["hdr_rule"], po["hdr_filter"]) == (_R, "CLX")
+    con.close()
+
+
+# ============================================================ AR-299: zbadanie bajtu kopii sprzed 0046
+
+def test_niezbadane_po_migracji_bada_etap_uzupelnien(tmp_path):
+    """AR-299: kopia FITS z odciskiem, a bez zbadania surowych bajtów (wiersz sprzed 0046) to „nie
+    wiem” - licznik `header_nonprintable_unread` ją widzi, jest kandydatem trybu Dostawy (nie licznika
+    porównań). Sterownik czyta nagłówek: kopia z bajtem dostaje marker, czysta - samo zbadanie;
+    `bytes_checked`, `remaining == 0`, drugi przebieg bez odczytu. Kopia zmieniona od skanu - `stale`,
+    bez zapisu.
+    Falsyfikator: kandydaci bez kopii niezbadanych → licznik zostaje po przebiegu."""
+    from horreum import resolver
+    from test_scan import _fits_z_bajtem
+    root = tmp_path / "ARCH"
+    z = _fits_z_bajtem(root / "z.fits", 0xE9)
+    c = _fits_z_bajtem(root / "c.fits", ord("e"), seed=1)
+    con = _baza_sprzed_0021(tmp_path, [z, c])
+    stan = resolver.review_state(con)
+    assert (stan.header_nonprintable, stan.header_nonprintable_unread) == (0, 2)
+    assert {r["path"] for r in scan.copy_facts_candidates(con)} == {str(z), str(c)}
+    assert scan.copy_facts_candidates(con, porownywalne=True) == []
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.read, s.written, s.bytes_checked, s.stale, s.remaining) == (2, 2, 2, 2, 0, 0)
+    assert (_loc(con, z)["nonprintable_keyword"], _loc(con, z)["nonprintable_char"]) == (
+        "OBSERVER", "0xE9")
+    assert _loc(con, c)["nonprintable_hash"] == _loc(con, c)["header_hash"]
+    stan = resolver.review_state(con)
+    assert (stan.header_nonprintable, stan.header_nonprintable_unread) == (1, 0)
+    s2 = scan.backfill_copy_facts(con, now=NOW)
+    assert (s2.rows, s2.read) == (0, 0)
+    con.close()
+    nowa = tmp_path / "n"
+    nowa.mkdir()
+    con = _baza_sprzed_0021(nowa, [z])
+    raw = bytearray(z.read_bytes())
+    raw[raw.index(b"kom \xe9") + 4] = ord("Z")       # inny odcisk niż wiersz: zmieniona od skanu
+    z.write_bytes(bytes(raw))
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.read, s.written, s.stale, s.bytes_checked) == (1, 0, 1, 0)
+    assert _loc(con, z)["nonprintable_hash"] is None
+    con.close()
+
+
+def test_fakty_i_zbadanie_jedna_transakcja(tmp_path, monkeypatch):
+    """AR-299: kopia z klasy faktów (klatka o dwóch kopiach) i niezbadana - fakty i zbadanie wchodzą
+    jedną transakcją: błąd bazy przy zapisie zbadania cofa też fakty (zero „połowy”).
+    Falsyfikator: zapis zbadania poza `repo.atomic` → fakty zostają bez zbadania."""
+    import sqlite3
+    from test_scan import _fits_z_bajtem
+    root = tmp_path / "ARCH"
+    a = _fits_z_bajtem(root / "a.fits", 0xE9)
+    b = _fits_z_bajtem(root / "b" / "a.fits", 0xE9)     # ta sama treść - jedna klatka, dwie kopie
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    assert {r["path"] for r in scan._kandydaci_faktow(con, False)} == {str(a), str(b)}
+
+    def _pada(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(repo, "_zapisz_marker_bajtu", _pada)
+    with pytest.raises(sqlite3.OperationalError):
+        scan.backfill_copy_facts(con, now=NOW)
+    for p in (a, b):
+        assert (_loc(con, p)["hdr_hash"], _loc(con, p)["nonprintable_hash"]) == (None, None)
     con.close()

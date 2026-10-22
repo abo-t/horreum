@@ -13,7 +13,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from horreum import db
 from horreum.gui import grid as grid_mod, i18n
@@ -220,7 +220,7 @@ def test_FH6_wycofanie_podaje_PRZYWROC_KLATKE_i_dwoma_krokami_ja_przywraca(widok
     v, con = widok
     con.execute("UPDATE location SET present = 0 WHERE frame_id = 3")   # plik zniknął z dysku
     con.commit()
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(grid_mod.FramesView, "_potwierdz_wycofanie", lambda self, n: True)
     v.apply_perspective(grid_mod.PRESET_VANISHED)
     _zaznacz(v, [3])
     recepty = _recepty(v)
@@ -551,7 +551,7 @@ def test_Z1_wycofanie_12_z_ktorych_5_dawno_wycofanych_odwrot_przywraca_DOKLADNIE
     con.execute("UPDATE location SET present = 0")                  # pliki zniknęły z dysku
     con.commit()
     repo.retire_frames(con, frame_ids=[1, 2, 3, 4, 5], now="2026-01-01T00:00:00")
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(grid_mod.FramesView, "_potwierdz_wycofanie", lambda self, n: True)
     v = FramesView(con, now_fn=lambda: NOW)
     try:
         v.refresh()

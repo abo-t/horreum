@@ -496,11 +496,10 @@ def test_AR95_zapisana_perspektywa_NIE_udaje_zbioru_z_uwagami(strona, con, monke
 
     Falsyfikator: zdejmij warunek `uwagi_zmieniaja` z `_stan_zgodny_z` → etykieta „★ Moja" bez
     sufiksu przy zbiorze z uwagami."""
-    from PySide6.QtWidgets import QInputDialog
     repo.set_frame_note(con, frame_ids=[1, 3], body="x", now=NOW)
     v = _z_uwagami(strona)
     assert v.combo_persp.currentText() == i18n.t("perspective.review"), "nad Przeglądem - zawężenie"
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Moja", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Moja")
     v._save_perspective()
     assert v.combo_persp.currentData() == ("saved", "Moja")
     assert v.combo_persp.currentText().endswith("(zmieniona)"), v.combo_persp.currentText()

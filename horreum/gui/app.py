@@ -34,7 +34,7 @@ from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-
 from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem, ogon_cofniecia,
-                                   podpowiedz_kart, szczegol_zdania, tekst_powodu,
+                                   podpowiedz_kart, polecenie_zdania, szczegol_zdania, tekst_powodu,
                                    zdanie_commitu_kart, zlacz_zdania)
 from horreum.gui.config_dialog import AssignConfigDialog, dopasuj_wysokosc
 # Kontener strony zbiorów: stałe prezentacji są wartościami jego sygnału, a `_TRASY` (poziom modułu)
@@ -1046,14 +1046,14 @@ def plan_kart_sciezki(con, canon, frame_ids):
 
 def _wariant_paska_kart(zdanie_pola, zdanie_paska, db_path, commit_id):
     """`po_zamknieciu` okna piszącego karty (AR-283, AR-272): (zdanie pola, zdanie paska, szczegół
-    paska). Po zamknięciu okna jedynym uchwytem cofnięcia commitu jest CLI - zdanie paska niesie
-    krótkie polecenie bez ścieżki bazy (pełna ścieżka przed numerem commitu ginęła w elizji), pełne
-    polecenie stoi w szczególe pod kursorem („Kopiuj szczegół”, wzór `objchg.bar.undo_cli`). Szczegół
-    trzyma też zdanie na pasku do następnego raportu (`MainWindow._flash`, AR-236) - zdanie bez niego
-    gasło po 5 s razem z numerem commitu."""
-    return (zdanie_pola, zdanie_paska,
-            i18n.t("wb.undo_cli_tip", id=commit_id,
-                   cli=i18n.t("wb.undo_cli", db=db_path, id=commit_id)))
+    paska, polecenie). Po zamknięciu okna uchwytami cofnięcia commitu są recepta paska „Cofnij zapis
+    (commit N)” (AR-296) i CLI - zdanie paska niesie krótkie polecenie bez ścieżki bazy (pełna ścieżka
+    przed numerem commitu ginęła w elizji), pełne polecenie stoi w szczególe pod kursorem i w polu
+    polecenia nośnika („Kopiuj polecenie”, AR-309). Szczegół trzyma też zdanie na pasku do następnego
+    raportu (`MainWindow._flash`, AR-236) - zdanie bez niego gasło po 5 s razem z numerem commitu."""
+    polecenie = i18n.t("wb.undo_cli", db=db_path, id=commit_id)
+    return (zdanie_pola, zdanie_paska, i18n.t("wb.undo_cli_tip", id=commit_id, cli=polecenie),
+            polecenie)
 
 
 class ConfirmPathObjectsDialog(QDialog):
@@ -1092,6 +1092,15 @@ class ConfirmPathObjectsDialog(QDialog):
 
     changed = Signal()          # zapis doszedł do skutku → gospodarz odświeża kolejkę i bibliotekę
     busy_changed = Signal(bool)  # okno pisze do plików → mutex drugiej powierzchni (D-PD-3)
+    # Nota cofnięcia DOMKNIĘTEGO poza oknem (pasek po zamknięciu, recepta „Cofnij zapis”, AR-296):
+    # klatki zostają nazwane z folderu, a „Zatwierdź” już nie istnieje.
+    UWAGA_COFNIECIA = "path.cards_restored_closed_note"
+
+    @property
+    def commit_po_zamknieciu(self):
+        """Commit kart, który po zamknięciu okna wolno cofnąć receptą paska (AR-296), albo None -
+        po cofnięciu domkniętym w oknie i po zapisie, który niczego nie podmienił."""
+        return self._commit_id
 
     def __init__(self, con, *, proposals, now_fn, db_path=None, run_stage_fn=None, parent=None):
         super().__init__(parent)
@@ -1436,7 +1445,7 @@ class ConfirmPathObjectsDialog(QDialog):
             msg, ogon_cofniecia(res, i18n.t("wb.undo_cli_short", id=self._commit_id))[0],
             self._db_path, self._commit_id) if ponow
             else (msg + i18n.t("path.cards_restored_note"),
-                  msg + i18n.t("path.cards_restored_closed_note"), ""))
+                  msg + i18n.t(self.UWAGA_COFNIECIA), "", ""))
         if not ponow:
             msg += i18n.t("path.cards_restored_note")
             self.undo_btn.setVisible(False)
@@ -1669,6 +1678,13 @@ class RepairHeaderDialog(QDialog):
 
     changed = Signal()          # zapis/cofnięcie doszło do skutku → gospodarz odświeża kolejkę
     busy_changed = Signal(bool)  # ta powierzchnia pisze do plików → mutex drugiej (D-PD-3)
+    # Nota cofnięcia domkniętego poza oknem (AR-296) - naprawa mówi sam stan, jak `_after_undo`.
+    UWAGA_COFNIECIA = ""
+
+    @property
+    def commit_po_zamknieciu(self):
+        """Commit kart do cofnięcia receptą paska po zamknięciu okna (AR-296) albo None."""
+        return self._commit_id
 
     def __init__(self, con, *, rows, db_path, now_fn, run_stage_fn=None, parent=None):
         super().__init__(parent)
@@ -2118,7 +2134,7 @@ class RepairHeaderDialog(QDialog):
         # pełne w szczególe - AR-272).
         self.po_zamknieciu = (_wariant_paska_kart(
             msg, ogon_cofniecia(res, i18n.t("wb.undo_cli_short", id=self._commit_id))[0],
-            self._db_path, self._commit_id) if ponow else (msg, msg, ""))
+            self._db_path, self._commit_id) if ponow else (msg, msg, "", ""))
         if not ponow:
             self.undo_btn.setVisible(False)      # commit ZUŻYTY - drugi undo nie ma czego cofać
             self.resolve_btn.setVisible(False)
@@ -2200,6 +2216,10 @@ class ObjectAxisView(QWidget):
     # Recepta paska po geście osi (`grid_model.Recepta` z wykonawcą) - „Cofnij dopisanie” po „Dopisz
     # nowy…” (AR-133). Pada PO `status_message`, bo raport gasi receptę poprzedniego gestu.
     status_recipe = Signal(object)
+    # Zdanie biegu cofnięcia zapisu kart z paska (AR-296) i recepta, która mu towarzyszy (`Recepta` albo
+    # None) - JEDNĄ emisją: gospodarz stawia zdanie na pasku bez odkładania do Porządków i wiąże z nim
+    # receptę (`MainWindow._wynik_cofniecia_osi`).
+    wynik_cofniecia = Signal(object, object)
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
@@ -2214,6 +2234,15 @@ class ObjectAxisView(QWidget):
         self._repair_dlg = None
         self._naprawa_zmienila = False        # okno naprawy zgłosiło koniec biegu (`changed`, AR-236)
         self._sciezka_zmienila = False        # …i okno „Zatwierdź ze ścieżki…” (AR-283)
+        # Cofnięcie commitu kart z paska po zamknięciu okna (AR-296): uchwyt zapisu tego widoku
+        # (leniwy - `wb_worker` ciągnie astropy), generacja callbacków (podbija ją demontaż widoku,
+        # `zatrzymaj_pola`) i flaga biegu z SYGNAŁU uchwytu - uchwyt ogłasza start, ZANIM ustawi
+        # swój wątek, więc `is_busy` w slocie startu mówiłby jeszcze „wolny” (wzór `FramesView`).
+        self._wb_kart = None
+        self._gen_kart = 0
+        self._bieg_kart = (-1, None, "")      # (generacja, commit, nota) biegu - `_cofnij_zapis_kart`
+        self._odlozona_kart = None            # (commit, nota) recepty odłożonej przez odmowę w biegu blokady
+        self._zapis_kart_trwa = False
         # Takt 3 (`Rozwiąż`) należy do Dostawy: gospodarz wstrzykuje wywołanie ISTNIEJĄCEJ,
         # bramkowanej drogi (`PipelineView.run_stage`). None = widok bez gospodarza (testy samego
         # widoku) → okno naprawy powie wprost, że taktu 3 nie ma stąd jak uruchomić.
@@ -2873,12 +2902,14 @@ class ObjectAxisView(QWidget):
         # jeszcze połówkę cofniętą — dla niej ta droga jest TĄ SAMĄ drogą, bo writeback gasi
         # nagrobek. Zbiór zamiast wyliczanki: przy rozszczepieniu wyliczanka zapala przycisk nad
         # jedną połówką i gasi nad drugą, choć obie prowadzą do tego samego okna.
+        # Cofnięcie z paska tego widoku (AR-296) pisze do plików jak okno - te same dwa przyciski gasną.
+        zapis_plikow = self._foreign_wb or self._zapis_kart_trwa
         self.repair_btn.setEnabled(tag in _CARD_TAGS
-                                   and not self._busy and not self._foreign_wb)
+                                   and not self._busy and not zapis_plikow)
         # Potwierdzanie propozycji pisze do BAZY i (od O3 kroku 1) kartę `OBJECT` do PLIKÓW - więc
         # mutex writebacku (`_foreign_wb`, D-PD-3) dotyczy go tak samo jak „Napraw nagłówek…".
         self.confirm_path_btn.setEnabled(tag == "path_proposals"
-                                         and not self._busy and not self._foreign_wb)
+                                         and not self._busy and not zapis_plikow)
         # Wygaszony przycisk tłumaczy się SAM (ta sama lekcja co WIZ #12 pięć linii wyżej): przy
         # swoim kubełku mówi, CO zrobi; poza nim — czego brakuje, żeby dało się go kliknąć.
         self.confirm_path_btn.setToolTip(i18n.t(
@@ -2914,7 +2945,8 @@ class ObjectAxisView(QWidget):
         # Mutex writebacku BIJE powód kubełka: „nie da się" i „nie teraz" to dwa różne zdania,
         # a użytkownik czekający na cudzy zapis potrzebuje tego drugiego.
         self.repair_btn.setToolTip(i18n.t(
-            "repair.tip_busy" if self._foreign_wb and tag in _CARD_TAGS
+            "wb.undo_recipe_tip_busy" if self._zapis_kart_trwa and tag in _CARD_TAGS
+            else "repair.tip_busy" if self._foreign_wb and tag in _CARD_TAGS
             else _REPAIR_TIPS.get(tag, "repair.tip_pick")))
 
     def _on_object_selected(self):
@@ -3210,6 +3242,7 @@ class ObjectAxisView(QWidget):
         if dlg.assigned or self._sciezka_zmienila:
             self.refresh(select_first=bool(dlg.assigned))
             self.status_message.emit(self._zdanie_okna_kart(dlg))
+            self._podaj_recepte_cofniecia_kart(dlg)
 
     @staticmethod
     def _zdanie_okna_kart(dlg):
@@ -3222,12 +3255,13 @@ class ObjectAxisView(QWidget):
         dopisze…” - po zamknięciu takiego przycisku nie ma. Okno trzyma wtedy wariant dla paska
         (`po_zamknieciu`, `_wariant_paska_kart`: zdanie pola, wariant - krótkie polecenie CLI cofnięcia
         commitu po zapisie albo jego ponowienia, sam stan - i szczegół z pełnym poleceniem); wariant
-        idzie tylko, gdy pole wciąż mówi to zdanie, z którym go złożono."""
-        okno, pasek, polecenie = dlg.po_zamknieciu or (None, None, "")
+        idzie tylko, gdy pole wciąż mówi to zdanie, z którym go złożono. Polecenie CLI jedzie też
+        polem polecenia nośnika („Kopiuj polecenie”, AR-309)."""
+        okno, pasek, szczegol, polecenie = dlg.po_zamknieciu or (None, None, "", "")
         status = ZdanieZeSzczegolem(dlg.status.text(), dlg.status.szczegol())
         if okno is not None and okno == dlg.status.text():
             status = ZdanieZeSzczegolem(pasek, "\n".join(
-                x for x in (dlg.status.szczegol(), polecenie) if x))
+                x for x in (dlg.status.szczegol(), szczegol) if x), polecenie)
         return zlacz_zdania(" - ", (status,
                                     ZdanieZeSzczegolem(dlg.error.text(), dlg.error.szczegol())))
 
@@ -3238,6 +3272,145 @@ class ObjectAxisView(QWidget):
         self._sciezka_zmienila = True
         self._load_review()
         self._sync_assign_enabled()
+
+    # ------------------------------------------------ cofnięcie zapisu kart z paska (AR-296)
+
+    def _podaj_recepte_cofniecia_kart(self, dlg):
+        """Po zdaniu okna kart: recepta „Cofnij zapis (commit N)”, gdy okno zostawiło commit do cofnięcia
+        (`commit_po_zamknieciu`). Recepta PO raporcie - raport gasi receptę poprzedniego gestu."""
+        if dlg.commit_po_zamknieciu is not None:
+            self.status_recipe.emit(self._recepta_cofniecia_kart(dlg.commit_po_zamknieciu,
+                                                                 dlg.UWAGA_COFNIECIA))
+
+    def _recepta_cofniecia_kart(self, commit_id, uwaga):
+        """Recepta „Cofnij zapis (commit N)” - człon z wykonawcą (wzór `_recepta_cofniecia_dopisania`)."""
+        from functools import partial
+        from horreum.gui.grid_model import CzlonRecepty, Recepta
+        return Recepta([CzlonRecepty(i18n.t("wb.undo_recipe", id=commit_id),
+                                     partial(self._cofnij_zapis_kart, commit_id, uwaga))])
+
+    def _cofnij_zapis_kart(self, commit_id, uwaga):
+        """Klik „Cofnij zapis (commit N)” po zamknięciu okna kart (AR-296) - ten sam rdzeń, co „Cofnij”
+        okna i `header-fix --undo` (`writeback.undo`), na wątku uchwytu zapisu tego widoku.
+
+        Odmowa przy biegu Dostawy i przy zapisie szuflady Zbiorów mówi zdaniem z numerem commitu (polecenie
+        CLI w szczególe i w polu polecenia), a oś PAMIĘTA receptę i podaje ją ponownie, gdy blokada się
+        skończy (`set_busy(False)`, `set_writeback_busy(False)` -> `_podaj_odlozona_kart`). Wyłączność BAJTÓW między
+        instancjami trzyma rdzeń (blokada pliku `writeback._exclusive`, region == wynik commitu,
+        operacja cofnięcia pod `BEGIN IMMEDIATE`) - drugi wykonawca dostaje wynik rdzenia, który pasek
+        mówi `ogon_cofniecia`. Bieg pamięta GENERACJĘ z chwili startu (`_bieg_kart`): demontaż widoku
+        (`zatrzymaj_pola`) unieważnia wszystkie trzy callbacki, także postęp, a zajętość zwalnia
+        uchwyt (`busy_changed`).
+
+        CALLBACKI TO METODY WIDOKU, NIE `functools.partial`: sygnał workera z wątku tła trafia do
+        metody obiektu Qt kolejką, w jego wątku - a do gołego obiektu wywoływalnego Qt woła go
+        wprost, w wątku workera (zmierzone: ogon czytał połączenie widoku z wątku tła -
+        `sqlite3.ProgrammingError`). Dane biegu (commit, nota, generacja) stoją więc na widoku.
+
+        ZDANIA BIEGU IDĄ KANAŁEM BEZ ODKŁADANIA (`wynik_cofniecia`): start, postęp, wynik i porażka padają
+        na pasek tam, gdzie człowiek jest - odmowa zamknięcia okna i przełączenia bazy obiecuje „pokaże
+        wynik”, a raport odłożony do Porządków ginąłby przy demontażu widoków. Start zdejmuje receptę
+        z paska - przycisk, który nic by nie zrobił, nie stoi czynny w biegu."""
+        if self._busy or self._foreign_wb:
+            self._odlozona_kart = (commit_id, uwaga)
+            self.wynik_cofniecia.emit(self._zdanie_polecenia_kart(i18n.t(
+                "wb.undo_recipe_busy" if self._busy else "wb.undo_recipe_foreign", id=commit_id),
+                commit_id), None)
+            return
+        if self._zapis_kart_trwa:
+            return
+        if self._wb_kart is None:
+            from horreum.gui.wb_worker import WritebackRunner
+            self._wb_kart = WritebackRunner(queries.db_path_of(self.con), now_fn=self._now, parent=self)
+            self._wb_kart.busy_changed.connect(self._na_zajetosc_kart)
+            self._wb_kart.busy_changed.connect(self.writeback_busy)   # mutex gridu, Dostawy, Domu
+        self._odlozona_kart = None
+        self._bieg_kart = (self._gen_kart, commit_id, uwaga)
+        self.wynik_cofniecia.emit(i18n.t("wb.undo_recipe_started", id=commit_id), None)
+        self._wb_kart.start("undo", commit_id, on_progress=self._postep_cofniecia_kart,
+                            on_done=self._po_cofnieciu_kart, on_failed=self._cofniecie_kart_padlo)
+
+    def _zdanie_polecenia_kart(self, zdanie, commit_id, szczegol=""):
+        """Zdanie paska o cofnięciu commitu kart z poleceniem CLI w szczególe i w polu polecenia
+        (`ZdanieZeSzczegolem` - nie gaśnie zegarem, „Kopiuj polecenie”, AR-309)."""
+        polecenie = i18n.t("wb.undo_cli", db=queries.db_path_of(self.con), id=commit_id)
+        return ZdanieZeSzczegolem(zdanie, "\n".join(x for x in (szczegol, i18n.t(
+            "wb.undo_cli_tip", id=commit_id, cli=polecenie)) if x), polecenie)
+
+    def _podaj_odlozona_kart(self):
+        """Koniec blokady (etap Dostawy, zapis Zbiorów): recepta odłożona przez odmowę wraca ze zdaniem."""
+        if self._odlozona_kart is None or self._busy or self._foreign_wb or self._zapis_kart_trwa:
+            return
+        (commit_id, uwaga), self._odlozona_kart = self._odlozona_kart, None
+        self.wynik_cofniecia.emit(
+            self._zdanie_polecenia_kart(i18n.t("wb.undo_recipe_ready", id=commit_id), commit_id),
+            self._recepta_cofniecia_kart(commit_id, uwaga))
+
+    def _na_zajetosc_kart(self, busy):
+        self._zapis_kart_trwa = bool(busy)
+        self._sync_assign_enabled()
+
+    def _bieg_kart_zywy(self):
+        """`(commit_id, uwaga)` biegu cofnięcia z paska, gdy jego generacja jest bieżąca, inaczej None."""
+        gen, commit_id, uwaga = self._bieg_kart
+        return (commit_id, uwaga) if gen == self._gen_kart else None
+
+    def _postep_cofniecia_kart(self, done, total, path, status):
+        bieg = self._bieg_kart_zywy()
+        if bieg is None:
+            return
+        self.wynik_cofniecia.emit(i18n.t("wb.undo_recipe_progress", id=bieg[0], done=done,
+                                         total=total), None)
+
+    def _po_cofnieciu_kart(self, op, res):
+        """Ogon cofnięcia z paska: zdanie i reguła „czy uchwyt zostaje” z `ogon_cofniecia` (rdzeń:
+        `UndoResult.complete`, „już cofnięte” to stan docelowy). Niedomknięte - zdanie z poleceniem CLI
+        w szczególe i w polu polecenia, recepta wraca; domknięte - stan bez recepty."""
+        bieg = self._bieg_kart_zywy()
+        if bieg is None:
+            return
+        commit_id, uwaga = bieg
+        from horreum.gui.wb_worker import podpowiedz_cofniecia
+        msg, ponow = ogon_cofniecia(res, i18n.t("wb.undo_recipe", id=commit_id))
+        self._load_review()
+        self._sync_assign_enabled()
+        if ponow:
+            # Wynik pada też poza Porządkami - zdanie mówi, gdzie stoi przycisk, który nazywa.
+            self.wynik_cofniecia.emit(self._zdanie_polecenia_kart(
+                msg + i18n.t("wb.undo_recipe_place"), commit_id, podpowiedz_cofniecia(res)),
+                self._recepta_cofniecia_kart(commit_id, uwaga))
+            return
+        # KLATKI ZOSTAJĄ Z OBIEKTEM Z COFNIĘTEJ KARTY, gdy po zapisie przeszło „Rozwiąż” (zmierzone na
+        # rdzeniu: obiekt ze źródłem `header` zostaje, także po kolejnym „Rozwiąż”) - zdanie to mówi.
+        zostaly = queries.klatki_commitu_z_obiektem_z_naglowka(self.con, commit_id)
+        if zostaly:
+            msg += i18n.t("wb.undo_recipe_object_note", n=zostaly)
+        self.wynik_cofniecia.emit(ZdanieZeSzczegolem(msg + (i18n.t(uwaga) if uwaga else ""),
+                                                     podpowiedz_cofniecia(res)), None)
+
+    def _cofniecie_kart_padlo(self, op, zdanie, podpowiedz):
+        """Wyjątek workera cofnięcia z paska: zdanie błędu ze szczegółem systemu, recepta wraca - nie
+        wiemy, czy pliki wróciły."""
+        bieg = self._bieg_kart_zywy()
+        if bieg is None:
+            return
+        commit_id, uwaga = bieg
+        from horreum.gui.wb_worker import czytelny_powod
+        self.wynik_cofniecia.emit(ZdanieZeSzczegolem(
+            i18n.t("grid.wb.error", msg=czytelny_powod(zdanie)), podpowiedz),
+            self._recepta_cofniecia_kart(commit_id, uwaga))
+
+    def refuse_close(self, say, *, przerwij=True):
+        """Straż zamknięcia okna i przełączenia bazy gospodarza (AR-296): `True` = cofnięcie z paska
+        trwa - zdanie i (przy `przerwij`) anulowanie po bieżącym pliku (`WritebackRunner.refuse_close`)."""
+        return self._wb_kart is not None and self._wb_kart.refuse_close(say, przerwij=przerwij)
+
+    def zatrzymaj_pola(self):
+        """Widok znika (zamknięcie okna, przełączenie bazy - `MainWindow._zatrzymaj_watki_widokow`):
+        callbacki cofnięcia z paska z chwili przed demontażem wracają bez skutku (generacja). Wątku
+        NIE zbiera i nie czeka: gospodarz nie demontuje widoku w biegu zapisu (`refuse_close`), a
+        sprzątanie wątku ma jednego właściciela - `QThread.finished` uchwytu. Idempotentne."""
+        self._gen_kart += 1
 
     # ------------------------------------------------ akcja osi SPRZĘTU (R1)
 
@@ -3392,6 +3565,7 @@ class ObjectAxisView(QWidget):
             self._repair_dlg = None
         if self._naprawa_zmienila:
             self.status_message.emit(self._zdanie_okna_kart(dlg))
+            self._podaj_recepte_cofniecia_kart(dlg)
 
     def _on_repair_changed(self):
         """Zapis/cofnięcie w oknie naprawy → kolejka mówi świeżą prawdę JUŻ po takcie 2 (dialog żyje
@@ -3487,12 +3661,14 @@ class ObjectAxisView(QWidget):
         self._sync_assign_enabled()
         if self._repair_dlg is not None:
             self._repair_dlg.set_pipeline_busy(busy)
+        self._podaj_odlozona_kart()          # recepta cofnięcia odłożona przez etap (AR-296)
 
     def set_writeback_busy(self, busy):
         """DRUGA powierzchnia writebacku (grid) pisze do plików — „Napraw nagłówek…" gaśnie
         (mutex, D-PD-3: dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`)."""
         self._foreign_wb = busy
         self._sync_assign_enabled()
+        self._podaj_odlozona_kart()          # …i przez zapis w Zbiorach (AR-296)
 
 
 # ============================================================ oś OBSERWATORIUM (PLAN_os_obserwatorium §3)
@@ -4067,6 +4243,12 @@ class MainWindow(QMainWindow):
         self.con = None
         self.db_path = None
         self.pipeline_view = None       # montuje go `_mount_views`; menu Plik bywa wołane przed bazą
+        # Widoki z uchwytami zapisu do plików - przed montażem ich nie ma (straż zapisu w biegu,
+        # `_odmowa_w_biegu_zapisu`, pyta o nie już przy pierwszym `open_path`).
+        self.grid_view = None
+        self.object_view = None
+        # Recepta osi Porządków razem z raportem, z którym przyszła (`_recepta_porzadkow`, AR-296).
+        self._recepta_porzadkow_stan = None
         self._now = now_fn
         # Wstrzykiwane wywołanie zwrotne „zmieniono bazę" (wzór jak `now_fn`): `main` podpina tu zapis
         # ostatniej ścieżki do trwałych ustawień; testy go nie podają → brak skutków ubocznych.
@@ -4348,14 +4530,24 @@ class MainWindow(QMainWindow):
         # ją ze stanu, o ile wciąż jest prawdą (FH-2e). Drugi nadawca - gest obiektu wydania po żniwach
         # (`_pokaz_gest_obiektu_wydania`) - żyje w miejscu, w którym padł jego raport, i gaśnie z nim.
         # Dom dostaje ją osobno, ze strumienia (`_recepta_gridu`).
-        if strona != STRONA_ZBIORY:
+        # Recepta osi Porządków (AR-296, AR-133) mówi o Porządkach: schodzi także przy wejściu w Zbiory -
+        # dawniej zostawała tam, gdy grid nie miał własnej recepty, a wynik jej wykonania szedł odłożony
+        # do Porządków, czyli tam, gdzie człowieka nie było.
+        stan = self._recepta_porzadkow_stan
+        if strona != STRONA_ZBIORY or (stan is not None and self._czlony_recepty is stan[0].czlony):
             self._ustaw_recepte("")
         msg = self._odlozone_raporty.pop(strona, "")
         if msg:
-            # Raport z chwili, gdy tego miejsca nie było widać - pada teraz, przy nim.
-            self._flash(msg, miejsce=strona)
+            # Raport z chwili, gdy tego miejsca nie było widać - pada teraz, przy nim. Raport, z którym
+            # związana jest recepta Porządków, staje bez wiązania: z receptą ponowienia nie gaśnie po
+            # jednej wizycie (AR-296).
+            self._flash(msg, miejsce=None if stan is not None and stan[1] is msg else strona)
         if strona == STRONA_ZBIORY:
             self.grid_view.ponow_recepte()
+        if strona == STRONA_PORZADKI and stan is not None and stan[1] is self._pelny_komunikat:
+            # Recepta wraca razem z raportem, z którym przyszła - także odłożonym: `_flash` wyżej
+            # postawił na pasku TEN SAM obiekt raportu (AR-296).
+            self._pokaz_recepte(stan[0])
         if strona == STRONA_DOM:
             # Dom mówi o bazie w chwili wejścia. Przełączenie z listy (strzałki, klik) czeka na
             # postój - klik i Enter odczytują od razu w `_on_nav_wejscie`; z kodu (Dom, menu) od razu.
@@ -4429,8 +4621,11 @@ class MainWindow(QMainWindow):
         przerwania; bez wątku okno zwalnia się samo, `HarvestDialog._zwolnij_gdy_wolne`), więc
         wątek w biegu przy wyjściu z aplikacji zabiłby ją tak samo jak wątek widoku."""
         widoki = [self.stack.widget(i) for i in range(self.stack.count())]
-        if self.stack.count():
-            widoki.append(self.grid_view)
+        # Oś obiektu siedzi w stronie Porządków (`TasksView`) - jej generacja cofnięcia z paska
+        # unieważnia spóźnione callbacki (AR-296), więc pytamy ją jawnie, jak grid. Warunkiem jest
+        # ŻYWY widok, nie niepusty stos: montaż przerwany wyjątkiem (AR-302, start z bazą) zostawia
+        # grid z wątkiem w biegu, zanim jakakolwiek strona trafi na stos.
+        widoki.extend(v for v in (self.grid_view, self.object_view) if v is not None and isValid(v))
         widoki.extend(self.findChildren(QDialog))
         for w in widoki:
             zatrzymaj = getattr(w, "zatrzymaj_pola", None)
@@ -4444,6 +4639,7 @@ class MainWindow(QMainWindow):
         # schodzi z paska tu, a nie dopiero przy pierwszym raporcie nowej bazy (Z9).
         self._ustaw_recepte("")
         self._recepta_strumienia = None
+        self._recepta_porzadkow_stan = None  # wykonawca na osi, która zaraz zniknie (AR-296)
         self.home_view = None
         self.nav.clear()
         self.nav.setVisible(False)
@@ -4580,6 +4776,10 @@ class MainWindow(QMainWindow):
         home.znajdz.connect(lambda: self.show_find())
         home.wydaj.connect(grid._open_object_release)
         home.popraw.connect(lambda: self._show_view(NAV_PORZADKI))
+        # Cofnięcie zapisu kart z paska Porządków (AR-296) pisze do plików bez modalnego okna -
+        # „Wciągnij z WBPP…” gaśnie jak przy zapisie Zbiorów (`_on_writeback_busy`).
+        tasks.object_view.writeback_busy.connect(home.set_writeback_busy)
+        tasks.object_view.wynik_cofniecia.connect(self._wynik_cofniecia_osi)   # bez odkładania (AR-296)
         home.teczka.connect(self._on_teczka_domu)
         home.wiecej.connect(self._on_wiecej_domu)
         home.recepta_klik.connect(
@@ -5123,7 +5323,8 @@ class MainWindow(QMainWindow):
         user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu)."""
         self.axis_view.set_busy(running)
         self.observatory_view.set_busy(running)
-        self.object_view.set_busy(running)     # „Przypisz obiekt…" (#8/P4) — zapis, gatowany jak inne
+        if running:
+            self.object_view.set_busy(True)     # „Przypisz obiekt…" (#8/P4) - zapis, gatowany jak inne
         self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
         self.planner_view.set_busy(running)  # planer czyta CAŁE archiwum — nie liczmy nocy na wpół zapisanej bazie
         self.home_view.set_busy(running)     # „Wydaj do WBPP" Domu gaśnie jak „Wydaj obiekt…" gridu
@@ -5133,13 +5334,23 @@ class MainWindow(QMainWindow):
             # „czy etap coś zapisał": przebieg przerwany albo zakończony błędem też mógł zapisać
             # (etapy łańcucha przed błędem, częściowy skan), a `running_changed(False)` przychodzi
             # w każdej z tych dróg - `_cleanup_thread` woła je po KAŻDYM końcu wątku.
-            self._odswiez_widoki_po_przebiegu()
-            # PANEL RODOWODU CZYTA STAN, KTÓRY ETAP WŁAŚNIE PRZEPISAŁ (bramka pakietu, zarzut 7).
-            # Bez tego takt 3 kończył się gorzej, niż zaczynał: gest uruchamiał przeliczenie, panel
-            # zostawał z zapisem sprzed niego i etykietą „nieaktualny", a user nie miał jak jej zdjąć
-            # inaczej niż przeklikaniem zaznaczenia. Odświeżamy po KAŻDYM etapie, nie tylko po
-            # rodowodzie — `resolve` i `group` też ruszają fakty, na których stoi powód.
-            self.grid_view.refresh_lineage_panel()
+            # Oś obiektu zwalnia się OSTATNIA (AR-296): koniec blokady podaje receptę cofnięcia zapisu kart
+            # odłożoną przez odmowę w biegu, a raporty osi z odświeżenia („Brak teleskopów na osi…”) padają
+            # wcześniej - zwolnienie przed odświeżeniem dawało zdanie „recepta wróciła” i receptę zgaszoną
+            # w tym samym obrocie. W `finally`: wyjątek odświeżenia nie zostawia osi zablokowanej. Koniec
+            # przebiegu doręczony W ŚRODKU odświeżenia (nowy krótki przebieg pod `processEvents` fazy) tylko
+            # zamawia kolejny obrót - oś zwalnia wywołanie zewnętrzne, po ostatnim obrocie.
+            try:
+                self._odswiez_widoki_po_przebiegu()
+                # PANEL RODOWODU CZYTA STAN, KTÓRY ETAP WŁAŚNIE PRZEPISAŁ (bramka pakietu, zarzut 7).
+                # Bez tego takt 3 kończył się gorzej, niż zaczynał: gest uruchamiał przeliczenie, panel
+                # zostawał z zapisem sprzed niego i etykietą „nieaktualny", a user nie miał jak jej zdjąć
+                # inaczej niż przeklikaniem zaznaczenia. Odświeżamy po KAŻDYM etapie, nie tylko po
+                # rodowodzie - `resolve` i `group` też ruszają fakty, na których stoi powód.
+                self.grid_view.refresh_lineage_panel()
+            finally:
+                if not self._odswiezam_widoki:
+                    self.object_view.set_busy(False)
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 
@@ -5212,7 +5423,15 @@ class MainWindow(QMainWindow):
         `open_db` (plik z zewnątrz, niczego jeszcze nie przejęliśmy); błąd montażu widoków to błąd
         programu i wybucha dalej. Okno komunikatu pada PO `busy`, bez kursora oczekiwania.
         Z `except` wychodzi samo zdanie: wyjątek w zmiennej lokalnej tworzy cykl z ramką i żyje do
-        przebiegu GC razem z tym, co jego ramki trzymają."""
+        przebiegu GC razem z tym, co jego ramki trzymają.
+
+        ZAPIS DO PLIKÓW W TOKU ODMAWIA PRZEŁĄCZENIA (AR-296): demontaż widoków skasowałby `QThread`
+        uchwytu w biegu (twardy abort), a ogon zapisu trafiłby w zamknięte połączenie - ta sama straż
+        co zamknięcie okna (`_odmowa_w_biegu_zapisu`), ale BEZ anulowania: samo zdanie na pasku, zapis
+        biegnie dalej (zamiar „przerwij” wyraża tylko zamknięcie okna)."""
+        if self._odmowa_w_biegu_zapisu(lambda _tekst: self._flash(i18n.t("wb.undo_switch_refused")),
+                                       przerwij=False):
+            return
         name = Path(path).name
         with busy.busy(self._say_phase, i18n.t("busy.open_db", name=name)) as faza:
             try:
@@ -5443,8 +5662,31 @@ class MainWindow(QMainWindow):
     def _recepta_porzadkow(self, recepta):
         """Recepta gestu osi w Porządkach („Cofnij dopisanie”, AR-133) - na pasek, gdy Porządki
         widać. Przychodzi PO raporcie gestu, który zgasił receptę poprzedniego gestu, więc kolejność
-        daje widok: najpierw zdanie, potem przycisk drogi powrotu."""
+        daje widok: najpierw zdanie, potem przycisk drogi powrotu.
+
+        RECEPTA ŻYJE ZE SWOIM RAPORTEM (AR-296): zapamiętana razem z obiektem raportu, który ją
+        poprzedził - żywym na pasku albo ODŁOŻONYM do wejścia w Porządki (`_raport_miejsca`), gdy wynik
+        przyszedł, kiedy człowiek był gdzie indziej. Wejście w Porządki podaje ją ponownie, dopóki na
+        pasku stoi ten sam raport (`_on_nav_changed`); nowszy raport ją unieważnia."""
+        raport = (self._pelny_komunikat if self._strona() == STRONA_PORZADKI
+                  else self._odlozone_raporty.get(STRONA_PORZADKI))
+        self._recepta_porzadkow_stan = (recepta, raport) if recepta and raport else None
         if self._strona() == STRONA_PORZADKI:
+            self._pokaz_recepte(recepta)
+
+    def _wynik_cofniecia_osi(self, msg, recepta):
+        """Zdanie biegu cofnięcia zapisu kart z paska osi (AR-296) - na pasek OD RAZU, bez wiązania
+        z miejscem (jak wynik gridu spoza Zbiorów, `_flash_grid`): odmowa zamknięcia okna i przełączenia
+        bazy obiecuje, że zapis „pokaże wynik”, a raport odłożony do Porządków nie padłby przed zamknięciem
+        i ginąłby przy demontażu widoków. Recepta (ponowienie, powrót po blokadzie) wiąże się z TYM
+        obiektem raportu i stoi na pasku przy Porządkach (`_on_nav_changed` poda ją przy wejściu). Raport
+        osi odłożony do Porządków jest STARSZY od zdania z receptą (odświeżenie po przebiegu Dostawy) -
+        zdanie go zastępuje, inaczej wejście w Porządki postawiłoby go na pasku i zgasiło receptę."""
+        if recepta:
+            self._odlozone_raporty.pop(STRONA_PORZADKI, None)
+        self._flash(msg, miejsce=None)
+        self._recepta_porzadkow_stan = (recepta, msg) if recepta else None
+        if recepta and self._strona() == STRONA_PORZADKI:
             self._pokaz_recepte(recepta)
 
     def _recepta_gridu(self, recepta):
@@ -5519,7 +5761,8 @@ class MainWindow(QMainWindow):
         pokazuje skrót, „Kopiuj zdanie” bierze pełne zdanie (`pelne`). PODPOWIEDŹ JEST JEDNA - paska
         (zdanie, recepta, szczegół; `_zwezone`): podpowiedź pola zasłaniałaby ją nad etykietą bez
         członu recepty, więc schodzi zaraz po `ustaw`."""
-        self.report_label.ustaw(self._zwezone(msg), szczegol_zdania(msg), pelne=msg)
+        self.report_label.ustaw(self._zwezone(msg), szczegol_zdania(msg), pelne=msg,
+                                polecenie=polecenie_zdania(msg))   # „Kopiuj polecenie” (AR-309)
         self.report_label.setToolTip("")
 
     def _przelicz_pasek(self):
@@ -5650,15 +5893,30 @@ class MainWindow(QMainWindow):
             return msg
         return fm.elidedText(msg, Qt.ElideRight, zapas)
 
+    def _odmowa_w_biegu_zapisu(self, say, *, przerwij=True):
+        """Straż zamknięcia okna i przełączenia bazy: `True` = uchwyt zapisu do plików trwa (szuflada
+        Zbiorów albo cofnięcie zapisu kart z paska osi obiektu, AR-296), a `say(tekst)` mówi, co się
+        dzieje (`WritebackRunner.refuse_close`). `przerwij` - anulowanie po bieżącym pliku: przy
+        zamknięciu okna intencja jest jasna; przełączenie bazy odmawia samym zdaniem, a zapis biegnie
+        dalej. Bez bazy i przed montażem widoków (pierwsze `open_path`: argument startu, ostatnia
+        baza) - `False` bez dotykania widoków, których jeszcze nie ma."""
+        if self.con is None:
+            return False
+        grid = getattr(self, "grid_view", None)
+        if grid is not None and grid._wb.refuse_close(say, przerwij=przerwij):
+            return True
+        osi = getattr(self, "object_view", None)
+        return osi is not None and osi.refuse_close(say, przerwij=przerwij)
+
     def closeEvent(self, event):
         # ZAPIS DO PLIKÓW W TOKU (szuflada Zbiorów) - okno ZOSTAJE, zamknięcie = żądanie anulowania po
         # bieżącym pliku (`WritebackRunner.refuse_close`, jak w oknach kart), drugie zamknięcie po biegu
         # zamyka (AR-280). Zmierzone: okno znikało w biegu, połączenie zamykało się pod wątkiem, który
         # pisał dalej, a ogon zapisu padał `ProgrammingError` na zamkniętej bazie. Bez otwartej bazy
         # widoku Zbiorów nie ma (`_mount_views`) - i nie ma czego pilnować. Poczekalnia bez zapisu w toku
-        # NIE pyta: wraca w szufladzie przy następnym otwarciu tej bazy.
-        grid = getattr(self, "grid_view", None)
-        if self.con is not None and grid is not None and grid._wb.refuse_close(self._flash):
+        # NIE pyta: wraca w szufladzie przy następnym otwarciu tej bazy. Ta sama straż obejmuje
+        # cofnięcie zapisu kart z paska Porządków (AR-296) - `_odmowa_w_biegu_zapisu`.
+        if self._odmowa_w_biegu_zapisu(self._flash):
             event.ignore()
             return
         # Top-level apka jest właścicielem połączenia - zamyka je przy zamknięciu okna. Wątki tła
@@ -5668,6 +5926,237 @@ class MainWindow(QMainWindow):
             self.con.close()
             self.con = None
         super().closeEvent(event)
+
+
+# ======================================== STRAŻ BŁĘDU PROGRAMU (AR-302) i TŁUMACZ Qt - rejon `main`
+# Importy tu, nie w bloku modułu: obie rzeczy żyją wyłącznie dla `main` (start programu).
+import logging  # noqa: E402
+import sys  # noqa: E402
+import threading  # noqa: E402
+
+from PySide6.QtCore import QEventLoop, QLibraryInfo, QObject, QTranslator, Slot  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtWidgets import QPlainTextEdit  # noqa: E402
+from shiboken6 import isValid  # noqa: E402
+
+from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu  # noqa: E402
+from horreum.item_reasons import PowodPozycji, powod_okna  # noqa: E402
+
+_LOG = logging.getLogger(__name__)
+
+
+class StrazBledowProgramu(QObject):
+    """Wyjątek, którego nikt nie złapał (slot Qt, metoda wirtualna, wątek tła) → OKNO błędu programu
+    z miejscem w kodzie (AR-302). Do AR-302 pakiet nie miał haka: PySide6 6.9.2 oddaje wyjątek ze
+    slotu `sys.excepthook`, a domyślny hak drukuje go na `stderr`, którego wydanie okienkowe
+    (`console=False`) nie ma - błąd przepadał bez śladu, okno stało dalej bez słowa (zmierzone).
+
+    WĄTEK: hak bywa wołany w wątku tła (slot obiektu w `QThread` - zmierzone; `threading.excepthook`
+    zawsze), a okno wolno budować wyłącznie w wątku GUI. Hak liczy powód TAM, gdzie go wołano (ślad
+    pełny - `powod_okna` bierze z niego miejsce `@ horreum/…:N`), i emituje `zgloszony`; obiekt straży
+    żyje w wątku GUI, więc z wątku tła sygnał idzie kolejką.
+
+    OKNO NIEMODALNE, JEDNO NARAZ: `show`, nie `exec` - hak nie kręci zagnieżdżonej pętli, a wyjątek
+    z `paintEvent` (seria: 3 wywołania w 50 ms, zmierzone) nie wchodzi ponownie w okno. Kolejne
+    zgłoszenia przy stojącym oknie podbijają jego licznik; zgłoszenie po zamknięciu okna otwiera NOWE
+    okno z własnym licznikiem - nic nie ginie po cichu.
+
+    BEZ REKURSJI I BEZ CISZY: budowa okna stoi pod przejściową blokadą reentrancji - zgłoszenie, które
+    przyjdzie w jej trakcie, i każde zgłoszenie po tym, jak własne okno raz padło, idzie do okna
+    zastępczego (`QMessageBox`); poprzedni hak dostaje zgłoszenie dopiero, gdy padnie i ono. Trwałe
+    wyłączenie straży odpadło: w wydaniu bez konsoli poprzedni hak nie ma dokąd pisać, więc drugi,
+    niezależny błąd przepadał. Każde zgłoszenie idzie też do poprzedniego haka, gdy jest `sys.stderr`
+    (konsola deweloperska zachowuje ślad). `BaseException` spoza `Exception` (przerwanie z klawiatury,
+    wyjście) - wyłącznie poprzedni hak. Wyjątek synchroniczny startu - `pokaz_przed_wyjsciem`."""
+
+    zgloszony = Signal(object)          # powód (`powod_okna`) - `object`: kod klasy i parametry
+
+    def __init__(self):
+        super().__init__()
+        self._poprzedni = sys.excepthook
+        self._poprzedni_watku = threading.excepthook
+        self._w_budowie = False         # blokada reentrancji na czas budowy i pokazania okna
+        self._okno_zepsute = False      # własne okno padło - zgłoszenia idą do okna zastępczego
+        self._start = False             # błąd startu: program się zakończy (`pokaz_przed_wyjsciem`)
+        self.okno = None                # ostatnie okno (QDialog) - testy czytają je wprost
+        self._lbl_kolejne = None
+        self._kolejne = 0
+        self.zastepcze = []             # okna zastępcze (`QMessageBox`) - trzymane, testy czytają je wprost
+        self.zgloszony.connect(self._pokaz)
+
+    def zainstaluj(self):
+        sys.excepthook = self._hak
+        threading.excepthook = self._hak_watku
+
+    def zdejmij(self):
+        """Poprzednie haki z powrotem (koniec `main`; testy wołają `main` kilka razy w jednej sesji)."""
+        sys.excepthook = self._poprzedni
+        threading.excepthook = self._poprzedni_watku
+
+    def pokaz_przed_wyjsciem(self, exc):
+        """Wyjątek SYNCHRONICZNY startu (budowa okna głównego, otwarcie bazy startowej) - wychodzi z `main`
+        ramkami, a interpreter wołałby hak dopiero po `finally`, który straż już zdjął: w wydaniu bez konsoli
+        program zamykał się bez słowa. Tu zgłoszenie idzie przy żywej straży, a pętla zdarzeń kręci się, aż
+        człowiek zamknie okno błędu (albo okno zastępcze). Wołający kończy program kodem błędu."""
+        self._start = True
+        self._hak(type(exc), exc, exc.__traceback__)
+        petla = QEventLoop()
+
+        def _sprawdz():
+            widoczne = [o for o in (self.okno, *self.zastepcze) if o is not None and isValid(o) and o.isVisible()]
+            if not widoczne:
+                petla.quit()
+        takt = QTimer()
+        takt.timeout.connect(_sprawdz)
+        takt.start(50)
+        petla.exec()
+        takt.stop()
+
+    def _zglos(self, wartosc):
+        try:
+            powod = powod_okna(wartosc)
+        except Exception:               # klasyfikacja padła - surowy tekst, ale ślad zostaje
+            try:
+                tekst = str(wartosc)
+            except Exception:           # zepsuty `__str__` wywraca zwykle i klasyfikację - sama klasa
+                tekst = "?"
+            powod = f"{type(wartosc).__name__}: {tekst}"
+        try:
+            self.zgloszony.emit(powod)
+        except Exception:
+            self._poprzedni(*sys.exc_info())
+
+    def _hak(self, typ, wartosc, tb):
+        if sys.stderr is not None or not isinstance(wartosc, Exception):
+            self._poprzedni(typ, wartosc, tb)
+        if isinstance(wartosc, Exception):
+            self._zglos(wartosc)
+
+    def _hak_watku(self, args):
+        wartosc = args.exc_value
+        if sys.stderr is not None or not isinstance(wartosc, Exception):
+            self._poprzedni_watku(args)
+        if isinstance(wartosc, Exception):
+            self._zglos(wartosc)
+
+    @Slot(object)
+    def _pokaz(self, powod):
+        """Zgłoszenie → okno. Zgłoszenie W TRAKCIE budowy okna (pokazanie maluje, malowanie może rzucić
+        i wrócić tu hakiem) i każde zgłoszenie po tym, jak własne okno raz padło, idzie do okna
+        zastępczego - nic nie jest wyłączane na stałe: kolejny błąd zawsze ma widoczny ślad. Dopiero
+        porażka okna zastępczego oddaje zgłoszenie poprzedniemu hakowi."""
+        if self._w_budowie or self._okno_zepsute:
+            self._pokaz_zastepczo(powod)
+            return
+        # Okno ma za rodzica okno aktywne w chwili błędu - zamknięty dialog-rodzic kasuje je razem
+        # z sobą, więc obiekt Pythona bywa pusty (`isValid`); takie okno jest po prostu zamknięte.
+        self._w_budowie = True
+        try:
+            zywe = self.okno is not None and isValid(self.okno)
+            if zywe and self.okno.isVisible():
+                self._kolejne += 1
+                self._lbl_kolejne.setText(i18n.t_plural("main.prog_error.more", self._kolejne))
+                self._lbl_kolejne.setVisible(True)
+                return
+            if zywe:
+                self.okno.deleteLater()
+            self._kolejne = 0
+            self.okno = None
+            self.okno = self._zbuduj_okno(powod)
+            self.okno.show()
+            self.okno.raise_()
+        except Exception:
+            self._okno_zepsute = True
+            if sys.stderr is not None:
+                self._poprzedni(*sys.exc_info())
+            self._pokaz_zastepczo(powod)
+        finally:
+            self._w_budowie = False
+
+    def _zdanie(self, powod):
+        """Zdanie okna (własnego i zastępczego): błąd programu słowem katalogu, klasa bazy/systemu swoim.
+        Błąd startu (`pokaz_przed_wyjsciem`) mówi, że program nie wystartował - okno główne jest schowane,
+        a „Zamknij” kończy program; zdanie „okno działa dalej” byłoby nieprawdą."""
+        klucz = "main.prog_error.text_start" if self._start else "main.prog_error.text"
+        if isinstance(powod, PowodPozycji) and powod.code == "prog_error":
+            return i18n.t(klucz, msg=i18n.t("main.prog_error.what"))
+        return i18n.t(klucz, msg=tekst_powodu(powod))
+
+    def _pokaz_zastepczo(self, powod):
+        """Okno zastępcze: zwykły `QMessageBox` (instancja, przycisk z katalogu) ze zdaniem błędu programu
+        i szczegółem z miejscem w kodzie - bez pól i menu własnego okna. Przy stojącym oknie zastępczym
+        kolejne zgłoszenie podbija jego licznik (jak w oknie własnym), zamiast otwierać następne - seria
+        z `paintEvent` po zamknięciu okna odsłaniającego widżet zalewałaby ekran oknami."""
+        try:
+            zywe = [o for o in self.zastepcze if isValid(o) and o.isVisible()]
+            if zywe:
+                okno = zywe[-1]
+                okno.kolejne += 1
+                okno.setInformativeText(i18n.t_plural("main.prog_error.more", okno.kolejne))
+                return
+            szczegol = wiersz_systemu(powod) if isinstance(powod, PowodPozycji) else ""
+            okno = QMessageBox(QMessageBox.Critical, i18n.t("main.prog_error.title"),
+                               "\n\n".join(c for c in (self._zdanie(powod), szczegol) if c))
+            okno.addButton(i18n.t("main.prog_error.close"), QMessageBox.AcceptRole)
+            okno.setModal(False)
+            okno.kolejne = 0
+            self.zastepcze = [okno]
+            okno.show()
+        except Exception:
+            self._poprzedni(*sys.exc_info())
+
+    def _zbuduj_okno(self, powod):
+        """Okno: zdanie (pole zdania ze szczegółem pod kursorem i w menu), szczegół WIDOCZNY w polu
+        tylko-do-odczytu (okno ma na niego miejsce), licznik kolejnych błędów, przyciski z katalogu."""
+        zdanie = self._zdanie(powod)
+        szczegol = wiersz_systemu(powod)
+        okno = QDialog(QApplication.activeWindow())
+        okno.setModal(False)
+        okno.setWindowTitle(i18n.t("main.prog_error.title"))
+        lay = QVBoxLayout(okno)
+        pole = EtykietaBledu()
+        pole.setWordWrap(True)
+        pole.ustaw(zdanie, szczegol)
+        lay.addWidget(pole)
+        okno.pole = pole
+        okno.szczegol = QPlainTextEdit(szczegol)
+        okno.szczegol.setReadOnly(True)
+        okno.szczegol.setVisible(bool(szczegol))
+        lay.addWidget(okno.szczegol)
+        self._lbl_kolejne = QLabel("")
+        self._lbl_kolejne.setVisible(False)
+        okno.lbl_kolejne = self._lbl_kolejne
+        lay.addWidget(self._lbl_kolejne)
+        rzad = QHBoxLayout()
+        rzad.addStretch(1)
+        okno.btn_kopiuj = QPushButton(i18n.t("main.prog_error.copy"))
+        okno.btn_kopiuj.setEnabled(bool(szczegol))
+        okno.btn_kopiuj.clicked.connect(lambda: QGuiApplication.clipboard().setText(szczegol))
+        rzad.addWidget(okno.btn_kopiuj)
+        okno.btn_zamknij = QPushButton(i18n.t("main.prog_error.close"))
+        okno.btn_zamknij.setDefault(True)
+        okno.btn_zamknij.clicked.connect(okno.close)
+        rzad.addWidget(okno.btn_zamknij)
+        lay.addLayout(rzad)
+        return okno
+
+
+def zainstaluj_tlumacza_qt(app, jezyk):
+    """Tłumacz Qt `qtbase_<język UI>` (teksty samego Qt: menu kontekstowe pól - „Cofnij”, „Wklej” -
+    i przyciski standardowe okien spoza katalogu) albo None. Idzie za językiem UI PROGRAMU, nie systemu:
+    UI EN na polskim Windows zostaje angielskie (`en` - bez tłumacza, Qt mówi po angielsku sam).
+    Brak pliku `.qm` (wydanie bez tłumaczeń) to nie powód, żeby program nie wstał (kod u klienta):
+    ostrzeżenie w logu i dalej po angielsku. Zdejmuje go `main` w tym samym `finally`, co haki straży."""
+    if jezyk == "en":
+        return None
+    tlumacz = QTranslator(app)
+    katalog = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    if not tlumacz.load(f"qtbase_{jezyk}", katalog):
+        _LOG.warning("tłumacz Qt: brak qtbase_%s w %s - teksty Qt zostają po angielsku", jezyk, katalog)
+        tlumacz.deleteLater()
+        return None
+    app.installTranslator(tlumacz)
+    return tlumacz
 
 
 def main(argv=None):
@@ -5703,6 +6192,41 @@ def main(argv=None):
     auto_lang = saved_lang if saved_lang is not None else QLocale().name()[:2]
     i18n.set_lang(auto_lang)
 
+    # Teksty samego Qt (menu pól, przyciski standardowe) w języku UI programu, i straż błędu programu
+    # PRZED oknem (AR-302). Błąd SYNCHRONICZNY budowy okna albo otwarcia bazy startowej wychodzi stąd
+    # ramkami - straż pokazuje go, póki jest zainstalowana (`pokaz_przed_wyjsciem`), a program kończy się
+    # kodem błędu. Straż i tłumacza zdejmuje `finally`: testy wołają `main` kilka razy na jednej
+    # `QApplication`, a hak i tłumacz to stan procesu.
+    tlumacz = zainstaluj_tlumacza_qt(app, i18n.current_lang())
+    straz = StrazBledowProgramu()
+    straz.zainstaluj()
+    try:
+        # Przechwycenie obejmuje WYŁĄCZNIE start synchroniczny, nie `app.exec()`: wyjątek z pętli
+        # zdarzeń (w testach - z podmienionego `exec`) wychodzi z `main` od razu, zamiast czekać, aż ktoś
+        # zamknie okno błędu. Okno główne, które zdążyło stanąć, chowa się na czas okna błędu (w połowie
+        # zamontowane przyjmowałoby gesty, a powrót z `main` nie przechodzi przez jego `closeEvent`),
+        # a po nim zamyka się zwykłą drogą.
+        okna = []
+        try:
+            _start_okna(argv, settings, okna)
+        except Exception as exc:
+            for w in okna:
+                w.hide()
+            straz.pokaz_przed_wyjsciem(exc)
+            for w in okna:
+                w.close()
+            return 1
+        return app.exec()
+    finally:
+        straz.zdejmij()
+        if tlumacz is not None:
+            app.removeTranslator(tlumacz)
+            tlumacz.deleteLater()
+
+
+def _start_okna(argv, settings, okna):
+    """Start synchroniczny `main` (pod strażą i tłumaczem): baza startowa i okno - dopisane do `okna`, zanim
+    cokolwiek może rzucić po jego pokazaniu. Pętlę zdarzeń kręci `main`."""
     if argv:
         start = argv[0]
     else:
@@ -5721,6 +6245,7 @@ def main(argv=None):
     # „czy ono w ogóle wstało" — i nie miał gdzie przeczytać odpowiedzi.
     # Kolejność jest tu CAŁĄ naprawą: okno bez bazy → faza na środku → dopiero odczyt.
     win = MainWindow(on_db_changed=zapamietaj_baze)
+    okna.append(win)
     win.show()
     if start:
         # Faza PRZED pierwszym przemalowaniem: bez tego okno błysnęłoby zdaniem „Brak bazy",
@@ -5728,4 +6253,3 @@ def main(argv=None):
         win._say_phase(i18n.t("busy.open_db", name=Path(start).name))
         busy.repaint()
         win.open_path(start)
-    return app.exec()

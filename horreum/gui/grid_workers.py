@@ -303,11 +303,13 @@ class ZbiorWorker(QObject):
     Anulowanie jak w `PolaWorker`: flaga sprawdzana między krokami składu + `Connection.interrupt`
     z wątku GUI na zapytanie w locie, pod zamkiem, żeby nie trafić w połączenie właśnie zamykane.
 
-    Wyjątek składu mówi tą samą regułą okna co `PolaWorker` (`powod_okna`, AR-264), ale samym zdaniem:
-    odbiorca (`grid.FramesView._on_zbior_failed`) zdania nie pokazuje, tylko ponawia skład na wątku GUI."""
+    Wyjątek składu mówi tą samą regułą okna co `PolaWorker` (`powod_okna`, AR-264), zdaniem ze szczegółem:
+    odbiorca (`grid.FramesView._on_zbior_failed`) ponawia skład RAZ w nowym biegu tego workera, a drugą
+    porażkę tej samej generacji kładzie na raport wczytania Zbiorów (AR-302)."""
 
     done = Signal(int, object)     # generacja, wynik `_sklad_zbioru`
-    failed = Signal(int, str)      # generacja, zdanie w języku UI
+    # generacja, zdanie (`ZdanieZeSzczegolem`) - `object`: `Signal(str)` zgubiłby szczegół (AR-302)
+    failed = Signal(int, object)
     finished = Signal()            # run() wrócił KAŻDĄ drogą → quit wątku
 
     def __init__(self, gen, stan, db_path):
@@ -344,7 +346,9 @@ class ZbiorWorker(QObject):
                     self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
                     self._con = None
         except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
-            error = tekst_powodu(powod_okna(exc))      # reguła `PolaWorker.run` (AR-198, AR-264)
+            # Reguła `PolaWorker.run` (AR-198, AR-264): zdanie i szczegół składane TU, póki ślad jest pełny.
+            powod = powod_okna(exc)
+            error = ZdanieZeSzczegolem(tekst_powodu(powod), wiersz_systemu(powod))
         if error is not None:
             self.failed.emit(self._gen, error)
         else:

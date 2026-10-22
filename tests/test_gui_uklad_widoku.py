@@ -15,7 +15,7 @@ from horreum import db
 from horreum.gui import grid as grid_mod
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QInputDialog
+from PySide6.QtWidgets import QApplication
 
 NOW = "2026-07-03T14:00:00"
 
@@ -74,7 +74,7 @@ def _rail_item(view, facet, value):
 
 
 def _zapisz_perspektywe(view, monkeypatch, nazwa):
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: (nazwa, True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: nazwa)
     view._save_perspective()
 
 

@@ -47,7 +47,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0043 indeks frame(object_id) - materiał okna stosu i propozycja rodowodu (AR-154)
     # + 0044 atomic_undo (ślad własnego cofnięcia drogi atomowej, AR-182)
     # + 0045 atomic_undo.outcome/kept_paths/settled_at (pliki obok ścieżki po cofnięciu, AR-127)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 45
+    # + 0046 location.nonprintable_hash/_keyword/_char (zbadanie bajtu spoza ASCII kopii FITS, AR-299)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 46
     con.close()
 
 

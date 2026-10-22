@@ -170,11 +170,13 @@ def _infer_type(value: object) -> str:
 
 
 def _to_text(value: object, value_type: str) -> str:
-    """Wartosc -> tekst kanoniczny do `pending_changes.new_value` (fits_io._coerce odwroci)."""
+    """Wartosc -> tekst kanoniczny do `pending_changes.new_value` (fits_io._coerce odwroci).
+    Karta logiczna: tekst spoza zbioru `card_rules.tekst_logiczny` -> `ValueError` (powod
+    `macro_type_mismatch` u wolajacego, AR-300; dawniej `abc` dawalo po cichu 'F')."""
     if value_type == "bool":
-        b = value if isinstance(value, bool) else str(value).strip().lower() in (
-            "t", "true", "1", "yes"
-        )
+        b = value if isinstance(value, bool) else card_rules.tekst_logiczny(value)
+        if b is None:
+            raise ValueError(f"tekst {value!r} nie jest wartoscia logiczna")
         return "T" if b else "F"
     if value_type == "int":
         return str(int(value))  # type: ignore[arg-type]
@@ -273,7 +275,9 @@ def _evaluate_change(
             return None, PowodPozycji(
                 f"karta '{kw}' nie ma wystąpienia [{idx}] - w nagłówku jest ich {cardinality}",
                 "card_idx_missing", keyword=kw, idx=idx, n=cardinality)
-        existing = first.get(kw)
+        # Wartość zastana i typ z wystąpienia `idx`, które zmiana dotyka (AR-300 b) - nie z pierwszego:
+        # szuflada pokazuje `old_value`, a pisarz rzutuje na `new_type`. `first` zostaje dla `env`.
+        existing = next((c for c in cards if c["keyword"] == kw and int(c["idx"]) == idx), None)
         old_value = existing["value_raw"] if existing is not None else None
         base_type = md.assign.value_type or (
             existing["value_type"] if existing is not None else None
@@ -320,9 +324,7 @@ def _evaluate_change(
     try:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
-        return None, PowodPozycji(f"wartość '{md.assign.expr}' nie pasuje do typu '{value_type}'",
-                                  "macro_type_mismatch", value=md.assign.expr,
-                                  value_type=value_type)
+        return None, card_rules.powod_typu(md.assign.expr, value_type)
 
     naruszenie = card_rules.card_violation(kw, new_value, md.assign.comment,
                                            new_card=md.assign.op == "add")
@@ -517,9 +519,7 @@ def evaluate_manual_change(cards, keyword: str, new_text: str,
     try:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
-        return ManualResult(False, PowodPozycji(
-            f"wartość '{new_text}' nie pasuje do typu '{value_type}'", "macro_type_mismatch",
-            value=new_text, value_type=value_type))
+        return ManualResult(False, card_rules.powod_typu(new_text, value_type))
     naruszenie = card_rules.card_violation(keyword, new_value, comment, new_card=op == "add")
     if naruszenie is not None:                       # AR-9: te same reguły co pisarz
         return ManualResult(False, naruszenie.reason)

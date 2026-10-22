@@ -961,14 +961,13 @@ def view_settings(qapp, gcon, monkeypatch):
 def test_facet_roundtrip_perspektywy_zlozonej(view_settings, monkeypatch):
     """Round-trip perspektywy ZŁOŻONEJ (nota R2): facety→rail, advanced→panel; combo odbija zapis
     (F4R2#6); „Zastosuj" panelu NIE kasuje facetów; stara perspektywa nadpisuje stan w całości."""
-    from PySide6.QtWidgets import QInputDialog
     v = view_settings
     v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))
     v._filter_tree = {"keyword": "GAIN", "operator": "exists"}
     v.filter_panel.set_tree(v._filter_tree)
     v.refresh()
     assert v.count_label.text() == "2 klatki"             # lighty ∩ GAIN = f1,f2
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Zlozona", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Zlozona")
     v._save_perspective()
     assert v.combo_persp.currentData() == ("saved", "Zlozona")   # F4R2#6: etykieta nie kłamie
     # odejdź na preset (F4R#2: preset zeruje facety)…
@@ -992,13 +991,11 @@ def test_perspektywa_ladujaca_z_bazy_przezywa_nowe_okno(view_settings, monkeypat
     """I-1 (D-P-I-3): nazwany widok jest własnością ARCHIWUM. Zapis w jednym oknie, odczyt
     w DRUGIM zbudowanym nad tą samą bazą — to jest w miniaturze „zapisz na stacji, otwórz na
     laptopie", którego rejestr użytkownika nie umiał."""
-    from PySide6.QtWidgets import QInputDialog
-
     from horreum.gui.grid import FramesView
     v = view_settings
     v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))
     v.refresh()
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Z bazy", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Z bazy")
     v._save_perspective()
     assert queries.perspectives(gcon)[0][0] == "Z bazy"
 
@@ -1429,9 +1426,10 @@ _POL = {"source": "date_obs", "offset_hours": 0, "fallback": True}
 
 
 def test_rename_lifecycle_stage_commit_restage_undo(rn_view):
-    """R1 #1 + R2 #1: stage→commit→re-stage MINTUJE nowy run_id, NIE kasuje 'applied' pierwszego. Fix#1
-    (rec#1/wiz#3): re-stage CHOWA leftover „Cofnij" (anty-orphan), a undo skommitowanego runu wraca
-    ścieżką CLI (R2 #7). Bezpośrednio po commicie (BEZ re-stage) „Cofnij" celuje w first_run."""
+    """R1 #1 + R2 #1: stage→commit→re-stage ze ZMIANAMI MINTUJE nowy run_id, NIE kasuje 'applied' pierwszego.
+    Fix#1 (rec#1/wiz#3): taki re-stage CHOWA leftover „Cofnij" (anty-orphan), a undo skommitowanego runu
+    wraca ścieżką CLI (R2 #7). Re-stage BEZ zmian (nazwy już kanoniczne) niczego nie wnosi do szuflady, więc
+    „Cofnij" zostaje przy first_run i nowy przebieg nie powstaje (AR-305, reguła makra AR-274)."""
     view, con, files = rn_view
     view._on_rename_stage(_POL)
     assert view._rename_pending_count() == 2
@@ -1444,11 +1442,16 @@ def test_rename_lifecycle_stage_commit_restage_undo(rn_view):
     applied = [r for r in writeback.renames_for_run(con, first_run) if r["status"] == "applied"]
     assert len(applied) == 2
 
-    view._on_rename_stage(_POL)                      # committed → MINT nowy run (touched=0, nazwy kanoniczne)
-    assert view._rename_run_id != first_run
+    view._on_rename_stage(_POL)                      # touched=0 (nazwy kanoniczne) → bez mintu, „Cofnij" zostaje
+    assert view._rename_run_id == first_run and view._rename_run_committed
+    assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "rename"
+
+    view._on_rename_stage({**_POL, "offset_hours": 1})   # inne nazwy → MINT nowy run
+    assert view._rename_run_id != first_run and view._rename_pending_count() == 2
     still = [r for r in writeback.renames_for_run(con, first_run) if r["status"] == "applied"]
     assert len(still) == 2                           # 'applied' pierwszego NIENARUSZONE (R2 #1, nie clobber)
     assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None   # fix#1: leftover „Cofnij" zdjęty
+    view._on_reject()                                # staging drugiego przebiegu schodzi, pliki nietknięte
 
     # undo skommitowanego runu wciąż osiągalne ścieżką CLI (R2 #7) → przywraca oryginały
     writeback.undo_renames(con, first_run, now=NOW)
@@ -3652,12 +3655,11 @@ def test_OS_ZYWOTNOSCI_tez_mowi_gdzie_podzialy_sie_klatki(obj_view, monkeypatch)
 
     Falsyfikator: zdejmij `_czlon_poza_widokiem` z `_po_gescie_klatki` → asercja czerwienieje,
     a zdanie wraca do potwierdzania zapisu na klatce, której na ekranie nie ma."""
-    from PySide6.QtWidgets import QMessageBox
     from horreum.gui import i18n
     v, con = obj_view
     con.execute("UPDATE location SET present = 0 WHERE frame_id = 3")   # plik zniknął z dysku
     con.commit()
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(grid_mod.FramesView, "_potwierdz_wycofanie", lambda self, n: True)
 
     v.apply_perspective(grid_mod.PRESET_VANISHED)
     _zaznacz(v, [3])
@@ -3684,14 +3686,13 @@ def test_os_zywotnosci_odmienia_jedna_klatke_a_recepta_nazywa_cel_bez_obiektu(
 
     Falsyfikator: wróć w `_po_gescie_klatki` do `i18n.t(klucz, …)` → zdanie renderuje surowy klucz;
     zdejmij `grid.sel.reveal_target` z `_czlony_recepty_gestu` → człon wraca do gołego gestu."""
-    from PySide6.QtWidgets import QMessageBox
     from horreum.gui import i18n
     i18n.set_lang(lang)
     try:
         v, con = obj_view
         con.execute("UPDATE location SET present = 0 WHERE frame_id = 3")
         con.commit()
-        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        monkeypatch.setattr(grid_mod.FramesView, "_potwierdz_wycofanie", lambda self, n: True)
         v.apply_perspective(grid_mod.PRESET_VANISHED)
         _zaznacz(v, [3])
         raporty, recepty = _sluchaj_paska(v)
@@ -5198,7 +5199,6 @@ def test_KAZDA_flaga_rodziny_przechodzi_caly_cykl_widoku(view, gcon, monkeypatch
     kryteriów ją nazywa, recepta widzi trim, zapis do bazy niesie ją pod kluczem spec-a (a resztę
     rodziny jawnie wyłączoną), a wejście z mostu planera zdejmuje wszystkie. Nowa flaga dopisana
     do `_TRIMY` wchodzi tu sama - bez dopisywania testu."""
-    from PySide6.QtWidgets import QInputDialog
     from horreum.gui import i18n
     presety = [(nazwa, klucz) for nazwa, spec in grid_mod.PRESETS.items()
                for klucz in spec if klucz.startswith("only_")]
@@ -5209,8 +5209,8 @@ def test_KAZDA_flaga_rodziny_przechodzi_caly_cykl_widoku(view, gcon, monkeypatch
         assert wlaczone == [f"_{klucz}"], f"{nazwa!r}: zapalone flagi {wlaczone}"
         assert i18n.t(f"grid.criteria.{klucz}") in view.sel_bar.criteria_label.toolTip(), nazwa
         assert view._trim_aktywny(), nazwa
-        monkeypatch.setattr(QInputDialog, "getText",
-                            staticmethod(lambda *a, _n=f"kopia {nazwa}", **k: (_n, True)))
+        monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy",
+                            lambda self, _n=f"kopia {nazwa}": _n)
         view._save_perspective()
         zapisana = dict(queries.perspectives(gcon))[f"kopia {nazwa}"]
         assert {grid_mod._klucz_spec(a): zapisana.get(grid_mod._klucz_spec(a))
@@ -5336,14 +5336,12 @@ _SPEC_Z_PRZYSZLOSCI = {"filter": None, "group_by": None, "only_z_przyszlosci": T
 
 
 def _otworz_z_przyszlosci(view, gcon, monkeypatch, nazwa_zapisu):
-    """Perspektywa nowszej wersji otwarta w tym buildzie; `QInputDialog` odpowie `nazwa_zapisu`."""
-    from PySide6.QtWidgets import QInputDialog
+    """Perspektywa nowszej wersji otwarta w tym buildzie; okno nazwy odpowie `nazwa_zapisu`."""
     from horreum import repo
     repo.save_perspective(gcon, name="Z przyszłości", now=NOW, spec=_SPEC_Z_PRZYSZLOSCI)
     view._load_facets()
     view.apply_perspective("Z przyszłości")
-    monkeypatch.setattr(QInputDialog, "getText",
-                        staticmethod(lambda *a, **k: (nazwa_zapisu, True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: nazwa_zapisu)
 
 
 def test_zapis_TEJ_SAMEJ_perspektywy_NIE_kasuje_warunkow_nowszej_wersji(view, gcon, monkeypatch):
@@ -5442,7 +5440,6 @@ def test_BP5_z_trimem_etykieta_trafia_w_preset_Z_TA_FLAGA_a_nie_w_Przeglad(view,
 
     Falsyfikator: przestawiaj po wyczyszczeniu zawsze na `_PRESET_CZYSTY` → czerwienieje pierwsza
     połowa; zdejmij wołanie właściciela etykiety → druga."""
-    from PySide6.QtWidgets import QInputDialog
     view.apply_perspective(grid_mod.PRESET_DUPS)
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
     view.sel_bar.btn_clear.click()
@@ -5450,7 +5447,7 @@ def test_BP5_z_trimem_etykieta_trafia_w_preset_Z_TA_FLAGA_a_nie_w_Przeglad(view,
     assert view._only_dups and view.count_label.text() == "1 klatka"      # trim dalej przycina
 
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Duble lightów", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Duble lightów")
     view._save_perspective()
     assert view.combo_persp.currentData() == ("saved", "Duble lightów")
     view.sel_bar.btn_clear.click()
@@ -5470,11 +5467,9 @@ def test_BP5_zapisana_z_facetem_schodzi_na_preset_zgodny_a_bez_dopasowania_NIE_z
 
     Falsyfikator: zdejmij wołanie właściciela etykiety z `_refresh` → czerwienieje pierwsza
     połowa; przestaw przy braku dopasowania na `_PRESET_CZYSTY` → druga."""
-    from PySide6.QtWidgets import QInputDialog
-
     from horreum import repo
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Lighty", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Lighty")
     view._save_perspective()
     assert view.combo_persp.currentData() == ("saved", "Lighty")
     view.sel_bar.btn_clear.click()
@@ -5854,7 +5849,6 @@ def test_BP5_R1_trim_z_filtrem_panelu_zostaje_a_zapisana_schodzi_na_preset_Z_TA_
     Falsyfikator: zdejmij wołanie właściciela z `_refresh` → druga połowa zostaje na zapisanej
     nazwie; przestawiaj etykietę po każdym przeładowaniu na `_PRESET_CZYSTY` → pierwsza gubi
     „Duplikaty"."""
-    from PySide6.QtWidgets import QInputDialog
     view.apply_perspective(grid_mod.PRESET_DUPS)
     wiersz = view.filter_panel._rows[0]
     wiersz["kw"].setCurrentText("OBJECT")
@@ -5865,7 +5859,7 @@ def test_BP5_R1_trim_z_filtrem_panelu_zostaje_a_zapisana_schodzi_na_preset_Z_TA_
     assert view.combo_persp.currentData() == ("preset", grid_mod.PRESET_DUPS), view.combo_persp.currentText()
     assert view._only_dups and view.count_label.text() == "1 klatka"      # bez trimu M51 = 2 klatki
 
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Duble M51", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Duble M51")
     view._save_perspective()
     assert view.combo_persp.currentData() == ("saved", "Duble M51")
     _przycisk_panelu_filtra(view, "grid.filter.clear").click()
@@ -6003,10 +5997,9 @@ def test_BP5_klik_w_listwie_zdejmujacy_facet_definicji_przestawia_etykiete_zapis
 
     Falsyfikator: zdejmij wołanie właściciela z `_refresh` → etykieta zostaje na „★ Lighty" nad
     dopełnieniem jej definicji."""
-    from PySide6.QtWidgets import QInputDialog
     v, _ = obj_view
     v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Lighty", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Lighty")
     v._save_perspective()
     assert v.combo_persp.currentData() == ("saved", "Lighty")
 
@@ -6033,7 +6026,6 @@ def test_BP5_BLIZNIAK_odbudowa_listy_perspektyw_zostawia_BIEZACA_pozycje(view, m
 
     Falsyfikator: zdejmij odtwarzanie pozycji w `_load_facets` → „Duplikaty" ratuje jeszcze
     właściciel w `_refresh`, ale zapisana perspektywa spada na preset."""
-    from PySide6.QtWidgets import QInputDialog
     view.apply_perspective(grid_mod.PRESET_DUPS)
     view._load_facets()
     view.refresh()
@@ -6042,7 +6034,7 @@ def test_BP5_BLIZNIAK_odbudowa_listy_perspektyw_zostawia_BIEZACA_pozycje(view, m
 
     view.apply_perspective(grid_mod._PRESET_CZYSTY)
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Lighty", True)))
+    monkeypatch.setattr(grid_mod.FramesView, "_zapytaj_nazwe_perspektywy", lambda self: "Lighty")
     view._save_perspective()
     view._load_facets()
     view.refresh()
@@ -7135,7 +7127,7 @@ def test_wiersz_szuflady_po_nieudanym_cofnieciu_mowi_commit_raz(qapp, tmp_path, 
         if cofniecie == "niedomkniete":
             assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in wynik, wynik
         else:
-            assert wynik.startswith(i18n.t("grid.wb.error", msg=i18n.t("objchg.item.prog_error"))), wynik
+            assert wynik.startswith(i18n.t("grid.wb.op.undo", msg=i18n.t("objchg.item.prog_error"))), wynik
     finally:
         view.close()
         con.close()
@@ -7147,3 +7139,237 @@ def test_EN_notka_cofniecia_kart_mowi_angielskim_cudzyslowem():
     i18n.set_lang("en")
     tekst = i18n.t("path.cards_restored_note")
     assert "\u201e" not in tekst and "\u201cConfirm\u201d" in tekst
+
+
+# ============================================================ AR-306: przyciski z katalogu w oknach Zbiorów i paska zbioru
+
+def _obsluz_okno(klasa, akcja, widziane, tekst=None):
+    """Obsługa okna modalnego z `QTimer.singleShot`: zapisuje napisy jego przycisków w `widziane`
+    i wykonuje `akcja` - "esc", "enter" (prawdziwy klawisz) albo napis przycisku (prawdziwy klik).
+    BEZPIECZNIK: okno innej klasy albo bez przycisku o tym napisie zamyka się odrzuceniem, a okno,
+    które po geście dalej stoi, odrzuca drugi zegar - `exec()` nie wisi."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+    okno = QApplication.activeModalWidget()
+    if not isinstance(okno, klasa):
+        widziane.append(None)
+        if okno is not None:
+            okno.reject()
+        return
+    przyciski = {b.text(): b for b in okno.findChildren(QPushButton) if b.isVisible()}
+    widziane.append(sorted(przyciski))
+    if tekst is not None:
+        okno.setTextValue(tekst)
+    QTimer.singleShot(2000, lambda: okno.isVisible() and (widziane.append("wisi"), okno.reject()))
+    if akcja == "esc":
+        QTest.keyClick(okno, Qt.Key_Escape)
+    elif akcja == "enter":
+        QTest.keyClick(okno, Qt.Key_Return)
+    elif akcja in przyciski:
+        QTest.mouseClick(przyciski[akcja], Qt.LeftButton)
+    else:
+        okno.reject()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_okno_zwolnienia_mowi_anuluj_z_katalogu(qapp, lang):
+    """AR-306: „Zwolnij plik do skanu…” - przycisk odrzucenia z katalogu (Qt bez tłumacza mówił „Cancel”
+    w polskim oknie); prawdziwy klik zamyka okno odrzuceniem. Mutant: bez tekstu z katalogu (PL czerwony)."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox
+    from horreum.gui import i18n
+    i18n.set_lang(lang)
+    dlg = grid_mod.ReleaseDialog(2)
+    try:
+        dlg.show()
+        anuluj = dlg.buttons.button(QDialogButtonBox.Cancel)
+        assert anuluj.text() == i18n.t("grid.inplace.release_cancel")
+        assert lang != "pl" or anuluj.text() != "Cancel"
+        QTest.mouseClick(anuluj, Qt.LeftButton)
+        assert dlg.result() == QDialog.Rejected and not dlg.isVisible()
+    finally:
+        dlg.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zapis_perspektywy_pyta_przyciskami_katalogu(view_settings, gcon, lang):
+    """AR-306: „Zapisz widok” pytało o nazwę statycznym `QInputDialog.getText` - „OK/Cancel” w polskim
+    oknie. Prawdziwy klik przycisku paska, okno prawdziwe: przyciski z katalogu; Esc i „Anuluj” niczego
+    nie zapisują, Enter i „Zapisz” zapisują wpisaną nazwę (Enter i Esc jak w oknie statycznym).
+    Mutant: statyczne `getText` (przyciski Qt - bezpiecznik zamyka okno)."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QInputDialog
+    from horreum.gui import i18n
+    i18n.set_lang(lang)
+    v = view_settings
+    v.show()
+    widziane = []
+    for akcja, nazwa in (("esc", "Moja E"), (i18n.t("grid.persp.save_cancel"), "Moja A"),
+                         ("enter", "Moja W"), (i18n.t("grid.persp.save_ok"), "Moja Z")):
+        QTimer.singleShot(0, lambda a=akcja, n=nazwa: _obsluz_okno(QInputDialog, a, widziane, n))
+        QTest.mouseClick(v.sel_bar.btn_save, Qt.LeftButton)
+    oczekiwane = sorted([i18n.t("grid.persp.save_ok"), i18n.t("grid.persp.save_cancel")])
+    assert widziane == [oczekiwane] * 4, widziane
+    assert lang != "pl" or "Cancel" not in widziane[0]
+    assert sorted(n for n, _spec in queries.perspectives(gcon)) == ["Moja W", "Moja Z"]
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wycofanie_klatki_pyta_przyciskami_katalogu(obj_view, lang):
+    """AR-306: „Wycofaj klatkę…” pytało statycznym `QMessageBox.question` - „Yes/No” w polskim oknie.
+    Okno prawdziwe (gest paska `act_retire`): przyciski z katalogu z czasownikiem i liczbą, treść odmieniona;
+    Esc i „Anuluj” klatki nie wycofują, Enter i „Wycofaj 1 klatkę” wycofują (Enter i Esc jak w oknie
+    statycznym). Mutant: statyczne `question` (przyciski Qt - bezpiecznik zamyka okno)."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+    from horreum.gui import i18n
+    i18n.set_lang(lang)
+    v, con = obj_view
+    con.execute("UPDATE location SET present = 0 WHERE frame_id IN (1, 3)")   # pliki zniknęły z dysku
+    con.commit()
+    v.apply_perspective(grid_mod.PRESET_VANISHED)
+    tresci, widziane = [], []
+
+    def _gest(akcja, klatka):
+        _zaznacz(v, [klatka])
+
+        def _w_oknie():
+            okno = QApplication.activeModalWidget()
+            tresci.append(okno.text() if isinstance(okno, QMessageBox) else None)
+            _obsluz_okno(QMessageBox, akcja, widziane)
+        QTimer.singleShot(0, _w_oknie)
+        v.sel_bar.act_retire.trigger()
+        return con.execute("SELECT retired_at FROM frame WHERE id = ?", (klatka,)).fetchone()[0]
+
+    assert _gest("esc", 3) is None
+    assert _gest(i18n.t("grid.sel.frame_retire_cancel"), 3) is None
+    assert _gest("enter", 3) is not None
+    assert _gest(i18n.t_plural("grid.sel.frame_retire_ok", 1), 1) is not None
+    oczekiwane = sorted([i18n.t_plural("grid.sel.frame_retire_ok", 1), i18n.t("grid.sel.frame_retire_cancel")])
+    assert widziane == [oczekiwane] * 4, widziane
+    assert tresci == [i18n.t_plural("grid.sel.frame_retire_ask", 1)] * 4
+
+
+def test_pytanie_o_wycofanie_odmienia_liczbe():
+    """AR-306: treść i przycisk okna wycofania odmieniają liczbę klatek (dawniej „Wycofać 1 zaznaczonych
+    klatek?”) - PL dla 1, 2, 5, 12, 22, EN dla 1 i 2."""
+    from horreum.gui import i18n
+    i18n.set_lang("pl")
+    assert [i18n.t_plural("grid.sel.frame_retire_ask", n).split("?")[0] for n in (1, 2, 5, 12, 22)] == [
+        "Wycofać 1 zaznaczoną klatkę", "Wycofać 2 zaznaczone klatki", "Wycofać 5 zaznaczonych klatek",
+        "Wycofać 12 zaznaczonych klatek", "Wycofać 22 zaznaczone klatki"]
+    assert [i18n.t_plural("grid.sel.frame_retire_ok", n) for n in (1, 2, 5, 12, 22)] == [
+        "Wycofaj 1 klatkę", "Wycofaj 2 klatki", "Wycofaj 5 klatek", "Wycofaj 12 klatek", "Wycofaj 22 klatki"]
+    i18n.set_lang("en")
+    assert [i18n.t_plural("grid.sel.frame_retire_ask", n).split("?")[0] for n in (1, 2)] == [
+        "Retire 1 selected frame", "Retire 2 selected frames"]
+    assert [i18n.t_plural("grid.sel.frame_retire_ok", n) for n in (1, 2)] == ["Retire 1 frame", "Retire 2 frames"]
+
+
+_STATYKI_QT = {"QInputDialog": lambda a: a.startswith("get"),
+               "QMessageBox": lambda a: a in ("question", "information", "critical", "about", "aboutQt")}
+
+
+def _przyciski_spoza_katalogu(drzewo):
+    """Miejsca (`lineno`, opis), w których okno pokaże standardowy przycisk Qt bez tekstu z katalogu (AR-306):
+    (1) statyki `QInputDialog.get*` i `QMessageBox.question/information/critical/about*`, a `QMessageBox.warning`
+    z własnym zestawem przycisków (sam `warning(rodzic, tytuł, treść)` ma tylko „OK”, identyczne w PL i EN);
+    (2) `QDialogButtonBox` ze standardowym przyciskiem innym niż `Ok` (konstruktor albo `addButton(<standard>)`)
+    bez `.button(QDialogButtonBox.<ten>).setText(...)` w tej samej funkcji; (3) instancja `QInputDialog` bez
+    `setOkButtonText` i `setCancelButtonText` w tej samej funkcji; (4) instancja `QMessageBox` ze standardowym
+    przyciskiem innym niż `Ok` (argument przycisków konstruktora, `setStandardButtons`, `addButton(<standard>)`)."""
+    import ast
+    rodzic = {d: n for n in ast.walk(drzewo) for d in ast.iter_child_nodes(n)}
+
+    def _funkcja(w):
+        while w in rodzic:
+            w = rodzic[w]
+            if isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return w
+        return drzewo
+
+    def _standardowe(w, klasa):
+        return {n.attr for n in ast.walk(w) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == klasa and n.attr[:1].isupper()} - {"Ok", "AcceptRole", "RejectRole",
+                                                                  "DestructiveRole", "ActionRole", "HelpRole",
+                                                                  "YesRole", "NoRole", "ResetRole", "ApplyRole",
+                                                                  "Question", "Warning", "Information", "Critical",
+                                                                  "NoIcon", "StandardButton", "ButtonRole"}
+
+    def _wolania(fn, nazwa):
+        return [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == nazwa]
+
+    def _napisane(fn):
+        out = set()
+        for c in _wolania(fn, "setText"):
+            v = c.func.value
+            if isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "button" and v.args:
+                a = v.args[0]
+                if isinstance(a, ast.Attribute):
+                    out.add(a.attr)
+        return out
+
+    miejsca = []
+    for w in ast.walk(drzewo):
+        if not isinstance(w, ast.Call):
+            continue
+        f = w.func
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in _STATYKI_QT:
+            if _STATYKI_QT[f.value.id](f.attr):
+                miejsca.append((w.lineno, f"{f.value.id}.{f.attr}"))
+            elif f.value.id == "QMessageBox" and f.attr == "warning" and (len(w.args) > 3 or w.keywords):
+                miejsca.append((w.lineno, "QMessageBox.warning z przyciskami"))
+        if isinstance(f, ast.Name) and f.id == "QDialogButtonBox":
+            brak = _standardowe(w, "QDialogButtonBox") - _napisane(_funkcja(w))
+            miejsca += [(w.lineno, f"QDialogButtonBox.{b} bez tekstu") for b in sorted(brak)]
+        if isinstance(f, ast.Name) and f.id == "QInputDialog":
+            fn = _funkcja(w)
+            if not (_wolania(fn, "setOkButtonText") and _wolania(fn, "setCancelButtonText")):
+                miejsca.append((w.lineno, "QInputDialog bez tekstów przycisków"))
+        if isinstance(f, ast.Name) and f.id == "QMessageBox" and (len(w.args) > 3 or any(
+                k.arg == "buttons" for k in w.keywords)):
+            miejsca += [(w.lineno, f"QMessageBox.{b}") for b in sorted(_standardowe(w, "QMessageBox"))]
+        if isinstance(f, ast.Attribute) and f.attr == "setStandardButtons":
+            miejsca += [(w.lineno, f"setStandardButtons {b}") for b in sorted(
+                _standardowe(w, "QMessageBox") | _standardowe(w, "QDialogButtonBox"))]
+        if isinstance(f, ast.Attribute) and f.attr == "addButton" and len(w.args) == 1:
+            a = w.args[0]
+            if isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name) and a.attr != "Ok" and (
+                    a.value.id == "QMessageBox" or (a.value.id == "QDialogButtonBox"
+                                                    and a.attr not in _napisane(_funkcja(w)))):
+                miejsca.append((w.lineno, f"addButton({a.value.id}.{a.attr})"))
+    return miejsca
+
+
+def test_okna_gui_bez_przyciskow_qt_spoza_katalogu():
+    """AR-306 - bramka klasy: żadne okno w `horreum/gui` (z podkatalogami) nie pokazuje standardowego
+    przycisku Qt bez tekstu z katalogu (Qt bez tłumacza mówi po angielsku w polskim UI). Zakres reguły
+    w `_przyciski_spoza_katalogu`. Falsyfikator na modułach syntetycznych: każda z czterech dróg wraca
+    jako miejsce, a ta sama konstrukcja z tekstami z katalogu - nie. Mutant: bez tekstu „Anuluj”
+    w oknie zwolnienia (bramka wskazuje `grid_selection.py`)."""
+    import ast
+    korzen = pathlib.Path(grid_mod.__file__).parent
+    znalezione = {str(p.relative_to(korzen)): m for p in sorted(korzen.rglob("*.py"))
+                  if (m := _przyciski_spoza_katalogu(ast.parse(p.read_text(encoding="utf-8"))))}
+    assert znalezione == {}, znalezione
+
+    zle = ("def a(s):\n    n, ok = QInputDialog.getText(s, 't', 'n')\n"
+           "def b(s):\n    QMessageBox.question(s, 't', 'x')\n"
+           "def c(s):\n    QMessageBox.warning(s, 't', 'x', QMessageBox.Yes | QMessageBox.No)\n"
+           "def d(s):\n    bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)\n"
+           "def e(s):\n    o = QInputDialog(s)\n    o.setOkButtonText('x')\n"
+           "def f(s):\n    m = QMessageBox(QMessageBox.Question, 't', 'x', QMessageBox.Yes | QMessageBox.No)\n"
+           "def g(s):\n    m = QMessageBox(s)\n    m.addButton(QMessageBox.Cancel)\n")
+    assert [opis for _l, opis in _przyciski_spoza_katalogu(ast.parse(zle))] == [
+        "QInputDialog.getText", "QMessageBox.question", "QMessageBox.warning z przyciskami",
+        "QDialogButtonBox.Cancel bez tekstu", "QInputDialog bez tekstów przycisków", "QMessageBox.No",
+        "QMessageBox.Yes", "addButton(QMessageBox.Cancel)"]
+    dobre = ("def a(s):\n    QMessageBox.warning(s, 't', 'x')\n"
+             "def d(s):\n    bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)\n"
+             "    bb.button(QDialogButtonBox.Cancel).setText(i18n.t('k'))\n"
+             "def e(s):\n    o = QInputDialog(s)\n    o.setOkButtonText('x')\n    o.setCancelButtonText('y')\n"
+             "def g(s):\n    m = QMessageBox(s)\n    m.addButton(i18n.t('k'), QMessageBox.AcceptRole)\n")
+    assert _przyciski_spoza_katalogu(ast.parse(dobre)) == []

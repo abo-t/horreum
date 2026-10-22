@@ -733,11 +733,13 @@ def _main(argv=None):
             print(f"Horreum project: blad -- {exc}")
             return 1
         con.close()
-        # DRY wydania obiektu: co krok manifestu powie po `--apply` przy tym stanie korzenia (AR-273,
-        # wskazówka - plik może się zmienić przed `--apply`, bajty chroni krok manifestu).
+        # DRY wydania obiektu i perspektywy: co krok manifestu powie po `--apply` przy tym stanie
+        # korzenia (AR-273, AR-306 - wskazówka; plik może się zmienić przed `--apply`, bajty chroni krok
+        # manifestu). Stan z jedynego odczytu sondy (`res.manifest_state`), nie drugim odczytem.
         wskazowka = (projection.manifest_step_refusal(
-            root, layout=proj.layout, state=projection.read_manifest_state(root),
-            object_id=proj.info["object_id"]) if args.object is not None and not args.apply else None)
+            root, layout=proj.layout, state=res.manifest_state,
+            object_id=proj.info["object_id"] if args.object is not None else None)
+            if not args.apply else None)
         print(_format_project(root, res, proj, limit=args.limit))
         if res.error is not None:
             # Krok wydania przerwany błędem systemu (AR-197): wynik z powodem, nie ślad stosu. Zdanie
@@ -754,7 +756,7 @@ def _main(argv=None):
                 print("  potem: ponow to samo polecenie (horreum project ... --apply)")
             return 1
         if wskazowka is not None:
-            # DRY wydania obiektu nad manifestem, którego krok nie zapisze (AR-273) - ta sama
+            # DRY wydania nad manifestem, którego krok nie zapisze (AR-273, AR-306) - ta sama
             # wskazówka co okno, z gestem terminala; stan teraz, nie obietnica.
             print(f"  manifestu nie da sie teraz zapisac: {proza_z_diagnoza(wskazowka)}")
             print("  potem: ponow to samo polecenie (horreum project ...)")

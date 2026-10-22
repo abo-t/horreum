@@ -1980,13 +1980,42 @@ def test_zlote_zdania_liczby_operacji_i_bajtu():
     assert writeback._bajt_naglowka(b" " * 80 + writeback._FITS_END_RECORD + b"\x00" * 80) is None
 
 
-def test_meta_odmowa_bajtu_i_operacji_jednym_literalem():
-    """SPOT (AR-269, AR-271): zdanie bajtu spoza ASCII i operacji nieznanej rodzi się w `writeback`
-    raz - wszystkie drogi (atom, w miejscu, cofnięcie, XISF) wołają jednego budowniczego.
-    Falsyfikator: kopia literału w drugiej drodze."""
-    zrodlo = inspect.getsource(writeback)
-    assert zrodlo.count('"header_nonprintable"') == 1 and zrodlo.count('"card_op_unknown"') == 1
-    assert '"xisf_bad_op"' not in zrodlo and "xisf_bad_op" not in ITEM_REASON_CODES
+def _budowniczowie_kodu(kod):
+    """`{(moduł, funkcja)}` wywołań `PowodPozycji(..., "<kod>")` w źródłach `horreum/` (AST): drugi
+    argument jako stała napisowa albo `code=` - funkcja otaczająca to budowniczy zdania."""
+    import pathlib
+    import horreum
+    wynik = set()
+
+    def odwiedz(wezel, modul, funkcja):
+        if isinstance(wezel, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funkcja = wezel.name                    # najbliższa otaczająca funkcja
+        if isinstance(wezel, ast.Call) and getattr(wezel.func, "id", None) == "PowodPozycji":
+            arg = wezel.args[1] if len(wezel.args) > 1 else next(
+                (k.value for k in wezel.keywords if k.arg == "code"), None)
+            if isinstance(arg, ast.Constant) and arg.value == kod:
+                wynik.add((modul, funkcja))
+        for dziecko in ast.iter_child_nodes(wezel):
+            odwiedz(dziecko, modul, funkcja)
+
+    for plik in pathlib.Path(horreum.__file__).parent.rglob("*.py"):
+        odwiedz(ast.parse(plik.read_text(encoding="utf-8")), plik.stem, None)
+    return wynik
+
+
+def test_meta_odmowa_bajtu_typu_i_operacji_jeden_budowniczy():
+    """SPOT (AR-269, AR-271, AR-299, AR-300): zdanie bajtu spoza ASCII, niezgodności typu i operacji
+    nieznanej rodzi się w JEDNYM budowniczym (AST po całym `horreum/`, nie liczenie napisu w źródle) -
+    pisarz w każdej drodze, podgląd makra i marker skanu wołają go; najbliższa zewnętrzna funkcja
+    wywołania `PowodPozycji` z danym kodem jest jedna.
+    Falsyfikator: kopia `PowodPozycji(..., "header_nonprintable")` w `writeback`."""
+    assert _budowniczowie_kodu("header_nonprintable") == {("card_rules", "powod_bajtu")}
+    assert _budowniczowie_kodu("macro_type_mismatch") == {("card_rules", "powod_typu")}
+    assert _budowniczowie_kodu("card_op_unknown") == {("writeback", "_nieznana_operacja")}
+    assert _budowniczowie_kodu("xisf_bad_op") == set() and "xisf_bad_op" not in ITEM_REASON_CODES
+    # zdanie i kod pisarza == budowniczy (tożsamość drogi, nie tylko kopii literału)
+    assert writeback._bajt_naglowka(b"OBSERVER= 'Ab\xe9'".ljust(80) + writeback._FITS_END_RECORD) == (
+        __import__("horreum.card_rules", fromlist=["x"]).powod_bajtu("OBSERVER", "0xE9"))
 
 
 # Predykat AR-281: wywołanie rdzenia w zdaniu dla człowieka - identyfikator z `_` albo `.` tuż przed
@@ -2175,3 +2204,305 @@ def test_okno_zmiany_obiektu_szczegol_operacji_w_statusie_i_odmowie():
     zdanie, szczegol = zdanie_odmowy_stagingu(OdmowaZPowodem(izolacja))
     assert szczegol == "Operacja zapisu w miejscu 21: writeback.recover_torn(21)", szczegol
     assert "recover_torn" not in zdanie, zdanie
+
+
+# ============================================================ AR-299: marker bajtu przy odmowie commitu
+
+def _commit_z_bajtem_po_skanie(tmp_path, inplace):
+    """Plik z DOSŁOWNYM `?` zeskanowany (zbadany, czysto - odcisk H), wpis w stagingu, potem `?` →
+    0xE9 z zachowanym `mtime`: odcisk astropy dalej H, więc dopiero bramka surowego nagłówka pisarza
+    zatrzymuje commit. Zwraca `(con, ścieżka, lokacja, bajty pliku przed commitem, wynik)`."""
+    import os
+    from test_writeback_inplace import _loc, _scan_in
+    from test_writeback_inplace_add import _z_bajtem
+    p = _z_bajtem(tmp_path / "f.fits", ord("?"))
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    loc = _loc(con, p)
+    repo.stage_pending(con, run_id="R", location_id=loc["id"], keyword="EXPTIME", idx=0, op="set",
+                       old_value="300.0", new_value="600.0", new_type="float", new_comment=None,
+                       expected_header_hash=loc["header_hash"])
+    st = os.stat(p)
+    raw = bytearray(p.read_bytes())
+    raw[raw.index(b"kom ?") + 4] = 0xE9
+    p.write_bytes(bytes(raw))
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    przed = p.read_bytes()
+    return con, p, loc, przed, writeback.commit(con, "R", now=NOW, inplace=inplace)
+
+
+def _marker(con, lid):
+    return tuple(con.execute("SELECT nonprintable_hash, nonprintable_keyword, nonprintable_char "
+                             "FROM location WHERE id = ?", (lid,)).fetchone())
+
+
+@pytest.mark.parametrize("inplace", [True, False])
+def test_odmowa_pisarza_zapisuje_marker_przy_tym_samym_odcisku(tmp_path, inplace):
+    """AR-299: kopia zbadana jako czysta, a bajt wniesiony po skanie przy zachowanym `mtime` i tym
+    samym odcisku - commit (obie drogi) odmawia `header_nonprintable`, wpis z kodem w bazie, a marker
+    kopii staje TĄ SAMĄ operacją klingi (`repo.block_on_nonprintable`) z eventem; plik bajt w bajt.
+    Falsyfikator: wpisy oznaczane samym `_mark` → marker zostaje „czysto”."""
+    con, p, loc, przed, res = _commit_z_bajtem_po_skanie(tmp_path, inplace)
+    assert not res.applied and len(res.blocked) == 1, res
+    assert res.blocked[0].reason.code == "header_nonprintable", res.blocked[0].reason
+    (kod, status) = con.execute("SELECT reason_code, status FROM pending_changes "
+                                "WHERE run_id = 'R'").fetchone()
+    assert (kod, status) == ("header_nonprintable", "blocked")
+    assert _marker(con, loc["id"]) == (loc["header_hash"], "OBSERVER", "0xE9")
+    (payload,) = [json.loads(r[0]) for r in con.execute(
+        "SELECT payload FROM event WHERE verb = 'location.refreshed' AND actor = 'user:local'")]
+    assert payload["nonprintable_keyword"] == {"before": None, "after": "OBSERVER"}
+    assert p.read_bytes() == przed
+    con.close()
+
+
+def test_blad_bazy_przy_markerze_zostawia_odmowe_z_kodem(tmp_path, monkeypatch):
+    """AR-299: błąd bazy w zapisie markera - jedna transakcja cofa całość, a wpis dostaje odmowę
+    dzisiejszą drogą: status 'blocked' z pierwotnym kodem, marker bez zmian (czysto), bez eventu
+    markera, plik bajt w bajt. Nigdy marker bez odmowy ani wyjątek zamiast wyniku.
+    Falsyfikator: status i marker w osobnych transakcjach bez obsługi błędu → wyjątek z commitu."""
+    import sqlite3
+
+    def _pada(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(repo, "_zapisz_marker_bajtu", _pada)
+    con, p, loc, przed, res = _commit_z_bajtem_po_skanie(tmp_path, True)
+    assert res.blocked[0].reason.code == "header_nonprintable", res
+    assert con.execute("SELECT reason_code, status FROM pending_changes WHERE run_id = 'R'"
+                       ).fetchone()[:] == ("header_nonprintable", "blocked")
+    assert _marker(con, loc["id"]) == (loc["header_hash"], None, None)
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'location.refreshed' "
+                       "AND actor = 'user:local'").fetchone()[0] == 0
+    assert p.read_bytes() == przed
+    con.close()
+
+
+# ============================================================ AR-300: goła wartość XISF, karta logiczna FITS, `idx`
+
+_KARTY_GOLE = ('\n    <FITSKeyword name="EXPTIME" value="300.0" comment="sek"/>'
+               '\n    <FITSKeyword name="GAIN" value="100" comment="e"/>'
+               '\n    <FITSKeyword name="SIMPLE" value="T" comment="std"/>'
+               '\n    <FITSKeyword name="OBSERVER" value="\'Abc\'" comment="kom"/>'
+               '\n    <FITSKeyword name="EXPOSURE" value="\'180.0\'" comment="cyt"/>'
+               '\n    <FITSKeyword name="COMMENT" value="" comment="tekst"/>')
+
+
+def _xisf_dwie_drogi(tmp_path, karty, op):
+    """`op` na dwóch kopiach XISF z `karty`: droga atomowa i w miejscu → `(atom, w miejscu)`; przy
+    odmowie plik bajt w bajt."""
+    import shutil
+    from test_card_rules import _xisf
+    from test_writeback_inplace import _Dziennik
+    from horreum import scan
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    a = _xisf(tmp_path, "a.xisf", karty)
+    b = tmp_path / "b.xisf"
+    shutil.copyfile(a, b)
+    przed, h = a.read_bytes(), scan.read_xisf_meta_full(str(a)).header_hash
+    ra = writeback.write_changes(str(a), [op], h)
+    rw = writeback.write_changes_inplace(str(b), [op], h, journal=_Dziennik())
+    for res, plik in ((ra, a), (rw, b)):
+        if res.status != "applied":
+            assert plik.read_bytes() == przed, res
+    return ra, rw
+
+
+@pytest.mark.parametrize("keyword, tekst, status, typ", [
+    ("EXPTIME", "abc", "blocked", "float"), ("EXPTIME", "1_0", "blocked", "float"),
+    ("GAIN", "abc", "blocked", "int"), ("GAIN", "301.5", "applied", None),
+    ("GAIN", "1.5D3", "applied", None), ("GAIN", "-2", "applied", None),
+    ("SIMPLE", "abc", "blocked", "bool"), ("SIMPLE", "true", "blocked", "bool"),
+    ("SIMPLE", "F", "applied", None), ("OBSERVER", "abc", "applied", None),
+    ("OBSERVER", "nan", "applied", None), ("EXPOSURE", "inf", "applied", None),
+    ("EXPOSURE", "abc", "applied", None), ("COMMENT", "abc", "applied", None),
+])
+def test_gola_wartosc_XISF_zostaje_literalem_swojego_rodzaju(tmp_path, keyword, tekst, status, typ):
+    """AR-300 (a): tekst na zastanej GOŁEJ wartości XISF idzie do pliku goło, więc musi zostać
+    literałem FITS swojego rodzaju (parser leksykalny `card_rules.literal_fits`): liczba → liczba
+    (int↔float wolno, wykładnik `D` legalny, `1_0` nie), `T`/`F` → `T`/`F`; cytowana wartość (także
+    cytowana liczba) i pusta - każdy tekst. Odmowa `macro_type_mismatch` z rodzajem zastanej, obie
+    drogi tym samym zdaniem, plik nietknięty.
+    Falsyfikatory: warunek „goła” zdjęty → cytowany odmawia; `float()` zamiast parsera → `1_0`
+    przechodzi, `1.5D3` odmawia."""
+    op = writeback.WriteOp(keyword, "set", tekst, "str", idx=0)
+    ra, rw = _xisf_dwie_drogi(tmp_path, _KARTY_GOLE, op)
+    for res in (ra, rw):
+        assert res.status == status, (res, keyword, tekst)
+        if typ:
+            assert res.reason.code == "macro_type_mismatch", res
+            assert dict(res.reason.params) == {"value": tekst, "value_type": typ}
+    if status == "blocked":
+        assert str(ra.reason) == str(rw.reason)
+
+
+def test_gola_wartosc_z_referencja_liczbowa_zatrzymuje_straznik(tmp_path):
+    """AR-300 (a): goła wartość zapisana referencją liczbową XML (`&#51;00` = `300`) - czytnik jej nie
+    rozwija (`scan._unescape_xml`, strażnik ma krzyczeć), więc zapis zatrzymuje strażnik wycinka
+    (`scan.locate_value_span`), zanim dojdzie do reguły gołej wartości; plik nietknięty.
+    Falsyfikator: strażnik wycinka zdjęty → tekst `abc` zapisany goło."""
+    karty = '\n    <FITSKeyword name="EXPTIME" value="&#51;00" comment="sek"/>'
+    op = writeback.WriteOp("EXPTIME", "set", "abc", "str", idx=0)
+    ra, rw = _xisf_dwie_drogi(tmp_path, karty, op)
+    for res in (ra, rw):
+        assert res.status == "failed" and "rozeszły się" in str(res.reason), res
+
+
+def _karty_xisf(tmp_path, karty):
+    """Lustro kart pliku XISF w kształcie `queries.frame_cards` (słowniki)."""
+    import dataclasses
+    from test_card_rules import _xisf
+    from horreum import scan
+    p = _xisf(tmp_path, "lustro.xisf", karty)
+    return [dataclasses.asdict(c) for c in scan.read_xisf_meta_full(str(p)).cards]
+
+
+def test_podglad_XISF_nie_odmawia_tam_gdzie_pisarz_przyjmie(tmp_path):
+    """AR-300 (a), zgodność kierunku: lustro bazy nie zna postaci goła/cytowana (`'180.0'` i `180.0` po
+    `_unquote_fits` to ten sam tekst), więc podgląd reguły gołej wartości NIE wydaje - dla każdego
+    przypadku: odmowa podglądu ⇒ odmowa pisarza. Cytowana liczba + `abc`: podgląd i pisarz przyjmują.
+    Falsyfikator: podgląd przewidujący postać z projekcji `value_num` → odmowa przy `'180.0'`."""
+    from horreum import macro
+    karty = _karty_xisf(tmp_path, _KARTY_GOLE)
+    cel = _cel(filetype="xisf", path="X:/L/a.xisf")
+    for keyword, tekst in (("EXPTIME", "abc"), ("EXPOSURE", "abc"), ("SIMPLE", "true"),
+                           ("GAIN", "301.5"), ("OBSERVER", "abc")):
+        md = macro.MacroDef(assign=macro.Assign(keyword, "set", tekst))
+        run = macro.run_macro(md, [1], targets_fn=lambda ids: [cel], cards_fn=lambda fid: karty)
+        pv, powod = macro.plan_manual_change([cel], keyword, tekst, cards_fn=lambda lid: karty)
+        ra, _rw = _xisf_dwie_drogi(tmp_path / keyword / tekst.replace(".", "_"), _KARTY_GOLE,
+                                   writeback.WriteOp(keyword, "set", tekst, "str", idx=0))
+        for odmowa in (bool(run.skipped), powod is not None):
+            assert not odmowa or ra.status == "blocked", (keyword, tekst)
+        assert not run.skipped and powod is None, (keyword, tekst, run.skipped, powod)
+    ra, rw = _xisf_dwie_drogi(tmp_path / "e", _KARTY_GOLE,
+                              writeback.WriteOp("EXPOSURE", "set", "abc", "str", idx=0))
+    assert ra.status == rw.status == "applied"
+
+
+def test_fits_karta_logiczna_tekst_spoza_zbioru_odmowa(tmp_path):
+    """AR-300 (F1): karta FITS logiczna - tekst spoza `t/true/1/yes` i `f/false/0/no` (np. `abc`) to
+    odmowa `macro_type_mismatch` (`value_type='bool'`) w podglądzie (makro, edycja komórki) i w pisarzu
+    (obie drogi) tym samym zdaniem, plik nietknięty; dawniej zapisywał się po cichu `F`. Teksty ze
+    zbioru zapisują `T`/`F`.
+    Falsyfikator: stary warunek `in (t, true, 1, yes)` → `abc` zapisane jako `F`."""
+    from horreum import macro, scan
+    from test_writeback_inplace import _Dziennik
+    from test_writeback_inplace_add import _fits_bez, _hash
+    karta = {"keyword": "FLIPPED", "idx": 0, "value_raw": "T", "value_num": None, "value_type": "bool",
+             "comment": None}
+    podglad = macro.evaluate_manual_change([karta], "FLIPPED", "abc")
+    assert not podglad.ok and podglad.reason.code == "macro_type_mismatch", podglad
+    assert dict(podglad.reason.params) == {"value": "abc", "value_type": "bool"}
+    run = macro.run_macro(macro.MacroDef(assign=macro.Assign("FLIPPED", "set", "abc")), [1],
+                          targets_fn=lambda ids: [_cel()], cards_fn=lambda fid: [karta])
+    assert str(run.skipped[0].reason) == str(podglad.reason)
+    p = _fits_bez(tmp_path / "f.fits", karty=[("FLIPPED", True)])
+    przed = p.read_bytes()
+    op = writeback.WriteOp("FLIPPED", "set", "abc", "bool", idx=0)
+    for res in (writeback.write_changes(str(p), [op], _hash(p)),
+                writeback.write_changes_inplace(str(p), [op], _hash(p), journal=_Dziennik())):
+        assert res.status == "blocked" and str(res.reason) == str(podglad.reason), res
+    assert p.read_bytes() == przed
+    for tekst, wynik in (("true", True), ("0", False), ("yes", True), ("F", False)):
+        assert macro.evaluate_manual_change([karta], "FLIPPED", tekst).new_value == (
+            "T" if wynik else "F")
+        q = _fits_bez(tmp_path / f"{tekst}.fits", karty=[("FLIPPED", not wynik)])
+        res = writeback.write_changes(str(q), [writeback.WriteOp("FLIPPED", "set", tekst, "bool",
+                                                                 idx=0)], _hash(q))
+        assert res.status == "applied", res
+        assert {c.keyword: c.value_raw for c in scan.read_fits_meta(str(q)).cards}["FLIPPED"] == (
+            "T" if wynik else "F")
+
+
+def test_podglad_idx_bierze_wystapienie_idx(tmp_path):
+    """AR-300 (b): makro na jawnym `idx` bierze wartość zastaną (`old_value`) i typ (`new_type`)
+    z wystąpienia `idx`, nie z pierwszego - szuflada pokazuje prawdziwą starą wartość, pisarz rzutuje
+    na typ tego wystąpienia.
+    Falsyfikator: `existing = first.get(kw)` → `old_value` i typ z wystąpienia 0."""
+    from horreum import macro
+    karty = [{"keyword": "XX", "idx": 0, "value_raw": "1.5", "value_num": 1.5, "value_type": "float",
+              "comment": None},
+             {"keyword": "XX", "idx": 1, "value_raw": "abc", "value_num": None, "value_type": "str",
+              "comment": None}]
+    md = macro.MacroDef(assign=macro.Assign("XX", "set", "def", idx=1))
+    run = macro.run_macro(md, [1], targets_fn=lambda ids: [_cel()], cards_fn=lambda fid: karty)
+    (pv,) = run.touched
+    assert (pv.idx, pv.old_value, pv.new_type, pv.new_value) == (1, "abc", "str", "def")
+    xisf = [{"keyword": "FILTER", "idx": i, "value_raw": v, "value_num": None, "value_type": "str",
+             "comment": None} for i, v in enumerate(("L", "R"))]
+    run = macro.run_macro(macro.MacroDef(assign=macro.Assign("FILTER", "set", "G", idx=1)), [1],
+                          targets_fn=lambda ids: [_cel(filetype="xisf")], cards_fn=lambda fid: xisf)
+    assert run.touched[0].old_value == "R"
+
+
+@pytest.mark.parametrize("zastana, tekst, komentarz, status", [
+    (" T ", " T ", "nowy", "applied"), ("T", " F ", None, "applied"), (" T ", "abc", None, "blocked"),
+])
+def test_gola_wartosc_logiczna_ze_spacjami_jednym_parserem(tmp_path, zastana, tekst, komentarz, status):
+    """AR-300 (a): rodzaj NOWEJ wartości logicznej liczy ten sam parser co rodzaj zastanej
+    (`card_rules.literal_fits` - spacje brzegowe nie należą do literału): zastana `" T "` z samą zmianą
+    komentarza przechodzi jak dawniej, `T` → `" F "` przechodzi (tekst łaty bez normalizacji), `abc`
+    odmawia - obie drogi pisarza XISF.
+    Falsyfikator: surowe porównanie `str(nowa) in ("T", "F")` → odmowa poprawnego zapisu."""
+    karty = f'\n    <FITSKeyword name="SIMPLE" value="{zastana}" comment="std"/>'
+    op = writeback.WriteOp("SIMPLE", "set", tekst, "str", idx=0, comment=komentarz)
+    for res in _xisf_dwie_drogi(tmp_path, karty, op):
+        assert res.status == status, res
+        if status == "blocked":
+            assert dict(res.reason.params) == {"value": tekst, "value_type": "bool"}
+
+
+def test_awaria_obu_zapisow_bazy_zostawia_odmowe_bajtu_z_nota(tmp_path, monkeypatch):
+    """AR-299: baza odmawia OBU prób utrwalenia odmowy (operacja klingi z markerem i awaryjny status
+    wpisów) - `commit` nie wyrzuca wyjątku bazy, wynik pliku dalej niesie `header_nonprintable`, a brak
+    utrwalenia statusu jest jawny notą z kodem `pending_status_not_saved`; plik bajt w bajt.
+    Falsyfikator: awaryjne oznaczenie wpisów bez obsługi błędu → `OperationalError` z `commit`."""
+    import sqlite3
+
+    def _pada(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(repo, "_zapisz_marker_bajtu", _pada)
+    monkeypatch.setattr(repo, "set_pending_status", _pada)
+    con, p, loc, przed, res = _commit_z_bajtem_po_skanie(tmp_path, True)
+    (wynik,) = res.blocked
+    assert wynik.reason.code == "header_nonprintable", wynik
+    (nota,) = dict(wynik.reason.params)["notes"]
+    assert nota.code == "pending_status_not_saved" and "database is locked" in str(nota), nota
+    assert p.read_bytes() == przed
+    monkeypatch.undo()
+    assert con.execute("SELECT status FROM pending_changes WHERE run_id = 'R'").fetchone()[0] == "pending"
+    con.close()
+
+
+def test_blad_po_zapisie_markera_wycofuje_status_powod_i_marker(tmp_path, monkeypatch):
+    """AR-299: błąd bazy PO rzeczywistym UPDATE markera (przy jego zdarzeniu) - jedna transakcja
+    `repo.block_on_nonprintable` wycofuje razem status, powód i marker (także gdy wołający potem
+    zatwierdza połączenie).
+    Falsyfikator: bez wspólnego `repo.atomic` status i marker zostają po zatwierdzeniu."""
+    import sqlite3
+    from test_writeback_inplace import _loc, _scan_in
+    from test_writeback_inplace_add import _z_bajtem
+    p = _z_bajtem(tmp_path / "f.fits", ord("?"))
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    loc = _loc(con, p)
+    pid = repo.stage_pending(con, run_id="R", location_id=loc["id"], keyword="EXPTIME", idx=0,
+                             op="set", old_value="300.0", new_value="600.0", new_type="float",
+                             new_comment=None, expected_header_hash=loc["header_hash"])
+    prawdziwe = repo.emit_event
+
+    def _zdarzenie(con_, **kw):
+        if kw.get("verb") == "location.refreshed" and kw.get("actor") == "user:local":
+            raise sqlite3.OperationalError("disk I/O error")
+        return prawdziwe(con_, **kw)
+    monkeypatch.setattr(repo, "emit_event", _zdarzenie)
+    powod = writeback._bajt_naglowka(b"OBSERVER= 'Ab\xe9'".ljust(80) + writeback._FITS_END_RECORD)
+    with pytest.raises(sqlite3.OperationalError):
+        repo.block_on_nonprintable(con, pending_ids=[pid], reason=powod, location_id=loc["id"],
+                                   header_hash=loc["header_hash"], keyword="OBSERVER", char="0xE9",
+                                   now=NOW)
+    con.commit()
+    assert con.execute("SELECT status, reason_code FROM pending_changes WHERE id = ?",
+                       (pid,)).fetchone()[:] == ("pending", None)
+    assert _marker(con, loc["id"]) == (loc["header_hash"], None, None)
+    con.close()

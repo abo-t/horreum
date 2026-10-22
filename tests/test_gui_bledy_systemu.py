@@ -156,7 +156,7 @@ def test_szuflada_po_awarii_mowi_blad_i_szczegol_mimo_oczekujacych(qapp, tmp_pat
     _klik(view.drawer.btn_commit)
     assert view._pending_count() == 1                         # staging przeżył awarię
     tekst = view.drawer.result.text()
-    assert tekst == i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+    assert tekst == i18n.t("grid.wb.op.commit", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
     assert view.drawer.result.toolTip() == tekst + "\n" + _tip()
     view.close()
     con.close()
@@ -416,7 +416,7 @@ def test_szuflada_awaria_cofniecia_przy_zywym_Cofnij_zostawia_Zatwierdzono(qapp,
     assert view.drawer.label.text() == etykieta
     monkeypatch.setitem(WritebackWorker._OPS, "undo", _odmowa)
     _klik(view._undo_btn)
-    blad = (i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+    blad = (i18n.t("grid.wb.op.undo", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
             + i18n.t("grid.wb.commit_id", id=view._undo_commit_id))
     assert view.drawer.label.text() == etykieta
     assert view.drawer.btn_commit.isHidden() and view.drawer.btn_reject.isHidden()
@@ -614,6 +614,8 @@ _ZNANE_SUROWE_MSG = {
         "zdanie z wykonawcy (`WritebackWorker.run` - `tekst_powodu`)",
     ("grid.py", "FramesView._on_pola_failed", "msg", "msg"):
         "zdanie z wykonawcy (`PolaWorker.run` - `tekst_powodu`)",
+    ("grid.py", "FramesView._on_zbior_failed", "msg", "msg"):
+        "zdanie z wykonawcy (`ZbiorWorker.run` - `tekst_powodu`)",
     ("grid.py", "FramesView._after_undo", "msg", "msg"): "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
     ("grid.py", "FramesView._after_undo_rename", "msg", "msg"):
         "zdanie z `ogon_cofniecia` (`tekst_powodu` wewnątrz)",
@@ -915,7 +917,7 @@ def _okno_szuflady(tmp_path, monkeypatch, _ustawienia, rzut):
     wynik = view.drawer.result.text(), view.drawer.result.szczegol()
     view.close()
     con.close()
-    return wynik, lambda zdanie: i18n.t("grid.wb.error", msg=zdanie)
+    return wynik, lambda zdanie: i18n.t("grid.wb.op.commit", msg=zdanie)
 
 
 def _okno_naprawy_kart(tmp_path, monkeypatch, _ustawienia, rzut):
@@ -1038,9 +1040,10 @@ def _odczyt_pol(tmp_path, monkeypatch, rzut):
 
 
 def _odczyt_zbioru(tmp_path, monkeypatch, rzut):
-    """Skład zbioru (`ZbiorWorker`) na ŚWIEŻEJ bazie - atrapa składu, nie błąd otwarcia bazy.
-    Odbiorca zdania nie pokazuje (ponawia skład), więc szczegółu nie ma dokąd nieść: `None`."""
+    """Skład zbioru (`ZbiorWorker`) na ŚWIEŻEJ bazie - atrapa składu, nie błąd otwarcia bazy. Zdanie
+    ze szczegółem (`ZdanieZeSzczegolem`): drugą porażkę odbiorca kładzie na raport wczytania (AR-302)."""
     from horreum.gui import grid_workers
+    from horreum.gui.wb_worker import szczegol_zdania
     from test_gui_pipeline import _fresh_db
     monkeypatch.setattr(grid_workers, "_sklad_zbioru", lambda *_a, **_k: rzut())
     w = grid_workers.ZbiorWorker(1, None, _fresh_db(tmp_path))
@@ -1048,7 +1051,7 @@ def _odczyt_zbioru(tmp_path, monkeypatch, rzut):
     w.failed.connect(lambda _gen, msg: bledy.append(msg))
     w.run()
     (msg,) = bledy
-    return (msg, None), lambda zdanie: zdanie
+    return (msg, szczegol_zdania(msg)), lambda zdanie: zdanie
 
 
 def _odczyt_teczek(tmp_path, monkeypatch, rzut):
@@ -1158,7 +1161,8 @@ _OKNA_ODCZYTU = {"pola": _odczyt_pol, "zbior": _odczyt_zbioru, "teczki": _odczyt
 # Plik pakietu, którego linia woła podmieniony rdzeń - miejsce w kodzie szczegółu (AR-237).
 _MIEJSCE_ODCZYTU = {"pola": "gui/grid_workers.py", "teczki": "gui/home.py", "dostawa": "gui/pipeline.py",
                     "sonda_zniw": "gui/harvest_dialog.py", "zniwa": "gui/harvest_dialog.py",
-                    "lista_wydan": "gui/harvest_dialog.py", "liczniki": "gui/tasks.py"}
+                    "lista_wydan": "gui/harvest_dialog.py", "liczniki": "gui/tasks.py",
+                    "zbior": "gui/grid_workers.py"}
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
@@ -1178,8 +1182,6 @@ def test_workery_odczytu_jedna_regula_wyjatku_okna(qapp, tmp_path, monkeypatch, 
     assert zdanie.startswith(glowa(powod)), zdanie
     if lang == "en":
         assert not set(zdanie.split("\n")[0]) & _POLSKIE, zdanie
-    if szczegol is None:                           # skład zbioru: odbiorca nie pokazuje zdania
-        return
     if wiersz is not None:
         assert szczegol == wiersz, szczegol
     else:
@@ -1434,3 +1436,724 @@ def test_liczniki_porzadkow_na_zamknietym_polaczeniu_mowia_bledem_programu(qapp,
         tv.con = prawdziwe
         tv.close()
         con.close()
+
+
+# ============================================================ AR-301: błąd wejścia nie jest błędem programu
+
+@pytest.mark.parametrize("sciezka, char", [
+    ("X:\\a\x00b", "U+0000"), ("X:\\a\x01b", "U+0001"), ("X:\\a\tb", "U+0009"), ("X:\\a\x1fb", "U+001F"),
+    ("X:\\a<b", "<"), ("X:\\a>b", ">"), ('X:\\a"b', '"'), ("X:\\a|b", "|"), ("X:\\a?b", "?"),
+    ("X:\\a*b", "*"), ("\\\\?\\X:\\a*b", "*"), ("\\\\.\\X:\\a<b", "<"),
+    ("X:\\a:b", None), ("X:\\ab ", None), ("X:\\ab.", None), ("X:\\a\x7fb", None),
+    ("\\\\?\\X:\\a\\b", None), ("\\\\.\\X:\\a\\b", None), ("\\\\serwer\\udzial\\out", None),
+])
+def test_powod_sciezki_wejscia_zbior_znakow(sciezka, char):
+    """Zbiór znaków błędu wejścia = zmierzony `os.stat` (NUL → `ValueError`, U+0001..U+001F
+    i `<>"|?*` → WinError 123); `:` w środku, spacja i kropka na końcu, U+007F to brak pliku, nie znak
+    niedozwolony; przedrostki `\\\\?\\` i `\\\\.\\` to składnia. Znak sterujący pokazany kodem.
+    Falsyfikator: zbiór bez sterujących, bez `<>"|?*` albo bez pomijania przedrostków."""
+    from horreum.item_reasons import powod_sciezki_wejscia
+    powod = powod_sciezki_wejscia(sciezka)
+    if char is None:
+        assert powod is None, powod
+    else:
+        assert powod.code == "path_bad_char" and dict(powod.params) == {"char": char}, powod
+        assert str(powod) == f"ścieżka zawiera niedozwolony znak: {char}"
+
+
+def test_prawdziwy_value_error_z_nul_dalej_bledem_programu():
+    """EXPECT (AR-301): ten sam `ValueError` „embedded null character”, rzucony przez `os.stat` dla
+    ścieżki, która NIE przyszła z pola (z bazy, z nagłówka), zostaje błędem programu z miejscem
+    w kodzie - klasa błędu wejścia żyje na granicy pola, nie w rozpoznaniu wyjątku. Falsyfikator:
+    `powod_okna` rozpoznaje NUL po treści wyjątku."""
+    from horreum.gui.harvest_dialog import HarvestDryWorker
+    from horreum.item_reasons import powod_okna
+    w = HarvestDryWorker(None, "X:\\a\x00b", "X:\\ARCH", 1, con=None)
+    try:
+        w._compute()
+    except ValueError as exc:
+        powod = powod_okna(exc)
+    else:
+        raise AssertionError("os.stat przyjął NUL")
+    assert powod.code == "prog_error", powod
+    assert re.fullmatch(r"ValueError: .*embedded null character.* @ horreum/gui/harvest_dialog\.py:\d+",
+                        dict(powod.params)["detail"]), powod.params
+
+
+# ============================================================ AR-302: ponowienie w tle, straż błędu programu
+
+def _blad_programu_w_pakiecie(*_a, **_k):
+    """Błąd programu, którego ramka leży w pakiecie (`horreum/item_reasons.py`) - miejsce w szczególe."""
+    from horreum.item_reasons import PowodPozycji
+    PowodPozycji("x", "kod_spoza_zbioru")
+
+
+_MIEJSCE_PAKIETU = r" @ horreum/item_reasons\.py:\d+"
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_ponowienie_skladu_zbioru_idzie_watkiem_i_druga_porazka_mowi_zdaniem(qapp, tmp_path, monkeypatch,
+                                                                             jezyk, lang):
+    """AR-302: skład zbioru w tle pada błędem programu w KAŻDYM biegu. Ponowienie idzie nowym biegiem
+    workera (dwa biegi w wątkach tła, zero składu na wątku GUI), a druga porażka tej samej generacji
+    mówi na raporcie wczytania Zbiorów zdaniem w języku UI ze szczegółem `Typ: opis @ horreum/…:N`;
+    tabela nie zostaje „w drodze”, nic nie leci do `sys.excepthook`. Falsyfikator: ponowienie
+    synchroniczne (`refresh()` w slocie) - skład na wątku GUI i wyjątek ze slotu; bez limitu ponowień -
+    worker w pętli (bezpiecznik)."""
+    import sys
+    import threading
+    from horreum.gui import queries as q
+    from horreum.gui.wb_worker import ZdanieZeSzczegolem
+    from test_gui_pola_w_tle import _baza, _czekaj, _widok_w_tle, _zamknij
+    jezyk(lang)
+    view, con = _widok_w_tle(_baza(tmp_path))
+    glowny = threading.get_ident()
+    watki, raporty, hak = [], [], []
+
+    def _br(c, ids):
+        watki.append("glowny" if threading.get_ident() == glowny else "tlo")
+        _blad_programu_w_pakiecie()
+    try:
+        monkeypatch.setattr(q, "base_rows", _br)
+        monkeypatch.setattr(sys, "excepthook", lambda *a: hak.append(a))
+        view.load_report.connect(raporty.append)
+        view.refresh(w_tle=True)
+        _czekaj(lambda: view._zbior_worker is None and len(watki) == 2 and not view._zbior_w_drodze(),
+                "dwa biegi składu nie skończyły")
+        assert watki == ["tlo", "tlo"] and hak == [], (watki, hak)
+        ostatni = raporty[-1]
+        assert isinstance(ostatni, ZdanieZeSzczegolem), raporty
+        assert ostatni == i18n.t("grid.zbior.failed_status", msg=i18n.t("objchg.item.prog_error")), ostatni
+        assert re.fullmatch(re.escape(i18n.t("objchg.st.detail_tip", detail="ValueError: kod powodu pozycji "
+                                             "spoza ITEM_REASON_CODES: 'kod_spoza_zbioru'")) + _MIEJSCE_PAKIETU,
+                            ostatni.szczegol), ostatni.szczegol
+        if lang == "en":
+            assert not set(ostatni) & _POLSKIE, ostatni
+    finally:
+        _zamknij(view, con)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_ponowienie_licznikow_idzie_watkiem_i_druga_porazka_mowi_zdaniem(qapp, tmp_path, monkeypatch,
+                                                                       jezyk, lang):
+    """AR-302: rachunek liczników Porządków w tle pada błędem programu w każdym biegu. Ponowienie idzie
+    nowym biegiem workera (zero rachunku na wątku GUI), druga porażka mówi w wierszu błędu nad listą
+    zdaniem błędu programu w języku UI, z miejscem w szczególe; `sys.excepthook` milczy. Falsyfikator:
+    `refresh_counts()` w slocie - rachunek na wątku GUI, wyjątek ze slotu, wiersz schowany."""
+    import sys
+    import threading
+    from horreum.gui import tasks as tasks_mod
+    from horreum.gui.app import MainWindow
+    from test_gui_pola_w_tle import _baza_obiektu, _czekaj, _czekaj_na_pola
+    jezyk(lang)
+    win = MainWindow(_baza_obiektu(tmp_path))
+    tasks = win.tasks_view
+    glowny = threading.get_ident()
+    watki, hak = [], []
+
+    def _stan(con):
+        watki.append("glowny" if threading.get_ident() == glowny else "tlo")
+        _blad_programu_w_pakiecie()
+    try:
+        _czekaj_na_pola(win.grid_view)
+        _czekaj(lambda: tasks._liczniki_thread is None, "liczniki montażu nie skończyły")
+        monkeypatch.setattr(tasks_mod, "_stan_licznikow", _stan)
+        monkeypatch.setattr(sys, "excepthook", lambda *a: hak.append(a))
+        tasks.refresh_counts(w_tle=True)
+        _czekaj(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(),
+                "druga porażka liczników nie doszła do wiersza błędu")
+        assert watki == ["tlo", "tlo"] and hak == [], (watki, hak)
+        zdanie = i18n.t("tasks.counts_failed", msg=i18n.t("objchg.item.prog_error"))
+        assert tasks.blad_licznikow.text() == zdanie
+        assert re.search(_MIEJSCE_PAKIETU + "$", tasks.blad_licznikow.szczegol()), tasks.blad_licznikow.szczegol()
+        if lang == "en":
+            assert not set(zdanie) & _POLSKIE, zdanie
+    finally:
+        win.close()
+
+
+def _main_z_petla(monkeypatch, scenariusz):
+    """`app.main([])` (bez bazy) z pętlą zdarzeń podmienioną na `scenariusz(straz)` - straż czytana
+    z zainstalowanego haka. Zwraca haki sprzed `main`. Okna główne zamykane po `main`."""
+    import sys
+    import threading
+    from horreum.gui import app as app_mod
+    okna = []
+    prawdziwy_show = app_mod.MainWindow.show
+
+    def _show(self):
+        okna.append(self)
+        return prawdziwy_show(self)
+
+    def _exec(_self):
+        straz = sys.excepthook.__self__
+        assert isinstance(straz, app_mod.StrazBledowProgramu) and threading.excepthook.__self__ is straz
+        scenariusz(straz)
+        return 0
+    monkeypatch.setattr(app_mod.MainWindow, "show", _show)
+    monkeypatch.setattr(app_mod.QApplication, "exec", _exec)
+    przed = (sys.excepthook, threading.excepthook)
+    try:
+        assert app_mod.main([]) == 0
+    finally:
+        for w in okna:
+            w.close()
+    return przed, okna
+
+
+def _pompuj_az(warunek, s=10):
+    """Pętla zdarzeń Qt (`QEventLoop.exec`) do `warunek()` albo bezpiecznika. NIE `processEvents`
+    z Pythona: wyjątek slotu doręczonego w `processEvents` wraca do wołającego w Pythonie (zmierzone,
+    PySide6 6.9.2), a do `sys.excepthook` trafia wyłącznie z pętli C++ - jak w programie (`app.exec`)."""
+    import time
+    from PySide6.QtCore import QEventLoop, QTimer
+    koniec = time.monotonic() + s
+    petla = QEventLoop()
+
+    def _sprawdz():
+        if warunek() or time.monotonic() > koniec:
+            petla.quit()
+    takt = QTimer()
+    takt.timeout.connect(_sprawdz)
+    takt.start(10)
+    petla.exec()
+    takt.stop()
+    return warunek()
+
+
+def _zamknij_okno(straz):
+    if straz.okno is not None:
+        straz.okno.close()
+
+
+@pytest.mark.zmienia_motyw          # `main()` stawia motyw na aplikacji (sprząta `conftest`)
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_wyjatek_w_slocie_po_starcie_mowi_oknem_bledu_programu_z_miejscem(qapp, monkeypatch, ustawienia,
+                                                                         jezyk, lang):
+    """AR-302: wyjątek ze slotu Qt, którego nikt nie złapał, po starcie programu (`main`) otwiera
+    niemodalne okno błędu programu w języku UI: zdanie, szczegół WIDOCZNY w oknie z miejscem
+    `@ horreum/…:N`, przyciski z katalogu; okno główne żyje dalej. Po `main` haki wracają do stanu
+    sprzed. Falsyfikator: `main` bez straży (wyjątek tylko na stderr) albo bez przywrócenia haków."""
+    import sys
+    import threading
+    from PySide6.QtCore import QTimer
+    ustawienia.setValue("ui/lang", lang)
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            okno = straz.okno
+            wynik.update(tytul=okno.windowTitle(), zdanie=okno.pole.text(), szczegol=okno.szczegol.toPlainText(),
+                         przyciski=(okno.btn_kopiuj.text(), okno.btn_zamknij.text()), modal=okno.isModal())
+        finally:
+            _zamknij_okno(straz)
+    przed, okna = _main_z_petla(monkeypatch, _scenariusz)
+    assert (sys.excepthook, threading.excepthook) == przed
+    assert wynik["tytul"] == i18n.t("main.prog_error.title") and not wynik["modal"]
+    assert wynik["zdanie"] == i18n.t("main.prog_error.text", msg=i18n.t("main.prog_error.what")), wynik
+    assert re.search(_MIEJSCE_PAKIETU + "$", wynik["szczegol"]), wynik["szczegol"]
+    assert wynik["przyciski"] == (i18n.t("main.prog_error.copy"), i18n.t("main.prog_error.close"))
+    if lang == "en":
+        assert not set(wynik["zdanie"] + "".join(wynik["przyciski"])) & _POLSKIE, wynik
+    assert len(okna) == 1
+
+
+@pytest.mark.zmienia_motyw
+def test_wyjatek_w_slocie_watku_qt_okno_powstaje_w_watku_gui(qapp, monkeypatch, ustawienia):
+    """AR-302: slot obiektu w `QThread` rzuca - PySide woła `sys.excepthook` W WĄTKU TŁA (zmierzone).
+    Okno błędu powstaje w wątku GUI (sygnał straży kolejką), z miejscem w szczególe. Falsyfikator:
+    okno budowane w wątku haka."""
+    from PySide6.QtCore import QObject, QThread, QTimer, Slot
+
+    class Pracownik(QObject):
+        @Slot()
+        def run(self):
+            _blad_programu_w_pakiecie()
+
+    wynik = {}
+
+    def _scenariusz(straz):
+        watek, pracownik = QThread(), Pracownik()
+        pracownik.moveToThread(watek)
+        watek.started.connect(pracownik.run)
+        try:
+            QTimer.singleShot(0, watek.start)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            wynik.update(watek_okna=straz.okno.thread(), szczegol=straz.okno.szczegol.toPlainText())
+        finally:
+            _zamknij_okno(straz)
+            watek.quit()
+            watek.wait(5000)
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert wynik["watek_okna"] is QApplication.instance().thread()
+    assert re.search(_MIEJSCE_PAKIETU + "$", wynik["szczegol"]), wynik["szczegol"]
+
+
+@pytest.mark.zmienia_motyw
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")   # wyjątek celowy
+def test_wyjatek_w_watku_pythona_mowi_oknem_przez_threading_excepthook(qapp, monkeypatch, ustawienia):
+    """AR-302: wyjątek w zwykłym `threading.Thread` nie idzie do `sys.excepthook`, tylko do
+    `threading.excepthook` (zmierzone) - straż pilnuje obu: okno w wątku GUI, z miejscem; po `main`
+    `threading.excepthook` wraca. Falsyfikator: straż tylko pod `sys.excepthook`."""
+    import threading
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            t = threading.Thread(target=_blad_programu_w_pakiecie)
+            t.start()
+            t.join(5)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            wynik.update(watek_okna=straz.okno.thread(), szczegol=straz.okno.szczegol.toPlainText())
+        finally:
+            _zamknij_okno(straz)
+    przed, _okna = _main_z_petla(monkeypatch, _scenariusz)
+    assert threading.excepthook is przed[1]
+    assert wynik["watek_okna"] is QApplication.instance().thread()
+    assert re.search(_MIEJSCE_PAKIETU + "$", wynik["szczegol"]), wynik["szczegol"]
+
+
+@pytest.mark.zmienia_motyw
+def test_seria_wyjatkow_jedno_okno_z_licznikiem_a_po_zamknieciu_nowe(qapp, monkeypatch, ustawienia):
+    """AR-302: seria wyjątków (jak z `paintEvent`) przy stojącym oknie - jedno okno, licznik „jeszcze 2”.
+    Zgłoszenie po zamknięciu okna otwiera NOWE okno z własnym, pustym licznikiem - nic nie ginie po
+    cichu. Falsyfikator: okno na każde zgłoszenie albo zgłoszenia po zamknięciu połknięte."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            for _ in range(3):
+                QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz._kolejne == 2), straz._kolejne
+            pierwsze = straz.okno
+            wynik.update(okien=sum(isinstance(w, QDialog) and w.isVisible()
+                                   and w.windowTitle() == i18n.t("main.prog_error.title")
+                                   for w in QApplication.topLevelWidgets()),
+                         licznik=pierwsze.lbl_kolejne.text(), widoczny=pierwsze.lbl_kolejne.isVisible())
+            pierwsze.close()
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not pierwsze and straz.okno.isVisible()), "brak nowego okna"
+            wynik.update(nowe_licznik_ukryty=straz.okno.lbl_kolejne.isHidden(), kolejne=straz._kolejne)
+        finally:
+            _zamknij_okno(straz)
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert wynik["okien"] == 1 and wynik["widoczny"], wynik
+    assert wynik["licznik"] == i18n.t_plural("main.prog_error.more", 2), wynik
+    assert wynik["nowe_licznik_ukryty"] and wynik["kolejne"] == 0, wynik
+
+
+@pytest.mark.zmienia_motyw
+def test_wyjatek_w_oknie_bledu_nie_zapetla_strazy(qapp, monkeypatch, ustawienia):
+    """AR-302: budowa okna błędu rzuca (konsola deweloperska - `sys.stderr` jest): konsola dostaje
+    zgłoszenie, wyjątek okna i kolejne zgłoszenie (3 wywołania), a oba błędy programu mają ślad w oknie
+    zastępczym - jednym, z licznikiem drugiego - bez pętli zgłoszeń; pętla zdarzeń żyje. Falsyfikatory:
+    wyjątek okna wraca do haka i wywołań przybywa bez końca; okno zastępcze na każde zgłoszenie."""
+    import sys
+    from PySide6.QtCore import QTimer
+    from horreum.gui import app as app_mod
+    poprzedni = []
+    monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: poprzedni.append(typ.__name__))
+
+    def _rzuca(self, powod):
+        raise RuntimeError("okno błędu nie powstało")
+    monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _rzuca)
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            _pompuj_az(lambda: len(poprzedni) >= 2, 5)
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            _pompuj_az(lambda: len(poprzedni) >= 3, 5)
+            _pompuj_az(lambda: False, 0.5)                     # czas na ewentualną pętlę zgłoszeń
+            zyje = []
+            QTimer.singleShot(0, lambda: zyje.append(1))
+            _pompuj_az(lambda: zyje, 5)
+            wynik.update(okno=straz.okno, zepsute=straz._okno_zepsute, zyje=zyje,
+                         zastepcze=sum(o.isVisible() for o in straz.zastepcze),
+                         licznik=straz.zastepcze[-1].informativeText())
+        finally:
+            for o in straz.zastepcze:
+                o.close()
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert poprzedni == ["ValueError", "RuntimeError", "ValueError"], poprzedni
+    assert wynik["okno"] is None and wynik["zepsute"] and wynik["zyje"] == [1], wynik
+    assert wynik["zastepcze"] == 1, wynik
+    assert wynik["licznik"] == i18n.t_plural("main.prog_error.more", 1), wynik
+
+
+def _okna_bledu_widoczne():
+    """Widoczne okna błędu programu (własne i zastępcze) - po tytule z katalogu."""
+    return [w for w in QApplication.topLevelWidgets()
+            if w.isVisible() and w.windowTitle() == i18n.t("main.prog_error.title")]
+
+
+@pytest.mark.zmienia_motyw
+def test_wyjatek_budowy_okna_glownego_bez_konsoli_mowi_oknem_i_konczy_kodem_bledu(qapp, monkeypatch,
+                                                                                 ustawienia):
+    """AR-302, wydanie okienkowe (`sys.stderr = None`): błąd programu w konstruktorze okna głównego wychodzi
+    z `main` SYNCHRONICZNIE - zanim `finally` zdejmie straż, okno błędu programu z miejscem w szczególe
+    stoi w pętli zdarzeń (test zamyka je sam bezpiecznikiem), potem `main` zwraca kod błędu, a haki
+    wracają. Falsyfikator: `main` bez przechwycenia - wyjątek wychodzi po zdjęciu straży, bez śladu."""
+    import sys
+    import threading
+    from PySide6.QtCore import QTimer
+    from horreum.gui import app as app_mod
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(app_mod.MainWindow, "__init__", lambda self, *a, **kw: _blad_programu_w_pakiecie())
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda _self: 0)
+    przed = (sys.excepthook, threading.excepthook)
+    widziane = []
+
+    def _zamknij_gdy_jest():
+        for w in _okna_bledu_widoczne():
+            szczegol = w.szczegol.toPlainText() if hasattr(w, "szczegol") else w.text()
+            widziane.append((type(w).__name__, szczegol))
+            w.close()
+    bezpiecznik = QTimer()
+    bezpiecznik.timeout.connect(_zamknij_gdy_jest)
+    bezpiecznik.start(100)
+    try:
+        kod = app_mod.main([])
+    finally:
+        bezpiecznik.stop()
+        for w in _okna_bledu_widoczne():
+            w.close()
+    assert kod != 0, kod
+    assert (sys.excepthook, threading.excepthook) == przed
+    assert [t for t, _s in widziane] == ["QDialog"], widziane
+    assert re.search(_MIEJSCE_PAKIETU + "$", widziane[0][1]), widziane
+
+
+@pytest.mark.zmienia_motyw
+def test_okno_bledu_padlo_bez_konsoli_kazdy_kolejny_blad_ma_okno_zastepcze(qapp, monkeypatch, ustawienia):
+    """AR-302, wydanie okienkowe (`sys.stderr = None`): budowa własnego okna błędu rzuca. Pierwszy błąd
+    programu i drugi, niezależny, mają KAŻDY widoczne okno zastępcze ze zdaniem i miejscem - nic nie idzie
+    wyłącznie do poprzedniego haka (bez konsoli nie miałby dokąd pisać). Falsyfikator: trwałe wyłączenie
+    straży po awarii okna - drugi błąd przepada."""
+    import sys
+    from PySide6.QtCore import QTimer
+    from horreum.gui import app as app_mod
+    poprzedni = []
+    monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: poprzedni.append(typ.__name__))
+    monkeypatch.setattr(sys, "stderr", None)
+
+    def _rzuca(self, powod):
+        raise RuntimeError("okno błędu nie powstało")
+    monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _rzuca)
+    teksty = []
+
+    def _scenariusz(straz):
+        try:
+            for _ in range(2):
+                QTimer.singleShot(0, _blad_programu_w_pakiecie)
+                assert _pompuj_az(lambda: any(o.isVisible() for o in straz.zastepcze)), "brak okna zastępczego"
+                for o in straz.zastepcze:
+                    if o.isVisible():
+                        teksty.append((o.windowTitle(), o.text(), [b.text() for b in o.buttons()]))
+                        o.close()
+        finally:
+            for o in straz.zastepcze:
+                o.close()
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert poprzedni == [], poprzedni
+    assert len(teksty) == 2, teksty
+    for tytul, tekst, przyciski in teksty:
+        assert tytul == i18n.t("main.prog_error.title") and przyciski == [i18n.t("main.prog_error.close")]
+        assert tekst.startswith(i18n.t("main.prog_error.text", msg=i18n.t("main.prog_error.what"))), tekst
+        assert re.search(_MIEJSCE_PAKIETU + "$", tekst), tekst
+
+
+def _bezpiecznik_okien_bledu(widziane, zdania=None):
+    """Zegar, który zamyka każde widoczne okno błędu programu i notuje jego klasę (i zdanie, gdy podano
+    `zdania`) - test nie wisi na pętli `pokaz_przed_wyjsciem`, a lista mówi, czy okno w ogóle stanęło."""
+    from PySide6.QtCore import QTimer
+
+    def _zamknij():
+        for w in _okna_bledu_widoczne():
+            widziane.append(type(w).__name__)
+            if zdania is not None:
+                zdania.append(w.pole.text() if hasattr(w, "pole") else w.text())
+            w.close()
+    zegar = QTimer()
+    zegar.timeout.connect(_zamknij)
+    zegar.start(100)
+    return zegar
+
+
+@pytest.mark.zmienia_motyw
+def test_wyjatek_z_petli_zdarzen_wychodzi_z_main_bez_okna_bledu(qapp, monkeypatch, ustawienia):
+    """AR-302: przechwycenie w `main` obejmuje wyłącznie start synchroniczny. Wyjątek, który wychodzi z pętli
+    zdarzeń (w testach - czerwona asercja scenariusza wewnątrz podmienionego `exec`), wychodzi z `main`
+    od razu, bez okna błędu, a haki wracają. Falsyfikator: `app.exec()` pod `except` straży - czerwony test
+    startu staje się oknem błędu i pętlą czekającą, aż ktoś je zamknie (bateria wisi)."""
+    import sys
+    import threading
+    from horreum.gui import app as app_mod
+
+    def _exec(_self):
+        raise AssertionError("czerwona asercja scenariusza")
+    monkeypatch.setattr(app_mod.QApplication, "exec", _exec)
+    przed = (sys.excepthook, threading.excepthook)
+    widziane = []
+    zegar = _bezpiecznik_okien_bledu(widziane)
+    try:
+        with pytest.raises(AssertionError, match="czerwona asercja"):
+            app_mod.main([])
+    finally:
+        zegar.stop()
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, app_mod.MainWindow):
+                w.close()
+    assert widziane == [], widziane
+    assert (sys.excepthook, threading.excepthook) == przed
+
+
+@pytest.mark.zmienia_motyw
+def test_wyjatek_otwarcia_bazy_startowej_chowa_okno_glowne_na_czas_okna_bledu(qapp, monkeypatch, ustawienia,
+                                                                              tmp_path):
+    """AR-302: błąd programu przy otwarciu bazy startowej pada PO pokazaniu okna głównego. Na czas okna błędu
+    okno główne jest schowane (w połowie zamontowane przyjmowałoby gesty, także zapis do plików, a powrót
+    z `main` nie przechodzi przez jego `closeEvent`); po zamknięciu okna błędu okno główne jest zamknięte,
+    `main` zwraca kod błędu. Falsyfikator: okno główne widoczne obok okna błędu."""
+    from horreum.gui import app as app_mod
+    baza = tmp_path / "start.db"
+    baza.write_bytes(b"")
+    monkeypatch.setattr(app_mod.MainWindow, "open_path", lambda self, p: _blad_programu_w_pakiecie())
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda _self: 0)
+    glowne = []
+    prawdziwy_show = app_mod.MainWindow.show
+
+    def _show(self):
+        glowne.append(self)
+        return prawdziwy_show(self)
+    monkeypatch.setattr(app_mod.MainWindow, "show", _show)
+    stan_przy_bledzie = []
+    prawdziwy_hak = app_mod.StrazBledowProgramu._hak
+
+    def _hak(self, typ, wartosc, tb):
+        stan_przy_bledzie.append([w.isVisible() for w in glowne])
+        return prawdziwy_hak(self, typ, wartosc, tb)
+    monkeypatch.setattr(app_mod.StrazBledowProgramu, "_hak", _hak)
+    zamkniecia = []
+    prawdziwy_close_event = app_mod.MainWindow.closeEvent
+
+    def _close_event(self, ev):
+        zamkniecia.append(self)
+        return prawdziwy_close_event(self, ev)
+    monkeypatch.setattr(app_mod.MainWindow, "closeEvent", _close_event)
+    widziane, zdania = [], []
+    zegar = _bezpiecznik_okien_bledu(widziane, zdania)
+    try:
+        kod = app_mod.main([str(baza)])
+        po_main = list(zamkniecia)
+    finally:
+        zegar.stop()
+        for w in glowne:
+            w.close()
+    assert kod == 1, kod
+    assert len(glowne) == 1 and stan_przy_bledzie == [[False]], stan_przy_bledzie
+    assert widziane == ["QDialog"], widziane
+    assert po_main == glowne, "okno główne nie zamknięte zwykłą drogą (`closeEvent`) przed wyjściem z `main`"
+    # Zdanie startu: okno główne schowane, „Zamknij” kończy program - nie „okno działa dalej”.
+    assert zdania == [i18n.t("main.prog_error.text_start", msg=i18n.t("main.prog_error.what"))], zdania
+
+
+@pytest.mark.zmienia_motyw
+def test_montaz_przerwany_po_gridzie_zbiera_watki_gridu_przy_zamknieciu(qapp, monkeypatch, ustawienia, tmp_path):
+    """AR-302: baza startowa otwiera się, montaż widoków buduje grid (wątek składu zbioru w biegu) i pada na
+    KOLEJNYM widoku, zanim jakakolwiek strona trafi na stos. Zamknięcie okna po oknie błędu zbiera wątki
+    gridu (`zatrzymaj_pola`) - `QThread` skasowany w biegu to twardy abort zamiast kodu błędu. Falsyfikator:
+    zbieranie wątków gridu warunkowane niepustym stosem."""
+    from horreum import db
+    from horreum.gui import app as app_mod, planner as planner_mod
+    from horreum.gui.grid import FramesView
+    baza = str(tmp_path / "start.db")
+    db.open_db(baza).close()
+
+    def _rzuca(self, *a, **k):
+        _blad_programu_w_pakiecie()
+    monkeypatch.setattr(planner_mod.PlannerView, "__init__", _rzuca)
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda _self: 0)
+    zebrane = []
+    prawdziwe = FramesView.zatrzymaj_pola
+
+    def _zatrzymaj(self):
+        zebrane.append(self)
+        return prawdziwe(self)
+    monkeypatch.setattr(FramesView, "zatrzymaj_pola", _zatrzymaj)
+    glowne = []
+    prawdziwy_show = app_mod.MainWindow.show
+
+    def _show(self):
+        glowne.append(self)
+        return prawdziwy_show(self)
+    monkeypatch.setattr(app_mod.MainWindow, "show", _show)
+    widziane = []
+    zegar = _bezpiecznik_okien_bledu(widziane)
+    try:
+        kod = app_mod.main([baza])
+        po_main = list(zebrane)
+    finally:
+        zegar.stop()
+        for w in glowne:
+            w.close()
+    assert kod == 1 and widziane == ["QDialog"], (kod, widziane)
+    assert len(glowne) == 1 and glowne[0].stack.count() == 0, "montaż doszedł do stosu - test nie mierzy szwu"
+    assert po_main and po_main[0] is glowne[0].grid_view, po_main
+
+
+@pytest.mark.zmienia_motyw
+def test_wyjatek_z_zepsutym_str_ma_okno_z_nazwa_klasy(qapp, monkeypatch, ustawienia):
+    """AR-302: wyjątek, którego `__str__` rzuca, wywraca klasyfikację (`powod_okna`) i surowy tekst zastępczy.
+    Zgłoszenie i tak ma widoczne okno z nazwą klasy i znakiem zamiast opisu - nic nie ginie po cichu.
+    Falsyfikator: tekst zastępczy składany wprost z `str(wartosc)` - wyjątek ucieka z haka bez okna."""
+    import sys
+    from PySide6.QtCore import QTimer
+    monkeypatch.setattr(sys, "stderr", None)
+
+    class ZepsutyOpis(Exception):
+        def __str__(self):
+            raise RuntimeError("opis nie powstał")
+
+    def _rzuc():
+        raise ZepsutyOpis()
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _rzuc)
+            assert _pompuj_az(lambda: _okna_bledu_widoczne()), "brak okna błędu"
+            okno = _okna_bledu_widoczne()[0]
+            wynik["tekst"] = (okno.szczegol.toPlainText() + okno.pole.text()) if hasattr(okno, "szczegol") \
+                else okno.text()
+        finally:
+            _zamknij_okno(straz)
+            for o in straz.zastepcze:
+                o.close()
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert "ZepsutyOpis: ?" in wynik["tekst"], wynik
+
+
+@pytest.mark.zmienia_motyw
+def test_seria_przy_stojacym_oknie_zastepczym_podbija_jego_licznik(qapp, monkeypatch, ustawienia):
+    """AR-302: własne okno błędu padło, potem seria trzech błędów (jak z `paintEvent`) - jedno okno zastępcze
+    z licznikiem „jeszcze 2”, nie trzy okna. Zgłoszenie po jego zamknięciu otwiera nowe, z pustym licznikiem.
+    Falsyfikator: okno zastępcze na każde zgłoszenie (zalew okien bez wyjścia)."""
+    import sys
+    from PySide6.QtCore import QTimer
+    from horreum.gui import app as app_mod
+    monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    def _rzuca(self, powod):
+        raise RuntimeError("okno błędu nie powstało")
+    monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _rzuca)
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            for _ in range(3):
+                QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.zastepcze and straz.zastepcze[-1].kolejne == 2), "brak licznika"
+            pierwsze = straz.zastepcze[-1]
+            wynik.update(okien=len(_okna_bledu_widoczne()), licznik=pierwsze.informativeText())
+            pierwsze.close()
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.zastepcze[-1] is not pierwsze and straz.zastepcze[-1].isVisible())
+            wynik.update(nowe=straz.zastepcze[-1].informativeText())
+        finally:
+            for o in straz.zastepcze:
+                o.close()
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert wynik["okien"] == 1, wynik
+    assert wynik["licznik"] == i18n.t_plural("main.prog_error.more", 2), wynik
+    assert wynik["nowe"] == "", wynik
+
+
+@pytest.mark.zmienia_motyw
+def test_zgloszenie_w_trakcie_budowy_okna_idzie_do_okna_zastepczego(qapp, monkeypatch, ustawienia):
+    """AR-302: pokazanie okna błędu maluje, a malowanie może rzucić i wrócić do straży hakiem W TRAKCIE budowy.
+    Takie zgłoszenie idzie do jednego okna zastępczego, a budowane okno zostaje oknem straży (bez rekursji,
+    straż nie jest wyłączona). Falsyfikator: brak blokady budowy - zgłoszenie wchodzi w budowę drugi raz."""
+    import sys
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog
+    from horreum.gui import app as app_mod
+    monkeypatch.setattr(sys, "stderr", None)
+    zbudowane = []
+
+    class _OknoMalujaceBlad(QDialog):
+        def show(self):
+            try:
+                _blad_programu_w_pakiecie()
+            except Exception as exc:
+                sys.excepthook(type(exc), exc, exc.__traceback__)
+            super().show()
+
+    def _zbuduj(self, powod):
+        okno = _OknoMalujaceBlad()
+        okno.setWindowTitle(i18n.t("main.prog_error.title"))
+        zbudowane.append(okno)
+        return okno
+    monkeypatch.setattr(app_mod.StrazBledowProgramu, "_zbuduj_okno", _zbuduj)
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "brak okna"
+            wynik.update(zbudowanych=len(zbudowane), okno=straz.okno is zbudowane[0],
+                         zastepcze=sum(o.isVisible() for o in straz.zastepcze), zepsute=straz._okno_zepsute)
+        finally:
+            _zamknij_okno(straz)
+            for o in straz.zastepcze:
+                o.close()
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert wynik == {"zbudowanych": 1, "okno": True, "zastepcze": 1, "zepsute": False}, wynik
+
+
+# ============================================================ tłumacz Qt w języku UI programu
+
+def _menu_pola():
+    from PySide6.QtWidgets import QLineEdit
+    pole = QLineEdit()
+    menu = pole.createStandardContextMenu()
+    teksty = [a.text().split("\t")[0].replace("&", "") for a in menu.actions() if a.text()]
+    menu.deleteLater()
+    pole.deleteLater()
+    return teksty
+
+
+@pytest.mark.zmienia_motyw
+@pytest.mark.parametrize("lang, cofnij, wklej", [("pl", "Cofnij", "Wklej"), ("en", "Undo", "Paste")])
+def test_tlumacz_qt_idzie_za_jezykiem_ui_i_schodzi_po_main(qapp, monkeypatch, ustawienia, lang, cofnij, wklej):
+    """Teksty samego Qt (menu kontekstowe pola) mówią językiem UI PROGRAMU, nie systemu: PL - „Cofnij”,
+    „Wklej”; EN na polskim systemie - „Undo”, „Paste”. Po `main` tłumacz zdjęty (testy wołają `main` kilka
+    razy na jednej aplikacji): menu znów angielskie. Falsyfikator: tłumacz z locale systemu albo bez
+    zdjęcia w `finally`."""
+    ustawienia.setValue("ui/lang", lang)
+    wynik = {}
+    _main_z_petla(monkeypatch, lambda _straz: wynik.update(menu=_menu_pola()))
+    assert cofnij in wynik["menu"] and wklej in wynik["menu"], wynik["menu"]
+    assert "Undo" in _menu_pola() and "Paste" in _menu_pola()
+
+
+@pytest.mark.zmienia_motyw
+def test_brak_pliku_tlumacza_qt_nie_zatrzymuje_startu(qapp, monkeypatch, ustawienia, caplog):
+    """Wydanie bez `qtbase_pl.qm`: `QTranslator.load` zwraca False - program startuje dalej po angielsku
+    (teksty Qt), ostrzeżenie w logu, żadnego wyjątku. Falsyfikator: instalacja tłumacza bez sprawdzenia
+    `load` albo wyjątek przy braku pliku."""
+    import logging
+    from horreum.gui import app as app_mod
+    ustawienia.setValue("ui/lang", "pl")
+    monkeypatch.setattr(app_mod.QTranslator, "load", lambda self, *a: False)
+    wynik = {}
+    with caplog.at_level(logging.WARNING, logger="horreum.gui.app"):
+        _main_z_petla(monkeypatch, lambda _straz: wynik.update(menu=_menu_pola()))
+    assert "Undo" in wynik["menu"], wynik["menu"]
+    assert any("qtbase_pl" in r.getMessage() for r in caplog.records), caplog.records

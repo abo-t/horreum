@@ -655,8 +655,11 @@ def read_manifest(root, *, errors_out=None):
     return payload
 
 
-def manifest_drift(root, layout):
+def manifest_drift(root, layout, state=None):
     """Kształt drzewa, KTÓRY W TYM KORZENIU JUŻ STOI, jeśli różni się od bieżącego — inaczej None.
+    `state` (`ManifestState` odczytu, który wołający już zrobił - sonda `apply(DRY)`, AR-306): treść
+    z niego zamiast drugiego odczytu pliku; ta sama tolerancja co `read_manifest` (brak, uszkodzenie
+    i błąd odczytu dają `payload is None`).
 
     Manifest niósł `segments` od pierwszego dnia, ale NIKT ich nie czytał (resztka z recenzji P2).
     Rozjazd jest cichy i kosztowny: zmiana definicji layoutu (P2: `telescope_label` → coalesce
@@ -666,7 +669,7 @@ def manifest_drift(root, layout):
     cross-checku wygląda na czysty.
 
     Manifest bez `segments` (zapisany przed tym polem) → milczymy: brak zeznania to nie rozjazd."""
-    payload = read_manifest(root)
+    payload = state.payload if state is not None else read_manifest(root)
     if not payload or not payload.get("segments"):
         return None
     was = _shape(payload.get("layout"), payload["segments"])
@@ -675,7 +678,8 @@ def manifest_drift(root, layout):
 
 @dataclasses.dataclass(frozen=True)
 class ManifestState:
-    """JEDEN odczyt `_PROJEKCJA.json` korzenia dla sondy wydania obiektu (AR-273): treść
+    """JEDEN odczyt `_PROJEKCJA.json` korzenia dla sondy wydania (AR-273; od AR-306 robi go sam
+    `apply(DRY)` i oddaje w `ApplyResult.manifest_state`, także dla wydania perspektywy): treść
     tolerancyjnie (`payload` - to, co dałby `read_manifest` bez `errors_out`), uszkodzenie pliku
     (`uszkodzenie` - pole, jak w `_manifest_z_pliku`) i błąd systemu odczytu (`blad` - `OSError`,
     „nie wiem”, nie „nie ma”). Świadkowie scalenia (`manifest_sources`) i wskazówka o manifeście
@@ -736,6 +740,11 @@ class ApplyResult:
     # Ile id wcześniejszych wydań manifest ZAPOMNIAŁ, bo ich plików dowodnie nie ma w drzewie
     # (scalenie bez utraty, AR-213: `_merge_object_manifest` ze świadkiem `extra_sources`).
     dropped: int = 0
+    # Stan `_PROJEKCJA.json` z JEDYNEGO odczytu sondy (`read_manifest_state`, AR-306) - wyłącznie
+    # w wyniku DRY, który doszedł do końca: odczyt PO pętli sondy, z niego `drift`, a wołający liczy
+    # z niego świadków scalenia i wskazówkę o manifeście (`manifest_step_refusal`) bez drugiego
+    # odczytu. Po realnym wydaniu None - stan sprzed linków i kroku manifestu nie jest bieżący.
+    manifest_state: ManifestState | None = None
 
     @property
     def counts(self) -> dict:
@@ -767,9 +776,11 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None, ex
     wcześniejszych wydań spoza tego planu zostają w manifeście (niepewne - nic nie ginie); z nimi
     id, którego pliku dowodnie nie ma w drzewie, schodzi z manifestu (`ApplyResult.dropped`)."""
     _assert_excluded_segment(root)
-    # PRZED czymkolwiek: `_write_manifest` nadpisze zeznanie starego drzewa, więc po masie nie byłoby
-    # już czego czytać. DRY sonduje ten sam fakt, bo to właśnie DRY ma ostrzec PRZED wydaniem.
-    drift = manifest_drift(root, projection.layout)
+    # Realne wydanie: PRZED czymkolwiek - `_write_manifest` nadpisze zeznanie starego drzewa, więc po
+    # masie nie byłoby już czego czytać. DRY sonduje ten sam fakt (to DRY ma ostrzec PRZED wydaniem),
+    # ale JEDNYM odczytem PO pętli sondy (AR-306): rozjazd i wskazówka o manifeście mówią o stanie
+    # z końca sondy - manifest zmieniony w trakcie długiej sondy na udziale nie umyka ostrzeżeniu.
+    drift = manifest_drift(root, projection.layout) if do_apply else None
     if do_apply:
         try:
             os.makedirs(root, exist_ok=True)       # korzeń istnieje dla linków I manifestu (KLINGA)
@@ -842,8 +853,13 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None, ex
         if progress is not None:
             progress(done, total, dst, status)
 
+    stan = None
+    if not do_apply and not cancelled:
+        # Sonda przerwana nie czyta manifestu - jej wyniku nikt nie odbierze (AR-245).
+        stan = read_manifest_state(root)
+        drift = manifest_drift(root, projection.layout, stan)
     result = ApplyResult(root, projection.layout, do_apply, copy, _z_kwarantanna(results, projection),
-                         cancelled, drift)
+                         cancelled, drift, manifest_state=stan)
     if do_apply:
         try:
             dropped = _write_manifest(root, result, now=now, manifest=manifest,

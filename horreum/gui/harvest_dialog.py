@@ -92,6 +92,7 @@ from horreum.gui.projection_dialog import _COLORS, _elide_path
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # błąd systemu w języku UI
                                    tekst_powodu, wiersz_systemu)       # (AR-184), szczegół na pasek (AR-218)
 from horreum.item_reasons import powod_okna, powod_systemu   # wyjątek workera jedną regułą okna (AR-264)
+from horreum.item_reasons import powod_sciezki_wejscia       # znak, którego ścieżka nie przyjmie (AR-301)
 
 # Ile poziomów nad wyjściem WBPP szukać manifestu wydania: WBPP pisze `master/` (i `calibrated/`)
 # wewnątrz katalogu roboczego, który wydanie obiektu kładzie pod `<karta>/OBJECTS/<obiekt>` -
@@ -1442,8 +1443,13 @@ class HarvestDialog(QDialog):
         """Sonda pod BIEŻĄCE parametry. Jeden worker naraz: sonda w biegu należy do starszej
         generacji (każde wołanie z pola idzie po `_invalidate`), więc dostaje anulowanie - nie
         czyta dalej plików, których wyniku nikt nie przyjmie - a świeża rusza po sprzątnięciu
-        (`_dry_pending`). Wczesny powrót (puste pole, ścieżka względna, brak archiwum) gasi pasek
-        i niczego nie zleca."""
+        (`_dry_pending`). Wczesny powrót (puste pole, znak niedozwolony, ścieżka względna, brak
+        archiwum) gasi pasek i niczego nie zleca.
+
+        ZNAK NIEDOZWOLONY TO BŁĄD WEJŚCIA (AR-301): to pole jest jedyną ścieżką wpisywaną ręką (reszta
+        przychodzi z okna wyboru systemu), a wklejenie wnosi do niego także NUL i TAB. Bez tej bramki NUL
+        mówił „błąd programu” (`ValueError` z `os.stat`), a `<>|?*"` i znaki sterujące - surowym tekstem
+        systemu (WinError 123, w UI EN po polsku)."""
         if self._closing or self._apply_worker is not None:
             return
         if self._dry_worker is not None:
@@ -1452,6 +1458,11 @@ class HarvestDialog(QDialog):
         if not output:
             self._set_probing(False)
             self._show_notice(i18n.t("harvest.no_output"))
+            return
+        powod = powod_sciezki_wejscia(output)
+        if powod is not None:
+            self._set_probing(False)
+            self._show_notice(i18n.t("harvest.dry_failed", msg=tekst_powodu(powod)), "error")
             return
         if not os.path.isabs(output):
             self._set_probing(False)

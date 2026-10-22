@@ -348,14 +348,21 @@ def szczegol_powodu(powod, *, root):
     return ""
 
 
-def zdanie_odmowy(powod):
+def zdanie_odmowy(powod, *, naprawa_okna=True):
     """Zdanie powodu w ŻYWYM oknie wydania (Qt-WOLNE, AR-251): `tekst_powodu`, a za odmową kroku
     manifestu, którą da się ponowić z okna - gest okna (`proj_manifest_damaged`/`_foreign`: „Odśwież
     podgląd” i „Zapisz manifest”, `proj_manifest_busy`: ponowienie wydania albo „Odśwież podgląd”),
     a za abortem sondy pierwszego linku (`proj_first_link`, AR-265) - przełącznik kopii okna.
     Zdanie rdzenia mówi fakt i radę wspólną dla każdej powierzchni (CLI drukuje je z własnym gestem);
-    pasek gospodarza po zamknięciu okna mówi samym `tekst_powodu` - przycisku zamkniętego okna nie ma."""
+    pasek gospodarza po zamknięciu okna mówi samym `tekst_powodu` - przycisku zamkniętego okna nie ma.
+
+    `naprawa_okna=False` - okno wydania perspektywy (AR-306): „Zapisz manifest” liczy się wyłącznie
+    dla wydania obiektu, a po odmowie kroku pliki już leżą, więc świeża sonda nie ma czego utworzyć
+    i „ponów wydanie” też nie istnieje - odmowa kroku manifestu mówi samym zdaniem rdzenia (fakt
+    i rada „sprawdź go albo usuń ręcznie” / „skasuj go ręcznie”)."""
     kod = getattr(powod, "code", None)
+    if not naprawa_okna and kod in ("proj_manifest_damaged", "proj_manifest_foreign", "proj_manifest_busy"):
+        return tekst_powodu(powod)
     if kod in ("proj_manifest_damaged", "proj_manifest_foreign"):
         return i18n.t("proj.manifest_retry", msg=tekst_powodu(powod))
     if kod == "proj_manifest_busy":
@@ -632,10 +639,11 @@ class DryWorker(QObject):
             # Obie słuchają anulowania (AR-245): zamknięcie okna w trakcie sondy nie czeka ani na
             # odczyt świadków z bazy i manifestu, ani na świadka drzewa - wyniku nikt nie odbierze.
             naprawa, zrodla, blokada = None, None, None
+            # JEDEN odczyt manifestu całej sondy - ten, który zrobił `apply(DRY)` po pętli (AR-306):
+            # z niego rozjazd układu, świadkowie scalenia i wskazówka niżej, bez drugiego odczytu tego
+            # samego pliku na udziale SMB (AR-273).
+            stan = res.manifest_state
             if self._object_id is not None and not self._cancel:
-                # JEDEN odczyt manifestu dla świadków scalenia i wskazówki niżej (AR-273) - bez
-                # drugiego odczytu tego samego pliku na udziale SMB.
-                stan = projection.read_manifest_state(root)
                 zrodla = projection.manifest_sources(con, root, stan)
                 if dry_complete(res) and res.drift is None and not self._cancel:
                     # Ten sam czas próby co zapis (`czas_proby_dla`, AR-245): oferta mówi o dacie,
@@ -653,6 +661,12 @@ class DryWorker(QObject):
                 if naprawa is None and not self._cancel:
                     blokada = projection.manifest_step_refusal(
                         root, layout=plan.layout, state=stan, object_id=plan.info["object_id"])
+            elif not self._cancel and res.counts.get("would-link", 0):
+                # Wydanie perspektywy (AR-306): krok manifestu po „Utwórz” odmawia nad plikiem roboczym,
+                # manifestem uszkodzonym albo zeznaniem wydania obiektu - ta sama wskazówka przed
+                # kliknięciem. Tylko gdy jest co utworzyć: bez pozycji „Utwórz” jest wygaszone, a krok
+                # manifestu nie rusza.
+                blokada = projection.manifest_step_refusal(root, layout=plan.layout, state=stan)
         finally:
             if own:
                 con.close()
@@ -1633,7 +1647,9 @@ class ProjectionDialog(QDialog):
                 # Pliki leżą, manifestu nie ma: naprawa w tej sesji okna (świeża sonda → „Zapisz
                 # manifest”) stempluje manifest czasem TEJ próby (AR-213).
                 self._ts_po_awarii = (self._apply_root, self._apply_now)
-                glowa = i18n.t("proj.manifest_error_head", msg=zdanie_odmowy(res.error))
+                # Gest naprawy okna wyłącznie w wydaniu obiektu (AR-306) - perspektywa go nie ma.
+                glowa = i18n.t("proj.manifest_error_head", msg=zdanie_odmowy(
+                    res.error, naprawa_okna=self._object_id is not None))
             else:
                 glowa = i18n.t("proj.apply_error", msg=tekst_powodu(res.error), made="") + "\n\n"
             self._zakoncz_bledem(glowa, res.error, i18n.t("proj.btn_error"), res)

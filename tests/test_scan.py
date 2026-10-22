@@ -2556,3 +2556,313 @@ def test_cli_scan_i_stacks_korzen_niedostepny_mowi_klasa_bez_sladu_stosu(tmp_pat
         out.encode("cp1250")
         assert (f"Horreum {kom}: blad -- udział sieciowy albo dysk nie odpowiada (WinError 21) - "
                 "PermissionError: [WinError 21] Urządzenie nie jest gotowe") in out, out
+
+
+# ============================================================ AR-299: bajt spoza ASCII zeznany przy skanie
+
+_OBOWIAZKOWE_FITS = ("SIMPLE  =                    T", "BITPIX  =                   16",
+                     "NAXIS   =                    2", "NAXIS1  =                    4",
+                     "NAXIS2  =                    4")
+
+
+def _fits_z_bajtem(path, bajt=None, seed=0):
+    """FITS (int16 4x4) składany z bajtów: karta `OBSERVER` z komentarzem `kom X`, gdzie `X` = `bajt`
+    (`None` - zostaje `X`); `seed` zmienia dane (tożsamość klatki)."""
+    linie = (*_OBOWIAZKOWE_FITS, "IMAGETYP= 'Light   '", "OBSERVER= 'Abc     '           / kom X",
+             "EXPTIME =                300.0 / sek")
+    raw = bytearray(b"".join(x.encode("ascii").ljust(80) for x in linie) + b"END".ljust(80))
+    raw += b" " * (-len(raw) % 2880)
+    if bajt is not None:
+        raw[raw.index(b"kom X") + 4] = bajt
+    dane = (np.arange(16, dtype=">i2") + seed).astype(">i2").tobytes()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(raw) + dane + b"\x00" * (2880 - len(dane)))
+    return path
+
+
+def _lokacja_bajtu(con, path):
+    return con.execute("SELECT id, header_hash, nonprintable_hash, nonprintable_keyword, "
+                       "nonprintable_char FROM location WHERE path = ?", (str(path),)).fetchone()
+
+
+def test_skan_zeznaje_bajt_kubelek_i_gasniecie(tmp_path):
+    """AR-299: skan FITS z 0xE9 w komentarzu karty zeznaje marker przy bieżącym odcisku (karta i bajt
+    jak zdanie pisarza), kubełek `review_state.header_nonprintable` = 1 poza `total`, kopii
+    niezbadanych 0, `location.added` niesie zeznanie. Naprawa poza Horreum (bajt → `e`, nowy `mtime`)
+    → kolejny skan gasi marker (`location.refreshed`), trzeci skan - zero zdarzeń.
+    Falsyfikator: detekcja zdjęta z `read_fits_meta` → kubełek 0."""
+    from horreum import resolver
+    root = tmp_path / "ARCH"
+    p = _fits_z_bajtem(root / "a.fits", 0xE9)
+    con = _db(tmp_path)
+    scan_tree(con, str(root), volume="V", now=NOW)
+    loc = _lokacja_bajtu(con, p)
+    assert (loc["nonprintable_hash"], loc["nonprintable_keyword"], loc["nonprintable_char"]) == (
+        loc["header_hash"], "OBSERVER", "0xE9")
+    stan = resolver.review_state(con)
+    assert (stan.header_nonprintable, stan.header_nonprintable_unread) == (1, 0)
+    total_przed = stan.total
+    (payload,) = [json.loads(r[0]) for r in con.execute(
+        "SELECT payload FROM event WHERE verb = 'location.added'")]
+    assert payload["nonprintable"] == {"keyword": "OBSERVER", "char": "0xE9"}
+    raw = bytearray(p.read_bytes())
+    raw[raw.index(b"kom \xe9") + 4] = ord("e")
+    p.write_bytes(bytes(raw))
+    st = os.stat(p)
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000_000))
+    scan_tree(con, str(root), volume="V", now=NOW)
+    loc = _lokacja_bajtu(con, p)
+    assert (loc["nonprintable_hash"], loc["nonprintable_keyword"], loc["nonprintable_char"]) == (
+        loc["header_hash"], None, None)
+    stan = resolver.review_state(con)
+    assert (stan.header_nonprintable, stan.header_nonprintable_unread, stan.total) == (0, 0, total_przed)
+    zmiana = json.loads(con.execute("SELECT payload FROM event WHERE verb = 'location.refreshed' "
+                                    "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert zmiana["nonprintable_keyword"] == {"before": "OBSERVER", "after": None}
+    ev = con.execute("SELECT max(id) FROM event").fetchone()[0]
+    scan_tree(con, str(root), volume="V", now=NOW)
+    assert con.execute("SELECT count(*) FROM event WHERE id > ? AND verb LIKE 'location.%'",
+                       (ev,)).fetchone()[0] == 0
+    con.close()
+
+
+def _dalsze_hdu_uszkodzone(jeden):
+    """Warianty pliku: poprawny HDU pierwszy + uszkodzony dalszy (bajty `jeden` = HDU pierwszy)."""
+    ext = (b"XTENSION= 'IMAGE   '".ljust(80) + b"BITPIX  =                   16".ljust(80))
+    return {
+        "bez_END": jeden + ext + b"NAXIS   =                    0".ljust(80),
+        "smieci": jeden + bytes(range(256)) * 12 + b"\x00" * (2880 - 3072 % 2880),
+        "dane_uciete": jeden + (ext + b"NAXIS   =                    2".ljust(80)
+                                + b"NAXIS1  =                  100".ljust(80)
+                                + b"NAXIS2  =                  100".ljust(80)
+                                + b"PCOUNT  =                    0".ljust(80)
+                                + b"GCOUNT  =                    1".ljust(80) + b"END".ljust(80)).ljust(2880),
+    }
+
+
+def test_bajt_w_drugim_hdu_i_uszkodzony_dalszy_hdu(tmp_path, monkeypatch):
+    """AR-299: bajt w nagłówku rozszerzenia (HDU niewybrane - pisarz i tak go odmawia, `writeto`
+    przepisuje wszystkie) → zeznanie `(EXTNAME, 0xE9)` przy `hdu_index=0`. Uszkodzony DALSZY HDU:
+    odczyt wynikiem i wyjątkiem jak dawny odczyt po ścieżce (dawny `fileinfo` już doczytywał dalsze
+    HDU - `HDUList._wasresized` iteruje wszystkie, sonda 2026-10-21), więc zbiór wyjątków bez zmian.
+    Osłona dalszych HDU w zeznaniu: wyjątek ich doczytania → kopia niezbadana (`repo.NIEZBADANE`),
+    plik czytelny.
+    Falsyfikatory: detekcja tylko HDU wybranego → brak markera rozszerzenia; osłona zdjęta →
+    wyjątek z `read_fits_meta`."""
+    from dataclasses import replace
+    from horreum import repo
+    p = tmp_path / "dwa.fits"
+    fits.HDUList([fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)),
+                  fits.ImageHDU(data=np.zeros((2, 2), dtype=np.uint16), name="EXT")]).writeto(p)
+    raw = bytearray(p.read_bytes())
+    raw[raw.index(b"EXTNAME = 'EXT") + 12] = 0xE9
+    p.write_bytes(bytes(raw))
+    meta = read_fits_meta(str(p))
+    assert (meta.hdu_index, meta.nonprintable) == (0, ("EXTNAME", "0xE9"))
+    jeden = _fits_z_bajtem(tmp_path / "jeden.fits").read_bytes()
+    for nazwa, tresc in _dalsze_hdu_uszkodzone(jeden).items():
+        zly = tmp_path / f"{nazwa}.fits"
+        zly.write_bytes(tresc)
+        try:
+            dawny = _odczyt_po_sciezce(str(zly))
+        except OSError as exc:
+            with pytest.raises(type(exc), match=str(exc)):
+                read_fits_meta(str(zly))
+        else:
+            assert replace(read_fits_meta(str(zly)), nonprintable=None) == dawny, nazwa
+
+    def _pada(self):
+        raise OSError("Header missing END card.")
+    monkeypatch.setattr(fits.HDUList, "readall", _pada)
+    wynik = read_fits_meta(str(_fits_z_bajtem(tmp_path / "trzy.fits")))
+    assert wynik.nonprintable is repo.NIEZBADANE and wynik.header["OBSERVER"] == "Abc"
+
+
+@pytest.mark.parametrize("bajt, kod", [(0xE9, "0xE9"), (0xB0, "0xB0"), (0x07, "0x07"),
+                                       (0x7F, "0x7F"), (ord("?"), None), (ord(" "), None)])
+def test_zeznanie_skanu_rowne_odmowie_pisarza(tmp_path, bajt, kod):
+    """AR-299 (SPOT): marker skanu ⇔ odmowa pisarza `header_nonprintable` na tym samym pliku, z tą
+    samą kartą i bajtem - jeden predykat (`card_rules.bajt_spoza_ascii`).
+    Falsyfikator: inny zbiór drukowalnych w skanie (np. bez 0x7F) → rozjazd."""
+    from horreum import writeback
+    p = _fits_z_bajtem(tmp_path / "s" / "a.fits", bajt)
+    kopia = tmp_path / "w" / "a.fits"
+    kopia.parent.mkdir()
+    shutil.copyfile(p, kopia)
+    rec = scan_file(str(p))
+    res = writeback.write_changes(str(kopia), [writeback.WriteOp("EXPTIME", "set", "600.0", "float",
+                                                                 idx=0)], rec.header_hash)
+    if kod is None:
+        assert rec.nonprintable is None and res.status == "applied", res
+    else:
+        assert rec.nonprintable == ("OBSERVER", kod)
+        assert res.status == "blocked" and res.reason.code == "header_nonprintable", res
+        assert dict(res.reason.params) == {"keyword": "OBSERVER", "char": kod}
+
+
+def test_pytajnik_ten_sam_odcisk_bez_markera(tmp_path):
+    """AR-299: dosłowny `?` daje TEN SAM odcisk nagłówka co 0xE9 (astropy czyta bajt jako `?`), a mimo
+    to marker nie stoi - zeznanie bierze surowe bajty, nie odcisk. Kopia zbadana (czysto).
+    Falsyfikator: marker liczony z tekstu astropy → `?` oznaczony."""
+    a = scan_file(str(_fits_z_bajtem(tmp_path / "a.fits", ord("?"))))
+    b = scan_file(str(_fits_z_bajtem(tmp_path / "b.fits", 0xE9)))
+    assert a.header_hash == b.header_hash
+    assert (a.nonprintable, b.nonprintable) == (None, ("OBSERVER", "0xE9"))
+
+
+def test_xisf_z_litera_spoza_ascii_bez_markera(tmp_path):
+    """AR-299: XISF to UTF-8, a pisarz XISF bajtów innych kart nie rusza - litera spoza ASCII
+    w komentarzu karty nie jest zeznaniem; kopia XISF nie liczy się do niezbadanych.
+    Falsyfikator: detekcja wołana dla XISF → marker."""
+    from horreum import resolver
+    from test_card_rules import _xisf
+    root = tmp_path / "ARCH"
+    root.mkdir()
+    p = _xisf(root, "x.xisf", '<FITSKeyword name="OBSERVER" value="\'Jan\'" comment="kom é"/>'
+                              '<FITSKeyword name="IMAGETYP" value="\'Light\'" comment=""/>')
+    assert scan_file(str(p)).nonprintable is None
+    con = _db(tmp_path)
+    scan_tree(con, str(root), volume="V", now=NOW)
+    loc = _lokacja_bajtu(con, p)
+    assert loc["nonprintable_keyword"] is None
+    stan = resolver.review_state(con)
+    assert (stan.header_nonprintable, stan.header_nonprintable_unread) == (0, 0)
+    con.close()
+
+
+def test_import_nie_badal_bajtow_marker_zostaje_w1_bez_kubelka(tmp_path):
+    """AR-299: rekord bez zbadania surowych bajtów (import z dawcy - `ScanRecord` bez pola) przy tym
+    samym odcisku zostawia marker kopii; kopia, której plik stał się nieczytelny z inną treścią (W1
+    z degeneracją - odcisk NULL), wypada z kubełka i z niezbadanych (marker nie opisuje już nagłówka).
+    Falsyfikator: `NIE_BADANO` traktowane jak „czysto” → marker znika przy imporcie."""
+    from horreum import repo, resolver
+    p = _fits_z_bajtem(tmp_path / "a.fits", 0xE9)
+    con = _db(tmp_path)
+    rec = scan_file(str(p))
+    ingest_record(con, rec, volume="V", now=NOW, summary=ScanSummary())
+    bez = ScanRecord(path=rec.path, size_bytes=rec.size_bytes, mtime="2027-01-01T00:00:00+00:00",
+                     header=rec.header, sha1_data=rec.sha1_data, file_sha1=rec.file_sha1,
+                     header_hash=rec.header_hash, hdu_index=rec.hdu_index, compressed=rec.compressed,
+                     cards=rec.cards)
+    assert bez.nonprintable is repo.NIE_BADANO
+    ingest_record(con, bez, volume="V", now=NOW, summary=ScanSummary())
+    assert _lokacja_bajtu(con, p)["nonprintable_keyword"] == "OBSERVER"
+    assert resolver.review_state(con).header_nonprintable == 1
+    w1 = ScanRecord(path=rec.path, size_bytes=rec.size_bytes, mtime="2027-02-01T00:00:00+00:00",
+                    header=None, error="OSError: zepsuty", error_kind="parse", sha1_data=None,
+                    file_sha1="inny")
+    ingest_record(con, w1, volume="V", now=NOW, summary=ScanSummary())
+    stan = resolver.review_state(con)
+    assert (stan.header_nonprintable, stan.header_nonprintable_unread) == (0, 0)
+    con.close()
+
+
+def test_kubelek_tylko_obecne_aktywne_przy_biezacym_odcisku(tmp_path):
+    """AR-299: kubełek = klatki aktywne z OBECNĄ kopią z markerem przy bieżącym odcisku; marker przy
+    odcisku starszym → kopia niezbadana (nie w kubełku); kopia nieobecna, klatka zastąpiona albo
+    wycofana - poza. Perspektywa czyta ten sam zbiór (`queries.header_nonprintable_frame_ids`).
+    Falsyfikator: predykat bez `nonprintable_hash = header_hash` → stary marker liczony."""
+    from horreum import repo, resolver
+    from horreum.gui import queries
+    p = _fits_z_bajtem(tmp_path / "a.fits", 0xE9)
+    con = _db(tmp_path)
+    ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary())
+    lid, fid = con.execute("SELECT id, frame_id FROM location").fetchone()
+    assert resolver.nonprintable_frame_ids(con) == queries.header_nonprintable_frame_ids(con) == {fid}
+    with con:                                          # stan „odcisk zmieniony bez zbadania”
+        bez_faktow = ", ".join(f"{k} = NULL" for k in repo.COPY_FACTS)
+        con.execute(f"UPDATE location SET header_hash = 'inny', {bez_faktow} WHERE id = ?", (lid,))
+    assert resolver.nonprintable_frame_ids(con) == set()
+    assert [r["id"] for r in resolver.nonprintable_unread_locations(con)] == [lid]
+    with con:
+        con.execute("UPDATE location SET header_hash = nonprintable_hash, present = 0 WHERE id = ?",
+                    (lid,))
+    assert resolver.nonprintable_frame_ids(con) == set()
+    assert resolver.nonprintable_unread_locations(con) == []
+    with con:
+        con.execute("UPDATE location SET present = 1 WHERE id = ?", (lid,))
+        con.execute("UPDATE frame SET retired_at = 't' WHERE id = ?", (fid,))
+    assert resolver.nonprintable_frame_ids(con) == set()
+    con.close()
+
+
+def _odczyt_po_sciezce(path):
+    """Dawny odczyt `read_fits_meta` (astropy po ścieżce, bez zeznania bajtu) - wzorzec porównania."""
+    with fits.open(path, mode="readonly", memmap=False) as hdul:
+        index, hdu = scan_module._select_hdu(hdul)
+        hdr = hdu.header
+        info = hdul.fileinfo(index)
+        return scan_module.FitsMeta(
+            header=scan_module._header_to_dict(hdr), cards=scan_module._parse_cards(hdr),
+            header_hash=scan_module._header_hash(hdr), hdu_index=index,
+            compressed=1 if isinstance(hdu, fits.CompImageHDU) else 0,
+            datloc=info["datLoc"], datspan=info["datSpan"])
+
+
+def test_odczyt_przez_uchwyt_rowny_odczytowi_po_sciezce(tmp_path):
+    """AR-299: `read_fits_meta` czyta przez własny uchwyt (zeznanie bajtu bez drugiego otwarcia) -
+    wszystkie pola zeznania jak dawny odczyt po ścieżce dla FITS 1-HDU, 2-HDU i skompresowanego
+    mastera (`CompImageHDU`, HDU wybrane = 1); pliki zepsute - ten sam wyjątek.
+    Falsyfikator: pozycja danych z `fileinfo(0)` → rozjazd na skompresowanym."""
+    from dataclasses import replace
+    pliki = [_fits_z_bajtem(tmp_path / "jeden.fits")]
+    dwa = tmp_path / "dwa.fits"
+    fits.HDUList([fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)),
+                  fits.ImageHDU(data=np.ones((2, 2), dtype=np.uint16))]).writeto(dwa)
+    komp = tmp_path / "komp.fits"
+    fits.HDUList([fits.PrimaryHDU(), fits.CompImageHDU(data=np.arange(64, dtype=np.int16)
+                                                         .reshape(8, 8))]).writeto(komp)
+    pliki += [dwa, komp]
+    for p in pliki:
+        assert replace(read_fits_meta(str(p)), nonprintable=None) == _odczyt_po_sciezce(str(p)), p
+    assert read_fits_meta(str(komp)).hdu_index == 1
+    for nazwa, tresc in (("pusty", b""), ("smieci", bytes(range(256)) * 20)):
+        zly = tmp_path / f"{nazwa}.fits"
+        zly.write_bytes(tresc)
+        with pytest.raises(OSError) as nowy:
+            read_fits_meta(str(zly))
+        with pytest.raises(OSError) as dawny:
+            _odczyt_po_sciezce(str(zly))
+        assert (type(nowy.value), str(nowy.value)) == (type(dawny.value), str(dawny.value))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="blokada udziału pliku - wyłącznie Windows")
+def test_uchwyt_zamkniety_po_wyjatku_i_blokada_pliku(tmp_path):
+    """AR-299: po wyjątku astropy własny uchwyt jest zamknięty (plik da się skasować); plik otwarty
+    bez współdzielenia (naruszenie udziału) - odczyt przez uchwyt i dawny odczyt po ścieżce dają ten
+    sam `PermissionError` z tym samym `errno`/`winerror` (CRT podaje `errno 13`).
+    Falsyfikator: uchwyt bez `with` → skasowanie odmawia."""
+    import ctypes
+    from ctypes import wintypes
+    bez_end = tmp_path / "bez_end.fits"
+    bez_end.write_bytes(b"SIMPLE  =                    T".ljust(80) + b" " * 2800)
+    with pytest.raises(OSError):
+        read_fits_meta(str(bez_end))
+    os.remove(bez_end)
+    assert not bez_end.exists()
+    p = _fits_z_bajtem(tmp_path / "zablokowany.fits")
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    uchwyt = k32.CreateFileW(str(p), 0x80000000, 0, None, 3, 0x80, None)   # GENERIC_READ, bez share
+    assert uchwyt not in (None, wintypes.HANDLE(-1).value)
+    try:
+        with pytest.raises(PermissionError) as nowy:
+            read_fits_meta(str(p))
+        with pytest.raises(PermissionError) as dawny:
+            _odczyt_po_sciezce(str(p))
+        assert (nowy.value.errno, nowy.value.winerror) == (dawny.value.errno, dawny.value.winerror)
+        assert scan_module.unreadable_kind_of(nowy.value) == "io"
+    finally:
+        k32.CloseHandle(uchwyt)
+
+
+def test_odczyty_wiersza_sterownika_bez_wiersza(tmp_path):
+    """AR-299: lokacja, która zniknęła między doborem kandydatów a zapisem - odczyty wiersza sterownika
+    uzupełnień mówią „brak” (`_zbadana` → `False`, `_odcisk_lokacji` → `None`), bez `TypeError`.
+    Falsyfikator: `fetchone()[0]` bez strażnika → wyjątek."""
+    con = _db(tmp_path)
+    assert scan_module._zbadana(con, 999) is False
+    assert scan_module._odcisk_lokacji(con, 999) is None
+    con.close()

@@ -1067,6 +1067,11 @@ class ReviewState:
     # jej rozjazd z teleskopem nie jest brakiem. Predykat: `optics_mismatch_frame_ids`.
     focal_mismatch: int = 0   # ogniskowa pliku > `OPTICS_TOLERANCE` od teleskopu (wybór ręki z listy)
     f_ratio_mismatch: int = 0  # f/ pliku > `OPTICS_TOLERANCE` od teleskopu (naprawa pliku na życzenie)
+    # BAJT SPOZA ASCII W SUROWYM NAGŁÓWKU KOPII FITS (AR-299, 0046) - POZA `total` z tego samego powodu
+    # co optyka: klatka oś ma, brak dotyczy zapisywalności kopii. Predykaty: `nonprintable_frame_ids`
+    # (klatki), `nonprintable_unread_locations` (KOPIE niezbadane - „nie wiem”, nie zero).
+    header_nonprintable: int = 0          # klatki z kopią, której nagłówka pisarz nie zapisze
+    header_nonprintable_unread: int = 0   # kopie FITS niezbadane przy bieżącym odcisku nagłówka
 
 
 # Rodzaje awarii odczytu kopii w kolejności raportu (P4-2): `io` dysk/dostęp, `parse` nagłówek,
@@ -1182,7 +1187,42 @@ def review_state(con):
                        kind_unknown=kind_unknown, unreadable=unreadable, total=total,
                        unreadable_kinds=unreadable_kinds,
                        focal_mismatch=len(optics_mismatch_frame_ids(con, "focal")),
-                       f_ratio_mismatch=len(optics_mismatch_frame_ids(con, "f_ratio")))
+                       f_ratio_mismatch=len(optics_mismatch_frame_ids(con, "f_ratio")),
+                       header_nonprintable=len(nonprintable_frame_ids(con)),
+                       header_nonprintable_unread=len(nonprintable_unread_locations(con)))
+
+
+def nonprintable_frame_ids(con):
+    """Klatki z kopią, której surowy nagłówek FITS ma bajt spoza drukowalnego ASCII (AR-299, 0046) -
+    JEDYNY właściciel predykatu kubełka Porządków „Nagłówek z bajtem spoza ASCII” i trimu perspektywy
+    (`gui.queries.header_nonprintable_frame_ids`). Read-only; `set` id klatek.
+
+    Warunki: klatka aktywna (`superseded_by`/`retired_at` NULL); kopia OBECNA (kopia, której nie ma,
+    nie jest robotą zapisu); marker przy BIEŻĄCYM odcisku (`nonprintable_hash = header_hash`) - marker
+    przy odcisku starszym opisuje nagłówek, którego już nie ma, i kopia wraca do niezbadanych."""
+    return {r[0] for r in con.execute(
+        "SELECT DISTINCT f.id FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE l.nonprintable_keyword IS NOT NULL AND l.nonprintable_hash = l.header_hash "
+        "AND l.present = 1 AND f.superseded_by IS NULL AND f.retired_at IS NULL").fetchall()}
+
+
+def nonprintable_unread_locations(con):
+    """KOPIE FITS NIEZBADANE (AR-299, 0046): obecne, klatek aktywnych, o znanym odcisku nagłówka, bez
+    zbadania surowych bajtów przy tym odcisku (`nonprintable_hash IS NOT header_hash`) - JEDYNY
+    właściciel predykatu licznika „niesprawdzone” w Porządkach i kandydatów zbadania etapu uzupełnień
+    Dostawy (`scan.copy_facts_candidates`). Licznik liczy wszystkie (kopia nieczytelna albo izolowana
+    to też „nie wiem”); sterownik odsiewa je kolumnami `unreadable_since` i `izolowana` (te same
+    bramki co kandydaci faktów kopii). Wiersze w kształcie kandydatów faktów kopii (+ dwie kolumny),
+    po `id`."""
+    return con.execute(
+        "SELECT l.id, l.volume, l.path, l.header_hash, l.hdr_hash, l.hdr_rule, l.unreadable_since, "
+        "       EXISTS (SELECT 1 FROM inplace_op o WHERE o.location_id = l.id "
+        "               AND o.phase IN (SELECT value FROM json_each(?))) AS izolowana "
+        "FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE f.filetype = 'fits' AND l.present = 1 AND l.header_hash IS NOT NULL "
+        "AND (l.nonprintable_hash IS NULL OR l.nonprintable_hash <> l.header_hash) "
+        "AND f.superseded_by IS NULL AND f.retired_at IS NULL ORDER BY l.id",
+        (json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),)).fetchall()
 
 
 OPTICS_FIELDS = ("focal", "f_ratio")

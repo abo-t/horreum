@@ -601,6 +601,8 @@ CATALOG = {
     "wb.copy_sentence": {"pl": "Kopiuj zdanie", "en": "Copy sentence"},
     "wb.copy_detail": {"pl": "Kopiuj szczegół", "en": "Copy details"},
     "wb.copy_selection": {"pl": "Kopiuj zaznaczenie", "en": "Copy selection"},
+    # AR-309: samo polecenie wiersza poleceń ze szczegółu (`EtykietaBledu.ustaw(polecenie=)`).
+    "wb.copy_command": {"pl": "Kopiuj polecenie", "en": "Copy command"},
     # Cofnięcie przerwane na żądanie (AR-176): ile nieprzetworzonych backupów nie ma trwałego dowodu
     # zakończenia (`UndoResult.remaining`) - wymagają sprawdzenia ponowieniem; zero - bez obietnicy.
     "wb.undo_cancelled_check": {
@@ -629,6 +631,38 @@ CATALOG = {
     "wb.undo_short": {"pl": " - cofnięcie: {cmd}", "en": " - to undo: {cmd}"},
     "wb.undo_cli_tip": {"pl": "Cofnięcie commitu {id} po zamknięciu okna (wiersz poleceń):\n{cli}",
                         "en": "Undo commit {id} after closing the window (command line):\n{cli}"},
+    # Recepta paska po zamknięciu okna kart (AR-296): cofnięcie commitu jednym kliknięciem z Porządków.
+    "wb.undo_recipe": {"pl": "Cofnij zapis (commit {id})", "en": "Undo the write (commit {id})"},
+    "wb.undo_recipe_busy": {
+        "pl": "Cofnięcie zapisu (commit {id}) czeka, aż skończy się etap Dostawy - po nim recepta wróci "
+              "w Porządkach.",
+        "en": "Undoing the write (commit {id}) waits for the Intake stage to finish - the recipe comes back "
+              "in Housekeeping after it."},
+    "wb.undo_recipe_foreign": {
+        "pl": "Cofnięcie zapisu (commit {id}) czeka, aż skończy się zapis do plików w Zbiorach - po nim "
+              "recepta wróci w Porządkach.",
+        "en": "Undoing the write (commit {id}) waits for the file write in Collections to finish - the "
+              "recipe comes back in Housekeeping after it."},
+    "wb.undo_recipe_ready": {
+        "pl": "Cofnięcie zapisu (commit {id}) znów możliwe - recepta stoi w Porządkach.",
+        "en": "Undoing the write (commit {id}) is possible again - the recipe is in Housekeeping."},
+    "wb.undo_recipe_started": {"pl": "Cofam zapis (commit {id})…", "en": "Undoing the write (commit {id})…"},
+    "wb.undo_recipe_progress": {"pl": "Cofam zapis (commit {id}): {done}/{total}",
+                                "en": "Undoing the write (commit {id}): {done}/{total}"},
+    # Wynik niedomknięty pada też poza Porządkami - zdanie mówi, gdzie stoi przycisk, który nazywa.
+    "wb.undo_recipe_place": {"pl": " (w Porządkach)", "en": " (in Housekeeping)"},
+    # Po zapisie kart przeszło „Rozwiąż” - obiekt z karty zostaje w bazie po jej cofnięciu (AR-296).
+    "wb.undo_recipe_object_note": {
+        "pl": " · obiekt z cofniętej karty zostaje w bazie (klatki: {n})",
+        "en": " · the object from the undone card stays in the database (frames: {n})"},
+    "wb.undo_recipe_tip_busy": {
+        "pl": "Cofnięcie zapisu z paska właśnie pisze do plików - poczekaj na jego koniec.",
+        "en": "Undoing the write from the status bar is writing to files right now - wait for it to finish."},
+    # Straż przełączenia bazy w biegu zapisu do plików (AR-296, `MainWindow._odmowa_w_biegu_zapisu`).
+    "wb.undo_switch_refused": {
+        "pl": "Zapis do plików trwa - bazę przełączysz, gdy się skończy i pokaże wynik.",
+        "en": "Writing to files is in progress - you can switch the database once it finishes and shows "
+              "its result."},
     # Plik „już cofnięty” w wyniku cofnięcia - stan docelowy, nie blokada (AR-160).
     "wb.undo_already": {
         "pl": {"one": "{n} już cofnięty", "few": "{n} już cofnięte", "many": "{n} już cofniętych"},
@@ -1535,6 +1569,18 @@ CATALOG = {
         "pl": {"one": "{n} perspektywę zapisano", "few": "{n} perspektywy zapisano",
                "many": "{n} perspektyw zapisano"},
         "en": {"one": "{n} perspective saved", "other": "{n} perspectives saved"}},
+    # AR-304: „Odrzuć” przebiegu szuflady z poprzedniej sesji - liczba zmian z ładunku `staging.discarded`.
+    "home.gest.staging_discarded": {
+        "pl": {"one": "odrzucono {n} zmianę z poprzedniej sesji", "few": "odrzucono {n} zmiany z poprzedniej sesji",
+               "many": "odrzucono {n} zmian z poprzedniej sesji"},
+        "en": {"one": "{n} change from the previous session discarded",
+               "other": "{n} changes from the previous session discarded"}},
+    "home.gest.staging_discarded_names": {
+        "pl": {"one": "odrzucono {n} zmianę nazwy z poprzedniej sesji",
+               "few": "odrzucono {n} zmiany nazw z poprzedniej sesji",
+               "many": "odrzucono {n} zmian nazw z poprzedniej sesji"},
+        "en": {"one": "{n} name change from the previous session discarded",
+               "other": "{n} name changes from the previous session discarded"}},
 
     # --- PLANER CELÓW (T5): nagłówek nocy, komórki listy, noty ---------------------------------
     # Świadomie BEZ badge'a przy pozycji nav (D-0731-6): „ile do zrobienia" zależy od suwaka
@@ -1826,14 +1872,30 @@ CATALOG = {
     "grid.sel.frame": {"pl": "Klatka", "en": "Frame"},
     "grid.sel.frame_retire": {"pl": "Wycofaj klatkę…", "en": "Retire frame…"},
     "grid.sel.frame_restore": {"pl": "Przywróć klatkę", "en": "Restore frame"},
+    # Wpis mnogi (AR-306): `t(..., n=)` dawało „Wycofać 1 zaznaczonych klatek?”.
     "grid.sel.frame_retire_ask": {
-        "pl": "Wycofać {n} zaznaczonych klatek?  Wycofanie zamyka sprawę klatki, której pliku "
-              "już nie ma na dysku: wypadnie z kolejek roboczych, ale ZOSTANIE w archiwum "
-              "i w godzinach. Gest można cofnąć (Klatka ▾ → Przywróć klatkę).",
-        "en": "Retire {n} selected frames?  Retiring closes the case of a frame whose file is "
-              "gone from disk: it drops out of the work queues but STAYS in the archive and in "
-              "the exposure hours. You can undo this (Frame ▾ → Restore frame).",
+        "pl": {"one": "Wycofać {n} zaznaczoną klatkę?  Wycofanie zamyka sprawę klatki, której pliku "
+                      "już nie ma na dysku: wypadnie z kolejek roboczych, ale ZOSTANIE w archiwum "
+                      "i w godzinach. Gest można cofnąć (Klatka ▾ → Przywróć klatkę).",
+               "few": "Wycofać {n} zaznaczone klatki?  Wycofanie zamyka sprawę klatki, której pliku "
+                      "już nie ma na dysku: wypadnie z kolejek roboczych, ale ZOSTANIE w archiwum "
+                      "i w godzinach. Gest można cofnąć (Klatka ▾ → Przywróć klatkę).",
+               "many": "Wycofać {n} zaznaczonych klatek?  Wycofanie zamyka sprawę klatki, której "
+                       "pliku już nie ma na dysku: wypadnie z kolejek roboczych, ale ZOSTANIE "
+                       "w archiwum i w godzinach. Gest można cofnąć (Klatka ▾ → Przywróć klatkę)."},
+        "en": {"one": "Retire {n} selected frame?  Retiring closes the case of a frame whose file is "
+                      "gone from disk: it drops out of the work queues but STAYS in the archive and "
+                      "in the exposure hours. You can undo this (Frame ▾ → Restore frame).",
+               "other": "Retire {n} selected frames?  Retiring closes the case of a frame whose file "
+                        "is gone from disk: it drops out of the work queues but STAYS in the archive "
+                        "and in the exposure hours. You can undo this (Frame ▾ → Restore frame)."},
     },
+    # Przyciski okna potwierdzenia z katalogu (AR-306) - Qt bez tłumacza mówi „Yes/No”.
+    "grid.sel.frame_retire_ok": {
+        "pl": {"one": "Wycofaj {n} klatkę", "few": "Wycofaj {n} klatki", "many": "Wycofaj {n} klatek"},
+        "en": {"one": "Retire {n} frame", "other": "Retire {n} frames"},
+    },
+    "grid.sel.frame_retire_cancel": {"pl": "Anuluj", "en": "Cancel"},
     # Odmiana po `{n}` = wszystkich klatkach gestu (dopełniacz po „z": „z 1 klatki", „z 5 klatek"),
     # wzorem `object.assigned` - „Przywrócono 1 z 1 klatek" czytało się jak błąd.
     "grid.sel.frame_retired": {
@@ -1964,6 +2026,31 @@ CATALOG = {
         "en": "No database — open or create one (File menu).",
     },
     "main.db_loaded": {"pl": "Baza: {path}", "en": "Database: {path}"},
+    # Okno błędu programu (AR-302, straż `sys.excepthook` w `main`): wyjątek ze slotu Qt albo wątku tła,
+    # którego nikt nie złapał - w wydaniu okienkowym (bez konsoli) przepadał bez śladu.
+    "main.prog_error.title": {"pl": "Błąd programu", "en": "Program error"},
+    # `{msg}` dla błędu programu (szczegół stoi w oknie, nie w podpowiedzi); klasa bazy/systemu mówi swoim zdaniem.
+    "main.prog_error.what": {"pl": "błąd programu", "en": "a program error"},
+    "main.prog_error.text": {
+        "pl": "Ostatnia czynność przerwana: {msg}. Okno działa dalej - szczegół niżej przyda się w zgłoszeniu.",
+        "en": "The last action was interrupted: {msg}. The window keeps working - the details below help "
+              "in a bug report.",
+    },
+    # Błąd startu (budowa okna, otwarcie bazy startowej): okno główne schowane, „Zamknij” kończy program.
+    "main.prog_error.text_start": {
+        "pl": "Program nie wystartował: {msg}. „Zamknij” kończy program - szczegół niżej przyda się w zgłoszeniu.",
+        "en": "The program did not start: {msg}. “Close” ends the program - the details below help in a bug "
+              "report.",
+    },
+    "main.prog_error.more": {
+        "pl": {"one": "Od pokazania tego okna: jeszcze {n} błąd.",
+               "few": "Od pokazania tego okna: jeszcze {n} błędy.",
+               "many": "Od pokazania tego okna: jeszcze {n} błędów."},
+        "en": {"one": "Since this window appeared: {n} more error.",
+               "other": "Since this window appeared: {n} more errors."},
+    },
+    "main.prog_error.copy": {"pl": "Kopiuj szczegół", "en": "Copy details"},
+    "main.prog_error.close": {"pl": "Zamknij", "en": "Close"},
     # AR-69: baza zapisana nowszym Horreum - odmowa, zanim program cokolwiek w niej zmieni.
     "main.db_too_new": {
         "pl": "Baza {name} pochodzi z nowszej wersji Horreum (schemat v{found}), a ten program "
@@ -2328,6 +2415,9 @@ CATALOG = {
                                  "en": "Fields (columns) - coverage not refreshed"},
     "grid.fields.failed_status": {"pl": "Nie policzyłem pokrycia pól: {msg}",
                                   "en": "Could not count field coverage: {msg}"},
+    # Skład zbioru padł dwa razy w wątku tła (AR-302): tabela zostaje przy zbiorze poprzednim.
+    "grid.zbior.failed_status": {"pl": "Zbiór się nie odświeżył - tabela pokazuje stan poprzedni: {msg}",
+                                 "en": "The set was not refreshed - the table shows the previous state: {msg}"},
 
     # --- akcje kling (wspólne makro+rename) ---
     "grid.action.preview": {"pl": "Podgląd", "en": "Preview"},
@@ -3374,6 +3464,40 @@ CATALOG = {
     "grid.drawer.lock_error": {
         "pl": "Nie da się założyć blokady szuflady obok pliku bazy ({detail}) - szuflada nie przyjmuje zmian",
         "en": "Cannot create the drawer lock next to the database file ({detail}) - the drawer takes no changes"},
+    # AR-308: przebieg zatrzymany izolacją zapisu w miejscu - pusta szuflada mówi, ile zmian czeka i co je
+    # zwolni (`FramesView._zdanie_izolacji`); gest, który zamknie ostatnią izolację, podejmie je w tej sesji.
+    "grid.drawer.pending_isolated": {
+        "pl": {"one": "{n} zmiana czeka, aż rozstrzygniesz zapis w miejscu",
+               "few": "{n} zmiany czekają, aż rozstrzygniesz zapis w miejscu",
+               "many": "{n} zmian czeka, aż rozstrzygniesz zapis w miejscu"},
+        "en": {"one": "{n} change waits for an in-place write to be settled",
+               "other": "{n} changes wait for an in-place write to be settled"}},
+    "grid.drawer.isolated_finish": {
+        "pl": "najpierw „{finish}”: {nav} → „{row}” - potem szuflada sama je podejmie",
+        "en": "first “{finish}”: {nav} → “{row}” - then the drawer picks them up by itself"},
+    "grid.drawer.isolated_torn": {
+        "pl": "najpierw „{restore}” albo „{release}”: {nav} → „{row}” - potem szuflada sama je podejmie",
+        "en": "first “{restore}” or “{release}”: {nav} → “{row}” - then the drawer picks them up by itself"},
+    "grid.drawer.isolated_more": {
+        "pl": {"one": "czeka też {n} zmiana zatrzymana zapisem w miejscu",
+               "few": "czekają też {n} zmiany zatrzymane zapisem w miejscu",
+               "many": "czeka też {n} zmian zatrzymanych zapisem w miejscu"},
+        "en": {"one": "{n} more change held by an in-place write is also waiting",
+               "other": "{n} more changes held by an in-place write are also waiting"}},
+    "grid.drawer.isolated_ready": {
+        "pl": {"one": "{n} zmiana zwolniona z zapisu w miejscu czeka - szuflada podejmie ją, gdy się zwolni",
+               "few": "{n} zmiany zwolnione z zapisu w miejscu czekają - szuflada podejmie je, gdy się zwolni",
+               "many": "{n} zmian zwolnionych z zapisu w miejscu czeka - szuflada podejmie je, gdy się zwolni"},
+        "en": {"one": "{n} change released from the in-place write is waiting - the drawer picks it up once "
+                      "it is free",
+               "other": "{n} changes released from the in-place write are waiting - the drawer picks them up "
+                        "once it is free"}},
+    # Etykieta pustej szuflady, gdy przebieg zwolniony z izolacji czeka, a szuflada go nie podjęła (zajęta,
+    # cudza blokada) - zamiast pustostanu przy zachowanych wpisach.
+    "grid.drawer.pending_ready": {
+        "pl": {"one": "{n} zmiana czeka na podjęcie", "few": "{n} zmiany czekają na podjęcie",
+               "many": "{n} zmian czeka na podjęcie"},
+        "en": {"one": "{n} change waiting to be picked up", "other": "{n} changes waiting to be picked up"}},
     "grid.action.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "grid.action.commit": {"pl": "Zatwierdź", "en": "Commit"},
     "grid.action.reject": {"pl": "Odrzuć", "en": "Discard"},
@@ -3388,6 +3512,9 @@ CATALOG = {
     "grid.persp.unknown": {"pl": "Nieznana perspektywa: {name}", "en": "Unknown perspective: {name}"},
     "grid.persp.save_title": {"pl": "Zapisz perspektywę", "en": "Save perspective"},
     "grid.persp.save_prompt": {"pl": "Nazwa:", "en": "Name:"},
+    # Przyciski okna nazwy z katalogu (AR-306) - Qt bez tłumacza mówi „Cancel”.
+    "grid.persp.save_ok": {"pl": "Zapisz", "en": "Save"},
+    "grid.persp.save_cancel": {"pl": "Anuluj", "en": "Cancel"},
     "grid.persp.saved": {"pl": "Zapisano perspektywę „{name}”", "en": "Perspective “{name}” saved"},
     # I-1: perspektywa mieszka w BAZIE, więc ta sama nazwa bywa przyjechana z drugiej maszyny.
     # Nadpisanie musi być POWIEDZIANE — „zapisano" mówiłoby o czymś, co się nie stało.
@@ -4628,7 +4755,9 @@ CATALOG = {
     },
     "proj.probing": {"pl": "Sprawdzam cel (podgląd, bez zmian na dysku)…",
                      "en": "Checking the target (preview, no disk changes)…"},
-    "proj.dry_failed": {"pl": "Nie można: {msg}", "en": "Cannot: {msg}"},
+    # Zdanie z czynnością (jak `harvest.dry_failed`): samo „Nie można:” przed błędem programu
+    # nie mówiło, czego nie można.
+    "proj.dry_failed": {"pl": "Nie można policzyć podglądu: {msg}", "en": "Cannot compute the preview: {msg}"},
     "proj.note_forced_copy": {"pl": "wymuszona kopia bajtów", "en": "forced byte copy"},
     "proj.note_other_vol": {"pl": "inny wolumen → kopia bajtów", "en": "other volume → byte copy"},
     "proj.note_same_vol": {
@@ -5136,7 +5265,8 @@ CATALOG = {
         "pl": "Czytam pliki wyjścia i ich historię (podgląd, bez zmian na dysku)…",
         "en": "Reading the output files and their history (preview, no disk changes)…",
     },
-    "harvest.dry_failed": {"pl": "Nie można: {msg}", "en": "Cannot: {msg}"},
+    # Zdanie z czynnością (wizytacja natywna, AR-301): „Nie można: błąd programu” nie mówiło, czego nie można.
+    "harvest.dry_failed": {"pl": "Nie można policzyć podglądu: {msg}", "en": "Cannot compute the preview: {msg}"},
     "harvest.head_dry": {
         "pl": "Do wciągnięcia {place} · już w archiwum {exists} · do przeglądu {review}",
         "en": "To take in {place} · already in the archive {exists} · to review {review}",
@@ -6337,6 +6467,8 @@ CATALOG = {
         "pl": "np. przywrócony z pełnej kopii, porównany hashem",
         "en": "e.g. restored from a full copy, compared by hash"},
     "grid.inplace.release_ok": {"pl": "Zwolnij", "en": "Release"},
+    # Z katalogu (AR-306) - standardowy przycisk Qt bez tłumacza mówi „Cancel”.
+    "grid.inplace.release_cancel": {"pl": "Anuluj", "en": "Cancel"},
     "grid.inplace.release_need_reason": {
         "pl": "Wpisz powód - zwolnienie to Twoje rozstrzygnięcie i zostaje w dzienniku.",
         "en": "Enter a reason - releasing is your decision and stays in the log."},
@@ -6496,9 +6628,11 @@ CATALOG = {
     "objchg.bar.undo_short": {"pl": " · cofnięcie: polecenie pod kursorem („{copy}”)",
                               "en": " · to undo: command under the cursor (“{copy}”)"},
     "objchg.bar.undo_cli": {"pl": "Cofnięcie przebiegu {run_id} po zamknięciu okna (wiersz "
-                                  "poleceń):\nhorreum object-change undo \"{db}\" {run_id}",
-                            "en": "Undo run {run_id} after closing the window (command line):\n"
-                                  "horreum object-change undo \"{db}\" {run_id}"},
+                                  "poleceń):\n{cli}",
+                            "en": "Undo run {run_id} after closing the window (command line):\n{cli}"},
+    # Samo polecenie cofnięcia przebiegu - pole polecenia nośnika zdania („Kopiuj polecenie”, AR-309).
+    "objchg.cli_undo": {"pl": "horreum object-change undo \"{db}\" {run_id}",
+                        "en": "horreum object-change undo \"{db}\" {run_id}"},
     "objchg.explain_align": {
         "pl": "Obiekt w bazie zostaje. Plik jedzie do folderu swojego obiektu, a karta OBJECT "
               "dostaje jego formę - per plik razem albo wcale. „Cofnij” działa, dopóki okno jest "
@@ -7742,6 +7876,11 @@ CATALOG = {
               "zapisze tego nagłówka bez zmiany tego bajtu; plik nietknięty",
         "en": "card {keyword} has byte {char} outside printable ASCII in the file - Horreum "
               "cannot write this header without changing that byte; file untouched"},
+    # Nota za odmową bajtu przy commicie, gdy status wpisów nie wszedł do bazy (AR-299).
+    "objchg.item.pending_status_not_saved": {
+        "pl": "status wpisów NIE zapisany w bazie (mogą dalej czekać w szufladzie): {detail}",
+        "en": "the entry status was NOT saved in the database (entries may still wait in the "
+              "drawer): {detail}"},
     "objchg.item.macro_manual_many": {
         "pl": "keyword '{keyword}' ma wiele wystąpień -- edycja ręczna poza krokiem 4",
         "en": "keyword '{keyword}' occurs more than once - manual editing is outside step 4"},
@@ -7854,6 +7993,9 @@ CATALOG = {
     # szczegół pod kursorem, nie w zdaniu.
     "objchg.item.prog_error": {"pl": "błąd programu - szczegół w podpowiedzi",
                                "en": "a program error - details in the tooltip"},
+    # Błąd wejścia (AR-301, `item_reasons.powod_sciezki_wejscia`): znak, którego ścieżka nie przyjmie.
+    "objchg.item.path_bad_char": {"pl": "ścieżka zawiera niedozwolony znak: {char}",
+                                  "en": "the path contains a character that is not allowed: {char}"},
     # Naprawa manifestu wydania obiektu (`projection.repair_manifest`, AR-213): odmowy zapisu
     # manifestu nad drzewem, które już leży w celu. PL = zdanie rdzenia znak w znak.
     "objchg.item.proj_manifest_incomplete": {
@@ -8389,6 +8531,47 @@ CATALOG = {
     "grid.criteria.only_f_ratio_mismatch": {
         "pl": "tylko f/ w pliku niezgodna z teleskopem",
         "en": "only f/ in the file disagreeing with the telescope"},
+    # Bajt spoza drukowalnego ASCII w surowym nagłówku kopii FITS (AR-299, 0046): wiersz Porządków,
+    # jego kopie niezbadane („?” / „N+”, jak `tasks.copies_unread`) i perspektywa w Zbiorach.
+    "tasks.header_nonprintable_frames": {"pl": "Nagłówek z bajtem spoza ASCII",
+                                         "en": "Header with a non-ASCII byte"},
+    "tasks.header_nonprintable_tip": {
+        "pl": "Karta w nagłówku tych plików FITS ma bajt spoza drukowalnego ASCII (np. polską "
+              "literę) - Horreum nie zapisze ich nagłówków, żeby tego bajtu nie zmienić.\nPopraw "
+              "kartę programem, który zapisał plik; skan przeczyta plik ponownie, gdy zmieni się jego "
+              "data modyfikacji.",
+        "en": "A card in the header of these FITS files has a byte outside printable ASCII (e.g. a "
+              "national letter) - Horreum will not write their headers, so as not to change that "
+              "byte.\nFix the card in the program that wrote the file; the scan reads the file again "
+              "when its modification time changes."},
+    "tasks.header_nonprintable_unread": {
+        "pl": {"one": "? · {n} kopia niesprawdzona", "few": "? · {n} kopie niesprawdzone",
+               "many": "? · {n} kopii niesprawdzonych"},
+        "en": {"one": "? · {n} copy not yet checked", "other": "? · {n} copies not yet checked"},
+    },
+    "tasks.header_nonprintable_partial": {
+        "pl": {"one": "{m}+ · {n} kopia niesprawdzona", "few": "{m}+ · {n} kopie niesprawdzone",
+               "many": "{m}+ · {n} kopii niesprawdzonych"},
+        "en": {"one": "{m}+ · {n} copy not yet checked",
+               "other": "{m}+ · {n} copies not yet checked"},
+    },
+    "tasks.header_nonprintable_unread_tip": {
+        "pl": {"one": "{n} kopia FITS czeka na sprawdzenie surowego nagłówka - zrobi to etap "
+                      "„{etap}” w Dostawie (sam odczyt nagłówków).",
+               "few": "{n} kopie FITS czekają na sprawdzenie surowego nagłówka - zrobi to etap "
+                      "„{etap}” w Dostawie (sam odczyt nagłówków).",
+               "many": "{n} kopii FITS czeka na sprawdzenie surowego nagłówka - zrobi to etap "
+                       "„{etap}” w Dostawie (sam odczyt nagłówków)."},
+        "en": {"one": "{n} FITS copy waits for its raw header to be checked - the “{etap}” stage "
+                      "in Intake does it (header reads only).",
+               "other": "{n} FITS copies wait for their raw headers to be checked - the “{etap}” "
+                        "stage in Intake does it (header reads only)."},
+    },
+    "perspective.header_nonprintable": {"pl": "Bajt spoza ASCII w nagłówku",
+                                        "en": "Non-ASCII byte in header"},
+    "grid.criteria.only_header_nonprintable": {
+        "pl": "tylko kopia z bajtem spoza ASCII w nagłówku",
+        "en": "only a copy with a non-ASCII byte in the header"},
     "grid.optics.fix_action": {"pl": "Popraw f/ w plikach (zgodnie z teleskopem)…",
                                "en": "Fix f/ in the files (to match the telescope)…"},
     "grid.optics.fix_tip": {

@@ -225,7 +225,7 @@ def test_szuflada_wraca_do_zdania_sprzed_gestu_takze_po_awarii_gestu(widok, monk
     _pozycje_kopii(v)[1].trigger()
     v._menu_tabeli.hide()
     assert _po_gescie(v)
-    blad = i18n.t("grid.wb.error", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+    blad = i18n.t("grid.wb.op.lead_copy", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
     assert v.drawer.result.text() == blad and v.drawer.result.szczegol() == _tip()
     v.apply_perspective(grid_mod._PRESET_CZYSTY)
     assert v.drawer.result.text() == "Zatwierdzono 3"

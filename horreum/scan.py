@@ -53,7 +53,7 @@ import sqlite3
 import struct
 import sys
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,6 +61,7 @@ import numpy as np
 from astropy.io import fits
 
 from . import exif, repo
+from .card_rules import bajt_spoza_ascii   # bajt spoza ASCII - predykat bramki pisarza (AR-299)
 from .hashing import sha1_of, sha1_of_span
 from .item_reasons import OdmowaZPowodem, PowodPozycji   # odmowy XISF z kodem (AR-158) - liść
 from .item_reasons import blad_systemu, proza_z_diagnoza   # błąd systemu klasą w odmowie (AR-198)
@@ -320,7 +321,12 @@ class ScanRecord:
       - `file_sha1_substituted`: sha1 pliku z podstawionym regionem `(offset, bajty)` - liczony
         WYŁĄCZNIE, gdy wołający poda `scan_file(substitute=)` (re-sync po zapisie w miejscu:
         podstawiony stary region == kotwica sprzed zapisu dowodzi, że poza nagłówkiem nic się nie
-        zmieniło); None w zwykłym skanie.
+        zmieniło); None w zwykłym skanie;
+      - `nonprintable`: zeznanie bajtu spoza drukowalnego ASCII w surowych nagłówkach FITS (AR-299,
+        `FitsMeta.nonprintable`): `None` - zbadano, czysto (też XISF/RAW - reguła pisarza ich nie
+        dotyczy); `(karta, "0xNN")` - bajt; `repo.NIEZBADANE` - dalsze HDU nie do doczytania;
+        `repo.NIE_BADANO` - surowych bajtów nikt nie czytał (W1, import z dawcy, rekord syntetyczny) -
+        klinga kopii zostawia wtedy stan zbadania, jaki był (`repo._marker_bajtu`).
     """
     path: str                         # ścieżka bezwzględna (str — spójnie z sha1_of/repo)
     size_bytes: int                   # fakt kopii (→ location.size_bytes; R2#6)
@@ -338,6 +344,7 @@ class ScanRecord:
     history: object = None            # (rows, inputs, tool) z historii XISF; None dla FITS/RAW i przy W1
     file_sha1_substituted: object = None   # sha1 pliku z podstawionym regionem - wyłącznie na żądanie
                                            # (`scan_file(substitute=)`, kontrola danych zapisu w miejscu)
+    nonprintable: object = repo.NIE_BADANO   # zeznanie bajtu spoza ASCII (AR-299, docstring)
 
 
 def _iter_suffixes(root, suffixes, excluded_out=None, errors_out=None):
@@ -559,21 +566,66 @@ class FitsMeta:
     compressed: int                   # 0/1 (CompImageHDU)
     datloc: int
     datspan: int
+    # Bajt spoza drukowalnego ASCII w surowych nagłówkach (AR-299, ten sam predykat co bramka pisarza
+    # `card_rules.bajt_spoza_ascii`): `None` - zbadano wszystkie HDU, czysto; `(karta, "0xNN")` - bajt;
+    # `repo.NIEZBADANE` - dalszych HDU nie dało się doczytać (plik czytelny jak dotąd, kopia czeka).
+    nonprintable: object = None
+
+
+def _bajt_w_odcinkach(fh, odcinki):
+    """Pierwszy bajt spoza ASCII w surowych regionach `[od, do)` z uchwytu `fh` albo `None`."""
+    for od, do in odcinki:
+        fh.seek(od)
+        traf = bajt_spoza_ascii(fh.read(do - od))
+        if traf is not None:
+            return traf
+    return None
+
+
+def _bajt_naglowkow(fh, hdul, index):
+    """Zeznanie bajtu spoza ASCII dla `FitsMeta.nonprintable` (AR-299). Najpierw HDU 0..`index`,
+    które `_select_hdu` już doczytał. Bez bajtu tam - dalsze HDU w OSŁONIE: pisarz odmawia także za
+    bajt w nagłówku HDU niewybranego (`writeto` przepisuje wszystkie), ale wyjątek ich doczytania
+    nie może zrobić z pliku czytelnego pliku nieczytelnego - wtedy `repo.NIEZBADANE`, a kopia zostaje
+    kandydatem zbadania przy każdej Dostawie (koszt jednego odczytu nagłówka, ~25 ms/plik na `R:`).
+    Dziś osłona jest obronna: `fileinfo` wołane wyżej już doczytuje wszystkie HDU
+    (`HDUList._wasresized`, astropy 8.0.0), więc plik z dalszym HDU nie do doczytania rzuca tam tak
+    samo jak przed zeznaniem bajtu; na `R:` nie ma plików wielo-HDU (2026-10-21)."""
+    def odcinki(zakres):
+        return [(hdul.fileinfo(i)["hdrLoc"], hdul.fileinfo(i)["datLoc"]) for i in zakres]
+
+    traf = _bajt_w_odcinkach(fh, odcinki(range(index + 1)))
+    if traf is not None:
+        return traf
+    try:
+        hdul.readall()
+        return _bajt_w_odcinkach(fh, odcinki(range(index + 1, len(hdul))))
+    except Exception:  # noqa: BLE001 - dalszy HDU uszkodzony: zeznanie niepełne, odczyt jak dotąd
+        return repo.NIEZBADANE
 
 
 def read_fits_meta(path):
     """Odczytaj z pliku FITS komplet: dict zeznania + karty + `header_hash` + `hdu_index` +
-    `compressed` + pozycję sekcji danych — JEDNO otwarcie astropy, read-only, bez ładowania
-    pikseli, bez pozostawiania uchwytu (Windows). Podnosi wyjątek dla pliku, który nie jest
-    FITS — faza skanu nie zgaduje (nierozstrzygalność → `event(*.review)` w warstwie upsertu)."""
-    with fits.open(path, mode="readonly", memmap=False) as hdul:
-        index, hdu = _select_hdu(hdul)
-        hdr = hdu.header
-        info = hdul.fileinfo(index)
-        return FitsMeta(
-            header=_header_to_dict(hdr), cards=_parse_cards(hdr), header_hash=_header_hash(hdr),
-            hdu_index=index, compressed=1 if isinstance(hdu, fits.CompImageHDU) else 0,
-            datloc=info["datLoc"], datspan=info["datSpan"])
+    `compressed` + pozycję sekcji danych + zeznanie bajtu spoza ASCII - JEDNO otwarcie, read-only,
+    bez ładowania pikseli, bez pozostawiania uchwytu (Windows). Podnosi wyjątek dla pliku, który
+    nie jest FITS - faza skanu nie zgaduje (nierozstrzygalność → `event(*.review)` w warstwie upsertu).
+
+    WŁASNY UCHWYT (AR-299): astropy czyta z uchwytu `open(path, "rb")` - surowe regiony nagłówków do
+    zeznania bajtu idą z niego bez drugiego otwarcia. Przy okazji taniej: astropy otwierane po ścieżce
+    robi `os.path.exists`, osobne otwarcie z odczytem magii kompresji i drugie otwarcie
+    (`astropy/io/fits/file.py`, 8.0.0) - na `R:` mediana 39,9 ms/plik po ścieżce, 22,4 ms przez uchwyt,
+    zeznanie bajtu +0,6 ms (312 plików, 2026-10-21). Wynik i wyjątki pliku zepsutego jak po ścieżce
+    (zmierzone dla FITS 1-HDU nieskompresowanych - cały wolumin `R:` - i plików syntetycznych)."""
+    with open(path, "rb") as fh:
+        with fits.open(fh, mode="readonly", memmap=False) as hdul:
+            index, hdu = _select_hdu(hdul)
+            hdr = hdu.header
+            info = hdul.fileinfo(index)
+            meta = FitsMeta(
+                header=_header_to_dict(hdr), cards=_parse_cards(hdr), header_hash=_header_hash(hdr),
+                hdu_index=index, compressed=1 if isinstance(hdu, fits.CompImageHDU) else 0,
+                datloc=info["datLoc"], datspan=info["datSpan"])
+            return replace(meta, nonprintable=_bajt_naglowkow(fh, hdul, index))
 
 
 def read_fits_header(path):
@@ -1421,9 +1473,10 @@ def scan_file(path, *, substitute=None):
     spath = str(p)
     header = None
     cards = header_hash = hdu_index = compressed = span = image_roles = history = None
+    nonprintable = repo.NIE_BADANO        # W1: surowych bajtów nie zbadano
     try:
-        header, cards, header_hash, hdu_index, compressed, span, image_roles, history = _read_meta(
-            spath, st.st_size)
+        (header, cards, header_hash, hdu_index, compressed, span, image_roles, history,
+         nonprintable) = _read_meta(spath, st.st_size)
         error = error_kind = None
     except Exception as exc:              # W1: dowolny błąd czytnika → review, nie crash pętli
         error = unreadable_reason_of(exc)
@@ -1458,6 +1511,7 @@ def scan_file(path, *, substitute=None):
         sha1_data=sha1_data, file_sha1=file_sha1,
         header_hash=header_hash, hdu_index=hdu_index, compressed=compressed, cards=cards,
         image_roles=image_roles, history=history, file_sha1_substituted=podstawiony,
+        nonprintable=nonprintable,
     )
 
 
@@ -1466,22 +1520,24 @@ def _read_meta(spath, size):
     kopii (`backfill_copy_facts`), które czyta SAM nagłówek, bez haszowania pliku. Dwie kopie tej
     dyspozycji rozjechałyby się przy pierwszym nowym formacie: skan widziałby go, a uzupełnienie nie.
 
-    Zwraca krotkę `(header, cards, header_hash, hdu_index, compressed, span, image_roles, history)`;
-    wyjątek czytnika propaguje (miękkie lądowanie robi wołający). `size` = rozmiar pliku ze `stat`
-    (span RAW-a: D-R-1, tożsamość RAW = sha1 CAŁEGO pliku → `sha1_data == file_sha1`)."""
+    Zwraca krotkę `(header, cards, header_hash, hdu_index, compressed, span, image_roles, history,
+    nonprintable)`; wyjątek czytnika propaguje (miękkie lądowanie robi wołający). `size` = rozmiar
+    pliku ze `stat` (span RAW-a: D-R-1, tożsamość RAW = sha1 CAŁEGO pliku → `sha1_data == file_sha1`).
+    `nonprintable` - zeznanie bajtu spoza ASCII (`FitsMeta.nonprintable`, AR-299); XISF i RAW `None`:
+    bramka bajtu pisarza jest wyłącznie FITS (XISF to UTF-8, RAW pisarz nie pisze)."""
     suffix = Path(spath).suffix.lower()
     if suffix in exif.RAW_SUFFIXES:
         emeta = exif.read_exif_meta(spath)
         cards = [Card(*row) for row in emeta.card_rows]   # opakuj krotki (unikamy cyklu importu)
-        return emeta.header, cards, emeta.header_hash, None, None, (0, size), None, None
+        return emeta.header, cards, emeta.header_hash, None, None, (0, size), None, None, None
     if suffix in XISF_SUFFIXES:
         # `hdu_index`/`compressed` zostają None (D-X-7: pojęcia obce formatowi)
         xmeta = read_xisf_meta_full(spath)
         return (xmeta.header, xmeta.cards, xmeta.header_hash, None, None, xmeta.image_span,
-                xmeta.image_roles, read_history(xmeta.xml_bytes.decode("utf-8", "replace")))
+                xmeta.image_roles, read_history(xmeta.xml_bytes.decode("utf-8", "replace")), None)
     meta = read_fits_meta(spath)
     return (meta.header, meta.cards, meta.header_hash, meta.hdu_index, meta.compressed,
-            (meta.datloc, meta.datspan), None, None)
+            (meta.datloc, meta.datspan), None, None, meta.nonprintable)
 
 
 def copy_header_facts(header, header_hash, image_roles):
@@ -1730,7 +1786,8 @@ def kind_rederive_plan(con, frame_ids=None):
                 if _mtime_iso(st) != k["mtime"]:
                     powod = f"kopia zmieniona od ostatniego skanu (najpierw Dostawa): {k['path']}"
                     break
-                header, _cards, header_hash, *_reszta, history = _read_meta(k["path"], st.st_size)
+                header, _cards, header_hash, *_reszta, history, _np = _read_meta(k["path"],
+                                                                                 st.st_size)
             except Exception as exc:                   # czkawka udziału: odmowa tej klatki, nie przebiegu
                 # Klasa z właściciela i surowy tekst ze ścieżką za nią (AR-198) - odmowę czyta druk
                 # `rederive-kind`, który ścieżki nie ma obok.
@@ -2004,7 +2061,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
             unreadable_since=None if readable else now,
             unreadable_kind=None if readable else rec.error_kind,
             unreadable_reason=None if readable else rec.error,
-            now=now, actor=actor)
+            nonprintable=rec.nonprintable, now=now, actor=actor)
         if loc_created:
             summary.locations_new += 1
             if not created:
@@ -2075,7 +2132,8 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
             compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
             unreadable_kind=kind_after, unreadable_reason=reason_after,
-            present=1, now=now, actor=actor, copy_facts=copy_facts, inplace_gen=inplace_gen)
+            present=1, now=now, actor=actor, copy_facts=copy_facts, inplace_gen=inplace_gen,
+            nonprintable=rec.nonprintable)
         summary.locations_refreshed += refreshed["facts"]
         _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
         return
@@ -2090,7 +2148,8 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
         compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
         unreadable_kind=kind_after, unreadable_reason=reason_after,
         present=1, now=now, actor=actor, raw_json=raw_json, cards=cards, hot_fields=hot,
-        camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen)
+        camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen,
+        nonprintable=rec.nonprintable)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
     _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
@@ -2352,6 +2411,8 @@ class CopyFactsSummary:
     raced: int = 0            # drugi konflikt generacji z rzędu (zapis w miejscu w toku) → ZERO
                               # zapisu, plik zdrowy, kopia czeka na następną dostawę; bez ścieżek
     remaining: int = 0        # kandydaci PO przebiegu (0 = komplet)
+    bytes_checked: int = 0    # kopie FITS, którym przebieg zapisał zbadanie bajtu spoza ASCII (AR-299)
+    bytes_unchecked: int = 0  # kopie FITS z dalszym HDU nie do doczytania - zbadanie niepełne, czekają
     cancelled: bool = False
     failed_paths: list = field(default_factory=list)
     stale_paths: list = field(default_factory=list)
@@ -2413,9 +2474,38 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
     kopia nieczytelna bez faktów to dla porównań kopii to samo „nie wiem", co kopia nieprzeczytana,
     i bez niej wiersz Porządków mówił „0" („sprawdzone, czysto") zamiast „?". Ten sam parametr
     przełącza oba pytania, więc sterownik dostaje dokładnie to, co dotąd. Zmierzona populacja
-    2026-10-07 na `pf4` `?mode=ro`: 0 kopii nieczytelnych - licznik dziś nie drgnie."""
+    2026-10-07 na `pf4` `?mode=ro`: 0 kopii nieczytelnych - licznik dziś nie drgnie.
+
+    KOPIE FITS NIEZBADANE (AR-299, 0046): tryb domyślny dokłada kopie FITS, których surowych nagłówków
+    nikt nie zbadał przy bieżącym odcisku (`resolver.nonprintable_unread_locations` - właściciel
+    predykatu i licznika „niesprawdzone” w Porządkach), z tymi samymi bramkami (obecna, z odciskiem,
+    czytelna, nie izolowana). Sterownik zbada je tym samym odczytem nagłówka - to jedyna droga, którą
+    kopie sprzed migracji (brama przyrostowa je pomija) dostają zbadanie; pierwsza Dostawa korzenia
+    archiwum po migracji czyta tak 15 598 nagłówków FITS na `R:` (~6,5 min, 2026-10-21). Tryb
+    `porownywalne` ich NIE dostaje: liczniki „?” porównań kopii z bajtem nie mają związku."""
+    rows = _kandydaci_faktow(con, porownywalne)
+    if not porownywalne:
+        znane = {r["id"] for r in rows}
+        rows = sorted([*rows, *(r for r in _niezbadane_do_odczytu(con) if r["id"] not in znane)],
+                      key=lambda r: r["id"])
+    if root is None:
+        return rows
+    prefix = canonize_root(root).rstrip("\\/") + os.sep
+    return [r for r in rows if _under(r["path"], prefix)]
+
+
+def _niezbadane_do_odczytu(con):
+    """Kopie FITS niezbadane (`resolver.nonprintable_unread_locations`), które sterownik może przeczytać:
+    czytelne i nie izolowane - te same bramki co kandydaci faktów (docstring `copy_facts_candidates`)."""
+    from . import resolver                # leniwie - jak `queries` niżej
+    return [r for r in resolver.nonprintable_unread_locations(con)
+            if r["unreadable_since"] is None and not r["izolowana"]]
+
+
+def _kandydaci_faktow(con, porownywalne):
+    """Kandydaci FAKTÓW kopii (0021) - stały literał opisany w `copy_facts_candidates`."""
     from .gui import queries
-    rows = con.execute(
+    return con.execute(
         "SELECT l.id, l.volume, l.path, l.header_hash, l.hdr_hash, l.hdr_rule FROM location l "
         "WHERE l.present = 1 AND l.header_hash IS NOT NULL "
         "  AND (l.hdr_hash IS NULL OR l.hdr_rule IS NULL OR l.hdr_rule < ? OR l.hdr_rule > ?) "
@@ -2427,17 +2517,13 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
         (COPY_TESTIMONY_RULE, COPY_TESTIMONY_RULE if porownywalne else None, int(porownywalne),
          json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),
          json.dumps(queries.copy_facts_class(con, porownywalne=porownywalne)))).fetchall()
-    if root is None:
-        return rows
-    prefix = canonize_root(root).rstrip("\\/") + os.sep
-    return [r for r in rows if _under(r["path"], prefix)]
 
 
 def _odcisk_lokacji(con, location_id):
     """Odcisk nagłówka lokacji z bazy TERAZ - kotwica porównania sterowników, które czytają plik
     długo po wyborze kandydatów (migawka mogła się zestarzeć: re-sync pisarza, równoległy skan)."""
-    return con.execute("SELECT header_hash FROM location WHERE id = ?",
-                       (location_id,)).fetchone()[0]
+    row = con.execute("SELECT header_hash FROM location WHERE id = ?", (location_id,)).fetchone()
+    return None if row is None else row[0]
 
 
 def _fakty_kopii_sa(con, location_id):
@@ -2447,6 +2533,14 @@ def _fakty_kopii_sa(con, location_id):
     row = con.execute("SELECT hdr_hash, hdr_rule FROM location WHERE id = ?",
                       (location_id,)).fetchone()
     return copy_facts_state(row["hdr_hash"], row["hdr_rule"]) != FAKTY_DO_DOCIAGNIECIA
+
+
+def _zbadana(con, location_id):
+    """Czy kopia ma zbadanie bajtu spoza ASCII przy BIEŻĄCYM odcisku nagłówka (AR-299, 0046) - zrobione
+    przez kogokolwiek (skan, re-sync pisarza, inny przebieg)."""
+    row = con.execute("SELECT nonprintable_hash IS NOT NULL AND nonprintable_hash = header_hash "
+                      "FROM location WHERE id = ?", (location_id,)).fetchone()
+    return row is not None and row[0] == 1
 
 
 def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=None,
@@ -2505,8 +2599,16 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
 
     DZIENNIK (AR-32): każda zapisana kopia - `location.refreshed` z `{before, after}` (klinga), a cały
     przebieg z kandydatami - JEDEN `location.copy_facts_summary` z polami tego `CopyFactsSummary`
-    (także przerwany: `cancelled`). Przebieg bez kandydatów zdarzenia nie zostawia."""
+    (także przerwany: `cancelled`). Przebieg bez kandydatów zdarzenia nie zostawia.
+
+    ZBADANIE BAJTU SPOZA ASCII (AR-299, 0046) idzie tym samym odczytem: kopia FITS niezbadana przy
+    bieżącym odcisku dostaje zbadanie (`repo.record_nonprintable`, ta sama kotwica odcisku), a kopia,
+    która potrzebuje obu - fakty i zbadanie w JEDNEJ transakcji (`repo.atomic`), żeby przerwanie nie
+    zostawiło połowy. Dalszy HDU nie do doczytania → `bytes_unchecked`, kopia czeka (zostaje kandydatem
+    przy każdej Dostawie)."""
     rows = copy_facts_candidates(con, root)
+    do_faktow = {r["id"] for r in _kandydaci_faktow(con, False)}
+    do_zbadania = {r["id"] for r in _niezbadane_do_odczytu(con)}
     s = CopyFactsSummary(rows=len(rows))
     total = len(rows)
     korzen = None if root is None else canonize_root(root)
@@ -2547,8 +2649,8 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                 # dotyczy. Kandydaci izolowanych nie niosą - bramka łapie zapis otwarty w trakcie.
                 if _isolated(con, path, row["volume"]):
                     raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
-                header, _cards, header_hash, _hdu, _comp, _span, image_roles, _hist = _read_meta(
-                    path, os.stat(path).st_size)
+                (header, _cards, header_hash, _hdu, _comp, _span, image_roles, _hist,
+                 bajt) = _read_meta(path, os.stat(path).st_size)
             except FileNotFoundError as exc:   # skasowany albo zerwany udział - klasa, potem świadek
                 # Zerwany udział (WinError 53/67) i dysk, którego nie ma (15), CPython podaje tą samą
                 # podklasą: brak mówi wyłącznie klasa `os_missing` właściciela, a świadek rozstrzyga
@@ -2577,32 +2679,55 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                 s.read += 1                    # raz, i wtedy, gdy udała się dopiero druga próba
                 przeczytany = True
             facts = copy_header_facts(header, header_hash, image_roles)
+            lid = row["id"]
+            fakty = lid in do_faktow           # kopia z klasy faktów
+            zbadac = lid in do_zbadania        # kopia FITS niezbadana
+            # Dalszy HDU nie do doczytania - zbadania nie zapiszemy (kopia czeka, `bytes_unchecked`).
+            niepelne = zbadac and bajt is repo.NIEZBADANE
+
+            def zrobione():
+                """Robota tej kopii zrobiona przez kogokolwiek: fakty (gdy z klasy) i zbadanie (gdy
+                niezbadana)."""
+                return ((not fakty or _fakty_kopii_sa(con, lid))
+                        and (not zbadac or niepelne or _zbadana(con, lid)))
             # Wiersz TERAZ, nie migawka kandydatów (docstring): fakty mógł dociągnąć re-sync pisarza
             # razem z nowym odciskiem - wtedy robota jest zrobiona, a nie „zmieniona na dysku".
-            zapisane = False
-            if header_hash == _odcisk_lokacji(con, row["id"]) and not _fakty_kopii_sa(con, row["id"]):
+            zapisane = zbadana = False
+            if header_hash == _odcisk_lokacji(con, lid) and not zrobione():
                 try:
-                    zapisane = repo.record_copy_facts(
-                        con, location_id=row["id"], copy_facts=facts, now=now, actor=actor,
-                        inplace_gen=gen)
+                    with repo.atomic(con):     # fakty i zbadanie jedną transakcją (albo żadne)
+                        if fakty and not _fakty_kopii_sa(con, lid):
+                            zapisane = repo.record_copy_facts(
+                                con, location_id=lid, copy_facts=facts, now=now, actor=actor,
+                                inplace_gen=gen)
+                        if zbadac and not niepelne and not _zbadana(con, lid):
+                            zbadana = repo.record_nonprintable(
+                                con, location_id=lid, header_hash=header_hash, wynik=bajt, now=now,
+                                actor=actor, inplace_gen=gen)
                 except repo.StaleScanRecord:   # zapis w miejscu po generacji - odczyt stęchły
+                    zapisane = zbadana = False
                     if proba < _PROBY_GENERACJI:
                         continue
                     s.raced += 1               # drugi konflikt: zapis w toku, plik zdrowy
                     break
-            if zapisane:
+            if niepelne:
+                s.bytes_unchecked += 1
+            if zapisane or zbadana:
                 s.written += 1
-            elif header_hash != _odcisk_lokacji(con, row["id"]):
+                s.bytes_checked += zbadana
+            elif header_hash != _odcisk_lokacji(con, lid):
                 # Odcisk pliku ≠ odcisk wiersza: kopia zmieniona od skanu - `stale` także wtedy, gdy
                 # fakty już są (zebrał je ktoś dla nagłówka, którego na dysku już nie ma). Przy
                 # faktach jedno ponowienie odczytu odsiewa wyścig, w którym to NASZ odczyt jest
                 # starszy od wiersza (skan wpisał nowszy nagłówek razem z faktami) - wtedy drugi
                 # odczyt zgadza się z wierszem i kopia idzie do `elsewhere`.
-                if _fakty_kopii_sa(con, row["id"]) and proba < _PROBY_GENERACJI:
+                if zrobione() and proba < _PROBY_GENERACJI:
                     continue
                 s.stale += 1
                 s.stale_paths.append(path)
-            elif _fakty_kopii_sa(con, row["id"]):  # ten sam nagłówek, fakty zebrane gdzie indziej
+            elif niepelne:                     # czeka na zbadanie, policzone w `bytes_unchecked`
+                pass
+            elif zrobione():                   # ten sam nagłówek, robotę zrobił ktoś inny
                 s.elsewhere += 1
             else:
                 s.stale += 1

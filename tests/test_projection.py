@@ -2367,3 +2367,118 @@ def test_odmowa_busy_mowi_nazwe_pliku_roboczego_a_sciezke_parametrem():
     assert dict(powod.params) == {"path": part}
     assert dict(powod.params)["path"] not in str(powod)
     assert f"({projection.MANIFEST_NAME}{projection.PART_SUFFIX})" in str(powod)
+
+
+# ============================================================ AR-306: jeden odczyt manifestu w sondzie wydania
+
+def _licz_otwarcia_manifestu(monkeypatch, root):
+    """Lista, do której `open` widziany przez `projection` dopisuje każde otwarcie `_PROJEKCJA.json`
+    korzenia `root` (owija `open` już podmieniony w module, np. `_open_pada`)."""
+    import builtins
+    dalej = getattr(projection, "open", builtins.open)
+    klucz = os.path.normcase(os.path.join(str(root), projection.MANIFEST_NAME))
+    otwarcia = []
+
+    def _open(p, *a, **kw):
+        if isinstance(p, (str, os.PathLike)) and os.path.normcase(os.fspath(p)) == klucz:
+            otwarcia.append(p)
+        return dalej(p, *a, **kw)
+    monkeypatch.setattr(projection, "open", _open, raising=False)
+    return otwarcia
+
+
+def _stan_bez_tozsamosci(stan):
+    """`ManifestState` do porównania: `OSError` po typie i kodzie, nie po tożsamości obiektu."""
+    blad = stan.blad
+    return stan.payload, stan.uszkodzenie, (type(blad), getattr(blad, "errno", None)) if blad else None
+
+
+@pytest.mark.parametrize("przypadek, kod_sondy, kod_kroku", [
+    ("brak", None, None),
+    ("perspektywa", None, None),
+    ("uszkodzony", "proj_manifest_damaged", "proj_manifest_damaged"),
+    ("folder_obiektu", "proj_manifest_foreign", "proj_manifest_foreign"),
+    ("plik_roboczy", "proj_manifest_busy", "proj_manifest_busy"),
+    ("odczyt", "proj_manifest_unreadable", "proj_manifest_failed"),
+])
+def test_sonda_wydania_perspektywy_niesie_stan_manifestu_z_jednego_odczytu(obiekt, tmp_path, monkeypatch,
+                                                                          przypadek, kod_sondy, kod_kroku):
+    """AR-306: `apply(DRY)` wydania perspektywy (układ kolumnowy) czyta `_PROJEKCJA.json` RAZ i oddaje stan
+    w `ApplyResult.manifest_state` - ten sam, który dałby `read_manifest_state`; rozjazd z niego równy
+    `manifest_drift` z własnym odczytem; wskazówka z niego mówi kod, który PRAWDZIWY krok manifestu daje
+    potem w `res.error` (wydanie perspektywy do folderu wydania obiektu - `foreign`). Realne wydanie
+    stanu nie niesie. Mutanty: DRY bez stanu; `manifest_drift` ignoruje stan (drugi odczyt)."""
+    con, i = obiekt
+    p = projection.plan(con, [i["la1"], i["lb1"]], "po-obiektach")
+    root = str(tmp_path / "_WBPP" / "karta")
+    path = os.path.join(root, projection.MANIFEST_NAME)
+    if przypadek == "folder_obiektu":
+        _po, root = _wydany(con, tmp_path)
+        path = os.path.join(root, projection.MANIFEST_NAME)
+    elif przypadek != "brak":
+        projection.apply(p, root, do_apply=True, now="T1", manifest={"perspektywa": "x"})
+        for dp, _dn, fn in os.walk(root):
+            for n in fn:
+                if n != projection.MANIFEST_NAME:
+                    os.remove(os.path.join(dp, n))          # drzewo niepełne: jest co utworzyć
+    if przypadek == "uszkodzony":
+        with open(path, "wb") as fh:
+            fh.write(b"{")
+    elif przypadek == "plik_roboczy":
+        with open(path + projection.PART_SUFFIX, "wb") as fh:
+            fh.write(b"cudzy")
+    elif przypadek == "odczyt":
+        _open_pada(monkeypatch, path, _odmowa_odczytu(path))
+    otwarcia = _licz_otwarcia_manifestu(monkeypatch, root)
+    res = projection.apply(p, root, do_apply=False)
+    assert len(otwarcia) == 1, otwarcia
+    assert res.counts.get("would-link", 0) == 2
+    assert res.manifest_state is not None
+    assert _stan_bez_tozsamosci(res.manifest_state) == _stan_bez_tozsamosci(projection.read_manifest_state(root))
+    assert res.drift == projection.manifest_drift(root, p.layout)
+    wskazowka = projection.manifest_step_refusal(root, layout=p.layout, state=res.manifest_state)
+    assert getattr(wskazowka, "code", None) == kod_sondy, wskazowka
+    realne = projection.apply(p, root, do_apply=True, now="T2", manifest={"perspektywa": "x"})
+    assert getattr(realne.error, "code", None) == kod_kroku, realne.error
+    assert realne.manifest_state is None
+    con.close()
+
+
+def test_sonda_wydania_czyta_manifest_po_petli(obiekt, tmp_path):
+    """AR-306: jedyny odczyt manifestu sondy jest PO pętli - manifest uszkodzony w trakcie długiej sondy
+    (inny pisarz między pozycjami) daje stan uszkodzony i wskazówkę `proj_manifest_damaged`, nie zdrowy
+    stan z początku sondy. Mutant: odczyt przed pętlą (stan zdrowy, wskazówka None)."""
+    con, _i = obiekt
+    p, root = _wydany(con, tmp_path)
+    for dp, _dn, fn in os.walk(root):
+        for n in fn:
+            if n.startswith("lb1"):
+                os.remove(os.path.join(dp, n))
+    path = os.path.join(root, projection.MANIFEST_NAME)
+    pytania = []
+
+    def _w_trakcie():
+        pytania.append(1)
+        if len(pytania) == 2:                               # przed drugą pozycją sondy
+            with open(path, "wb") as fh:
+                fh.write(b"{")
+        return False
+    assert len(p.items) >= 2
+    res = projection.apply(p, root, do_apply=False, should_cancel=_w_trakcie)
+    assert len(pytania) == len(p.items)
+    assert res.manifest_state.uszkodzenie == "JSON"
+    w = projection.manifest_step_refusal(root, layout=p.layout, state=res.manifest_state,
+                                         object_id=p.info["object_id"])
+    assert (w.code, dict(w.params)["detail"]) == ("proj_manifest_damaged", "JSON")
+    con.close()
+
+
+def test_sonda_przerwana_nie_czyta_manifestu(obiekt, tmp_path, monkeypatch):
+    """AR-306 (AR-245): sonda przerwana anulowaniem nie czyta manifestu - jej wyniku nikt nie odbierze;
+    stan None. Mutant: odczyt także po anulowaniu (jedno otwarcie)."""
+    con, _i = obiekt
+    p, root = _wydany(con, tmp_path)
+    otwarcia = _licz_otwarcia_manifestu(monkeypatch, root)
+    res = projection.apply(p, root, do_apply=False, should_cancel=lambda: True)
+    assert res.cancelled and res.manifest_state is None and otwarcia == []
+    con.close()

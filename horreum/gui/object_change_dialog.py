@@ -528,13 +528,14 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
     return czytelny_powod(msg)
 
 
-def zdanie_paska(res, *, target, n, przed=None, obiekty=(), cofniecie=False, droga=("", "")):
+def zdanie_paska(res, *, target, n, przed=None, obiekty=(), cofniecie=False, droga=("", "", "")):
     """Zdanie PASKA po zamknięciu okna (odbiór 0.19.0 OB12) - jedno zdanie gestu jak u sąsiadów
     osi obiektu („Przypisz obiekt”, „Cofnij przypisanie”): ile klatek (`n` - z TRWAŁEGO stanu
     pozycji przebiegu, nie z ostatniej tury: „Dokończ” i ponowione cofnięcie sumują się), na jaki
     obiekt, z jakiego albo do jakiego wróciły (`przed` - jeden obiekt z chwili podglądu wszystkich
-    liczonych klatek, inaczej None) i droga powrotu (`droga` = (człon zdania, szczegół) - składa ją
-    okno: Porządki albo polecenie CLI w szczególe pod kursorem, AR-272). Zdanie okna
+    liczonych klatek, inaczej None) i droga powrotu (`droga` = (człon zdania, szczegół, polecenie) -
+    składa ją okno: Porządki albo polecenie CLI w szczególe pod kursorem, AR-272, i w polu polecenia
+    nośnika do „Kopiuj polecenie”, AR-309). Zdanie okna
     (`zdanie_wyniku_zmiany`) mówi pozycjami i numerem przebiegu, a po zamknięciu nie widać już
     listy, do której się odnosi.
 
@@ -562,9 +563,9 @@ def zdanie_paska(res, *, target, n, przed=None, obiekty=(), cofniecie=False, dro
         msg += wynik[len(glowny):]
         if res.cancelled:
             msg += i18n.t("wb.cancelled_note")
-    czlon, szczegol = droga
+    czlon, szczegol, polecenie = droga
     zdanie = czytelny_powod(msg) + czlon
-    return ZdanieZeSzczegolem(zdanie, szczegol) if szczegol else zdanie
+    return ZdanieZeSzczegolem(zdanie, szczegol, polecenie=polecenie) if szczegol else zdanie
 
 
 def zdanie_odmowy_stagingu(exc):
@@ -1376,13 +1377,14 @@ class ObjectChangeDialog(QDialog):
                    if it["status"] == ("undone" if cofniecie else "applied")]
         stare = {it["before_canon"] for it in liczone}
         przed = next(iter(stare)) if len(stare) == 1 else None
-        droga = ("", "")
+        droga = ("", "", "")
         if run_id in queries.interrupted_object_change_runs(self.con):
             droga = (i18n.t("objchg.bar.tasks", nav=i18n.t("nav.porzadki"),
-                            row=i18n.t("tasks.object_change_interrupted")), "")
+                            row=i18n.t("tasks.object_change_interrupted")), "", "")
         elif self._run_id is not None and self._do_cofniecia and self._db_path:
-            droga = (i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_detail")),
-                     i18n.t("objchg.bar.undo_cli", db=self._db_path, run_id=run_id))
+            polecenie = i18n.t("objchg.cli_undo", db=self._db_path, run_id=run_id)
+            droga = (i18n.t("objchg.bar.undo_short", copy=i18n.t("wb.copy_command")),
+                     i18n.t("objchg.bar.undo_cli", run_id=run_id, cli=polecenie), polecenie)
         return zdanie_paska(res, target=self._target, n=len(liczone), przed=przed,
                             obiekty=self._obiekty, cofniecie=cofniecie, droga=droga)
 

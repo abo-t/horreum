@@ -449,9 +449,11 @@ def test_staging_samych_pominiec_mowi_przyczyny_i_zdejmuje_stary_wynik(qapp, tmp
 
 
 def test_staging_samych_pominiec_przy_zywym_cofnij_zostawia_cofnij(qapp, tmp_path):
-    """Zapis (żywe „Cofnij”), potem staging samych pominięć - „Cofnij” i wiersz szuflady z numerem commitu
-    zostają (reguła „Popraw f/”: „Cofnij” znika, gdy do szuflady COŚ wchodzi), przyczyny mówi pasek.
-    Falsyfikator: `_dismiss_undo` przed makrem (szuflada bez akcji i bez numeru commitu)."""
+    """Zapis (żywe „Cofnij”), potem staging samych pominięć - „Cofnij” i etykieta „Zatwierdzono” zostają
+    (reguła „Popraw f/”: „Cofnij” znika, gdy do szuflady COŚ wchodzi), a przyczyny stoją w wierszu szuflady
+    obok niego z numerem commitu raz - jak bez „Cofnij” (AR-309). Falsyfikatory: `_dismiss_undo` przed
+    makrem (szuflada bez akcji i bez numeru commitu); wynik szuflady bez zdania stagingu (przyczyny tylko na
+    pasku, stary wynik w szufladzie)."""
     _path, con, _p = _cztery_pliki_z_kopia(tmp_path)
     v = _widok_szuflady(con, inline=True)
     try:
@@ -460,12 +462,14 @@ def test_staging_samych_pominiec_przy_zywym_cofnij_zostawia_cofnij(qapp, tmp_pat
         _makro_przyciskiem(v, "TELESCOP", "EQ6")
         _klik_w(v.drawer.btn_commit)
         cid = v._undo_commit_id
-        wiersz = v.drawer.label.text() + " | " + v.drawer.result.text()
+        etykieta = v.drawer.label.text()
         _makro_przyciskiem(v, "EXPTIME", "abc")
         assert v._undo_mode == "macro" and v._undo_btn.isVisible()
-        assert v.drawer.label.text() + " | " + v.drawer.result.text() == wiersz
-        assert wiersz.count(f"commit {cid})") == 1
+        assert v.drawer.label.text() == etykieta
+        assert v.drawer.result.text() == zdania[-1] + i18n.t("grid.wb.commit_id", id=cid)
+        assert (etykieta + " " + v.drawer.result.text()).count(f"commit {cid})") == 1
         assert " 3: " in zdania[-1] and " · 1: " in zdania[-1]
+        assert v.drawer.btn_commit.isHidden() and v.drawer.btn_reject.isHidden()
     finally:
         _zamknij_widok(v)
         con.close()
@@ -831,7 +835,8 @@ def test_przebieg_z_zapisem_w_miejscu_nie_jest_podejmowany(qapp, tmp_path, monke
     assert queries.oczekujace_przebiegi_szuflady(con) == []
     v = _widok_szuflady(con, inline=True)
     try:
-        assert v._run_id is None and v.drawer.label.text() == i18n.t("grid.drawer.empty")
+        # Nie podjęty, ale nie „pusta” - szuflada mówi, ile zmian czeka na zapis w miejscu (AR-308).
+        assert v._run_id is None and v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 1)
         assert [tuple(r) for r in con.execute(
             "SELECT id, status, inplace_op_id IS NOT NULL FROM pending_changes ORDER BY id")] == przed
     finally:
@@ -959,6 +964,565 @@ def test_ta_kopia_prowadzi_przy_zywym_cofnij_niesie_identyfikator_raz(qapp, tmp_
         assert _po_gescie(v)
         assert v._undo_mode == "macro" and _wiersz_szuflady(v).count(ident) == 1, _wiersz_szuflady(v)
         assert v.drawer.label.text().startswith(i18n.t("grid.wb.committed_label", n=1)[:12])
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+# ============================================================ AR-308 - przebieg zatrzymany izolacją zapisu w miejscu
+
+
+def _zatrzymany_izolacja(tmp_path, monkeypatch, n=3, faza="written"):
+    """Przebieg `R` (karta OBJECT na `n` plikach) zatrzymany izolacją tak, jak zostawia go program zabity
+    w biegu zapisu w miejscu: pierwszy plik zapisany i związany z operacją w fazie `faza` (`written` - re-sync
+    padł; `unverified` - `fsync` padł po zapisie), reszta czeka. Prawdziwy pisarz; atrapą jest wyłącznie
+    status wpisu związanego - proces zginął przed jego zapisem, więc wpis zostaje `pending`. Zwraca
+    (ścieżka bazy, [(plik, frame_id)]) - połączenie zamknięte (restart)."""
+    from test_gui_izolacja_zapisu import _baza, _fazy
+    con, pliki = _baza(tmp_path, n=n)
+    licz = []
+
+    def _po_pierwszym():
+        licz.append(1)
+        return len(licz) > 1
+    with monkeypatch.context() as m:
+        if faza == "written":
+            m.setattr(writeback.scan, "scan_file",
+                      lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
+        else:
+            prawdziwy = os.fsync
+
+            def _fsync(fd):
+                prawdziwy(fd)
+                raise OSError(64, "The specified network name is no longer available")
+            m.setattr(writeback.os, "fsync", _fsync)
+        writeback.commit(con, "R", now=NOW, inplace=True, should_cancel=_po_pierwszym)
+    assert _fazy(con) == [faza]
+    with con:
+        con.execute("UPDATE pending_changes SET status = 'pending' WHERE inplace_op_id IS NOT NULL")
+    assert con.execute("SELECT count(*) FROM pending_changes WHERE status = 'pending'").fetchone()[0] == n
+    con.close()
+    return str(tmp_path / "h.db"), pliki
+
+
+def _statusy(con):
+    return [tuple(r) for r in con.execute(
+        "SELECT run_id, status, inplace_op_id FROM pending_changes ORDER BY id")]
+
+
+class _ZwolnijBezOkna:
+    """Okno „Zwolnij plik do skanu…” zaakceptowane z powodem - bez modalu w teście."""
+
+    def __init__(self, n, parent=None):
+        self.n = n
+
+    def exec(self):
+        from PySide6.QtWidgets import QDialog
+        return QDialog.Accepted
+
+    def reason(self):
+        return "plik przywrócony z pełnej kopii"
+
+
+_GEST_IZOLACJI = {"dokoncz": "act_finish_write", "przywroc": "act_restore_header", "zwolnij": "act_release_file"}
+
+
+def _makro_dodaj(v, kw, wartosc):
+    """Panel makra, `add` karty i „Do stagingu” prawdziwym klikiem (pliki izolacji nie mają karty do `set`)."""
+    if not v.macro_bar.isVisible():
+        _klik_w(v.sel_bar.btn_macro)
+    b = v.macro_bar
+    b.asg_kw.setCurrentText(kw)
+    b.asg_op.setCurrentIndex(1)
+    b.asg_expr.setText(wartosc)
+    b.comp_name.setText("")
+    b.comp_expr.setText("")
+    _klik_w(b.btn_stage)
+
+
+def _gest_izolacji(v, gest, fid, monkeypatch, faza="written"):
+    """Gest izolacji z menu Zbiorów nad klatką `fid`: perspektywa izolacji fazy `faza`, zaznaczenie, akcja
+    pozycji menu (`QAction.trigger` - ten sam slot co klik w menu), czekanie pętlą na wątek zapisu
+    i przyłożenie zbioru."""
+    from test_gui_izolacja_zapisu import _zaznacz
+    from test_gui_pasek_szczegol import _czekaj
+    akcja = _GEST_IZOLACJI[gest]
+    if gest == "zwolnij":
+        monkeypatch.setattr(grid_mod, "ReleaseDialog", _ZwolnijBezOkna)
+    v.apply_perspective(grid_mod.PRESET_PENDING_FINISH if faza == "written" else grid_mod.PRESET_TORN_WRITE)
+    _czekaj(lambda: not v._zbior_w_drodze(), "perspektywa izolacji")
+    _zaznacz(v, [fid])
+    v._sync_menu_zapisu()
+    assert getattr(v, akcja).isEnabled(), getattr(v, akcja).toolTip()
+    getattr(v, akcja).trigger()
+    _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), f"gest {gest}")
+
+
+@pytest.mark.parametrize("faza", ["written", "unverified"])
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_przebieg_zatrzymany_izolacja_mowi_ile_czeka_i_droge(qapp, tmp_path, monkeypatch, lang, faza):
+    """Restart po zapisie w miejscu przerwanym śmiercią programu: szuflada przebiegu nie podejmuje (należy do
+    dokończenia albo odzysku), ale nie mówi „pusta” - etykieta liczy czekające zmiany, wynik mówi gest i wiersz
+    Porządków właściwy fazie operacji. Wpisy w bazie nietknięte. Falsyfikatory: pusta szuflada bez zdania
+    izolacji („pusta”); droga dokończenia przy zapisie przerwanym (albo odwrotnie)."""
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch, faza=faza)
+    i18n.set_lang(lang)
+    con, v = _restart(path)
+    try:
+        przed = _statusy(con)
+        assert v._run_id is None
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 3)
+        nav = i18n.t("nav.porzadki")
+        if faza == "written":
+            droga = i18n.t("grid.drawer.isolated_finish", finish=i18n.t("grid.inplace.finish"), nav=nav,
+                           row=i18n.t("tasks.pending_finish_frames"))
+        else:
+            droga = i18n.t("grid.drawer.isolated_torn", restore=i18n.t("grid.inplace.restore"),
+                           release=i18n.t("grid.inplace.release"), nav=nav, row=i18n.t("tasks.torn_write_frames"))
+        assert v.drawer.result.text() == droga
+        assert not v.drawer.btn_commit.isEnabled() and not v.drawer.btn_reject.isEnabled()
+        assert _statusy(con) == przed
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+@pytest.mark.parametrize("gest,faza,n", [("dokoncz", "written", 3), ("przywroc", "unverified", 3),
+                                         ("zwolnij", "written", 1)])
+def test_gest_zamykajacy_izolacje_podejmuje_przebieg_w_tej_samej_sesji(qapp, tmp_path, monkeypatch, gest,
+                                                                      faza, n):
+    """„Dokończ zapis” / „Przywróć nagłówek…” / „Zwolnij…” zamyka ostatnią operację izolującą przebiegu - szuflada
+    podejmuje go od razu, w tej samej sesji: „Z poprzedniej sesji czeka N” z czynnymi Zatwierdź/Odrzuć, wynik =
+    zdanie gestu + zdanie przebiegu, a „Zatwierdź” rozstrzyga wszystkie czekające wpisy. Przebieg jednego pliku
+    (jedyny wpis związany z operacją) też - po „Zwolnij” z N = 1 (operacja zamknięta ręką, wpis wiąże się na
+    nowo). Falsyfikator: ogon gestu bez podjęcia (szuflada dalej bez przebiegu, zmiany wracają dopiero przy
+    kolejnym otwarciu bazy)."""
+    from test_gui_pasek_szczegol import _czekaj
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch, n=n, faza=faza)
+    con, v = _restart(path)
+    try:
+        assert v._run_id is None and v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", n)
+        _gest_izolacji(v, gest, pliki[0][1], monkeypatch, faza)
+        czeka = v._pending_count()
+        assert v._run_id == "R" and czeka >= 1, (gest, _statusy(con))
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", czeka)
+        assert v.drawer.btn_commit.isVisible() and v.drawer.btn_commit.isEnabled()
+        assert v.drawer.btn_reject.isEnabled()
+        przebieg = v._zdanie_przebiegu_poprzedniego()
+        assert przebieg and v.drawer.result.text().endswith(" · " + przebieg), v.drawer.result.text()
+        _klik_w(v.drawer.btn_commit)
+        _czekaj(lambda: not v._wb.is_busy, "Zatwierdź po podjęciu")
+        assert not [s for r, s, _o in _statusy(con) if r == "R" and s == "pending"], _statusy(con)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_przywroc_odmawia_na_poprawnym_zapisie_szuflada_dalej_mowi_o_izolacji(qapp, tmp_path, monkeypatch):
+    """„Przywróć nagłówek…” na zapisie zweryfikowanym (faza `written`, kontrola danych przechodzi) rdzeń odmawia
+    - operacja dalej izoluje, więc szuflada niczego nie podejmuje i dalej mówi o izolacji. Falsyfikator:
+    podjęcie po każdym geście izolacji bez względu na wynik (przebieg należący do dokończenia w szufladzie)."""
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        _gest_izolacji(v, "przywroc", pliki[0][1], monkeypatch)
+        assert v._run_id is None
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 3)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_zmiana_perspektywy_po_podjeciu_nie_wraca_do_zdania_izolacji(qapp, tmp_path, monkeypatch):
+    """Po „Dokończ zapis” i podjęciu zmiana perspektywy oddaje szufladzie zdanie podjętego przebiegu - nie zdanie
+    izolacji sprzed gestu, które już nie jest prawdą. Falsyfikator: pamięć wyniku gestu bez poprawki przy
+    podjęciu (droga „najpierw Dokończ zapis” obok etykiety „Z poprzedniej sesji czeka”)."""
+    from test_gui_pasek_szczegol import _czekaj
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        droga = v.drawer.result.text()
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        assert v._run_id == "R"
+        v.apply_perspective(grid_mod.PRESET_TORN_WRITE)
+        _czekaj(lambda: not v._zbior_w_drodze(), "inna perspektywa")
+        assert v.drawer.result.text() == v._zdanie_przebiegu_poprzedniego() != droga
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", v._pending_count())
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_podjecie_po_gescie_wymaga_blokady_szuflady(qapp, tmp_path, monkeypatch):
+    """Dwa okna na jednej bazie: szufladę prowadzi okno A (własny staging), „Dokończ zapis” robi okno B - B nie
+    podejmuje przebiegu, mówi, że szufladę prowadzi inne okno, a czekające wpisy zostają. Falsyfikator: podjęcie
+    po geście bez blokady szuflady (B prowadzi przebieg obok żywego A)."""
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con_a, a = _restart(path)
+    con_b = None
+    try:
+        _makro_dodaj(a, "OBSERVER", "obs")
+        assert a._run_id not in (None, "R")
+        con_b, b = _restart(path)
+        try:
+            _gest_izolacji(b, "dokoncz", pliki[0][1], monkeypatch)
+            assert b._run_id is None
+            assert i18n.t("grid.drawer.foreign_owner") in b.drawer.result.text()
+            assert len([s for r, s, _o in _statusy(con_b) if r == "R" and s == "pending"]) == 2
+        finally:
+            _zamknij_widok(b)
+    finally:
+        if con_b is not None:
+            con_b.close()
+        _zamknij_widok(a)
+        con_a.close()
+
+
+def test_podjecie_po_gescie_bierze_przebieg_z_izolacji_nie_starszy_zwykly(qapp, tmp_path, monkeypatch):
+    """Szuflada wolna, czeka zwykły przebieg `Y` NOWSZY niż zatrzymany `R`: „Dokończ zapis” podejmuje `R`
+    (ten, który gest zwolnił), a `Y` dalej wraca przy kolejnym otwarciu bazy (reguła starszych przebiegów).
+    Falsyfikator: podjęcie najnowszego podejmowalnego bez pamięci przebiegów zatrzymanych (`Y`)."""
+    from horreum import repo
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con = db.connect(path)
+    lok = [(r["id"], r["header_hash"]) for r in con.execute(
+        "SELECT id, header_hash FROM location ORDER BY id")]
+    for run_id, (lid, hh) in (("Y", lok[1]), ("Z", lok[2])):
+        repo.stage_pending(con, run_id=run_id, location_id=lid, keyword="TELESCOP", idx=0, op="set",
+                           old_value=None, new_value="EQ6", new_type="str", new_comment=None,
+                           expected_header_hash=hh)
+    con.close()
+    con, v = _restart(path)
+    try:
+        assert v._run_id == "Z"
+        _klik_w(v.drawer.btn_reject)                     # szuflada wolna, Y czeka, R zatrzymany
+        assert v._run_id is None
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 3)
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        assert v._run_id == "R"
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_szuflada_zajeta_przy_zamknieciu_izolacji_mowi_ze_wroci(qapp, tmp_path, monkeypatch):
+    """Żywe „Cofnij” zapisu tej sesji w chwili, gdy „Dokończ zapis” zwalnia przebieg zatrzymany: szuflada go nie
+    podejmuje (świeżego „Cofnij” nie zdejmujemy po cichu) i mówi, że zmiany wrócą przy kolejnym otwarciu bazy.
+    Falsyfikator: podjęcie przy żywym „Cofnij” („Cofnij” znika albo stoi obok Zatwierdź/Odrzuć)."""
+    from test_gui_pasek_szczegol import _czekaj
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        _makro_dodaj(v, "OBSERVER", "obs")
+        assert v._run_id not in (None, "R") and v._pending_count() >= 1
+        _klik_w(v.drawer.btn_commit)
+        _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "zapis tej sesji")
+        assert v._undo_mode == "macro"
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        assert v._run_id is None and v._undo_mode == "macro" and v._undo_btn.isVisible()
+        assert i18n.t_plural("grid.drawer.isolated_ready", 2) in v.drawer.result.text()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_gestu_po_zamknieciu_operacji_podejmuje_przebieg(qapp, tmp_path, monkeypatch):
+    """Wyjątek całej operacji gestu PO tym, jak pętla zamknęła operację (prawdziwe dokończenie, potem wyjątek):
+    ogon awarii też podejmuje przebieg, a szuflada mówi zdaniem operacji z nazwą gestu. Falsyfikator: ogon
+    awarii bez podjęcia (pusta szuflada przy przebiegu podejmowalnym)."""
+    from horreum.gui.wb_worker import WritebackWorker, po_operacjach
+
+    def _dokoncz_i_pada(con, t, now, pr, sc):
+        po_operacjach(con, t, now, pr, sc, writeback.finish_inplace)
+        raise ValueError("złamany inwariant po dokończeniu")
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        monkeypatch.setitem(WritebackWorker._OPS, "finish_inplace", _dokoncz_i_pada)
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        assert v._run_id == "R"
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", v._pending_count())
+        assert v.drawer.result.text().startswith(i18n.t("grid.wb.op.finish_inplace", msg=""))
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_klucze_izolacji_odmieniaja_liczbe():
+    """Odmiana kluczy zdania izolacji (1, 2, 5, 12, 22) w PL i EN; EN bez polskich znaków i bez „."""
+    i18n.set_lang("pl")
+    assert [i18n.t_plural("grid.drawer.pending_isolated", n).split(",")[0] for n in (1, 2, 5, 12, 22)] == [
+        "1 zmiana czeka", "2 zmiany czekają", "5 zmian czeka", "12 zmian czeka", "22 zmiany czekają"]
+    assert [i18n.t_plural("grid.drawer.isolated_ready", n).split(" - ")[0] for n in (1, 2, 5, 12, 22)] == [
+        "1 zmiana zwolniona z zapisu w miejscu czeka", "2 zmiany zwolnione z zapisu w miejscu czekają",
+        "5 zmian zwolnionych z zapisu w miejscu czeka", "12 zmian zwolnionych z zapisu w miejscu czeka",
+        "22 zmiany zwolnione z zapisu w miejscu czekają"]
+    assert i18n.t_plural("grid.drawer.isolated_more", 22) == "czekają też 22 zmiany zatrzymane zapisem w miejscu"
+    assert i18n.t_plural("grid.drawer.isolated_more", 5) == "czeka też 5 zmian zatrzymanych zapisem w miejscu"
+    i18n.set_lang("en")
+    assert i18n.t_plural("grid.drawer.pending_isolated", 1) == "1 change waits for an in-place write to be settled"
+    assert i18n.t_plural("grid.drawer.pending_isolated", 2) == "2 changes wait for an in-place write to be settled"
+    for klucz in ("grid.drawer.pending_isolated", "grid.drawer.isolated_more", "grid.drawer.isolated_ready",
+                  "grid.drawer.isolated_finish", "grid.drawer.isolated_torn"):
+        for n in (1, 2):
+            tekst = (i18n.t_plural(klucz, n) if klucz.endswith(("isolated", "more", "ready"))
+                     else i18n.t(klucz, finish="F", restore="R", release="Z", nav="N", row="W"))
+            assert not set(tekst) & set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ„"), tekst
+
+
+# ============================================================ AR-309 - zdania szuflady
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_pole_zdania_kopiuje_samo_polecenie(qapp, tmp_path, lang):
+    """Pole zdania (`EtykietaBledu` - wynik szuflady) z poleceniem podanym osobno: prawdziwy prawy klik daje
+    „Kopiuj zdanie”, „Kopiuj szczegół”, „Kopiuj polecenie”, a ta ostatnia kopiuje SAMO polecenie (szczegół niesie
+    prozę z poleceniem - wklejona do terminala proza pada pierwsza). Zdanie bez polecenia (`setText`) zdejmuje
+    pozycję. Falsyfikatory: menu bez pozycji polecenia; `setText` zostawia polecenie poprzedniego zdania;
+    pozycja kopiuje szczegół."""
+    from PySide6.QtGui import QGuiApplication
+    from prawy_klik import menu_pola_otwarte, prawy_klik
+    i18n.set_lang(lang)
+    _path, con, _p = _baza_szuflady(tmp_path, 1)
+    v = _widok_szuflady(con, inline=True)
+    pole = v.drawer.result
+    polecenie = 'horreum header-fix "X:\\L\\h.db" --undo 7'
+    szczegol = "Cofnięcie commitu 7 po zamknięciu okna (wiersz poleceń):\n" + polecenie
+    try:
+        pole.ustaw("4 zapisane", szczegol, polecenie=polecenie)
+        assert pole.polecenie() == polecenie
+        prawy_klik(pole)
+        pozycje = menu_pola_otwarte(pole)
+        assert list(pozycje) == [i18n.t("wb.copy_sentence"), i18n.t("wb.copy_detail"), i18n.t("wb.copy_command")]
+        pozycje[i18n.t("wb.copy_command")].trigger()
+        assert QGuiApplication.clipboard().text() == polecenie
+        pole._menu.hide()
+        pole.setText("inne zdanie")
+        assert pole.polecenie() == ""
+        prawy_klik(pole)
+        assert i18n.t("wb.copy_command") not in menu_pola_otwarte(pole)
+        pole._menu.hide()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_awaria_operacji_w_szufladzie_mowi_nazwe_gestu(qapp, tmp_path, monkeypatch, lang):
+    """Wyjątek całej operacji zapisu (błąd programu) po kliku „Zatwierdź”: szuflada mówi tym samym zdaniem
+    operacji co pasek - z nazwą tego, co się nie udało, w PL i EN - a nie „BŁĄD: błąd programu…”.
+    Falsyfikator: wynik szuflady z `grid.wb.error`."""
+    from horreum.gui.wb_worker import WritebackWorker
+
+    def _pada(*_a):
+        raise ValueError("złamany inwariant zapisu")
+    i18n.set_lang(lang)
+    _path, con, _p = _baza_szuflady(tmp_path, 2)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        monkeypatch.setitem(WritebackWorker._OPS, "commit", _pada)
+        _klik_w(v.drawer.btn_commit)
+        assert v.drawer.result.text() == i18n.t("grid.wb.op.commit", msg=i18n.t("objchg.item.prog_error"))
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+# ============================================================ AR-305 - Nazwy: „Cofnij” znika dopiero przy zmianie
+
+
+def test_zly_wzor_nazw_przy_zywym_cofnij_zostawia_cofnij(qapp, tmp_path):
+    """Zapis makra (żywe „Cofnij”), potem „Do stagingu” Nazw ze złym wzorem: zdanie błędu wzoru na pasku,
+    a „Cofnij”, jego tryb i wiersz szuflady zostają - zły wzór niczego do szuflady nie wnosi. Falsyfikator:
+    `_dismiss_undo` przed walidacją wzoru (szuflada bez żadnego przycisku)."""
+    _path, con, _p = _baza_szuflady(tmp_path, 2)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        zdania = []
+        v.status_message.connect(zdania.append)
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        _klik_w(v.drawer.btn_commit)
+        wiersz = _wiersz_szuflady(v)
+        v._on_rename_stage({**_POL, "template": ["datetime", {"t": "orig", "re": "("}]})
+        assert zdania[-1].startswith(i18n.t("grid.rename.error", e="")), zdania[-1]
+        assert v._undo_mode == "macro" and v._undo_btn.isVisible() and _wiersz_szuflady(v) == wiersz
+        assert v._rename_run_id is None
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_staging_nazw_bez_zmian_przy_zywym_cofnij_mowi_w_szufladzie(qapp, tmp_path):
+    """Zmiana nazw zapisana (żywe „Cofnij” przebiegu nazw), potem ten sam staging - nazwy już kanoniczne, zero
+    zmian: „Cofnij” zostaje przy tym samym przebiegu, a zdanie stagingu staje w wierszu szuflady obok niego
+    z identyfikatorem przebiegu raz (jak w makrze). Falsyfikatory: `_dismiss_undo` przy zerze zmian; mint nowego
+    przebiegu przy zerze zmian; zdanie stagingu tylko na pasku."""
+    _path, con, _p = _baza_szuflady(tmp_path, 2)
+    v = _widok_szuflady(con, inline=True)
+    try:
+        zdania = []
+        v.status_message.connect(zdania.append)
+        v._on_rename_stage(_POL)
+        _klik_w(v.drawer.btn_commit)
+        run = v._undo_rename_run_id
+        etykieta = v.drawer.label.text()
+        v._on_rename_stage(_POL)
+        assert v._undo_mode == "rename" and v._undo_btn.isVisible() and v._undo_rename_run_id == run
+        assert v._rename_run_id == run and v.drawer.label.text() == etykieta
+        assert zdania[-1].startswith(i18n.t_plural("grid.rename.staged", 0, s=2, target="")[:10]), zdania[-1]
+        assert v.drawer.result.text() == zdania[-1] + i18n.t("grid.wb.run_id", id=run)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_staging_nazw_bez_zmian_nie_bierze_blokady_szuflady(qapp, tmp_path):
+    """Staging Nazw bez żadnej zmiany nie zakłada przebiegu - nie trzyma więc blokady szuflady: drugie okno na tej
+    bazie przyjmuje swój staging. Falsyfikator: mint przebiegu i blokada przy zerze zmian (drugie okno słyszy
+    „szufladę prowadzi inne okno”, choć nic nie czeka)."""
+    path, con, _p = _baza_szuflady(tmp_path, 2)
+    a = _widok_szuflady(con, inline=True)
+    con_b = db.connect(path)
+    b = None
+    try:
+        a._on_rename_stage(_POL)
+        _klik_w(a.drawer.btn_commit)                     # nazwy kanoniczne, przebieg zapisany - blokada oddana
+        a._on_rename_stage(_POL)                         # zero zmian
+        b = _widok_szuflady(con_b, inline=True)
+        _makro_przyciskiem(b, "TELESCOP", "EQ6")
+        assert b._run_id is not None and b._pending_count() == 2
+    finally:
+        if b is not None:
+            _zamknij_widok(b)
+        con_b.close()
+        _zamknij_widok(a)
+        con.close()
+
+
+def test_odrzuc_po_zwolnij_zdejmuje_wpis_zwiazany_z_operacja_zamknieta(qapp, tmp_path, monkeypatch):
+    """Przebieg jednego pliku zatrzymany izolacją, „Zwolnij…” - szuflada podejmuje go (jedyny wpis związany
+    z operacją zamkniętą ręką), a „Odrzuć” zdejmuje także ten wpis: w bazie nie zostaje nic czekającego, czego
+    szuflada już by nie pokazała; dziennik ma odrzucenie jednej zmiany. Falsyfikator: „Odrzuć” zdejmujące
+    wyłącznie wpisy bez związku z operacją (wpis zostaje `pending` bez słowa)."""
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch, n=1)
+    con, v = _restart(path)
+    try:
+        _gest_izolacji(v, "zwolnij", pliki[0][1], monkeypatch)
+        assert v._run_id == "R" and v._pending_count() == 1
+        _klik_w(v.drawer.btn_reject)
+        assert v._run_id is None
+        assert not [s for r, s, _o in _statusy(con) if r == "R" and s == "pending"], _statusy(con)
+        assert v.drawer.label.text() == i18n.t("grid.drawer.empty")
+        zdarzenie = con.execute("SELECT payload FROM event WHERE verb = 'staging.discarded'").fetchone()
+        assert json.loads(zdarzenie["payload"]) == {"n": 1, "klinga": "karty"}
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_izolacja_zamknieta_innym_polaczeniem_odswiezenie_podejmuje(qapp, tmp_path, monkeypatch):
+    """Izolację przebiegu zamyka ktoś inny (drugie połączenie - jak CLI albo drugie okno - prawdziwe
+    `writeback.finish_inplace`), a widok tylko odświeża szufladę (koniec cudzego zapisu, bez restartu): przebieg
+    zapamiętany jako zatrzymany jest już podejmowalny, więc szuflada go podejmuje - nie mówi „pusta” przy
+    czekających wpisach. Falsyfikator: odświeżenie pustej szuflady bez `_podejmij_zwolnione`."""
+    path, _pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_isolated", 3)
+        con2 = db.connect(path)
+        try:
+            op_id = con2.execute("SELECT id FROM inplace_op").fetchone()[0]
+            assert writeback.finish_inplace(con2, op_id, now=NOW).status == "applied"
+        finally:
+            con2.close()
+        v.set_writeback_busy(True)                       # cudzy zapis plików (okno naprawy) i jego koniec -
+        v.set_writeback_busy(False)                      # zwykłe odświeżenie szuflady
+        assert v._run_id == "R" and v._pending_count() == 2
+        assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 2)
+        assert v.drawer.btn_commit.isVisible() and v.drawer.btn_commit.isEnabled()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def _dokoncz_i_pada(monkeypatch):
+    """Operacja „Dokończ zapis”, której pętla PRAWDZIWIE zamyka operację, a potem rzuca wyjątek."""
+    from horreum.gui.wb_worker import WritebackWorker, po_operacjach
+
+    def _op(con, t, now, pr, sc):
+        po_operacjach(con, t, now, pr, sc, writeback.finish_inplace)
+        raise ValueError("złamany inwariant po dokończeniu")
+    monkeypatch.setitem(WritebackWorker._OPS, "finish_inplace", _op)
+
+
+def test_awaria_gestu_przy_zywym_cofnij_mowi_ze_zmiany_czekaja(qapp, tmp_path, monkeypatch):
+    """Częściowa awaria gestu izolacji (operacja zamknięta, potem wyjątek) przy żywym „Cofnij”: szuflada nie
+    podejmuje przebiegu, a zdanie błędu mówi też, że zwolnione zmiany czekają; „Cofnij” i „Zatwierdzono” zostają.
+    Falsyfikator: ogon awarii gubiący człon `_podejmij_po_izolacji` (samo zdanie błędu)."""
+    from test_gui_pasek_szczegol import _czekaj
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        _makro_dodaj(v, "OBSERVER", "obs")
+        _klik_w(v.drawer.btn_commit)
+        _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "zapis tej sesji")
+        assert v._undo_mode == "macro"
+        _dokoncz_i_pada(monkeypatch)
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        wynik = v.drawer.result.text()
+        assert v._run_id is None and v._undo_mode == "macro" and v._undo_btn.isVisible()
+        assert wynik.startswith(i18n.t("grid.wb.op.finish_inplace", msg="")[:20]), wynik
+        assert i18n.t_plural("grid.drawer.isolated_ready", 2) in wynik, wynik
+        assert v.drawer.label.text() != i18n.t("grid.drawer.empty")
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_gestu_przy_cudzej_blokadzie_mowi_ze_zmiany_czekaja(qapp, tmp_path, monkeypatch):
+    """Częściowa awaria gestu izolacji w oknie B, gdy szufladę prowadzi okno A: B nie podejmuje przebiegu, zdanie
+    błędu mówi, kto prowadzi szufladę, a etykieta - że zmiany czekają na podjęcie, nie „pusta”. Falsyfikatory:
+    ogon awarii bez członu; pusta szuflada z pustostanem przy zachowanych wpisach."""
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con_a, a = _restart(path)
+    con_b = None
+    try:
+        _makro_dodaj(a, "OBSERVER", "obs")
+        con_b, b = _restart(path)
+        try:
+            _dokoncz_i_pada(monkeypatch)
+            _gest_izolacji(b, "dokoncz", pliki[0][1], monkeypatch)
+            assert b._run_id is None
+            assert i18n.t("grid.drawer.foreign_owner") in b.drawer.result.text()
+            assert b.drawer.label.text() == i18n.t_plural("grid.drawer.pending_ready", 2)
+        finally:
+            _zamknij_widok(b)
+    finally:
+        if con_b is not None:
+            con_b.close()
+        _zamknij_widok(a)
+        con_a.close()
+
+
+def test_izolacja_zamknieta_przy_podjetym_innym_przebiegu_mowi_ze_czeka(qapp, tmp_path, monkeypatch):
+    """Przy otwarciu szuflada podejmuje zwykły przebieg `Z` i mówi, że obok czeka zatrzymany `R`; „Dokończ zapis”
+    dla `R` BEZ odrzucania `Z` - szuflada zajęta, więc zdanie mówi, że zwolnione zmiany czekają. Falsyfikator:
+    `R` niezapamiętany przy członie `isolated_more` (gest nie wie o `R`, informacja znika)."""
+    from horreum import repo
+    path, pliki = _zatrzymany_izolacja(tmp_path, monkeypatch)
+    con = db.connect(path)
+    lid, hh = con.execute("SELECT id, header_hash FROM location ORDER BY id LIMIT 1 OFFSET 2").fetchone()
+    repo.stage_pending(con, run_id="Z", location_id=lid, keyword="TELESCOP", idx=0, op="set",
+                       old_value=None, new_value="EQ6", new_type="str", new_comment=None, expected_header_hash=hh)
+    con.close()
+    con, v = _restart(path)
+    try:
+        assert v._run_id == "Z"
+        assert i18n.t_plural("grid.drawer.isolated_more", 3) in v.drawer.result.text()
+        _gest_izolacji(v, "dokoncz", pliki[0][1], monkeypatch)
+        assert v._run_id == "Z"
+        assert i18n.t_plural("grid.drawer.isolated_ready", 2) in v.drawer.result.text(), v.drawer.result.text()
     finally:
         _zamknij_widok(v)
         con.close()

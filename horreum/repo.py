@@ -335,10 +335,43 @@ def _copy_facts_checked(copy_facts):
     return copy_facts
 
 
+class _Stan:
+    """Wartość-znacznik o czytelnym `repr` (sentinel zeznania bajtu, AR-299)."""
+    def __init__(self, nazwa):
+        self._nazwa = nazwa
+
+    def __repr__(self):
+        return self._nazwa
+
+
+# ZEZNANIE BAJTU SPOZA ASCII KOPII (0046, AR-299) - poza `None` (zbadano, czysto) i `(karta, "0xNN")`:
+# NIE_BADANO - wołający surowych bajtów nie czytał (import z dawcy, W1, rekord syntetyczny): stan
+# zbadania wiersza zostaje, a kotwica odcisku sama go unieważnia, gdy odcisk się zmieni;
+# NIEZBADANE - czytał, ale dalszych HDU nie dało się doczytać (`scan.read_fits_meta`): stan „nie
+# zbadano” jawnie, kopia czeka na etap uzupełnień.
+NIE_BADANO = _Stan("NIE_BADANO")
+NIEZBADANE = _Stan("NIEZBADANE")
+
+
+def _marker_bajtu(np, row, header_hash):
+    """`(nonprintable_hash, nonprintable_keyword, nonprintable_char)` po zapisie lokacji z zeznaniem
+    `np` (kształt `scan.ScanRecord.nonprintable`); `row` = wiersz sprzed zapisu albo `None` (nowa)."""
+    if np is NIE_BADANO:
+        if row is None:
+            return None, None, None
+        return row["nonprintable_hash"], row["nonprintable_keyword"], row["nonprintable_char"]
+    if np is NIEZBADANE or header_hash is None:
+        return None, None, None
+    if np is None:
+        return header_hash, None, None
+    keyword, char = np
+    return header_hash, keyword, char
+
+
 def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, mtime=None,
                  file_sha1=None, header_hash=None, hdu_index=None, compressed=None,
                  size_bytes=None, copy_facts=None, unreadable_since=None, unreadable_kind=None,
-                 unreadable_reason=None, now, actor="scan"):
+                 unreadable_reason=None, nonprintable=NIE_BADANO, now, actor="scan"):
     """Dołóż lokalizację frame'a po `UNIQUE(volume, path)` wraz z faktami KOPII (file_sha1/
     header_hash/hdu_index/compressed/size_bytes — brief §2; `hdu_index`/`compressed` NULL dla XISF,
     wszystkie odciski NULL przy W1). Już znana →
@@ -358,30 +391,38 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
     ścieżki, a skutki były dwa: brama przyrostowa przy tym samym `mtime` pomijała kopię bez markera
     (nikt jej już nie czytał), a szkielet nie niósł rodzaju awarii - kubełek nie mówił, czy winny
     jest dysk, czy parser. Domyślnie `None` - kopia czytelna (dowód odczytu niesie wołający).
-    Rodzaj i powód bez markera odbija CHECK 0019."""
+    Rodzaj i powód bez markera odbija CHECK 0019.
+
+    `nonprintable` (0046, AR-299) - zeznanie bajtu spoza ASCII z odczytu (`_marker_bajtu`); domyślnie
+    `NIE_BADANO` = kopia niezbadana (licznik „niesprawdzone” i etap uzupełnień ją widzą)."""
     row = con.execute(
         "SELECT id FROM location WHERE volume = ? AND path = ?", (volume, path)).fetchone()
     if row is not None:
         return row[0], False
 
     cf = _copy_facts_checked(copy_facts)
+    np_hash, np_keyword, np_char = _marker_bajtu(nonprintable, None, header_hash)
     with _tx(con):  # atomowo: INSERT location + INSERT event
         cur = con.execute(
             "INSERT INTO location(frame_id, volume, drive_letter, path, tier, mtime, "
             "file_sha1, header_hash, hdu_index, compressed, size_bytes, last_verified_at, "
             "unreadable_since, unreadable_kind, unreadable_reason, "
             "image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, "
-            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, hdr_rule) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, hdr_rule, "
+            "nonprintable_hash, nonprintable_keyword, nonprintable_char) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?)",
             (frame_id, volume, drive_letter, path, tier, mtime,
              file_sha1, header_hash, hdu_index, compressed, size_bytes, now,
              unreadable_since, unreadable_kind, unreadable_reason,
-             *(cf[k] for k in COPY_FACTS)),
+             *(cf[k] for k in COPY_FACTS), np_hash, np_keyword, np_char),
         )
         location_id = cur.lastrowid
         payload = {"volume": volume, "path": path, "tier": tier}
         if unreadable_since is not None:
             payload["unreadable_kind"] = unreadable_kind
+        if np_keyword is not None:
+            payload["nonprintable"] = {"keyword": np_keyword, "char": np_char}
         emit_event(
             con, actor=actor, verb="location.added", target=f"frame:{frame_id}", now=now,
             payload=payload,
@@ -403,9 +444,11 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
 # `COPY_FACTS` TU (0021): liczba/role obrazów i zeznanie nagłówka kopii są faktami KOPII jak odcisk
 # nagłówka - ich przejście idzie do tego samego payloadu `location.refreshed`, a zmiana odcisku
 # i zmiana faktów lecą JEDNYM UPDATE-em (kotwica `hdr_hash == header_hash`, CHECK 0021).
+# `nonprintable_*` TU (0046, AR-299): zbadanie bajtu spoza ASCII i jego przejście są faktem kopii
+# z jej nagłówka - idą tym samym UPDATE-em i tym samym payloadem co odcisk, którym są kotwiczone.
 _LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed", "size_bytes",
                    "unreadable_since", "unreadable_kind", "unreadable_reason", "present",
-                   *COPY_FACTS)
+                   *COPY_FACTS, "nonprintable_hash", "nonprintable_keyword", "nonprintable_char")
 
 
 def rebind_location(con, *, location_id, frame_after, now, actor="scan", inplace_gen=None):
@@ -1076,7 +1119,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                      hdu_index, compressed, size_bytes, unreadable_since, unreadable_kind,
                      unreadable_reason, present, now,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
-                     kind=None, copy_facts=None, inplace_gen=None):
+                     kind=None, copy_facts=None, inplace_gen=None, nonprintable=NIE_BADANO):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
 
@@ -1123,6 +1166,9 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       → `StaleScanRecord` w TEJ SAMEJ transakcji co zapis, zero zapisu: odczyt mógł trafić w zapis
       w toku albo go wyprzedzić, a spóźniony zapis faktów przywróciłby stan, który pisarz zmienia.
       `None` = wołający nie jest skanem (re-sync pisarza, import) - bez sprawdzenia.
+    - **`nonprintable`** (0046, AR-299): zeznanie bajtu spoza ASCII z odczytu (`_marker_bajtu`).
+      Domyślne `NIE_BADANO` NIE jest cichym wektorem gaszenia - zostawia stan zbadania wiersza, a ten
+      i tak przestaje się liczyć, gdy odcisk nagłówka się zmieni (kotwica `nonprintable_hash`).
 
     `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
     POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
@@ -1141,11 +1187,14 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, "
             "unreadable_since, unreadable_kind, unreadable_reason, present, "
             "image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, "
-            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, hdr_rule "
+            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, hdr_rule, "
+            "nonprintable_hash, nonprintable_keyword, nonprintable_char "
             "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         _refuse_if_newer_inplace(con, location_id, inplace_gen)
+        after["nonprintable_hash"], after["nonprintable_keyword"], after["nonprintable_char"] = (
+            _marker_bajtu(nonprintable, row, header_hash))
         # Faktów kopii nieczytanych (`None`) nie ruszamy: zostają wartościami z wiersza. Tak samo
         # fakty wiersza zebrane regułą NOWSZĄ niż reguła wołającego (AR-33, kontrakt
         # `record_copy_facts`: binarka starsza od bazy niczego nie cofa) - o ile opisują ten sam
@@ -1171,10 +1220,12 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             "unreadable_reason = ?, present = ?, last_verified_at = ?, "
             "image_count = ?, image_roles = ?, hdr_filter = ?, hdr_imagetyp = ?, hdr_object = ?, "
             "hdr_telescop = ?, hdr_instrume = ?, hdr_exptime = ?, hdr_xbinning = ?, "
-            "hdr_date_obs = ?, hdr_hash = ?, hdr_rule = ? WHERE id = ?",
+            "hdr_date_obs = ?, hdr_hash = ?, hdr_rule = ?, nonprintable_hash = ?, "
+            "nonprintable_keyword = ?, nonprintable_char = ? WHERE id = ?",
             (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, unreadable_since,
              unreadable_kind, unreadable_reason, present, now,
-             *(after[k] for k in COPY_FACTS), location_id))
+             *(after[k] for k in COPY_FACTS), after["nonprintable_hash"],
+             after["nonprintable_keyword"], after["nonprintable_char"], location_id))
         emit_event(con, actor=actor, verb="location.refreshed",
                    target=f"location:{location_id}", now=now, payload=changed)
         result["facts"] = True
@@ -1636,6 +1687,59 @@ def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copi
         emit_event(con, actor=actor, verb="location.refreshed",
                    target=f"location:{location_id}", now=now, payload=changed)
     return True
+
+
+def _zapisz_marker_bajtu(con, *, location_id, header_hash, wynik, now, actor):
+    """Ciało zapisu zbadania bajtu spoza ASCII (0046, AR-299) pod transakcją wołającego: CAS na odcisku
+    (`header_hash` wiersza == odcisk odczytu), przejście → UPDATE literałem + `location.refreshed`
+    z `{pole: {before, after}}`. Zwraca `True` przy zmianie."""
+    row = con.execute(
+        "SELECT header_hash, nonprintable_hash, nonprintable_keyword, nonprintable_char "
+        "FROM location WHERE id = ?", (location_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"location:{location_id} nie istnieje")
+    if header_hash is None or row["header_hash"] != header_hash:
+        return False
+    po = dict(zip(("nonprintable_hash", "nonprintable_keyword", "nonprintable_char"),
+                  _marker_bajtu(wynik, row, header_hash)))
+    changed = {k: {"before": row[k], "after": v} for k, v in po.items() if row[k] != v}
+    if not changed:
+        return False
+    con.execute("UPDATE location SET nonprintable_hash = ?, nonprintable_keyword = ?, "
+                "nonprintable_char = ? WHERE id = ? AND header_hash = ?",
+                (po["nonprintable_hash"], po["nonprintable_keyword"], po["nonprintable_char"],
+                 location_id, header_hash))
+    emit_event(con, actor=actor, verb="location.refreshed", target=f"location:{location_id}",
+               now=now, payload=changed)
+    return True
+
+
+def record_nonprintable(con, *, location_id, header_hash, wynik, now, actor="backfill:copies",
+                        inplace_gen=None):
+    """ZBADANIE BAJTU SPOZA ASCII kopii (0046, AR-299) z odczytu samego nagłówka - droga
+    `scan.backfill_copy_facts` dla kopii sprzed migracji, których brama przyrostowa skanu nie czyta.
+    `wynik` = `None` (czysto) albo `(karta, "0xNN")`. Kotwica odcisku jak w `record_copy_facts`: inny
+    odcisk = kopia zmieniona od skanu → `False`, zero zapisu; `inplace_gen` - jak tam
+    (`StaleScanRecord`). Zwraca `True` przy zapisie."""
+    with _immediate(con):
+        _refuse_if_newer_inplace(con, location_id, inplace_gen)
+        return _zapisz_marker_bajtu(con, location_id=location_id, header_hash=header_hash,
+                                    wynik=wynik, now=now, actor=actor)
+
+
+def block_on_nonprintable(con, *, pending_ids, reason, location_id, header_hash, keyword, char, now,
+                          actor="user:local"):
+    """ODMOWA BAJTU PRZY COMMICIE (AR-299): status 'blocked' wpisów stagingu z powodem (jedyny pisarz
+    trójki - `_set_pending_reason_tx`) i marker bajtu kopii JEDNĄ transakcją (`atomic`): albo oba, albo
+    żaden - nigdy marker bez odmowy ani odmowa połowy wpisów. Marker idzie pod kotwicą odcisku
+    stagingu `header_hash` (pisarz sprawdził ją z plikiem przed bramką bajtu); inny odcisk w wierszu →
+    sam status, bez markera."""
+    with atomic(con):
+        for pending_id in pending_ids:
+            con.execute("UPDATE pending_changes SET status = 'blocked' WHERE id = ?", (pending_id,))
+        _set_pending_reason_tx(con, pending_ids, reason)
+        _zapisz_marker_bajtu(con, location_id=location_id, header_hash=header_hash,
+                             wynik=(keyword, char), now=now, actor=actor)
 
 
 def flag_copy_facts_summary(con, summary, now, actor="backfill:copies"):
@@ -4531,11 +4635,17 @@ def _zdejmij_oczekujace_tx(con, run_id, klinga):
     (`pending_changes`) albo `nazwy` (`pending_renames`) - pod transakcją wołającego.
     Zwraca ich liczbę. Wpisy rozstrzygnięte zapisem przerwanym zostają: na `failed` kart stoi
     potwierdzenie skanem (`confirm_failed_commit_by_scan`), na `applied` nazw - cofnięcie przebiegu
-    (`writeback.undo_renames`). Wpis związany z operacją w miejscu (`inplace_op_id`) i wiersz nazwy
-    z otwartym zamiarem (`in_flight`) też zostają - jak w `clear_pending_for_run`/`clear_renames_for_run`."""
+    (`writeback.undo_renames`). Wpis związany z operacją w miejscu IZOLUJĄCĄ (faza z
+    `INPLACE_ISOLATING_PHASES` - zamiar czekający na dokończenie zapisu) i wiersz nazwy z otwartym
+    zamiarem (`in_flight`) też zostają - jak w `clear_pending_for_run`/`clear_renames_for_run`. Wpis
+    związany z operacją już ZAMKNIĘTĄ (`released`, `recovered`, `synced`) szuflada podejmuje jak
+    zwykły (`begin_inplace_commit` wiąże go na nowo, AR-308), więc i odrzuca jak zwykły."""
     if klinga == "karty":
         return con.execute("DELETE FROM pending_changes WHERE run_id = ? AND status = 'pending' "
-                           "AND inplace_op_id IS NULL", (run_id,)).rowcount
+                           "AND (inplace_op_id IS NULL OR inplace_op_id NOT IN ("
+                           "     SELECT id FROM inplace_op "
+                           "     WHERE phase IN (SELECT value FROM json_each(?))))",
+                           (run_id, json.dumps(list(INPLACE_ISOLATING_PHASES)))).rowcount
     if klinga == "nazwy":
         return con.execute("DELETE FROM pending_renames WHERE run_id = ? AND status = 'pending' "
                            "AND in_flight IS NULL", (run_id,)).rowcount

@@ -488,3 +488,46 @@ def test_cli_dry_mowi_wskazowke_o_manifescie(tmp_path, capsys, przypadek):
         i = wiersze.index(f"  manifestu nie da sie teraz zapisac: {zdanie}")
         assert wiersze[i + 1] == "  potem: ponow to samo polecenie (horreum project ...)", wiersze[i:]
     assert man.read_bytes() == przed and (przypadek != "zajety" or part.read_bytes() == b"cudzy")
+
+
+@pytest.mark.parametrize("przypadek", ["zdrowy", "uszkodzony", "zajety", "folder_obiektu"])
+def test_cli_dry_perspektywy_mowi_wskazowke_o_manifescie(tmp_path, capsys, przypadek):
+    """AR-306: `project` bez `--object` i bez `--apply` (wydanie perspektywy) nad manifestem uszkodzonym,
+    przy cudzym pliku roboczym albo w folderze wydania obiektu drukuje tę samą wskazówkę co wydanie
+    obiektu - z gestem terminala; zdrowy manifest perspektywy - bez wiersza. Kod 0 (DRY), bajty
+    nietknięte, cp1250. Mutant: wskazówka wyłącznie z `--object` (wiersz znika)."""
+    if przypadek == "folder_obiektu":
+        dbp = _seed_obiekt(tmp_path)
+        karta = tmp_path / "_WBPP" / "karta"
+        assert cli.main(["project", str(dbp), "--root", str(karta), "--object", "IC1795", "--apply"]) == 0
+        root = karta / "OBJECTS" / "IC1795"
+    else:
+        dbp, _files = _seed(tmp_path)
+        root = tmp_path / "_WBPP" / "feed"
+        assert cli.main(["project", str(dbp), "--root", str(root), "--apply"]) == 0
+    man = root / projection.MANIFEST_NAME
+    part = root / (projection.MANIFEST_NAME + projection.PART_SUFFIX)
+    zdanie = None
+    if przypadek == "uszkodzony":
+        man.write_bytes(b"{")
+        zdanie = ("manifest wydania (_PROJEKCJA.json) leży w folderze, ale nie jest poprawnym zeznaniem "
+                  "(JSON) - nie nadpisuję go; sprawdź go albo usuń ręcznie")
+    elif przypadek == "zajety":
+        part.write_bytes(b"cudzy")
+        zdanie = ("obok manifestu leży plik roboczy innego zapisu (_PROJEKCJA.json.part) - gdy żaden zapis "
+                  "nie trwa, skasuj go ręcznie")
+    elif przypadek == "folder_obiektu":
+        zdanie = ("manifest wydania (_PROJEKCJA.json) w folderze należy do innego wydania (sprzeczne pole: "
+                  "layout) - nie nadpisuję go; sprawdź go albo usuń ręcznie")
+    przed = man.read_bytes()
+    capsys.readouterr()
+    assert cli.main(["project", str(dbp), "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    out.encode("cp1250")
+    wiersze = out.splitlines()
+    if zdanie is None:
+        assert not any("manifestu nie da sie" in w for w in wiersze), out
+    else:
+        i = wiersze.index(f"  manifestu nie da sie teraz zapisac: {zdanie}")
+        assert wiersze[i + 1] == "  potem: ponow to samo polecenie (horreum project ...)", wiersze[i:]
+    assert man.read_bytes() == przed and (przypadek != "zajety" or part.read_bytes() == b"cudzy")

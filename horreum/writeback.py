@@ -72,6 +72,7 @@ from astropy.io import fits
 
 from . import exif, hashing, repo, scan
 from .card_rules import FITS_RECORD as _FITS_RECORD
+from .db import _DZIENNIK_MIGRACJI_OD   # wersja, od której baza ma dziennik migracji (granica śladu)
 from .resolve.paths import path_key   # ścieżka FIZYCZNA (bez wielkości liter) - jak planer i straż
 from .object_change import ZdanieRdzenia   # ostrzeżenie gestu z kodem dla okna (AR-138)
 from .item_reasons import (ITEM_REASON_CODES,   # powód z kodem (AR-141, AR-148)
@@ -1029,8 +1030,10 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
                 powod = _odmowa_sumy(hdr)
                 if powod is not None:
                     return WriteResult("blocked", powod, None)
-                # AR-271: bajt spoza ASCII w surowym nagłówku - `writeto` zamieniłby go na `?`.
-                powod = _odmowa_bajtow(fh, _odcinki_naglowkow(hdul))
+                # AR-271: bajt spoza ASCII w surowym nagłówku - `writeto` zamieniłby go na `?`; AR-174:
+                # rekord `END` z ogonem - `writeto` zastąpiłby ogon spacjami.
+                odcinki = _odcinki_naglowkow(hdul)
+                powod = _odmowa_bajtow(fh, odcinki) or _odmowa_granic(fh, odcinki)
                 if powod is not None:
                     return WriteResult("blocked", powod, None)
                 info = hdul.fileinfo(index)
@@ -1282,7 +1285,8 @@ def _plan_przywrocenia(path: str, fh, env: RegionBackup, expected_hash: str | No
     hdr, start, data_start, _, odcinki = granice
     # AR-271: bajt spoza ASCII w pliku zastanym albo w regionie koperty - odmowa z kodem przed plikiem
     # tymczasowym i śladem cofnięcia (ta sama reguła co zapis; koperta zaczyna się na granicy HDU).
-    powod = _odmowa_bajtow(fh, odcinki) or _bajt_naglowka(env.region)
+    powod = (_odmowa_bajtow(fh, odcinki) or _bajt_naglowka(env.region)
+             or _odmowa_granic(fh, odcinki))                       # AR-174: rekord `END` z ogonem
     if powod is not None:
         return WriteResult("blocked", powod, None)
     if start != env.offset:
@@ -1314,8 +1318,10 @@ def _fits_semantyczny(path: str, fh, tekst: str, expected_hash: str | None):
                 return WriteResult("blocked", _UNDO_HEADER_CHANGED, None)
             # AR-271: plik zastany i tekst backupu (region koperty albo stary tekst) - ta sama odmowa
             # co zapis; dawniej `writeto` kończył 'failed' gołym `VerifyError` albo pisał `?`.
-            powod = (_odmowa_bajtow(fh, _odcinki_naglowkow(hdul))
-                     or _bajt_naglowka(tekst.encode("latin-1", "replace")))
+            odcinki = _odcinki_naglowkow(hdul)
+            powod = (_odmowa_bajtow(fh, odcinki)
+                     or _bajt_naglowka(tekst.encode("latin-1", "replace"))
+                     or _odmowa_granic(fh, odcinki))               # AR-174: rekord `END` z ogonem
             if powod is not None:
                 return WriteResult("blocked", powod, None)
             info = hdul.fileinfo(index)
@@ -1943,6 +1949,47 @@ def _odmowa_bajtow(fh, odcinki) -> PowodPozycji | None:
     return None
 
 
+# ODMOWA GRANIC NAGŁÓWKA FITS (AR-174): region nagłówka HDU kończy się blokiem 2880 B z KANONICZNYM rekordem
+# `END` (`END` + 77 spacji) i ani blokiem więcej. Rekord `END` z niepustym ogonem astropy czyta z ostrzeżeniem
+# i przy `writeto` zastępuje ogon spacjami - droga atomowa i cofnięcie zmieniłyby bajty spoza karty bez słowa,
+# a zapis w miejscu nie znajdzie granic. Odmowa z kodem, plik nietknięty - ta sama klasa co bajt spoza ASCII
+# („pisarz nie zmienia bajtów bez słowa”). Populacja: 0 z 15 597 czytelnych plików FITS na `R:` (spis
+# 2026-10-24, surowy odczyt) - bramka obronna.
+_GRANICE_END = PowodPozycji(
+    "granice nagłówka FITS z bajtów pliku nie zgadzają się z kartą END (rekord END z niepustym ogonem "
+    "albo blok bez END) - Horreum nie zapisze tego nagłówka bez zmiany tych bajtów; plik nietknięty",
+    "header_end_bounds")
+# Rekord `END` tak, jak go szuka astropy: wzorzec znak w znak z `astropy/io/fits/header.py` (`HEADER_END_RE`,
+# astropy 8.0.0) - kanoniczny `END` + 77 spacji ALBO `END` z ogonem zaczętym znakiem spoza `[A-Z0-9_-]`. Kopia,
+# bo nazwa astropy nie jest dokumentowanym API, a `pyproject.toml` nie przypina wersji; parytet z bieżącym
+# astropy pilnuje `tests/test_powody_pisarza.py`.
+_FITS_END_RE = re.compile(rb"(?:(?P<valid>END {77}) *)|(?P<invalid>END$|END {0,76}[^A-Z0-9_-])")
+
+
+def _granice_end_zgodne(raw: bytes) -> bool:
+    """Czy region nagłówka `raw` (od początku HDU, wielokrotność 2880 B) kończy się na bloku z PIERWSZYM
+    rekordem `END` i czy ten rekord jest kanoniczny. Pierwszy rekord `END` liczony jak w astropy
+    (`_FITS_END_RE` na granicy karty, jak `Header._find_end_card`): kanoniczny ALBO `END` z ogonem
+    spoza znaków słowa kluczowego. Rekord `END` z ogonem przed kanonicznym `END` w tym samym bloku to
+    nagłówek, którego koniec dwa parsery astropy czytają różnie (klasyczny - na pierwszym, szybki parser
+    `fits.open` - `_utils.parse_header`, wyłącznie kanoniczny `END` - na drugim, z rekordem z ogonem jako
+    kartą) - odmowa, jak przy samym ogonie."""
+    rekordy = [raw[i:i + _FITS_RECORD] for i in range(0, len(raw), _FITS_RECORD)]
+    koniec = next((i for i, r in enumerate(rekordy) if _FITS_END_RE.match(r)), None)
+    return (koniec is not None and rekordy[koniec] == _FITS_END_RECORD
+            and len(raw) == -(-(koniec + 1) * _FITS_RECORD // 2880) * 2880)
+
+
+def _odmowa_granic(fh, odcinki) -> PowodPozycji | None:
+    """`_GRANICE_END` dla pierwszego nagłówka HDU z `odcinki`, który nie kończy się kanonicznym `END`,
+    albo `None` - surowe bajty z uchwytu blokady `fh`, miejsce w kolejce obok `_odmowa_bajtow`."""
+    for od, do in odcinki:
+        fh.seek(od)
+        if not _granice_end_zgodne(fh.read(do - od)):
+            return _GRANICE_END
+    return None
+
+
 _FITS_END_RECORD = b"END" + b" " * 77
 # Blokada: przerwy między próbami otwarcia przy błędzie współdzielenia (32) / blokady (33).
 _LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0)
@@ -2171,16 +2218,15 @@ def _fits_region_checked(fh, start: int, data_start: int, expected_hash: str | N
     """Region nagłówka FITS `[start, data_start)` PRZECZYTANY Z UCHWYTU BLOKADY i sprawdzony sam
     w sobie (Z1): długość = wielokrotność 2880 kończąca się blokiem z kartą `END` (granice HDU
     z bajtów, nie z offsetów parsera), `header_hash` == oczekiwany, układ danych == `uklad`.
-    Zwraca `(raw, hash)` albo `WriteResult('blocked')` przy innym hashu; niespójne granice/układ
-    → `ValueError` ('failed', zero zapisu)."""
+    Zwraca `(raw, hash)` albo `WriteResult('blocked')` przy innym hashu i przy granicach niezgodnych
+    z kanonicznym `END` (`_GRANICE_END`, AR-174 - fakt pliku, odmowa z kodem); region niekompletny i układ
+    danych inny niż z parsera → `ValueError` ('failed', zero zapisu - rozjazd parsera z bajtami)."""
     fh.seek(start)
     raw = fh.read(data_start - start)
     if len(raw) != data_start - start or not raw or len(raw) % 2880:
         raise ValueError(f"FITS: region nagłówka {start}:{data_start} niekompletny ({len(raw)} B)")
-    rekordy = [raw[i:i + _FITS_RECORD] for i in range(0, len(raw), _FITS_RECORD)]
-    koniec = next((i for i, r in enumerate(rekordy) if r == _FITS_END_RECORD), None)
-    if koniec is None or len(raw) != -(-(koniec + 1) * _FITS_RECORD // 2880) * 2880:
-        raise ValueError("FITS: granice nagłówka z uchwytu nie zgadzają się z kartą END")
+    if not _granice_end_zgodne(raw):          # AR-174: odmowa z kodem, plik nietknięty
+        return WriteResult("blocked", _GRANICE_END, None)
     hdr = fits.Header.fromstring(raw.decode("latin-1"))
     biezacy = scan._header_hash(hdr)
     if expected_hash is not None and biezacy != expected_hash:
@@ -2717,9 +2763,11 @@ def _zapas_z_lustra(cards) -> str | None:
     Rekordów przed `END` jest tyle, ile kart w lustrze, gdy każda stoi w jednym rekordzie; `END`
     zajmuje następny, a nagłówek kończy się na najbliższej granicy 2880 B (36 rekordów - granicę
     z bajtów sprawdza pisarz, `_fits_region_checked`). Reguła zakłada nagłówek o MINIMALNEJ liczbie
-    bloków: plik z dodatkowymi blokami spacji za blokiem `END` lustro widzi tak samo, a pisarz
-    odmawia go jako `failed` (granice z uchwytu nie zgadzają się z kartą `END`) - na `R:` 0 na 323
-    zmierzonych, rejestr."""
+    bloków z kanonicznym rekordem `END`. Plik z blokiem spacji za blokiem `END` nie dochodzi do pisarza
+    (astropy go nie czyta - skan go nie wciągnie); rekord `END` z niepustym ogonem lustro widzi jak każdy
+    inny, prognoza mówi „w miejscu”, a pisarz odmawia z kodem `header_end_bounds` (AR-174). Na `R:` 0 na
+    15 597 czytelnych plikach FITS (spis 2026-10-24: region parsera = minimalny, `END` kanoniczny, lustro
+    = rekordy) - prognoza bez faktu skanu, rejestr."""
     rekordy = 0
     puste = False
     for keyword, value_raw, value_type, comment in cards:
@@ -3124,7 +3172,7 @@ def _group_by_location(rows) -> list[tuple[int, list]]:
 
 
 def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None, kontrola=None,
-            w_transakcji=None, przed_wciagnieciem=None, zapis_commitu=None) -> "_Resync":
+            w_transakcji=None, przed_wciagnieciem=None) -> "_Resync":
     """RE-SYNC bazy po mutacji pliku - REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
     (read-only, świeże hasze/nagłówek/karty) → `ingest_record`: `refresh_location` odświeża fakty
     kopii + zeznanie + `cards` + `frame.camera_id/kind` z eventami (actor="user:local"). Wymaga
@@ -3164,11 +3212,9 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     (`repo._settle_withheld_tx`) zobaczyłoby inny nagłówek i nazwało je zastąpionym - a wynik tego
     zamknięcia rozstrzyga, czy cofnięcie bez dowodu zeznania samo zakłada wstrzymanie (B2).
 
-    `zapis_commitu` = `(commit_id, location_id)`, gdy re-sync wciąga WYNIK ZAPISU commitu kart (droga
-    atomowa `_zapisz_lokacje`, dokończenie operacji `commit` w miejscu `_dokoncz`, potwierdzenie
-    podmiany z dysku `_potwierdz_z_dysku`): para idzie do ładunku `header.refreshed` tej transakcji
-    (`repo.refresh_location`) - dowód pochodzenia, po którym cofnięcie commitu znajduje przypisanie
-    „Rozwiąż” z jego karty (AR-311). Cofnięcia i odzysk jej nie podają.
+    Dowód pochodzenia zapisu karty (para commit/plik, AR-311) nie jedzie re-synciem: stawia go znacznik
+    przejścia wpisu `OBJECT` w 'applied' w transakcji `w_transakcji` (`repo._zapis_karty_obiektu_tx`,
+    AR-319) - ta sama reguła dla re-syncu, skanu, rekoncyliacji i dokończenia wstrzymania.
 
     Zwraca `_Resync`: `niezgodne` (kontrola danych - nic nie wciągnięto, `zeznanie` `None`) albo
     `zeznanie`."""
@@ -3180,8 +3226,7 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
         if przed_wciagnieciem is not None:
             przed_wciagnieciem()
         scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(),
-                           actor=actor,
-                           **({} if zapis_commitu is None else {"zapis_commitu": zapis_commitu}))
+                           actor=actor)
         zeznanie = _dowod_zeznania(con, rec, volume, now=now, actor=actor)
         if w_transakcji is not None:
             w_transakcji(zeznanie)
@@ -3398,10 +3443,7 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
         try:
             wynik = _resync(con, loc["path"], loc["volume"], now=now,
                             expect_sha1_data=loc["sha1_data"], kontrola=kontrola,
-                            przed_wciagnieciem=_przed, w_transakcji=_zamknij,
-                            zapis_commitu=((op["commit_id"], op["location_id"])
-                                           if op["kind"] == "commit" and op["commit_id"] is not None
-                                           else None))
+                            przed_wciagnieciem=_przed, w_transakcji=_zamknij)
         except Exception as exc:  # noqa: BLE001 - wsad idzie dalej, operacja zostaje `written`
             blad = _blad_systemu(exc)
             if padlo_zamkniecie:
@@ -3536,8 +3578,7 @@ def _potwierdz_z_dysku(con, b, loc, *, now, intent_outcome=None) -> str | None:
             withheld_reason=None if zeznanie else repo.withheld_reason(
                 con, location_id=loc["id"], commit_id=b["commit_id"]))
     wynik = _resync(con, loc["path"], loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
-                    przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz,
-                    zapis_commitu=(b["commit_id"], loc["id"]))
+                    przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz)
     if wynik.niezgodne is not None:
         return PowodPozycji(f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na "
                             f"dysku leży wersja tego commitu, ale {wynik.niezgodne}",
@@ -4169,8 +4210,7 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
 
     try:                              # droga atomowa: PLIK→DB (T8); pełny odczyt pliku
         niezgodne = _resync(con, path, loc["volume"], now=now,
-                            expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij,
-                            zapis_commitu=(stan.commit_id, location_id)).niezgodne
+                            expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij).niezgodne
     except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
         # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
         # przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej naprawi ponowny
@@ -4471,13 +4511,28 @@ def reconcile_renames(con, *, now, volume=None) -> list[FileResult]:
             if loc is not None and loc["volume"] != volume:
                 continue                          # cudzy wolumin - litera ścieżki nie dowodzi tożsamości
         try:
-            wyniki.append(_rozstrzygnij_zamiar(con, r, now=now))
+            wynik = _rozstrzygnij_zamiar(con, r, now=now)
         except Exception as exc:  # noqa: BLE001 - jeden zamiar nie przerywa etapu, w którym go liczymy
             blad = _blad_systemu(exc)
-            wyniki.append(FileResult(r["location_id"], r["old_path"], "blocked", PowodPozycji(
+            wynik = FileResult(r["location_id"], r["old_path"], "blocked", PowodPozycji(
                 f"rekoncyliacja padła ({blad}) - zamiar zostaje", "reconcile_failed",
-                detail=blad)))
+                detail=blad))
+        if wynik.status == "blocked":
+            wynik = _utrwal_odmowe_zamiaru(con, r, wynik)
+        wyniki.append(wynik)
     return wyniki
+
+
+def _utrwal_odmowe_zamiaru(con, r, wynik) -> FileResult:
+    """Powód odmowy rekoncyliacji na wierszu zamiaru (`repo.note_rename_intent_refusal`, AR-323) - z kierunkiem
+    zamiaru, który ta rekoncyliacja widziała. Porażka zapisu powodu nie zmienia wyniku zamiaru ('blocked');
+    dokleja się do powodu, żeby nie zniknęła bez słowa."""
+    try:
+        repo.note_rename_intent_refusal(con, rename_id=r["id"], reason=wynik.reason,
+                                        expect_in_flight=r["in_flight"])
+    except Exception as exc:  # noqa: BLE001 - wynik zamiaru zostaje, dopisek mówi o porażce zapisu
+        return dataclasses.replace(wynik, reason=_dopisz(wynik.reason, _blad_systemu(exc)))
+    return wynik
 
 
 # Celowo INNE zdanie niż `_BRAK_LOCATION` („brak location w bazie”, kod `no_location`): rekoncyliacja
@@ -4914,13 +4969,16 @@ def _cofniecie_zakonczone(con, commit_id, b) -> bool:
 
 def _granica_sladu(con):
     """Chwila, od której KAŻDE cofnięcie w TEJ bazie zostawia ślad przed podmianą (`atomic_undo`, 0044)
-    - jeden odczyt dziennika migracji (`migration_log`, 0047): chwila 0044, a gdy baza dostała 0044
-    przed dziennikiem - chwila 0047 (ostrożnie: wszystko wcześniejsze „wymaga sprawdzenia”). Data kodu
-    nie jest tą chwilą: baza zmigrowana później pisała commity po dacie kodu, a ich cofnięcia mogły nie
-    zostawić śladu. `None` = brak wiersza (baza bez dziennika) - nic nie jest „nietknięte”."""
-    return con.execute(
-        "SELECT coalesce((SELECT applied_at FROM migration_log WHERE version = 44), "
-        "                (SELECT applied_at FROM migration_log WHERE version = 47))").fetchone()[0]
+    - wiersz dziennika migracji (`migration_log`) wersji, która go zakłada (0047, `db._DZIENNIK_MIGRACJI_OD`).
+    Wiersz 0044 nie jest osobną chwilą: dziennik dopisuje migracje przebiegu dopiero razem z 0047, jednym
+    poleceniem (`db.migrate`), więc 0044 ma wiersz wyłącznie wtedy, gdy weszła w tym samym przebiegu - z tą
+    samą chwilą; baza, która dostała 0044 wcześniej, wiersza 0044 nie ma, a chwila 0047 jest wtedy górną
+    granicą (ostrożnie: wszystko wcześniejsze „wymaga sprawdzenia”). Data kodu nie jest tą chwilą: baza
+    zmigrowana później pisała commity po dacie kodu, a ich cofnięcia mogły nie zostawić śladu. `None` =
+    brak wiersza (baza bez dziennika) - nic nie jest „nietknięte”."""
+    row = con.execute("SELECT applied_at FROM migration_log WHERE version = ?",
+                      (_DZIENNIK_MIGRACJI_OD,)).fetchone()
+    return None if row is None else row[0]
 
 
 def _slad_proby_cofniecia(con, commit_id, b) -> bool:
@@ -4977,8 +5035,11 @@ def _stan_nieprzetworzonego(con, commit_id, b, granica) -> str:
       * `"nietkniety"` - plik w stanie po zapisie WIADOMO: brak śladu próby cofnięcia
         (`_slad_proby_cofniecia`), brak nowszego żywego zapisu (`_nowszy_zywy_zapis`), baza opisuje
         plik jako wynik commitu (`location.header_hash = post_hash`) ORAZ ślad musiałby powstać - commit
-        zapisany od `granica` (`_granica_sladu` tej bazy; 0022 śladuje każde cofnięcie w miejscu, 0044
-        każde atomowe; porównanie po pierwszych 19 znakach - sufiksy strefy `Z`/`+00:00`).
+        zapisany w sekundzie PO sekundzie `granica` (`_granica_sladu` tej bazy; 0022 śladuje każde
+        cofnięcie w miejscu, 0044 każde atomowe). Porównanie chwil w UTC (`julianday`, strefa zapisu
+        dowolna); dziennik zapisuje chwilę z dokładnością do sekundy (`db._apply_migration`), więc commit
+        z TEJ SAMEJ sekundy mógł wyprzedzić migrację - granica konserwatywna `+1 second`; zapis czasu,
+        którego `julianday` nie czyta, też „wymaga sprawdzenia”.
         Granica obejmuje TAKŻE commity zapisane w miejscu: ich cofnięcie przy zmianie inode albo rozmiaru
         pliku idzie drogą atomową (`restore_inplace` → `Fallback` przed dziennikiem), a przed 0044 ta
         droga śladu nie zostawiała;
@@ -4993,10 +5054,12 @@ def _stan_nieprzetworzonego(con, commit_id, b, granica) -> str:
     naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()
     if naglowek is None or naglowek[0] != b["post_hash"]:
         return "do_sprawdzenia"
-    zapisany = con.execute("SELECT applied_at FROM commits WHERE id = ?", (commit_id,)).fetchone()
-    if granica and zapisany is not None and zapisany[0] and zapisany[0][:19] >= granica[:19]:
-        return "nietkniety"
-    return "do_sprawdzenia"
+    if granica is None:
+        return "do_sprawdzenia"
+    po_granicy = con.execute(
+        "SELECT julianday(applied_at) >= julianday(?, '+1 second') FROM commits WHERE id = ?",
+        (granica, commit_id)).fetchone()
+    return "nietkniety" if po_granicy is not None and po_granicy[0] == 1 else "do_sprawdzenia"
 
 
 def _czeka_na_dokonczenie(con, commit_id, b) -> bool:
@@ -5988,6 +6051,9 @@ def _commity_przebiegu(con, run_id) -> tuple[int, ...]:
     return tuple(r[0] for r in con.execute(
         "SELECT DISTINCT c.id FROM commits c JOIN header_backups b ON b.commit_id = c.id "
         "WHERE c.run_id = ? AND b.unreplaced_at IS NULL ORDER BY c.id", (run_id,)))
+
+
+commity_przebiegu = _commity_przebiegu    # nazwa publiczna dla wołających spoza pisarza (CLI)
 
 
 def _backupy_lokacji(con, run_id, location_id):

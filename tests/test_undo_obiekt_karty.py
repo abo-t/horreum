@@ -448,8 +448,7 @@ def test_commit_wieloplikowy_kotwica_per_plik(tmp_path, inplace):
     assert len(c.applied) == 2, c
     resolver.run_resolver(con, NOW)
     pary = sorted((json.loads(p)["commit_id"], json.loads(p)["location_id"]) for (p,) in con.execute(
-        "SELECT payload FROM event WHERE verb = 'header.refreshed' "
-        "AND json_extract(payload, '$.commit_id') IS NOT NULL"))
+        "SELECT payload FROM event WHERE verb = ?", (repo.ZNACZNIK_ZAPISU_KARTY,)))
     assert pary == sorted([(c.commit_id, a["id"]), (c.commit_id, b["id"])]), pary
     u = writeback.undo(con, c.commit_id, now=NOW)
     assert sorted(u.objects_restored) == sorted([a["frame_id"], b["frame_id"]]), u
@@ -458,17 +457,14 @@ def test_commit_wieloplikowy_kotwica_per_plik(tmp_path, inplace):
     con.close()
 
 
-def test_zapis_bez_dowodu_pochodzenia_nie_odtwarza(tmp_path, monkeypatch):
-    """Commit, którego re-sync nie zostawił pary (commit, plik) w zdarzeniu zeznania - tak wyglądają zapisy
-    sprzed tego dowodu (emulacja: re-sync bez `zapis_commitu`): cofnięcie nie zgaduje kotwicy po odcisku
-    ani czasie, klatka zostaje przy obiekcie z karty i nie jest liczona."""
-    prawdziwy = writeback._resync
-
-    def _bez_pary(*a, zapis_commitu=None, **kw):
-        return prawdziwy(*a, **kw)
-    monkeypatch.setattr(writeback, "_resync", _bez_pary)
+def test_zapis_bez_dowodu_pochodzenia_nie_odtwarza(tmp_path):
+    """Commit bez dowodu pochodzenia (para commit/plik ani w znaczniku zapisu karty, ani w zdarzeniu
+    zeznania) - tak wyglądają zapisy sprzed tego dowodu (emulacja: znacznik usunięty z dziennika bazy testu):
+    cofnięcie nie zgaduje kotwicy po odcisku ani czasie, klatka zostaje przy obiekcie z karty i nie jest
+    liczona."""
     s = _scena(tmp_path, inplace=False)
-    monkeypatch.setattr(writeback, "_resync", prawdziwy)
+    s.con.execute("DELETE FROM event WHERE verb = ?", (repo.ZNACZNIK_ZAPISU_KARTY,))
+    s.con.commit()
     resolver.run_resolver(s.con, NOW)
     u = writeback.undo(s.con, s.commit, now=NOW)
     assert u.complete and u.objects_restored == () and u.objects_kept == (), u
@@ -488,7 +484,7 @@ def _karta_set(con, run_id, lid, wartosc):
 def test_stos_c2_c1_kotwica_to_zapis_c1(tmp_path, inplace, c2):
     """„Zatwierdź ze ścieżki…” `(NGC7635, path)` → C1 dopisuje kartę `OBJECT`, „Rozwiąż” przestawia na
     `header` → C2 pisze w ten sam plik → cofnięcie C2 (odcisk nagłówka wraca do wyniku C1 i niesie własne
-    `header.refreshed`) → cofnięcie C1. Kotwica to PIERWSZE zdarzenie nagłówka z odciskiem C1 po zapisie C1:
+    `header.refreshed`) → cofnięcie C1. Kotwica to znacznik zapisu karty C1 z parą (C1, plik):
       * C2 zmienia `OBSERVER` - cofnięcie C1 oddaje `(NGC7635, path)`, klatka policzona jako powrót;
       * C2 zmienia `OBJECT` na `NGC 7000` + „Rozwiąż” + cofnięcie C2 + ponowne „Rozwiąż” (oś wraca do
         `NGC7635`) - po przypisaniu z karty C1 oś drgnęła, więc klatka ZOSTAJE (policzona), nigdy nie bierze

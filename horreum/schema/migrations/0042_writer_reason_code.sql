@@ -12,7 +12,8 @@
 --
 -- TRÓJKĘ `reason`/`reason_code`/`reason_args` piszą WYŁĄCZNIE `repo._set_pending_reason_tx`,
 -- `repo._set_rename_reason_tx` i INSERT w `repo._withhold_write_tx` (kodek `item_reasons.do_bazy`,
--- meta-test AST).
+-- meta-test AST). Powód odmowy rekoncyliacji zamiaru renamu (`repo.note_rename_intent_refusal`, AR-323)
+-- idzie tą samą drogą - przez `repo._set_rename_reason_tx`.
 --
 -- STRAŻNIK W DDL (wzorzec 0041): kod nigdy bez prozy, parametry wyłącznie razem z kodem i zawsze jako
 -- obiekt JSON. `withheld_write.reason` jest `NOT NULL` od 0037 - tam „kod tylko z prozą” trzyma

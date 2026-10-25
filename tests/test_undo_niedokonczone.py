@@ -90,7 +90,7 @@ def _baza_z_wersji(sciezka, wersja):
 @pytest.mark.parametrize("z_wersji", [43, 46])
 def test_granica_sladu_to_chwila_migracji_tej_bazy(tmp_path, z_wersji):
     """Dziennik migracji (0047): baza z v43 dostaje 0044..0047 jednym przebiegiem - jedna chwila,
-    granica = chwila 0044; baza z v46 nie ma chwili 0044 - granica = chwila 0047 (ostrożnie). Commit
+    granica = chwila 0047, równa chwili 0044; baza z v46 nie ma chwili 0044 - granica = chwila 0047. Commit
     zapisany PO granicy, bez śladu próby → „nietknięty”; zapisany po dacie powstania kodu, ale PRZED
     migracją tej bazy → „wymaga sprawdzenia”. Falsyfikator: granica ze stałej daty kodu zamiast z bazy
     (commit z 2026-10-20 byłby „nietknięty”)."""
@@ -394,3 +394,94 @@ def test_odmowa_nowszego_zapisu_mowi_zdaniem_z_katalogu():
         assert tekst_powodu(powod) == "the location has a newer write (commit 7) - undo that one first"
     finally:
         i18n.set_lang("pl")
+
+
+# ============================================================ granica śladu: chwila dziennika, sekunda, strefa (AR-320)
+
+
+def _chwila_dziennika(con):
+    from datetime import datetime
+    return datetime.strptime(con.execute(
+        "SELECT applied_at FROM migration_log WHERE version = 47").fetchone()[0],
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_granica_sladu_to_wiersz_dziennika_47(tmp_path):
+    """Baza z v43 ma wiersze 0044..0047 jedną chwilą; granicą jest wiersz 0047 czytany wprost, nie 0044
+    (tu przestawiony w bazie testu o dzień wstecz, żeby je rozróżnić). Falsyfikator: `coalesce(44, 47)`."""
+    con = _baza_z_wersji(tmp_path / "h.db", 43)
+    con.execute("UPDATE migration_log SET applied_at = '2000-01-01T00:00:00Z' WHERE version = 44")
+    con.commit()
+    assert writeback._granica_sladu(con) == con.execute(
+        "SELECT applied_at FROM migration_log WHERE version = 47").fetchone()[0]
+    con.close()
+
+
+@pytest.mark.parametrize("przesuniecie, zapis, oczekiwany", [
+    (-1.0, "+00:00", 0),       # sekunda przed migracją
+    (0.0, "+00:00", 0),        # sekunda migracji - commit mógł ją wyprzedzić (granica konserwatywna)
+    (0.0, "Z", 0),
+    (0.5, "+00:00", 0),        # wciąż sekunda migracji
+    (1.0, "+00:00", 1),        # pierwsza pełna sekunda po migracji
+    (1.0, "Z", 1),
+    (3600.0, "+02:00", 0),     # 1 h po migracji w zapisie lokalnym = 1 h PRZED nią w UTC
+    (3600.0, "+0000", 0),      # 1 h po migracji, strefa bez dwukropka - `julianday` go nie czyta (NULL)
+], ids=["T-1s", "T", "T_Z", "T+0,5s", "T+1s", "T+1s_Z", "strefa+02", "nieczytelny"])
+def test_klasa_nietkniety_od_sekundy_po_chwili_dziennika(tmp_path, przesuniecie, zapis, oczekiwany):
+    """Commit atomowy z zegarem względem chwili T dziennika tej bazy (wiersz 0047, sekundy): „nietknięty”
+    wyłącznie od T + 1 s; T - 1 s, T i T + 0,5 s - „wymaga sprawdzenia” (dziennik gubi ułamek sekundy, więc
+    commit z sekundy migracji mógł ją wyprzedzić). Zapis w strefie `+02:00` porównany w UTC. Zapis, którego
+    `julianday` nie czyta (strefa `+0000` bez dwukropka, T + 1 h) - „wymaga sprawdzenia”, nie „nietknięty”.
+    Falsyfikatory: `>` zamiast `>=` (T + 1 s), bez `+1 second` (T), porównanie tekstem `[:19]` (strefa),
+    tekstem bez `[:19]` (sufiks `Z`), NULL `julianday` liczony jak „po granicy” (zapis nieczytelny)."""
+    from datetime import timedelta, timezone
+    con = db.open_db(str(tmp_path / "h.db"))
+    t = _chwila_dziennika(con).replace(tzinfo=timezone.utc) + timedelta(seconds=przesuniecie)
+    if zapis == "+02:00":                  # cyfry T + 1 h, ale w strefie +02:00 - w UTC to T - 1 h
+        kiedy = t.replace(tzinfo=None).isoformat() + "+02:00"
+    elif zapis == "+0000":                 # T + 1 h w UTC, ale zapis, którego `julianday` nie czyta
+        kiedy = t.strftime("%Y-%m-%dT%H:%M:%S") + "+0000"
+    elif zapis == "Z":
+        kiedy = t.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    else:
+        kiedy = t.isoformat()
+    p = _fits(tmp_path / "f.fits", seed=1)
+    _scan_in(con, p)
+    _karta(con, "R", _loc(con, p)["id"], "NGC 6992 X")
+    c = writeback.commit(con, "R", now=kiedy, inplace=False)
+    assert con.execute("SELECT applied_at FROM commits WHERE id = ?",
+                       (c.commit_id,)).fetchone()[0] == kiedy
+    u = writeback.undo(con, c.commit_id, now=NOW, should_cancel=_po(0))
+    assert u.remaining == 1 and u.untouched == oczekiwany, (kiedy, u)
+    con.close()
+
+
+def test_wiersz_dziennika_w_transakcji_migracji(tmp_path, monkeypatch):
+    """Wpis `migration_log` pada (wyzwalacz `RAISE` w skrypcie 0047): migracja cofa się CAŁA - `user_version`
+    zostaje 46, tabeli dziennika nie ma; ponowne otwarcie bez awarii dochodzi do 47 z wierszem. Falsyfikator:
+    zatwierdzenie skryptu przed wpisem (wpis poza transakcją migracji)."""
+    pelne = list(db.MIGRATIONS)
+    path = str(tmp_path / "h.db")
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in pelne if m[0] <= 46])
+    db.open_db(path).close()
+    monkeypatch.setattr(db, "MIGRATIONS", pelne)
+    prawdziwy = db._migration_sql
+
+    def _z_awaria(filename):
+        sql = prawdziwy(filename)
+        if filename.startswith("0047"):
+            sql += ("\nCREATE TRIGGER stop BEFORE INSERT ON migration_log "
+                    "BEGIN SELECT RAISE(ABORT, 'stop wpisu'); END;")
+        return sql
+    monkeypatch.setattr(db, "_migration_sql", _z_awaria)
+    con = db.connect(path)
+    with pytest.raises(Exception, match="stop wpisu"):
+        db.migrate(con)
+    assert not con.in_transaction and db._user_version(con) == 46
+    assert con.execute("SELECT count(*) FROM sqlite_master WHERE name = 'migration_log'").fetchone()[0] == 0
+    con.close()
+    monkeypatch.setattr(db, "_migration_sql", prawdziwy)
+    con = db.open_db(path)
+    assert db._user_version(con) == db.SCHEMA_VERSION
+    assert [r[0] for r in con.execute("SELECT version FROM migration_log")] == [47]
+    con.close()

@@ -1952,13 +1952,11 @@ def _record_stack_history(con, rec, *, location_id, kind, now, actor):
 
 
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
-                  actor="scan", inplace_gen=None, zapis_commitu=None):
+                  actor="scan", inplace_gen=None):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
     (`scan_tree`) i importu z dawcy (rekord pochodzi z nagłówka pliku ALBO z cache'owanego
     źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj). `actor` idzie do
     KAŻDEGO eventu tej ścieżki (import z dawcy podaje `import:fitsmirror`, brief §4.2).
-    `zapis_commitu` = `(commit_id, location_id)` re-syncu zapisu commitu kart (`writeback._resync`) -
-    przekazywane bez zmian do `repo.refresh_location` (dowód pochodzenia zeznania, AR-311).
 
     TOŻSAMOŚĆ (brief §2): frame po `sha1_data` (odcisk sekcji danych); nieobliczalny →
     DEGENERACJA (sha1 całego pliku + `sha1_data_uncomputable=1`) — legalna WYŁĄCZNIE dla ścieżki
@@ -2024,13 +2022,11 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     rekord = ScanSummary()
     with repo.atomic(con):
         _ingest_in_tx(con, rec, volume=volume, drive_letter=drive_letter, tier=tier, now=now,
-                      summary=rekord, actor=actor, inplace_gen=inplace_gen,
-                      zapis_commitu=zapis_commitu)
+                      summary=rekord, actor=actor, inplace_gen=inplace_gen)
     _dolicz_probe(summary, rekord)
 
 
-def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, inplace_gen,
-                  zapis_commitu=None):
+def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, inplace_gen):
     """Ciało `ingest_record` - wołane WYŁĄCZNIE w jego zakresie `repo.atomic` (kontrakt tam)."""
     readable = rec.header is not None
     copy_facts = copy_header_facts(rec.header, rec.header_hash, rec.image_roles)
@@ -2153,7 +2149,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
         unreadable_kind=kind_after, unreadable_reason=reason_after,
         present=1, now=now, actor=actor, raw_json=raw_json, cards=cards, hot_fields=hot,
         camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen,
-        nonprintable=rec.nonprintable, zapis_commitu=zapis_commitu)
+        nonprintable=rec.nonprintable)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
     _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)

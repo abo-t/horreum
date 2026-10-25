@@ -1119,8 +1119,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                      hdu_index, compressed, size_bytes, unreadable_since, unreadable_kind,
                      unreadable_reason, present, now,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
-                     kind=None, copy_facts=None, inplace_gen=None, nonprintable=NIE_BADANO,
-                     zapis_commitu=None):
+                     kind=None, copy_facts=None, inplace_gen=None, nonprintable=NIE_BADANO):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
 
@@ -1170,10 +1169,8 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     - **`nonprintable`** (0046, AR-299): zeznanie bajtu spoza ASCII z odczytu (`_marker_bajtu`).
       Domyślne `NIE_BADANO` NIE jest cichym wektorem gaszenia - zostawia stan zbadania wiersza, a ten
       i tak przestaje się liczyć, gdy odcisk nagłówka się zmieni (kotwica `nonprintable_hash`).
-    - **`zapis_commitu`** (AR-311): `(commit_id, location_id)`, gdy wołającym jest re-sync ZAPISU
-      commitu kart (`writeback._resync`). Para trafia do ładunku `header.refreshed` tej transakcji -
-      dowód pochodzenia zeznania z karty, po którym cofnięcie commitu znajduje przypisanie „Rozwiąż”
-      (`_plan_obiektu_z_karty`). `None` (skan, import, cofnięcie) - ładunek jak dotąd.
+    Dowodu pochodzenia zapisu karty (para commit/plik) ta klinga nie niesie - niesie go znacznik
+    przejścia wpisu `OBJECT` w 'applied' (`_zapis_karty_obiektu_tx`, AR-319), wspólny dla każdej drogi.
 
     `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
     POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
@@ -1241,9 +1238,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
         result["rederived"] = _rewrite_testimony(
             con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot_fields,
             camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.refreshed",
-            payload={"header_hash_before": row["header_hash"], "header_hash_after": header_hash,
-                     **({} if zapis_commitu is None else
-                        {"commit_id": int(zapis_commitu[0]), "location_id": int(zapis_commitu[1])})})
+            payload={"header_hash_before": row["header_hash"], "header_hash_after": header_hash})
     return result
 
 
@@ -3457,9 +3452,9 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, te
         if any(w["keyword"] == "OBJECT" for w in wpisy):
             reka = con.execute("SELECT hand_version FROM header_backups WHERE id = ?",
                                (row["backup_id"],)).fetchone()["hand_version"]
-            uwaga = _clear_tombstone_same_hand_tx(con, frame_id=frame_id, hand_version=reka,
-                                                  commit_id=commit_id, location_id=location_id,
-                                                  now=now, actor=actor)
+            uwaga = _zapis_karty_obiektu_tx(con, frame_id=frame_id, hand_version=reka,
+                                            commit_id=commit_id, location_id=location_id,
+                                            now=now, actor=actor)
         powod = PowodPozycji(f"potwierdzone skanem: nagłówek na dysku = zapisany w commicie "
                              f"{commit_id}", "confirmed_by_scan", commit_id=commit_id)
         ids = [w["id"] for w in wpisy]
@@ -3540,14 +3535,19 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
       4. nagłówek klatki mówi (`header.object_raw`) → `None` - przebieg i tak przeliczy obiekt
          z zeznania; 4b. INNA obecna kopia klatki ma niepusty `hdr_object` → `None` - karta żyje na
          innej kopii, a przebieg może nazwać klatkę z niej;
-      5. kotwica = zdarzenie zeznania z DOWODEM POCHODZENIA: `header.refreshed` re-syncu zapisu TEGO
-         commitu na TYM pliku niesie parę `(commit_id, location_id)` w ładunku
-         (`refresh_location(zapis_commitu=)`, wołane przez `writeback._resync`). Ani odcisk nagłówka, ani
-         czas tego nie dowodzą: cofnięcie późniejszego C2 przywraca ten sam odcisk, dwa commity tej
-         samej karty dzielą odcisk i sekundę, commit wieloplikowy ma jedno `applied_at` na wszystkie
-         pliki, a niezwiązane `header.adopted` może nieść ten sam odcisk. Brak zdarzenia z parą (commit
-         zapisany przed tym dowodem, zeznanie z innej kopii) → `None`: klatka zostaje, nic nie
-         zgadujemy. Pierwsze zdarzenie osi po kotwicy musi być przypisaniem RESOLVERA - samo
+      5. kotwica = DOWÓD POCHODZENIA z parą `(commit_id, location_id)` TEGO commitu na TYM pliku:
+         znacznik `header.card_applied` (`_zapis_karty_obiektu_tx`, emitowany przy KAŻDYM przejściu wpisu
+         `OBJECT` w 'applied' - re-sync, skan, rekoncyliacja, dokończenie wstrzymania) albo - zapis
+         sprzed znacznika - `header.refreshed` z tą samą parą (format historyczny: re-sync zapisu commitu
+         kart, `writeback._resync`, kładł parę `(commit_id, location_id)` w ładunek `header.refreshed`, zanim
+         dowód przeszedł do znacznika `header.card_applied`, AR-311 → AR-319).
+         Dokładna para, nigdy odcisk nagłówka ani czas: cofnięcie późniejszego C2 przywraca ten sam
+         odcisk, dwa commity tej samej karty dzielą odcisk i sekundę, commit wieloplikowy ma jedno
+         `applied_at` na wszystkie pliki, a niezwiązane `header.adopted` może nieść ten sam odcisk. Brak
+         zdarzenia z parą (commit zapisany przed dowodem, zeznanie z innej kopii) → `None`: klatka
+         zostaje, nic nie zgadujemy. Brak zdarzenia osi po kotwicy przy klatce z obiektem ze źródłem
+         `header` (przypisanie wyprzedziło późne rozliczenie zapisu) → `zostaje` - zdanie ją liczy.
+         Pierwsze zdarzenie osi po kotwicy musi być przypisaniem RESOLVERA - samo
          `object.assigned` (stan sprzed: pustka) albo sąsiednia para
          `object.unassigned` + `object.assigned` (stan sprzed z ładunku odpięcia, `id + 1`, ten sam
          aktor; na `pf4` 3 521 z 3 521 par) - inaczej `None` (oś zmieniła ręka, nie karta);
@@ -3588,17 +3588,26 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
         return None
     kotwica = con.execute(
         "SELECT min(id) FROM event WHERE target = ? "
-        "AND verb IN ('header.refreshed', 'header.adopted') "
+        "AND verb IN (?, 'header.refreshed') "
         "AND json_extract(payload, '$.commit_id') = ? "
         "AND json_extract(payload, '$.location_id') = ?",
-        (target, int(commit_id), int(location_id))).fetchone()[0]
+        (target, ZNACZNIK_ZAPISU_KARTY, int(commit_id), int(location_id))).fetchone()[0]
     if kotwica is None:
         return None
     osi = con.execute(
         "SELECT id, verb, actor, payload FROM event WHERE target = ? AND id > ? "
         "AND verb IN (SELECT value FROM json_each(?)) ORDER BY id",
         (target, kotwica, json.dumps(_OBJECT_AXIS_VERBS))).fetchall()
-    if not osi or osi[0]["actor"] != "resolver":
+    if not osi:
+        # Przypisanie z karty mogło wyprzedzić kotwicę („Rozwiąż” między skanem, który wciągnął kartę,
+        # a późnym rozliczeniem zapisu): klatka przy obiekcie ze źródłem `header`, a nagłówek po
+        # cofnięciu go nie mówi (krok 4) - klatka zostaje i zdanie ją liczy.
+        fr = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
+                         (frame_id,)).fetchone()
+        if fr is not None and fr["object_id"] is not None and fr["object_source"] == "header":
+            return ("zostaje",)
+        return None
+    if osi[0]["actor"] != "resolver":
         return None
     if osi[0]["verb"] == "object.assigned":
         przypisanie, przed = osi[0], (None, None)
@@ -5223,7 +5232,7 @@ def settle_backup_attempt(con, *, backup_id, pending_ids, testimony_ok, now, wit
         if any(w["keyword"] == "OBJECT" for w in wpisy):
             loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
                               (b["location_id"],)).fetchone()
-            uwaga = _clear_tombstone_same_hand_tx(
+            uwaga = _zapis_karty_obiektu_tx(
                 con, frame_id=loc["frame_id"], hand_version=b["hand_version"],
                 commit_id=b["commit_id"], location_id=b["location_id"], now=now, actor=actor)
         powod = PowodPozycji(f"potwierdzone z dysku: nagłówek na dysku = zapisany w commicie "
@@ -5291,6 +5300,37 @@ def _clear_tombstone_same_hand_tx(con, *, frame_id, hand_version, commit_id, loc
     return None
 
 
+# Znacznik przejścia zapisu karty `OBJECT` commitu w 'applied' (AR-319) - kotwica odtworzenia obiektu
+# (`_plan_obiektu_z_karty`). Aktor stały, spoza `user%`: to fakt przejścia zapisu, nie gest ręki, więc zdanie
+# Domu o ostatnim geście (`gui.queries.last_hand_gesture`) go nie liczy.
+ZNACZNIK_ZAPISU_KARTY = "header.card_applied"
+AKTOR_ZNACZNIKA = "writeback"
+
+
+def _zapis_karty_obiektu_tx(con, *, frame_id, hand_version, commit_id, location_id, now, actor):
+    """WPIS `OBJECT` COMMITU PRZECHODZI W 'applied' (AR-319) - jedna reguła dla wszystkich dróg: zapis
+    atomowy (`clear_tombstone_after_write`), dokończenie w miejscu (`finish_inplace_op`), rekoncyliacja
+    backupu (`settle_backup_attempt`), skan potwierdzający (`confirm_failed_commit_by_scan`) i dokończenie
+    wstrzymania (`_settle_withheld_tx`). Pod transakcją wołającego:
+
+      1. EXPECT: lokacja `location_id` należy do klatki `frame_id` - inaczej `ValueError`, zero zapisu
+         (para dowodu musi opisywać plik tej klatki);
+      2. znacznik `header.card_applied` na `frame:<id>` z parą `(commit_id, location_id)` - dowód
+         pochodzenia, po którym cofnięcie commitu znajduje przypisanie „Rozwiąż” z jego karty, niezależnie
+         od tego, czy zeznanie wjechało re-synciem pisarza, skanem czy przejęciem;
+      3. zgaszenie nagrobka ręki przy tej samej wersji decyzji ręki (`_clear_tombstone_same_hand_tx`) -
+         zwrot jak tam (dopisek powodu albo `None`)."""
+    loc = con.execute("SELECT frame_id FROM location WHERE id = ?", (int(location_id),)).fetchone()
+    if loc is None or loc["frame_id"] != frame_id:
+        raise ValueError(f"lokacja {location_id} nie należy do klatki {frame_id} - znacznik zapisu "
+                         f"karty commitu {commit_id} odmówiony")
+    emit_event(con, actor=AKTOR_ZNACZNIKA, verb=ZNACZNIK_ZAPISU_KARTY, target=f"frame:{frame_id}",
+               now=now, payload={"commit_id": int(commit_id), "location_id": int(location_id)})
+    return _clear_tombstone_same_hand_tx(con, frame_id=frame_id, hand_version=hand_version,
+                                         commit_id=commit_id, location_id=location_id, now=now,
+                                         actor=actor)
+
+
 def clear_tombstone_after_write(con, *, frame_id, backup_id, commit_id, location_id, now,
                                 actor="user:local"):
     """Zgaszenie nagrobka po zapisie karty `OBJECT` drogą atomową (`writeback._zapisz_lokacje`,
@@ -5300,9 +5340,9 @@ def clear_tombstone_after_write(con, *, frame_id, backup_id, commit_id, location
     with _immediate(con):
         reka = con.execute("SELECT hand_version FROM header_backups WHERE id = ?",
                            (backup_id,)).fetchone()["hand_version"]
-        return _clear_tombstone_same_hand_tx(con, frame_id=frame_id, hand_version=reka,
-                                             commit_id=commit_id, location_id=location_id,
-                                             now=now, actor=actor)
+        return _zapis_karty_obiektu_tx(con, frame_id=frame_id, hand_version=reka,
+                                       commit_id=commit_id, location_id=location_id,
+                                       now=now, actor=actor)
 
 
 def withhold_write(con, *, kind, location_id, commit_id, header_hash, reason, now, pending_ids=(),
@@ -5528,7 +5568,7 @@ def _settle_withheld_tx(con, *, location_id, frame_id, sha1_data, header_hash, t
             powod = PowodPozycji("dokończone: zeznanie klatki przyjęło zapisany nagłówek",
                                  "withheld_completed")
             if w["object_written"]:
-                powod = dopisz(powod, _clear_tombstone_same_hand_tx(
+                powod = dopisz(powod, _zapis_karty_obiektu_tx(
                     con, frame_id=frame_id, hand_version=w["hand_version"],
                     commit_id=w["commit_id"], location_id=location_id, now=now, actor=actor))
             con.execute("UPDATE withheld_write SET settled_at = ?, settled_how = 'completed' "
@@ -5862,7 +5902,7 @@ def finish_inplace_op(con, *, op_id, now, testimony_ok, withheld_reason=None,
             reka = con.execute(
                 "SELECT hand_version FROM header_backups WHERE commit_id = ? AND location_id = ? "
                 "ORDER BY id DESC LIMIT 1", (op["commit_id"], op["location_id"])).fetchone()
-            uwaga = _clear_tombstone_same_hand_tx(
+            uwaga = _zapis_karty_obiektu_tx(
                 con, frame_id=loc["frame_id"], hand_version=None if reka is None else reka[0],
                 commit_id=op["commit_id"], location_id=op["location_id"], now=now, actor=actor)
         con.execute("UPDATE pending_changes SET status = 'applied' WHERE inplace_op_id = ?",
@@ -6215,6 +6255,28 @@ def drop_rename_intent(con, *, rename_id):
     odbiła, kompensacja wróciła plik na stare miejsce przy bazie po rollbacku). Transient."""
     with con:
         con.execute("UPDATE pending_renames SET in_flight = NULL WHERE id = ?", (rename_id,))
+
+
+def note_rename_intent_refusal(con, *, rename_id, reason, expect_in_flight) -> bool:
+    """POWÓD ODMOWY REKONCYLIACJI na wierszu zamiaru (AR-323): rekoncyliacja (`writeback.reconcile_renames`)
+    zostawia zamiar otwarty, a jej powód (z kodem) trafia do trójki `reason`/`reason_code`/`reason_args`
+    wiersza - szuflada czyta go z bazy, nie ze zwrotu, który żyje tylko w procesie rekoncyliacji.
+
+    CAS KIERUNKU (jak `settle_rename_intent`): zapis wyłącznie, gdy zamiar wciąż stoi w kierunku, który
+    wołający widział (`expect_in_flight`). Zamiar rozstrzygnięty w międzyczasie (`in_flight` NULL) albo
+    zamknięty i otwarty na nowo w przeciwnym kierunku (`open_rename_intent` wymaga tylko `in_flight IS NULL`)
+    nie dostaje starej odmowy. Status wiersza i zamiar zostają, jakie są. Ta sama trójka już w bazie = bez
+    zapisu (rekoncyliacja biegnie przy każdym skanie i commicie). Czyści powód rozstrzygnięcie zamiaru
+    (`settle_rename_intent` nadpisuje trójkę swoim powodem). Transient - bez eventu. Zwraca `True`, gdy
+    trójka się zmieniła."""
+    trojka = do_bazy(reason)
+    with _immediate(con):
+        row = con.execute("SELECT reason, reason_code, reason_args FROM pending_renames "
+                          "WHERE id = ? AND in_flight = ?", (rename_id, expect_in_flight)).fetchone()
+        if row is None or tuple(row) == tuple(trojka):
+            return False
+        _set_rename_reason_tx(con, rename_id, reason)
+    return True
 
 
 @dataclass

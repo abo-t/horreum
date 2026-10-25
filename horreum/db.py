@@ -5,6 +5,7 @@ i PRAGMA, ale ZERO DML domenowego (INSERT/UPDATE/DELETE) — pilnuje tego meta-t
 (`tests/test_repo_safety.py`). Wersjonowanie przez `PRAGMA user_version` (wbudowany licznik
 SQLite) — bez tabeli bookkeepingu, więc bez INSERT-u w warstwie infra.
 """
+import json
 import sqlite3
 from importlib import resources
 
@@ -324,15 +325,18 @@ def _apply_migration(con, version, sql, dziennik=()):
     `dziennik` (0047, AR-318): wersje, którym ta transakcja dopisuje wiersz `migration_log` - jednym
     poleceniem, więc jedną chwilą zegara SQLite (UTC); od 0047 sama migracja, a przy 0047 także migracje
     tego przebiegu sprzed niej (ten sam moment). Infrastruktura jak `user_version`, nie zapis domenowy:
-    wiersz wchodzi razem z migracją albo wcale. Wersje to int z `MIGRATIONS` (literał jak w PRAGMA)."""
-    wpis = ""
-    if dziennik:
-        wersje = ",".join(str(int(v)) for v in dziennik)
-        wpis = (f"INSERT INTO migration_log (version, applied_at) "
-                f"SELECT value, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM json_each('[{wersje}]');\n")
-    script = f"BEGIN IMMEDIATE;\n{sql}\n;\n{wpis}PRAGMA user_version = {int(version)};\nCOMMIT;\n"
+    wiersz wchodzi razem z migracją albo wcale. Wpis idzie OSOBNYM `execute` literałem z parametrem
+    (`executescript` parametrów nie przyjmuje, a SQL sklejony w skrypcie był dla meta-testu literałów DML
+    niewidoczny - AR-320): skrypt migracji otwiera transakcję i jej nie zamyka, wpis, numer wersji
+    i `COMMIT` idą po nim na tym samym połączeniu - jedna transakcja, jak dotąd."""
     try:
-        con.executescript(script)
+        con.executescript(f"BEGIN IMMEDIATE;\n{sql}\n;\n")
+        if dziennik:
+            con.execute("INSERT INTO migration_log (version, applied_at) "
+                        "SELECT value, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM json_each(?)",
+                        (json.dumps([int(v) for v in dziennik]),))
+        con.execute(f"PRAGMA user_version = {int(version)}")
+        con.commit()
     except BaseException:
         if con.in_transaction:
             con.rollback()

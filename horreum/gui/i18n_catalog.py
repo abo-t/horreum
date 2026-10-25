@@ -8048,6 +8048,14 @@ CATALOG = {
               "zapisze tego nagłówka bez zmiany tego bajtu; plik nietknięty",
         "en": "card {keyword} has byte {char} outside printable ASCII in the file - Horreum "
               "cannot write this header without changing that byte; file untouched"},
+    # Granice nagłówka FITS niezgodne z kanonicznym rekordem END (AR-174).
+    "objchg.item.header_end_bounds": {
+        "pl": "granice nagłówka FITS z bajtów pliku nie zgadzają się z kartą END (rekord END z "
+              "niepustym ogonem albo blok bez END) - Horreum nie zapisze tego nagłówka bez zmiany "
+              "tych bajtów; plik nietknięty",
+        "en": "the FITS header bounds in the file bytes do not match the END card (an END record "
+              "with a non-blank tail or a block without END) - Horreum cannot write this header "
+              "without changing those bytes; file untouched"},
     # Nota za odmową bajtu przy commicie, gdy status wpisów nie wszedł do bazy (AR-299).
     "objchg.item.pending_status_not_saved": {
         "pl": "status wpisów NIE zapisany w bazie (mogą dalej czekać w szufladzie): {detail}",

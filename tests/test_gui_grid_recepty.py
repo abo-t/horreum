@@ -1280,6 +1280,13 @@ def test_zamkniecie_w_biegu_cofniecia_mowi_pliki_nietkniete_a_wiersz_dokancza_po
     nietkniętych (zdanie „wymaga sprawdzenia”); wiersz bez recepty po kliku."""
     from PySide6.QtWidgets import QPushButton
     win, path, pliki = _okno_naprawy(tmp_path, n=3)
+    # Granica śladu cofnięcia (`writeback._granica_sladu`) to chwila migracji tej bazy z dokładnością do
+    # sekundy, a commit z TEJ SAMEJ sekundy rdzeń liczy ostrożnie („wymaga sprawdzenia”, AR-320). Baza testu
+    # zmigrowana wcześniej - zdanie nietkniętych nie zależy od tego, czy test zmieścił się w jednej sekundzie.
+    con = db.connect(str(path))
+    con.execute("UPDATE migration_log SET applied_at = '2000-01-01T00:00:00Z' WHERE version = 47")
+    con.commit()
+    con.close()
     przed = _bajty(pliki)
     try:
         commit = _naprawa_prawdziwym_exec(win)

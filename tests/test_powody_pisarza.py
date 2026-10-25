@@ -2506,3 +2506,133 @@ def test_blad_po_zapisie_markera_wycofuje_status_powod_i_marker(tmp_path, monkey
                        (pid,)).fetchone()[:] == ("pending", None)
     assert _marker(con, loc["id"]) == (loc["header_hash"], None, None)
     con.close()
+
+
+# ============================================================ granice nagłówka: rekord END z ogonem (AR-174)
+
+
+def test_wzorzec_rekordu_END_zgodny_z_astropy():
+    """Parytet kopii `writeback._FITS_END_RE` z `astropy.io.fits.header.HEADER_END_RE` zainstalowanego astropy
+    (wzorzec i flagi). Brak nazwy w astropy - asercja z receptą, nie `skip`: bramka granic jest poprawna tylko
+    tak długo, jak szuka rekordu `END` tak jak czytnik, więc zniknięcie reguły z astropy to sygnał do ponownego
+    sprawdzenia `Header._find_end_card`; `skip` przeszedłby w podsumowaniu biegu bez słowa.
+    Falsyfikator: zmieniony wzorzec kopii."""
+    from astropy.io.fits import header as naglowek_astropy
+    assert hasattr(naglowek_astropy, "HEADER_END_RE"), (
+        "astropy zdjął HEADER_END_RE z astropy.io.fits.header - sprawdź, jak dziś szuka rekordu END "
+        "(Header._find_end_card), i zaktualizuj writeback._FITS_END_RE")
+    wzor = naglowek_astropy.HEADER_END_RE
+    assert (wzor.pattern, wzor.flags) == (writeback._FITS_END_RE.pattern, writeback._FITS_END_RE.flags)
+
+
+def _z_ogonem_end(p):
+    """Rekord `END` pliku FITS `p` z niepustym ogonem (`END` + spacje + `XXXXXXX`) - astropy czyta go
+    z ostrzeżeniem, a `writeto` zastępuje ogon spacjami."""
+    raw = p.read_bytes()
+    i = raw.index(b"END" + b" " * 77)
+    p.write_bytes(raw[:i] + b"END" + b" " * 70 + b"XXXXXXX" + raw[i + 80:])
+    return p
+
+
+def _z_ogonem_end_przed_kanonicznym(p):
+    """Rekord `END` z ogonem (`_z_ogonem_end`), a za nim w TYM SAMYM bloku kanoniczny `END` (w miejscu
+    wolnego rekordu). Parser klasyczny astropy (`HEADER_END_RE`) kończy nagłówek na pierwszym z nich,
+    szybki parser `fits.open` (wyłącznie kanoniczny `END`) - na drugim, z rekordem z ogonem jako kartą."""
+    raw = _z_ogonem_end(p).read_bytes()
+    i = raw.index(b"END" + b" " * 70 + b"XXXXXXX")
+    assert i % 2880 + 160 <= 2880 and raw[i + 80:i + 160] == b" " * 80, "brak wolnego rekordu w bloku"
+    p.write_bytes(raw[:i + 80] + writeback._FITS_END_RECORD + raw[i + 160:])
+    return p
+
+
+@pytest.mark.parametrize("psuj", [_z_ogonem_end, _z_ogonem_end_przed_kanonicznym],
+                         ids=["ogon", "ogon_przed_kanonicznym"])
+def test_rekord_END_z_ogonem_odmowa_z_kodem_na_obu_drogach(tmp_path, psuj):
+    """Rekord `END` z niepustym ogonem - sam albo przed kanonicznym `END` w tym samym bloku: zapis w miejscu
+    i droga atomowa 'blocked' z kodem `header_end_bounds`, bez parametrów, plik bajt w bajt (bez pliku
+    tymczasowego), zdanie PL = wpis katalogu, okno PL i EN. Dawniej: w miejscu `ValueError` → 'failed',
+    atomowo 'applied' z ogonem zastąpionym spacjami bez słowa. Falsyfikatory: `ValueError`
+    w `_fits_region_checked`; bramka granic zdjęta z `write_changes`; predykat granic szukający pierwszego
+    KANONICZNEGO `END` zamiast pierwszego rekordu `END` w rozumieniu astropy (wariant przed kanonicznym)."""
+    pytest.importorskip("PySide6")
+    from test_writeback_inplace import _fits
+    p = psuj(_fits(tmp_path / "f.fits"))
+    ops = [writeback.WriteOp("OBJECT", "set", "M 33", "str")]
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        atomowo, w_miejscu = _odmowa_obu_drog(p, ops)
+    for res in (atomowo, w_miejscu):
+        pl, en = _odmowa_z_kodem(res, "header_end_bounds", {})
+        assert "END" in pl and "END" in en
+    assert b"XXXXXXX" in p.read_bytes()
+
+
+@pytest.mark.parametrize("zrodlo", ["koperta", "tekst"])
+def test_cofniecie_przy_rekordzie_END_z_ogonem_odmawia_kodem(tmp_path, zrodlo):
+    """Commit atomowy, potem ktoś dopisuje ogon do rekordu `END` (odcisk astropy bez zmian): cofnięcie
+    - drogą koperty regionu i drogą semantyczną z tekstu backupu - 'blocked' z kodem `header_end_bounds`,
+    plik bajt w bajt. Falsyfikator: bramka granic zdjęta z cofnięcia (koperta) / z `_fits_semantyczny`."""
+    import warnings
+    from test_writeback_inplace import _fits, _loc, _scan_in
+    p = _fits(tmp_path / "f.fits")
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    loc = _loc(con, p)
+    repo.stage_pending(con, run_id="R", location_id=loc["id"], keyword="OBJECT", idx=0, op="set",
+                       old_value=None, new_value="M 33", new_type="str", new_comment=None,
+                       expected_header_hash=loc["header_hash"])
+    res = writeback.commit(con, "R", now=NOW, inplace=False)
+    assert len(res.applied) == 1, res
+    if zrodlo == "tekst":                     # backup sprzed koperty regionu - droga semantyczna
+        tekst = con.execute("SELECT header_text FROM header_backups").fetchone()[0]
+        stary = writeback.RegionBackup.decode(tekst).region.decode("latin-1")
+        con.execute("UPDATE header_backups SET header_text = ?", (stary,))
+        con.commit()
+    _z_ogonem_end(p)
+    przed = p.read_bytes()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        u = writeback.undo(con, res.commit_id, now=NOW)
+    assert not u.restored and len(u.blocked) == 1, u
+    assert u.blocked[0].reason.code == "header_end_bounds", u.blocked[0].reason
+    assert p.read_bytes() == przed
+    con.close()
+
+
+@pytest.mark.parametrize("zrodlo", ["koperta", "tekst"])
+def test_cofniecie_commitu_bez_bramki_na_END_z_ogonem_przed_kanonicznym_odmawia_kodem(tmp_path, monkeypatch,
+                                                                                    zrodlo):
+    """Plik z rekordem `END`+ogon przed kanonicznym `END` w tym samym bloku (`_z_ogonem_end_przed_kanonicznym`)
+    przeszedł commit atomowy pisarzem bez bramki granic (odcisk `fits.open` sięga kanonicznego `END`, więc
+    cofnięcie widzi nagłówek z commitu): cofnięcie - drogą koperty regionu i drogą semantyczną z tekstu
+    backupu - 'blocked' z kodem `header_end_bounds`, plik bajt w bajt. Ten sam układ dopisany PO commicie
+    zatrzymuje wcześniej bramka odcisku (`undo_header_changed`). Falsyfikator: predykat granic szukający
+    pierwszego KANONICZNEGO `END`."""
+    import warnings
+    from test_writeback_inplace import _fits, _loc, _scan_in
+    p = _z_ogonem_end_przed_kanonicznym(_fits(tmp_path / "f.fits"))
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    loc = _loc(con, p)
+    repo.stage_pending(con, run_id="R", location_id=loc["id"], keyword="OBJECT", idx=0, op="set",
+                       old_value=None, new_value="M 33", new_type="str", new_comment=None,
+                       expected_header_hash=loc["header_hash"])
+    with monkeypatch.context() as m:
+        m.setattr(writeback, "_granice_end_zgodne", lambda raw: True)    # pisarz bez bramki granic
+        res = writeback.commit(con, "R", now=NOW, inplace=False)
+    assert len(res.applied) == 1, res
+    if zrodlo == "tekst":                     # backup sprzed koperty regionu - droga semantyczna
+        tekst = con.execute("SELECT header_text FROM header_backups").fetchone()[0]
+        stary = writeback.RegionBackup.decode(tekst).region.decode("latin-1")
+        con.execute("UPDATE header_backups SET header_text = ?", (stary,))
+        con.commit()
+    przed = p.read_bytes()
+    assert b"END" + b" " * 70 + b"XXXXXXX" in przed
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        u = writeback.undo(con, res.commit_id, now=NOW)
+    assert not u.restored and len(u.blocked) == 1, u
+    assert u.blocked[0].reason.code == "header_end_bounds", u.blocked[0].reason
+    assert p.read_bytes() == przed
+    con.close()

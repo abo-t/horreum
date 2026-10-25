@@ -193,6 +193,9 @@ ITEM_REASON_CODES = frozenset({
     # --- odmowa bajtu spoza ASCII przy commicie, gdy status wpisów nie wszedł do bazy (AR-299,
     # `writeback._status_nie_zapisany`): nota za `header_nonprintable`, plik nietknięty
     "pending_status_not_saved",
+    # --- granice nagłówka FITS niezgodne z kanonicznym rekordem `END` (AR-174, `writeback._GRANICE_END`):
+    # odmowa zapisu w miejscu, drogi atomowej i cofnięcia, plik nietknięty
+    "header_end_bounds",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
@@ -667,3 +670,18 @@ def proza_z_diagnoza(powod):
         return None
     szczegoly = szczegoly_systemu(powod)
     return " - ".join([str(powod), *szczegoly]) if szczegoly else str(powod)
+
+
+# Kody ODMOWY REKONCYLIACJI zamiaru renamu (AR-323): powody, z którymi `writeback.reconcile_renames` zwraca
+# 'blocked' (`_rozstrzygnij_zamiar`, `_dysk_milczy`, gałąź `except` w `reconcile_renames`) i które
+# `repo.note_rename_intent_refusal` kładzie na wiersz zamiaru. PO CO ZBIÓR: wiersz z otwartym zamiarem niesie
+# też powód samej próby renamu - `torn_db_not`, `returned_intent_left`, powody 'blocked' pisarza (porażka
+# zgaszenia zamiaru przed renamem połknięta w `_rename_pod_straza`) - a `status` tych dwóch nie rozróżnia
+# (zapis odmowy statusu nie zmienia). Szuflada mówi „rekoncyliacja odmówiła” wyłącznie dla kodu z tego zbioru;
+# inny kod na wierszu z zamiarem to próba, której rekoncyliacja jeszcze nie rozstrzygała. Zbiór jest rozłączny
+# z każdym innym kodem powodu `writeback` i `repo` (pisarz renamu, `rename_file`, wyjątki repo) - pilnuje
+# `tests/test_writeback_rekoncyliacja_powod.py` (AST: zbiór == kody 'blocked' rekoncyliacji).
+KODY_ODMOWY_REKONCYLIACJI = frozenset({
+    "disk_silent", "intent_both_names", "intent_no_name", "intent_mtime_differs",
+    "intent_sha1_differs", "intent_changed", "intent_target_taken", "reconcile_failed",
+})

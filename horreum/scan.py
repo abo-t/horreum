@@ -2425,6 +2425,18 @@ class CopyFactsSummary:
     stale_paths: list = field(default_factory=list)
     missing_paths: list = field(default_factory=list)
 
+    # Które człony raportu mówią o robocie przebiegu (AR-324) - JEDEN predykat dla raportu Dostawy
+    # (`pipeline._format_copy_facts`) i wiersza CLI (`cli._presence_tail`). Przebieg samych bajtów
+    # (po aktualizacji: 15 598 kopii czeka na bajty, 0 na fakty - kopia pf4 po migracji do v47) nie mówi
+    # „uzupełniono 0 z 0”; przebieg bez żadnej roboty zostaje przy członie faktów („0 z 0” = nic nie czekało).
+    @property
+    def czlon_faktow(self):
+        return bool(self.rows_facts or not self.rows_bytes)
+
+    @property
+    def czlon_bajtow(self):
+        return self.rows_bytes > 0
+
 
 def copy_facts_candidates(con, root=None, *, porownywalne=False):
     """Kandydaci uzupełnienia faktów kopii (0021): kopie OBECNE, o znanym odcisku nagłówka, bez

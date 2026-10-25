@@ -15,9 +15,9 @@ from .item_reasons import (   # błąd systemu i bazy klasą w drukach (AR-197, 
 
 
 class _VersionAction(argparse.Action):
-    """`--version` sięga po numer DOPIERO przy użyciu flagi. `importlib.metadata` (jedyny
-    właściciel numeru — patrz `horreum/__init__.py`) kosztuje ~45 ms, czyli więcej niż cały
-    import CLI; ta sama dyscyplina leniwości co `_layout` niżej."""
+    """`--version` sięga po numer DOPIERO przy użyciu flagi. Odczyt metadanych (jedyny właściciel
+    numeru i zmierzony koszt - nagłówek `horreum/__init__.py`) kosztuje więcej niż cały import CLI;
+    ta sama dyscyplina leniwości co `_layout` niżej."""
 
     def __init__(self, option_strings, dest, help=None):
         super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, help=help)
@@ -632,48 +632,76 @@ def _main(argv=None):
         from .gui import queries
         now = datetime.now(timezone.utc).isoformat()
         source = "date_obs" if args.source == "date-obs" else "filename"
-        con = db.open_db(args.db)
+        # Zapis (`--undo`, `--apply`): blokada szuflady PRZED otwarciem bazy z migracją (`_wez_blokade`) -
+        # odmowa nie zmienia schematu bazy, którą prowadzi okno; DRY bez blokady.
         if args.undo:
-            res = writeback.undo_renames(con, args.undo, now=now)
-            con.close()
+            blokada = _wez_blokade(args.db, "rename")          # cofnięcie też pisze nazwy (AR-322)
+            if blokada is None:
+                return 2
+            try:
+                con = db.open_db(args.db)
+                try:
+                    res = writeback.undo_renames(con, args.undo, now=now)
+                finally:
+                    con.close()
+            finally:
+                _oddaj_blokade(blokada)
             print(_format_rename_undo(args.db, args.undo, res))
             return 0
         tree = _load_filter_tree(args.filter_json)             # ścieżka pliku LUB inline (SPOT z gridem)
         template = _load_filter_tree(args.template_json) or naming.DEFAULT_TEMPLATE   # file-or-inline; brak→domyślny
-        # Przerwane renamy (AR-29) PRZED podglądem: podgląd liczy nazwy od `location.path`, więc baza
-        # musi już stać tam, gdzie plik. DRY nie mutuje - mówi tylko, ile zamiarów czeka.
-        if args.apply:
-            pre_reconciled = writeback.reconcile_renames(con, now=now)
-        else:
-            otwarte = len(writeback.open_rename_intents(con))
-        frame_ids = filter_engine.run(
-            tree,
-            leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
-            universe_fn=lambda: queries.all_frame_ids(con))
-        run_id = uuid.uuid4().hex if args.apply else None
+        # Wzór PRZED blokadą, otwarciem bazy i rekoncyliacją (AR-322): odmowa wzoru jest czysta (O(tokenów), jak
+        # w gridzie przed mintem), a rekoncyliacja to pierwsza mutacja `--apply` - zły wzór nie może jej wyprzedzić.
         try:
-            run = naming.run_rename(
-                sorted(frame_ids), targets_fn=lambda ids: queries.rename_frame_targets(con, ids),
-                source=source, offset_hours=args.offset_hours, template=template,
-                fallback=not args.no_fallback, run_id=run_id)
-        except ValueError as e:                                # zły regex orig w szablonie (INFORMUJ)
-            con.close()
+            naming.validate_template(template)
+        except ValueError as e:                                # zły regex orig / token w szablonie (INFORMUJ)
             print(f"Horreum rename: błąd wzoru nazwy: {e}")
             return 2
-        if not args.apply:
-            con.close()
-            print(_format_rename_dry(args.db, run, limit=args.limit, open_intents=otwarte))  # DRY: zero mutacji
-            return 0
-        from . import repo
-        for p in run.touched:
-            repo.stage_rename(con, run_id=run_id, location_id=p.location_id, old_path=p.old_path,
-                              new_path=p.new_path, expected_mtime=p.mtime)
+        blokada = None
+        if args.apply:
+            blokada = _wez_blokade(args.db, "rename")
+            if blokada is None:
+                return 2
+        # Połączenie zamknięte przed zwolnieniem blokady, także przy wyjątku - jak w gałęzi `--undo`.
+        try:
+            con = db.open_db(args.db)                          # migracja dopiero pod blokadą (`--apply`)
+            try:
+                # Przerwane renamy (AR-29) PRZED podglądem: podgląd liczy nazwy od `location.path`, więc baza
+                # musi już stać tam, gdzie plik. DRY nie mutuje - mówi tylko, ile zamiarów czeka.
+                if args.apply:
+                    pre_reconciled = writeback.reconcile_renames(con, now=now)
+                else:
+                    otwarte = len(writeback.open_rename_intents(con))
+                frame_ids = filter_engine.run(
+                    tree,
+                    leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
+                    universe_fn=lambda: queries.all_frame_ids(con))
+                run_id = uuid.uuid4().hex if args.apply else None
+                try:
+                    run = naming.run_rename(
+                        sorted(frame_ids), targets_fn=lambda ids: queries.rename_frame_targets(con, ids),
+                        source=source, offset_hours=args.offset_hours, template=template,
+                        fallback=not args.no_fallback, run_id=run_id)
+                except ValueError as e:                        # straż: wzór sprawdzony wyżej tą samą funkcją
+                    print(f"Horreum rename: błąd wzoru nazwy: {e}")
+                    return 2
+                if not args.apply:
+                    print(_format_rename_dry(args.db, run, limit=args.limit, open_intents=otwarte))  # DRY: zero mutacji
+                    return 0
+                from . import repo
+                for p in run.touched:
+                    repo.stage_rename(con, run_id=run_id, location_id=p.location_id, old_path=p.old_path,
+                                      new_path=p.new_path, expected_mtime=p.mtime)
 
-        def heartbeat(done, total, _path, _status):      # puls co 100 (rename na NAS wolniejszy niż import, R1 #10)
-            if done % 100 == 0 or done == total:
-                print(f"  rename: {done}/{total}")
-        res = writeback.commit_renames(con, run_id, now=now, progress=heartbeat)
-        con.close()
+                # puls co 100 (rename na NAS wolniejszy niż import, R1 #10)
+                def heartbeat(done, total, _path, _status):
+                    if done % 100 == 0 or done == total:
+                        print(f"  rename: {done}/{total}")
+                res = writeback.commit_renames(con, run_id, now=now, progress=heartbeat)
+            finally:
+                con.close()
+        finally:
+            _oddaj_blokade(blokada)
         print(_format_rename_apply(args.db, run, res, run_id, pre_reconciled=pre_reconciled))
         return 0
     if args.cmd == "project":
@@ -1141,9 +1169,14 @@ def _presence_tail(con, root, *, now):
     for etap, w in derive.adopt_and_derive(con, root, now):
         if etap == "copy_facts":
             # Dwie roboty osobno (AR-315): po aktualizacji kopie czekają na same bajty nagłówka,
-            # a „zebrane 15598 z 15598” mówiło o faktach, których nie zebrano.
-            yield (f"  fakty kopii: zebrane {w.facts_written} z {w.rows_facts}, bajty naglowka "
-                   f"sprawdzone {w.bytes_checked} z {w.rows_bytes} (niesprawdzone {w.bytes_unchecked}, "
+            # a „zebrane 15598 z 15598” mówiło o faktach, których nie zebrano. Człon bez roboty
+            # schodzi tym samym predykatem co w raporcie Dostawy (`CopyFactsSummary.czlon_*`, AR-324).
+            czlony = []
+            if w.czlon_faktow:
+                czlony.append(f"zebrane {w.facts_written} z {w.rows_facts}")
+            if w.czlon_bajtow:
+                czlony.append(f"bajty naglowka sprawdzone {w.bytes_checked} z {w.rows_bytes}")
+            yield (f"  fakty kopii: {', '.join(czlony)} (niesprawdzone {w.bytes_unchecked}, "
                    f"domkniete rownolegle {w.elsewhere}, zmienione na dysku {w.stale}, brak pliku {w.missing}, blad odczytu {w.failed}, "
                    f"zapis w toku {w.raced}); czeka {w.remaining}")
         elif etap == "adopt_testimony":
@@ -1160,6 +1193,72 @@ def _presence_tail(con, root, *, now):
                    f"historia nieodczytana {w.history_unread}")
         else:
             yield f"  {etap}: {w}"
+
+
+def _sciezka_bazy(baza):
+    """Ścieżka pliku bazy `baza` w postaci, w której okno zakłada przy niej blokadę szuflady (`queries.db_path_of`
+    połączenia SQLite), ustalona BEZ ZAPISU: połączenie tylko do odczytu (URI `mode=ro`, jak baza dawcy importu)
+    nie zakłada brakującego pliku i nie przestawia trybu dziennika (`db.connect` ustawia WAL). Bazy nie da się
+    tak otworzyć: brak pliku → `os.path.abspath` (`open_db` założy bazę dopiero pod blokadą); brak katalogu → ten
+    sam błąd SQLite, którym bez blokady pada `open_db` (bazy nie da się założyć), przed blokadą. `:memory:` → ""
+    (blokada pusta, jak w oknie dla bazy w pamięci)."""
+    import sqlite3
+    from urllib.request import pathname2url
+    from .gui import queries
+    if baza == ":memory:":
+        return ""
+    apath = os.path.abspath(baza)
+    url = pathname2url(apath)
+    if url.startswith("//") and not url.startswith("///"):
+        url = "//" + url                     # UNC `\\host\udzial`: pusty autorytet URI (`file:////host/udzial`)
+    try:
+        con = sqlite3.connect(f"file:{url}?mode=ro", uri=True)
+    except sqlite3.Error:
+        if not os.path.isdir(os.path.dirname(apath)):
+            raise
+        return apath
+    try:
+        return queries.db_path_of(con)
+    finally:
+        con.close()
+
+
+def _wez_blokade(baza, polecenie):
+    """Wyłączność szuflady bazy `baza` (argument polecenia) dla polecenia, które pisze nazwy albo karty
+    przebiegu (AR-322): `blokada_szuflady.Blokada` albo None - odmowa wydrukowana (wołający kończy kodem 2,
+    zero zmian). Ten sam plik `<baza>.szuflada.lock`, który trzyma okno z przebiegiem w szufladzie: okno
+    otwarte w biegu polecenia nie podejmie jego przebiegu, a polecenie nie wejdzie w przebieg okna. Ścieżka
+    bazy z połączenia (`queries.db_path_of`), jak w oknie (`gui.grid.FramesView`: `queries.db_path_of(con)`
+    + `.szuflada.lock`) - nie surowy argument (`_sciezka_bazy`).
+
+    PRZED MIGRACJĄ I BEZ ZAPISU: ścieżkę daje połączenie tylko do odczytu, zamknięte przed blokadą; wołający
+    otwiera bazę `db.open_db` (założenie brakującej, tryb dziennika WAL, migracja i kroki pomigracyjne) dopiero
+    pod blokadą. Odmowa zostawia więc bazę okna takiej, jaka była - „Zero zmian” jest prawdą także o pliku
+    bazy, jej schemacie i trybie dziennika. ASCII (konsola cp1250)."""
+    from . import blokada_szuflady
+    try:
+        return blokada_szuflady.wez(_sciezka_bazy(baza))
+    except blokada_szuflady.SzufladaZajeta as z:
+        kto = f"PID {z.pid}, program {z.program}" if z.pid is not None else "PID nieznany"
+        print(f"Horreum {polecenie}: ODMOWA -- szuflade tej bazy prowadzi inny proces Horreum ({kto}); "
+              f"zatwierdz albo odrzuc zmiany w tamtym oknie albo poczekaj na koniec polecenia, potem "
+              f"powtorz. Zero zmian.")
+    except OSError as exc:
+        print(f"Horreum {polecenie}: ODMOWA -- nie da sie zalozyc blokady szuflady obok bazy: "
+              f"{blad_systemu(exc)}. Zero zmian.")
+    return None
+
+
+def _oddaj_blokade(blokada):
+    """Zwolnienie po poleceniu; porażka usunięcia pliku blokady nie zmienia wyniku polecenia (okno
+    i następne polecenie przejmą plik nietrzymany) - jeden wiersz uwagi."""
+    if blokada is None:
+        return
+    try:
+        blokada.zwolnij()
+    except OSError as exc:
+        print(f"  uwaga: pliku blokady szuflady nie usunieto ({blad_systemu(exc)}) - nastepne okno "
+              f"albo polecenie go przejmie")
 
 
 def _format_rename_dry(db_path, run, *, limit, open_intents=0):
@@ -2323,18 +2422,25 @@ def _cmd_object_change(args, parser):
         return 2
     from . import writeback                              # lazy (astropy przez pisarza)
     now = datetime.now(timezone.utc).isoformat()
-    con = db.open_db(args.db)
+    krok = (writeback.commit_object_change if args.oc_cmd == "finish"
+            else writeback.undo_object_change)
+    # Blokada szuflady PRZED otwarciem bazy z migracją (AR-322, `_wez_blokade`): odmowa nie zmienia schematu.
+    blokada = _wez_blokade(args.db, f"object-change {args.oc_cmd}")
+    if blokada is None:
+        return 2
     try:
-        krok = (writeback.commit_object_change if args.oc_cmd == "finish"
-                else writeback.undo_object_change)
+        con = db.open_db(args.db)
         try:
-            res = krok(con, args.run_id, now=now)
-        except ValueError as exc:
-            print(f"Horreum object-change {args.oc_cmd} {args.db} (przebieg {args.run_id}): "
-                  f"odmowa - {exc}")
-            return 2
+            try:
+                res = krok(con, args.run_id, now=now)
+            except ValueError as exc:
+                print(f"Horreum object-change {args.oc_cmd} {args.db} (przebieg {args.run_id}): "
+                      f"odmowa - {exc}")
+                return 2
+        finally:
+            con.close()
     finally:
-        con.close()
+        _oddaj_blokade(blokada)
     zrobione = "zmienione" if args.oc_cmd == "finish" else "cofniete"
     # AR-82: `finish` - karta ZAPISANA, zeznanie klatki wstrzymane (osobny kubeł, kod 1: robota
     # czeka); `undo` - karta wróciła, zeznanie nie (podzbiór cofniętych).
@@ -2378,10 +2484,33 @@ def _cmd_header_fix(args):
     rodowód). Kod wyjścia APPLY: 1, gdy którykolwiek plik zablokowany, nieudany albo zapisany
     z zeznaniem wstrzymanym (AR-82: głosem klatki mówi inna kopia). Kod wyjścia UNDO: 1, gdy cofnięcie
     nie jest domknięte (`UndoResult.complete` - ta sama reguła co uchwyt „Cofnij” okien, AR-160):
-    plik „już cofnięty” (`UndoResult.already`) ma własny wiersz i nie liczy się do zablokowanych."""
+    plik „już cofnięty” (`UndoResult.already`) ma własny wiersz i nie liczy się do zablokowanych.
+
+    WYŁĄCZNOŚĆ SZUFLADY (AR-322): zapis (`--apply`) i cofnięcie (`--undo`) biegną pod blokadą szuflady od
+    otwarcia bazy z migracją, przez odczyt wierszy, plan liczony teraz i porównanie z planem DRY, po zapis
+    albo cofnięcie i łańcuch pochodnych - inny proces nie zmieni stanu między planem a zapisem ani nie cofnie
+    commitu, zanim pochodne utrwalą przeliczony kanon. Każda odmowa pod blokadą ją zwalnia (`finally`); DRY
+    i odmowa pliku planu - bez blokady (nic nie zapisują)."""
     from . import macro, repo, writeback
     now = datetime.now(timezone.utc).isoformat()
-    con = db.open_db(args.db)
+    zapis = args.apply or args.undo is not None
+    if args.apply and args.undo is None:
+        try:
+            zapisany = _wczytaj_plan(args.plan, "header-fix", args.db)
+        except (OSError, ValueError) as exc:
+            print(f"Horreum header-fix {args.db} (APPLY): odmowa - "
+                  f"{proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
+            return 2
+    blokada = None
+    if zapis:
+        blokada = _wez_blokade(args.db, "header-fix")
+        if blokada is None:
+            return 2
+    try:
+        con = db.open_db(args.db)                        # migracja dopiero pod blokadą (zapis)
+    except BaseException:
+        _oddaj_blokade(blokada)
+        raise
     try:
         if args.undo is not None:
             res = writeback.undo(con, args.undo, now=now)
@@ -2413,12 +2542,6 @@ def _cmd_header_fix(args):
             print("\n".join(lines))
             return 0 if res.complete else 1
         if args.apply:
-            try:
-                zapisany = _wczytaj_plan(args.plan, "header-fix", args.db)
-            except (OSError, ValueError) as exc:
-                print(f"Horreum header-fix {args.db} (APPLY): odmowa - "
-                      f"{proza_z_diagnoza(blad_systemu(exc, z_typem=False))}")
-                return 2
             ids, keywords = set(zapisany["frames"]), tuple(zapisany["keywords"])
             forms = zapisany["filter_forms"]
         else:
@@ -2472,6 +2595,8 @@ def _cmd_header_fix(args):
                          f"nie jest planem z DRY ({len(zapisany['items'])} kart) - powtorz DRY")
             print("\n".join(lines))
             return 1
+        # Staging i zapis pod tą samą blokadą co plan wyżej (AR-322): przebieg kart czekający między plikami
+        # okno podjęłoby jak swój.
         repo.stage_pending_many(con, run_id=plan.run.run_id, previews=plan.run.touched)
         res = writeback.commit(con, plan.run.run_id, now=now, inplace=True)
         lines.append(f"  zapisane {len(res.applied)} (w miejscu {len(res.in_place)}), z zeznaniem "
@@ -2486,7 +2611,10 @@ def _cmd_header_fix(args):
         print("\n".join(lines))
         return 1 if (res.blocked or res.failed or res.withheld) else 0
     finally:
-        con.close()
+        try:
+            con.close()
+        finally:
+            _oddaj_blokade(blokada)                      # po pochodnych i po każdej odmowie pod blokadą
 
 
 if __name__ == "__main__":

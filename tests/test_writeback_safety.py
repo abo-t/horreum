@@ -36,7 +36,11 @@ PKG = Path(horreum.__file__).parent
 # w katalogu danych programu użytkownika (wydanie okienkowe nie ma `stderr`). Dopisek, obrót po progu
 # i założenie katalogu, wyłącznie pod katalogiem od wołającego; mapa mutacji przypięta niżej
 # (`_DZIENNIK_MUTACJE`), a test modułu sprawdza w biegu, że poza katalogiem dziennika nic się nie zmienia.
-DOORS = {PKG / "writeback.py", PKG / "projection.py", PKG / "raport.py", PKG / "gui" / "dziennik_bledow.py"}
+# Szóste drzwi - `blokada_szuflady.py` (AR-322): plik STANU obok bazy (`<baza>.szuflada.lock`, format `QLockFile`),
+# nie dane użytkownika - wyłączność szuflady dla poleceń CLI zapisu; mapa mutacji przypięta niżej
+# (`_BLOKADA_MUTACJE`), a test w biegu sprawdza, że poza plikiem blokady nic się nie zmienia.
+DOORS = {PKG / "writeback.py", PKG / "projection.py", PKG / "raport.py", PKG / "gui" / "dziennik_bledow.py",
+         PKG / "blokada_szuflady.py"}
 
 # os.<attr> — mutacje pliku (kwalifikowane przez moduł `os`, nie goły attr). `link`/`symlink`/`mkdir`/
 # `makedirs` doszły z projekcją (KROK 6): tworzenie linków/katalogów to mutacja filesystemu.
@@ -439,4 +443,94 @@ def test_wyjatek_po_dokladnej_sciezce_nie_po_nazwie():
     """Z8: zagnieżdżony moduł o nazwie klingi NIE jest klingą."""
     assert PKG / "gui" / "writeback.py" not in DOORS and PKG / "writeback.py" in DOORS
     assert PKG / "gui" / "raport.py" not in DOORS and PKG / "raport.py" in DOORS
+
+
+# ---- szóste drzwi: blokada szuflady (AR-322) ----
+# Dwie funkcje modułu, każda z JEDNYM wywołaniem mutującym: założenie pliku blokady (`CreateFileW`, `CREATE_NEW`)
+# i jego usunięcie (zwolnienie, przejęcie martwej, sprzątanie po nieudanym założeniu). Klasa `Blokada` nie mutuje
+# sama (woła `_usun`). Mapa tych drzwi liczy WYWOŁANIA (lista), nie rodzaje (zbiór): drugie `os.remove` w `_usun`
+# to nowa mutacja w dozwolonej funkcji, której mapa zbiorów (`_mapa_mutacji`) nie widzi.
+_BLOKADA_MUTACJE = {
+    "_zaloz": [".CreateFileW(...)"],
+    "_usun": ["os.remove(...)"],
+}
+
+
+def _mapa_wywolan(zrodlo):
+    """{funkcja najwyższego poziomu: posortowana lista opisów mutacji} - `_mutatory_po_funkcjach` z krotnością."""
+    return {k: sorted(v) for k, v in _mutatory_po_funkcjach(ast.parse(zrodlo)).items()}
+
+
+def test_drzwi_blokady_mutuja_tylko_w_dozwolonych_funkcjach():
+    """Szóste drzwi (`blokada_szuflady.py`) mutują wyłącznie w `_zaloz` i `_usun`, każda funkcja JEDNYM
+    wywołaniem; `open` tylko do odczytu (treść cudzej blokady). Falsyfikator: `os.remove` albo zapis dopisany
+    w innej funkcji modułu."""
+    zrodlo = (PKG / "blokada_szuflady.py").read_text(encoding="utf-8")
+    assert _mapa_wywolan(zrodlo) == _BLOKADA_MUTACJE
+    found = _mapa_wywolan(zrodlo + "\n\ndef _wyciek(p):\n    os.remove(p)\n")
+    assert found != _BLOKADA_MUTACJE and found["_wyciek"] == ["os.remove(...)"]
+
+
+def test_drugie_usuniecie_w_dozwolonej_funkcji_przewraca_bramke_blokady():
+    """Negatywny dowód krotności na KOPII żywego źródła w pamięci: drugie `os.remove` dopisane w `_usun` (tu:
+    pliku bazy obok blokady) - ta sama funkcja i ten sam rodzaj mutacji - zmienia mapę wywołań, więc bramka
+    drzwi blokady czerwienieje, choć mapa zbiorów zostaje ta sama. Falsyfikator: mapa drzwi blokady ze zbiorów."""
+    zrodlo = (PKG / "blokada_szuflady.py").read_text(encoding="utf-8")
+    usun = "def _usun(plik):\n    os.remove(plik)\n"
+    assert zrodlo.count(usun) == 1
+    zmienione = zrodlo.replace(usun, usun + "    os.remove(plik[:-len(PRZYROSTEK)])\n")
+    found = _mapa_wywolan(zmienione)
+    assert found != _BLOKADA_MUTACJE and found["_usun"] == ["os.remove(...)", "os.remove(...)"]
+    assert _mapa_mutacji(zmienione) == _mapa_mutacji(zrodlo)
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="blokada szuflady - Windows (CreateFileW)")
+@pytest.mark.parametrize("wariant", ["wolna", "martwa_pusta", "blad_zapisu_tresci"])
+def test_blokada_zmienia_wylacznie_plik_blokady(tmp_path, monkeypatch, wariant):
+    """W biegu: wzięcie i zwolnienie blokady obok bazy zmienia w katalogu WYŁĄCZNIE `sciezka(baza)` - przy
+    trzymanej jest jeden nowy plik (ten, z PID-em tego procesu), po zwolnieniu katalog bajt w bajt jak przed.
+    Druga baza w tym samym katalogu i jej pliki (z cudzą blokadą) nietknięte. Warianty: przejęcie martwej
+    blokady (pusty plik, nikt go nie trzyma - proces padł przed zapisem treści) i sprzątanie po błędzie zapisu
+    treści (`WriteFile` odmawia na założonym pliku - `wez` rzuca `OSError`) - także wtedy katalog na końcu
+    bajt w bajt jak przed."""
+    import os
+    from horreum import blokada_szuflady
+    baza = tmp_path / "a.db"
+    plik = blokada_szuflady.sciezka(str(baza))
+    for p, b in ((baza, b"BAZA"), (tmp_path / "b.db", b"INNA"), (tmp_path / "b.db.szuflada.lock", b"OBCA")):
+        p.write_bytes(b)
+
+    def _stan():
+        return {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    przed = _stan()
+    if wariant == "blad_zapisu_tresci":
+        prawdziwy = blokada_szuflady._kernel32()
+        zalozony = []
+
+        class _OdmowaZapisu:
+            def __getattr__(self, nazwa):
+                return getattr(prawdziwy, nazwa)
+
+            def WriteFile(self, *_a):
+                zalozony.append(_stan().get("a.db.szuflada.lock"))
+                return 0
+        monkeypatch.setattr(blokada_szuflady, "_kernel32", lambda: _OdmowaZapisu())
+        with pytest.raises(OSError):
+            blokada_szuflady.wez(str(baza))
+        monkeypatch.undo()
+        assert zalozony == [b""], "odmowa przed założeniem pliku - test nic by nie mierzył"
+        assert _stan() == przed
+        return
+    if wariant == "martwa_pusta":
+        open(plik, "wb").close()
+    blokada = blokada_szuflady.wez(str(baza))
+    try:
+        w_biegu = _stan()
+        assert set(w_biegu) - set(przed) == {"a.db.szuflada.lock"}
+        assert {k: v for k, v in w_biegu.items() if k in przed} == przed
+        assert w_biegu["a.db.szuflada.lock"].split(b"\n")[0] == str(os.getpid()).encode()
+        assert blokada.plik == plik
+    finally:
+        blokada.zwolnij()
+    assert _stan() == przed
 

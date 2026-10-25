@@ -137,6 +137,9 @@ ITEM_REASON_CODES = frozenset({
     # --- błędy systemu klasą (AR-168, `blad_systemu` niżej) i bramka sumy kontrolnej z faktów
     # bazy (AR-167, `card_rules.BRAMKA_SUMY`); region sprzed commitu bez dowodu całego pliku (AR-169)
     "os_denied", "os_missing", "os_no_space", "os_share_lost", "fits_checksum",
+    # --- klasa ogólna błędu systemu WYŁĄCZNIE na drodze zapisu dziennika błędów programu (AR-324,
+    # `powod_zapisu_dziennika`): kod Windows/errno spoza klas wyżej, surowy tekst w `detail`
+    "os_other",
     "undo_region_unproven",
     "undo_newer_write",   # lokacja ma nowszy, niecofnięty zapis - cofnięcie odmawia (AR-318)
     # --- bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
@@ -200,7 +203,7 @@ ITEM_REASON_CODES = frozenset({
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie
 # mówi klasę i numer (`os_code`), komunikat systemu jest w języku systemu, nie UI.
-OS_REASON_CODES = frozenset({"os_denied", "os_missing", "os_no_space", "os_share_lost"})
+OS_REASON_CODES = frozenset({"os_denied", "os_missing", "os_no_space", "os_share_lost", "os_other"})
 # Kody błędu bazy klasą (AR-198, `powod_bazy`): zdanie mówi klasę i nazwę błędu SQLite (`db_code`),
 # surowy tekst SQLite jedzie w `detail` jak przy systemie.
 DB_REASON_CODES = frozenset({"db_busy", "db_unavailable", "db_full", "db_damaged"})
@@ -490,21 +493,24 @@ def _miejsce_w_kodzie(exc):
     return None
 
 
-def powod_systemu(exc):
+def powod_systemu(exc, *, ogolna=False):
     """Błąd systemu KLASĄ → `PowodPozycji` (`os_denied`, `os_missing`, `os_no_space`,
     `os_share_lost`: krótka fraza z numerem `os_code`, surowy tekst `Typ: opis` w `detail`) albo
     None - błąd spoza klas, wyjątek nie-`OSError`. Wołający z WŁASNĄ diagnozą spoza klas (czytnik
     żniw, kopia wiodąca) pyta tylko o klasę; reszta bierze `blad_systemu`. Razem z `powod_bazy`
     JEDYNE miejsce rdzenia, w którym tekst wyjątku staje się powodem (meta-test
-    `tests/test_powody_pisarza.py`)."""
+    `tests/test_powody_pisarza.py`). `ogolna=True` (wyłącznie `powod_zapisu_dziennika`, AR-324):
+    `OSError` spoza klas dostaje klasę ogólną `os_other` zamiast None."""
     if not isinstance(exc, OSError):
         return None
     surowy = _surowy(exc)
     kod_win = getattr(exc, "winerror", None)
     if kod_win is not None:
         klasa, os_code = _OS_WINERROR.get(kod_win), f"WinError {kod_win}"
-    else:
+    elif exc.errno is not None:
         klasa, os_code = _OS_ERRNO.get(exc.errno), f"Errno {exc.errno}"
+    else:                                   # `OSError("tekst")` - bez numeru; klasa ogólna mówi typ
+        klasa, os_code = None, type(exc).__name__
     if klasa == "denied":
         return PowodPozycji(f"odmowa dostępu do pliku ({os_code})", "os_denied",
                             os_code=os_code, detail=surowy)
@@ -517,6 +523,8 @@ def powod_systemu(exc):
     if klasa == "share_lost":
         return PowodPozycji(f"udział sieciowy albo dysk nie odpowiada ({os_code})",
                             "os_share_lost", os_code=os_code, detail=surowy)
+    if ogolna:
+        return PowodPozycji(f"błąd systemu plików ({os_code})", "os_other", os_code=os_code, detail=surowy)
     return None
 
 
@@ -576,6 +584,18 @@ def blad_systemu(exc, *, z_typem=True):
     if powod is not None:
         return powod
     return _surowy(exc) if z_typem else str(exc)
+
+
+def powod_zapisu_dziennika(exc):
+    """Powód porażki ZAPISU dziennika błędów programu (AR-324, linia dziennika w oknie straży
+    `gui.app.StrazBledowProgramu`): błąd systemu albo bazy klasą jak wszędzie; `OSError` spoza klas -
+    klasa ogólna `os_other` („błąd systemu plików (WinError N)”, surowy tekst w `detail`), żeby zdanie
+    mówiło w języku UI, a nie tekstem systemu (zmierzone na prawdziwym `Dziennik.zapisz`: plik w miejscu
+    katalogu dziennika - WinError 183, niedozwolona nazwa katalogu - WinError 123); inny wyjątek -
+    reguła okna (`powod_okna`, błąd programu z miejscem). Klasa ogólna TYLKO tutaj: w drogach plików
+    archiwum kod spoza tabeli zostaje tekstem systemu (`blad_systemu` - zajętość 32/33 rozpoznaje dalej
+    `gui.wb_worker.czytelny_powod`)."""
+    return powod_systemu(exc, ogolna=True) or powod_bazy(exc) or powod_okna(exc)
 
 
 def blad_windows(err, path):

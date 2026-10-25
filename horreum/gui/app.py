@@ -6220,7 +6220,7 @@ from shiboken6 import isValid  # noqa: E402
 
 from horreum.gui import dziennik_bledow  # noqa: E402
 from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu  # noqa: E402
-from horreum.item_reasons import PowodPozycji, powod_okna  # noqa: E402
+from horreum.item_reasons import PowodPozycji, powod_okna, powod_zapisu_dziennika  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
 
@@ -6321,13 +6321,22 @@ class StrazBledowProgramu(QObject):
         sys.excepthook = self._poprzedni
         threading.excepthook = self._poprzedni_watku
 
+    @staticmethod
+    def _bez_aplikacji():
+        """Stan straży przed `QApplication` (`main`, AR-324): `QDialog`/`QMessageBox` i `QEventLoop` bez aplikacji
+        widżetów to twarde przerwanie procesu - nie dziennik, nie okno."""
+        return not isinstance(QApplication.instance(), QApplication)
+
     def pokaz_przed_wyjsciem(self, exc):
         """Wyjątek SYNCHRONICZNY startu (budowa okna głównego, otwarcie bazy startowej) - wychodzi z `main`
         ramkami, a interpreter wołałby hak dopiero po `finally`, który straż już zdjął: w wydaniu bez konsoli
         program zamykał się bez słowa. Tu zgłoszenie idzie przy żywej straży, a pętla zdarzeń kręci się, aż
-        człowiek zamknie okno błędu (albo okno zastępcze). Wołający kończy program kodem błędu."""
+        człowiek zamknie okno błędu (albo okno zastępcze). Wołający kończy program kodem błędu. Błąd PRZED
+        `QApplication` (albo samej `QApplication`, AR-324): wpis w dzienniku i `stderr`, bez okna i bez pętli."""
         self._start = True
         self._hak(type(exc), exc, exc.__traceback__)
+        if self._bez_aplikacji():
+            return
         petla = QEventLoop()
 
         def _sprawdz():
@@ -6378,7 +6387,7 @@ class StrazBledowProgramu(QObject):
                 slad="".join(traceback.format_exception(type(wartosc), wartosc, tb))))
         except Exception as exc:
             try:
-                return ZapisDziennika(blad=powod_okna(exc))
+                return ZapisDziennika(blad=powod_zapisu_dziennika(exc))   # klasa także spoza tabeli (AR-324)
             except Exception:
                 return ZapisDziennika(blad=f"{type(exc).__name__}: {self._tekst(exc)}")
 
@@ -6401,8 +6410,11 @@ class StrazBledowProgramu(QObject):
         i wrócić tu hakiem) i każde zgłoszenie po tym, jak własne okno raz padło, idzie do okna
         zastępczego - nic nie jest wyłączane na stałe: kolejny błąd zawsze ma widoczny ślad. Dopiero
         porażka okna zastępczego oddaje zgłoszenie poprzedniemu hakowi. Kolejne zgłoszenie przy stojącym
-        oknie odświeża też linię dziennika - porażka późniejszego zapisu nie jest ciszą."""
+        oknie odświeża też linię dziennika - porażka późniejszego zapisu nie jest ciszą. Bez `QApplication`
+        (straż stoi przed nią, AR-324) okna nie ma jak zbudować - zgłoszenie zostaje w dzienniku i `stderr`."""
         powod, zapis = zgloszenie
+        if self._bez_aplikacji():
+            return
         if self._w_budowie or self._okno_zepsute:
             self._pokaz_zastepczo(powod, zapis)
             return
@@ -6574,29 +6586,17 @@ def main(argv=None):
             pass
 
     argv = list(sys.argv[1:] if argv is None else argv)
-    app = QApplication.instance() or QApplication([])
 
-    # Trwałe ustawienia (Windows: rejestr) — przechowują ścieżkę ostatnio otwartej bazy i motyw.
-    settings = QSettings("Horreum", "Horreum")
-
-    # Motyw PRZED oknem (F6 §7): domyślnie ciemny; paleta/QSS/kolory stanów podłączone globalnie.
-    apply_theme(app, theme.normalize(settings.value("ui/theme", theme.DEFAULT)))
-
-    # Język PRZED oknem (#1, lustro motywu): jawny wybór z QSettings, inaczej auto z locale systemu
-    # (gdy w available_langs), inaczej PL. Ustawiamy `_LANG` RAZ — stałe→klucze w widokach rozwiążą
-    # etykiety z katalogu w czasie budowy (D-L1 restart-required v1; `_LANG` nie mutuje w sesji).
-    saved_lang = settings.value("ui/lang", None)
-    auto_lang = saved_lang if saved_lang is not None else QLocale().name()[:2]
-    i18n.set_lang(auto_lang)
-
-    # Teksty samego Qt (menu pól, przyciski standardowe) w języku UI programu, i straż błędu programu
-    # PRZED oknem (AR-302). Błąd SYNCHRONICZNY budowy okna albo otwarcia bazy startowej wychodzi stąd
-    # ramkami - straż pokazuje go, póki jest zainstalowana (`pokaz_przed_wyjsciem`), a program kończy się
-    # kodem błędu. Straż i tłumacza zdejmuje `finally`: testy wołają `main` kilka razy na jednej
-    # `QApplication`, a hak i tłumacz to stan procesu.
-    tlumacz = zainstaluj_tlumacza_qt(app, i18n.current_lang())
+    # Straż błędu programu PIERWSZA (AR-302, AR-324): przed `QApplication`, `QSettings`, motywem, językiem
+    # i tłumaczem - błąd któregokolwiek z nich trafia do dziennika i kończy program kodem błędu. Dwa stany
+    # JEDNEJ straży (jeden zestaw haków - bez podwójnego wpisu): bez aplikacji dziennik i `stderr`, bez okna
+    # (`QDialog` bez `QApplication` to twarde przerwanie); po niej - okno błędu. Katalog dziennika z
+    # `QStandardPaths` jest ten sam przed aplikacją i po niej (zmierzone: = `%LOCALAPPDATA%`). Straż
+    # i tłumacza zdejmuje `finally`: testy wołają `main` kilka razy na jednej `QApplication`, a hak
+    # i tłumacz to stan procesu.
     straz = StrazBledowProgramu(katalog_dziennika_bledow())     # dziennik błędów (AR-312)
     straz.zainstaluj()
+    app = tlumacz = None
     try:
         # Przechwycenie obejmuje WYŁĄCZNIE start synchroniczny, nie `app.exec()`: wyjątek z pętli
         # zdarzeń (w testach - z podmienionego `exec`) wychodzi z `main` od razu, zamiast czekać, aż ktoś
@@ -6605,6 +6605,23 @@ def main(argv=None):
         # a po nim zamyka się zwykłą drogą.
         okna = []
         try:
+            app = QApplication.instance() or QApplication([])
+
+            # Trwałe ustawienia (Windows: rejestr) - przechowują ścieżkę ostatnio otwartej bazy i motyw.
+            settings = QSettings("Horreum", "Horreum")
+
+            # Motyw PRZED oknem (F6 §7): domyślnie ciemny; paleta/QSS/kolory stanów podłączone globalnie.
+            apply_theme(app, theme.normalize(settings.value("ui/theme", theme.DEFAULT)))
+
+            # Język PRZED oknem (#1, lustro motywu): jawny wybór z QSettings, inaczej auto z locale systemu
+            # (gdy w available_langs), inaczej PL. Ustawiamy `_LANG` RAZ - stałe→klucze w widokach rozwiążą
+            # etykiety z katalogu w czasie budowy (D-L1 restart-required v1; `_LANG` nie mutuje w sesji).
+            saved_lang = settings.value("ui/lang", None)
+            auto_lang = saved_lang if saved_lang is not None else QLocale().name()[:2]
+            i18n.set_lang(auto_lang)
+
+            # Teksty samego Qt (menu pól, przyciski standardowe) w języku UI programu.
+            tlumacz = zainstaluj_tlumacza_qt(app, i18n.current_lang())
             _start_okna(argv, settings, okna)
         except Exception as exc:
             for w in okna:

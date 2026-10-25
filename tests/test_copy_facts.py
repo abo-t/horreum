@@ -1178,6 +1178,32 @@ def test_robota_domknieta_po_wyborze_listy_to_domkniete_rownolegle(tmp_path, mon
     monkeypatch.setattr(scan, "_dwie_roboty", _wybor_i_rownolegle_domkniecie)
     wiersze = list(cli._presence_tail(con, None, now=NOW))
     con.close()
-    assert wiersze[0] == ("  fakty kopii: zebrane 0 z 0, bajty naglowka sprawdzone 0 z 1 (niesprawdzone 0, "
+    assert wiersze[0] == ("  fakty kopii: bajty naglowka sprawdzone 0 z 1 (niesprawdzone 0, "
                           "domkniete rownolegle 1, zmienione na dysku 0, brak pliku 0, blad odczytu 0, "
                           "zapis w toku 0); czeka 0"), wiersze
+
+
+# ---- AR-324: człon bez roboty schodzi z wiersza CLI tym samym predykatem co w raporcie Dostawy ----
+
+@pytest.mark.parametrize("rows_facts, rows_bytes, fakty, bajty", [
+    (0, 0, True, False),     # nic nie czekało - zostaje człon faktów („0 z 0” mówi „nic do zrobienia”)
+    (0, 3, False, True),     # przebieg samych bajtów (po aktualizacji) - bez „zebrane 0 z 0”
+    (4, 0, True, False),     # same fakty (XISF) - bez „bajty sprawdzone 0 z 0”
+    (4, 3, True, True),
+])
+def test_czlony_raportu_faktow_kopii(rows_facts, rows_bytes, fakty, bajty):
+    """Predykat członów `CopyFactsSummary` - jeden dla Dostawy i CLI. Falsyfikator: człon faktów zawsze."""
+    s = scan.CopyFactsSummary(rows_facts=rows_facts, rows_bytes=rows_bytes)
+    assert (s.czlon_faktow, s.czlon_bajtow) == (fakty, bajty)
+
+
+def test_wiersz_cli_przebiegu_samych_faktow_bez_czlonu_bajtow(tmp_path):
+    """Dwa XISF jednej klatki - fakty czekają, bajtów nagłówka FITS do zbadania nie ma: wiersz CLI mówi
+    „zebrane 2 z 2” i nie mówi o bajtach. Falsyfikator: człon bajtów drukowany zawsze („sprawdzone 0 z 0”)."""
+    from horreum import cli
+    _root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    wiersze = list(cli._presence_tail(con, None, now=NOW))
+    con.close()
+    assert wiersze[0].startswith("  fakty kopii: zebrane 2 z 2 (niesprawdzone 0, "), wiersze
+    assert "bajty naglowka" not in wiersze[0] and wiersze[0].isascii(), wiersze

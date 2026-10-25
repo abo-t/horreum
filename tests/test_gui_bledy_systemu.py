@@ -2337,17 +2337,23 @@ def _plik_tylko_do_odczytu():
 
 @pytest.mark.zmienia_motyw
 @pytest.mark.parametrize("lang", ["pl", "en"])
-@pytest.mark.parametrize("zepsuj", ["plik_tylko_do_odczytu", "plik_w_miejscu_katalogu"])
-def test_porazka_zapisu_dziennika_okno_stoi_ze_zdaniem(qapp, monkeypatch, ustawienia, jezyk, lang, zepsuj):
+@pytest.mark.parametrize("zepsuj", ["plik_tylko_do_odczytu", "plik_w_miejscu_katalogu", "nazwa_niedozwolona"])
+def test_porazka_zapisu_dziennika_okno_stoi_ze_zdaniem(qapp, monkeypatch, ustawienia, jezyk, lang, zepsuj,
+                                                       tmp_path):
     """Dziennika nie da się zapisać: okno błędu i tak stoi, a jego linia mówi, że dziennika nie zapisano -
     zdaniem klasy błędu systemu, ze szczegółem pod kursorem; „Otwórz dziennik” schowany. Porażka zapisu
-    nie jest ciszą ani nie zdejmuje okna. Falsyfikator: wyjątek dziennika wychodzi z haka (bez okna)."""
+    nie jest ciszą ani nie zdejmuje okna. Kod Windows spoza klas (plik w miejscu katalogu - 183,
+    niedozwolona nazwa katalogu - 123) mówi klasą ogólną `os_other` w języku UI, surowy tekst pod kursorem
+    (AR-324). Falsyfikator: wyjątek dziennika wychodzi z haka (bez okna); surowe `Typ: opis` w zdaniu."""
     import stat
     from PySide6.QtCore import QTimer
+    from horreum.gui import app as app_mod
     ustawienia.setValue("ui/lang", lang)
     plik = _plik_tylko_do_odczytu() if zepsuj == "plik_tylko_do_odczytu" else None
-    if plik is None:
+    if zepsuj == "plik_w_miejscu_katalogu":
         _plik_w_miejscu_katalogu()
+    elif zepsuj == "nazwa_niedozwolona":
+        monkeypatch.setattr(app_mod, "katalog_dziennika_bledow", lambda: str(tmp_path / "zla<nazwa"))
     wynik = {}
 
     def _scenariusz(straz):
@@ -2373,10 +2379,14 @@ def test_porazka_zapisu_dziennika_okno_stoi_ze_zdaniem(qapp, monkeypatch, ustawi
         assert wynik["szczegol"], wynik
         assert _czytaj(plik) == "stary wpis\n"
     else:
-        # Błąd spoza klas systemu: surowy `Typ: opis` w zdaniu, bez wymyślonego szczegółu (`wiersz_systemu`).
-        assert "FileExistsError" in wynik["linia"], wynik
+        # Kod spoza klas systemu: klasa ogólna z numerem w zdaniu, surowy `Typ: opis` tylko w szczególe.
+        kod = "WinError 183" if zepsuj == "plik_w_miejscu_katalogu" else "WinError 123"
+        assert wynik["linia"] == i18n.t("main.prog_error.log_failed",
+                                        msg=i18n.t("objchg.item.os_other", os_code=kod)), wynik
+        assert "FileExistsError" not in wynik["linia"] and "OSError" not in wynik["linia"], wynik
+        assert ("FileExistsError" if kod.endswith("183") else "OSError") in wynik["szczegol"], wynik
     if lang == "en":
-        assert not set(poczatek + koniec + (wynik["linia"] if plik is not None else "")) & _POLSKIE, wynik
+        assert not set(wynik["linia"]) & _POLSKIE, wynik
 
 
 @pytest.mark.zmienia_motyw
@@ -2433,3 +2443,145 @@ def test_przycisk_okna_otwiera_dziennik(qapp, monkeypatch, ustawienia):
     _main_z_petla(monkeypatch, _scenariusz)
     assert [os.path.normcase(os.path.normpath(p)) for p in otwarte] == [
         os.path.normcase(_plik_dziennika())], otwarte
+
+
+# ============================================================ AR-324: klasa błędu zapisu dziennika
+
+@pytest.mark.parametrize("exc, kod, os_code", [
+    (FileExistsError(17, "Nie można utworzyć pliku, który już istnieje", r"X:\D\Horreum", 183), "os_other",
+     "WinError 183"),
+    (OSError(22, "Nazwa pliku, nazwa katalogu lub składnia etykiety woluminu jest niepoprawna",
+             r"X:\D\zla<nazwa", 123), "os_other", "WinError 123"),
+    (FileExistsError(17, "File exists"), "os_other", "Errno 17"),            # CRT bez kodu Windows
+    (OSError("bez numeru"), "os_other", "OSError"),
+    (PermissionError(13, "Odmowa dostępu", r"X:\D\bledy.log", 5), "os_denied", "WinError 5"),
+])
+def test_powod_zapisu_dziennika_klasa_zloty_pl_i_en(exc, kod, os_code, jezyk):
+    """`item_reasons.powod_zapisu_dziennika`: kod Windows/errno spoza klas → klasa ogólna `os_other`
+    z numerem, surowy `Typ: opis` w `detail`; kod z klasy zostaje swoją klasą. Zdanie złote PL (proza
+    rdzenia = katalog) i EN bez polskich znaków. Falsyfikator: `blad_systemu` (surowy tekst, nie powód)."""
+    from horreum.gui.wb_worker import tekst_powodu
+    from horreum.item_reasons import PowodPozycji, powod_zapisu_dziennika
+    powod = powod_zapisu_dziennika(exc)
+    assert isinstance(powod, PowodPozycji) and powod.code == kod, powod
+    assert dict(powod.params) == {"os_code": os_code, "detail": f"{type(exc).__name__}: {exc}"}, powod.params
+    if kod == "os_other":
+        assert str(powod) == f"błąd systemu plików ({os_code})"
+    jezyk("pl")
+    assert tekst_powodu(powod) == str(powod)
+    jezyk("en")
+    en = tekst_powodu(powod)
+    assert os_code in en and not set(en) & _POLSKIE, en
+    assert wiersz_systemu(powod), "szczegół systemu pod kursorem"
+
+
+def test_powod_zapisu_dziennika_poza_systemem_to_regula_okna():
+    """Wyjątek nie-`OSError` przy zapisie dziennika (np. kodowanie śladu) - reguła okna: błąd programu
+    z miejscem, nie klasa systemu."""
+    from horreum.item_reasons import PowodPozycji, powod_zapisu_dziennika
+    powod = powod_zapisu_dziennika(UnicodeEncodeError("utf-8", "x", 0, 1, "surrogates not allowed"))
+    assert isinstance(powod, PowodPozycji) and powod.code == "prog_error", powod
+
+
+@pytest.mark.zmienia_motyw
+def test_porazka_zapisu_dziennika_nie_zapisuje_dziennika_ponownie(qapp, monkeypatch, ustawienia):
+    """Zapis dziennika pada (plik w miejscu katalogu, WinError 183): jedno zgłoszenie = jedna próba zapisu,
+    bez drugiego zgłoszenia, bez okna zastępczego i bez wołania poprzedniego haka z błędem dziennika -
+    porażka dziennika nie wraca do straży jako nowy błąd programu. Falsyfikator: klasyfikacja porażki,
+    która rzuca, albo zapis porażki do dziennika."""
+    import sys
+    from PySide6.QtCore import QTimer
+    from horreum.gui import dziennik_bledow
+    monkeypatch.setattr(sys, "stderr", None)
+    _plik_w_miejscu_katalogu()
+    proby = []
+    prawdziwy = dziennik_bledow.Dziennik.zapisz
+
+    def _licz(self, **kw):
+        proby.append(kw["naglowek"])
+        return prawdziwy(self, **kw)
+    monkeypatch.setattr(dziennik_bledow.Dziennik, "zapisz", _licz)
+    wynik = {}
+
+    def _scenariusz(straz):
+        try:
+            QTimer.singleShot(0, _blad_programu_w_pakiecie)
+            assert _pompuj_az(lambda: straz.okno is not None and straz.okno.isVisible()), "okno nie powstało"
+            _pompuj_az(lambda: False, s=0.3)
+            wynik.update(kolejne=straz._kolejne, zastepcze=len(straz.zastepcze), linia=straz.okno.lbl_dziennik.text())
+        finally:
+            _zamknij_okno(straz)
+    _main_z_petla(monkeypatch, _scenariusz)
+    assert len(proby) == 1, proby
+    assert (wynik["kolejne"], wynik["zastepcze"]) == (0, 0), wynik
+    assert wynik["linia"] == i18n.t("main.prog_error.log_failed",
+                                    msg=i18n.t("objchg.item.os_other", os_code="WinError 183")), wynik
+
+
+# ============================================================ AR-324: straż przed całym startem `main`
+
+class _AplikacjaPada:
+    """Atrapa `QApplication` w `app`: instancji nie ma, konstruktor rzuca błędem programu z ramki pakietu."""
+
+    @staticmethod
+    def instance():
+        return None
+
+    def __init__(self, *_a):
+        _blad_programu_w_pakiecie()
+
+
+@pytest.mark.zmienia_motyw
+@pytest.mark.parametrize("miejsce", ["QApplication", "QSettings", "apply_theme", "set_lang", "tlumacz"])
+def test_blad_kazdego_kroku_startu_trafia_do_dziennika(qapp, monkeypatch, ustawienia, miejsce):
+    """Błąd w KAŻDYM kroku `main` przed oknem - `QApplication`, `QSettings`, motyw, język, tłumacz Qt - trafia do
+    dziennika dokładnie jednym wpisem z miejscem w pakiecie, `main` kończy się kodem błędu, haki wracają. Bez
+    aplikacji (błąd samej `QApplication`) straż nie buduje okna ani pętli zdarzeń (`QDialog` bez aplikacji to
+    twarde przerwanie); po niej - okno błędu startu. Falsyfikator: straż instalowana za tymi krokami (wyjątek
+    wychodzi z `main` bez wpisu); stan „bez aplikacji” bez strażnika (okno albo `QEventLoop`)."""
+    import sys
+    import threading
+    from PySide6.QtCore import QTimer
+    from horreum.gui import app as app_mod
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda _self: 0)
+    if miejsce == "QApplication":
+        monkeypatch.setattr(app_mod, "QApplication", _AplikacjaPada)
+    elif miejsce == "QSettings":
+        monkeypatch.setattr(app_mod, "QSettings", _blad_programu_w_pakiecie)
+    elif miejsce == "apply_theme":
+        monkeypatch.setattr(app_mod, "apply_theme", _blad_programu_w_pakiecie)
+    elif miejsce == "set_lang":
+        monkeypatch.setattr(app_mod.i18n, "set_lang", _blad_programu_w_pakiecie)
+    else:
+        monkeypatch.setattr(app_mod, "zainstaluj_tlumacza_qt", _blad_programu_w_pakiecie)
+    petle = []
+    prawdziwa_petla = app_mod.QEventLoop
+    monkeypatch.setattr(app_mod, "QEventLoop", lambda *a: petle.append(1) or prawdziwa_petla(*a))
+    przed = (sys.excepthook, threading.excepthook)
+    widziane = []
+
+    def _zamknij_gdy_jest():
+        for w in _okna_bledu_widoczne():
+            widziane.append(type(w).__name__)
+            w.close()
+    bezpiecznik = QTimer()
+    bezpiecznik.timeout.connect(_zamknij_gdy_jest)
+    bezpiecznik.start(100)
+    try:
+        kod = app_mod.main([])
+    finally:
+        bezpiecznik.stop()
+        for w in _okna_bledu_widoczne():
+            w.close()
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, app_mod.MainWindow):
+                w.close()
+    assert kod != 0, kod
+    assert (sys.excepthook, threading.excepthook) == przed
+    tresc = _czytaj(_plik_dziennika())
+    assert len(_wpisy(tresc)) == 1 and re.search(_MIEJSCE_PAKIETU + "$", tresc, re.M), tresc
+    if miejsce == "QApplication":
+        assert (widziane, petle) == ([], []), (widziane, petle)
+    else:
+        assert widziane == ["QDialog"] and petle == [1], (widziane, petle)

@@ -11,8 +11,12 @@ CZYTANY: metadane zainstalowanej paczki (wheel, editable, frozen — specy wnosz
 `copy_metadata`), a w gołym klonie bez instalacji wprost z `pyproject.toml`. Nieznanego numeru
 NIE zgadujemy — oddajemy `"nieznana"`. Bramka klasy: `tests/test_version.py`.
 
-Rozwiązanie jest LENIWE (PEP 562): `importlib.metadata` kosztuje ~45 ms, czyli więcej niż cały
-import `horreum.cli` (~33 ms, zmierzone). Płaci je dopiero ten, kto pyta o wersję.
+Rozwiązanie jest LENIWE (PEP 562): płaci dopiero ten, kto pyta o wersję. Zmierzone 2026-10-24
+(`.venv-build`, Python 3.13, Windows 11, 10 świeżych procesów, `perf_counter`): pierwsze sięgnięcie
+w świeżym procesie 65-78 ms (mediana ~70 ms; z tego ~41 ms to sam import `importlib.metadata`), czyli
+więcej niż cały import `horreum.cli` (53-61 ms); gdy `importlib.metadata` jest już w procesie (GUI -
+ciągnie go import `horreum.gui.app`) - 20-24 ms. Każde kolejne sięgnięcie ~0,4 ms: wynik NIE jest
+pamiętany, każde czyta metadane od nowa.
 """
 
 def _read_version():

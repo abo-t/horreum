@@ -7973,6 +7973,9 @@ CATALOG = {
                                 "en": "not enough space on the disk ({os_code})"},
     "objchg.item.os_share_lost": {"pl": "udział sieciowy albo dysk nie odpowiada ({os_code})",
                                   "en": "the network share or disk is not responding ({os_code})"},
+    # AR-324: klasa ogólna wyłącznie na drodze zapisu dziennika błędów (`item_reasons.powod_zapisu_dziennika`).
+    "objchg.item.os_other": {"pl": "błąd systemu plików ({os_code})",
+                             "en": "file system error ({os_code})"},
     "objchg.item.fits_checksum": {"pl": "FITS z sumą kontrolną (CHECKSUM/DATASUM)",
                                   "en": "FITS with a checksum (CHECKSUM/DATASUM)"},
     "objchg.item.undo_region_unproven": {

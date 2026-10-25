@@ -5905,14 +5905,57 @@ class FramesView(QWidget):
         self.macro_bar.btn_stage.setEnabled(False)       # bez nowego stagingu w biegu
         self.rename_bar.btn_stage.setEnabled(False)
         self._wb.start(op, target_id, on_progress=self._on_wb_progress, on_done=after_slot,
-                       on_failed=self._on_wb_failed)
+                       on_failed=self._on_wb_failed, on_partial=self._on_wb_czesciowy)
 
     @Slot(int, int, str, str)
     def _on_wb_progress(self, done, total, path, status):
         self.drawer.update_progress(done, total, path)
 
+    # ---- „Cofnij” po awarii zapisu za podmianą plików (AR-322) ----
+    # Operacja „Zatwierdź”, która podmieniła pliki i potem rzuciła, zostawiała commit bez „Cofnij” (droga tylko
+    # przez CLI). Wykonawca podaje, co TA operacja zdążyła (`wb_worker.CzescZapisu` - commit z różnicy względem
+    # stanu sprzed operacji i pliki `applied` z postępu rdzenia), sygnałem PRZED porażką; ogon porażki stawia
+    # „Cofnij” tak jak po udanym zapisie, gdy nic w przebiegu nie czeka. Czekające wpisy (awaria w środku) - bez
+    # „Cofnij”, jak zapis przerwany anulowaniem: szuflada mówi „N do dokończenia”, „Zatwierdź” dokończy.
+
+    @Slot(str, object)
+    def _on_wb_czesciowy(self, op, czesc):
+        self._czesc_po_awarii = (op, czesc)
+
+    def _cofnij_po_awarii(self, op):
+        """Stawia „Cofnij” po awarii za podmianą plików; zwraca `op`, gdy postawiło, inaczej None."""
+        czesc, self._czesc_po_awarii = getattr(self, "_czesc_po_awarii", None), None
+        if czesc is None or czesc[0] != op:
+            return None
+        czesc = czesc[1]
+        if op == "commit" and czesc.commit_id is not None and self._pending_count() == 0:
+            self._last_commit_id = czesc.commit_id
+            self._install_undo(czesc.commit_id, "", applied=len(czesc.applied))
+            self._run_id = None                          # przebieg domknięty commitem - jak `_after_commit`
+            return op
+        if op == "commit_rename" and self._rename_pending_count() == 0:
+            run_id = self._wb_target_id                  # cel „Cofnij” przechwycony teraz - jak `_after_commit_rename`
+            self._undo_rename_run_id = run_id
+            self._rename_run_committed = True
+            self._install_rename_undo(run_id, "", applied=len(czesc.applied))
+            return op
+        return None
+
     @Slot(str, str, str)
     def _on_wb_failed(self, op, msg, podpowiedz):
+        # PRZED zamknięciem pustych (nazwy: zapisany przebieg zostaje)
+        postawione = self._cofnij_po_awarii(op)
+        # „Cofnij” po awarii, nic nie czeka - podgląd jak w `_after_commit` / `_after_commit_rename` (AR-207,
+        # AR-250): kolumna chowa się od razu (mówiłaby „do zapisania” / „nazwa →” o tym, co już na dysku),
+        # a przeładowanie zbioru niżej (`_przeladuj_po_gescie`) zdejmuje podgląd w tym samym resecie
+        # (`_zastosuj_zbior`).
+        if postawione == "commit":
+            self._schowaj_podglad_po_zapisie()
+            self._odloz_podglad_do_przylozenia({})
+        elif postawione == "commit_rename":
+            self._preview_owner = None
+            self._schowaj_podglad_po_zapisie()
+            self._odloz_podglad_do_przylozenia({}, i18n.t("grid.preview.name"))
         self.drawer.end_progress()
         self._zamknij_puste_przebiegi()                  # operacja mogła rozstrzygnąć wszystkie wpisy (AR-316)
         if self._undo_mode is not None:

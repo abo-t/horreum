@@ -69,6 +69,15 @@ def _zapis_kart(con, run_id, now, progress, should_cancel):
                             inplace=True)
 
 
+@dataclasses.dataclass(frozen=True)
+class CzescZapisu:
+    """Co zapis kart albo nazw zdążył zrobić przed wyjątkiem (`WritebackWorker.czesciowy`, AR-322): `commit_id`
+    commitu TEJ operacji (karty; None dla nazw - ich cofnięcie idzie po przebiegu) i ścieżki plików, które
+    rdzeń zgłosił jako `applied`. Bez podmienionego pliku sygnału nie ma - „Cofnij” nie miałoby czego cofać."""
+    commit_id: int | None
+    applied: tuple
+
+
 class WritebackWorker(QObject):
     """Wykonawca commitu/undo writebacku w wątku tła — bliźniak `PipelineWorker` (pipeline.py §4).
     Otwiera WŁASNE połączenie w SWOIM wątku (`db.connect`; sqlite `check_same_thread` — połączenia
@@ -126,6 +135,12 @@ class WritebackWorker(QObject):
             if isinstance(t, tuple) else lead_copy.lead_copy_gesture(con, t, now)),
     }
 
+    # Wynik CZĘŚCIOWY zapisu, który padł wyjątkiem po podmianie plików (AR-322): op + `CzescZapisu` - emitowany
+    # PRZED `failed` (ten sam wątek → ta sama kolejność u odbiorcy), wyłącznie dla `commit`/`commit_rename`,
+    # gdy ta operacja podmieniła choć jeden plik. Osobny sygnał, nie czwarty parametr `failed`: `start` pinuje
+    # arność odbiorcy porażki (3), a PySide przycina argumenty po cichu - ośmiu odbiorców zgubiłoby go bez błędu.
+    czesciowy = Signal(str, object)
+
     def __init__(self, db_path, op, target_id, *, now_fn):
         super().__init__()
         self._db_path = db_path
@@ -133,6 +148,7 @@ class WritebackWorker(QObject):
         self._target_id = target_id
         self._now = now_fn
         self._cancel = threading.Event()
+        self._podmienione = []                  # ścieżki z postępu rdzenia ze statusem `applied` (TA operacja)
 
     def request_cancel(self):
         """Kooperatywne anulowanie — stawiane w GŁÓWNYM wątku, czytane w workerze (`Event` bezpieczny
@@ -143,9 +159,10 @@ class WritebackWorker(QObject):
     def run(self):
         con = None
         result = None
-        error = podpowiedz = None
+        error = podpowiedz = czesc = przed = None
         try:
             con = db.connect(self._db_path)     # WŁASNE połączenie w TYM wątku (baza już zmigrowana)
+            przed = self._commity_przed(con)
             result = self._OPS[self._op](con, self._target_id, self._now(),
                                          self._emit_progress, self._cancel.is_set)
         except Exception as exc:                # błąd → sygnał, NIE crash
@@ -159,10 +176,14 @@ class WritebackWorker(QObject):
             # szedł surowym `ValueError: …` w zdaniu, po polsku także w UI EN (wizytacja natywna).
             powod = powod_okna(exc)
             error, podpowiedz = tekst_powodu(powod), wiersz_systemu(powod)
+            if con is not None and self._podmienione:
+                czesc = self._czesc_zapisu(con, przed)
         finally:
             if con is not None:
                 con.close()                     # zamknij PRZED done — main czyta tylko przez self.con
         if error is not None:
+            if czesc is not None:
+                self.czesciowy.emit(self._op, czesc)
             self.failed.emit(self._op, error, podpowiedz)
         else:
             self.done.emit(self._op, result)
@@ -170,7 +191,32 @@ class WritebackWorker(QObject):
 
     def _emit_progress(self, done, total, path, status):
         # wołane SYNCHRONICZNIE w wątku workera przez rdzeń; ~7 plików/s (I/O NAS) → emisja per plik tania
+        if status == "applied":                 # rdzeń raportuje status PO pliku - plik w biegu się nie liczy
+            self._podmienione.append(path)
         self.progress.emit(done, total, path, status)
+
+    def _commity_przed(self, con):
+        """Commity kart przebiegu z podmienionym plikiem PRZED operacją - tylko dla `commit` (delta `_czesc_zapisu`)."""
+        if self._op != "commit":
+            return None
+        return set(writeback.commity_przebiegu(con, self._target_id))
+
+    def _czesc_zapisu(self, con, przed):
+        """`CzescZapisu` operacji, która padła po podmianie choć jednego pliku, albo None. Karty: JEDYNY commit
+        nowy względem stanu sprzed operacji (jeden `commit` rdzenia = jeden wiersz `commits`); inna liczba
+        nowych - stan, którego rdzeń nie robi, więc bez „Cofnij” (okno nie zgaduje). Nazwy: cofnięcie idzie
+        po przebiegu, wystarczą ścieżki. Odczyt, który sam padnie (baza pod wyjątkiem), nie zmienia porażki."""
+        if self._op == "commit_rename":
+            return CzescZapisu(None, tuple(self._podmienione))
+        if self._op != "commit" or przed is None:
+            return None
+        try:
+            nowe = set(writeback.commity_przebiegu(con, self._target_id)) - przed
+        except Exception:
+            return None
+        if len(nowe) != 1:
+            return None
+        return CzescZapisu(nowe.pop(), tuple(self._podmienione))
 
 
 class WritebackRunner(QObject):
@@ -203,7 +249,7 @@ class WritebackRunner(QObject):
         wyklucza gospodarz (uchwyt jest per-powierzchnia, D-PD-3)."""
         return self._thread is not None
 
-    def start(self, op, target_id, *, on_progress, on_done, on_failed) -> bool:
+    def start(self, op, target_id, *, on_progress, on_done, on_failed, on_partial=None) -> bool:
         """Odpal `op` (klucz `WritebackWorker._OPS`) na `target_id`. Zwraca False, gdy
         operacja już trwa (wołający nie ma wtedy prawa liczyć na callbacki). Sloty dostaje wołający
         - TEN moduł nie wie, co jest paskiem, a co przyciskiem. `on_failed(op, zdanie, podpowiedź)`:
@@ -211,7 +257,9 @@ class WritebackRunner(QObject):
         szczegół systemu bez błędu (AR-185). Zła arność odbiorcy = `TypeError` od razu (EXPECT),
         nie cisza dopiero przy pierwszej awarii; odbiorca bez sygnatury do sprawdzenia (wbudowany,
         np. `max`) - też `TypeError`: arności nie da się dowieść. Sprawdzenie stoi ZA zajętością -
-        operacja w biegu odpowiada `False` każdemu wołającemu (wołający nie dostaje wtedy callbacków)."""
+        operacja w biegu odpowiada `False` każdemu wołającemu (wołający nie dostaje wtedy callbacków).
+        `on_partial(op, CzescZapisu)` (opcjonalny, AR-322): wynik częściowy zapisu, który padł po podmianie
+        plików - przychodzi PRZED `on_failed` tej samej operacji; METODA obiektu Qt (kolejka, wątek okna)."""
         if self._thread is not None:
             return False
         try:
@@ -223,6 +271,8 @@ class WritebackRunner(QObject):
         self._worker.progress.connect(on_progress)
         self._worker.done.connect(on_done)
         self._worker.failed.connect(on_failed)
+        if on_partial is not None:
+            self._worker.czesciowy.connect(on_partial)
         self.busy_changed.emit(True)
         if self.async_ok and self._db_path:
             self._thread = QThread(self)

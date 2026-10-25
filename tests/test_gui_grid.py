@@ -7375,3 +7375,362 @@ def test_okna_gui_bez_przyciskow_qt_spoza_katalogu():
              "def e(s):\n    o = QInputDialog(s)\n    o.setOkButtonText('x')\n    o.setCancelButtonText('y')\n"
              "def g(s):\n    m = QMessageBox(s)\n    m.addButton(i18n.t('k'), QMessageBox.AcceptRole)\n")
     assert _przyciski_spoza_katalogu(ast.parse(dobre)) == []
+
+
+# ============================================================ AR-322: „Cofnij” po awarii zapisu za podmianą plików
+# (`FramesView._on_wb_failed` + `_cofnij_po_awarii`, wynik częściowy wykonawcy `WritebackWorker.czesciowy`)
+
+def _szuflada_awarii(tmp_path, n=3):
+    from test_gui_grid_szuflada import _baza_szuflady, _widok_szuflady
+    path, con, pliki = _baza_szuflady(tmp_path, n)
+    return path, con, pliki, _widok_szuflady(con, inline=True)
+
+
+def _bajty_plikow(pliki):
+    return {str(p): p.read_bytes() for p in pliki}
+
+
+def _commity(con, run_id):
+    return [r[0] for r in con.execute("SELECT id FROM commits WHERE run_id = ? ORDER BY id", (run_id,))]
+
+
+def test_awaria_po_podmianie_ostatniego_pliku_daje_cofnij_tej_operacji(qapp, tmp_path, monkeypatch):
+    """„Zatwierdź”, którego operacja zapisuje wszystkie trzy pliki, a potem rzuca (prawdziwy zapis, atrapa wyłącznie
+    wyjątku): szuflada oferuje „Cofnij” commitu TEJ operacji - etykieta „Zatwierdzono: 3”, zdanie błędu operacji
+    z numerem commitu - a klik „Cofnij” przywraca bajty plików. Falsyfikator: ogon awarii bez „Cofnij”."""
+    from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
+    from test_gui_grid_szuflada import _klik_w, _makro_przyciskiem, _zamknij_widok
+
+    def _zapisz_i_pada(c, t, now, pr, sc):
+        _zapis_kart(c, t, now, pr, sc)
+        raise ValueError("złamany inwariant po zapisie")
+    path, con, pliki, v = _szuflada_awarii(tmp_path)
+    try:
+        przed = _bajty_plikow(pliki)
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        run = v._run_id
+        monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
+        _klik_w(v.drawer.btn_commit)
+        [commit] = _commity(con, run)
+        assert v._undo_mode == "macro" and v._undo_commit_id == commit and v._undo_btn.isVisibleTo(v)
+        assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=3)
+        assert v.drawer.result.text().startswith(i18n.t("grid.wb.op.commit", msg="")[:20])
+        assert v.drawer.result.text().endswith(i18n.t("grid.wb.commit_id", id=commit)), v.drawer.result.text()
+        assert _bajty_plikow(pliki) != przed
+        monkeypatch.undo()
+        _klik_w(v._undo_btn)
+        assert _bajty_plikow(pliki) == przed
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_w_przebiegu_podjetym_daje_cofnij_nowego_commitu_nie_starego(qapp, tmp_path, monkeypatch):
+    """Przebieg z wcześniejszym zapisem przerwanym (commit pierwszego pliku, dwa wpisy czekają), potem „Zatwierdź”
+    reszty, która zapisuje i rzuca: „Cofnij” celuje w commit TEJ operacji (różnica względem stanu sprzed niej),
+    nie w najwyższy ani pierwszy commit przebiegu. Falsyfikator: rekonstrukcja „z najwyższego commitu” albo
+    z pierwszego - cofnięcie innej operacji."""
+    from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
+    from test_gui_grid_szuflada import _klik_w, _makro_przyciskiem, _przerwany_zapis, _zamknij_widok
+    path, con, pliki, v = _szuflada_awarii(tmp_path)
+    v._writeback_async = True                            # brama przerwania potrzebuje wątku zapisu
+    try:
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        run = v._run_id
+        _przerwany_zapis(v, monkeypatch)
+        stary = _commity(con, run)
+        assert v._pending_count() == 2 and len(stary) == 1, (v._pending_count(), stary)
+
+        def _zapisz_i_pada(c, t, now, pr, sc):
+            _zapis_kart(c, t, now, pr, sc)
+            raise ValueError("złamany inwariant po zapisie")
+        monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
+        _klik_w(v.drawer.btn_commit)
+        from test_gui_pasek_szczegol import _czekaj
+        _czekaj(lambda: not v._wb.is_busy, "zapis reszty")
+        QApplication.processEvents()
+        nowe = [c for c in _commity(con, run) if c not in stary]
+        assert len(nowe) == 1 and v._undo_mode == "macro" and v._undo_commit_id == nowe[0], (nowe, v._undo_commit_id)
+        assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=2)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_w_srodku_zapisu_bez_cofnij_reszta_czeka(qapp, tmp_path, monkeypatch):
+    """Operacja zapisuje pierwszy z trzech plików i rzuca: dwa wpisy czekają - bez „Cofnij” (jak zapis przerwany
+    anulowaniem), Zatwierdź/Odrzuć dalej są, przebieg zostaje otwarty. Falsyfikator: „Cofnij” przy czekających."""
+    from horreum import writeback as wb
+    from test_gui_grid_szuflada import _klik_w, _makro_przyciskiem, _zamknij_widok
+    path, con, pliki, v = _szuflada_awarii(tmp_path)
+    try:
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        run = v._run_id
+        prawdziwe = wb._zapisz_lokacje
+        licz = []
+
+        def _po_pierwszym(*a, **k):
+            if licz:
+                raise ValueError("złamany inwariant w środku zapisu")
+            licz.append(1)
+            return prawdziwe(*a, **k)
+        monkeypatch.setattr(wb, "_zapisz_lokacje", _po_pierwszym)
+        _klik_w(v.drawer.btn_commit)
+        assert v._undo_mode is None and v._run_id == run and v._pending_count() == 2
+        assert v.drawer.btn_commit.isVisibleTo(v)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_po_backupie_przed_podmiana_bez_cofnij(qapp, tmp_path, monkeypatch):
+    """Zapis w miejscu: dziennik operacji (commit, backup nagłówka, wiązanie wpisu) wchodzi do bazy, a wyjątek
+    pada PRZED pierwszym bajtem pliku (prawdziwe `repo.begin_inplace_commit`, potem wyjątek): commit jest
+    w bazie, plik nietknięty - „Cofnij” nie staje (nic by nie cofnęło). Falsyfikator: „Cofnij” z samego
+    wiersza `commits` bez pliku zgłoszonego jako zapisany."""
+    from horreum import repo
+    from test_gui_grid_szuflada import _klik_w, _makro_przyciskiem, _zamknij_widok
+    path, con, pliki, v = _szuflada_awarii(tmp_path, n=1)
+    try:
+        przed = _bajty_plikow(pliki)
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        run = v._run_id
+        prawdziwe = repo.begin_inplace_commit
+
+        def _po_backupie(*a, **k):
+            prawdziwe(*a, **k)
+            raise ValueError("złamany inwariant po backupie")
+        monkeypatch.setattr(repo, "begin_inplace_commit", _po_backupie)
+        _klik_w(v.drawer.btn_commit)
+        assert _commity(con, run), "commit nie powstał - test nic by nie mierzył"
+        assert v._undo_mode is None and _bajty_plikow(pliki) == przed
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_wykonawca_podaje_wynik_czesciowy_tylko_z_plikow_zapisanych_ta_operacja(qapp, tmp_path):
+    """`WritebackWorker` na prawdziwym zapisie kart: wyjątek po zapisie wszystkich plików → `czesciowy` z commitem
+    tej operacji i ścieżkami `applied` PRZED `failed`; ten sam zapis z postępem niezgłaszającym plików (commit
+    w bazie, ale ta operacja nie zgłosiła zapisanego pliku) → bez `czesciowy`. Falsyfikator: delta z samego
+    wiersza `commits` (bez warunku plików zgłoszonych jako `applied`)."""
+    from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
+    from test_gui_grid_szuflada import _baza_szuflady
+    from horreum import macro, repo
+    from horreum.gui import queries
+    wyniki = {}
+    for wariant in ("zglasza", "milczy"):
+        path, con, pliki = _baza_szuflady(tmp_path, 2, nazwa=wariant)
+        fids = [r[0] for r in con.execute("SELECT id FROM frame ORDER BY id")]
+        md = macro.MacroDef.from_dict({"assign": {"keyword": "TELESCOP", "op": "set", "expr": "'EQ6'"}})
+        mr = macro.run_macro(md, fids, targets_fn=lambda ids: queries.writeback_frame_targets(con, ids),
+                             cards_fn=lambda fid: queries.frame_cards(con, fid), run_id="R")
+        repo.stage_pending_many(con, run_id="R", previews=mr.touched)
+        con.close()
+
+        def _zapisz_i_pada(c, t, now, pr, sc, wariant=wariant):
+            _zapis_kart(c, t, now, pr if wariant == "zglasza" else (lambda *a: None), sc)
+            raise ValueError("po zapisie")
+        sygnaly = []
+        w = WritebackWorker(path, "commit", "R", now_fn=lambda: "2026-07-03T14:00:00")
+        WritebackWorker._OPS["commit"], dawny = _zapisz_i_pada, WritebackWorker._OPS["commit"]
+        try:
+            w.czesciowy.connect(lambda op, cz: sygnaly.append(("czesciowy", op, cz)))
+            w.failed.connect(lambda op, msg, tip: sygnaly.append(("failed", op)))
+            w.run()
+        finally:
+            WritebackWorker._OPS["commit"] = dawny
+        c2 = db.connect(path)
+        commity = _commity(c2, "R")
+        c2.close()
+        wyniki[wariant] = (sygnaly, commity, {str(p) for p in pliki})
+    sygnaly, commity, sciezki = wyniki["zglasza"]
+    assert [s[0] for s in sygnaly] == ["czesciowy", "failed"], sygnaly
+    assert sygnaly[0][2].commit_id == commity[0] and set(sygnaly[0][2].applied) == sciezki, sygnaly
+    sygnaly, commity, _s = wyniki["milczy"]
+    assert commity and [s[0] for s in sygnaly] == ["failed"], (sygnaly, commity)
+
+
+def test_awaria_po_zmianie_wszystkich_nazw_daje_cofnij_nazw(qapp, tmp_path, monkeypatch):
+    """Zmiana trzech nazw zapisana, potem wyjątek operacji: „Cofnij” nazw przebiegu (etykieta „Przemianowano: 3”),
+    klik przywraca stare nazwy. Falsyfikator: ogon awarii bez „Cofnij” nazw (droga tylko przez CLI)."""
+    from horreum.gui.wb_worker import WritebackWorker
+    from test_gui_grid_szuflada import _POL, _klik_w, _zamknij_widok
+    path, con, pliki, v = _szuflada_awarii(tmp_path)
+    try:
+        v._on_rename_stage(_POL)
+        run = v._rename_run_id
+        prawdziwe = WritebackWorker._OPS["commit_rename"]
+
+        def _zmien_i_pada(c, t, now, pr, sc):
+            prawdziwe(c, t, now, pr, sc)
+            raise ValueError("złamany inwariant po zmianie nazw")
+        monkeypatch.setitem(WritebackWorker._OPS, "commit_rename", _zmien_i_pada)
+        _klik_w(v.drawer.btn_commit)
+        assert not any(p.exists() for p in pliki), "nazwy nie zmienione - test nic by nie mierzył"
+        assert v._undo_mode == "rename" and v._undo_rename_run_id == run and v._undo_btn.isVisibleTo(v)
+        assert v.drawer.label.text() == i18n.t("grid.rename.renamed_label", n=3)
+        monkeypatch.undo()
+        _klik_w(v._undo_btn)
+        assert all(p.exists() for p in pliki)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_po_zapisaniu_wszystkich_kart_chowa_kolumne_podgladu(qapp, tmp_path, monkeypatch):
+    """„Zatwierdź”, którego operacja zapisuje wszystkie trzy pliki i rzuca: obok „Cofnij” kolumna podglądu chowa
+    się od razu - w czasie składu zbioru po awarii (skład w wątku tła trzymany bramą) mówiłaby „do zapisania”
+    o wartościach już na dysku - a przyłożenie zbioru zdejmuje podgląd, jak po udanym zapisie (`_after_commit`).
+    Falsyfikator: ogon awarii bez schowania kolumny i bez odłożenia pustego podglądu do przyłożenia."""
+    import threading
+    from horreum.gui import grid_workers
+    from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
+    from test_gui_grid_szuflada import _baza_szuflady, _makro_przyciskiem, _klik_w, _zamknij_widok
+    from test_gui_pasek_szczegol import _czekaj
+    from test_gui_pola_w_tle import _czekaj_na_pola
+    brama, uzbrojona = threading.Event(), threading.Event()
+    prawdziwy = grid_workers._sklad_zbioru
+
+    def _sklad(c, stan, przerwij=lambda: None):
+        if uzbrojona.is_set():
+            brama.wait(30)
+        return prawdziwy(c, stan, przerwij)
+    monkeypatch.setattr(grid_workers, "_sklad_zbioru", _sklad)
+
+    def _zapisz_i_pada(c, t, now, pr, sc):
+        _zapis_kart(c, t, now, pr, sc)
+        raise ValueError("złamany inwariant po zapisie")
+    path, con, pliki = _baza_szuflady(tmp_path, 3)
+    v = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
+    v._writeback_async = False
+    v.resize(1400, 800)
+    v.show()
+    try:
+        _czekaj_na_pola(v)
+        _makro_przyciskiem(v, "TELESCOP", "EQ6")
+        kolumna = v.model._preview_col()
+        assert kolumna is not None and not v.table.isColumnHidden(kolumna)
+        monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
+        uzbrojona.set()
+        _klik_w(v.drawer.btn_commit)
+        assert v._undo_mode == "macro" and v._pending_count() == 0
+        assert v._zbior_w_drodze(), "skład po awarii w drodze - test mierzy okno przed przyłożeniem"
+        assert v.model._preview_active() and v.table.isColumnHidden(v.model._preview_col())
+        brama.set()
+        _czekaj(lambda: not v._zbior_w_drodze(), "przyłożenie zbioru po awarii")
+        assert not v.model._preview_active() and v._undo_mode == "macro"
+    finally:
+        brama.set()
+        _czekaj(lambda: not v._zbior_w_drodze(), "skład zbioru po teście")
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_w_srodku_zmiany_nazw_bez_cofnij_reszta_czeka(qapp, tmp_path, monkeypatch):
+    """Operacja zmiany nazw zapisuje pierwszą z trzech nazw i rzuca: dwa wpisy czekają - bez „Cofnij” nazw (jak
+    zmiana przerwana anulowaniem), przebieg zostaje otwarty, Zatwierdź i Odrzuć widoczne, a następne „Zatwierdź”
+    dokańcza resztę. Falsyfikator: „Cofnij” nazw po awarii mimo czekających wpisów."""
+    from horreum.gui.wb_worker import WritebackWorker
+    from test_gui_grid_szuflada import _POL, _klik_w, _zamknij_widok
+    path, con, pliki, v = _szuflada_awarii(tmp_path)
+    try:
+        v._on_rename_stage(_POL)
+        run = v._rename_run_id
+        prawdziwe = WritebackWorker._OPS["commit_rename"]
+
+        def _pierwsza_i_pada(c, t, now, pr, sc):
+            def _po_pliku(done, total, p, status):
+                pr(done, total, p, status)
+                if status == "applied":
+                    raise ValueError("złamany inwariant w środku zmiany nazw")
+            return prawdziwe(c, t, now, _po_pliku, sc)
+        monkeypatch.setitem(WritebackWorker._OPS, "commit_rename", _pierwsza_i_pada)
+        _klik_w(v.drawer.btn_commit)
+        assert sum(not p.exists() for p in pliki) == 1, "nie jedna nazwa zmieniona - test nic by nie mierzył"
+        assert v._undo_mode is None and v._rename_run_id == run and v._rename_pending_count() == 2
+        assert v.drawer.btn_commit.isVisibleTo(v) and v.drawer.btn_reject.isVisibleTo(v)
+        monkeypatch.undo()
+        _klik_w(v.drawer.btn_commit)
+        assert not any(p.exists() for p in pliki) and v._undo_mode == "rename"
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_awaria_po_zmianie_wszystkich_nazw_chowa_kolumne_podgladu_nazw(qapp, tmp_path, monkeypatch):
+    """Zmiana trzech nazw zapisana, potem wyjątek operacji: obok „Cofnij” nazw kolumna podglądu nazw chowa się od
+    razu - w czasie składu zbioru po awarii (skład w wątku tła trzymany bramą) mówiłaby „nazwa →” o nazwach już
+    zmienionych - a przyłożenie zbioru zdejmuje podgląd i jego właściciela, jak po udanej zmianie nazw
+    (`_after_commit_rename`). Falsyfikator: ogon awarii nazw bez schowania kolumny i bez odłożenia pustego podglądu."""
+    import threading
+    from horreum.gui import grid_workers
+    from horreum.gui.wb_worker import WritebackWorker
+    from test_gui_grid_szuflada import _POL, _baza_szuflady, _klik_w, _zamknij_widok
+    from test_gui_pasek_szczegol import _czekaj
+    from test_gui_pola_w_tle import _czekaj_na_pola
+    brama, uzbrojona = threading.Event(), threading.Event()
+    prawdziwy = grid_workers._sklad_zbioru
+
+    def _sklad(c, stan, przerwij=lambda: None):
+        if uzbrojona.is_set():
+            brama.wait(30)
+        return prawdziwy(c, stan, przerwij)
+    monkeypatch.setattr(grid_workers, "_sklad_zbioru", _sklad)
+    prawdziwe = WritebackWorker._OPS["commit_rename"]
+
+    def _zmien_i_pada(c, t, now, pr, sc):
+        prawdziwe(c, t, now, pr, sc)
+        raise ValueError("złamany inwariant po zmianie nazw")
+    path, con, pliki = _baza_szuflady(tmp_path, 3)
+    v = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
+    v._writeback_async = False
+    v.resize(1400, 800)
+    v.show()
+    try:
+        _czekaj_na_pola(v)
+        v._on_rename_stage(_POL)
+        kolumna = v.model._preview_col()
+        assert kolumna is not None and not v.table.isColumnHidden(kolumna) and v._preview_owner == "rename"
+        monkeypatch.setitem(WritebackWorker._OPS, "commit_rename", _zmien_i_pada)
+        uzbrojona.set()
+        _klik_w(v.drawer.btn_commit)
+        assert not any(p.exists() for p in pliki), "nazwy nie zmienione - test nic by nie mierzył"
+        assert v._undo_mode == "rename" and v._rename_pending_count() == 0
+        assert v._zbior_w_drodze(), "skład po awarii w drodze - test mierzy okno przed przyłożeniem"
+        assert v.model._preview_active() and v.table.isColumnHidden(v.model._preview_col())
+        brama.set()
+        _czekaj(lambda: not v._zbior_w_drodze(), "przyłożenie zbioru po awarii")
+        assert not v.model._preview_active() and v._preview_owner is None and v._undo_mode == "rename"
+    finally:
+        brama.set()
+        _czekaj(lambda: not v._zbior_w_drodze(), "skład zbioru po teście")
+        _zamknij_widok(v)
+        con.close()
+
+
+@pytest.mark.parametrize("nowych", [1, 2])
+def test_wykonawca_bez_wyniku_czesciowego_gdy_operacja_nie_dala_jednego_commitu(qapp, tmp_path, monkeypatch,
+                                                                               nowych):
+    """`WritebackWorker` (karty): operacja zgłasza zapisany plik i rzuca, a commitów przebiegu z podmienionym
+    plikiem (`writeback.commity_przebiegu`, atrapa) jest po niej o `nowych` więcej niż przed. Jeden nowy -
+    `czesciowy` z tym commitem przed `failed`; dwa nowe (np. commit innego procesu na tym samym przebiegu) - bez
+    `czesciowy`, sam `failed`: okno nie zgaduje, który commit cofać. Falsyfikator: wykonawca bez warunku
+    „dokładnie jeden nowy commit”."""
+    from horreum.gui.wb_worker import WritebackWorker
+    path = str(tmp_path / "w.db")
+    db.open_db(path).close()
+    odczyty = iter([(7,), (7, *range(100, 100 + nowych))])
+    monkeypatch.setattr(writeback, "commity_przebiegu", lambda con, run_id: next(odczyty))
+
+    def _zapisz_i_pada(c, t, now, pr, sc):
+        pr(1, 1, "x.fits", "applied")
+        raise ValueError("po zapisie")
+    monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
+    sygnaly = []
+    w = WritebackWorker(path, "commit", "R", now_fn=lambda: NOW)
+    w.czesciowy.connect(lambda op, cz: sygnaly.append(("czesciowy", cz.commit_id, cz.applied)))
+    w.failed.connect(lambda op, msg, tip: sygnaly.append(("failed", op)))
+    w.run()
+    oczekiwane = [("czesciowy", 100, ("x.fits",))] if nowych == 1 else []
+    assert sygnaly == oczekiwane + [("failed", "commit")], sygnaly

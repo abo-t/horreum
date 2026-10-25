@@ -3544,10 +3544,32 @@ CATALOG = {
         "en": {"one": "Macro: {n} change is waiting in the drawer - commit or discard it before a new macro",
                "other": "Macro: {n} changes are waiting in the drawer - commit or discard them before a new macro"}},
     # AR-280: szufladę bazy prowadzi jedno okno naraz (blokada pliku obok bazy) - drugie nie podejmuje
-    # ani nie zakłada przebiegu.
+    # ani nie zakłada przebiegu. Blokadę może trzymać też proces bez okna (CLI) - zdanie mówi PID z pliku
+    # blokady, a po jego zakończeniu szuflada podejmuje przebieg sama (AR-323); bez PID - wariant `_nopid`.
     "grid.drawer.foreign_owner": {
-        "pl": "Szufladę tej bazy prowadzi inne okno programu - zmiany zatwierdź albo odrzuć tam",
-        "en": "Another program window runs the drawer of this database - commit or discard the changes there"},
+        "pl": "Szufladę tej bazy prowadzi inny proces Horreum (okno albo wiersz poleceń, PID {pid}) - zatwierdź "
+              "albo odrzuć zmiany tam; po jego zakończeniu szuflada podejmie, co zostało",
+        "en": "Another Horreum process (a window or the command line, PID {pid}) runs the drawer of this "
+              "database - commit or discard the changes there; once it ends, the drawer picks up what is left"},
+    "grid.drawer.foreign_owner_nopid": {
+        "pl": "Szufladę tej bazy prowadzi inny proces Horreum (okno albo wiersz poleceń) - zatwierdź albo odrzuć "
+              "zmiany tam; po jego zakończeniu szuflada podejmie, co zostało",
+        "en": "Another Horreum process (a window or the command line) runs the drawer of this database - commit "
+              "or discard the changes there; once it ends, the drawer picks up what is left"},
+    # AR-323: podjęcie przebiegu BEZ gestu tego okna (odświeżenie pustej szuflady) - kolumna podglądu zmienia
+    # się sama, więc szuflada (i pasek przy widocznych Zbiorach) mówi, co się stało.
+    "grid.drawer.picked_up": {
+        "pl": {"one": "Szuflada podjęła {n} zmianę zwolnioną poza tym oknem",
+               "few": "Szuflada podjęła {n} zmiany zwolnione poza tym oknem",
+               "many": "Szuflada podjęła {n} zmian zwolnionych poza tym oknem"},
+        "en": {"one": "The drawer picked up {n} change released outside this window",
+               "other": "The drawer picked up {n} changes released outside this window"}},
+    "grid.drawer.picked_up_names": {
+        "pl": {"one": "Szuflada podjęła {n} zmianę nazwy zwolnioną poza tym oknem",
+               "few": "Szuflada podjęła {n} zmiany nazw zwolnione poza tym oknem",
+               "many": "Szuflada podjęła {n} zmian nazw zwolnionych poza tym oknem"},
+        "en": {"one": "The drawer picked up {n} name change released outside this window",
+               "other": "The drawer picked up {n} name changes released outside this window"}},
     "grid.drawer.lock_error": {
         "pl": "Nie da się założyć blokady szuflady obok pliku bazy ({detail}) - szuflada nie przyjmuje zmian",
         "en": "Cannot create the drawer lock next to the database file ({detail}) - the drawer takes no changes"},
@@ -3599,6 +3621,11 @@ CATALOG = {
         "en": "a name write in another window finishes by itself; an interrupted one is settled by "
               "“{receive}” on the archive ({nav}) or the next name write - then the drawer picks them up "
               "by itself"},
+    # AR-323: zamiar nazw, którego rekoncyliacja odmówiła - powód z wiersza zamiaru
+    # (`queries.powody_zamiarow_nazw`), zamiast obietnicy „Przyjmij nowe”, która go nie rozstrzygnie.
+    "grid.drawer.names_held_refused": {
+        "pl": "przerwanego zapisu nazw rekoncyliacja nie rozstrzygnęła: {reason} - rozstrzyga człowiek",
+        "en": "reconciliation did not settle the interrupted name write: {reason} - a person decides"},
     "grid.drawer.names_held_more": {
         "pl": {"one": "czeka też {n} zmiana nazwy zatrzymana zapisem nazw",
                "few": "czekają też {n} zmiany nazw zatrzymane zapisem nazw",

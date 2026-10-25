@@ -134,6 +134,9 @@ _DROGI = [
     ("compose_name nieznany token",
      lambda mp: _odmowa_wzoru(lambda: naming.compose_name(_fakty(), DT, template=["planeta"])),
      "rename_tpl_unknown_token", "nieznany token szablonu: 'planeta'", "unknown pattern token: 'planeta'"),
+    ("validate_template nieznany token",
+     lambda mp: _odmowa_wzoru(lambda: naming.validate_template(["datetime", "planeta"])),
+     "rename_tpl_unknown_token", "nieznany token szablonu: 'planeta'", "unknown pattern token: 'planeta'"),
 ]
 _IDS = [d[0] for d in _DROGI]
 

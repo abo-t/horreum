@@ -20,7 +20,7 @@ ich w jeden run członu drugiego został ostatni rozjazd: liczba jechała za zmi
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
@@ -109,6 +109,8 @@ class FacetRail(QWidget):
     """Emituje `facetsChanged(dict)` — NOWY stan po kliku (cykl `facet_model.cycle`)."""
 
     facetsChanged = Signal(object)
+    # `FontChange` przychodzi też w trakcie budowy (rodzic, styl) - zanim listy, szukajka i tytuły istnieją.
+    _zbudowana = False
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -172,6 +174,7 @@ class FacetRail(QWidget):
                 # Sufit PO wpięciu w listwę: wiersz ma się zmierzyć fontem, który lista dziedziczy
                 # od rodzica, a nie tym, który miała jako sierota.
                 self._dopasuj_sufit(lw)
+        self._zbudowana = True              # od tej chwili `changeEvent` podaje font dzieciom
 
     # ---- API (FramesView) ----
     def state(self):
@@ -285,13 +288,6 @@ class FacetRail(QWidget):
                 self._set_empty_row(lw, pusto=lw.count() == 0, fraza="")
                 if facet in _KROTKIE:
                     self._dopasuj_sufit(lw)        # W-6: z wiersza, który właśnie stanął na liście
-                if facet in _ZNIKAJACE and widac:
-                    # Grupa stanów: wysokość DOPASOWANA DO LICZBY WARTOŚCI (stanów jest najwyżej osiem,
-                    # zwykle cztery) - przy podłodze jednego wiersza layout ściskał grupę do jednej
-                    # wartości z suwakiem (zmierzone natywnie). Stała wysokość nie podnosi podłogi
-                    # okna: pion listwy bierze przewijany kontener (`FramesView.rail_box`).
-                    wiersz = lw.sizeHintForRow(0)
-                    lw.setFixedHeight(min(lw.count(), _ROWS_ZNIKAJACE) * wiersz + 2 * lw.frameWidth())
             if aliases is not None:
                 self._aliases = aliases
             if alias_forms is not None:
@@ -379,13 +375,52 @@ class FacetRail(QWidget):
         tyle co zwykły (zmierzone: offscreen 12/12 px, natywnie Segoe UI 9 pt 16/16 px - sufit 66).
 
         Lista pusta (konstruktor - wierszy jeszcze nie ma, a `sizeHintForRow` zwraca wtedy -1) mierzy
-        wiersz-sondę: wstawiony i zdjęty w tym samym przebiegu, zanim cokolwiek się narysuje."""
+        wiersz-sondę: wstawiony i zdjęty w tym samym przebiegu, zanim cokolwiek się narysuje.
+
+        Grupa stanów (`_ZNIKAJACE`) widoczna z wartościami: wysokość DOPASOWANA DO LICZBY WARTOŚCI (stanów
+        jest najwyżej osiem, zwykle cztery) - przy podłodze jednego wiersza layout ściskał grupę do jednej
+        wartości z suwakiem (zmierzone natywnie). Stała wysokość nie podnosi podłogi okna: pion listwy
+        bierze przewijany kontener (`FramesView.rail_box`). Tu, nie w `set_data`, bo liczy się też po
+        zmianie fontu (`changeEvent`, AR-144) - jedna droga dla obu. Każda inna lista zdejmuje minimum,
+        które `setFixedHeight` zostawia (grupa stanów schowana po pustym zbiorze); `setMaximumHeight`
+        go nie rusza."""
         wiersz = lw.sizeHintForRow(0)
         if wiersz <= 0:
             lw.addItem(QListWidgetItem("Xg"))
             wiersz = lw.sizeHintForRow(0)
             lw.takeItem(0)
+        if (any(lw is self._lists.get(facet) for facet in _ZNIKAJACE)
+                and not lw.isHidden() and lw.count() > 0):
+            lw.setFixedHeight(min(lw.count(), _ROWS_ZNIKAJACE) * wiersz + 2 * lw.frameWidth())
+            return
+        lw.setMinimumHeight(0)
         lw.setMaximumHeight(_SHORT_ROWS * wiersz + 2 * lw.frameWidth())
+
+    def changeEvent(self, e):
+        """Zmiana fontu listwy - także fontu APLIKACJI (font systemu zmieniony w biegu, AR-144). Pod czynnym
+        arkuszem motywu font aplikacji dochodzi do listwy, ale nie do jej dzieci (zmierzone natywnie: listwa
+        9,0 → 14,4 pt, listy, szukajka i tytuły zostają 9,0 pt; listwa dostaje JEDNO `FontChange`, listy
+        żadnego), więc listwa podaje go dalej i liczy wysokości grup od nowa z nowego wiersza. Synchronicznie,
+        nie odroczone jak w planerze: zdarzenie przychodzi raz na zmianę, a fonty dzieci nie wracają do
+        listwy zdarzeniem. `setFont(self.font())` fontem dziedziczonym nie przypina listy - dalej idzie za
+        listwą. Tytuł zostaje pogrubiony (jak w konstruktorze). Szerokość kolumny godzin
+        (`TwoPartDelegate.fit_tertiary`) mierzy font listy, a malowanie bierze ją z pamięci delegata
+        (`rows.py` `paint`) - po nowym foncie liczy się od nowa na adnotacjach wierszy, które lista już ma,
+        jak w `set_data`; bez tego kolumna zostawała ze starego fontu do następnego przeładowania."""
+        super().changeEvent(e)
+        if e.type() != QEvent.FontChange or not self._zbudowana:
+            return
+        font = self.font()
+        for lw in self._lists.values():
+            lw.setFont(font)
+            lw.itemDelegate().fit_tertiary([lw.item(i).data(rows.TERTIARY) for i in range(lw.count())])
+        self.search.setFont(font)
+        for lbl in self._tytuly.values():
+            pogrubiony = QFont(font)
+            pogrubiony.setBold(True)
+            lbl.setFont(pogrubiony)
+        for facet in _KROTKIE:
+            self._dopasuj_sufit(self._lists[facet])
 
     def refresh_theme(self):
         """Przemaluj wykluczenia po zmianie motywu. Kolor ⊖ jest WYPALONY w itemie przy `set_data`

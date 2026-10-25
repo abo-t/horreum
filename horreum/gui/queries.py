@@ -5423,6 +5423,34 @@ def przebiegi_nazw_w_locie(con):
     return [{"run_id": r["run_id"], "n": r["n"]} for r in _przebiegi_nazw_szuflady(con) if r["w_locie"]]
 
 
+def powody_zamiarow_nazw(con, run_ids):
+    """Odmowy rekoncyliacji zamiarów nazw przebiegów `run_ids` - zbioru przebiegów, o których mówi zdanie
+    szuflady (powód zamiaru spoza niego nie dołącza do cudzego zdania): `(odmowy, czekajace)`.
+
+    `odmowy` - słowniki `run_id`, `reason`, `reason_code`, `reason_args` wierszy z otwartym zamiarem
+    (`in_flight`) i kodem z `item_reasons.KODY_ODMOWY_REKONCYLIACJI` (trójkę kładzie
+    `repo.note_rename_intent_refusal`, gdy `writeback.reconcile_renames` zwraca 'blocked' - AR-323), od
+    najnowszego. `czekajace` - ile pozostałych otwartych zamiarów tych przebiegów czeka na rekoncyliację:
+    wiersz bez kodu (śmierć procesu w biegu zapisu) i wiersz z kodem SAMEJ PRÓBY renamu (`torn_db_not`,
+    `returned_intent_left`, powód 'blocked' pisarza przy połkniętej porażce zgaszenia zamiaru) - rekoncyliacja
+    go jeszcze nie rozstrzygała, więc to nie jej odmowa. `status` tych dwóch nie rozróżnia (odmowa go nie
+    zmienia), rozróżnia kod. Filtr przebiegów i kodów idzie w Pythonie po literale SQL. Zbiór mały z definicji
+    (próby przerwane awarią) - czytelnik: zdanie pustej szuflady o nazwach zatrzymanych
+    (`FramesView._zdanie_wylaczonych`), wołane wyłącznie, gdy takie przebiegi są."""
+    run_ids = set(run_ids)
+    odmowy, czekajace = [], 0
+    for r in con.execute(
+            "SELECT run_id, reason, reason_code, reason_args FROM pending_renames "
+            "WHERE in_flight IS NOT NULL ORDER BY id DESC"):
+        if r["run_id"] not in run_ids:
+            continue
+        if r["reason_code"] in item_reasons.KODY_ODMOWY_REKONCYLIACJI:
+            odmowy.append(dict(r))
+        else:
+            czekajace += 1
+    return odmowy, czekajace
+
+
 def _przebiegi_kart_szuflady(con):
     """Przebiegi kart szuflady z wpisami czekającymi (`pending`), bez przebiegów zmiany obiektu - od
     NAJNOWSZEGO (`max(id)` czekającego wpisu). JEDEN predykat izolacji dla dwóch czytelników
@@ -5537,8 +5565,3 @@ def niedokonczone_cofniecia_kart(con):
         if n:
             wynik.append((commit_id, n))
     return wynik
-
-# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po
-#   nadaniu obiektów ręką. Kubełek liczyć ze STANU (obiekt jest => no_object nie ma prawa się
-#   pokazać) albo gest zmieniający fakt sam proponuje przeliczenie (wzorzec taktu 3, b803b5d).

@@ -588,7 +588,8 @@ def _kadr_z_ucietym_brzegiem(lw, pelnych=7):
 
 
 @pytest.mark.parametrize("droga", ["font_listwy",
-                                   pytest.param("font_aplikacji_pod_arkuszem", marks=pytest.mark.zmienia_motyw)])
+                                   pytest.param("font_aplikacji_pod_arkuszem", marks=pytest.mark.zmienia_motyw),
+                                   pytest.param("font_aplikacji_zywa_listwa", marks=pytest.mark.zmienia_motyw)])
 def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp, droga):
     """W-6 (wizytacja 0810): sufit grupy krótkiej był stałą 72 px, a przy wierszu 16 px to 4,375
     wiersza - Rodzaj pokazywał połówkę `master_dark`, która czyta się jak ostatni wiersz, a nie jak
@@ -601,25 +602,32 @@ def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp, dr
       przeładowaniu;
     * `font_aplikacji_pod_arkuszem` - arkusz motywu na aplikacji (`apply_theme`) i font przez
       `QApplication.setFont`, listwa budowana od nowa przy każdym foncie: strażnik reguł arkusza dla
-      wierszy list (sufit z realnego wiersza pod QSS produkcji). Przy czynnym arkuszu font aplikacji
-      nie schodzi do list żywej listwy - droga bez przebudowy to `AR-144`, nie ten parametr.
+      wierszy list (sufit z realnego wiersza pod QSS produkcji);
+    * `font_aplikacji_zywa_listwa` - arkusz motywu i `QApplication.setFont` na ŻYWEJ listwie, bez przebudowy
+      (font systemu zmieniony w biegu, AR-144): pod arkuszem font aplikacji dochodzi do listwy, ale nie do jej
+      dzieci, więc listwa podaje go dalej (`FacetRail.changeEvent`) - listy, szukajka i tytuły idą za nim,
+      a sufit liczy się z nowego wiersza.
 
-    Listwa jest WYSOKA, żeby grupy krótkie stały na suficie: bramka mierzy sufit, a nie ściskanie
-    przez layout przy niskim oknie.
+    Listwa jest WYSOKA (1600 px), żeby grupy krótkie stały na suficie we wszystkich trzech drogach także
+    natywnie: bramka mierzy sufit, a nie ściskanie przez layout przy niskim oknie (natywnie wiersz ×1,6 ma
+    26 px i przy 900 px layout ściskał grupy poniżej sufitu w każdej drodze).
 
     Falsyfikatory: przywróć w `_dopasuj_sufit` stałą 72 px → oba parametry padają (viewport 70 px
     przy wierszu 12 px, 5,83 wiersza); licz sufit tylko w konstruktorze → pada `font_listwy` przy
-    drugim foncie (48 px przy wierszu 19 px), `font_aplikacji_pod_arkuszem` nie (listwa nowa)."""
+    drugim foncie (48 px przy wierszu 19 px), `font_aplikacji_pod_arkuszem` nie (listwa nowa); zdejmij
+    `FacetRail.changeEvent` → pada `font_aplikacji_zywa_listwa` (listy zostają przy starym foncie: jeden wiersz
+    przy obu fontach)."""
     from PySide6.QtGui import QFont
     from horreum.gui import app as app_mod, theme
     from horreum.gui.facets import _SHORT_ROWS
-    przez_aplikacje = droga == "font_aplikacji_pod_arkuszem"
+    przez_aplikacje = droga in ("font_aplikacji_pod_arkuszem", "font_aplikacji_zywa_listwa")
+    zywa = droga == "font_aplikacji_zywa_listwa"
     if przez_aplikacje:
         app_mod.apply_theme(qapp, theme.DEFAULT)
     wartosci = [(f"W{i}", f"W{i}", 9 - i) for i in range(7)]
     counts = {"object": [(1, "M31", 1)], "filter": wartosci, "kind": wartosci,
               "telescope": wartosci, "night": [("2025-01-01", "2025-01-01", 1)]}
-    rail = _kadr_rail(qapp, counts, wys=900)
+    rail = _kadr_rail(qapp, counts, wys=1600)
     listwy = [rail]
     try:
         bazowy = rail.font()
@@ -629,12 +637,14 @@ def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp, dr
             font.setPointSizeF(bazowy.pointSizeF() * skala)
             if not przez_aplikacje:
                 rail.setFont(font)
+            elif zywa and skala != 1.0:
+                QApplication.setFont(font)       # listwa ŻYWA - bez przebudowy (AR-144)
             elif skala != 1.0:
                 # Pod arkuszem font aplikacji nie schodzi do list ŻYWEJ listwy (zmierzone: listwa
                 # 14,4 pt, listy 9,0 pt), a produkcja stawia font, zanim powstaną widżety - listwa
                 # powstaje więc od nowa, przy nowym foncie aplikacji.
                 QApplication.setFont(font)
-                rail = _kadr_rail(qapp, counts, wys=900)
+                rail = _kadr_rail(qapp, counts, wys=1600)
                 listwy.append(rail)
             rail.set_data(counts, {"kind": {"in": [["W0", "W0"]]}})
             _pompuj(qapp)
@@ -645,10 +655,58 @@ def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp, dr
                 assert vp % wiersz == 0, f"{facet} ×{skala}: viewport {vp} px = {vp / wiersz:.3f} wiersza"
                 assert vp // wiersz == _SHORT_ROWS
                 wiersze.add(wiersz)
+            if zywa:
+                pt = rail.font().pointSizeF()
+                inne = [lw.font() for lw in rail._lists.values()] + [rail.search.font()]
+                assert {f.pointSizeF() for f in inne} == {pt}, "dzieci listwy nie poszły za fontem aplikacji"
+                assert all(t.font().pointSizeF() == pt and t.font().bold() for t in rail._tytuly.values())
         assert len(wiersze) == 2, f"oba fonty dały wiersz {wiersze} - bramka nie zmierzyła dwóch metryk"
     finally:
         for listwa in listwy:
             listwa.hide()
+
+
+def test_facet_rail_kolumna_godzin_idzie_za_fontem_bez_przeladowania(qapp):
+    """Font listwy zmieniony w biegu (AR-144), BEZ `set_data`: kolumna godzin liczy się od nowa z fontu listy
+    po zwiększeniu i po zmniejszeniu - każdy wiersz z adnotacją rysuje ją w kolumnie równej najszerszej
+    adnotacji listy, więc prawy brzeg licznika jest wspólny i bez nadmiaru miejsca. Malowanie bierze szerokość
+    z pamięci delegata (`rows.TwoPartDelegate.paint`): bez przeliczenia większy font dawał wierszowi
+    najszerszemu własną, szerszą kolumnę (licznik rozjechany względem reszty), a mniejszy zostawiał nadmiar
+    starego fontu. Falsyfikator: `FacetRail.changeEvent` bez `fit_tertiary`."""
+    from PySide6.QtGui import QFont, QFontMetrics
+    from horreum.gui import rows
+    counts = {"object": [(1, "M51", 5), (2, "NGC7000", 3), (7, "IC434", 2)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    extras = {"object": {1: (" · 60.4 h", "Ha: 60.4 h"), 2: (" · 3.0 h", "OIII: 3.0 h"),
+                         7: (" · 1.5 h", "L: 1.5 h")}}
+    rail = _kadr_rail(qapp, counts)
+    try:
+        rail.set_data(counts, {}, extras)
+        _pompuj(qapp)
+        lw = rail._lists["object"]
+        d = lw.itemDelegate()
+
+        def _kolumny():
+            # Kolumna godzin wiersza tak, jak liczy ją malowanie: wspólna z pamięci delegata albo własna
+            # wiersza, gdy jego adnotacja jest szersza. Wiersze bez pogrubienia - font wiersza = font listy.
+            fm = QFontMetrics(lw.font())
+            ogony = [lw.item(i).data(rows.TERTIARY) for i in range(lw.count())]
+            return {max(d._tertiary_w, fm.horizontalAdvance(t)) for t in ogony if t}
+
+        bazowy = rail.font()
+        szerokosci = []
+        for skala in (1.6, 0.8):
+            font = QFont(bazowy)
+            font.setPointSizeF(bazowy.pointSizeF() * skala)
+            rail.setFont(font)
+            _pompuj(qapp)
+            assert lw.font().pointSizeF() == font.pointSizeF()
+            najszersza = QFontMetrics(lw.font()).horizontalAdvance(" · 60.4 h")
+            assert _kolumny() == {najszersza}, (skala, _kolumny(), najszersza)
+            szerokosci.append(najszersza)
+        assert szerokosci[0] > szerokosci[1], "oba fonty dały tę samą kolumnę - test nie zmierzył zmiany"
+    finally:
+        rail.hide()
 
 
 def test_facet_rail_klik_SPOZA_kadru_stawia_wybor_w_kadrze(qapp):

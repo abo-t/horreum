@@ -239,8 +239,9 @@ class FramesView(QWidget):
         self._starsze_przebiegi = 0
         self._run_podjety = None    # `run_id` podjęty przy otwarciu - także po „Zatwierdź” (zdanie odmowy makra)
         # Przebiegi, które ta sesja widziała wyłączone z podjęcia (`_wylaczone`): karty zatrzymane izolacją
-        # zapisu w miejscu (AR-308) i nazwy z otwartym zamiarem (AR-316) - gest albo odświeżenie pustej
-        # szuflady, które zastanie je zwolnione, podejmuje je w tej sesji.
+        # zapisu w miejscu (AR-308), nazwy z otwartym zamiarem (AR-316) i najnowszy przebieg odmówiony
+        # przy otwarciu cudzą blokadą szuflady (AR-323) - gest albo odświeżenie pustej szuflady, które
+        # zastanie je zwolnione, podejmuje je w tej sesji.
         self._wylaczone_znane = set()
         # Zdanie ostatnio wpisane w wynik pustej szuflady przez ODŚWIEŻENIE (nie gest): droga przebiegów
         # wyłączonych, człon zwolnionych niepodjętych, błąd odczytu - następne odświeżenie je zastępuje
@@ -5506,7 +5507,12 @@ class FramesView(QWidget):
         if self._blokada_szuflady.isLocked() or self._blokada_szuflady.tryLock(0):
             return None
         if self._blokada_szuflady.error() == QLockFile.LockError.LockFailedError:
-            return i18n.t("grid.drawer.foreign_owner")
+            # Blokadę może trzymać też proces bez okna (CLI) - zdanie mówi PID, gdy plik blokady go niesie.
+            info = self._blokada_szuflady.getLockInfo()
+            pid = info[0] if info else None
+            if pid:
+                return i18n.t("grid.drawer.foreign_owner", pid=pid)
+            return i18n.t("grid.drawer.foreign_owner_nopid")
         return i18n.t("grid.drawer.lock_error", detail=self._blokada_szuflady.error().name)
 
     def _szuflada_do_stagingu(self):
@@ -5598,7 +5604,12 @@ class FramesView(QWidget):
         tekst SQLite czy systemu spoza klas) staje zdaniem w szufladzie ze szczegółem pod kursorem, okno
         żyje, a następne udane odświeżenie zdanie zdejmuje (`_zdanie_odswiezenia`). Użycie API bazy wbrew
         kontraktowi (`ProgrammingError`, `InterfaceError` - `powod_okna` daje błąd programu) i każdy inny
-        wyjątek lecą dalej, jak w każdym slocie."""
+        wyjątek lecą dalej, jak w każdym slocie.
+
+        Odłożenie konsumuje się PRZED strażnikiem: każdy strażnik ma właściciela, który odświeża sam po
+        swoim końcu (wyliczeni wyżej), więc flaga zostawiona przy wczesnym powrocie tylko powtarzałaby
+        bezskuteczne próby przy każdym przejściu „zbiór nie w drodze”."""
+        self._odswiezenie_po_zbiorze = False
         if (self._pola_stop or self._wb.is_busy or self._foreign_wb or self._etap_w_biegu
                 or self._okno_zmiany_obiektu is not None or self._undo_mode is not None
                 or self._run_id is not None
@@ -5607,7 +5618,6 @@ class FramesView(QWidget):
         if self._zbior_w_drodze() or self._edytor_otwarty():
             self._odswiezenie_po_zbiorze = True
             return
-        self._odswiezenie_po_zbiorze = False
         from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu
         from horreum.item_reasons import powod_okna
         try:
@@ -5632,14 +5642,24 @@ class FramesView(QWidget):
         makro nie zastąpi ich po cichu. Starsze przebiegi czekają na kolejne otwarcia - zdanie je liczy.
 
         PODJĘCIE WYŁĄCZNIE Z BLOKADĄ SZUFLADY (`_wez_szuflade`): przebieg z wpisami czekającymi może
-        prowadzić żywe inne okno programu na tej bazie - bez blokady szuflada nic nie podejmuje i mówi
-        jednym zdaniem, kto ją prowadzi."""
+        prowadzić żywe inne okno programu na tej bazie - bez blokady szuflada nic nie podejmuje. Przebieg,
+        który podjęłaby, zapamiętuje jak przebiegi wyłączone (`_wylaczone_znane`, AR-323): pusta szuflada
+        mówi „N zmian czeka na podjęcie” z kropką „◌” i zdaniem, kto ją prowadzi (`_pusta` →
+        `_podejmij_zwolnione`, gałąź cudzej blokady), a odświeżenie po zwolnieniu blokady podejmuje go
+        w tej sesji. Dawniej zostawała etykieta pustostanu, a zdanie o drugim oknie trwało także po jego
+        zamknięciu, choć nikt już szuflady nie prowadził. Wyłącznie NAJNOWSZY przebieg - starsze wracają
+        przy kolejnych otwarciach bazy (reguła AR-280)."""
         przebiegi = queries.oczekujace_przebiegi_szuflady(self.con)
         if not przebiegi:
             return
-        zdanie = self._wez_szuflade()
-        if zdanie is not None:
-            self.drawer.set_result(zdanie)
+        if self._wez_szuflade() is not None:
+            self._wylaczone_znane.add(przebiegi[0]["run_id"])
+            # Przebiegi zatrzymane izolacją (albo zamiarem nazw) zapamiętane od razu przy odmowie - zwolnione
+            # później wracają do szuflady tej sesji. Tę samą pamięć uzupełnia gałąź cudzej blokady w `_pusta`
+            # (składa zdanie z `_zdanie_wylaczonych`), więc odczyt tu nie zależy od tego, którą gałęzią
+            # `_pusta` pójdzie. Zdanie i kropkę stawia `_refresh_drawer` z końca `__init__` (`_pusta` →
+            # `_podejmij_zwolnione`, gałąź cudzej blokady) - jedna droga z odświeżeniem.
+            self._wylaczone()
             return
         self._podejmij(przebiegi[0], len(przebiegi) - 1)
 
@@ -5754,8 +5774,19 @@ class FramesView(QWidget):
         if nazwy:
             if izolowane:
                 drogi.append(i18n.t_plural("grid.drawer.names_held_more", n_nazw))
-            drogi.append(i18n.t("grid.drawer.names_held_way", receive=i18n.t("pipeline.receive"),
-                                nav=i18n.t("nav.dostawa")))
+            # Zamiar, którego rekoncyliacja ODMÓWIŁA, niesie powód z kodem odmowy na wierszu (AR-323) -
+            # „Przyjmij nowe” go nie rozstrzygnie, więc droga mówi powód zamiast obietnicy; obietnica zostaje
+            # dla zamiarów, które na rekoncyliację dopiero czekają (bez kodu albo z kodem samej próby
+            # renamu). Odczyt wyłącznie przebiegów tego zdania (`nazwy`).
+            from horreum.gui.wb_worker import tekst_powodu
+            from horreum.item_reasons import z_bazy
+            odmowy, czekajace = queries.powody_zamiarow_nazw(self.con, {p["run_id"] for p in nazwy})
+            powody = list(dict.fromkeys((w["reason"], w["reason_code"], w["reason_args"]) for w in odmowy))
+            if not powody or czekajace:
+                drogi.append(i18n.t("grid.drawer.names_held_way", receive=i18n.t("pipeline.receive"),
+                                    nav=i18n.t("nav.dostawa")))
+            drogi.extend(i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(z_bazy(*trojka)))
+                         for trojka in powody)           # jeden człon na odrębny powód
         etykieta = (i18n.t_plural("grid.drawer.pending_isolated", sum(p["n"] for p in izolowane)) if izolowane
                     else i18n.t_plural("grid.drawer.pending_names_held", n_nazw))
         return etykieta, " · ".join(drogi)
@@ -5770,9 +5801,11 @@ class FramesView(QWidget):
 
         NAJPIERW przebiegi zwolnione gdzie indziej (`_podejmij_zwolnione`): podjęty - szuflada pokazuje go
         (`_refresh_drawer`), a `result` dostaje człon przebiegu; niepodjęty (szuflada zajęta, cudza blokada) -
-        etykieta `pending_ready` i zdanie, dlaczego czeka, zamiast pustostanu. Kropka zmian czekających poza
+        etykieta `pending_ready` i zdanie, dlaczego czeka, zamiast pustostanu, a za nim etykieta i droga
+        przebiegów wciąż wyłączonych (`_zdanie_wylaczonych`), gdy takie są obok. Kropka zmian czekających poza
         szufladą (`StagingDrawer.set_count(zatrzymane=…)`, AR-316) stoi przy obu stanach „czeka, ale nie
-        tutaj”: wyłączonych i zwolnionych niepodjętych."""
+        tutaj”: wyłączonych i zwolnionych niepodjętych - wtedy bez Zatwierdź/Odrzuć (AR-323). Podjęcie bez
+        `result` (odświeżenie, nie gest) mówi zdaniem podjęcia (`picked_up`)."""
         stan, czlon, gotowe = self._podejmij_zwolnione()
         if stan == "podjety":
             self._zdanie_odswiezenia = ""
@@ -5786,17 +5819,43 @@ class FramesView(QWidget):
                     self.model.set_preview(self._podglad_nazw_ze_stagingu(), label=i18n.t("grid.preview.name"))
             if result:
                 self._ustaw_wynik(" · ".join(z for z in (result, czlon) if z))
+            else:
+                # Podjęcie BEZ gestu tego okna (odświeżenie, AR-323): kolumna podglądu zmienia się sama, więc
+                # szuflada mówi, co się stało - liczbą wpisów PODJĘTEGO przebiegu. Pasek należy do gospodarza:
+                # emisja wyłącznie przy widocznych Zbiorach (odświeżenie biegnie też po etapie Dostawy, gdy
+                # widok jest schowany - zdanie gridu nadpisałoby raport etapu). Dziecko zminimalizowanego
+                # okna Qt liczy jako widoczne (sonda offscreen i natywna: `isVisible()` True przy
+                # `isMinimized()` True), więc warunek pyta też okno.
+                nazwy = self._rename_pending_count()
+                zdanie = (i18n.t_plural("grid.drawer.picked_up_names", nazwy) if nazwy
+                          else i18n.t_plural("grid.drawer.picked_up", self._pending_count()))
+                self._ustaw_wynik(" · ".join(z for z in (zdanie, czlon) if z))
+                if self.isVisible() and not self.window().isMinimized():
+                    self.status_message.emit(zdanie)
             return
         zatrzymane = i18n.t("grid.drawer.dot_held_tip")
+        # Stan „◌” (zmiany czekają poza tą szufladą): Zatwierdź/Odrzuć nie mają tu nic do zrobienia, a gest,
+        # który zmiany zwolni, mówi zdanie obok - przyciski znikają, zamiast stać wygaszone (AR-323). Pustostan
+        # „○” zostaje z wygaszonymi; podjęcie (`set_count(n > 0)`) pokazuje je samo. `_pusta` biegnie bez
+        # żywego „Cofnij” (strażnik wołających) - przy nim widoczność należy do `_install_undo`.
+        akcje = self._undo_mode is None
         # Zdanie odświeżenia, które wciąż stoi w polu wyniku - następne odświeżenie je zastępuje albo zdejmuje
         # (droga, człon zwolnionych, błąd odczytu); zdanie gestu zostaje.
         wlasne = (result is None and bool(self._zdanie_odswiezenia)
                   and self.drawer.result.text() == self._zdanie_odswiezenia)
         if stan:
-            zdanie = " · ".join(z for z in (result, czlon) if z)
+            # Obok zwolnionych niepodjętych mogą czekać przebiegi wciąż wyłączone z podjęcia (izolacja kart,
+            # zamiar nazw) - ich etykieta i droga wchodzą członami zdania. Etykieta szuflady zostaje przy
+            # zwolnionych (krótka; zdanie jest elidowane, etykieta nie), a zwolnione nie przesłaniają
+            # przebiegu zatrzymanego: przy cudzej blokadzie zwykły przebieg odmówiony przy otwarciu czeka
+            # w `_wylaczone_znane` razem z zatrzymanym izolacją.
+            etykieta, droga = self._zdanie_wylaczonych()
+            zdanie = " · ".join(z for z in (result, czlon, etykieta, droga) if z)
             self._zdanie_odswiezenia = zdanie if result is None else ""
             self.drawer.set_count(0, result=zdanie, label=i18n.t_plural("grid.drawer.pending_ready", gotowe),
                                   zatrzymane=zatrzymane)
+            if akcje:
+                self.drawer.set_commit_actions_visible(False)
             return
         etykieta, droga = self._zdanie_wylaczonych()
         if etykieta is None:
@@ -5804,11 +5863,15 @@ class FramesView(QWidget):
                 result = ""
             self._zdanie_odswiezenia = ""
             self.drawer.set_count(0, result=result)
+            if akcje:
+                self.drawer.set_commit_actions_visible(True)
             return
         if result is None and (not self.drawer.result.text() or wlasne):
             result = droga                       # pusta albo zdanie poprzedniego odświeżenia
         self._zdanie_odswiezenia = droga
         self.drawer.set_count(0, result=result, label=etykieta, zatrzymane=zatrzymane)
+        if akcje:
+            self.drawer.set_commit_actions_visible(False)
 
     def _podejmij_po_izolacji(self, op):
         """Po geście izolacji (`op` z `_GESTY_ZAPISU` - „Dokończ zapis”, „Przywróć nagłówek…”, „Zwolnij…”;
@@ -5824,8 +5887,9 @@ class FramesView(QWidget):
 
     def _podejmij_zwolnione(self):
         """Przebieg zapamiętany jako wyłączony z podjęcia (`_wylaczone_znane` - karty zatrzymane izolacją,
-        nazwy z otwartym zamiarem), który jest już podejmowalny (ostatnia operacja izolująca zamknięta albo
-        zamiar rozstrzygnięty - gestem tej sesji albo gdzie indziej), szuflada podejmuje - najnowszy z nich,
+        nazwy z otwartym zamiarem, przebieg odmówiony przy otwarciu cudzą blokadą), który jest już
+        podejmowalny (ostatnia operacja izolująca zamknięta, zamiar rozstrzygnięty albo blokada wolna -
+        gestem tej sesji albo gdzie indziej), szuflada podejmuje - najnowszy z nich,
         kartę przed nazwami (kolejność `queries.oczekujace_przebiegi_szuflady`), z blokadą szuflady.
         `(stan, człon, n)`: `"podjety"` + zdanie podjętego przebiegu; `"zajeta"` (żywe „Cofnij”, przebieg tej
         sesji) + `isolated_ready`/`names_held_ready`; `"cudza"` + zdanie blokady; `("", "", 0)`, gdy nic się
@@ -6311,9 +6375,20 @@ class FramesView(QWidget):
         # i blokada szuflady) powstaje wyłącznie, gdy jest co zastagingować - pusty przebieg trzymałby
         # blokadę szuflady bez niczego do podjęcia.
         try:
-            naming.validate_template(policy.get("template") or naming.DEFAULT_TEMPLATE)  # zły regex → stop przed mintem
+            # Zły regex, nieznany token (AR-208) i każda inna odmowa wzoru → stop przed mintem.
+            naming.validate_template(policy.get("template") or naming.DEFAULT_TEMPLATE)
         except ValueError as e:
-            self.status_message.emit(self._zdanie_bledu_wzoru(e))
+            # Wynik gestu w szufladzie i na pasku - trzy gałęzie jak błąd definicji makra (`_run`): przy
+            # żywym „Cofnij” etykieta „Zatwierdzono…” zostaje, a zdanie niesie identyfikator (AR-276).
+            zdanie = self._zdanie_bledu_wzoru(e)
+            if self._undo_mode is not None:
+                self._ustaw_wynik(zdanie)
+            elif self._rename_pending_count():
+                self._refresh_drawer()                   # etykieta przebiegu (także podjętego) bez zmian
+                self.drawer.set_result(zdanie)
+            else:
+                self._pusta(result=zdanie)
+            self.status_message.emit(zdanie)
             return
         # Pętla życia run_id (R1 #1 + R2 #1): run niecommitowany → clear (bezpieczne, same 'pending');
         # run skommitowany → MINTUJ NOWY (clear skasowałby wiersze 'applied' = rekordy undo).
@@ -6329,10 +6404,14 @@ class FramesView(QWidget):
         if otwarty:
             # Run niecommitowany - także przerwany anulowaniem albo podjęty z poprzedniej sesji (AR-280):
             # schodzą wyłącznie CZEKAJĄCE wiersze; `applied` zapisu przerwanego to rekordy jego cofnięcia.
-            # Idempotentny re-staging także przy zerze nazw - lustro makra.
-            repo.clear_waiting_staging(self.con, run_id=self._rename_run_id, klinga="nazwy")
-            if self._rename_run_id == self._run_poprzedni:
-                self._run_poprzedni = None               # szuflada niesie już staging tej sesji
+            # Idempotentny re-staging także przy zerze nazw - lustro makra. Droga „Odrzuć” (AR-323): zamiar
+            # przebiegu podjętego z poprzedniej sesji schodzi z wpisem w dzienniku (`staging.discarded`) i
+            # szuflada niesie odtąd staging tej sesji (`_run_poprzedni` zerowany); staging tej sesji -
+            # transient, bez zdarzenia. Przebieg podjęty, z którego nic już nie czeka (wpisy zdjęte gdzie
+            # indziej), nie ma czego odrzucać: zdarzenie z `n = 0` Dom mówiłby jako „1 zmiana”.
+            if self._rename_run_id == self._run_poprzedni and not self._rename_pending_count():
+                self._run_poprzedni = None
+            self._odrzuc_czekajace(self._rename_run_id, "nazwy")
         for p in run.touched:
             repo.stage_rename(self.con, run_id=self._rename_run_id, location_id=p.location_id,
                               old_path=p.old_path, new_path=p.new_path, expected_mtime=p.mtime)

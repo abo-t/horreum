@@ -106,6 +106,10 @@ _DISC_LEN = 12                                         # hex prefiksu sha1_data 
 _UNSAFE = re.compile(r"[^0-9A-Za-z+._-]+")             # spacje/separatory/śmieć → '_'
 # Tokeny bez argumentu — WSTECZNIE zgodne z v1 (goły string w liście szablonu).
 BARE_TOKENS = frozenset({"datetime", "object", "kind", "filter", "exp", "disc"})
+# CAŁY słownik tokenów wzoru (AR-208): bez argumentu, parametryczne (folder/orig) i strukturalne
+# (flatgrp/trail). `validate_template` odrzuca token spoza niego PRZED przebiegiem - edytor wzoru podaje
+# dokładnie ten zbiór (`grid_panels._TokenRow._TOKENS`, pin w testach).
+TOKENS = BARE_TOKENS | frozenset({"folder", "orig", "flatgrp", "trail"})
 # Znacznik braku podpiętego flatu - ten sam, który archiwum już niesie w nazwach lightów
 # (`FLATGRP_NOFLAT_`). Grupę flatu z nazwy mastera czyta `recipe.parse_master_path` (`_flatgrp_segment`).
 _NOFLAT = "NOFLAT"
@@ -461,8 +465,10 @@ def _pick_template(template, kind, filetype):
 def validate_template(template):
     """Skompiluj regexy tokenów `orig` w CAŁYM szablonie (lista albo dict per typ) RAZ przed przebiegiem
     (INFORMUJ, R-v2 #5): zły regex → `ValueError` z czytelnym powodem do wołającego (CLI/GUI pokaże),
-    nie ciche pominięcie na każdej klatce. Tak samo `trail` nie na końcu wzoru i nieznany `case` tokenu
-    kind. TANIA (O(tokenów)) - powierzchnia może ją wołać przed mintem run_id, by nie przebiegać dwa razy."""
+    nie ciche pominięcie na każdej klatce. Tak samo `trail` nie na końcu wzoru, nieznany `case` tokenu
+    kind i token spoza słownika (`TOKENS`, AR-208) - to samo zdanie i kod, które dałby `compose_name`
+    w pętli przebiegu, więc żadna odmowa `compose_name` nie zostaje na później. TANIA (O(tokenów)) -
+    powierzchnia może ją wołać przed mintem run_id, by nie przebiegać dwa razy."""
     lists = template.values() if isinstance(template, dict) else [template]
     for specs in lists:
         specs = list(specs)
@@ -483,6 +489,11 @@ def validate_template(template):
                 raise OdmowaZPowodem(PowodPozycji(
                     f"nieznana wielkość liter tokenu 'kind': {repr(args.get('case'))}",
                     "rename_tpl_bad_case", value=repr(args.get("case"))))
+            elif not isinstance(tok, str) or tok not in TOKENS:
+                # `isinstance` przed `in`: `{"t": [...]}` daje token niehaszowalny, a `TypeError` uciekłby
+                # spod `except ValueError` wołających.
+                raise OdmowaZPowodem(PowodPozycji(f"nieznany token szablonu: {repr(tok)}",
+                                                  "rename_tpl_unknown_token", value=repr(tok)))
 
 
 # ============================================================ silnik run_rename (§3)

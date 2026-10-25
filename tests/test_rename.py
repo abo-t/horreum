@@ -944,3 +944,38 @@ def test_commit_renamu_przechodzi_przez_przejsciowe_zajecie(tmp_path, monkeypatc
     assert _stan(con, lid) == (nowa, 1, 1)
     assert os.path.exists(nowa) and not os.path.exists(stara)
     con.close()
+
+
+# ============================================================ AR-208 - token spoza słownika we wzorze
+
+
+@pytest.mark.parametrize("wzor, token", [
+    (["datetime", "planeta"], "'planeta'"),
+    ({"fits": ["kind", "planeta"], "default": ["kind"]}, "'planeta'"),
+    ([{"t": None}], "None"),
+    ([{"t": ["x"]}], "['x']"),
+], ids=["lista", "dict_per_typ", "dict_bez_t", "token_niehaszowalny"])
+def test_validate_template_odrzuca_token_spoza_slownika(wzor, token):
+    """`validate_template` odrzuca token spoza `naming.TOKENS` tym samym kodem i zdaniem co `compose_name` -
+    w liście, w wzorze per typ i w tokenie, który nie jest napisem (niehaszowalny daje odmowę, nie `TypeError`,
+    który uciekłby spod `except ValueError` wołających). Falsyfikatory: brak gałęzi (wzór przechodzi); brak
+    `isinstance` (`TypeError` przy `["x"]`)."""
+    with pytest.raises(naming.OdmowaZPowodem) as info:
+        naming.validate_template(wzor)
+    assert info.value.powod.code == "rename_tpl_unknown_token"
+    assert str(info.value) == f"nieznany token szablonu: {token}"
+
+
+def test_tokeny_edytora_to_slownik_rdzenia():
+    """Edytor wzoru podaje dokładnie słownik rdzenia (`naming.TOKENS`), a `compose_name` przyjmuje każdy jego
+    token bez odmowy - rozjazd edytor/rdzeń/walidacja pada tu, nie na wzorze człowieka."""
+    pytest.importorskip("PySide6")
+    from horreum.gui.grid_panels import _TokenRow
+    assert {tid for _klucz, tid in _TokenRow._TOKENS} == naming.TOKENS
+    fakty = {"kind": "light", "object_canon": "M31", "object_raw": "M31", "filter_canon": "Ha", "exptime": 300.0,
+             "sha1_data": "abc123def456789", "path": r"X:\L\a.fits", "ext": ".fits", "flat_master_id": None,
+             "flat_paths": []}
+    for tok in sorted(naming.TOKENS - {"trail"}):
+        naming.validate_template([tok, "trail"])
+        nazwa, problem = naming.compose_name(fakty, datetime(2024, 3, 15, 21, 30, 45), template=[tok, "trail"])
+        assert nazwa and problem is None, (tok, problem)

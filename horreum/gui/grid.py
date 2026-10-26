@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import sqlite3
 import statistics
@@ -41,16 +42,16 @@ from PySide6.QtCore import (
     QEvent, QItemSelection, QItemSelectionModel, QLockFile, QModelIndex, QPersistentModelIndex, Qt, QSettings,
     QThread, QTimer, Signal, Slot,
 )
-from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QFont, QFontMetricsF, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton, QDialog, QMenu,
-    QFrame, QMessageBox, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QFrame, QMessageBox, QScrollArea, QSizePolicy, QSplitter, QStyle, QVBoxLayout, QWidget,
 )
 
 from horreum import (
     filter_engine, lead_copy, lineage, macro as macro_mod, naming, repo, scan, stacks, supersede, writeback,
 )
-from horreum.gui import busy, facet_model, i18n, queries, rows
+from horreum.gui import busy, facet_model, i18n, queries, rows, szerokosci
 from horreum.gui.facets import FacetRail
 from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui import assign_dialog
@@ -323,14 +324,28 @@ class FramesView(QWidget):
         self._przeladowanie_z_zaznaczeniem = None
         self._zbudowany = False     # koniec `__init__`: od tej chwili zmiana kolumn przeładowuje zbiór
         self._build_ui()
-        # PRZED pierwszym zbudowaniem listy perspektyw: rejestr sprzed I-1 dowozi swoje widoki do
-        # bazy, więc combo od razu pokazuje komplet, a nie „gdzie się podziały moje perspektywy".
-        self._import_settings_perspectives()
-        self._load_facets()
-        self._podejmij_przebieg_poprzedni()   # PRZED pierwszym zbiorem: podgląd jedzie z nim (AR-280)
-        self.refresh(w_tle=True)    # otwarcie bazy: okno żyje, zanim zbiór dojedzie (AR-27)
-        self._refresh_drawer()
-        self._przywroc_panel_rodowodu()   # panel rodowodu otwarty przy zamknięciu wraca otwarty
+        # KONSTRUKTOR FAILURE-ATOMIC (AR-333). Od `_load_facets` startują wątki tła (pola, skład zbioru)
+        # i bierze się blokada szuflady, a gospodarz dostaje widok dopiero po powrocie konstruktora - jego
+        # obwódka porażki (`MainWindow._zbuduj_strone`) i zbieranie wątków (`_zatrzymaj_watki_widokow`) go
+        # nie widzą. Porażka dalej (błąd programu albo bazy) zostawiała żywe `QThread` (skasowane w biegu -
+        # twardy abort) i blokadę, przez którą następna budowa w tym procesie mówiła „inny proces prowadzi”
+        # o sobie samej. Sprząta `zatrzymaj_pola` (oba wątki i blokada, idempotentne), a widok schodzi
+        # z rodzica, żeby ten nie trzymał pół-zbudowanego dziecka z połączeniami; obiekt Pythona trzyma
+        # jeszcze ślad wyjątku, więc bez `deleteLater`.
+        try:
+            # PRZED pierwszym zbudowaniem listy perspektyw: rejestr sprzed I-1 dowozi swoje widoki do
+            # bazy, więc combo od razu pokazuje komplet, a nie „gdzie się podziały moje perspektywy".
+            self._import_settings_perspectives()
+            self._load_facets()
+            self._podejmij_przebieg_poprzedni()   # PRZED pierwszym zbiorem: podgląd jedzie z nim (AR-280)
+            self.refresh(w_tle=True)    # otwarcie bazy: okno żyje, zanim zbiór dojedzie (AR-27)
+            self._refresh_drawer()
+            self._przywroc_panel_rodowodu()   # panel rodowodu otwarty przy zamknięciu wraca otwarty
+        except BaseException:
+            self.zatrzymaj_pola()
+            if self.parent() is not None:
+                self.setParent(None)
+            raise
         self._zbudowany = True
 
     # ---- budowa ----
@@ -1325,16 +1340,122 @@ class FramesView(QWidget):
             self._szerokosci_znajdz()
         if self.model._version_col() is not None:
             self.table.resizeColumnToContents(self.model._version_col())
+        # Wejście przy zbiorze W DRODZE policzyło szerokości z modelu, którego wiersze dopiero jadą (przy
+        # otwarciu bazy z pustego - zostawały podpowiedzi nagłówka, AR-346): zamówienie na najbliższe
+        # przyłożenie zbioru, także nowszego zlecenia, które zastąpi to w drodze. Wyjście ze Znajdź je zdejmuje.
+        self._szerokosci_zamowione = None
+        if znajdz and self._zbior_w_drodze():
+            self._zamow_szerokosci()
         self.stan_zbioru_zmieniony.emit()
 
-    def _szerokosci_znajdz(self):
+    # Kolumny Znajdź szerokie z treści - kolejność rachunku Qt (`_szerokosci_znajdz`), obiekt pierwszy.
+    _KOLUMNY_Z_TRESCI = ("_object", "night", "filter_canon", "exptime", "_zestaw")
+    # ZAMÓWIENIE SZEROKOŚCI NA PRZYŁOŻENIE ZBIORU (AR-346): `{klucz kolumny}` albo None. PRZECHODZI na nowsze
+    # zlecenie, które zastąpi zbiór w drodze (zapytanie wpisane zaraz po otwarciu bazy, wynik pól przed zbiorem
+    # startu): liczy najbliższe przyłożenie, jakiekolwiek ono jest. Gaśnie przy tym przyłożeniu, przy porażce
+    # terminalnej składu (`_on_zbior_failed` - zbioru, na który czekało, już nie będzie) i przy wyjściu ze
+    # Znajdź. Kolumnę zdejmuje z niego gest ręki (`_reka_zmienila_szerokosc`): szerokość z ręki w oknie
+    # „w drodze” przeżywa reset po znaczeniu kolumny (`_zapamietaj_szerokosci`) i przyłożenie jej nie nadpisuje.
+    _szerokosci_zamowione = None
+    _szerokosci_programowe = 0    # zmiana szerokości w toku od programu (reset modelu, własny rachunek)
+    _straz_szerokosci = False     # strażnik ręki podpięty (raz na widok, przy pierwszym zamówieniu)
+
+    def _zamow_szerokosci(self):
+        """Zamów szerokości Znajdź na przyłożenie zbioru, który jest w drodze. Strażnik ręki - sygnał
+        `sectionResized` poza zmianą od programu: własny rachunek i reset modelu, w którym
+        `_uloz_belki_i_wersje` oddaje szerokości po znaczeniu kolumny. Podpięty po budowie widoku, więc
+        koniec resetu dochodzi do niego PO tamtym oddaniu (sloty idą w kolejności połączeń)."""
+        if not self._straz_szerokosci:
+            self._straz_szerokosci = True
+            self.table.horizontalHeader().sectionResized.connect(self._reka_zmienila_szerokosc)
+            self.model.modelAboutToBeReset.connect(self._reset_szerokosci_start)
+            self.model.modelReset.connect(self._reset_szerokosci_koniec)
+        self._szerokosci_zamowione = set(self._KOLUMNY_Z_TRESCI)
+
+    # Strażnik resetu jest dziś bez skutku - `QHeaderView::reset` zachowuje sekcje, a oddanie po znaczeniu daje
+    # pięciu kolumnom Znajdź tę samą szerokość, przy której `resizeSection` nie emituje sygnału (qheaderview.cpp:884,
+    # Qt 6.9.2) - i zadziała, gdy reset zmieni szerokość zamówionej kolumny (kolumna wstawiona w środek zestawu).
+    def _reset_szerokosci_start(self):
+        self._szerokosci_programowe += 1
+
+    def _reset_szerokosci_koniec(self):
+        self._szerokosci_programowe -= 1
+
+    def _reka_zmienila_szerokosc(self, kolumna, _stara, _nowa):
+        """Gest ręki na sekcji nagłówka (przeciągnięcie, dwuklik w uchwyt) zdejmuje tę kolumnę z zamówienia."""
+        if self._szerokosci_zamowione is None or self._szerokosci_programowe:
+            return
+        self._szerokosci_zamowione.discard(self.model._col_key(kolumna))
+
+    def _szerokosci_znajdz(self, klucze=None):
         """Szerokości prostego zestawu kolumn przy wejściu w Znajdź: krótkie fakty (obiekt, noc,
         filtr, czas, zestaw) z treści, uwaga stałą szerokością (tooltip niesie pełną). Liczone przy
         wejściu, nie przy każdym przeładowaniu - potem szerokość ręki idzie za znaczeniem kolumny
-        (`_zapamietaj_szerokosci`)."""
-        for klucz in ("_object", "night", "filter_canon", "exptime", "_zestaw"):
-            self.table.resizeColumnToContents(self.model.base_col(klucz))
-        self.table.setColumnWidth(self.model.base_col("note"), _SZEROKOSC_UWAG)
+        (`_zapamietaj_szerokosci`). `klucze` - wyłącznie te kolumny, bez uwagi: najbliższe przyłożenie zbioru
+        po wejściu przy zbiorze w drodze (`_zamow_szerokosci`).
+
+        TA SAMA LICZBA CO `resizeColumnToContents`, BEZ PRZEJŚCIA QT PO `data()` (AR-346). Qt pyta model
+        o osiem ról na komórkę (`szerokosci`) - na kopii pf4 40 000 wywołań, klik w kafel Znajdź 455-795 ms
+        natywnie. Tu te same wiersze (`szerokosci.wiersze_podpowiedzi` ze stanu widoku, który czyta Qt), tekst
+        i czcionka komórki z `_base_cell` (ta sama droga, którą `data()` idzie do kolumn bazowych) i metryka
+        fontu z czcionką rozwiązaną jak w `QStyledItemDelegate::initStyleOption`; tekst z `\\n` liczy się
+        najszerszą linią (Qt łamie go na separatorze linii). Zmierzone natywnie na kopii pf4: te same szerokości
+        co Qt w PL i EN, przy belkach grup i przy aktywnym spanie (reguła na prototypie: 5000/5000 komórek,
+        2364/2364 komórek kursywą); klik w kafel Znajdź 156-335 ms wobec 457-814 ms (dwie serie przeplatane).
+
+        BELKA GRUPY regułą spanu Qt (`QTableViewPrivate::widthHintForIndex`, Qt 6.9.2): podpis z czcionką
+        belki minus BIEŻĄCE szerokości kolumn spanu; wiersz belki liczy się do limitu wierszy. Qt liczy
+        kolumny po kolei od obiektu - jedynej z podpisem belki - więc odejmuje szerokości sprzed rachunku."""
+        t, m = self.table, self.model
+        h, vh = t.horizontalHeader(), t.verticalHeader()
+        # EXPECT: wiersz widoku = wiersz modelu - na tym stoi reguła wierszy Qt (`wiersze_podpowiedzi`).
+        assert vh.hiddenSectionCount() == 0, "grid schował wiersz - reguła wierszy Qt liczy widok jak model"
+        assert not vh.sectionsMoved(), "grid przestawił wiersz - reguła wierszy Qt liczy widok jak model"
+        kolumny = [m.base_col(k) for k in (self._KOLUMNY_Z_TRESCI if klucze is None else klucze)]
+        wiersze = szerokosci.wiersze_podpowiedzi(
+            max(0, vh.visualIndexAt(0)), vh.visualIndexAt(t.viewport().height()) if t.isVisible() else -1,
+            m.rowCount(), h.resizeContentsPrecision())
+        czcionka = t.font()
+        miary = {None: QFontMetricsF(czcionka)}
+        tekstu, czcionki = Qt.DisplayRole, Qt.FontRole     # raz: dostęp do skrótu roli kosztuje ~2 µs
+
+        def szerokosc_tekstu(tekst, rola_czcionki):
+            if rola_czcionki is None:
+                fm = miary[None]
+            else:
+                f = QFont(rola_czcionki).resolve(czcionka)
+                fm = miary.get(f.key()) or miary.setdefault(f.key(), QFontMetricsF(f))
+            return max(math.ceil(fm.horizontalAdvance(linia)) for linia in tekst.split("\n"))
+
+        def szerokosc_tresci(r, c):
+            row = m._rows[r]
+            if "_group" not in row:
+                klucz = m._col_key(c)
+                return szerokosc_tekstu(m._base_cell(row, klucz, tekstu), m._base_cell(row, klucz, czcionki))
+            if c != 0:
+                return None                   # podpis belki stoi wyłącznie w kolumnie 0 (`GridTableModel.data`)
+            idx = m.index(r, 0)
+            w = szerokosc_tekstu(idx.data(tekstu), idx.data(czcionki))
+            spanu = t.columnSpan(r, 0)        # span belki od kolumny 0 (`_uloz_belki_i_wersje`)
+            if spanu > 1:
+                lewa = h.logicalIndex(0)
+                w -= sum(t.columnWidth(h.visualIndex(lewa + i)) for i in range(1, spanu + 1))
+            return w
+
+        margines = (2 * (t.style().pixelMetric(QStyle.PM_FocusFrameHMargin, None, t) + 1)
+                    + (1 if t.showGrid() else 0))
+        szer = szerokosci.szerokosci_kolumn(szerokosc_tresci, wiersze, kolumny, margines,
+                                            [h.sectionSizeHint(c) for c in kolumny])
+        # Własny rachunek to nie gest ręki. Strażnik jest dziś bez skutku - przy wejściu zamówienie staje PO tym
+        # rachunku, przy przyłożeniu schodzi PRZED nim - i zadziała, gdy rachunek pobiegnie przy żywym zamówieniu.
+        self._szerokosci_programowe += 1
+        try:
+            for c, w in zip(kolumny, szer):
+                t.setColumnWidth(c, w)
+            if klucze is None:
+                t.setColumnWidth(m.base_col("note"), _SZEROKOSC_UWAG)
+        finally:
+            self._szerokosci_programowe -= 1
 
     def skladniki_stanu(self, *, tylko_bez_kontrolki=False):
         """Składniki zawężenia zbioru jako `(klucz, etykieta)` - rząd chipów Znajdź. Każdy składnik,
@@ -3832,6 +3953,9 @@ class FramesView(QWidget):
         self._zbior_bieg_gen = None
         if self._zbior_ponowiony == gen:
             self._zbior_ponowiony = None
+            # Zamówienie szerokości Znajdź (AR-346) czekało na zbiór, którego nie będzie - inaczej liczyłoby
+            # przyłożenie dużo późniejszego przeładowania, niczym niezwiązanego z wejściem.
+            self._szerokosci_zamowione = None
             self.load_report.emit(ZdanieZeSzczegolem(i18n.t("grid.zbior.failed_status", msg=msg),
                                                      szczegol_zdania(msg)))
             return
@@ -3865,6 +3989,11 @@ class FramesView(QWidget):
                             images_unknown=self._perspektywa_obrazow(),
                             preview=podglad, preview_label=etykieta)
         self._uloz_kolumny()
+        # Szerokości zamówione przy wejściu w Znajdź przy zbiorze w drodze (AR-346) - najbliższe przyłożenie, także
+        # nowszego zlecenia, liczy je raz i zamówienie zdejmuje.
+        zamowione, self._szerokosci_zamowione = self._szerokosci_zamowione, None
+        if zamowione:
+            self._szerokosci_znajdz(tuple(k for k in self._KOLUMNY_Z_TRESCI if k in zamowione))
         if self.model._version_col() is not None:
             # Domyślne 100 px elidowało „inna integracja · 2026-02-21 12:43 · 33 wejścia", czyli
             # właśnie te fakty, po które perspektywa istnieje. Koszt znikomy: perspektywa ma na

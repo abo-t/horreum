@@ -1065,9 +1065,9 @@ def test_szerokosci_kolumn_z_metryka_wstrzyknieta():
     nagłówkiem)."""
     from types import SimpleNamespace
 
-    from horreum.gui.planner import szerokosci_kolumn
+    from horreum.gui.szerokosci import szerokosci_kolumn
     wiersze = [SimpleNamespace(a="abc", b="1"), SimpleNamespace(a="abcdef", b="22")]
-    metryka = lambda s: 7 * len(s)                       # noqa: E731 - metryka testowa
+    metryka = lambda w, k: 7 * len(getattr(w, k))       # noqa: E731 - metryka testowa
     assert szerokosci_kolumn(metryka, wiersze, ["a", "b"], 5, [10, 40]) == [47, 40]
     assert szerokosci_kolumn(metryka, [], ["a", "b"], 5, [10, 40]) == [10, 40]
 

@@ -740,6 +740,112 @@ def test_zamkniecie_okna_przed_dobudowa_nie_buduje_niczego(qapp, tmp_path, monke
     assert STRONA_ZBIORY in win._zaslepki and win.con is None
 
 
+# ---------------------------------------------------------------- porażka konstruktora gridu (AR-333)
+
+def _baza_z_przebiegiem(tmp_path):
+    """Baza s8 z przebiegiem szuflady czekającym (`repo.stage_pending`) - budowa gridu bierze blokadę szuflady
+    w `_podejmij_przebieg_poprzedni`, żeby podjąć przebieg."""
+    from horreum import db, repo
+    sciezka = _baza(tmp_path)
+    con = db.connect(sciezka)
+    lid, hh = con.execute("SELECT id, header_hash FROM location ORDER BY id LIMIT 1").fetchone()
+    repo.stage_pending(con, run_id="R", location_id=lid, keyword="TELESCOP", idx=0, op="set", old_value="RC8",
+                       new_value="EQ6", new_type="str", new_comment=None, expected_header_hash=hh)
+    assert [p["run_id"] for p in queries.oczekujace_przebiegi_szuflady(con)] == ["R"]
+    con.close()
+    return sciezka
+
+
+def _pada_w(monkeypatch, miejsce):
+    """`FramesView.<miejsce>` rzuca (błąd programu w konstruktorze) i zapamiętuje pół-zbudowany widok.
+    Zwraca `(pół-zbudowane widoki, prawdziwa metoda)`."""
+    from horreum.gui.grid import FramesView
+    polowy, prawdziwa = [], getattr(FramesView, miejsce)
+
+    def _rzuca(self, *a, **k):
+        polowy.append(self)
+        raise RuntimeError("konstruktor gridu padł")
+    monkeypatch.setattr(FramesView, miejsce, _rzuca)
+    return polowy, prawdziwa
+
+
+def _blokada_wolna(sciezka):
+    from PySide6.QtCore import QLockFile
+    swieza = QLockFile(sciezka + ".szuflada.lock")
+    if not swieza.tryLock(0):
+        return False
+    swieza.unlock()
+    return True
+
+
+@pytest.mark.parametrize("miejsce", ["_przywroc_panel_rodowodu", "_odbuduj_perspektywy"])
+def test_porazka_konstruktora_gridu_zbiera_watki_i_oddaje_blokade(qapp, tmp_path, monkeypatch, miejsce):
+    """Błąd programu w `FramesView.__init__` PO starcie wątków tła - po wątku pól (`_odbuduj_perspektywy` w
+    `_load_facets`) albo po obu wątkach i blokadzie szuflady (`_przywroc_panel_rodowodu`) - w trybie produktu,
+    przy przebiegu szuflady czekającym, a wątki trzymane bramą w biegu. Klik w wiersz Znajdź: jedno zgłoszenie
+    straży, pół-zbudowany widok ma oba wątki zebrane, a blokada szuflady jest wolna. Druga budowa w tym samym
+    procesie (obiekt wyjątku żyje, jak w oknie błędu straży) podejmuje przebieg i nie mówi, że szufladę prowadzi
+    inny proces Horreum. Falsyfikatory: konstruktor bez obwódki (wątki w biegu, blokada trzymana, zdanie
+    o „innym procesie” z własnym PID-em); obwódka bez `zatrzymaj_pola`; obwódka połykająca wyjątek (zero
+    zgłoszeń); obwódka zaczęta za `_load_facets` (wątek pól poza sprzątaniem)."""
+    from horreum.gui import i18n
+    from horreum.gui.grid import FramesView
+    from test_gui_znajdz_szerokosci import _bramy_watkow
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", True)
+    sciezka = _baza_z_przebiegiem(tmp_path)
+    bramy = _bramy_watkow(monkeypatch)
+    polowy, prawdziwa = _pada_w(monkeypatch, miejsce)
+    wyjatki = []
+    monkeypatch.setattr(sys, "excepthook", lambda typ, exc, tb: wyjatki.append(exc))
+    win = _okno(sciezka)
+    try:
+        _klik_nav(win, app_mod.NAV_ZNAJDZ)
+        assert len(wyjatki) == 1 and "konstruktor gridu padł" in str(wyjatki[0]), wyjatki
+        assert len(polowy) == 1
+        assert polowy[0]._zbior_thread is None and polowy[0]._pola_thread is None, "wątek tła poza sprzątaniem"
+        assert _blokada_wolna(sciezka), "blokada szuflady została przy pół-zbudowanym widoku"
+        assert win.stack.currentIndex() == STRONA_DOM and "grid_view" not in win._strony
+        monkeypatch.setattr(FramesView, miejsce, prawdziwa)       # „okno błędu zamknięte” - ponów
+        bramy["zbior"].set()
+        bramy["pola"].set()
+        _klik_nav(win, app_mod.NAV_ZNAJDZ)
+        drugi = win._strony["grid_view"]
+        assert drugi._run_id == "R"
+        assert drugi.drawer.label.text() == i18n.t_plural("grid.drawer.pending_prev", 1)
+        assert drugi.drawer.result.text() != i18n.t("grid.drawer.foreign_owner", pid=os.getpid())
+    finally:
+        bramy["zbior"].set()
+        bramy["pola"].set()
+        win.close()
+
+
+def test_porazka_konstruktora_gridu_z_rodzicem_odpina_widok(qapp, tmp_path, monkeypatch):
+    """Widok budowany z rodzicem (publiczna droga konstruktora): porażka po starcie wątków zbiera je, oddaje
+    blokadę szuflady i odpina widok od rodzica - rodzic nie trzyma pół-zbudowanego dziecka z połączeniami
+    (obiekt Pythona żyje w śladzie wyjątku). Falsyfikator: obwódka bez odpięcia od rodzica."""
+    from PySide6.QtWidgets import QWidget
+    from horreum import db
+    from horreum.gui.grid import FramesView
+    from test_gui_znajdz_szerokosci import _bramy_watkow
+    sciezka = _baza_z_przebiegiem(tmp_path)
+    bramy = _bramy_watkow(monkeypatch)
+    polowy, _prawdziwa = _pada_w(monkeypatch, "_przywroc_panel_rodowodu")
+    con = db.connect(sciezka)
+    rodzic = QWidget()
+    try:
+        with pytest.raises(RuntimeError, match="konstruktor gridu padł"):
+            FramesView(con, parent=rodzic, pola_poza_watkiem=True)
+        assert len(polowy) == 1
+        assert rodzic.findChildren(FramesView) == [] and polowy[0].parent() is None
+        assert polowy[0]._zbior_thread is None and polowy[0]._pola_thread is None
+        assert _blokada_wolna(sciezka)
+    finally:
+        bramy["zbior"].set()
+        bramy["pola"].set()
+        rodzic.close()
+        con.close()
+
+
 # ---------------------------------------------------------------- „Wciągnij z WBPP…” bez budowy Dostawy (AR-335)
 
 def _okna_zniw(monkeypatch):

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
 from horreum import db, repo, sky, targets
 from horreum.gui import i18n, planner_model as pm, queries, theme
 from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
+from horreum.gui.szerokosci import szerokosci_kolumn   # szerokości kolumn z treści bez Qt (AR-175, AR-346)
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198, AR-218)
                                    tekst_powodu, wiersz_systemu)
 from horreum.item_reasons import powod_okna   # jedna reguła wyjątku okna (AR-209, AR-214)
@@ -119,20 +120,6 @@ _PARK_UNSAID = "unsaid"
 
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
-
-
-def szerokosci_kolumn(metryka, wiersze, pola, margines, podpowiedzi):
-    """Szerokość każdej kolumny listy planera = najszerszy tekst komórki (`metryka(tekst)` - szerokość
-    w px, sufit) plus `margines` elementu widoku, nie mniej niż `podpowiedzi[c]` (podpowiedź sekcji
-    nagłówka). To ta sama liczba, którą daje `ResizeToContents` (`max(sizeHintForColumn,
-    sectionSizeHint)`) dla komórek z samym tekstem - zmierzone natywnie: 11/11 kolumn równo, PL i EN,
-    485 wierszy kopii pf4; ~30-40 ms wobec ~1,1-1,4 s przejścia Qt. Czysta funkcja: metryka podana
-    z zewnątrz, więc rachunek da się sprawdzić bez okna (AR-175)."""
-    out = []
-    for c, pole in enumerate(pola):
-        tekst = max((metryka(str(getattr(w, pole))) for w in wiersze), default=0)
-        out.append(max(tekst + margines, podpowiedzi[c]))
-    return out
 
 
 class PlanWorker(QObject):
@@ -1321,15 +1308,17 @@ class PlannerView(QWidget):
             self.panel_note.setModified(True)
 
     def _dopasuj_kolumny(self):
-        """Szerokości kolumn listy do treści (`szerokosci_kolumn`, AR-175) - raz na wynik, przy planerze
-        widocznym i niewidocznym (przejście po wierszach metryką fontu, ~30-40 ms na 485 wierszach).
+        """Szerokości kolumn listy do treści (`szerokosci.szerokosci_kolumn`, AR-175) - raz na wynik, przy
+        planerze widocznym i niewidocznym (przejście po WSZYSTKICH wierszach metryką fontu, ~30-40 ms na 485
+        wierszach; zmierzone natywnie: 11/11 kolumn równo z `ResizeToContents`, PL i EN, 485 wierszy kopii pf4).
         Margines elementu widoku to wzór `QCommonStyle` dla komórki z tekstem: 2 × (`PM_FocusFrameHMargin`
         + 1) i linia siatki. Ostatnia kolumna (Notatka) rozciąga się do reszty szerokości - bez wpisu."""
         t, hh = self.table, self.table.horizontalHeader()
         fm = QFontMetricsF(t.font())
         margines = (2 * (t.style().pixelMetric(QStyle.PM_FocusFrameHMargin, None, t) + 1)
                     + (1 if t.showGrid() else 0))
-        szer = szerokosci_kolumn(lambda s: math.ceil(fm.horizontalAdvance(s)), self.model._rows,
+        szer = szerokosci_kolumn(lambda w, pole: math.ceil(fm.horizontalAdvance(str(getattr(w, pole)))),
+                                 self.model._rows,
                                  [pole for _klucz, pole in _COLUMNS], margines,
                                  [hh.sectionSizeHint(c) for c in range(len(_COLUMNS))])
         for c, w in enumerate(szer[:-1]):

@@ -50,10 +50,13 @@ def _py_files():
     return sorted(PKG.rglob("*.py"))
 
 
-# Szum SQL zdejmowany przed szukaniem czasownika: komentarze `--` i `/* */`, napisy `'...'` (z `''` w środku)
-# oraz akcja klucza obcego `ON DELETE`/`ON UPDATE` w DDL (`REFERENCES x ON DELETE CASCADE` to nie zapis).
-_SQL_SZUM = re.compile(r"--[^\n]*|/\*.*?(?:\*/|\Z)|'(?:[^']|'')*'?|\bON\s+(?:DELETE|UPDATE)\b",
-                       re.DOTALL | re.IGNORECASE)
+# Szum SQL zdejmowany przed szukaniem czasownika: komentarze `--` i `/* */`, napisy `'...'` (z `''` w środku),
+# identyfikatory w cudzysłowie SQLite (`"..."` z `""`, `` `...` ``, `[...]` - `AS "--"` nie otwiera komentarza,
+# a `AS "DELETE"` nie jest zapisem) oraz akcja klucza obcego `ON DELETE`/`ON UPDATE` w DDL (`REFERENCES x ON
+# DELETE CASCADE` to nie zapis). Jedno wyrażenie z alternatywą: skan od lewej bierze w każdym miejscu tę formę,
+# która tam się zaczyna, więc znak komentarza w napisie albo identyfikatorze nie zjada reszty literału.
+_SQL_SZUM = re.compile(r"--[^\n]*|/\*.*?(?:\*/|\Z)|'(?:[^']|'')*'?|\"(?:[^\"]|\"\")*\"?|`[^`]*`?|\[[^\]]*\]?"
+                       r"|\bON\s+(?:DELETE|UPDATE)\b", re.DOTALL | re.IGNORECASE)
 # `REPLACE(` to funkcja SQL (`SELECT replace(path, ...)`), nie zapis.
 _SQL_CZASOWNIK = re.compile(r"\b(INSERT|UPDATE|DELETE|UPSERT|REPLACE(?!\s*\())\b", re.IGNORECASE)
 
@@ -185,11 +188,16 @@ def test_bramki_db_lapia_obejscia(zrodlo, bramka):
     "WITH x AS (SELECT 1) DELETE FROM frame",
     "/* k */ DELETE FROM frame",
     "select 1;\n  insert or replace into frame (id) values (1)",
+    'SELECT 1 AS "--"; DELETE FROM frame',
+    "SELECT 1 AS [--]; DELETE FROM frame",
+    "SELECT 1 AS `/*`; DELETE FROM frame",
 ], ids=["dml_za_pragma", "dml_za_ddl", "dml_za_komentarzem_liniowym", "prefiks_cte", "komentarz_blokowy",
-        "male_litery_w_drugiej_instrukcji"])
+        "male_litery_w_drugiej_instrukcji", "znak_komentarza_w_identyfikatorze_cudzyslow",
+        "znak_komentarza_w_identyfikatorze_nawias", "znak_komentarza_w_identyfikatorze_backtick"])
 def test_bramka_modulu_lapie_dml_poza_pierwsza_instrukcja(sql):
     """AR-328: literał, którego pierwsza instrukcja nie jest zapisem, a dalsza (albo główna po CTE czy
-    komentarzu) jest - bramka modułu spoza repo.py i bramka DML `db.py` łapią go tak samo jak gołe DELETE."""
+    komentarzu) jest - bramka modułu spoza repo.py i bramka DML `db.py` łapią go tak samo jak gołe DELETE.
+    Znak komentarza w identyfikatorze w cudzysłowie (`AS "--"`, `[--]`, `` `/*` ``) nie zjada dalszej instrukcji."""
     tree = ast.parse(f"con.executescript({sql!r})\n")
     assert _naruszenia("scan.py", tree), sql
     assert _dml_db(tree)[0], sql
@@ -204,11 +212,15 @@ def test_bramka_modulu_lapie_dml_poza_pierwsza_instrukcja(sql):
     "SELECT id /* DELETE FROM frame; */ FROM frame",
     "CREATE TABLE t (a INTEGER REFERENCES frame(id) ON DELETE CASCADE ON UPDATE NO ACTION)",
     "SELECT updated_at, deleted FROM location",
+    'SELECT 1 AS "DELETE", "a""UPDATE" FROM frame',
+    "SELECT [update], `insert` FROM frame",
 ], ids=["funkcja_replace", "srednik_w_napisie", "dml_w_napisie", "dml_w_komentarzu", "dml_w_komentarzu_blokowym",
-        "akcja_klucza_obcego", "slowa_z_przedrostkiem"])
+        "akcja_klucza_obcego", "slowa_z_przedrostkiem", "czasownik_jako_identyfikator_w_cudzyslowie",
+        "czasownik_jako_identyfikator_w_nawiasie_i_backticku"])
 def test_bramka_modulu_bez_falszywego_alarmu(sql):
     """Kontrola fałszywego alarmu tokenizera AR-328: funkcja `replace()`, napis i komentarz z tekstem DML,
-    średnik w napisie, akcja klucza obcego w DDL i kolumny o nazwach z czasownikiem nie są zapisem."""
+    średnik w napisie, akcja klucza obcego w DDL, kolumny o nazwach z czasownikiem i czasownik jako identyfikator
+    w cudzysłowie (`"DELETE"`, `[update]`, `` `insert` ``) nie są zapisem."""
     tree = ast.parse(f"con.execute({sql!r})\n")
     assert not _naruszenia("scan.py", tree), sql
     assert not _dml_db(tree)[0], sql

@@ -672,12 +672,14 @@ def _goracy_wal_bez_shm(katalog):
         con.execute("CREATE TABLE t (x)")
         con.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(200)])
         con.commit()
+        strona = con.execute("PRAGMA page_size").fetchone()[0]
         baza = katalog / "h.db"
         shutil.copyfile(zrodlo, baza)
         shutil.copyfile(f"{zrodlo}-wal", f"{baza}-wal")
     finally:
         con.close()
-    assert os.path.getsize(f"{baza}-wal") > 0 and not os.path.exists(f"{baza}-shm")
+    # Nagłówek WAL (32 B) i co najmniej jedna pełna ramka (24 B nagłówka ramki + strona) - sam nagłówek to WAL pusty.
+    assert os.path.getsize(f"{baza}-wal") >= 32 + 24 + strona and not os.path.exists(f"{baza}-shm")
     return baza
 
 

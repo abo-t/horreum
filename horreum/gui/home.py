@@ -699,7 +699,8 @@ class HomeView(QWidget):
         „Wciągnij z WBPP…” z menu „Więcej…” gaśnie tak samo: „Zamknij i przyjmij” okna żniw
         uruchamia łańcuch Dostawy, który w biegu odmówi, a wtedy rodowód dokładny wciągniętych
         stosów zostaje tylko w folderze wydania. Podpowiedź to zdanie odmowy złotej akcji;
-        bramkę przed oknem trzyma i tak gospodarz (`PipelineView.powod_odmowy_biegu`)."""
+        bramkę przed oknem trzyma i tak gospodarz (`MainWindow._on_open_harvest` - reguła
+        `dostawa_bramka.powod_odmowy_biegu`, bez budowy strony Dostawy, AR-335)."""
         self.tile_wydaj.setEnabled(not busy)
         self.tile_wydaj.setToolTip(i18n.t("home.tile.release_busy") if busy
                                    else i18n.t("home.tile.release_tip"))
@@ -708,7 +709,7 @@ class HomeView(QWidget):
 
     def set_writeback_busy(self, busy):
         """Zapis nagłówków do plików: „Wciągnij z WBPP…” gaśnie z tego samego powodu co w biegu
-        Dostawy - łańcuch po „Zamknij i przyjmij” odmówiłby (`PipelineView.powod_odmowy_biegu`).
+        Dostawy - łańcuch po „Zamknij i przyjmij” odmówiłby (`dostawa_bramka.powod_odmowy_biegu`).
         Osobny stan, nie `set_busy`: koniec zapisu nie może zapalić pozycji w trwającym biegu."""
         self._zniwa_zapis = bool(busy)
         self._sync_zniwa()

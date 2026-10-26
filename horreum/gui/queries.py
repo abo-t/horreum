@@ -313,6 +313,27 @@ def open_telescope_adds(con):
         "SELECT DISTINCT telescope_id FROM telescope_add WHERE undone_at IS NULL").fetchall()}
 
 
+# ------------------------------------------------ tożsamość zamiaru odłożonej recepty osi (AR-336)
+# Wpis kolejki odłożonych recept (`app._Odlozona`) żyje w pamięci okna, kluczowany ścieżką bazy - plik podmieniony pod
+# tą samą ścieżką inną biblioteką ma te same NUMERY commitów i teleskopów. Tożsamość zamiaru (`ObjectAxisView._zywy`)
+# czyta się z bazy przy odłożeniu i porównuje przy każdym podaniu.
+
+def przebieg_commitu(con, commit_id):
+    """`commits.run_id` commitu kart (uuid4 klingi zapisu - jeden na przebieg) albo `None`, gdy commitu nie ma."""
+    row = con.execute("SELECT run_id FROM commits WHERE id = ?", (commit_id,)).fetchone()
+    return None if row is None else row[0]
+
+
+def slad_dopisania(con, telescope_id):
+    """Ślad NIECOFNIĘTEGO gestu „Dopisz nowy…” teleskopu (`telescope_add`, 0040): `(first_event_id, created_at)`
+    najnowszego otwartego wiersza albo `None`. `first_event_id` to numer zdarzenia dziennika TEJ bazy, `created_at` -
+    zegar gestu z mikrosekundami (`datetime.now(timezone.utc).isoformat()`)."""
+    row = con.execute(
+        "SELECT first_event_id, created_at FROM telescope_add WHERE telescope_id = ? AND undone_at IS NULL "
+        "ORDER BY id DESC LIMIT 1", (telescope_id,)).fetchone()
+    return None if row is None else (row[0], row[1])
+
+
 def merged_under(con, canon_id):
     """Teleskopy scalone „pod" danym kanonem (widok szczegółu — co zwinięto w ten teleskop). Dzięki
     inwariantowi głębokość ≤ 1 (§3a) wszystkie są BEZPOŚREDNIMI członkami (`merged_into = canon_id`),

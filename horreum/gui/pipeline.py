@@ -32,6 +32,7 @@ from horreum.gui.kolko import kolko                # kółko myszy przestawia po
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198)
                                    tekst_powodu, wiersz_systemu)
+from horreum.gui import dostawa_bramka   # bramka biegu i napis gestu kopii bez Qt - czytają je też gospodarz i Porządki
 from horreum.item_reasons import powod_okna       # wyjątek etapu jedną regułą okna (AR-264)
 from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
@@ -520,16 +521,6 @@ def naglowek_etapu(name):
     """`[etap] ` - nagłówek każdej linii logu Dostawy (`pipeline.fmt.head`, AR-115). Klucze linii
     niosą samą treść; nagłówek dokleja wyłącznie ta funkcja."""
     return i18n.t("pipeline.fmt.head", stage=_nazwa_etapu(name))
-
-
-def etykieta_gestu_kopii(czeka):
-    """Napis gestu faktów kopii z `scan.CopyFactsWaiting` (AR-315) - JEDNO miejsce wyboru: przycisk Dostawy
-    (`PipelineView._sync_copy_facts`) i podpowiedź wiersza bajtów w Porządkach (AR-327) nazywają go tak samo."""
-    if czeka.facts and czeka.bytes:
-        return i18n.t("pipeline.btn.copy_both", fakty=czeka.facts, bajty=czeka.bytes)
-    if czeka.bytes:
-        return i18n.t("pipeline.btn.copy_bytes", n=czeka.bytes)
-    return i18n.t("pipeline.btn.copy_facts", n=czeka.facts)
 
 
 def etykieta_przyjmij_nowe():
@@ -1232,7 +1223,7 @@ class PipelineView(QWidget):
                 con.close()
         n = czeka.copies
         self._copy_facts_waiting = n
-        gest = etykieta_gestu_kopii(czeka)
+        gest = dostawa_bramka.etykieta_gestu_kopii(czeka)
         czas = zdanie_czasu(n * MS_NA_KOPIE / 1000)
         tip, why = [], []
         if czeka.facts:
@@ -1391,14 +1382,13 @@ class PipelineView(QWidget):
         sekwencja „all” nie może ruszyć TERAZ (brak bazy, bieg Dostawy w toku, zapis nagłówków do
         plików), albo `None`. Woła ją `receive`, `run_all_on` i gospodarz PRZED gestem, który
         kończy się biegiem - okno żniw: „Zamknij i przyjmij” to `run_all_on`, a odmowa po
-        przyjęciu gubiła rodowód dokładny wciągniętych stosów (zostaje tylko w folderze wydania)."""
-        if self._db_path is None:
-            return i18n.t("pipeline.refuse.no_db")
-        if self._thread is not None:
-            return i18n.t("pipeline.refuse.delivery_running")
-        if self._writeback_busy:
-            return i18n.t("pipeline.refuse.writeback")
-        return None
+        przyjęciu gubiła rodowód dokładny wciągniętych stosów (zostaje tylko w folderze wydania).
+
+        Reguła mieszka w `dostawa_bramka.powod_odmowy_biegu` (AR-335) - ten widok podaje jej WŁASNY stan, także bieg
+        etapu bez bazy (`ETAPY_BEZ_BAZY`: `_thread` jest, a `running_changed` nie pada); gospodarz bez zbudowanej Dostawy
+        podaje swoje zatrzaski, zamiast budować stronę dla samego powodu."""
+        return dostawa_bramka.powod_odmowy_biegu(baza=self._db_path is not None, bieg=self._thread is not None,
+                                                 zapis=self._writeback_busy)
 
     def _pick_and_scan(self, stage):
         """Pytanie o katalog (pierwsza dostawa albo źródło niedostępne), zapamiętanie go jak

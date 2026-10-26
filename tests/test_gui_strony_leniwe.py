@@ -738,3 +738,95 @@ def test_zamkniecie_okna_przed_dobudowa_nie_buduje_niczego(qapp, tmp_path, monke
         QApplication.processEvents()
     assert gridy == [] and wyjatki == [], (gridy, wyjatki)
     assert STRONA_ZBIORY in win._zaslepki and win.con is None
+
+
+# ---------------------------------------------------------------- „Wciągnij z WBPP…” bez budowy Dostawy (AR-335)
+
+def _okna_zniw(monkeypatch):
+    """Okno żniw podmienione modułem w `sys.modules` (droga gospodarza importuje je leniwie): lista połączeń okien
+    utworzonych przez gospodarza; okno wraca bez wciągnięcia (`harvested_root=None`)."""
+    import types
+    okna = []
+
+    class _OknoZniw:
+        def __init__(self, con, **_kw):
+            okna.append(con)
+            self.summary, self.harvested_root, self.harvested_stacks = "", None, []
+
+        def exec(self):
+            return 0
+    modul = types.ModuleType("horreum.gui.harvest_dialog")
+    modul.HarvestDialog = _OknoZniw
+    monkeypatch.setitem(sys.modules, "horreum.gui.harvest_dialog", modul)
+    return okna
+
+
+def test_wciagnij_z_domu_bez_wciagniecia_nie_buduje_dostawy(qapp, tmp_path, monkeypatch):
+    """AR-335: „Więcej… → Wciągnij z WBPP…” z Domu otwiera okno żniw, a strona Dostawy nie powstaje - powód odmowy
+    biegu przy niezbudowanej Dostawie mówią zatrzaski gospodarza. Falsyfikator: bramka z odczytu property
+    `pipeline_view` (budowa całej Dostawy dla samego powodu)."""
+    from horreum.gui import home as home_mod
+    okna = _okna_zniw(monkeypatch)
+    win = _okno(_baza(tmp_path))
+    try:
+        assert STRONA_DOSTAWA not in _zbudowane(win)
+        win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA].trigger()
+        assert okna == [win.con]
+        assert STRONA_DOSTAWA not in _zbudowane(win)
+    finally:
+        win.close()
+
+
+def test_wciagnij_przy_zapisie_zbiorow_odmawia_bez_budowy_dostawy(qapp, tmp_path, monkeypatch):
+    """AR-335: zapis Zbiorów do plików w toku (prawdziwy uchwyt `grid._wb`) - wejście gospodarza w „Wciągnij z WBPP…”
+    (pozycja Domu jest wtedy wygaszona, więc wprost) odmawia zdaniem zapisu, okna nie otwiera i Dostawy nie buduje.
+    Falsyfikator: gałąź bez zatrzasku zapisu gospodarza (okno otwiera się w czasie zapisu)."""
+    from horreum.gui import home as home_mod, i18n
+    okna = _okna_zniw(monkeypatch)
+    win = _okno(_baza(tmp_path))
+    try:
+        grid = win.grid_view
+        grid._wb.busy_changed.emit(True)
+        try:
+            win._on_wiecej_domu(home_mod.WIECEJ_ZNIWA)
+            assert okna == []
+            assert str(win._pelny_komunikat) == i18n.t("pipeline.refuse.writeback")
+            assert STRONA_DOSTAWA not in _zbudowane(win)
+        finally:
+            grid._wb.busy_changed.emit(False)
+    finally:
+        win.close()
+
+
+def test_wciagnij_przy_sondzie_zrodla_zbudowanej_dostawy_odmawia_stanem_widoku(qapp, tmp_path, monkeypatch, ustawienia):
+    """AR-335: Dostawa zbudowana, w biegu sama sonda źródła („Wskaż katalog…”, etap `probe` bez bazy) - wątek
+    widoku jest, a `running_changed` nie pada, więc zatrzask biegu gospodarza stoi na fałszu. Odmowa biegu przychodzi
+    ze stanu widoku (`PipelineView.powod_odmowy_biegu`), okno żniw się nie otwiera. Falsyfikator: gospodarz pyta
+    własnych zatrzasków także przy zbudowanej Dostawie."""
+    import threading
+    from PySide6.QtWidgets import QFileDialog
+    from horreum.gui import home as home_mod, i18n
+    from horreum.gui.pipeline import PipelineWorker
+    okna = _okna_zniw(monkeypatch)
+    katalog = tmp_path / "zrodlo"
+    katalog.mkdir()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(katalog)))
+    puszczona = threading.Event()
+    prawdziwa_sonda = PipelineWorker._zrodlo
+
+    def _sonda_za_brama(self, *a, **k):
+        puszczona.wait(30)
+        return prawdziwa_sonda(self, *a, **k)
+    monkeypatch.setattr(PipelineWorker, "_zrodlo", _sonda_za_brama)
+    win = _okno(_baza(tmp_path))
+    try:
+        pipeline = win.pipeline_view
+        pipeline._on_pick_dir()
+        assert pipeline._thread is not None and not win._dostawa_w_biegu
+        win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA].trigger()
+        assert okna == []
+        assert str(win._pelny_komunikat) == i18n.t("pipeline.refuse.delivery_running")
+    finally:
+        puszczona.set()
+        _czekaj(lambda: win._gotowy("pipeline_view")._thread is None, "koniec sondy źródła")
+        win.close()

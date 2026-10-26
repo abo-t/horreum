@@ -1305,3 +1305,297 @@ def test_wpis_cofniecia_kart_bez_czego_cofac_schodzi_po_cichu(qapp, tmp_path, mo
         assert win._kolejki_osi[queries.klucz_bazy(str(path))] == []
     finally:
         win.close()
+
+
+# ------------------------------------------------------------ AR-348: aktywacja okna jako chwila podania, koniec blokady
+
+def _pokazane(sciezka, monkeypatch):
+    """`_okno` pokazane i aktywne - aktywacja (`MainWindow.changeEvent`) potrzebuje okna na ekranie (offscreen)."""
+    from test_gui_pasek_szczegol import _czekaj
+    win = _okno(sciezka, monkeypatch)
+    win.resize(1400, 900)
+    win.show()
+    win.activateWindow()
+    _czekaj(lambda: QApplication.activeWindow() is win, "okno aktywne")
+    return win
+
+
+def _cofnij_dopisanie_obok(sciezka, tid):
+    """„Cofnij dopisanie” drugim połączeniem - jak drugie okno albo CLI: w tym oknie nie pada żadne zdarzenie."""
+    con = db.open_db(sciezka)
+    try:
+        repo.undo_new_telescope(con, telescope_id=tid, now=NOW)
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("droga", ["drugie_okno", "modal"])
+def test_aktywacja_okna_zdejmuje_martwa_recepte_dopisania_z_paska_porzadkow(qapp, tmp_path, monkeypatch, droga):
+    """AR-348: recepta „Cofnij dopisanie” podana w Porządkach, gest zamknięty poza oknem drugim połączeniem - przed
+    powrotem z innego okna (`drugie_okno`) albo pod oknem modalnym tego okna (`modal`: prawdziwe `exec()`, zamknięte
+    `reject`). Bez zdarzenia w oknie recepta stoi; powrót do okna (aktywacja) zdejmuje ją z paska i ze stanu, a wpis
+    z kolejki. Obie drogi kończą się tą samą linią produktu (jedno `changeEvent`, bez gałęzi modala), więc falsyfikator
+    jest jeden: okno bez obsługi aktywacji (martwa recepta do najbliższej chwili podania)."""
+    from PySide6.QtCore import QTimer
+    from horreum.gui.app import NAV_PORZADKI
+    from test_gui_grid_szuflada import _aktywuj
+    from test_gui_pasek_szczegol import _czekaj
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    win = _pokazane(a, monkeypatch)
+    ov = win.object_view
+    try:
+        win._show_view(NAV_PORZADKI)
+        ov.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        ov.set_busy(False)
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.ready", telescope=etykieta)
+        assert win._recepta_porzadkow_stan is not None and win.recipe_label.isVisible()
+        if droga == "drugie_okno":
+            _cofnij_dopisanie_obok(a, tid)
+        else:
+            okno = QDialog(win)
+            okno.setModal(True)
+
+            def _w_modalu():
+                _cofnij_dopisanie_obok(a, tid)
+                okno.reject()
+            bezpiecznik = QTimer()
+            bezpiecznik.setSingleShot(True)
+            bezpiecznik.timeout.connect(okno.reject)            # okno zamyka się samo, gdyby krok nie przeszedł
+            bezpiecznik.start(10000)
+            QTimer.singleShot(50, _w_modalu)
+            try:
+                okno.exec()
+            finally:
+                bezpiecznik.stop()
+            # Offscreen nie ma menedżera okien, który po zamknięciu modala oddaje aktywację rodzicowi (platforma
+            # natywna robi to sama) - test oddaje ją niżej jawnie: przejście aktywacji okno modalne → okno główne.
+            assert QApplication.activeWindow() is not win
+        assert win._recepta_porzadkow_stan is not None        # bez zdarzenia w oknie stoi
+        if droga == "drugie_okno":
+            _aktywuj(win)
+        else:
+            win.activateWindow()
+            _czekaj(lambda: QApplication.activeWindow() is win, "okno aktywne po modalu")
+        assert win._recepta_porzadkow_stan is None
+        assert not win.recipe_label.isVisible()
+        assert win._kolejki_osi[queries.klucz_bazy(a)] == []
+    finally:
+        win.close()
+
+
+def test_sama_dezaktywacja_okna_zostawia_martwa_recepte(qapp, tmp_path, monkeypatch):
+    """AR-348: odejście do innego okna bez powrotu nie jest chwilą podania - recepta „Cofnij dopisanie”, której gest
+    zamknięto poza oknem, stoi na pasku i w stanie, a martwy wpis w kolejce, dopóki okno nie wróci do aktywnych (pasek
+    czyta się po powrocie; czyszczenie przy odejściu dokładałoby drugi odczyt bazy na każde odejście i powrót).
+    Falsyfikator: `changeEvent` bez `isActiveWindow()` (czyszczenie także przy dezaktywacji)."""
+    from PySide6.QtWidgets import QWidget
+    from horreum.gui.app import NAV_PORZADKI
+    from test_gui_pasek_szczegol import _czekaj
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    win = _pokazane(a, monkeypatch)
+    ov = win.object_view
+    inne = QWidget()
+    try:
+        win._show_view(NAV_PORZADKI)
+        ov.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        ov.set_busy(False)
+        assert win._recepta_porzadkow_stan is not None
+        _cofnij_dopisanie_obok(a, tid)
+        inne.resize(200, 100)
+        inne.show()
+        inne.activateWindow()
+        _czekaj(lambda: QApplication.activeWindow() is inne, "drugie okno aktywne")
+        assert win._recepta_porzadkow_stan is not None and win.recipe_label.isVisible()
+        [wpis] = win._kolejki_osi[queries.klucz_bazy(a)]
+        assert not ov._zywy(wpis)                       # wpis martwy w bazie - stoi wyłącznie z braku powrotu
+    finally:
+        inne.close()
+        win.close()
+
+
+def test_aktywacja_okna_zdejmuje_martwe_zdanie_cofniecia_kart_poza_porzadkami(qapp, tmp_path, monkeypatch):
+    """AR-348: gotowość „Cofnij zapis (commit N)” ma szczegół (polecenie CLI) i nie ma miejsca, więc stoi na pasku
+    KAŻDEJ strony; commit cofnięty poza oknem (rdzeń na drugim połączeniu - jak `header-fix --undo`) przy Domu na
+    ekranie: powrót do okna zdejmuje martwe zdanie i stan recepty. Falsyfikatory: brak obsługi aktywacji; czyszczenie
+    z `WindowActivate` Porządków (dociera tylko do widocznych dzieci - na Domu Porządków nie widać)."""
+    from horreum.gui.app import NAV_DOM, MainWindow
+    from test_gui_grid_recepty import _naprawa_prawdziwym_exec, _okno_naprawy
+    from test_gui_grid_szuflada import _aktywuj
+    from test_gui_pasek_szczegol import _czekaj
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    win, path, _pliki = _okno_naprawy(tmp_path)
+    ov = win.object_view
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        ov.set_busy(True)
+        win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
+        ov.set_busy(False)
+        gotowosc = i18n.t("wb.undo_recipe_ready", id=commit)
+        assert str(win._pelny_komunikat) == gotowosc
+        win._show_view(NAV_DOM)
+        win.activateWindow()
+        _czekaj(lambda: QApplication.activeWindow() is win, "okno aktywne")
+        assert str(win._pelny_komunikat) == gotowosc           # zdanie bez miejsca stoi na Domu
+        con = db.open_db(str(path))
+        try:
+            assert writeback.undo(con, commit, now=NOW).complete
+        finally:
+            con.close()
+        _aktywuj(win)
+        assert gotowosc not in str(win._pelny_komunikat)
+        assert win._recepta_porzadkow_stan is None
+        assert win._kolejki_osi[queries.klucz_bazy(str(path))] == []
+    finally:
+        win.close()
+
+
+def test_koniec_zapisu_podaje_wpis_za_martwa_recepta_podana_przy_wejsciu(qapp, tmp_path, monkeypatch):
+    """AR-348 (droga końca blokady): A „dopisanie” odłożony w etapie, podany i zgaszony cudzym raportem; zapis Zbiorów
+    w biegu (prawdziwy uchwyt `grid._wb`); B „karty” odłożony w tym zapisie; wejście w Porządki podaje ponownie A; A
+    cofnięty poza oknem; koniec zapisu - pasek mówi gotowość B, a stan recepty to recepta B. Falsyfikator: czyszczenie
+    martwych wpisów PO straży stojącej recepty (straż widzi żywą receptę A i nic nie podaje)."""
+    from horreum.gui.app import NAV_DOM, NAV_PORZADKI, MainWindow
+    from test_gui_grid_recepty import _naprawa_prawdziwym_exec, _okno_naprawy_z_kamera
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    win, path, _pliki = _okno_naprawy_z_kamera(tmp_path)
+    ov = win.object_view
+    etykieta = "RC8 0.5x"
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        karty = win._recepta_porzadkow_stan[0]
+        fids = [r[0] for r in win.con.execute("SELECT id FROM frame ORDER BY id")]
+        tid, _g = repo.user_assign_config_new_telescope(win.con, frame_ids=fids, name=etykieta, focal_mm=800.0,
+                                                         now=NOW)
+        ov.set_busy(True)
+        ov._recepta_cofniecia_dopisania(tid, etykieta).czlony[0].wykonaj()
+        ov.set_busy(False)
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.ready", telescope=etykieta)
+        win._flash("cudzy raport")
+        grid = win.grid_view
+        grid._wb.busy_changed.emit(True)
+        karty.czlony[0].wykonaj()
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_foreign", id=commit)
+        win._show_view(NAV_DOM)
+        win._show_view(NAV_PORZADKI)
+        assert i18n.t("object.config_undo_add.ready", telescope=etykieta) in str(win._pelny_komunikat)
+        _cofnij_dopisanie_obok(str(path), tid)
+        grid._wb.busy_changed.emit(False)
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_ready", id=commit)
+        stan = win._recepta_porzadkow_stan
+        assert stan is not None and stan[0].czlony[0].tekst == i18n.t("wb.undo_recipe", id=commit)
+    finally:
+        win.close()
+
+
+# ------------------------------------------------------------ AR-336: tożsamość zamiaru we wpisie kolejki
+
+NOW_INNY = "2026-10-12T10:00:00.123456+00:00"
+
+
+def _baza_z_dopisaniem_w(katalog, now):
+    """`_baza_z_dopisanymi` w katalogu `katalog` z zegarem gestu `now` - druga biblioteka z gestem tego samego numeru
+    teleskopu i tymi samymi numerami zdarzeń (ten sam skrypt), różna wyłącznie chwilą gestu."""
+    con, obce, rc8 = _baza(katalog)
+    tid, _g = repo.user_assign_config_new_telescope(con, frame_ids=[obce[0]], name="RC8 0.5x", focal_mm=800.0,
+                                                     in_park=1, source_telescope_id=rc8, now=now)
+    con.close()
+    return str(katalog / "o.db"), tid
+
+
+def _bez_wal(sciezka):
+    for koncowka in ("-wal", "-shm"):
+        assert not os.path.exists(sciezka + koncowka), sciezka + koncowka
+
+
+def test_podmiana_pliku_bazy_inna_biblioteka_nie_podaje_cudzego_commitu(qapp, tmp_path, monkeypatch):
+    """AR-336: „Cofnij zapis (commit N)” odłożony w bibliotece A pod ścieżką P; okno przechodzi do B, a pod P trafia
+    inna biblioteka C z ŻYWYM commitem kart o tym samym numerze - powrót do P nie ogłasza gotowości (klik cofnąłby
+    commit C - zapis do jej plików), wpis schodzi z kolejki. Klucz kolejki zostaje ścieżką. Falsyfikator: `_zywy` bez
+    tożsamości zamiaru (`commits.run_id`)."""
+    import shutil
+    from horreum.gui.app import MainWindow
+    from test_gui_grid_recepty import _naprawa_prawdziwym_exec, _okno_naprawy
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "c").mkdir()
+    win_c, path_c, _pliki_c = _okno_naprawy(tmp_path / "c")
+    try:
+        commit_c = _naprawa_prawdziwym_exec(win_c)
+    finally:
+        win_c.close()
+    win, path, _pliki = _okno_naprawy(tmp_path / "a")
+    ov = win.object_view
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        assert commit == commit_c
+        ov.set_busy(True)
+        win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_busy", id=commit)
+        b = str(tmp_path / "b.db")
+        db.open_db(b).close()
+        win.open_path(b)
+        _bez_wal(str(path))
+        _bez_wal(str(path_c))         # commit C cały w pliku głównym - kopia niesie go, a nie stan sprzed niego
+        shutil.copyfile(path_c, path)
+        win.open_path(str(path))
+        assert str(win._pelny_komunikat) == i18n.t("main.db_loaded", path=str(path))
+        assert win._kolejki_osi[queries.klucz_bazy(str(path))] == []
+    finally:
+        win.close()
+
+
+def test_podmiana_pliku_bazy_nie_podaje_cudzego_dopisania(qapp, tmp_path, monkeypatch):
+    """AR-336: „Cofnij dopisanie” odłożony w A; pod tę ścieżkę trafia C z OTWARTYM gestem tego samego numeru teleskopu
+    i tymi samymi numerami zdarzeń, ale z inną chwilą gestu - powrót nie ogłasza gotowości, wpis schodzi. Falsyfikator:
+    tożsamość wyłącznie dla kart (dopisanie po samym numerze teleskopu)."""
+    import shutil
+    (tmp_path / "a").mkdir()
+    (tmp_path / "c").mkdir()
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path / "a")
+    c, tid_c = _baza_z_dopisaniem_w(tmp_path / "c", NOW_INNY)
+    assert tid_c == tid
+    b = str(tmp_path / "b.db")
+    db.open_db(b).close()
+    win = _okno(a, monkeypatch)
+    try:
+        win.object_view.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        win.open_path(b)
+        _bez_wal(a)
+        _bez_wal(c)                   # gest C cały w pliku głównym - kopia niesie go, a nie stan sprzed niego
+        shutil.copyfile(c, a)
+        win.open_path(a)
+        assert str(win._pelny_komunikat) == i18n.t("main.db_loaded", path=a)
+        assert win._kolejki_osi[queries.klucz_bazy(a)] == []
+    finally:
+        win.close()
+
+
+def test_przywrocona_kopia_tej_samej_biblioteki_podaje_wpis(qapp, tmp_path, monkeypatch):
+    """AR-336 (granica w drugą stronę): kopia TEJ SAMEJ biblioteki wraca pod ścieżkę - zamiar ten sam, więc gotowość
+    „Cofnij dopisanie” pada po otwarciu jak dotąd. Falsyfikator: tożsamość, która żadnej bazy nie uznaje za tę samą."""
+    import shutil
+    import sqlite3
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    kopia = str(tmp_path / "kopia.db")
+    b = str(tmp_path / "b.db")
+    db.open_db(b).close()
+    win = _okno(a, monkeypatch)
+    try:
+        win.object_view.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        zrodlo, cel = sqlite3.connect(a), sqlite3.connect(kopia)
+        try:
+            zrodlo.backup(cel)
+        finally:
+            zrodlo.close()
+            cel.close()
+        win.open_path(b)
+        _bez_wal(a)
+        shutil.copyfile(kopia, a)
+        win.open_path(a)
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.ready", telescope=etykieta)
+    finally:
+        win.close()

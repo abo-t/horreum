@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 
 from horreum import db, repo, resolver, scan, supersede, writeback
 from horreum.gui import i18n, queries, rows, theme
+from horreum.gui import dostawa_bramka   # napis gestu Dostawy bez modułu Dostawy (AR-337) - moduł bez Qt
 from horreum.gui.app import (
     _REVIEW_TAG, ROLA_RODZAJU_KOLORU, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView,
     _utc_now_iso,
@@ -381,10 +382,13 @@ def _stan_licznikow(con):
     porównania kopii nie ruszą.
 
     Kopie niezbadane wiersza bajtów (AR-327): podpowiedź nazywa gest Dostawy jego napisem
-    (`pipeline.etykieta_gestu_kopii`), a napis zależy od obu robót - `scan.copy_facts_waiting` liczy się tylko,
-    gdy wiersz ma kopie niezbadane (64-84 ms na kopii pf4): w wątku tła przy rachunku `w_tle`
-    (`_LicznikiWorker`), a na wątku GUI przy odczycie synchronicznym `refresh_counts` (wejście w Porządki,
-    powrót z podstrony, tryb bez wątków tła)."""
+    (`dostawa_bramka.etykieta_gestu_kopii` - moduł bez Qt, lista Porządków nie importuje modułu Dostawy, AR-337),
+    a napis zależy od obu robót - `scan.copy_facts_waiting` liczy się tylko, gdy wiersz ma kopie niezbadane: w wątku
+    tła przy rachunku `w_tle` (`_LicznikiWorker`), a na wątku GUI przy odczycie synchronicznym `refresh_counts`
+    (wejście w Porządki, powrót z podstrony, tryb bez wątków tła). Zmierzone natywnie na kopii pf4 zaraz po migracji
+    0046: 59-143 ms z 964-1271 ms całego rachunku (7 %); napis zastępczy z samego licznika niezbadanych kłamałby przy
+    faktach i bajtach naraz (test AR-327 `test_podpowiedz_wiersza_bajtow_nazywa_przycisk_dostawy`), więc ten rachunek
+    zostaje w obu trybach."""
     state = queries.tasks_state(con)
     state.update(_liczniki_osi(con))       # AR-59/AR-41 - od właścicieli predykatów
     if state.get("header_nonprintable_unread"):
@@ -1255,11 +1259,11 @@ class TasksView(QWidget):
                 tip += _zdanie_podzbioru(key, n - robota)
             if niezbadane:
                 # Podpowiedź nazywa PRZYCISK Dostawy jego napisem (AR-327) - nie etap „Fakty kopii”, którego
-                # w Dostawie nikt nie widzi. Stan spoza `_stan_licznikow` (atrapy) - napis z samych bajtów.
-                from horreum.gui.pipeline import etykieta_gestu_kopii
+                # w Dostawie nikt nie widzi. Stan spoza `_stan_licznikow` (atrapy) - napis z samych bajtów. Napis
+                # z modułu bez Qt (AR-337): wynik z tła nie importuje modułu Dostawy na wątku GUI.
                 czekaja = state.get("copy_facts_waiting") or scan.CopyFactsWaiting(bytes=niezbadane)
                 kopie = i18n.t_plural("tasks.header_nonprintable_unread_tip", niezbadane,
-                                      gest=etykieta_gestu_kopii(czekaja))
+                                      gest=dostawa_bramka.etykieta_gestu_kopii(czekaja))
                 tip = f"{tip}\n{kopie}" if tip else kopie
             elif czesciowe:
                 kopie = zdanie_kopii_bez_zeznania(

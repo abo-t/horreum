@@ -1662,7 +1662,7 @@ def _already_scanned(con, volume, path, mtime):
     w bazie I CZYTELNY — TANIA detekcja (`stat`) PRZED drogim `sha1_of` (pełny odczyt). Czysta funkcja
     `con→bool`, testowalna bez Qt.
 
-    STAŁY literał SELECT + bind `?` (f-string wysadziłby bramkę AST §8.1 — `_first_sql_verb`=None dla
+    STAŁY literał SELECT + bind `?` (f-string wysadziłby bramkę AST §8.1 - `_czasowniki_sql`=None dla
     nie-literału = offender poza repo.py/db.py). `UNIQUE(volume, path)` → ≤1 wiersz; `mtime`
     rozstrzyga „niezmieniony".
 

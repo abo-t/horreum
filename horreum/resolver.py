@@ -1342,8 +1342,8 @@ def nameless_lights(con):
     archiwum i kotwica nawrotu przestałaby pilnować tej, dla której powstała.
 
     Literał PEŁNY, mimo że bliźniaki niżej różnią się jednym słowem: wspólny prefiks + sklejenie
-    czyni SQL nie-literałem, a `_first_sql_verb` zwraca wtedy `None` = offender bramki AST §8.1
-    (złapane przebiegiem 2026-08-01 — bramka zadziałała dokładnie tak, jak miała)."""
+    czyni SQL nie-literałem, a `_czasowniki_sql` zwraca wtedy `None` = offender bramki AST §8.1
+    (złapane przebiegiem 2026-08-01 - bramka zadziałała dokładnie tak, jak miała)."""
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "

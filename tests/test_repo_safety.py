@@ -50,19 +50,22 @@ def _py_files():
     return sorted(PKG.rglob("*.py"))
 
 
-def _first_sql_verb(node):
-    """Pierwszy token SQL z literału (pomijając wiodące białe znaki i komentarze '--').
-    Zwraca UPPER token albo None gdy arg nie jest literałem stringa."""
-    if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+# Szum SQL zdejmowany przed szukaniem czasownika: komentarze `--` i `/* */`, napisy `'...'` (z `''` w środku)
+# oraz akcja klucza obcego `ON DELETE`/`ON UPDATE` w DDL (`REFERENCES x ON DELETE CASCADE` to nie zapis).
+_SQL_SZUM = re.compile(r"--[^\n]*|/\*.*?(?:\*/|\Z)|'(?:[^']|'')*'?|\bON\s+(?:DELETE|UPDATE)\b",
+                       re.DOTALL | re.IGNORECASE)
+# `REPLACE(` to funkcja SQL (`SELECT replace(path, ...)`), nie zapis.
+_SQL_CZASOWNIK = re.compile(r"\b(INSERT|UPDATE|DELETE|UPSERT|REPLACE(?!\s*\())\b", re.IGNORECASE)
+
+
+def _czasowniki_sql(node):
+    """Czasowniki DML WSZYSTKICH instrukcji literału SQL (UPPER, w kolejności) albo None, gdy arg nie jest
+    literałem stringa. AR-328: czasownik to słowo w KAŻDEJ instrukcji po zdjęciu szumu, nie pierwszy token
+    pierwszej linii - DML za `PRAGMA ...;`, prefiks CTE (`WITH x AS (...) DELETE`) i komentarz blokowy przed
+    `DELETE` nie są ucieczką (sonda 2026-10-26: 889 literałów pakietu, werdykt bez zmian)."""
+    if not _literal(node):
         return None
-    lines = []
-    for raw in node.value.splitlines():
-        stripped = raw.strip()
-        if stripped and not stripped.startswith("--"):
-            lines.append(stripped)
-    if not lines:
-        return ""
-    return lines[0].split(None, 1)[0].upper()
+    return [m.group(1).upper() for m in _SQL_CZASOWNIK.finditer(_SQL_SZUM.sub(" ", node.value))]
 
 
 def _exec_calls(tree):
@@ -73,22 +76,29 @@ def _exec_calls(tree):
             yield f.attr, arg0
 
 
+def _naruszenia(name, tree):
+    """Naruszenia jednej klingi w drzewie modułu `name` (nazwa pliku): DML w literale poza repo.py (poza
+    sankcjonowanym wpisem dziennika migracji w db.py) i SQL dynamiczny poza repo.py/db.py. Osobna funkcja,
+    żeby falsyfikator syntetyczny szedł tą samą drogą co pliki pakietu."""
+    zle = []
+    for method, arg0 in _exec_calls(tree):
+        verbs = _czasowniki_sql(arg0)
+        if verbs is None:
+            # SQL dynamiczny (zmienna/f-string) - nieweryfikowalny. Dozwolony tylko w domach.
+            if name not in (DOOR, INFRA):
+                zle.append(f"{name}: {method}(<dynamiczny SQL>) poza repo.py/db.py")
+        elif verbs and name != DOOR and not _dml_infra(name, arg0):
+            zle.append(f"{name}: {method}('{verbs[0]} ...') poza repo.py")
+    return zle
+
+
 def test_brak_dml_domenowego_poza_repo():
     """Statyczny meta-tripwir: DML (INSERT/UPDATE/DELETE/REPLACE) tylko w repo.py; SQL dynamiczny
     tylko w repo.py/db.py. Gwarancja: żaden moduł nie zapisze do bazy z pominięciem warstwy repo
     (a więc z pominięciem emisji `event`)."""
     offenders = []
     for src in _py_files():
-        name = src.name
-        tree = ast.parse(src.read_text(encoding="utf-8"))
-        for method, arg0 in _exec_calls(tree):
-            verb = _first_sql_verb(arg0)
-            if verb is None:
-                # SQL dynamiczny (zmienna/f-string) - nieweryfikowalny. Dozwolony tylko w domach.
-                if name not in (DOOR, INFRA):
-                    offenders.append(f"{name}: {method}(<dynamiczny SQL>) poza repo.py/db.py")
-            elif verb in WRITE_VERBS and name != DOOR and not _dml_infra(name, arg0):
-                offenders.append(f"{name}: {method}('{verb} ...') poza repo.py")
+        offenders += _naruszenia(src.name, ast.parse(src.read_text(encoding="utf-8")))
     assert not offenders, f"zapis do bazy poza jedną klingą: {offenders}"
 
 
@@ -97,7 +107,7 @@ def test_klinga_istnieje_w_repo():
     Gdyby ktoś usunął zapisy z repo.py, warstwa byłaby martwa - ten test to złapie."""
     repo = PKG / "repo.py"
     tree = ast.parse(repo.read_text(encoding="utf-8"))
-    verbs = {_first_sql_verb(a) for _, a in _exec_calls(tree)}
+    verbs = {v for _, a in _exec_calls(tree) for v in (_czasowniki_sql(a) or ())}
     assert verbs & set(WRITE_VERBS), "repo.py nie zawiera żadnego INSERT/UPDATE/DELETE - klinga martwa"
 
 
@@ -105,8 +115,8 @@ def _dml_db(tree):
     """`(DML domenowy, wpisy dziennika migracji)` drzewa `db.py`: literały z czasownikiem DML poza
     sankcjonowanym wpisem oraz INSTRUKCJE `INSERT INTO migration_log` we wszystkich literałach (instrukcja
     za `;` też się liczy - liczba instrukcji, nie wywołań)."""
-    bad = [v for _, a in _exec_calls(tree)
-           if (v := _first_sql_verb(a)) in WRITE_VERBS and not _dml_infra(INFRA, a)]
+    bad = [vs[0] for _, a in _exec_calls(tree)
+           if (vs := _czasowniki_sql(a)) and not _dml_infra(INFRA, a)]
     wpisy = [s for _, a in _exec_calls(tree) if _literal(a)
              for s in _instrukcje(a.value) if DML_INFRA.match(s)]
     return bad, wpisy
@@ -166,3 +176,39 @@ def test_bramki_db_lapia_obejscia(zrodlo, bramka):
     bad, wpisy = _dml_db(tree)
     wynik = {"dml": bool(bad), "wpisy": len(wpisy) != 1, "dynamiczny": bool(_dynamiczny_db(tree))}
     assert wynik[bramka], (bramka, bad, wpisy)
+
+
+@pytest.mark.parametrize("sql", [
+    "PRAGMA foreign_keys = ON; DELETE FROM frame",
+    "CREATE TABLE t(x); UPDATE frame SET kind = 'x'",
+    "SELECT 1; -- k\nDELETE FROM frame",
+    "WITH x AS (SELECT 1) DELETE FROM frame",
+    "/* k */ DELETE FROM frame",
+    "select 1;\n  insert or replace into frame (id) values (1)",
+], ids=["dml_za_pragma", "dml_za_ddl", "dml_za_komentarzem_liniowym", "prefiks_cte", "komentarz_blokowy",
+        "male_litery_w_drugiej_instrukcji"])
+def test_bramka_modulu_lapie_dml_poza_pierwsza_instrukcja(sql):
+    """AR-328: literał, którego pierwsza instrukcja nie jest zapisem, a dalsza (albo główna po CTE czy
+    komentarzu) jest - bramka modułu spoza repo.py i bramka DML `db.py` łapią go tak samo jak gołe DELETE."""
+    tree = ast.parse(f"con.executescript({sql!r})\n")
+    assert _naruszenia("scan.py", tree), sql
+    assert _dml_db(tree)[0], sql
+    assert not _naruszenia(DOOR, tree)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT replace(path, 'a', 'b') FROM location",
+    "SELECT 'a;b' FROM location",
+    "SELECT id FROM location WHERE note = 'DELETE FROM frame'",
+    "SELECT id FROM frame -- DELETE FROM frame",
+    "SELECT id /* DELETE FROM frame; */ FROM frame",
+    "CREATE TABLE t (a INTEGER REFERENCES frame(id) ON DELETE CASCADE ON UPDATE NO ACTION)",
+    "SELECT updated_at, deleted FROM location",
+], ids=["funkcja_replace", "srednik_w_napisie", "dml_w_napisie", "dml_w_komentarzu", "dml_w_komentarzu_blokowym",
+        "akcja_klucza_obcego", "slowa_z_przedrostkiem"])
+def test_bramka_modulu_bez_falszywego_alarmu(sql):
+    """Kontrola fałszywego alarmu tokenizera AR-328: funkcja `replace()`, napis i komentarz z tekstem DML,
+    średnik w napisie, akcja klucza obcego w DDL i kolumny o nazwach z czasownikiem nie są zapisem."""
+    tree = ast.parse(f"con.execute({sql!r})\n")
+    assert not _naruszenia("scan.py", tree), sql
+    assert not _dml_db(tree)[0], sql

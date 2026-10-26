@@ -658,3 +658,45 @@ def test_sciezka_verbatim_bazy_trafia_w_blokade_okna(tmp_path):
     assert os.path.abspath(verbatim) != os.path.abspath(str(dbp))       # przesłanka falsyfikatora
     assert cli._sciezka_bazy(verbatim) == cli._sciezka_bazy(str(dbp))
     assert dbp.read_bytes() == przed
+
+
+def _goracy_wal_bez_shm(katalog):
+    """Baza w trybie WAL z ramkami niezcheckpointowanymi w `-wal` i bez `-shm` - stan kopii przywróconej bez
+    pliku pamięci dzielonej. Kopia plików bazy i `-wal` pisanej połączeniem z wyłączonym autocheckpointem."""
+    import shutil
+    (katalog / "zrodlo").mkdir()
+    zrodlo = katalog / "zrodlo" / "h.db"
+    con = db.connect(str(zrodlo))
+    try:
+        con.execute("PRAGMA wal_autocheckpoint = 0")
+        con.execute("CREATE TABLE t (x)")
+        con.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(200)])
+        con.commit()
+        baza = katalog / "h.db"
+        shutil.copyfile(zrodlo, baza)
+        shutil.copyfile(f"{zrodlo}-wal", f"{baza}-wal")
+    finally:
+        con.close()
+    assert os.path.getsize(f"{baza}-wal") > 0 and not os.path.exists(f"{baza}-shm")
+    return baza
+
+
+@pytest.mark.parametrize("stan", ["goracy_wal_bez_shm", "plik_nie_sqlite", "katalog_pod_sciezka"])
+def test_sciezka_istniejacej_nieotwieralnej_bazy_bez_wyjatku_i_bez_zapisu(tmp_path, stan):
+    """AR-342: baza, która ISTNIEJE, ale nie jest zwykłym plikiem SQLite gotowym do odczytu (gorący WAL bez `-shm`,
+    plik nie-SQLite, katalog pod ścieżką bazy) - `_sciezka_bazy` oddaje bezwzględną ścieżkę bez wyjątku i bez zapisu:
+    pliki katalogu bajt w bajt jak przed, `-shm` nie powstaje (decyzję o bazie podejmuje dopiero `db.open_db` pod
+    blokadą). Falsyfikator: połączenie ścieżki z zapisem (`db.connect` - tryb WAL, checkpoint, `-shm`) albo wyjątek
+    pierwszego zapytania poza strażą."""
+    if stan == "goracy_wal_bez_shm":
+        baza = _goracy_wal_bez_shm(tmp_path)
+    elif stan == "plik_nie_sqlite":
+        baza = tmp_path / "h.db"
+        baza.write_bytes(b"to nie jest baza SQLite " * 64)
+    else:
+        baza = tmp_path / "h.db"
+        baza.mkdir()
+    przed = _pliki_katalogu(tmp_path)
+    assert cli._sciezka_bazy(str(baza)) == os.path.abspath(baza)
+    assert _pliki_katalogu(tmp_path) == przed
+    assert not os.path.exists(f"{baza}-shm")

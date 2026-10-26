@@ -4896,20 +4896,229 @@ def undo(con, commit_id, *, now,
     ręki, który commit zgasił kartą `OBJECT` na TYM pliku - w transakcji re-syncu (droga atomowa)
     albo dokończenia operacji cofnięcia (droga w miejscu, `repo.finish_inplace_op`). Plik
     'failed'/'blocked' nagrobka nie odtwarza. Commit sprzed AR-38 (zgaszenie bez `commit_id`)
-    i klatka z nowszym werdyktem ręki → bez zmian (`repo._restore_object_tombstone_tx`)."""
-    backups = backups_for_commit(con, commit_id)
-    total = len(backups)
-    restored: list[FileResult] = []
-    blocked: list[FileResult] = []
-    failed: list[FileResult] = []
-    semantic: list[FileResult] = []
-    withheld: list[FileResult] = []
-    already: list[FileResult] = []
-    kubly = {"restored": restored, "blocked": blocked, "failed": failed}
+    i klatka z nowszym werdyktem ręki → bez zmian (`repo._restore_object_tombstone_tx`).
+
+    PĘTLA WSPÓLNA z cofnięciem przebiegu (`undo_run`): przerwanie, liczenie reszty, postęp i wynik idą
+    przez `_cofnij_backupy`. Jeden commit ma najwyżej jeden backup lokacji (`UNIQUE(commit_id,
+    location_id)`), więc wynik per lokacja jest tu wynikiem per backup. ŁAŃCUCH PRZEBIEGU
+    (`_cofniete_lancuchem`, AR-345): backup tego commitu, którego własne cofnięcie atomowe raz się
+    domknęło, a starszy commit tego samego przebiegu na tej lokacji jest już cofnięty, to „już cofnięte”
+    bez dotyku pliku - dawniej ponowienie mówiło `undo_header_changed` o pliku w stanie sprzed przebiegu."""
+    return _cofnij_backupy(con, commit_id, [(commit_id, b) for b in backups_for_commit(con, commit_id)],
+                           now=now, progress=progress, should_cancel=should_cancel)
+
+
+# ------------------------------------------------ COFNIĘCIE PRZEBIEGU KART (AR-345)
+# „Cofnij” szuflady Zbiorów cofa CAŁY przebieg (decyzja CEO): zapis przerwany i dokończony daje dwa commity
+# tego samego przebiegu, a dawniej uchwyt pamiętał jeden. Zakres zamraża okno w chwili postawienia „Cofnij”
+# (`przebieg_do_cofniecia`, odczyt pod blokadą szuflady), a `undo_run` cofa dokładnie te commity, od najnowszego
+# (nakładka: ta sama lokacja w dwóch commitach - cofanie od najstarszego odmawia `undo_newer_write` i zostawia
+# plik w stanie pośrednim). Jedna klasyfikacja backupów (`_klasy_przebiegu`) dla zakresu, etykiety szuflady
+# i faktów wyniku częściowego wykonawcy - złożona z istniejących predykatów rdzenia.
+
+_JUZ_LANCUCHEM = PowodPozycji("już cofnięte - zapis wrócił razem ze starszym zapisem tego przebiegu",
+                              "undo_already_chain")
+
+
+def _cofniete_lancuchem(con, commit_id, b) -> bool:
+    """Czy backup `b` commitu jest „już cofnięty” ŁAŃCUCHEM przebiegu: (a) jego WŁASNE cofnięcie atomowe
+    raz się domknęło (wiersz `atomic_undo` z `synced_at` - stawia go wyłącznie transakcja re-syncu tego
+    cofnięcia, razem ze skutkami w bazie) ORAZ (b) starszy commit TEGO przebiegu ma backup tej lokacji
+    z dowodem zakończenia (`_cofniecie_zakonczone`). Straż nowszego zapisu (`_nowszy_zywy_zapis`) nie pozwala
+    domknąć starszego przed nowszym, więc baza opisuje wtedy stan sprzed starszego, a własna para śladu
+    nowszego już się z lokacją nie zgadza - ponowienie szłoby w `undo_header_changed`. Warunek (a): starszy
+    cofnięty, ZANIM nowszy zapisał tę lokację (np. `header-fix --undo` przed podjęciem przebiegu), nie domyka
+    nowszego - ten wciąż trzeba cofnąć. Cofnięcie nowszego w miejscu łańcucha nie potrzebuje: domyka je faza
+    `synced` jego operacji (`_cofniecie_zakonczone`)."""
+    if con.execute("SELECT 1 FROM atomic_undo WHERE backup_id = ? AND synced_at IS NOT NULL LIMIT 1",
+                   (b["id"],)).fetchone() is None:
+        return False
+    starsze = con.execute(
+        "SELECT hb.id, hb.commit_id, hb.location_id FROM header_backups hb "
+        "JOIN commits c ON c.id = hb.commit_id "
+        "WHERE c.run_id = (SELECT run_id FROM commits WHERE id = ?) AND hb.location_id = ? "
+        "AND hb.commit_id < ? AND hb.unreplaced_at IS NULL ORDER BY hb.commit_id DESC",
+        (commit_id, int(b["location_id"]), commit_id)).fetchall()
+    return any(_cofniecie_zakonczone(con, s["commit_id"], s) for s in starsze)
+
+
+@dataclasses.dataclass(frozen=True)
+class ZakresCofniecia:
+    """Zakres „Cofnij” przebiegu kart (`przebieg_do_cofniecia`): `commity` z czymkolwiek do cofnięcia
+    (rosnąco) i liczby RÓŻNYCH plików: `zatwierdzone` (podmiana potwierdzona), `do_sprawdzenia` (podmiana
+    bez dowodu - cofnięcie ją rozstrzygnie), `otwarte` (otwarty zapis w miejscu - najpierw odzysk). Plik
+    w kilku commitach liczy się raz, klasą najsłabszego dowodu."""
+    commity: tuple
+    zatwierdzone: int
+    do_sprawdzenia: int
+    otwarte: int
+
+    @property
+    def cofnij(self) -> bool:
+        """Czy „Cofnij” ma co zrobić - plik z otwartym zapisem rozstrzyga odzysk, nie cofnięcie."""
+        return self.zatwierdzone + self.do_sprawdzenia > 0
+
+
+def _klasy_przebiegu(con, run_id) -> list[tuple[int, int, str]]:
+    """Klasa KAŻDEGO backupu przebiegu kart `run_id` (backupy bez `unreplaced_at`, jak `backups_for_commit`):
+    `(commit_id, location_id, klasa)` po commitach rosnąco. Z jednej listy wychodzi zakres przebiegu i zakres
+    commitów jednej operacji (`zakresy_cofniecia`) - klasa backupu nie zależy od zawężenia. Klasy - z predykatów,
+    które rozstrzygają cofnięcie (`_cofnij_lokacje`), bez odczytu pliku:
+
+      * `"zakonczony"` - dowód zakończenia (`_cofniecie_zakonczone`) albo łańcuch przebiegu
+        (`_cofniete_lancuchem`): nie ma czego cofać;
+      * `"otwarty"` - operacja zapisu albo cofnięcia w miejscu w fazie otwartej
+        (`repo.INPLACE_OPEN_PHASES`): cofnięcie odmawia `undo_open_op` - najpierw odzysk („Przywróć nagłówek
+        sprzed zapisu”), więc „Cofnij” tego pliku nie rozstrzyga;
+      * `"poza"` - operacja commitu po odzysku (`recovered`): region wrócił sprzed commitu, cofnięcie mówi
+        `undo_already_region`;
+      * `"niepewny"` - podmiana bez dowodu: operacja zwolniona ręką (`released` - zwolnienie zmienia samą fazę)
+        albo backup drogi atomowej niepotwierdzony (`pending_since`, AR-40); cofnięcie rozstrzyga go samo
+        (rekoncyliacja backupu, porównanie regionu);
+      * `"zatwierdzony"` - podmiana potwierdzona: operacja w fazie `written`/`synced` albo backup drogi
+        atomowej potwierdzony w transakcji straży podmiany.
+
+    ODCZYT WSADOWY: trzy zapytania na przebieg zamiast sześciu-siedmiu na backup (pomiar przed: 2000 plików
+    jednego commitu - 12-14 tys. zapytań, mediana 122-167 ms w wątku okna, który pyta o zakres przy „Odrzuć”
+    i zamknięciu przebiegu). Reguły są LUSTREM predykatów cofnięcia na migawce bazy: ostatnia operacja rodzaju
+    (`_ostatnia_operacja`), ślad atomowy wciągnięty z parą lokacji (`_wynik_wlasny_w_bazie`), dowód zakończenia
+    i łańcuch; równoważność z nimi na wszystkich klasach i nakładkach pinuje test - zmiana predykatu cofnięcia
+    zmienia i to lustro. Trzy odczyty idą w JEDNEJ migawce WAL (własna transakcja odczytu, zamykana wycofaniem;
+    w transakcji wołającego - w niej, bez zamykania): zapis innego połączenia między nimi nie złoży pary stanów,
+    która nigdy nie istniała."""
+    wlasna = not con.in_transaction
+    if wlasna:
+        con.execute("BEGIN")                    # migawka WAL na trzy odczyty (wzór `gui/grid_workers.py`)
+    try:
+        backupy = con.execute(
+            "SELECT hb.id, hb.commit_id, hb.location_id, hb.pending_since FROM header_backups hb "
+            "JOIN commits c ON c.id = hb.commit_id WHERE c.run_id = ? AND hb.unreplaced_at IS NULL "
+            "ORDER BY hb.commit_id, hb.id", (run_id,)).fetchall()
+        faza: dict[tuple, str] = {}             # (commit, lokacja, rodzaj) → faza OSTATNIEJ operacji
+        for r in con.execute(
+                "SELECT io.commit_id, io.location_id, io.kind, io.phase FROM inplace_op io "
+                "JOIN commits c ON c.id = io.commit_id WHERE c.run_id = ? ORDER BY io.id", (run_id,)):
+            faza[(r[0], r[1], r[2])] = r[3]
+        domkniete, wlasne = set(), set()        # backupy ze śladem atomowym wciągniętym; z parą lokacji
+        for r in con.execute(
+                "SELECT au.backup_id, au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash "
+                "FROM atomic_undo au JOIN header_backups hb ON hb.id = au.backup_id "
+                "JOIN commits c ON c.id = hb.commit_id JOIN location l ON l.id = hb.location_id "
+                "WHERE c.run_id = ? AND au.synced_at IS NOT NULL", (run_id,)):
+            domkniete.add(r[0])
+            if r[1]:
+                wlasne.add(r[0])
+    finally:
+        if wlasna:
+            con.rollback()                      # odczyt - nic do zatwierdzenia
+
+    def zakonczony(b):                          # `_cofniecie_zakonczone` backupu bez `unreplaced_at`
+        return faza.get((b["commit_id"], b["location_id"], "undo")) == "synced" or b["id"] in wlasne
+
+    starsze: dict[int, list] = {}               # lokacja → backupy starszych commitów przebiegu
+    klasy = []
+    for b in backupy:
+        cid, lid = int(b["commit_id"]), int(b["location_id"])
+        op_c, op_u = faza.get((cid, lid, "commit")), faza.get((cid, lid, "undo"))
+        if zakonczony(b) or (b["id"] in domkniete and any(zakonczony(s) for s in starsze.get(lid, ()))):
+            k = "zakonczony"
+        elif op_c in repo.INPLACE_OPEN_PHASES or op_u in repo.INPLACE_OPEN_PHASES:
+            k = "otwarty"
+        elif op_c is not None:
+            k = "poza" if op_c == "recovered" else "niepewny" if op_c == "released" else "zatwierdzony"
+        else:
+            k = "niepewny" if b["pending_since"] is not None else "zatwierdzony"
+        klasy.append((cid, lid, k))
+        starsze.setdefault(lid, []).append(b)
+    return klasy
+
+
+def _zakres_z_klas(klasy, commity=None) -> ZakresCofniecia | None:
+    """Zakres „Cofnij” z klas backupów (`_klasy_przebiegu`), zawężony do `commity` (None - wszystkie):
+    commity z backupem w klasie `zatwierdzony`/`niepewny`/`otwarty` i liczby RÓŻNYCH plików (plik w kilku
+    commitach - klasą najsłabszego dowodu) - albo `None`, gdy nie ma czego cofać."""
+    zbior = None if commity is None else set(commity)
+    pliki: dict[int, set] = {}
+    w_zakresie: dict[int, None] = {}
+    for cid, lid, k in klasy:
+        if (zbior is None or cid in zbior) and k in ("zatwierdzony", "niepewny", "otwarty"):
+            pliki.setdefault(lid, set()).add(k)
+            w_zakresie[cid] = None
+    if not w_zakresie:
+        return None
+    otwarte = sum(1 for k in pliki.values() if "otwarty" in k)
+    niepewne = sum(1 for k in pliki.values() if "otwarty" not in k and "niepewny" in k)
+    return ZakresCofniecia(tuple(w_zakresie), len(pliki) - otwarte - niepewne, niepewne, otwarte)
+
+
+def przebieg_do_cofniecia(con, run_id) -> ZakresCofniecia | None:
+    """Zakres „Cofnij” przebiegu kart `run_id` (`_zakres_z_klas`) - albo `None`, gdy nie ma czego cofać.
+    Odczyt, zero zapisu."""
+    return _zakres_z_klas(_klasy_przebiegu(con, run_id))
+
+
+def zakresy_cofniecia(con, run_id, commity) -> tuple[ZakresCofniecia | None, ZakresCofniecia | None]:
+    """Zakres „Cofnij” CAŁEGO przebiegu kart `run_id` i zakres zawężony do `commity` (commity jednej operacji
+    zapisu - fakty wyniku częściowego wykonawcy) z JEDNEJ klasyfikacji backupów. Odczyt, zero zapisu."""
+    klasy = _klasy_przebiegu(con, run_id)
+    return _zakres_z_klas(klasy), _zakres_z_klas(klasy, commity)
+
+
+def undo_run(con, commity, *, now,
+             progress: Callable[[int, int, str, str], None] | None = None,
+             should_cancel: Callable[[], bool] | None = None) -> UndoResult:
+    """Cofnij ZAMROŻONY zakres przebiegu kart (`commity` z `przebieg_do_cofniecia` w chwili postawienia
+    „Cofnij”): commity od najnowszego, każdy backup ciałem `undo` (`_cofnij_lokacje`) w pętli wspólnej
+    (`_cofnij_backupy`) - wynik per lokacja, przerwanie z resztą po wszystkich commitach zakresu.
+
+    ZAMIAR PRZED PIERWSZYM PLIKIEM (AR-318): zdarzenie `run.undo_started` z zakresem
+    (`repo.zamiar_cofniecia_przebiegu`, ten sam `now`) - wiersz Porządków „Dokończ cofnięcie” widzi
+    commit, którego cofnięcie przerwano na granicy commitów albo przed pierwszym plikiem (bez tego starszy
+    commit nie miał śladu próby). Zakres pusty albo z dwóch przebiegów to błąd wołającego (EXPECT) - przed
+    jakimkolwiek zapisem. `UndoResult.commit_id` = `run_id` (jak `undo_renames`)."""
+    commity = tuple(sorted({int(c) for c in commity}))
+    przebiegi = [r[0] for r in con.execute(
+        "SELECT DISTINCT run_id FROM commits WHERE id IN (SELECT value FROM json_each(?))",
+        (json.dumps(list(commity)),))]
+    znane = con.execute("SELECT count(*) FROM commits WHERE id IN (SELECT value FROM json_each(?))",
+                        (json.dumps(list(commity)),)).fetchone()[0]
+    if not commity or len(przebiegi) != 1 or znane != len(commity):
+        raise ValueError(f"zakres cofnięcia przebiegu {commity} - pusty, z nieznanym commitem albo z "
+                         f"kilku przebiegów ({przebiegi})")
+    run_id = przebiegi[0]
+    pozycje = [(cid, b) for cid in reversed(commity) for b in backups_for_commit(con, cid)]
+    repo.zamiar_cofniecia_przebiegu(con, run_id=run_id, commity=commity, now=now)
+    return _cofnij_backupy(con, run_id, pozycje, now=now, progress=progress, should_cancel=should_cancel)
+
+
+def _waga_wyniku(c) -> int:
+    """Waga wyniku cofnięcia lokacji w scaleniu przebiegu: porażka przed blokadą przed przywróceniem przed
+    „już cofnięte” (mniej = ważniejsze)."""
+    if c.wynik.status == "failed":
+        return 0
+    if c.wynik.status == "blocked" and not c.juz:
+        return 1
+    return 2 if c.wynik.status == "restored" else 3
+
+
+def _cofnij_backupy(con, wynik_id, pozycje, *, now, progress, should_cancel) -> UndoResult:
+    """PĘTLA COFNIĘCIA wspólna dla `undo` (jeden commit) i `undo_run` (zakres przebiegu): `pozycje` =
+    `(commit_id, backup)` w kolejności przetwarzania. Przerwanie sprawdzane przed KAŻDYM backupem; reszta
+    (`UndoResult.remaining`/`untouched`, AR-176, AR-318) liczona po wszystkich nieprzetworzonych pozycjach.
+    Postęp per backup. Backup cofnięty łańcuchem przebiegu (`_cofniete_lancuchem`) - „już cofnięte” bez
+    dotyku pliku i bez ponownego rozliczenia bazy (jego skutki rozliczyła transakcja własnego cofnięcia).
+
+    WYNIK PER LOKACJA: lokacja z kilku commitów ma JEDEN wynik - porażka przed blokadą spoza „już cofnięte”
+    przed przywróceniem przed „już cofnięte”; wśród porażek równej wagi pierwsza (najnowszy commit -
+    przyczyna), wśród przywróceń ostatnia (najstarszy commit - stan końcowy pliku, z niej `semantic`
+    i `withheld`). Stan obiektu klatki (AR-311) per `frame_id`: werdykt najstarszego commitu, w obrębie
+    commitu pierwszy - bez powtórzeń."""
+    total = len(pozycje)
+    lokacje: dict[int, _CofniecieLokacji] = {}
     cancelled = False
     remaining = None
     untouched = None
-    obiekty: dict[int, str] = {}             # frame_id → werdykt obiektu (AR-311), kolejność wyników
+    obiekty: dict[int, tuple] = {}           # frame_id → (commit_id, werdykt obiektu AR-311)
     done = 0
 
     def _report(path, status):
@@ -4918,36 +5127,44 @@ def undo(con, commit_id, *, now,
         if progress is not None:
             progress(done, total, path, status)
 
-    for i, b in enumerate(backups):
+    for i, (cid, b) in enumerate(pozycje):
         if should_cancel is not None and should_cancel():
             cancelled = True
             granica = _granica_sladu(con)
-            stany = [_stan_nieprzetworzonego(con, commit_id, r, granica) for r in backups[i:]]
+            stany = ["zakonczony" if _cofniete_lancuchem(con, c, r)
+                     else _stan_nieprzetworzonego(con, c, r, granica) for c, r in pozycje[i:]]
             remaining = sum(1 for s in stany if s != "zakonczony")
             untouched = stany.count("nietkniety")
             break
-        cofniecie = _cofnij_lokacje(con, commit_id, b, now=now)
-        kubly[cofniecie.wynik.status].append(cofniecie.wynik)
-        if cofniecie.semantycznie:
-            semantic.append(cofniecie.wynik)
-        if cofniecie.wstrzymane:
-            withheld.append(cofniecie.wynik)
-        if cofniecie.juz:                       # „już cofnięte” - nie ma czego ponawiać (AR-160)
-            already.append(cofniecie.wynik)
+        lid = int(b["location_id"])
+        if _cofniete_lancuchem(con, cid, b):
+            loc = _location(con, lid)
+            cofniecie = _CofniecieLokacji(FileResult(lid, loc["path"] if loc is not None else "", "blocked",
+                                                     _JUZ_LANCUCHEM), juz=True)
+        else:
+            cofniecie = _cofnij_lokacje(con, cid, b, now=now)
+        stary = lokacje.get(lid)
+        if (stary is None or _waga_wyniku(cofniecie) < _waga_wyniku(stary)
+                or _waga_wyniku(cofniecie) == _waga_wyniku(stary) == 2):
+            lokacje[lid] = cofniecie
         if cofniecie.wynik.status == "restored" or cofniecie.juz:
             # Stan obiektu klatki ze STANU bazy (AR-311): odtworzony teraz albo wcześniejszym biegiem
             # tego cofnięcia - ponowienie mówi tę samą liczbę co całość, jak „już cofnięte” plików.
-            fid, werdykt = repo.object_undo_verdict(con, commit_id=commit_id,
-                                                    location_id=int(b["location_id"]))
-            if werdykt is not None:
-                obiekty.setdefault(fid, werdykt)
+            fid, werdykt = repo.object_undo_verdict(con, commit_id=cid, location_id=lid)
+            if werdykt is not None and (fid not in obiekty or obiekty[fid][0] != cid):
+                obiekty[fid] = (cid, werdykt)
         _report(cofniecie.wynik.path, cofniecie.wynik.status)
 
-    return UndoResult(commit_id, restored, blocked, failed, cancelled, semantic=semantic,
-                      withheld=withheld, already=already, remaining=remaining,
+    wyniki = list(lokacje.values())
+    return UndoResult(wynik_id, [c.wynik for c in wyniki if c.wynik.status == "restored"],
+                      [c.wynik for c in wyniki if c.wynik.status == "blocked"],
+                      [c.wynik for c in wyniki if c.wynik.status == "failed"], cancelled,
+                      semantic=[c.wynik for c in wyniki if c.semantycznie],
+                      withheld=[c.wynik for c in wyniki if c.wstrzymane],
+                      already=[c.wynik for c in wyniki if c.juz], remaining=remaining,
                       untouched=untouched,
-                      objects_restored=tuple(f for f, w in obiekty.items() if w == "wrocil"),
-                      objects_kept=tuple(f for f, w in obiekty.items() if w == "zostaje"))
+                      objects_restored=tuple(f for f, (_c, w) in obiekty.items() if w == "wrocil"),
+                      objects_kept=tuple(f for f, (_c, w) in obiekty.items() if w == "zostaje"))
 
 
 def _cofniecie_zakonczone(con, commit_id, b) -> bool:

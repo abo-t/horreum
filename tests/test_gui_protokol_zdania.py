@@ -270,7 +270,7 @@ def test_kazda_operacja_widoku_ma_zdanie_porazki_i_zadnej_martwej():
     """Komplet `grid.wb.op.<op>` (PL, EN) dla operacji widoku - i NIC ponad nie (bez martwych par).
     Falsyfikator: nowa operacja w widoku bez zdania (pasek pokazałby klucz) albo klucz bez operacji."""
     ops = _ops_widoku()
-    assert ops == {"commit", "undo", "commit_rename", "undo_rename", "lead_copy", "finish_inplace",
+    assert ops == {"commit", "undo_run", "commit_rename", "undo_rename", "lead_copy", "finish_inplace",
                    "recover_torn", "release_inplace"}, ops
     assert ops <= set(WritebackWorker._OPS)
     klucze = {k.removeprefix("grid.wb.op.") for k in CATALOG if k.startswith("grid.wb.op.")}

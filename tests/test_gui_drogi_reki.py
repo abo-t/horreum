@@ -619,14 +619,14 @@ def test_commit_edycji_zapisuje_plik_a_cel_cofniecia_lapie_commit(wb_view):
     view.model.setData(view.model.index(0, _kol(view, "TELESCOP")), "EQ6")
     view._on_commit()
     assert fits.getheader(str(p))["TELESCOP"] == "EQ6"
-    pierwszy = view._undo_commit_id
-    assert pierwszy == view._last_commit_id and view._undo_mode == "macro"
+    pierwszy = view._undo_commity
+    assert pierwszy and view._undo_mode == "macro"
 
     view.model.setData(view.model.index(0, _kol(view, "TELESCOP")), "EQ8")
     assert view._undo_mode is None                             # stare „Cofnij" unieważnione
     view._on_commit()
     assert fits.getheader(str(p))["TELESCOP"] == "EQ8"
-    assert view._undo_commit_id == view._last_commit_id != pierwszy
+    assert view._undo_commity != pierwszy                      # nowy przebieg - cel złapany przy commicie
     view._dispatch_undo()
     assert fits.getheader(str(p))["TELESCOP"] == "EQ6"
 

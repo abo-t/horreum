@@ -3567,6 +3567,22 @@ CATALOG = {
               "zmiany tam; po jego zakończeniu szuflada podejmie, co zostało",
         "en": "Another Horreum process (a window or the command line) runs the drawer of this database - commit "
               "or discard the changes there; once it ends, the drawer picks up what is left"},
+    # „Ponów nieudane (N)” (AR-347): wpisy, których zapis się nie udał, a plików nie ruszył, wracają do TEGO
+    # SAMEGO przebiegu (`repo.ponow_nieudane`) - „Zatwierdź” spróbuje jeszcze raz.
+    "grid.drawer.retry": {"pl": "Ponów nieudane ({n})", "en": "Retry failed ({n})"},
+    "grid.drawer.retry_tip": {
+        "pl": "Zmiany, których zapis się nie udał, a plików nie ruszył, wracają do szuflady - „{commit}” "
+              "spróbuje jeszcze raz",
+        "en": "Changes whose write failed without touching the files go back to the drawer - “{commit}” "
+              "tries again"},
+    "grid.drawer.retry_staged": {
+        "pl": {"one": "Wróciła {n} nieudana zmiana - „{commit}” spróbuje jeszcze raz",
+               "few": "Wróciły {n} nieudane zmiany - „{commit}” spróbuje jeszcze raz",
+               "many": "Wróciło {n} nieudanych zmian - „{commit}” spróbuje jeszcze raz"},
+        "en": {"one": "{n} failed change is back - “{commit}” tries again",
+               "other": "{n} failed changes are back - “{commit}” tries again"}},
+    "grid.drawer.retry_none": {"pl": "Nieudanych zmian do ponowienia już nie ma",
+                               "en": "No failed changes left to retry"},
     # AR-323: podjęcie przebiegu BEZ gestu tego okna (odświeżenie pustej szuflady) - kolumna podglądu zmienia
     # się sama, więc szuflada (i pasek przy widocznych Zbiorach) mówi, co się stało.
     "grid.drawer.picked_up": {
@@ -3791,18 +3807,69 @@ CATALOG = {
         "pl": " - przerwano, {n} do dokończenia", "en": " - interrupted, {n} to finish",
     },
     "grid.wb.commit_id": {"pl": "  (commit {id})", "en": "  (commit {id})"},
+    # „Cofnij” przebiegu z kilkoma commitami (AR-345) - kotwica `header-fix --undo N` każdego z nich.
+    "grid.wb.commit_ids": {"pl": "  (commity {ids})", "en": "  (commits {ids})"},
     "grid.wb.run_id": {"pl": "  (run {id})", "en": "  (run {id})"},
     # Etykieta szuflady po zapisie BEZ identyfikatora commitu (AR-255): stoi w tym samym wierszu, co
     # zdanie wyniku z ogonem `grid.wb.commit_id` - identyfikator raz, w zdaniu (jak `renamed_label`).
     "grid.wb.committed_label": {"pl": "Zatwierdzono: {n}", "en": "Committed: {n}"},
+    # „Cofnij” przebiegu bez pliku z potwierdzoną podmianą (AR-345): same pliki do sprawdzenia - nie
+    # „Zatwierdzono: 0”.
+    "grid.wb.to_check_label": {"pl": "Do sprawdzenia: {n}", "en": "To check: {n}"},
+    # Wynik CZĘŚCIOWY zapisu przerwanego awarią (AR-344): głowa z liczbą plików z faktów bazy, „co najmniej”,
+    # gdy odczyt faktów padł; ogon - co czeka albo co cofa „Cofnij”. Bliźniak anulowania: `grid.wb.interrupted`.
+    "grid.wb.partial_commit": {
+        "pl": {"one": "{n} z {m} zapisany, potem błąd: {msg}", "few": "{n} z {m} zapisane, potem błąd: {msg}",
+               "many": "{n} z {m} zapisanych, potem błąd: {msg}"},
+        "en": {"one": "{n} of {m} applied, then an error: {msg}", "other": "{n} of {m} applied, then an error: {msg}"}},
+    "grid.wb.partial_commit_min": {
+        "pl": {"one": "co najmniej {n} z {m} zapisany, potem błąd: {msg}",
+               "few": "co najmniej {n} z {m} zapisane, potem błąd: {msg}",
+               "many": "co najmniej {n} z {m} zapisanych, potem błąd: {msg}"},
+        "en": {"one": "at least {n} of {m} applied, then an error: {msg}",
+               "other": "at least {n} of {m} applied, then an error: {msg}"}},
+    "grid.wb.partial_rename": {
+        "pl": {"one": "{n} z {m} przemianowany, potem błąd: {msg}",
+               "few": "{n} z {m} przemianowane, potem błąd: {msg}",
+               "many": "{n} z {m} przemianowanych, potem błąd: {msg}"},
+        "en": {"one": "{n} of {m} renamed, then an error: {msg}", "other": "{n} of {m} renamed, then an error: {msg}"}},
+    "grid.wb.partial_rename_min": {
+        "pl": {"one": "co najmniej {n} z {m} przemianowany, potem błąd: {msg}",
+               "few": "co najmniej {n} z {m} przemianowane, potem błąd: {msg}",
+               "many": "co najmniej {n} z {m} przemianowanych, potem błąd: {msg}"},
+        "en": {"one": "at least {n} of {m} renamed, then an error: {msg}",
+               "other": "at least {n} of {m} renamed, then an error: {msg}"}},
+    "grid.wb.partial_finish": {"pl": " - {n} do dokończenia", "en": " - {n} to finish"},
+    "grid.wb.partial_undo": {"pl": " - „{undo}” cofa zapisane", "en": " - “{undo}” undoes the written files"},
+    "grid.wb.partial_undo_names": {"pl": " - „{undo}” przywraca stare nazwy",
+                                   "en": " - “{undo}” restores the old names"},
+    # Pliki bez dowodu podmiany przy „Cofnij” przebiegu (AR-345): rozstrzyga je cofnięcie (podmiana
+    # niepotwierdzona, zwolnienie ręką) albo najpierw odzysk (otwarty zapis w miejscu - cofnięcie odmawia).
+    "grid.wb.to_check": {
+        "pl": {"one": " · {n} plik do sprawdzenia - „{undo}” go sprawdzi",
+               "few": " · {n} pliki do sprawdzenia - „{undo}” je sprawdzi",
+               "many": " · {n} plików do sprawdzenia - „{undo}” je sprawdzi"},
+        "en": {"one": " · {n} file to check - “{undo}” checks it",
+               "other": " · {n} files to check - “{undo}” checks them"}},
+    "grid.wb.open_write": {
+        "pl": {"one": " · {n} plik z przerwanym zapisem w miejscu - najpierw „{restore}” ({nav} → „{row}”)",
+               "few": " · {n} pliki z przerwanym zapisem w miejscu - najpierw „{restore}” ({nav} → „{row}”)",
+               "many": " · {n} plików z przerwanym zapisem w miejscu - najpierw „{restore}” ({nav} → „{row}”)"},
+        "en": {"one": " · {n} file with an interrupted in-place write - first “{restore}” ({nav} → “{row}”)",
+               "other": " · {n} files with an interrupted in-place write - first “{restore}” ({nav} → “{row}”)"}},
+    # „Cofnij” po „Odrzuć” albo po operacji, która sama nic nie zapisała (AR-345) - skąd przycisk.
+    "grid.wb.written_before": {
+        "pl": {"one": " · {n} plik zapisany wcześniej", "few": " · {n} pliki zapisane wcześniej",
+               "many": " · {n} plików zapisanych wcześniej"},
+        "en": {"one": " · {n} file written earlier", "other": " · {n} files written earlier"}},
     "grid.rename.renamed_label": {"pl": "Przemianowano: {n}", "en": "Renamed: {n}"},
     "grid.wb.error": {"pl": "BŁĄD: {msg}", "en": "ERROR: {msg}"},
     # Awaria całej operacji uchwytu zapisu Zbiorów na pasku (AR-204): zdanie per operacja startowana
     # z widoku (`FramesView._on_wb_failed`), bez tokenu operacji i bez żargonu „Writeback”.
     "grid.wb.op.commit": {"pl": "Zapis zmian do plików nie powiódł się: {msg}",
                           "en": "Writing the changes to files failed: {msg}"},
-    "grid.wb.op.undo": {"pl": "Cofnięcie zapisu nie powiodło się: {msg}",
-                        "en": "Undoing the write failed: {msg}"},
+    "grid.wb.op.undo_run": {"pl": "Cofnięcie zapisu nie powiodło się: {msg}",
+                            "en": "Undoing the write failed: {msg}"},
     "grid.wb.op.commit_rename": {"pl": "Zmiana nazw plików nie powiodła się: {msg}",
                                  "en": "Renaming the files failed: {msg}"},
     "grid.wb.op.undo_rename": {"pl": "Cofnięcie zmiany nazw nie powiodło się: {msg}",
@@ -8026,6 +8093,9 @@ CATALOG = {
     "objchg.item.undo_newer_write": {
         "pl": "lokacja ma nowszy zapis (commit {commit_id}) - cofnij najpierw jego",
         "en": "the location has a newer write (commit {commit_id}) - undo that one first"},
+    "objchg.item.undo_already_chain": {
+        "pl": "już cofnięte - zapis wrócił razem ze starszym zapisem tego przebiegu",
+        "en": "already undone - the write came back together with an older write of this run"},
     # Bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
     # `evaluate_manual_change`) i powody wyrażenia (`expr.eval_for`, parametr `inner` powodów
     # `macro_compute`/`macro_assign`). PL = zdanie rdzenia znak w znak (polskie znaki od AR-228,

@@ -71,11 +71,30 @@ def _zapis_kart(con, run_id, now, progress, should_cancel):
 
 @dataclasses.dataclass(frozen=True)
 class CzescZapisu:
-    """Co zapis kart albo nazw zdążył zrobić przed wyjątkiem (`WritebackWorker.czesciowy`, AR-322): `commit_id`
-    commitu TEJ operacji (karty; None dla nazw - ich cofnięcie idzie po przebiegu) i ścieżki plików, które
-    rdzeń zgłosił jako `applied`. Bez podmienionego pliku sygnału nie ma - „Cofnij” nie miałoby czego cofać."""
-    commit_id: int | None
+    """FAKTY operacji zapisu kart albo nazw (`WritebackWorker.czesciowy`, AR-322, AR-344, AR-345) - liczone
+    przez wykonawcę na własnym połączeniu PO operacji, udanej i nieudanej, każde pole w osłonie (odczyt, który
+    sam padnie, daje pole „nieznane”, nie zmienia wyniku operacji):
+
+      * `applied` - ścieżki z postępu rdzenia ze statusem zapisu (`applied`, `withheld`) - dolna granica;
+        plik, po którym wyjątek padł przed postępem, tu nie wchodzi;
+      * `wszystkie` - pliki operacji: lokacje czekających wpisów przebiegu PRZED pierwszym zapisem (postęp
+        przychodzi dopiero po pliku, więc awaria na pierwszym pliku nie miałaby źródła tej liczby);
+      * `zapisane`, `do_sprawdzenia`, `otwarte` - pliki commitów TEJ operacji (delta commitów przebiegu)
+        w klasach rdzenia (`writeback.zakresy_cofniecia`); `zapisane` None - odczyt padł (zdanie mówi
+        wtedy „co najmniej” z `applied`); nazwy: `zapisane` = nowe wiersze `applied`;
+      * `zakres` - zakres „Cofnij” przebiegu kart (`writeback.ZakresCofniecia` albo None) i `zakres_znany` -
+        czy odczyt się udał (None przy udanym odczycie znaczy „nie ma czego cofać”);
+      * `czeka` - wpisy `pending` przebiegu po operacji; `nazwy` - wiersze `applied` przebiegu nazw (cel
+        „Cofnij” nazw); None - odczyt padł."""
     applied: tuple
+    wszystkie: int | None = None
+    zapisane: int | None = None
+    do_sprawdzenia: int = 0
+    otwarte: int = 0
+    zakres: object = None
+    zakres_znany: bool = False
+    czeka: int | None = None
+    nazwy: int | None = None
 
 
 class WritebackWorker(QObject):
@@ -117,6 +136,9 @@ class WritebackWorker(QObject):
             con, t, now=now, progress=pr, should_cancel=sc),
         "commit_rename": lambda con, t, now, pr, sc: writeback.commit_renames(con, t, now=now, progress=pr, should_cancel=sc),
         "undo":          lambda con, t, now, pr, sc: writeback.undo(con, t, now=now, progress=pr, should_cancel=sc),
+        # „Cofnij” szuflady Zbiorów (AR-345): cel = krotka commitów przebiegu zamrożona przy postawieniu przycisku.
+        "undo_run":      lambda con, t, now, pr, sc: writeback.undo_run(con, t, now=now, progress=pr,
+                                                                        should_cancel=sc),
         "undo_rename":   lambda con, t, now, pr, sc: writeback.undo_renames(con, t, now=now, progress=pr, should_cancel=sc),
         "finish_inplace": lambda con, t, now, pr, sc: po_operacjach(con, t, now, pr, sc, writeback.finish_inplace),
         "recover_torn":   lambda con, t, now, pr, sc: po_operacjach(con, t, now, pr, sc, writeback.recover_torn),
@@ -135,10 +157,10 @@ class WritebackWorker(QObject):
             if isinstance(t, tuple) else lead_copy.lead_copy_gesture(con, t, now)),
     }
 
-    # Wynik CZĘŚCIOWY zapisu, który padł wyjątkiem po podmianie plików (AR-322): op + `CzescZapisu` - emitowany
-    # PRZED `failed` (ten sam wątek → ta sama kolejność u odbiorcy), wyłącznie dla `commit`/`commit_rename`,
-    # gdy ta operacja podmieniła choć jeden plik. Osobny sygnał, nie czwarty parametr `failed`: `start` pinuje
-    # arność odbiorcy porażki (3), a PySide przycina argumenty po cichu - ośmiu odbiorców zgubiłoby go bez błędu.
+    # FAKTY operacji zapisu (AR-322, AR-344, AR-345): op + `CzescZapisu` - emitowane PRZED `done` i PRZED `failed`
+    # (ten sam wątek → ta sama kolejność u odbiorcy), wyłącznie dla `commit`/`commit_rename`. Odbiorca zużywa je
+    # raz, w ogonie TEJ operacji. Osobny sygnał, nie czwarty parametr `failed`: `start` pinuje arność odbiorcy
+    # porażki (3), a PySide przycina argumenty po cichu - ośmiu odbiorców zgubiłoby go bez błędu.
     czesciowy = Signal(str, object)
 
     def __init__(self, db_path, op, target_id, *, now_fn):
@@ -148,7 +170,7 @@ class WritebackWorker(QObject):
         self._target_id = target_id
         self._now = now_fn
         self._cancel = threading.Event()
-        self._podmienione = []                  # ścieżki z postępu rdzenia ze statusem `applied` (TA operacja)
+        self._podmienione = []                  # ścieżki z postępu rdzenia ze statusem zapisu (TA operacja)
 
     def request_cancel(self):
         """Kooperatywne anulowanie — stawiane w GŁÓWNYM wątku, czytane w workerze (`Event` bezpieczny
@@ -162,7 +184,7 @@ class WritebackWorker(QObject):
         error = podpowiedz = czesc = przed = None
         try:
             con = db.connect(self._db_path)     # WŁASNE połączenie w TYM wątku (baza już zmigrowana)
-            przed = self._commity_przed(con)
+            przed = self._przed_operacja(con)
             result = self._OPS[self._op](con, self._target_id, self._now(),
                                          self._emit_progress, self._cancel.is_set)
         except Exception as exc:                # błąd → sygnał, NIE crash
@@ -176,14 +198,15 @@ class WritebackWorker(QObject):
             # szedł surowym `ValueError: …` w zdaniu, po polsku także w UI EN (wizytacja natywna).
             powod = powod_okna(exc)
             error, podpowiedz = tekst_powodu(powod), wiersz_systemu(powod)
-            if con is not None and self._podmienione:
+        try:
+            if con is not None and przed is not None:
                 czesc = self._czesc_zapisu(con, przed)
         finally:
             if con is not None:
                 con.close()                     # zamknij PRZED done — main czyta tylko przez self.con
+        if czesc is not None:
+            self.czesciowy.emit(self._op, czesc)
         if error is not None:
-            if czesc is not None:
-                self.czesciowy.emit(self._op, czesc)
             self.failed.emit(self._op, error, podpowiedz)
         else:
             self.done.emit(self._op, result)
@@ -191,32 +214,64 @@ class WritebackWorker(QObject):
 
     def _emit_progress(self, done, total, path, status):
         # wołane SYNCHRONICZNIE w wątku workera przez rdzeń; ~7 plików/s (I/O NAS) → emisja per plik tania
-        if status == "applied":                 # rdzeń raportuje status PO pliku - plik w biegu się nie liczy
+        # rdzeń raportuje status PO pliku - plik w biegu się nie liczy; `withheld` to plik ZAPISANY (AR-82)
+        if status in ("applied", "withheld"):
             self._podmienione.append(path)
         self.progress.emit(done, total, path, status)
 
-    def _commity_przed(self, con):
-        """Commity kart przebiegu z podmienionym plikiem PRZED operacją - tylko dla `commit` (delta `_czesc_zapisu`)."""
-        if self._op != "commit":
-            return None
-        return set(writeback.commity_przebiegu(con, self._target_id))
+    def _przed_operacja(self, con):
+        """Stan przebiegu PRZED operacją zapisu (`commit`, `commit_rename`), albo None dla innych operacji:
+        `(znane, wszystkie)` - id commitów kart z podmienionym plikiem (nazwy: id wierszy `applied`) do delty
+        TEJ operacji i liczba plików operacji (lokacje czekających wpisów - tyle grup przechodzi rdzeń,
+        `writeback.commit`, `writeback.commit_renames`). Liczona przed pierwszym zapisem: postęp przychodzi
+        dopiero po pliku, a awaria na pierwszym pliku nie dałaby żadnego. Błąd odczytu - błąd operacji
+        przed jakimkolwiek zapisem (jak każdy wyjątek tej osłony)."""
+        if self._op == "commit":
+            czeka = {r["location_id"] for r in writeback.pending_for_run(con, self._target_id)
+                     if r["status"] == "pending"}
+            return set(writeback.commity_przebiegu(con, self._target_id)), len(czeka)
+        if self._op == "commit_rename":
+            wiersze = writeback.renames_for_run(con, self._target_id)
+            return ({r["id"] for r in wiersze if r["status"] == "applied"},
+                    sum(1 for r in wiersze if r["status"] == "pending"))
+        return None
 
     def _czesc_zapisu(self, con, przed):
-        """`CzescZapisu` operacji, która padła po podmianie choć jednego pliku, albo None. Karty: JEDYNY commit
-        nowy względem stanu sprzed operacji (jeden `commit` rdzenia = jeden wiersz `commits`); inna liczba
-        nowych - stan, którego rdzeń nie robi, więc bez „Cofnij” (okno nie zgaduje). Nazwy: cofnięcie idzie
-        po przebiegu, wystarczą ścieżki. Odczyt, który sam padnie (baza pod wyjątkiem), nie zmienia porażki."""
+        """`CzescZapisu` operacji zapisu - z BAZY, na połączeniu wykonawcy, po operacji udanej i nieudanej.
+        Karty: pliki commitów TEJ operacji (delta względem `przed`) w klasach rdzenia, zakres „Cofnij” całego
+        przebiegu i czekające wpisy; nazwy: nowe wiersze `applied`, wiersze `applied` przebiegu i czekające.
+        Każdy odczyt w osłonie - odczyt, który sam padnie (baza pod wyjątkiem), daje pole „nieznane”
+        i nie zmienia wyniku operacji."""
+        znane, wszystkie = przed
+        podmienione = tuple(self._podmienione)
+
+        def _albo_none(odczyt):
+            try:
+                return odczyt()
+            except Exception:  # noqa: BLE001 - fakt nieznany, porażka operacji bez zmian
+                return None
+
         if self._op == "commit_rename":
-            return CzescZapisu(None, tuple(self._podmienione))
-        if self._op != "commit" or przed is None:
-            return None
-        try:
-            nowe = set(writeback.commity_przebiegu(con, self._target_id)) - przed
-        except Exception:
-            return None
-        if len(nowe) != 1:
-            return None
-        return CzescZapisu(nowe.pop(), tuple(self._podmienione))
+            wiersze = _albo_none(lambda: writeback.renames_for_run(con, self._target_id))
+            if wiersze is None:
+                return CzescZapisu(podmienione, wszystkie)
+            return CzescZapisu(
+                podmienione, wszystkie,
+                zapisane=sum(1 for r in wiersze if r["status"] == "applied" and r["id"] not in znane),
+                czeka=sum(1 for r in wiersze if r["status"] == "pending"),
+                nazwy=sum(1 for r in wiersze if r["status"] == "applied"))
+        nowe = _albo_none(lambda: set(writeback.commity_przebiegu(con, self._target_id)) - znane)
+        # Jedna klasyfikacja backupów przebiegu: zakres „Cofnij” całości i pliki commitów TEJ operacji.
+        zakresy = _albo_none(lambda: writeback.zakresy_cofniecia(con, self._target_id, nowe or ()))
+        pola = {"zapisane": None}
+        if nowe is not None and zakresy is not None:
+            z = zakresy[1]
+            pola = {"zapisane": z.zatwierdzone if z else 0, "do_sprawdzenia": z.do_sprawdzenia if z else 0,
+                    "otwarte": z.otwarte if z else 0}
+        czeka = _albo_none(lambda: sum(1 for r in writeback.pending_for_run(con, self._target_id)
+                                       if r["status"] == "pending"))
+        return CzescZapisu(podmienione, wszystkie, zakres=zakresy[0] if zakresy else None,
+                           zakres_znany=zakresy is not None, czeka=czeka, **pola)
 
 
 class WritebackRunner(QObject):
@@ -1139,3 +1194,55 @@ def ogon_cofniecia(res, przycisk):
     elif not res.complete:
         msg += i18n.t("grid.wb.undo_retry", undo=przycisk)
     return msg, not res.complete
+
+
+# ------------------------------------------------ wynik CZĘŚCIOWY zapisu szuflady (AR-344)
+# Anulowanie i awaria w środku zapisu mówią jednym ogonem (`ogon_czesci_zapisu`): co czeka na dokończenie
+# albo co cofa „Cofnij”. Głowa awarii liczy pliki z FAKTÓW wykonawcy (`CzescZapisu` - baza, nie postęp:
+# plik zapisany ze statusem `withheld`/`failed` po re-syncu albo zapisany przed wyjątkiem bez postępu też
+# jest zapisany), więc szuflada nie mówi „Zatwierdzono: 3” obok „nie powiódł się”.
+
+
+def ogon_czesci_zapisu(czeka, *, blad=False, cofnij=None, nazwy=False):
+    """Ogon zdania zapisu przerwanego: anulowanie (`blad=False`) - „ - przerwano, N do dokończenia”
+    (`grid.wb.interrupted`, znak w znak jak dotąd); awaria z czekającymi - „ - N do dokończenia”; awaria bez
+    czekających przy żywym „Cofnij” (`cofnij` = etykieta przycisku) - co „Cofnij” cofa; inaczej `""`."""
+    if not blad:
+        return i18n.t("grid.wb.interrupted", n=czeka)
+    if czeka:
+        return i18n.t("grid.wb.partial_finish", n=czeka)
+    if cofnij:
+        return i18n.t("grid.wb.partial_undo_names" if nazwy else "grid.wb.partial_undo", undo=cofnij)
+    return ""
+
+
+def czlony_niepewnych(do_sprawdzenia, otwarte, *, przycisk):
+    """Człony zdania o plikach bez dowodu podmiany (AR-345): „do sprawdzenia - „Cofnij” je sprawdzi”
+    (podmiana niepotwierdzona, zwolnienie ręką - cofnięcie je rozstrzyga) i „przerwany zapis w miejscu -
+    najpierw „Przywróć nagłówek…”” (operacja otwarta - cofnięcie odmawia `undo_open_op` i odsyła do odzysku)."""
+    czlony = ""
+    if do_sprawdzenia:
+        czlony += i18n.t_plural("grid.wb.to_check", do_sprawdzenia, undo=przycisk)
+    if otwarte:
+        czlony += i18n.t_plural("grid.wb.open_write", otwarte, restore=i18n.t("grid.inplace.restore"),
+                                nav=i18n.t("nav.porzadki"), row=i18n.t("tasks.torn_write_frames"))
+    return czlony
+
+
+def zdanie_czesci_zapisu(op, czesc, msg, *, czeka, cofnij, przycisk):
+    """Zdanie awarii zapisu kart (`op` `commit`) albo nazw (`commit_rename`), który zdążył ruszyć pliki -
+    „N z M zapisane, potem błąd: <powód>” + człony niepewnych + ogon (`ogon_czesci_zapisu`) - albo None,
+    gdy fakty nie znają żadnego pliku tej operacji (wtedy mówi zdanie operacji `grid.wb.op.<op>`). N z bazy;
+    odczyt faktów padł - „co najmniej N” z postępu. `msg` - powód w języku UI (szczegół idzie protokołem
+    zdania i szczegółu wołającego)."""
+    if czesc is None or czesc.wszystkie is None:
+        return None
+    pewne = czesc.zapisane is not None
+    n = czesc.zapisane if pewne else len(czesc.applied)
+    if n + czesc.do_sprawdzenia + czesc.otwarte == 0:
+        return None
+    nazwy = op == "commit_rename"
+    klucz = ("grid.wb.partial_rename" if nazwy else "grid.wb.partial_commit") + ("" if pewne else "_min")
+    return (i18n.t_plural(klucz, n, m=czesc.wszystkie, msg=msg)
+            + czlony_niepewnych(czesc.do_sprawdzenia, czesc.otwarte, przycisk=przycisk)
+            + ogon_czesci_zapisu(czeka, blad=True, cofnij=cofnij, nazwy=nazwy))

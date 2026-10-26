@@ -4871,6 +4871,74 @@ def discard_staging(con, *, run_id, klinga, now, actor="user:local"):
     return n
 
 
+def zamiar_cofniecia_przebiegu(con, *, run_id, commity, now, actor="writeback:undo"):
+    """ZAMIAR cofnięcia przebiegu kart (AR-345, AR-318): zdarzenie `run.undo_started` z zamrożonym zakresem
+    (`payload.commity`) własną transakcją, PRZED pierwszym plikiem `writeback.undo_run` - z tym samym `now`
+    co reszta cofnięcia. Wiersz Porządków „Dokończ cofnięcie” (`gui.queries.niedokonczone_cofniecia_kart`)
+    widzi z niego commit, którego cofnięcie przerwano na granicy commitów albo przed pierwszym plikiem -
+    pliku nie ruszono, więc ślad próby per commit nie powstał. Aktor księgowy spoza `user%` (jak `scan`,
+    `resolver`): to ślad dla Porządków, nie gest ręki - Dom (`queries.last_hand_gesture`) go nie liczy."""
+    with con:
+        emit_event(con, actor=actor, verb="run.undo_started", target=f"run:{run_id}", now=now,
+                   payload={"commity": [int(c) for c in commity]},
+                   reason="cofnięcie przebiegu z szuflady - zakres zamrożony przy „Cofnij”")
+
+
+def nieudane_do_ponowienia(con, *, run_id, klinga):
+    """Wpisy `failed` przebiegu szuflady, których pliku ten przebieg NIE dotknął - do gestu „Ponów nieudane”
+    (AR-347). Predykat z FAKTÓW, nie z kodów powodu: zajętość pliku kart (WinError 32/33) kodu nie ma
+    z założenia (`item_reasons._OS_WINERROR`), a ponowienie wpisu nietkniętego jest bezpieczne z konstrukcji -
+    pisarz sprawdza kotwicę stagingu od nowa.
+
+    Karty (`pending_changes`): bez zapisu wstrzymanego (`withheld_id` - plik zapisany), bez wiązania z operacją
+    zapisu w miejscu (wiązanie powstaje przed pierwszym bajtem), bez backupu tej lokacji w commitach przebiegu
+    (backup = pisarz doszedł do zapisu), bez nowszego wpisu tej pary (lokacja, karta) - już ponowiony; kopia
+    obecna. Nazwy (`pending_renames`): bez otwartego zamiaru (rozdarcie go zostawia), baza widzi plik pod
+    starą nazwą, bez nowszego wiersza tej lokacji w przebiegu, kopia obecna. Wiersze od najstarszego."""
+    if klinga == "karty":
+        return con.execute(
+            "SELECT p.id, p.location_id, p.keyword, p.idx, p.op, p.old_value, p.new_value, p.new_type, "
+            "       p.new_comment, p.expected_header_hash "
+            "FROM pending_changes p JOIN location l ON l.id = p.location_id AND l.present = 1 "
+            "WHERE p.run_id = ? AND p.status = 'failed' AND p.withheld_id IS NULL "
+            "  AND p.inplace_op_id IS NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM pending_changes n WHERE n.run_id = p.run_id "
+            "                  AND n.location_id = p.location_id AND n.keyword = p.keyword AND n.id > p.id) "
+            "  AND NOT EXISTS (SELECT 1 FROM header_backups b JOIN commits c ON c.id = b.commit_id "
+            "                  WHERE c.run_id = p.run_id AND b.location_id = p.location_id) "
+            "ORDER BY p.id", (run_id,)).fetchall()
+    if klinga == "nazwy":
+        return con.execute(
+            "SELECT r.id, r.location_id, r.old_path, r.new_path, r.expected_mtime "
+            "FROM pending_renames r JOIN location l ON l.id = r.location_id AND l.present = 1 "
+            "     AND l.path = r.old_path "
+            "WHERE r.run_id = ? AND r.status = 'failed' AND r.in_flight IS NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM pending_renames n WHERE n.run_id = r.run_id "
+            "                  AND n.location_id = r.location_id AND n.id > r.id) "
+            "ORDER BY r.id", (run_id,)).fetchall()
+    raise ValueError(f"nieznana klinga szuflady: {klinga!r}")
+
+
+def ponow_nieudane(con, *, run_id, klinga):
+    """„Ponów nieudane” szuflady (AR-347): kopie wpisów `nieudane_do_ponowienia` jako NOWE wpisy `pending`
+    TEGO SAMEGO przebiegu - jedną transakcją, przez jedyne literały INSERT stagingu (`_insert_pending`,
+    `_insert_rename`), z kotwicą ze stagingu (`expected_header_hash`, `expected_mtime`), bez powodu. Ten sam
+    przebieg: „Cofnij” po ponowieniu cofa cały przebieg (decyzja CEO), także po restarcie. Wpis `failed`
+    zostaje jako historia - zasłania go nowszy. Transient - bez zdarzenia, jak każdy staging. Zwraca liczbę
+    nowych wpisów."""
+    with con:
+        wiersze = nieudane_do_ponowienia(con, run_id=run_id, klinga=klinga)
+        for r in wiersze:
+            if klinga == "karty":
+                _insert_pending(con, (run_id, r["location_id"], r["keyword"], r["idx"], r["op"],
+                                      r["old_value"], r["new_value"], r["new_type"], r["new_comment"],
+                                      r["expected_header_hash"]))
+            else:
+                _insert_rename(con, (run_id, r["location_id"], r["old_path"], r["new_path"],
+                                     r["expected_mtime"]))
+    return len(wiersze)
+
+
 def insert_commit(con, *, run_id, now, summary=None):
     """Utwórz wiersz `commits` (grupuje przebieg do undo). Zwraca commit_id. Transient — wskaźnik
     grupujący, nie event (mutacje plików niosą eventy re-syncu)."""

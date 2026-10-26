@@ -146,7 +146,8 @@ def test_szuflada_podejmuje_przerwany_zapis_po_restarcie(qapp, tmp_path, monkeyp
         _klik_w(v.drawer.btn_commit)
         _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "dokończenie zapisu")
         assert [fits.getheader(str(p))["TELESCOP"] for p in pliki] == ["EQ6"] * 3
-        assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=2)
+        # „Cofnij” cofa CAŁY przebieg, także commit sprzed restartu (AR-345) - etykieta liczy jego pliki.
+        assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=3)
     finally:
         _zamknij_widok(v)
         con.close()
@@ -269,8 +270,13 @@ def test_odrzuc_przebieg_z_poprzedniej_sesji_zostawia_rozstrzygniete_i_wpis_w_dz
         zdarzenia = [(r["verb"], r["target"], json.loads(r["payload"])) for r in con.execute(
             "SELECT verb, target, payload FROM event WHERE verb = 'staging.discarded'")]
         assert zdarzenia == [("staging.discarded", f"run:{run_id}", {"n": 2, "klinga": "karty"})]
-        assert v._run_id is None and v.drawer.label.text() == i18n.t("grid.drawer.empty")
-        assert v.drawer.result.text() == i18n.t_plural("grid.wb.rejected", 2)
+        # Plik zapisany przed restartem dostaje „Cofnij” przebiegu (AR-345) - dawniej pustostan i droga przez CLI.
+        [cid] = [r[0] for r in con.execute("SELECT id FROM commits WHERE run_id = ?", (run_id,))]
+        assert v._run_id is None and v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=1)
+        assert v.drawer.result.text() == (i18n.t_plural("grid.wb.rejected", 2)
+                                          + i18n.t_plural("grid.wb.written_before", 1)
+                                          + i18n.t("grid.wb.commit_id", id=cid))
+        assert v._undo_btn.isVisible() and v._undo_commity == (cid,)
     finally:
         _zamknij_widok(v)
         con.close()
@@ -468,7 +474,7 @@ def test_staging_samych_pominiec_przy_zywym_cofnij_zostawia_cofnij(qapp, tmp_pat
         v.status_message.connect(zdania.append)
         _makro_przyciskiem(v, "TELESCOP", "EQ6")
         _klik_w(v.drawer.btn_commit)
-        cid = v._undo_commit_id
+        [cid] = v._undo_commity
         etykieta = v.drawer.label.text()
         _makro_przyciskiem(v, "EXPTIME", "abc")
         assert v._undo_mode == "macro" and v._undo_btn.isVisible()
@@ -545,7 +551,7 @@ def test_wiersz_szuflady_przy_zywym_cofnij_niesie_identyfikator_raz(qapp, tmp_pa
         try:
             v.refresh()
             v._on_commit()
-            ident = f"commit {v._undo_commit_id})"
+            ident = f"commit {v._undo_commity[0]})"
             assert _wiersz_szuflady(v).count(ident) == 1
             loc = con.execute("SELECT id, header_hash FROM location WHERE frame_id = ?", (fid,)).fetchone()
             repo.stage_pending(con, run_id="R2", location_id=loc["id"], keyword="OBJECT", idx=0, op="set",
@@ -575,7 +581,7 @@ def test_wiersz_szuflady_przy_zywym_cofnij_niesie_identyfikator_raz(qapp, tmp_pa
         if galaz == "podglad_blad":
             _makro_przyciskiem(v, "TELESCOP", "EQ6")
             _klik_w(v.drawer.btn_commit)
-            ident, etykieta = f"commit {v._undo_commit_id})", i18n.t("grid.wb.committed_label", n=2)
+            ident, etykieta = f"commit {v._undo_commity[0]})", i18n.t("grid.wb.committed_label", n=2)
             _makro_przyciskiem(v, "TELESCOP", "EQ6", przycisk="prev", comp="1 +")
         else:
             v._on_rename_stage(_POL)
@@ -747,7 +753,7 @@ def test_szuflada_po_cofnieciu_niesie_numery_operacji_wszystkich_plikow(qapp, tm
         _klik_w(v.drawer.btn_commit)
         assert v._undo_btn.isVisible()
         wynik = writeback.UndoResult(1, [], [], _izolowane_dwa_pliki())
-        op = "undo" if klinga == "karty" else "undo_rename"
+        op = "undo_run" if klinga == "karty" else "undo_rename"       # „Cofnij” kart = przebieg (AR-345)
         monkeypatch.setitem(WritebackWorker._OPS, op, lambda *_a: wynik)
         _klik_w(v._undo_btn)
         szczegol = v.drawer.result.szczegol()
@@ -962,7 +968,7 @@ def test_ta_kopia_prowadzi_przy_zywym_cofnij_niesie_identyfikator_raz(qapp, tmp_
         assert v._pending_count() >= 1
         _klik_w(v.drawer.btn_commit)
         assert _po_gescie(v)
-        ident = f"commit {v._undo_commit_id})"
+        ident = f"commit {v._undo_commity[0]})"
         assert v._undo_mode == "macro" and _wiersz_szuflady(v).count(ident) == 1
         v.apply_perspective(grid_mod.PRESET_COPY_CONFLICT)
         _prawy_klik(v, _wiersz(v, fid))
@@ -1355,7 +1361,7 @@ def test_zly_wzor_nazw_przy_zywym_cofnij_zostawia_cofnij(qapp, tmp_path):
         v._on_rename_stage({**_POL, "template": ["datetime", {"t": "orig", "re": "("}]})
         assert zdania[-1].startswith(i18n.t("grid.rename.error", e="")), zdania[-1]
         assert v._undo_mode == "macro" and v._undo_btn.isVisible() and v.drawer.label.text() == etykieta
-        assert v.drawer.result.text() == zdania[-1] + i18n.t("grid.wb.commit_id", id=v._undo_commit_id)
+        assert v.drawer.result.text() == zdania[-1] + i18n.t("grid.wb.commit_id", id=v._undo_commity[0])
         assert v._rename_run_id is None
     finally:
         _zamknij_widok(v)
@@ -1422,7 +1428,10 @@ def test_odrzuc_po_zwolnij_zdejmuje_wpis_zwiazany_z_operacja_zamknieta(qapp, tmp
         _klik_w(v.drawer.btn_reject)
         assert v._run_id is None
         assert not [s for r, s, _o in _statusy(con) if r == "R" and s == "pending"], _statusy(con)
-        assert v.drawer.label.text() == i18n.t("grid.drawer.empty")
+        # Zapis zwolniony ręką to commit przebiegu bez dowodu podmiany (AR-345): „Cofnij” go sprawdzi, etykieta
+        # mówi „Do sprawdzenia: 1”, nie „Zatwierdzono” - dawniej pustostan.
+        assert v.drawer.label.text() == i18n.t("grid.wb.to_check_label", n=1)
+        assert v._undo_btn.isVisible()
         zdarzenie = con.execute("SELECT payload FROM event WHERE verb = 'staging.discarded'").fetchone()
         assert json.loads(zdarzenie["payload"]) == {"n": 1, "klinga": "karty"}
     finally:
@@ -1629,7 +1638,9 @@ def test_awaria_zapisu_po_rozstrzygnieciu_wszystkich_wpisow_oddaje_blokade(qapp,
         _makro_przyciskiem(a, "TELESCOP", "EQ6")
         monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
         _klik_w(a.drawer.btn_commit)
-        assert a.drawer.result.text().startswith(i18n.t("grid.wb.op.commit", msg="")[:20])
+        # Wynik częściowy (AR-344): pliki zapisane, potem błąd - nie samo „nie powiódł się”.
+        assert a.drawer.result.text().startswith(i18n.t_plural(
+            "grid.wb.partial_commit", 3, m=3, msg=i18n.t("objchg.item.prog_error"))), a.drawer.result.text()
         assert a._run_id is None and not _trzyma_blokade(a)
         b = _widok_szuflady(con_b, inline=True)
         _makro_przyciskiem(b, "TELESCOP", "AZ-GTI")
@@ -1645,10 +1656,11 @@ def test_awaria_zapisu_po_rozstrzygnieciu_wszystkich_wpisow_oddaje_blokade(qapp,
 def test_przerwane_nazwy_wyczyszczone_do_zera_zamykaja_sie_jak_odrzucone(qapp, tmp_path, monkeypatch):
     """Zmiana trzech nazw przerwana po pierwszym pliku, potem staging nazw bez żadnej zmiany: przebieg nazw
     (niezapisany) przy zerze czekających zamyka się jak po „Odrzuć” - wiersz `applied` przerwanego zapisu
-    zostaje w bazie, a cofnięcie przebiegu z rdzenia (droga CLI `rename --undo`) przywraca pierwszy plik.
-    Falsyfikator: zamknięcie także przebiegu ZAPISANEGO (bez warunku `_rename_run_committed`) - czerwone
-    zastane testy żywego „Cofnij” nazw."""
-    from test_gui_pasek_szczegol import _anuluj_w_biegu, _brama_po_pierwszym_pliku
+    zostaje w bazie, szuflada oddaje blokadę, a nazwa pierwszego pliku dostaje „Cofnij” nazw (AR-345 - dawniej
+    droga wyłącznie przez CLI `rename --undo`); klik przywraca pierwszy plik. Falsyfikatory: zamknięcie także
+    przebiegu ZAPISANEGO (bez warunku `_rename_run_committed`) - czerwone zastane testy żywego „Cofnij” nazw;
+    zamknięcie bez „Cofnij” zapisanych nazw."""
+    from test_gui_pasek_szczegol import _anuluj_w_biegu, _brama_po_pierwszym_pliku, _czekaj
     path, con, pliki = _baza_szuflady(tmp_path, 3)
     v = _widok_szuflady(con)
     try:
@@ -1660,9 +1672,10 @@ def test_przerwane_nazwy_wyczyszczone_do_zera_zamykaja_sie_jak_odrzucone(qapp, t
         _anuluj_w_biegu(v, brama, doszlo, stary)
         assert v._rename_pending_count() == 2 and not pliki[0].exists()
         v._on_rename_stage({**_POL, "template": [{"t": "orig", "re": ".*"}]})
-        assert v._rename_run_id is None and not _trzyma_blokade(v)
+        assert v._rename_run_committed and v._undo_mode == "rename" and not _trzyma_blokade(v)
         assert [r["status"] for r in writeback.renames_for_run(con, run)] == ["applied"]
-        writeback.undo_renames(con, run, now=NOW)
+        _klik_w(v._undo_btn)
+        _czekaj(lambda: not v._wb.is_busy and not v._zbior_w_drodze(), "cofnięcie nazw")
         assert pliki[0].exists()
     finally:
         _zamknij_widok(v)
@@ -2502,7 +2515,12 @@ def test_stan_czwarty_chowa_zatwierdz_i_odrzuc(qapp, tmp_path, monkeypatch, stan
         v.set_writeback_busy(False)
         assert _kropka(v)[0] == "●" and _akcje(v) == (True, True, True, True)
         _klik_w(v.drawer.btn_reject)
-        assert _kropka(v)[0] == "○" and _akcje(v) == (True, False, True, False)
+        if stan == "nazwy":
+            # Pierwszy plik przemianowany przed śmiercią procesu (wiersz `applied` po rekoncyliacji): „Odrzuć”
+            # stawia „Cofnij” nazw (AR-345) - jedyną akcją jest ono, Zatwierdź/Odrzuć schowane.
+            assert _kropka(v)[0] == "○" and _akcje(v) == (False, False, False, False) and v._undo_btn.isVisible()
+        else:
+            assert _kropka(v)[0] == "○" and _akcje(v) == (True, False, True, False)
     finally:
         if blokada is not None and blokada.isLocked():
             blokada.unlock()

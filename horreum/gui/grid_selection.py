@@ -568,6 +568,7 @@ class StagingDrawer(QFrame):
     commit = Signal()
     reject = Signal()
     cancel = Signal()
+    retry = Signal()        # „Ponów nieudane (N)” (AR-347)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -584,13 +585,25 @@ class StagingDrawer(QFrame):
         self.btn_cancel.clicked.connect(lambda: self.cancel.emit())
         self.btn_commit = QPushButton(i18n.t("grid.action.commit")); self.btn_commit.clicked.connect(lambda: self.commit.emit())
         self.btn_reject = QPushButton(i18n.t("grid.action.reject")); self.btn_reject.clicked.connect(lambda: self.reject.emit())
+        # „Ponów nieudane (N)” (AR-347): za Zatwierdź/Odrzuć, przed „Cofnij” (ten dokłada widok na koniec układu).
+        # Widoczny wyłącznie po zamkniętym przebiegu z wpisami do ponowienia (`set_retry`).
+        self.btn_retry = QPushButton(); self.btn_retry.setVisible(False)
+        self.btn_retry.setToolTip(i18n.t("grid.drawer.retry_tip", commit=i18n.t("grid.action.commit")))
+        self.btn_retry.clicked.connect(lambda: self.retry.emit())
         # Klaster licznik+wynik po LEWEJ (dot·label·result), rozpychacz, akcje po prawej — inaczej
         # `result` ze stretch=1 rozrzucał licznik i przyciski na całą szerokość (wizytator D1).
         lay.addWidget(self.dot); lay.addWidget(self.label); lay.addSpacing(8)
         lay.addWidget(self.result); lay.addStretch(1)
         lay.addWidget(self.bar); lay.addWidget(self.btn_cancel)
-        lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject)
+        lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject); lay.addWidget(self.btn_retry)
         self.set_count(0)
+
+    def set_retry(self, n):
+        """„Ponów nieudane (N)”: `n > 0` pokazuje przycisk z liczbą wpisów, `0` go chowa. Chowa go też sam
+        nowy staging (`set_count(n > 0)`); bieg operacji (także gestu spoza stagingu) tylko go wygasza
+        (`begin_progress`/`end_progress`) - gest izolacji nie zabiera drogi ponowienia."""
+        self.btn_retry.setText(i18n.t("grid.drawer.retry", n=n))
+        self.btn_retry.setVisible(n > 0)
 
     def begin_progress(self, total):
         """Wejście w tryb postępu (start commitu/undo): pasek + „Anuluj" widoczne, Zatwierdź/Odrzuć
@@ -601,6 +614,7 @@ class StagingDrawer(QFrame):
         self.result.setText("")
         self.btn_cancel.setVisible(True); self.btn_cancel.setEnabled(True)
         self.btn_commit.setVisible(False); self.btn_reject.setVisible(False)
+        self.btn_retry.setEnabled(False)            # nie klikać w biegu - ale zostaje (AR-347)
 
     def update_progress(self, done, total, path):
         """Slot postępu (główny wątek): pasek done/total + nazwa bieżącego pliku w `result`."""
@@ -615,6 +629,7 @@ class StagingDrawer(QFrame):
         wołający (set_count / set_commit_actions_visible) w post-processingu commitu."""
         self.bar.setVisible(False); self.btn_cancel.setVisible(False)
         self.btn_commit.setVisible(True); self.btn_reject.setVisible(True)
+        self.btn_retry.setEnabled(True)
 
     def set_count(self, n, *, result=None, label=None, zatrzymane=None):
         """Licznik szuflady: kropka, etykieta, Zatwierdź/Odrzuć. Kropka ma TRZY kształty (różnią się bez
@@ -648,8 +663,10 @@ class StagingDrawer(QFrame):
         self.btn_reject.setEnabled(n > 0)
         # Nowy staging (n>0) → Zatwierdź/Odrzuć znowu widoczne. NIE chowa tu „Cofnij" (osobny przycisk
         # FramesView) — to robi `_dismiss_undo` przy starcie stagingu (recenzent #1/#4, wiz #3).
+        # „Ponów nieudane” chowa się tu: do szuflady weszło coś nowego (staging, podjęcie, ponowienie).
         if n > 0:
             self.set_commit_actions_visible(True)
+            self.set_retry(0)
         if result is not None:
             self.result.setText(result)
 

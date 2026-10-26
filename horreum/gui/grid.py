@@ -5050,7 +5050,9 @@ class FramesView(QWidget):
         odrzucony (`_zamknij_puste_przebiegi`, AR-316) - blokada szuflady schodzi przy ogonie, nie trzyma
         pustego przebiegu."""
         self.drawer.end_progress()
-        self._zamknij_puste_przebiegi()
+        # Gest rozstrzygnął ostatni czekający wpis przebiegu z zapisanymi plikami - „Cofnij” całego przebiegu
+        # (AR-345); zdanie gestu stawia potem `_po_gescie_zapisu` (z identyfikatorem przy żywym „Cofnij”).
+        self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
         if self._undo_mode is not None:
             self.drawer.set_commit_actions_visible(False)
         msg, szczegol = _zdanie_gestu_zapisu(op, res), _podpowiedz_gestu_zapisu(op, res)
@@ -5214,6 +5216,7 @@ class FramesView(QWidget):
             self._sync_lineage_busy()
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(False)
+            self.drawer.btn_retry.setEnabled(False)      # „Ponów nieudane” to staging - jak „Cofnij” (AR-347)
         else:
             n = self._active_pending_count()             # mode-aware (R1 #2): makro LUB rename
             self.drawer.btn_commit.setEnabled(n > 0)
@@ -5222,6 +5225,7 @@ class FramesView(QWidget):
             self.sel_bar.btn_obj.setEnabled(True)        # nie zależy od zbioru - wraca od razu
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
+            self.drawer.btn_retry.setEnabled(True)
             self._sync_akcji_zbioru()                    # paski i „Wydaj" wg widocznych - i zbioru w drodze
             # „Przyjmij nowe” rozstrzyga zamiary nazw, inny etap bywa w biegu, gdy ktoś zamyka izolację -
             # pusta szuflada mówi stan po etapie, nie do następnej aktywacji okna (AR-316).
@@ -5241,9 +5245,11 @@ class FramesView(QWidget):
             self.drawer.btn_reject.setEnabled(False)
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(False)
+            self.drawer.btn_retry.setEnabled(False)      # jak „Cofnij” (AR-347)
         else:
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
+            self.drawer.btn_retry.setEnabled(True)
             self._refresh_drawer()                       # szczere stany wg oczekujących AKTYWNEJ klingi
 
     # ---- makro / staging (KROK 4, druga klinga) ----
@@ -5379,7 +5385,9 @@ class FramesView(QWidget):
                 idx=p.idx, op=p.op, old_value=p.old_value, new_value=p.new_value,
                 new_type=p.new_type, new_comment=p.comment,
                 expected_header_hash=p.expected_header_hash)
-        self._zamknij_puste_przebiegi()                  # re-stage bez zmian = przebieg odrzucony (AR-316)
+        # Re-stage bez zmian = przebieg odrzucony (AR-316); zapisany wcześniej plik - „Cofnij” (AR-345), a zdanie
+        # gestu idzie niżej obok niego (gałąź „żywe Cofnij, zero zmian”).
+        self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
         self._show_preview(run)
         zdanie = (i18n.t_plural("grid.macro.staged", len(run.touched), s=len(run.skipped))
                   + zdanie_pominiec_makra(run.skipped))
@@ -5468,7 +5476,8 @@ class FramesView(QWidget):
         """Edycja JEDNEJ komórki keyworda → szuflada (AR-61). Te same bramki i ta sama klinga co makro:
         `macro.plan_manual_change` (cel kopii + reguły karty) → `repo.stage_pending_replacing` pod
         przebiegiem `_run_id`. Commit, „Odrzuć" i „Cofnij" są więc wspólne z makrem, a cel cofnięcia
-        łapie `_install_undo` w chwili commitu (`_undo_commit_id`) - edycja nie zakłada trzeciego trybu.
+        łapie `_install_undo` w chwili commitu (`_undo_commity` - zakres przebiegu zamrożony) - edycja nie
+        zakłada trzeciego trybu.
 
         Odmowa (zajętość, staging nazw, bramka celu albo karty) mówi powód na pasku i niczego nie
         zapisuje. Druga edycja tej samej karty ZASTĘPUJE pierwszą (także wpis makra tej karty).
@@ -5683,12 +5692,18 @@ class FramesView(QWidget):
         WŁASNEGO przebiegu (`_after_gestu_zapisu`) - ta droga wymaga wpisu związanego z operacją izolującą,
         który został czekający; żywy zapis tej szuflady rozstrzyga go jako `failed` (zmierzone: anulowanie po
         pierwszym pliku z re-syncem, który padł - związany `failed`, reszta czeka i zostaje po „Dokończ zapis”).
-        NIE w `_refresh_drawer`: ogon zapisu nazw woła go, zanim oznaczy przebieg jako zapisany."""
+        NIE w `_refresh_drawer`: ogon zapisu nazw woła go, zanim oznaczy przebieg jako zapisany.
+
+        Zwraca `(karty, nazwy)` - `run_id` przebiegów zamkniętych TERAZ (None, gdy klinga nic nie zamknęła):
+        przebieg z zapisanymi plikami (zapis przerwany, potem zero czekających) dostaje „Cofnij” przez
+        `_cofnij_po_zamknieciu` (AR-345) - dawniej zostawał z plikami zmienionymi bez drogi w szufladzie."""
+        karty = nazwy = None
         if self._run_id is not None and self._pending_count() == 0:
-            self._run_id = None
+            karty, self._run_id = self._run_id, None
         if (self._rename_run_id is not None and not self._rename_run_committed
                 and self._rename_pending_count() == 0):
-            self._rename_run_id = None
+            nazwy, self._rename_run_id = self._rename_run_id, None
+        return karty, nazwy
 
     def closeEvent(self, event):
         self._zwolnij_szuflade()                         # widok znika - przebieg podejmie następne okno
@@ -5790,6 +5805,13 @@ class FramesView(QWidget):
             # `_pusta` pójdzie. Zdanie i kropkę stawia `_refresh_drawer` z końca `__init__` (`_pusta` →
             # `_podejmij_zwolnione`, gałąź cudzej blokady) - jedna droga z odświeżeniem.
             self._wylaczone()
+            return
+        # PONOWNY ODCZYT POD BLOKADĄ (AR-345): między odczytem wyżej a blokadą inne okno mogło domknąć ten
+        # przebieg i oddać szufladę - podjęty nieaktualny przebieg przyjąłby nowy staging do cudzego zapisu,
+        # a jego „Cofnij” objęłoby cudzy commit. Decyzja zapada na stanie widzianym pod blokadą.
+        przebiegi = queries.oczekujace_przebiegi_szuflady(self.con)
+        if not przebiegi:
+            self._zwolnij_szuflade()
             return
         self._podejmij(przebiegi[0], len(przebiegi) - 1)
 
@@ -6049,6 +6071,14 @@ class FramesView(QWidget):
         zdanie = self._wez_szuflade()
         if zdanie is not None:
             return "cudza", zdanie, n
+        # Ponowny odczyt POD blokadą (AR-345, jak `_podejmij_przebieg_poprzedni`): przebieg mógł się zamknąć
+        # między odczytem a blokadą - nic do podjęcia, szuflada wraca.
+        przebiegi = queries.oczekujace_przebiegi_szuflady(self.con)
+        gotowe = [p for p in przebiegi if p["run_id"] in self._wylaczone_znane]
+        if not gotowe:
+            self._zwolnij_szuflade()
+            return "", "", 0
+        n = sum(p["n"] for p in gotowe)
         self._wylaczone_znane.discard(gotowe[0]["run_id"])
         self._podejmij(gotowe[0], len(przebiegi) - 1)
         czlon = self._zdanie_przebiegu_poprzedniego()
@@ -6105,40 +6135,51 @@ class FramesView(QWidget):
     def _on_wb_progress(self, done, total, path, status):
         self.drawer.update_progress(done, total, path)
 
-    # ---- „Cofnij” po awarii zapisu za podmianą plików (AR-322) ----
+    # ---- „Cofnij” po awarii zapisu za podmianą plików (AR-322, AR-344, AR-345) ----
     # Operacja „Zatwierdź”, która podmieniła pliki i potem rzuciła, zostawiała commit bez „Cofnij” (droga tylko
-    # przez CLI). Wykonawca podaje, co TA operacja zdążyła (`wb_worker.CzescZapisu` - commit z różnicy względem
-    # stanu sprzed operacji i pliki `applied` z postępu rdzenia), sygnałem PRZED porażką; ogon porażki stawia
-    # „Cofnij” tak jak po udanym zapisie, gdy nic w przebiegu nie czeka. Czekające wpisy (awaria w środku) - bez
-    # „Cofnij”, jak zapis przerwany anulowaniem: szuflada mówi „N do dokończenia”, „Zatwierdź” dokończy.
+    # przez CLI). Wykonawca podaje FAKTY operacji z bazy (`wb_worker.CzescZapisu`: zakres „Cofnij” przebiegu,
+    # czekające wpisy, pliki tej operacji) sygnałem PRZED `done` i PRZED `failed`; ogon zużywa je RAZ, wyłącznie dla
+    # tej samej operacji i celu. Ogon porażki stawia „Cofnij” całego przebiegu, gdy nic w nim nie czeka - bez
+    # czytania bazy przed wyjściem z trybu postępu (fakty nieznane - bez „Cofnij”, zdanie operacji zostaje).
+    # Czekające wpisy (awaria w środku) - bez „Cofnij”, jak zapis przerwany anulowaniem: „N do dokończenia”.
 
     @Slot(str, object)
     def _on_wb_czesciowy(self, op, czesc):
-        self._czesc_po_awarii = (op, czesc)
+        self._fakty_zapisu = (op, self._wb_target_id, czesc)
 
-    def _cofnij_po_awarii(self, op):
-        """Stawia „Cofnij” po awarii za podmianą plików; zwraca `op`, gdy postawiło, inaczej None."""
-        czesc, self._czesc_po_awarii = getattr(self, "_czesc_po_awarii", None), None
-        if czesc is None or czesc[0] != op:
+    def _wez_fakty(self, op):
+        """Fakty wykonawcy TEJ operacji (`CzescZapisu`) - zużyte raz: ogon sukcesu i porażki biorą je na
+        wejściu, a fakty innej operacji albo innego celu (pozostałe po przerwanym biegu) przepadają."""
+        fakty, self._fakty_zapisu = getattr(self, "_fakty_zapisu", None), None
+        if fakty is None or fakty[0] != op or fakty[1] != self._wb_target_id:
             return None
-        czesc = czesc[1]
-        if op == "commit" and czesc.commit_id is not None and self._pending_count() == 0:
-            self._last_commit_id = czesc.commit_id
-            self._install_undo(czesc.commit_id, "", applied=len(czesc.applied))
+        return fakty[2]
+
+    def _cofnij_po_awarii(self, op, czesc):
+        """Stawia „Cofnij” po awarii zapisu z faktów wykonawcy (`czesc`): przebieg bez czekających wpisów -
+        karty: zakres całego przebiegu (`CzescZapisu.zakres`), nazwy: wiersze `applied` przebiegu. Zwraca `op`,
+        gdy postawiło, inaczej None. Bez odczytu bazy."""
+        if czesc is None or czesc.czeka != 0:
+            return None
+        if op == "commit" and self._postaw_cofnij_przebiegu(self._wb_target_id, "", czesc.zakres):
             self._run_id = None                          # przebieg domknięty commitem - jak `_after_commit`
             return op
-        if op == "commit_rename" and self._rename_pending_count() == 0:
+        if op == "commit_rename" and czesc.nazwy:
             run_id = self._wb_target_id                  # cel „Cofnij” przechwycony teraz - jak `_after_commit_rename`
             self._undo_rename_run_id = run_id
             self._rename_run_committed = True
-            self._install_rename_undo(run_id, "", applied=len(czesc.applied))
+            self._install_rename_undo(run_id, "", applied=czesc.nazwy)
             return op
         return None
 
     @Slot(str, str, str)
     def _on_wb_failed(self, op, msg, podpowiedz):
+        czesc = self._wez_fakty(op)
+        # Tryb postępu schodzi PIERWSZY: nic przed nim nie czyta bazy (odczyt, który by padł, zostawiłby pasek
+        # i „Anuluj” bez zdania błędu).
+        self.drawer.end_progress()
         # PRZED zamknięciem pustych (nazwy: zapisany przebieg zostaje)
-        postawione = self._cofnij_po_awarii(op)
+        postawione = self._cofnij_po_awarii(op, czesc)
         # „Cofnij” po awarii, nic nie czeka - podgląd jak w `_after_commit` / `_after_commit_rename` (AR-207,
         # AR-250): kolumna chowa się od razu (mówiłaby „do zapisania” / „nazwa →” o tym, co już na dysku),
         # a przeładowanie zbioru niżej (`_przeladuj_po_gescie`) zdejmuje podgląd w tym samym resecie
@@ -6150,15 +6191,22 @@ class FramesView(QWidget):
             self._preview_owner = None
             self._schowaj_podglad_po_zapisie()
             self._odloz_podglad_do_przylozenia({}, i18n.t("grid.preview.name"))
-        self.drawer.end_progress()
-        self._zamknij_puste_przebiegi()                  # operacja mogła rozstrzygnąć wszystkie wpisy (AR-316)
+        # Operacja mogła rozstrzygnąć wszystkie wpisy (AR-316). Zakres „Cofnij” po awarii dają WYŁĄCZNIE fakty
+        # wykonawcy (`_cofnij_po_awarii`) - przebieg zamknięty tu bez nich zostaje bez „Cofnij”.
+        self._zamknij_puste_przebiegi()
         if self._undo_mode is not None:
             # Żywe „Cofnij” (porażka cofnięcia albo gestu przy świeżym commicie): jedyną akcją zostaje
             # ono - `end_progress` pokazałby obok szare Zatwierdź/Odrzuć (reguła `_install_undo`).
             self.drawer.set_commit_actions_visible(False)
         # Szuflada mówi tym samym zdaniem operacji co pasek (AR-309): „BŁĄD: błąd programu…” nie mówiło,
-        # który gest się nie udał.
-        blad = i18n.t(f"grid.wb.op.{op}", msg=msg)
+        # który gest się nie udał. Zapis, który zdążył ruszyć pliki, mówi wynikiem częściowym z faktów wykonawcy
+        # (AR-344): „3 z 3 zapisane, potem błąd: … - „Cofnij” cofa zapisane”, a nie „Zatwierdzono: 3” obok
+        # „nie powiódł się”.
+        from horreum.gui.wb_worker import zdanie_czesci_zapisu
+        cofnij = i18n.t("grid.action.undo")
+        blad = (zdanie_czesci_zapisu(op, czesc, msg, czeka=czesc.czeka, cofnij=cofnij if postawione else None,
+                                     przycisk=cofnij) if op in ("commit", "commit_rename") and czesc else None)
+        blad = blad or i18n.t(f"grid.wb.op.{op}", msg=msg)
         czlon = self._podejmij_po_izolacji(op)   # pętla gestu mogła zamknąć operacje przed wyjątkiem (AR-308)
         # Zdanie po przyłożeniu zbioru składanego w tle - raport wczytania by je przykrył (AR-84).
         # Zdanie operacji z katalogu (AR-204), nie token `op` - pasek mówi, co się nie udało, a szczegół
@@ -6175,9 +6223,10 @@ class FramesView(QWidget):
             # Padł gest spoza stagingu w toku (`_odpal_gest_plikowy`): błąd jest jego wynikiem, więc
             # zmiana perspektywy oddaje szufladzie zdanie sprzed gestu, jak po sukcesie (AR-204).
             self._oznacz_wynik_gestu_zapisu()
-        # Wyjątek w ŚRODKU operacji nie mówi, ile plików zdążyło się zmienić (każdy plik to osobny
-        # zapis), a przerwany zapis w miejscu sam jest wierszem Porządków (kopia izolowana) - więc
-        # plakietka liczy się ze stanu także tu, bez zgadywania, czy coś się zapisało.
+        if op in ("commit", "commit_rename") and czesc is not None and czesc.czeka == 0:
+            self._pokaz_ponowienie("karty" if op == "commit" else "nazwy", self._wb_target_id)
+        # Przerwany zapis w miejscu sam jest wierszem Porządków (kopia izolowana), a fakty wykonawcy mogą
+        # być nieznane - plakietka liczy się ze stanu także tu, bez zgadywania, czy coś się zapisało.
         self.stan_porzadkow_changed.emit()
 
     def _on_wb_cancel(self):
@@ -6216,7 +6265,7 @@ class FramesView(QWidget):
         izolacji i kopii wiodącej, błąd operacji, cofnięcie niedomknięte, błąd definicji makra - gubiło
         kotwicę `header-fix --undo N` / cofnięcia nazw po restarcie, choć przycisk dalej ją cofał."""
         if self._undo_mode == "macro":
-            return zdanie + i18n.t("grid.wb.commit_id", id=self._undo_commit_id)
+            return zdanie + self._kotwica_commitow(self._undo_commity)
         if self._undo_mode == "rename":
             return zdanie + i18n.t("grid.wb.run_id", id=self._undo_rename_run_id)
         return zdanie
@@ -6241,10 +6290,17 @@ class FramesView(QWidget):
 
     def _after_commit(self, op, res):
         """Post-processing commitu makra (wątek główny). Anulowano → część 'pending' została w runie:
-        run zostaje otwarty do dokończenia, bez „Cofnij" (zapisane siedzą w commits - undo po CLI).
-        Zapis szedł w miejscu (AR-161): plik przepisany w całości (spadek na drogę atomową) zdanie
-        mówi członem okien kart (`zdanie_drogi_zapisu`), szczegół spadku stoi w podpowiedzi."""
-        from horreum.gui.wb_worker import zdanie_drogi_zapisu   # jedna reguła z oknami kart (AR-161)
+        run zostaje otwarty do dokończenia, bez „Cofnij" - zapisane dokończony przebieg cofnie razem
+        z resztą (AR-345). Zapis szedł w miejscu (AR-161): plik przepisany w całości (spadek na drogę
+        atomową) zdanie mówi członem okien kart (`zdanie_drogi_zapisu`), szczegół spadku stoi w podpowiedzi.
+
+        PRZEBIEG ZAMKNIĘTY (nic nie czeka) dostaje „Cofnij” CAŁEGO przebiegu z zakresem z faktów wykonawcy
+        (`wb_worker.CzescZapisu.zakres`) - także commit sprzed przerwania i sprzed restartu okna (decyzja CEO),
+        także gdy ta operacja sama nic nie podmieniła. Fakty nieznane (odczyt wykonawcy padł, wywołanie wprost)
+        - zakres z commitu TEJ operacji (`commit_do_cofniecia`, wiarygodny `CommitResult.commit_id`)."""
+        from horreum.gui.wb_worker import (ogon_czesci_zapisu,   # jedna reguła z oknami kart (AR-161)
+                                           zdanie_drogi_zapisu)
+        fakty = self._wez_fakty(op)
         self.drawer.end_progress()
         # Szuflada ze stanu PRZED zdaniem wyniku: przy oczekujących zmianach (zapis przerwany)
         # `set_count` bez wyniku czyści go jak przy nowym stagingu - wołana po zdaniu zjadała
@@ -6255,18 +6311,20 @@ class FramesView(QWidget):
         droga = zdanie_drogi_zapisu(res)                 # pusty bez spadku - jak w oknach kart
         remaining = self._pending_count()
         if remaining > 0:                                # przerwane anulowaniem
-            ogon = i18n.t("grid.wb.interrupted", n=remaining)
+            ogon = ogon_czesci_zapisu(remaining)
             self.drawer.set_count(remaining, result=summary + wskazanie + droga + ogon)
-        elif commit_do_cofniecia(res) is not None:       # także `failed` z kopią nagłówka (Z11)
-            ogon = i18n.t("grid.wb.commit_id", id=res.commit_id)   # pasek; szuflada - `_install_undo`
-            self._last_commit_id = res.commit_id
-            self._install_undo(res.commit_id, summary + wskazanie + droga,
-                               applied=len(res.applied))
+        else:
+            zakres = self._zakres_po_zapisie(res, fakty)
+            # Ta operacja nic nie podmieniła, a przebieg ma zapis sprzed przerwania - zdanie mówi, skąd „Cofnij”.
+            wczesniej = commit_do_cofniecia(res) is None
+            if self._postaw_cofnij_przebiegu(res.run_id, summary + wskazanie + droga, zakres,
+                                             wczesniej=wczesniej):
+                ogon = self._kotwica_commitow(self._undo_commity)   # pasek; szuflada - `_install_undo`
+            else:                                        # nic do cofnięcia (blocked/failed/skipped)
+                ogon = ""
+                self._pusta(result=summary + wskazanie + droga + self._czlon_otwartych(zakres))
             self._run_id = None                          # R#5: run domknięty commitem
-        else:                                            # wszystko blocked/failed/skipped
-            ogon = ""
-            self._pusta(result=summary + wskazanie + droga)
-            self._run_id = None
+            self._pokaz_ponowienie("karty", res.run_id)
         self._podpowiedz_wyniku(podpowiedz)
         # Baza odświeżona - grid pokaże nowe wartości po składzie w tle; zdanie po przyłożeniu,
         # inaczej raport wczytania by je przykrył (AR-84). Zbiór ten sam, więc zaznaczenie wraca
@@ -6321,15 +6379,19 @@ class FramesView(QWidget):
         self._podglad_po_zapisie = self.model._preview
         self.table.setColumnHidden(kolumna, True)
 
-    def _install_undo(self, commit_id, summary, applied):
-        """Po udanym commicie makra szuflada oferuje jednorazowe „Cofnij" (undo całego commitu). Etykieta
-        „Zatwierdzono…" zamiast pustostanu, by nie przeczyła wynikowi obok (wizytator D2) - bez
-        identyfikatora commitu: niesie go zdanie wyniku w tym samym wierszu (AR-255), doklejony
-        w jednym miejscu (`_zdanie_przy_cofnij`, AR-276) - `summary` przychodzi bez niego."""
-        self._undo_commit_id = commit_id
+    def _install_undo(self, run_id, zakres, summary):
+        """Po zapisie makra szuflada oferuje jednorazowe „Cofnij" CAŁEGO przebiegu `run_id` (AR-345): cel to
+        commity `zakres` (`writeback.ZakresCofniecia`) ZAMROŻONE teraz - wykonawca cofa dokładnie je
+        (`undo_run`), nie commity odczytane przy kliku. Etykieta „Zatwierdzono: N” (pliki z potwierdzoną
+        podmianą) albo, bez takich, „Do sprawdzenia: K” zamiast pustostanu, by nie przeczyła wynikowi obok
+        (wizytator D2) - bez identyfikatora commitu: niesie go zdanie wyniku w tym samym wierszu (AR-255),
+        doklejony w jednym miejscu (`_zdanie_przy_cofnij`, AR-276) - `summary` przychodzi bez niego."""
+        self._undo_run_id = run_id
+        self._undo_commity = tuple(zakres.commity)
         self._undo_mode = "macro"                        # dispatch współdzielonego „Cofnij" (R1 #3)
-        self.drawer.set_count(0, result=self._zdanie_przy_cofnij(summary),
-                              label=i18n.t("grid.wb.committed_label", n=applied))
+        etykieta = (i18n.t("grid.wb.committed_label", n=zakres.zatwierdzone) if zakres.zatwierdzone
+                    else i18n.t("grid.wb.to_check_label", n=zakres.do_sprawdzenia + zakres.otwarte))
+        self.drawer.set_count(0, result=self._zdanie_przy_cofnij(summary), label=etykieta)
         self.drawer.set_commit_actions_visible(False)   # jedyna sensowna akcja teraz to Cofnij (#5)
         self._ensure_undo_button()
         self._undo_btn.setVisible(True)
@@ -6352,14 +6414,18 @@ class FramesView(QWidget):
         self._undo_mode = None
 
     def _dispatch_undo(self):
-        """Współdzielony „Cofnij" woła undo AKTYWNEJ klingi wg `_undo_mode` (R1 #3, init None)."""
+        """Współdzielony „Cofnij" woła undo AKTYWNEJ klingi wg `_undo_mode` (R1 #3, init None). Cofnięcie
+        gasi drogę ponowienia nieudanych (AR-347) - ponowiony zapis po cofnięciu przeczyłby intencji."""
+        self._do_ponowienia = None
+        self.drawer.set_retry(0)
         if self._undo_mode == "rename":
             self._on_undo_rename(self._undo_rename_run_id)
         else:
-            self._on_undo(self._undo_commit_id)
+            self._on_undo(self._undo_commity)
 
-    def _on_undo(self, commit_id):
-        self._start_writeback("undo", commit_id, self._after_undo)
+    def _on_undo(self, commity):
+        """Cofnięcie zamrożonego zakresu przebiegu kart (`_undo_commity`, AR-345) na wątku tła."""
+        self._start_writeback("undo_run", tuple(commity), self._after_undo)
 
     def _after_undo(self, op, res):
         """Ogon cofnięcia makra - lustro `_after_undo_rename` (AR-31 (2)). BŁĄD JEST WIDOCZNY I DA
@@ -6400,6 +6466,144 @@ class FramesView(QWidget):
         if res.restored or res.failed:
             self.stan_porzadkow_changed.emit()
 
+    # ---- „Cofnij” CAŁEGO przebiegu kart i „Ponów nieudane” (AR-345, AR-347) ----
+    # Każde zamknięcie przebiegu kart (zapis, awaria, „Odrzuć”, przebieg wyczyszczony do zera) pyta o zakres
+    # „Cofnij” tą samą regułą rdzenia (`writeback.przebieg_do_cofniecia`): z faktów wykonawcy w ogonie zapisu,
+    # z odczytu w wątku okna tam, gdzie wykonawcy nie ma. „Cofnij” stoi przy plikach, które cofnięcie
+    # rozstrzyga; plik z otwartym zapisem w miejscu mówi drogę odzysku (cofnięcie go nie rozstrzygnie).
+    # „Ponów nieudane (N)” stawia każde zamknięcie po zapisie z wpisami nieudanymi, których pliku przebieg
+    # nie dotknął (`repo.nieudane_do_ponowienia`); kopie wracają do TEGO SAMEGO przebiegu, więc „Cofnij” po
+    # ponowieniu cofa cały przebieg.
+
+    def _kotwica_commitow(self, commity):
+        """Identyfikator(y) commitów „Cofnij” w zdaniu (AR-276): jeden - `grid.wb.commit_id`, kilka -
+        `grid.wb.commit_ids` (każdy to kotwica `header-fix --undo N` po restarcie)."""
+        if len(commity) == 1:
+            return i18n.t("grid.wb.commit_id", id=commity[0])
+        return i18n.t("grid.wb.commit_ids", ids=", ".join(str(c) for c in commity))
+
+    def _zakres_z_bazy(self, run_id):
+        """Zakres „Cofnij” przebiegu kart odczytany w wątku okna tam, gdzie faktów wykonawcy nie ma („Odrzuć”,
+        zamknięcie pustego przebiegu, ogon gestu izolacji). Błąd bazy - None: bez „Cofnij”, zdanie gestu
+        zostaje (odczyt pomocniczy nie przerywa ogona gestu)."""
+        try:
+            return writeback.przebieg_do_cofniecia(self.con, run_id)
+        except sqlite3.Error:
+            return None
+
+    @staticmethod
+    def _zakres_po_zapisie(res, fakty):
+        """Zakres „Cofnij” po udanym zapisie: z faktów wykonawcy, a gdy odczyt faktów padł albo ich nie ma -
+        co najmniej commit TEJ operacji (`commit_do_cofniecia`): plik zmieniony, liczba potwierdzonych
+        nieznana - zapisane pliki wyniku albo „do sprawdzenia”."""
+        if fakty is not None and fakty.zakres_znany:
+            return fakty.zakres
+        commit_id = commit_do_cofniecia(res)
+        if commit_id is None:
+            return None
+        zapisane = len(res.applied) + len(res.withheld)
+        return writeback.ZakresCofniecia((commit_id,), zapisane, 0 if zapisane else 1, 0)
+
+    @staticmethod
+    def _czlon_otwartych(zakres):
+        """Człon zdania o plikach z otwartym zapisem w miejscu, gdy „Cofnij” nie stoi (rozstrzyga je odzysk)."""
+        from horreum.gui.wb_worker import czlony_niepewnych
+        if zakres is None or not zakres.otwarte:
+            return ""
+        return czlony_niepewnych(0, zakres.otwarte, przycisk=i18n.t("grid.action.undo"))
+
+    def _postaw_cofnij_przebiegu(self, run_id, zdanie, zakres, *, wczesniej=False):
+        """„Cofnij” całego przebiegu kart `run_id` z zakresem `zakres` (zamrożonym teraz) - True, gdy stanęło.
+        Zdanie dostaje człony plików bez dowodu podmiany (`czlony_niepewnych`) i - `wczesniej`: operacja, która
+        przebieg zamyka, sama niczego nie zapisała - skąd przycisk („N plik zapisany wcześniej”)."""
+        from horreum.gui.wb_worker import czlony_niepewnych
+        if zakres is None or not zakres.cofnij:
+            return False
+        if wczesniej and zakres.zatwierdzone:
+            zdanie += i18n.t_plural("grid.wb.written_before", zakres.zatwierdzone)
+        zdanie += czlony_niepewnych(zakres.do_sprawdzenia, zakres.otwarte, przycisk=i18n.t("grid.action.undo"))
+        self._install_undo(run_id, zakres, zdanie)
+        return True
+
+    def _nazwy_zapisane(self, run_id):
+        """Wiersze `applied` przebiegu nazw (cel „Cofnij” nazw - `writeback.undo_renames`); błąd bazy - 0."""
+        try:
+            return sum(1 for r in writeback.renames_for_run(self.con, run_id) if r["status"] == "applied")
+        except sqlite3.Error:
+            return 0
+
+    def _postaw_cofnij_nazw(self, run_id, zdanie, zapisane):
+        """„Cofnij” nazw przebiegu `run_id` z `zapisane` wierszami `applied` - lustro gałęzi zapisu
+        `_after_commit_rename`: przebieg zostaje bieżący jako zapisany (nowy staging założy nowy)."""
+        self._rename_run_id = run_id
+        self._undo_rename_run_id = run_id
+        self._rename_run_committed = True
+        self._install_rename_undo(run_id, zdanie, applied=zapisane)
+
+    def _cofnij_po_zamknieciu(self, zamkniete, zdanie=""):
+        """„Cofnij” przebiegów zamkniętych przez `_zamknij_puste_przebiegi` (krotka `(karty, nazwy)`) - gdy mają
+        zapisane pliki. Bez nich szuflada zostaje, jak ją zostawił wołający."""
+        karty, nazwy = zamkniete
+        if karty is not None:
+            self._postaw_cofnij_przebiegu(karty, zdanie, self._zakres_z_bazy(karty), wczesniej=True)
+        if nazwy is not None:
+            zapisane = self._nazwy_zapisane(nazwy)
+            if zapisane:
+                self._postaw_cofnij_nazw(nazwy, zdanie + i18n.t_plural("grid.wb.written_before", zapisane),
+                                         zapisane)
+
+    def _pokaz_ponowienie(self, klinga, run_id):
+        """„Ponów nieudane (N)” po zamkniętym przebiegu `run_id` (AR-347): N = wpisy nieudane, których pliku
+        przebieg nie dotknął (`repo.nieudane_do_ponowienia`); zero - przycisk schowany. Slot podpinany raz,
+        leniwie (wzór `_ensure_undo_button`). Błąd bazy - bez przycisku."""
+        try:
+            n = len(repo.nieudane_do_ponowienia(self.con, run_id=run_id, klinga=klinga))
+        except sqlite3.Error:
+            n = 0
+        self._do_ponowienia = (klinga, run_id) if n else None
+        if n and not getattr(self, "_ponowienie_podpiete", False):
+            self.drawer.retry.connect(self._on_ponow_nieudane)
+            self._ponowienie_podpiete = True
+        self.drawer.set_retry(n)
+
+    def _on_ponow_nieudane(self):
+        """Klik „Ponów nieudane (N)”: kopie wpisów nieudanych wracają do TEGO SAMEGO przebiegu
+        (`repo.ponow_nieudane`) pod blokadą szuflady, przebieg znów jest bieżący (Zatwierdź/Odrzuć, podgląd),
+        a „Cofnij” poprzedniego zapisu chowa się jak przy każdym stagingu - po „Zatwierdź” wraca dla CAŁEGO
+        przebiegu, po „Odrzuć” dla zapisanych plików. Druga linia za wygaszeniem przycisku: zapis w biegu,
+        cudzy zapis, etap Dostawy albo staging w toku - nic. Wpisy rozstrzygnięte w międzyczasie gdzie indziej -
+        zdanie, że nie ma czego ponawiać."""
+        cel = getattr(self, "_do_ponowienia", None)
+        if (cel is None or self._wb.is_busy or self._foreign_wb or self._etap_w_biegu
+                or self._run_id is not None
+                or (self._rename_run_id is not None and not self._rename_run_committed)):
+            return
+        klinga, run_id = cel
+        if not self._szuflada_do_stagingu():             # szufladę bazy prowadzi inne okno (AR-280)
+            return
+        n = repo.ponow_nieudane(self.con, run_id=run_id, klinga=klinga)
+        self._do_ponowienia = None
+        if not n:
+            self.drawer.set_retry(0)
+            self._ustaw_wynik(i18n.t("grid.drawer.retry_none"))
+            self._sync_staging_mutex()                   # nic nie weszło - blokada wraca
+            return
+        self._dismiss_undo()                             # do szuflady weszło coś nowego
+        if klinga == "karty":
+            self._run_id = run_id
+            self._note_preview_takeover("macro")
+            self.model.set_preview(self._podglad_ze_stagingu())
+        else:
+            self._rename_run_id = run_id
+            self._rename_run_committed = False
+            self._note_preview_takeover("rename")
+            self.model.set_preview(self._podglad_nazw_ze_stagingu(), label=i18n.t("grid.preview.name"))
+        self._pokaz_kolumne_podgladu()
+        self._refresh_drawer()                           # `set_count(n > 0)` chowa też „Ponów nieudane”
+        zdanie = i18n.t_plural("grid.drawer.retry_staged", n, commit=i18n.t("grid.action.commit"))
+        self.drawer.set_result(zdanie)
+        self.status_message.emit(zdanie)
+
     def _on_reject(self):
         if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
             self._on_reject_rename()
@@ -6408,13 +6612,19 @@ class FramesView(QWidget):
             return
         # Zdanie odrzucenia - nie ogona starszego gestu, gdy zbiór jest w drodze (AR-84).
         self._podbij_zeton()
-        n = self._odrzuc_czekajace(self._run_id, "karty")
+        run_id = self._run_id
+        n = self._odrzuc_czekajace(run_id, "karty")
         self._run_id = None
         self.model.set_preview({})
         self._preview_owner = None
-        self._pusta(result=i18n.t_plural("grid.wb.rejected", n))   # trwałe sprzężenie w szufladzie (#3)
+        zdanie = i18n.t_plural("grid.wb.rejected", n)
+        # Pliki zapisane przerwanym zapisem tego przebiegu (także sprzed restartu - decyzja CEO) dostają
+        # „Cofnij” (AR-345); dawniej zostawały zmienione z drogą wyłącznie przez CLI.
+        zakres = self._zakres_z_bazy(run_id)
+        if not self._postaw_cofnij_przebiegu(run_id, zdanie, zakres, wczesniej=True):
+            self._pusta(result=zdanie + self._czlon_otwartych(zakres))   # trwałe sprzężenie w szufladzie (#3)
         self._sync_staging_mutex()
-        self.status_message.emit(i18n.t_plural("grid.wb.rejected", n))
+        self.status_message.emit(zdanie)
 
     def _odrzuc_czekajace(self, run_id, klinga):
         """„Odrzuć” obu kling: zdejmuje CZEKAJĄCE wpisy przebiegu, rozstrzygnięte przerwanym zapisem
@@ -6545,7 +6755,8 @@ class FramesView(QWidget):
         for p in run.touched:
             repo.stage_rename(self.con, run_id=self._rename_run_id, location_id=p.location_id,
                               old_path=p.old_path, new_path=p.new_path, expected_mtime=p.mtime)
-        self._zamknij_puste_przebiegi()                  # re-staging bez zmian = przebieg odrzucony (AR-316)
+        # Re-staging bez zmian = przebieg odrzucony (AR-316); nazwy zmienione wcześniej - „Cofnij” nazw (AR-345).
+        self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
         self._show_rename_preview(run)
         self._refresh_drawer()
         zdanie = i18n.t_plural("grid.rename.staged", len(run.touched), s=len(run.skipped), target=target)
@@ -6583,28 +6794,35 @@ class FramesView(QWidget):
 
     def _after_commit_rename(self, op, res):
         """Post-processing commitu renamu (wątek główny). Anulowano → reszta nazw została 'pending':
-        run zostaje otwarty do dokończenia, bez „Cofnij"."""
+        run zostaje otwarty do dokończenia, bez „Cofnij". Przebieg zamknięty - „Cofnij” nazw, gdy PRZEBIEG ma
+        wiersze `applied` (fakty wykonawcy, AR-345): także po dokończeniu, w którym ta operacja niczego nie
+        przemianowała, a zapis przerwany zdążył - cofnięcie nazw idzie po całym przebiegu."""
+        from horreum.gui.wb_worker import ogon_czesci_zapisu
+        fakty = self._wez_fakty(op)
         self.drawer.end_progress()
         self._refresh_drawer()                           # PRZED zdaniem wyniku - jak w `_after_commit`
         run_id = self._wb_target_id
         summary = self._commit_summary(res, "grid.wb.renamed")
         wskazanie, podpowiedz = self._wskazanie_powodow(res)   # pozostałe powody (AR-176)
         remaining = self._rename_pending_count()
+        zapisane = fakty.nazwy if fakty is not None and fakty.nazwy is not None else len(res.applied)
         if remaining > 0:                                # przerwane anulowaniem
-            ogon = i18n.t("grid.wb.interrupted", n=remaining)
+            ogon = ogon_czesci_zapisu(remaining)
             self.drawer.set_count(remaining, label=i18n.t_plural("grid.drawer.pending_rename", remaining),
                                   result=summary + wskazanie + ogon)
-        elif res.applied:                                # Cofnij TYLKO gdy coś zrobione (R2 #6)
+        elif zapisane:                                   # Cofnij TYLKO gdy coś zrobione (R2 #6)
             # run_id w wyniku: undo po restarcie przez CLI (R2 #7) - pasek tu, szuflada w `_install_rename_undo`
             ogon = i18n.t("grid.wb.run_id", id=run_id)
-            self._undo_rename_run_id = run_id            # PRZECHWYĆ cel Cofnij przed re-stage (R2 #1)
-            self._rename_run_committed = True
-            self._install_rename_undo(run_id, summary + wskazanie, applied=len(res.applied))
+            czlon = "" if res.applied else i18n.t_plural("grid.wb.written_before", zapisane)
+            # PRZECHWYĆ cel Cofnij przed re-stage (R2 #1)
+            self._postaw_cofnij_nazw(run_id, summary + wskazanie + czlon, zapisane)
         else:                                            # wszystko blocked/failed → run zwolniony
             ogon = ""
             self._rename_run_id = None
             self._rename_run_committed = False
             self._pusta(result=summary + wskazanie)
+        if remaining == 0:
+            self._pokaz_ponowienie("nazwy", run_id)
         self._podpowiedz_wyniku(podpowiedz)
         # Baza odświeżona - grid pokaże nowe ścieżki po składzie w tle, zdanie po przyłożeniu (AR-84).
         # Zbiór ten sam - zaznaczenie wraca migawką z chwili przyłożenia (AR-187); podgląd zmienia się
@@ -6681,11 +6899,20 @@ class FramesView(QWidget):
             return
         # Zdanie odrzucenia - nie ogona starszego gestu, gdy zbiór jest w drodze (AR-84).
         self._podbij_zeton()
-        n = self._odrzuc_czekajace(self._rename_run_id, "nazwy")
-        self._rename_run_id = None
-        self._rename_run_committed = False
+        run_id = self._rename_run_id
+        n = self._odrzuc_czekajace(run_id, "nazwy")
         self.model.set_preview({})
         self._preview_owner = None
-        self._pusta(result=i18n.t_plural("grid.rename.rejected", n))
+        zdanie = i18n.t_plural("grid.rename.rejected", n)
+        # Nazwy zmienione przerwanym zapisem tego przebiegu dostają „Cofnij” nazw (AR-345, lustro kart) - dawniej
+        # wiersze `applied` zostawały z drogą wyłącznie przez CLI `rename --undo`.
+        zapisane = self._nazwy_zapisane(run_id)
+        if zapisane:
+            self._postaw_cofnij_nazw(run_id, zdanie + i18n.t_plural("grid.wb.written_before", zapisane),
+                                     zapisane)
+        else:
+            self._rename_run_id = None
+            self._rename_run_committed = False
+            self._pusta(result=zdanie)
         self._sync_staging_mutex()
-        self.status_message.emit(i18n.t_plural("grid.rename.rejected", n))
+        self.status_message.emit(zdanie)

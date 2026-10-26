@@ -1154,10 +1154,10 @@ def test_macro_stage_then_commit_edits_file(wb_view):
     assert fits.getheader(str(p))["TELESCOP"] == "EQ6"   # plik zmieniony
     assert view._run_id is None                          # run domknięty (R#5)
     assert view._pending_count() == 0
-    assert hasattr(view, "_last_commit_id")
+    assert view._undo_commity                            # zakres „Cofnij” przebiegu zamrożony (AR-345)
 
     # cofnij przez szufladę
-    view._on_undo(view._last_commit_id)
+    view._dispatch_undo()
     assert fits.getheader(str(p))["TELESCOP"] == "RC8"   # przywrócone
 
 
@@ -1210,7 +1210,7 @@ def test_commit_i_cofniecie_makra_odswiezaja_plakietke_Porzadkow(wb_view):
     assert fits.getheader(str(p))["TELESCOP"] == "EQ6", "commit podmienił plik"
     assert len(emisje) == 1, "commit, który podmienił plik, odświeża plakietkę"
 
-    view._on_undo(view._last_commit_id)
+    view._dispatch_undo()
     assert fits.getheader(str(p))["TELESCOP"] == "RC8", "cofnięcie przywróciło plik"
     assert len(emisje) == 2, "cofnięcie, które przywróciło plik, odświeża plakietkę"
 
@@ -1260,8 +1260,8 @@ def test_cofniecie_makra_z_bledem_pokazuje_powod_i_zostawia_Cofnij(wb_view, monk
     view.macro_bar.asg_expr.setText("EQ6")
     view.macro_bar._emit_stage()
     view._on_commit()
-    commit_id = view._undo_commit_id
-    assert commit_id is not None and fits.getheader(str(p))["TELESCOP"] == "EQ6"
+    commit_id = view._undo_commity
+    assert commit_id and fits.getheader(str(p))["TELESCOP"] == "EQ6"
     with monkeypatch.context() as m:
         m.setattr(writeback.scan, "scan_file",
                   lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
@@ -1270,7 +1270,7 @@ def test_cofniecie_makra_z_bledem_pokazuje_powod_i_zostawia_Cofnij(wb_view, monk
     assert "1 błąd" in tekst and "zerwany udział" in tekst, tekst          # odmiana: nie „1 błędów”
     assert i18n.t("grid.action.undo") in tekst, "recepta ponowienia nazywa przycisk"
     assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
-    assert view._undo_commit_id == commit_id
+    assert view._undo_commity == commit_id
     view._dispatch_undo()                                # ponowienie kończy cofnięcie
     assert fits.getheader(str(p))["TELESCOP"] == "RC8"
     assert "1 przywrócony" in view.drawer.result.text() \
@@ -1288,7 +1288,7 @@ def test_szuflada_daje_Cofnij_gdy_commit_ma_failed_z_kopia_naglowka(wb_view):
         run_id="r", commit_id=9, applied=[], blocked=[], skipped=[],
         failed=[writeback.FileResult(1, str(p), "failed", "weryfikacja po podmianie")])
     view._after_commit("commit", res)
-    assert view._last_commit_id == 9
+    assert view._undo_commity == (9,)
     assert "commit 9" in view.drawer.result.text()
 
 
@@ -6422,7 +6422,7 @@ def _commit_makra(view):
     view.macro_bar.asg_expr.setText("EQ6")
     view.macro_bar._emit_stage()
     view._on_commit()
-    return view._undo_commit_id
+    return view._undo_commity
 
 
 def test_cofniecie_makra_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(wb_view, monkeypatch):
@@ -6440,7 +6440,7 @@ def test_cofniecie_makra_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(wb_view, 
     assert commit_id is not None and fits.getheader(str(p))["TELESCOP"] == "EQ6"
     przerwane = i18n.t("wb.undo_cancelled", undo=i18n.t("grid.action.undo"))
     with monkeypatch.context() as m:
-        m.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
+        m.setitem(WritebackWorker._OPS, "undo_run", lambda c, t, now, pr, sc: writeback.undo_run(
             c, t, now=now, progress=pr, should_cancel=lambda: True))
         view._dispatch_undo()
     # Rdzeń zna resztę (AR-176): commit z datą sprzed granicy śladu cofnięcia (AR-318, `NOW` modułu) -
@@ -6448,7 +6448,7 @@ def test_cofniecie_makra_PRZERWANE_zostawia_Cofnij_a_ponowienie_konczy(wb_view, 
     assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in \
         view.drawer.result.text(), view.drawer.result.text()
     assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
-    assert view._undo_commit_id == commit_id and fits.getheader(str(p))["TELESCOP"] == "EQ6"
+    assert view._undo_commity == commit_id and fits.getheader(str(p))["TELESCOP"] == "EQ6"
     wrocil = writeback.FileResult(1, str(p), "restored", None)
     view._after_undo("undo", writeback.UndoResult(commit_id, [wrocil], [], [], cancelled=True))
     assert przerwane in view.drawer.result.text()
@@ -6473,7 +6473,7 @@ def test_cofniecie_makra_z_bledem_mowi_powod_po_angielsku_w_UI_EN(wb_view, monke
     assert "broken share" in tekst and "1 error" in tekst, tekst
     assert i18n.t("grid.wb.undo_retry", undo="Undo") in tekst, tekst
     assert not set(tekst) & set("„ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"), tekst
-    assert view._undo_btn.isVisibleTo(view) and view._undo_commit_id == commit_id
+    assert view._undo_btn.isVisibleTo(view) and view._undo_commity == commit_id
 
 
 def test_cofniecie_makra_ZABLOKOWANE_bez_juz_cofnietego_zostawia_Cofnij(wb_view):
@@ -6487,7 +6487,7 @@ def test_cofniecie_makra_ZABLOKOWANE_bez_juz_cofnietego_zostawia_Cofnij(wb_view)
     commit_id = _commit_makra(view)
     fits.setval(str(p), "IMAGETYP", value="Flat")                # cudza zmiana po commicie
     view._dispatch_undo()
-    assert view._undo_btn.isVisibleTo(view) and view._undo_commit_id == commit_id
+    assert view._undo_btn.isVisibleTo(view) and view._undo_commity == commit_id
     assert i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo")) in view.drawer.result.text()
     juz = writeback.FileResult(1, str(p), "blocked", "już cofnięte")
     view._after_undo("undo", writeback.UndoResult(commit_id, [], [juz], [], already=[juz]))
@@ -6737,7 +6737,7 @@ def test_commit_szuflady_w_miejscu_cofa_szuflada_i_CLI(wb_view, capsys):
     assert _operacje(con) == [("commit", "synced"), ("undo", "synced")]
     _stage_makra(view, "TELESCOP", "EQ7")
     view._on_commit()
-    commit_id = view._undo_commit_id
+    commit_id = view._undo_commity[-1]
     assert p.read_bytes() != przed
     kod, out = _cli(capsys, "header-fix", str(p.with_name("wb.db")), "--undo", str(commit_id))
     assert kod == 0 and "przywrocone 1" in out, out
@@ -6746,12 +6746,13 @@ def test_commit_szuflady_w_miejscu_cofa_szuflada_i_CLI(wb_view, capsys):
 
 
 def test_szuflada_zapis_rozdarty_widac_w_Porzadkach_z_droga_odzysku(wb_view, monkeypatch):
-    """AR-161: zapis szuflady w miejscu przerwany po zapisie (weryfikacja pada) - szuflada widzi go
-    jak okna kart: „Cofnij” zostaje (backup w commicie), zdanie niesie drogę odzysku
-    (`recover_torn`), kopia trafia do wiersza Porządków „Plik po przerwanym zapisie”, a plakietka
-    Porządków się odświeża.
+    """AR-161: zapis szuflady w miejscu przerwany po zapisie (weryfikacja pada) - zdanie niesie drogę odzysku
+    (`recover_torn`), kopia trafia do wiersza Porządków „Plik po przerwanym zapisie”, a plakietka Porządków
+    się odświeża. Operacja zostaje otwarta (`unverified`), więc „Cofnij” nie staje - cofnięcie odmówiłoby
+    `undo_open_op` i odesłało do odzysku (AR-345); zdanie mówi „najpierw Przywróć nagłówek…”.
 
-    Falsyfikator: szuflada drogą atomową → zapis bez dziennika, wiersza Porządków brak."""
+    Falsyfikatory: szuflada drogą atomową → zapis bez dziennika, wiersza Porządków brak; „Cofnij” przy
+    otwartym zapisie."""
     view, con, p = wb_view
     emisje = []
     view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
@@ -6770,7 +6771,9 @@ def test_szuflada_zapis_rozdarty_widac_w_Porzadkach_z_droga_odzysku(wb_view, mon
     assert fr.reason.code == "backup_saved_in_isolated", fr.reason
     fid = con.execute("SELECT frame_id FROM location").fetchone()[0]
     assert queries.torn_write_frame_ids(con) == {fid}
-    assert view._undo_mode == "macro" and not view._undo_btn.isHidden()
+    assert view._undo_mode is None
+    assert i18n.t_plural("grid.wb.open_write", 1, restore=i18n.t("grid.inplace.restore"), nav=i18n.t("nav.porzadki"),
+                         row=i18n.t("tasks.torn_write_frames")) in view.drawer.result.text(), view.drawer.result.text()
     # AR-281: zdanie mówi gest z menu, wywołanie rdzenia z numerem operacji stoi w szczególe pola.
     assert f"„{writeback._GEST_PRZYWROC}”" in view.drawer.result.text(), view.drawer.result.text()
     assert "writeback.recover_torn(" in view.drawer.result.szczegol(), view.drawer.result.szczegol()
@@ -7134,8 +7137,7 @@ def test_wiersz_szuflady_po_zapisie_mowi_commit_raz(qapp, tmp_path, lang):
         from PySide6.QtTest import QTest
         QTest.mouseClick(view.drawer.btn_commit, Qt.LeftButton)
         QApplication.processEvents()
-        cid = view._undo_commit_id
-        assert cid is not None
+        [cid] = view._undo_commity
         etykieta, wynik = view.drawer.label.text(), view.drawer.result.text()
         assert etykieta == i18n.t("grid.wb.committed_label", n=1)
         assert (etykieta + " " + wynik).count(f"commit {cid})") == 1
@@ -7167,18 +7169,18 @@ def test_wiersz_szuflady_po_nieudanym_cofnieciu_mowi_commit_raz(qapp, tmp_path, 
         bar._emit_stage()
         QTest.mouseClick(view.drawer.btn_commit, Qt.LeftButton)
         QApplication.processEvents()
-        cid = view._undo_commit_id
-        assert cid is not None and view._undo_mode == "macro"
+        [cid] = view._undo_commity
+        assert view._undo_mode == "macro"
         if cofniecie == "niedomkniete":
-            monkeypatch.setitem(WritebackWorker._OPS, "undo", lambda c, t, now, pr, sc: writeback.undo(
+            monkeypatch.setitem(WritebackWorker._OPS, "undo_run", lambda c, t, now, pr, sc: writeback.undo_run(
                 c, t, now=now, progress=pr, should_cancel=lambda: True))
         else:
             def _pada(*_a):
                 raise ValueError("złamany inwariant cofnięcia")
-            monkeypatch.setitem(WritebackWorker._OPS, "undo", _pada)
+            monkeypatch.setitem(WritebackWorker._OPS, "undo_run", _pada)
         QTest.mouseClick(view._undo_btn, Qt.LeftButton)
         QApplication.processEvents()
-        assert view._undo_mode == "macro" and view._undo_btn.isVisible() and view._undo_commit_id == cid
+        assert view._undo_mode == "macro" and view._undo_btn.isVisible() and view._undo_commity == (cid,)
         etykieta, wynik = view.drawer.label.text(), view.drawer.result.text()
         assert etykieta == i18n.t("grid.wb.committed_label", n=1)
         assert (etykieta + " " + wynik).count(f"commit {cid})") == 1, (etykieta, wynik)
@@ -7187,7 +7189,7 @@ def test_wiersz_szuflady_po_nieudanym_cofnieciu_mowi_commit_raz(qapp, tmp_path, 
             # AR-318: commit z datą sprzed granicy śladu cofnięcia (`NOW` modułu) - „wymaga sprawdzenia”.
             assert i18n.t_plural("wb.undo_cancelled_check", 1, undo=i18n.t("grid.action.undo")) in wynik, wynik
         else:
-            assert wynik.startswith(i18n.t("grid.wb.op.undo", msg=i18n.t("objchg.item.prog_error"))), wynik
+            assert wynik.startswith(i18n.t("grid.wb.op.undo_run", msg=i18n.t("objchg.item.prog_error"))), wynik
     finally:
         view.close()
         con.close()
@@ -7454,8 +7456,10 @@ def _commity(con, run_id):
 
 def test_awaria_po_podmianie_ostatniego_pliku_daje_cofnij_tej_operacji(qapp, tmp_path, monkeypatch):
     """„Zatwierdź”, którego operacja zapisuje wszystkie trzy pliki, a potem rzuca (prawdziwy zapis, atrapa wyłącznie
-    wyjątku): szuflada oferuje „Cofnij” commitu TEJ operacji - etykieta „Zatwierdzono: 3”, zdanie błędu operacji
-    z numerem commitu - a klik „Cofnij” przywraca bajty plików. Falsyfikator: ogon awarii bez „Cofnij”."""
+    wyjątku): szuflada oferuje „Cofnij” przebiegu - etykieta „Zatwierdzono: 3”, JEDNO zdanie wyniku częściowego
+    („3 z 3 zapisane, potem błąd: …”, AR-344, nie „nie powiódł się” obok „Zatwierdzono”) z numerem commitu - a klik
+    „Cofnij” przywraca bajty plików. Falsyfikatory: ogon awarii bez „Cofnij”; zdanie operacji zamiast wyniku
+    częściowego."""
     from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
     from test_gui_grid_szuflada import _klik_w, _makro_przyciskiem, _zamknij_widok
 
@@ -7470,10 +7474,12 @@ def test_awaria_po_podmianie_ostatniego_pliku_daje_cofnij_tej_operacji(qapp, tmp
         monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
         _klik_w(v.drawer.btn_commit)
         [commit] = _commity(con, run)
-        assert v._undo_mode == "macro" and v._undo_commit_id == commit and v._undo_btn.isVisibleTo(v)
+        assert v._undo_mode == "macro" and v._undo_commity == (commit,) and v._undo_btn.isVisibleTo(v)
         assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=3)
-        assert v.drawer.result.text().startswith(i18n.t("grid.wb.op.commit", msg="")[:20])
-        assert v.drawer.result.text().endswith(i18n.t("grid.wb.commit_id", id=commit)), v.drawer.result.text()
+        assert v.drawer.result.text() == (
+            i18n.t_plural("grid.wb.partial_commit", 3, m=3, msg=i18n.t("objchg.item.prog_error"))
+            + i18n.t("grid.wb.partial_undo", undo=i18n.t("grid.action.undo"))
+            + i18n.t("grid.wb.commit_id", id=commit)), v.drawer.result.text()
         assert _bajty_plikow(pliki) != przed
         monkeypatch.undo()
         _klik_w(v._undo_btn)
@@ -7483,16 +7489,17 @@ def test_awaria_po_podmianie_ostatniego_pliku_daje_cofnij_tej_operacji(qapp, tmp
         con.close()
 
 
-def test_awaria_w_przebiegu_podjetym_daje_cofnij_nowego_commitu_nie_starego(qapp, tmp_path, monkeypatch):
+def test_awaria_w_przebiegu_przerwanym_daje_cofnij_calego_przebiegu(qapp, tmp_path, monkeypatch):
     """Przebieg z wcześniejszym zapisem przerwanym (commit pierwszego pliku, dwa wpisy czekają), potem „Zatwierdź”
-    reszty, która zapisuje i rzuca: „Cofnij” celuje w commit TEJ operacji (różnica względem stanu sprzed niej),
-    nie w najwyższy ani pierwszy commit przebiegu. Falsyfikator: rekonstrukcja „z najwyższego commitu” albo
-    z pierwszego - cofnięcie innej operacji."""
+    reszty, która zapisuje i rzuca: „Cofnij” obejmuje OBA commity przebiegu (decyzja CEO, AR-345 - dawniej sam
+    commit tej operacji), etykieta liczy trzy pliki, a klik „Cofnij” przywraca bajty wszystkich trzech.
+    Falsyfikator: zakres „Cofnij” z commitu tej operacji - plik pierwszego zapisu zostaje zmieniony."""
     from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
     from test_gui_grid_szuflada import _klik_w, _makro_przyciskiem, _przerwany_zapis, _zamknij_widok
     path, con, pliki, v = _szuflada_awarii(tmp_path)
     v._writeback_async = True                            # brama przerwania potrzebuje wątku zapisu
     try:
+        przed = _bajty_plikow(pliki)
         _makro_przyciskiem(v, "TELESCOP", "EQ6")
         run = v._run_id
         _przerwany_zapis(v, monkeypatch)
@@ -7508,8 +7515,13 @@ def test_awaria_w_przebiegu_podjetym_daje_cofnij_nowego_commitu_nie_starego(qapp
         _czekaj(lambda: not v._wb.is_busy, "zapis reszty")
         QApplication.processEvents()
         nowe = [c for c in _commity(con, run) if c not in stary]
-        assert len(nowe) == 1 and v._undo_mode == "macro" and v._undo_commit_id == nowe[0], (nowe, v._undo_commit_id)
-        assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=2)
+        assert len(nowe) == 1 and v._undo_mode == "macro" and v._undo_commity == tuple(stary + nowe), (
+            nowe, v._undo_commity)
+        assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=3)
+        monkeypatch.undo()
+        _klik_w(v._undo_btn)
+        _czekaj(lambda: not v._wb.is_busy, "cofnięcie przebiegu")
+        assert _bajty_plikow(pliki) == przed
     finally:
         _zamknij_widok(v)
         con.close()
@@ -7536,6 +7548,10 @@ def test_awaria_w_srodku_zapisu_bez_cofnij_reszta_czeka(qapp, tmp_path, monkeypa
         _klik_w(v.drawer.btn_commit)
         assert v._undo_mode is None and v._run_id == run and v._pending_count() == 2
         assert v.drawer.btn_commit.isVisibleTo(v)
+        # AR-344: zdanie mówi, że plik już zmieniono i ile czeka - z faktów bazy, nie z samego zdania operacji.
+        assert v.drawer.result.text() == (
+            i18n.t_plural("grid.wb.partial_commit", 1, m=3, msg=i18n.t("objchg.item.prog_error"))
+            + i18n.t("grid.wb.partial_finish", n=2)), v.drawer.result.text()
     finally:
         _zamknij_widok(v)
         con.close()
@@ -7544,8 +7560,9 @@ def test_awaria_w_srodku_zapisu_bez_cofnij_reszta_czeka(qapp, tmp_path, monkeypa
 def test_awaria_po_backupie_przed_podmiana_bez_cofnij(qapp, tmp_path, monkeypatch):
     """Zapis w miejscu: dziennik operacji (commit, backup nagłówka, wiązanie wpisu) wchodzi do bazy, a wyjątek
     pada PRZED pierwszym bajtem pliku (prawdziwe `repo.begin_inplace_commit`, potem wyjątek): commit jest
-    w bazie, plik nietknięty - „Cofnij” nie staje (nic by nie cofnęło). Falsyfikator: „Cofnij” z samego
-    wiersza `commits` bez pliku zgłoszonego jako zapisany."""
+    w bazie, plik nietknięty, operacja otwarta (`writing`) - „Cofnij” nie staje (cofnięcie odmówiłoby
+    `undo_open_op`), a zdanie mówi prawdę: plik z przerwanym zapisem - najpierw „Przywróć nagłówek…” (AR-345).
+    Falsyfikatory: „Cofnij” z samego wiersza `commits` bez potwierdzonej podmiany; zdanie bez drogi odzysku."""
     from horreum import repo
     from test_gui_grid_szuflada import _klik_w, _makro_przyciskiem, _zamknij_widok
     path, con, pliki, v = _szuflada_awarii(tmp_path, n=1)
@@ -7562,16 +7579,19 @@ def test_awaria_po_backupie_przed_podmiana_bez_cofnij(qapp, tmp_path, monkeypatc
         _klik_w(v.drawer.btn_commit)
         assert _commity(con, run), "commit nie powstał - test nic by nie mierzył"
         assert v._undo_mode is None and _bajty_plikow(pliki) == przed
+        droga = i18n.t_plural("grid.wb.open_write", 1, restore=i18n.t("grid.inplace.restore"),
+                              nav=i18n.t("nav.porzadki"), row=i18n.t("tasks.torn_write_frames"))
+        assert v.drawer.result.text().endswith(droga), v.drawer.result.text()
     finally:
         _zamknij_widok(v)
         con.close()
 
 
 def test_wykonawca_podaje_wynik_czesciowy_tylko_z_plikow_zapisanych_ta_operacja(qapp, tmp_path):
-    """`WritebackWorker` na prawdziwym zapisie kart: wyjątek po zapisie wszystkich plików → `czesciowy` z commitem
-    tej operacji i ścieżkami `applied` PRZED `failed`; ten sam zapis z postępem niezgłaszającym plików (commit
-    w bazie, ale ta operacja nie zgłosiła zapisanego pliku) → bez `czesciowy`. Falsyfikator: delta z samego
-    wiersza `commits` (bez warunku plików zgłoszonych jako `applied`)."""
+    """`WritebackWorker` na prawdziwym zapisie kart: wyjątek po zapisie wszystkich plików → `czesciowy` PRZED `failed`
+    z faktami Z BAZY (dwa pliki zapisane z dwóch, zakres „Cofnij” przebiegu, nic nie czeka) i ścieżkami z postępu;
+    ten sam zapis z postępem niezgłaszającym plików (AR-344: wyjątek przed postępem) → te same fakty z bazy, tylko
+    ścieżek z postępu brak. Falsyfikator: liczba zapisanych z postępu (zero przy milczącym postępie)."""
     from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
     from test_gui_grid_szuflada import _baza_szuflady
     from horreum import macro, repo
@@ -7602,11 +7622,12 @@ def test_wykonawca_podaje_wynik_czesciowy_tylko_z_plikow_zapisanych_ta_operacja(
         commity = _commity(c2, "R")
         c2.close()
         wyniki[wariant] = (sygnaly, commity, {str(p) for p in pliki})
-    sygnaly, commity, sciezki = wyniki["zglasza"]
-    assert [s[0] for s in sygnaly] == ["czesciowy", "failed"], sygnaly
-    assert sygnaly[0][2].commit_id == commity[0] and set(sygnaly[0][2].applied) == sciezki, sygnaly
-    sygnaly, commity, _s = wyniki["milczy"]
-    assert commity and [s[0] for s in sygnaly] == ["failed"], (sygnaly, commity)
+    for wariant, sciezki_postepu in (("zglasza", wyniki["zglasza"][2]), ("milczy", set())):
+        sygnaly, commity, _s = wyniki[wariant]
+        assert [s[0] for s in sygnaly] == ["czesciowy", "failed"], (wariant, sygnaly)
+        cz = sygnaly[0][2]
+        assert (cz.zapisane, cz.wszystkie, cz.czeka, cz.zakres.commity) == (2, 2, 0, tuple(commity)), (wariant, cz)
+        assert set(cz.applied) == sciezki_postepu, (wariant, cz.applied)
 
 
 def test_awaria_po_zmianie_wszystkich_nazw_daje_cofnij_nazw(qapp, tmp_path, monkeypatch):
@@ -7767,28 +7788,36 @@ def test_awaria_po_zmianie_wszystkich_nazw_chowa_kolumne_podgladu_nazw(qapp, tmp
         con.close()
 
 
-@pytest.mark.parametrize("nowych", [1, 2])
-def test_wykonawca_bez_wyniku_czesciowego_gdy_operacja_nie_dala_jednego_commitu(qapp, tmp_path, monkeypatch,
-                                                                               nowych):
-    """`WritebackWorker` (karty): operacja zgłasza zapisany plik i rzuca, a commitów przebiegu z podmienionym
-    plikiem (`writeback.commity_przebiegu`, atrapa) jest po niej o `nowych` więcej niż przed. Jeden nowy -
-    `czesciowy` z tym commitem przed `failed`; dwa nowe (np. commit innego procesu na tym samym przebiegu) - bez
-    `czesciowy`, sam `failed`: okno nie zgaduje, który commit cofać. Falsyfikator: wykonawca bez warunku
-    „dokładnie jeden nowy commit”."""
-    from horreum.gui.wb_worker import WritebackWorker
-    path = str(tmp_path / "w.db")
-    db.open_db(path).close()
-    odczyty = iter([(7,), (7, *range(100, 100 + nowych))])
-    monkeypatch.setattr(writeback, "commity_przebiegu", lambda con, run_id: next(odczyty))
+def test_wykonawca_liczy_pliki_wszystkich_commitow_operacji(qapp, tmp_path):
+    """`WritebackWorker` (karty): jedna operacja, która w przebiegu zakłada DWA commity (zapis przerwany po
+    pierwszym pliku i dokończony w tym samym biegu) i rzuca - `czesciowy` przed `failed` liczy pliki obu commitów
+    tej operacji z bazy (3 z 3), a zakres „Cofnij” obejmuje oba (decyzja CEO: „Cofnij” cofa cały przebieg - okno
+    nie wybiera commitu). Falsyfikator: dawna reguła „dokładnie jeden nowy commit, inaczej bez wyniku częściowego”."""
+    from horreum.gui.wb_worker import WritebackWorker, _zapis_kart
+    from test_gui_grid_szuflada import _baza_szuflady
+    from horreum import macro, repo
+    from horreum.gui import queries
+    path, con, _pliki = _baza_szuflady(tmp_path, 3)
+    md = macro.MacroDef.from_dict({"assign": {"keyword": "TELESCOP", "op": "set", "expr": "'EQ6'"}})
+    mr = macro.run_macro(md, [r[0] for r in con.execute("SELECT id FROM frame ORDER BY id")],
+                         targets_fn=lambda ids: queries.writeback_frame_targets(con, ids),
+                         cards_fn=lambda fid: queries.frame_cards(con, fid), run_id="R")
+    repo.stage_pending_many(con, run_id="R", previews=mr.touched)
+    con.close()
 
-    def _zapisz_i_pada(c, t, now, pr, sc):
-        pr(1, 1, "x.fits", "applied")
+    def _dwa_commity_i_pada(c, t, now, pr, sc):
+        licz = []
+        _zapis_kart(c, t, now, pr, lambda: licz.append(1) or len(licz) > 1)
+        _zapis_kart(c, t, now, pr, sc)
         raise ValueError("po zapisie")
-    monkeypatch.setitem(WritebackWorker._OPS, "commit", _zapisz_i_pada)
     sygnaly = []
     w = WritebackWorker(path, "commit", "R", now_fn=lambda: NOW)
-    w.czesciowy.connect(lambda op, cz: sygnaly.append(("czesciowy", cz.commit_id, cz.applied)))
-    w.failed.connect(lambda op, msg, tip: sygnaly.append(("failed", op)))
-    w.run()
-    oczekiwane = [("czesciowy", 100, ("x.fits",))] if nowych == 1 else []
-    assert sygnaly == oczekiwane + [("failed", "commit")], sygnaly
+    WritebackWorker._OPS["commit"], dawny = _dwa_commity_i_pada, WritebackWorker._OPS["commit"]
+    try:
+        w.czesciowy.connect(lambda op, cz: sygnaly.append(("czesciowy", cz.zapisane, cz.wszystkie,
+                                                           cz.zakres.commity)))
+        w.failed.connect(lambda op, msg, tip: sygnaly.append(("failed", op)))
+        w.run()
+    finally:
+        WritebackWorker._OPS["commit"] = dawny
+    assert sygnaly == [("czesciowy", 3, 3, (1, 2)), ("failed", "commit")], sygnaly

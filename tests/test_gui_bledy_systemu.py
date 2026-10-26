@@ -414,10 +414,10 @@ def test_szuflada_awaria_cofniecia_przy_zywym_Cofnij_zostawia_Zatwierdzono(qapp,
     assert view._undo_mode == "macro"
     etykieta = i18n.t("grid.wb.committed_label", n=1)
     assert view.drawer.label.text() == etykieta
-    monkeypatch.setitem(WritebackWorker._OPS, "undo", _odmowa)
+    monkeypatch.setitem(WritebackWorker._OPS, "undo_run", _odmowa)
     _klik(view._undo_btn)
-    blad = (i18n.t("grid.wb.op.undo", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
-            + i18n.t("grid.wb.commit_id", id=view._undo_commit_id))
+    blad = (i18n.t("grid.wb.op.undo_run", msg=i18n.t("objchg.item.os_denied", os_code="WinError 5"))
+            + i18n.t("grid.wb.commit_id", id=view._undo_commity[0]))
     assert view.drawer.label.text() == etykieta
     assert view.drawer.btn_commit.isHidden() and view.drawer.btn_reject.isHidden()
     assert view._undo_btn.isVisible()
@@ -612,6 +612,8 @@ _ZNANE_SUROWE_MSG = {
     ("app.py", "ObservatoryAxisView._on_unmerge", "e", "e"): _ODMOWA_OSI,
     ("grid.py", "FramesView._on_wb_failed", "msg", "msg"):
         "zdanie z wykonawcy (`WritebackWorker.run` - `tekst_powodu`)",
+    ("wb_worker.py", "zdanie_czesci_zapisu", "msg", "msg"):
+        "zdanie z wykonawcy (`WritebackWorker.run` - `tekst_powodu`), podane przez `FramesView._on_wb_failed`",
     ("grid.py", "FramesView._on_pola_failed", "msg", "msg"):
         "zdanie z wykonawcy (`PolaWorker.run` - `tekst_powodu`)",
     ("grid.py", "FramesView._on_zbior_failed", "msg", "msg"):

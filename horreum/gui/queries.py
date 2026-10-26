@@ -5564,10 +5564,21 @@ def niedokonczone_cofniecia_kart(con):
       3. BEZ commitów przebiegów „Zmień obiekt…”/„Uzgodnij pliki…” (`object_change_run`): ich cofnięcie
          to przebieg karta → plik → baza, a drogą powrotu jest wiersz „Przerwane zmiany obiektu”.
 
+    ZAMIAR COFNIĘCIA PRZEBIEGU (AR-345): commit z zakresu zdarzenia `run.undo_started`
+    (`repo.zamiar_cofniecia_przebiegu`, przed pierwszym plikiem `writeback.undo_run`) jest kandydatem bez
+    śladu próby per commit - zamiar JEST śladem; filtr „czeka na dokończenie” zostaje. Bez tego cofnięcie
+    przebiegu przerwane na granicy commitów zostawiało starszy commit zmieniony bez wiersza, a ślad
+    „inny commit przebiegu cofany” dawał fałszywy wiersz po legalnym `header-fix --undo` jednego commitu.
+    Zdarzenia czyta zakres po `target` (`run:…`, indeks `idx_event_target`) - filtr samym `verb` to pełny
+    przegląd dziennika (kopia `pf4`, 179 tys. zdarzeń: 0,008 ms wobec 45,8 ms).
+
     Granica: commit wyłącznie atomowy cofany przed 0044 i przerwany nie ma śladu „zaczęcia” - wiersza
-    nie dostanie (droga: recepta w sesji, CLI). Na kopii `pf4` (2026-10-22) wynik pusty, kandydaci
-    1,07 ms (sonda fazy planu)."""
+    nie dostanie (droga: recepta w sesji, CLI); tak samo pojedyncze cofnięcie commitu przerwane przed
+    pierwszym plikiem. Na kopii `pf4` (2026-10-22) wynik pusty, kandydaci 1,07 ms (sonda fazy planu)."""
     from horreum import writeback          # lazy: rdzeń pisarza ciągnie astropy (wołający już go ma)
+    z_zamiaru = {int(r[0]) for r in con.execute(
+        "SELECT DISTINCT j.value FROM event e, json_each(json_extract(e.payload, '$.commity')) j "
+        "WHERE e.target >= 'run:' AND e.target < 'run;' AND e.verb = 'run.undo_started'")}
     kandydaci = [r[0] for r in con.execute(
         "SELECT c.id FROM commits c "
         "WHERE c.id IN (SELECT commit_id FROM inplace_op WHERE commit_id IS NOT NULL "
@@ -5578,9 +5589,10 @@ def niedokonczone_cofniecia_kart(con):
         "AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = c.run_id) "
         "ORDER BY c.id")]
     wynik = []
-    for commit_id in kandydaci:
+    for commit_id in sorted(set(kandydaci) | z_zamiaru):
         backupy = writeback.backups_for_commit(con, commit_id)
-        if not any(writeback._slad_proby_cofniecia(con, commit_id, b) for b in backupy):
+        if commit_id not in z_zamiaru and not any(
+                writeback._slad_proby_cofniecia(con, commit_id, b) for b in backupy):
             continue
         n = sum(1 for b in backupy if writeback._czeka_na_dokonczenie(con, commit_id, b))
         if n:

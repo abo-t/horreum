@@ -6,6 +6,47 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.21.0] - 2026-10-26
+
+Wydanie o **kółku myszy, które nie zmienia pól bez kliknięcia, i „Cofnij”, które cofa cały przebieg szuflady**.
+Kółko nad polem bez fokusu przewija listę zamiast przestawiać próg Planera albo filtr. „Cofnij” w szufladzie cofa
+wszystkie zapisy przebiegu, także te sprzed restartu okna, a nieudane pliki można postawić ponownie jednym gestem.
+Wejście w Znajdź z Domu nie zatrzymuje okna. **Schemat bazy bez zmian (47)** - baza otwarta w 0.20.0 otwiera się
+tak samo; baza ze starszej wersji przechodzi tę samą migrację co w 0.20.0, więc przed pierwszym uruchomieniem zrób
+kopię pliku bazy.
+
+### Dodane
+
+- **„Ponów nieudane (N)” w szufladzie zmian:** po zapisie, w którym część plików się nie udała (np. plik zajęty),
+  gest stawia nieudane pliki ponownie w tym samym przebiegu - kart i nazw - a „Cofnij” cofa potem cały przebieg.
+
+### Zmienione
+
+- **„Cofnij” cofa cały przebieg szuflady:** wszystkie jego zapisy od najnowszego, także zapis sprzed restartu okna
+  i sprzed „Anuluj”. „Cofnij” stoi także po „Odrzuć”, po zamknięciu przebiegu do zera i po operacji bez podmiany
+  pliku. Cofnięcie przerwane między zapisami przebiegu widać w Porządkach jako „Dokończ cofnięcie”.
+- **Zapis przerwany awarią w połowie** mówi w szufladzie jednym zdaniem „zapisano N z M, …” zamiast „Zatwierdzono: N”
+  obok porażki; zapis rozdarty bez możliwości cofnięcia podaje drogę odzysku.
+- **Znajdź:** szerokości kolumn liczone z metryki fontu zamiast mierzenia każdej komórki - klik w kafel Znajdź
+  z Domu ~550 → ~180 ms (pomiar natywny, mediana), bez przestoju okna. Szerokości dopasowują się także do zbioru,
+  który przy wejściu był jeszcze w drodze; szerokość ustawiona ręką na kolumnie wygrywa.
+- **Planer w biegu Dostawy** liczy się raz, po końcu biegu, i mówi to zdaniem w nagłówku nocy.
+- **„Wciągnij z WBPP…” z Domu** nie buduje ekranu Dostawy, gdy bieg jest niemożliwy - powód odmowy idzie od razu.
+- **Główny przycisk Dostawy** zostaje pogrubiony razem z wyróżnieniem po każdej zmianie motywu.
+
+### Naprawione
+
+- **Kółko myszy zmieniało pole bez kliknięcia:** kółko nad progami Planera, „Park…”, wzorem nazwy i filtrami
+  przewijało wartość pola pod kursorem, więc próg Planera dało się przestawić przy przewijaniu listy. Teraz kółko
+  zmienia pole tylko wtedy, gdy pole ma fokus (po kliknięciu); bez fokusu przewija listę pod kursorem.
+- **Wzór nazwy z tokenem spoza słownika** pokazuje się wiernie (token obcy, poziom folderu spoza pola), a „Podgląd”
+  mówi zdaniem z kodem przy nieprawidłowym wyrażeniu albo poziomie folderu zamiast błędu programu.
+- **Recepty paska po powrocie do okna:** aktywacja okna zdejmuje z paska recepty, które przestały być aktualne (po
+  innym oknie, po zamknięciu okna dialogowego).
+- **„Cofnij zapis (commit N)” odłożone przed podmianą pliku bazy** (np. przywróconą kopią pod tą samą ścieżką) nie
+  cofa commitu innej biblioteki.
+- **Okno Znajdź** sprząta wątek składu, gdy budowa ekranu się nie uda.
+
 ## [0.20.0] - 2026-10-26
 
 Wydanie o **szufladzie, która przeżywa restart i mówi, co się stało, cofnięciu, które mówi, co zostało, i oknie,
@@ -1725,7 +1766,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.20.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/abo-t/horreum/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/abo-t/horreum/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/abo-t/horreum/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/abo-t/horreum/compare/v0.17.0...v0.18.0

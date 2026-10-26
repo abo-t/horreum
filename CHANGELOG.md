@@ -6,6 +6,73 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.20.0] - 2026-10-26
+
+Wydanie o **szufladzie, która przeżywa restart i mówi, co się stało, cofnięciu, które mówi, co zostało, i oknie,
+które nie stoi**. Zmiany czekające w szufladzie wracają po ponownym otwarciu bazy, a zapis przerwany w połowie ma
+zdanie i drogę dokończenia. Przerwane cofnięcie zapisu kart podaje, ile plików zostało w stanie po zapisie, a ile
+wymaga sprawdzenia. Pisarz kart nie zmienia bajtów nagłówka bez słowa. Otwarcie bazy nie buduje od razu wszystkich
+ekranów, a liczniki Porządków liczą się w tle. **Schemat bazy 45 → 47** (znacznik bajtu spoza ASCII w nagłówku
+kopii, dziennik migracji): bazę otwartą w tej wersji 0.19.0 i starsze już nie otworzą - przed pierwszym
+uruchomieniem zrób kopię pliku bazy.
+
+### Dodane
+
+- **Wiersz Porządków „Nagłówek z bajtem spoza ASCII”:** skan bada surowe bajty nagłówka kopii i oznacza nagłówek
+  FITS z bajtem spoza drukowalnego ASCII (np. polski znak w komentarzu karty) - takiego nagłówka pisarz nie zmieni,
+  więc Porządki mówią o nim przed zapisem. Dostawa ma przycisk „Sprawdź bajty nagłówków (N)” z szacunkiem czasu przed
+  biegiem i tempem w biegu.
+- **Dziennik błędów programu:** błąd programu trafia do pliku dziennika (z rotacją), zanim pokaże się okno błędu;
+  menu „Pomoc → Otwórz dziennik błędów”. Okno błędu z miejscem w kodzie pojawia się także przy błędzie w czasie
+  startu (budowa okna, otwarcie bazy startowej).
+- **Wiersz Porządków „Dokończ cofnięcie (commit N)”** dla cofnięcia zapisu kart przerwanego w połowie. Gdy bazę
+  trzyma inny proces Horreum (okno albo wiersz poleceń), wiersz mówi to z numerem procesu.
+- **Wiersz poleceń pod blokadą szuflady:** `rename --apply/--undo`, `header-fix --apply/--undo` i `object-change`
+  odmawiają (kod 2, baza nietknięta), gdy szufladę tej bazy prowadzi otwarte okno programu - z numerem procesu
+  w zdaniu. Dotąd polecenie mogło zapisywać równolegle z oknem.
+- **Sortowanie list Osi teleskopu i Osi obserwatorium:** klik nagłówka sortuje, drugi odwraca; liczby liczbowo,
+  puste na końcu, porządek przeżywa odświeżenie. Gdy odświeżenie listy zamknie wpis w trakcie pisania, pasek mówi,
+  że wpis nie został zapisany.
+- **Oś teleskopu z Domu:** pozycja w menu „Więcej…”.
+
+### Zmienione
+
+- **Otwarcie bazy:** ekrany powstają przy pierwszym wejściu, a Zbiory dobudowują się zaraz po pierwszym pokazaniu
+  okna (otwarcie archiwum ~17 tys. klatek, pomiar natywny: ~690 → ~190 ms). Liczniki Porządków liczą się w tle -
+  „Porządki (…)” i faza liczenia przy tytule listy stoją do pierwszego wyniku, a klik w tym czasie wykonuje się po
+  wyniku. Gdy liczenie się nie uda, plakietka Porządków i kafel Domu mówią „!” zamiast pokazywać zero.
+- **Zmiana motywu** przemalowuje listę Porządków, kolejkę osi obiektu i optykę osi teleskopu bez przeliczania i bez
+  zapisu do bazy.
+- **Dostawa:** główny przycisk w ciemnym bursztynie z motywu; gdy wejście do Dostawy ma powód (fakty kopii, bajty
+  nagłówków), wyróżnienie i fokus stoją na przycisku, którego ten powód wymaga, a podpowiedź wiersza Porządków nazywa
+  ten przycisk jego napisem.
+- **Cofnięcie zapisu kart mówi, co zostało:** przerwane cofnięcie podaje „N nietkniętych plików zostaje w stanie po
+  zapisie, M wymaga sprawdzenia”; cofnięcie odmawia, gdy po cofanym zapisie przyszedł nowszy zapis tych plików,
+  i przywraca stan obiektu klatki sprzed zapisu (także po „Rozwiąż”).
+- **Recepty paska:** „Cofnij zapis (commit N)” zostaje na pasku Porządków po zamknięciu okna kart; w biegu Dostawy
+  albo zapisu Zbiorów odmawia zdaniem z numerem commitu i poleceniem dla wiersza poleceń, a po końcu biegu wraca
+  sama. Recepty odłożone w biegu przeżywają przełączenie bazy i znikają, gdy ten sam gest wykonano inną drogą
+  (wiersz poleceń, drugie okno, Oś teleskopu). Recepty optyki i perspektyw przeżywają przeładowanie Zbiorów.
+- **Szuflada zmian mówi, co się stało:** po zapisie w miejscu przerwanym zamknięciem procesu mówi zdaniem zapisu
+  przerwanego zamiast „pusta”, a „Dokończ zapis” podejmuje przebieg; Dom mówi „odrzucono N zmian z poprzedniej
+  sesji”. Przebieg wyczyszczony do zera zamyka się jak po „Odrzuć”; „◌” oznacza przebiegi czekające poza tą
+  szufladą; pusta szuflada odświeża się przy pokazaniu, aktywacji okna i końcu Dostawy. Gdy uzgodnienie nazw
+  odmówiło, szuflada podaje powód; pod blokadą innego okna mówi, który przebieg tam czeka. Zapis przerwany awarią
+  w połowie (część plików zapisana) ma w szufladzie „Cofnij”.
+- **Znajdź i Zbiory:** EXPTIME i „Czas” z najwyżej jednym miejscem po przecinku (pełna wartość w podpowiedzi);
+  wiersz „Wersje stosów” liczy grupy; Shift+strzałka po sortowaniu idzie od kotwicy zaznaczenia.
+- **„Zmień obiekt…”:** podgląd mówi prawdę dla każdej pozycji (RAW bez karty przenoszony według planu), „Nie
+  rozpoznaję nazwy…” dopiero po pauzie w pisaniu, a po zamknięciu okna pasek mówi, ile klatek przeszło na jaki
+  obiekt.
+- **Okno wydania:** raport bez surowych znaczników technicznych; „Otwórz w Eksploratorze” po powrocie do wydanego
+  obiektu, gdy folder istnieje.
+- **Planer:** wyszukanie bez trafienia (np. „M 4” bez aliasu w katalogu) mówi to zdaniem, a trafienie przez alias
+  pokazuje nazwę katalogową z aliasem („NGC1976 (M 42)”); szerokości kolumn bez przeliczania całej tabeli.
+- **Listwa filtrów Zbiorów** dopasowuje listy, pole i tytuły do powiększonego fontu.
+- **Szablon nazw** odrzuca nieznany token tym samym zdaniem co zapis nazwy.
+- Przyciski okien systemowych Qt w języku interfejsu programu; przyciski okien Zbiorów i paska zbioru z katalogu
+  tłumaczeń.
+
 ### Naprawione
 
 - **Perspektywa „f/ niezgodna z teleskopem”:** podpowiedź z liczbą klatek do poprawy („RC8 200 → 8…”) zostaje na
@@ -49,6 +116,12 @@ schemat i API mogą się jeszcze zmieniać.
 - **Okno wydania:** przed „Utwórz” mówi, że manifestu nie da się teraz zapisać (uszkodzony, innego wydania, zajęty),
   także przy niepełnym drzewie; odmowa przy zajętym pliku roboczym podaje jego nazwę raz, pełna ścieżka stoi
   w szczególe. Polecenie `project` przy pierwszym dowiązaniu odmówionym radzi `--copy` zamiast przełącznika okna.
+- **Pisarz kart** odmawia nagłówkowi FITS z `END` przed kanonicznym zakończeniem nagłówka - bajty pliku zostają
+  nietknięte (dotąd dwa czytniki nagłówka mogły widzieć w takim pliku różne końce).
+- **XISF:** gołą wartość logiczną karty czyta jeden parser; jawny indeks wystąpienia bierze starą wartość swojego
+  wystąpienia.
+- **Pole „Baza:”** zawija długą ścieżkę i od pierwszego układu mieści się albo kończy wielokropkiem; znak NUL w polu
+  folderu wyjścia żniw mówi się błędem wejścia; przełączenie bazy w biegu zapisu odmawia bez anulowania biegu.
 
 ## [0.19.0] - 2026-10-20
 
@@ -1652,7 +1725,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.19.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/abo-t/horreum/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/abo-t/horreum/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/abo-t/horreum/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/abo-t/horreum/compare/v0.16.0...v0.17.0

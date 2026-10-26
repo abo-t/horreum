@@ -34,6 +34,7 @@ from horreum import db, macro as macro_mod, projection, repo, resolver, stacks
 from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-wolny)
 from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem, ogon_cofniecia,
                                    podpowiedz_kart, polecenie_zdania, szczegol_zdania, tekst_powodu,
                                    zdanie_commitu_kart, zlacz_zdania)
@@ -562,7 +563,7 @@ class TelescopeAxisView(QWidget):
         actions.addWidget(self.btn_undo_add)
         actions.addStretch(1)
         actions.addWidget(QLabel(i18n.t("axis.tel.merge_into")))
-        self.combo_target = QComboBox()
+        self.combo_target = kolko(QComboBox())
         self.combo_target.currentIndexChanged.connect(self._sync_merge_enabled)
         actions.addWidget(self.combo_target)
         self.btn_merge = QPushButton(i18n.t("action.merge"))
@@ -2476,11 +2477,11 @@ class ObjectAxisView(QWidget):
         # --- pasek filtra ---
         bar = QHBoxLayout()
         bar.addWidget(QLabel(i18n.t("filter.telescope")))
-        self.combo_tel = QComboBox()
+        self.combo_tel = kolko(QComboBox())
         self.combo_tel.currentIndexChanged.connect(self._on_filter_changed)
         bar.addWidget(self.combo_tel)
         bar.addWidget(QLabel(i18n.t("filter.filter")))
-        self.combo_filter = QComboBox()
+        self.combo_filter = kolko(QComboBox())
         self.combo_filter.currentIndexChanged.connect(self._on_filter_changed)
         bar.addWidget(self.combo_filter)
         bar.addStretch(1)
@@ -4145,7 +4146,7 @@ class ObservatoryAxisView(QWidget):
         actions = QHBoxLayout()
         actions.addStretch(1)
         actions.addWidget(QLabel(i18n.t("axis.obs.merge_into")))
-        self.combo_target = QComboBox()
+        self.combo_target = kolko(QComboBox())
         self.combo_target.currentIndexChanged.connect(self._sync_merge_enabled)
         actions.addWidget(self.combo_target)
         self.btn_merge = QPushButton(i18n.t("action.merge"))
@@ -5508,16 +5509,17 @@ class MainWindow(QMainWindow):
 
     def _zbuduj_planer(self, utworzone):
         """Strona Planera. Motyw PRZEKAZANY, nie czytany przez widok z rejestru (wiz T5 N4 - jeden właściciel
-        faktu). Bieg Dostawy - planer wygaszony od chwili budowy (zatrzask, AR-325)."""
+        faktu). Bieg Dostawy - parametr konstruktora (AR-325, AR-334): planer wygaszony od chwili budowy i bez rachunku
+        nocy do końca przebiegu (liczy go `refresh` z `_odswiez_widoki_po_przebiegu`), a nie zatrzask po konstruktorze,
+        który już policzył."""
         from horreum.gui.planner import PlannerView                  # lazy: Qt-import tylko gdy budujemy
         motyw = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
-        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now, theme_name=motyw)
+        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now, theme_name=motyw,
+                              w_biegu=self._dostawa_w_biegu)
         utworzone.append(planner)
         planner.status_message.connect(self._raport_planera)
         planner.open_sites.connect(self._on_open_sites)                # AR-48: pusty stan → stanowiska
         planner.show_frames_for.connect(self._on_show_target_frames)   # T5e: most planer → grid
-        if self._dostawa_w_biegu:
-            planner.set_busy(True)
         return {"planner_view": planner}, planner
 
     def _on_przebieg_zmiany_obiektu(self, run_id):

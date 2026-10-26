@@ -52,6 +52,7 @@ from horreum import (
 )
 from horreum.gui import busy, facet_model, i18n, queries, rows
 from horreum.gui.facets import FacetRail
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.note_dialog import NoteDialog
@@ -341,12 +342,12 @@ class FramesView(QWidget):
         # mieszkają w SelectionBar niżej.
         bar = QHBoxLayout()
         bar.addWidget(QLabel(i18n.t("grid.top.perspective")))
-        self.combo_persp = QComboBox()
+        self.combo_persp = kolko(QComboBox())
         self.combo_persp.currentIndexChanged.connect(self._on_perspective)
         bar.addWidget(self.combo_persp)
         bar.addSpacing(16)
         bar.addWidget(QLabel(i18n.t("grid.top.group_by")))
-        self.combo_group = QComboBox()
+        self.combo_group = kolko(QComboBox())
         self.combo_group.addItem(i18n.t("grid.top.no_group"), None)
         for label, key in BASE_COLS:
             if key not in ("path",):

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum.gui import i18n, queries
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui.config_dialog import (
     FolderFilter, default_dialog_size, folder_item, folder_list, visible_rows,
 )
@@ -127,7 +128,7 @@ class AssignObservatoryDialog(QDialog):
         grupa.addButton(self.radio_existing)
         grupa.addButton(self.radio_new)
         lay.addWidget(self.radio_existing)
-        self.combo = QComboBox()
+        self.combo = kolko(QComboBox())
         self.combo.addItem(i18n.t("obshand.pick_site"), None)
         for o in queries.active_observatories(self.con):
             etykieta = o["name"] or f'{o["lat"]:.4f}, {o["lon"]:.4f}'

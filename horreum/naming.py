@@ -468,13 +468,24 @@ def validate_template(template):
     nie ciche pominięcie na każdej klatce. Tak samo `trail` nie na końcu wzoru, nieznany `case` tokenu
     kind i token spoza słownika (`TOKENS`, AR-208) - to samo zdanie i kod, które dałby `compose_name`
     w pętli przebiegu, więc żadna odmowa `compose_name` nie zostaje na później. TANIA (O(tokenów)) -
-    powierzchnia może ją wołać przed mintem run_id, by nie przebiegać dwa razy."""
+    powierzchnia może ją wołać przed mintem run_id, by nie przebiegać dwa razy.
+
+    WZÓR Z ZEWNĄTRZ (AR-341: edytor zachowuje specyfikację, której nie umie pokazać): `re` tokenu `orig`
+    niebędące napisem i `n` tokenu `folder`, którego `_folder_segment` nie weźmie przez `int()`, też
+    odmawiają tutaj kodem - inaczej `re.compile` rzuciłby `TypeError`, a `compose_name` surowy `ValueError`
+    bez kodu, oba poza `except` wołających. Wartości, które rdzeń przyjmuje (`n` = 0 czy 12), przechodzą."""
     lists = template.values() if isinstance(template, dict) else [template]
     for specs in lists:
         specs = list(specs)
         for i, spec in enumerate(specs):
             tok, args = _spec_parts(spec)
             if tok == "orig":
+                if not isinstance(args.get("re", ""), str):
+                    # Nazwa typu (język Pythona) jedzie parametrem - jawna granica, jak tekst `re.error` niżej.
+                    raise OdmowaZPowodem(PowodPozycji(
+                        f"zły regex w tokenie 'orig': {repr(args.get('re'))} ({type(args.get('re')).__name__})",
+                        "rename_tpl_bad_regex", value=repr(args.get("re")),
+                        detail=type(args.get("re")).__name__))
                 try:
                     re.compile(args.get("re", ""))
                 except re.error as e:
@@ -482,6 +493,13 @@ def validate_template(template):
                     raise OdmowaZPowodem(PowodPozycji(
                         f"zły regex w tokenie 'orig': {repr(args.get('re'))} ({str(e)})",
                         "rename_tpl_bad_regex", value=repr(args.get("re")), detail=str(e)))
+            elif tok == "folder":
+                try:
+                    int(args.get("n", 1))               # ta sama konwersja co `_folder_segment`
+                except (TypeError, ValueError, OverflowError):
+                    raise OdmowaZPowodem(PowodPozycji(
+                        f"zły poziom tokenu 'folder': {repr(args.get('n', 1))}",
+                        "rename_tpl_bad_level", value=repr(args.get("n", 1)))) from None
             elif tok == "trail" and i != len(specs) - 1:
                 raise OdmowaZPowodem(PowodPozycji("token 'trail' musi być ostatni we wzorze",
                                                   "rename_tpl_trail_not_last"))

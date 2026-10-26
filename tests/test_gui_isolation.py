@@ -65,6 +65,9 @@ QT_WIDGET_FILES = {"gui/app.py", "gui/pipeline.py", "gui/grid.py", "gui/projecti
                    # AR-17 krok 3: okno „Zmień obiekt…”/„Uzgodnij pliki…” (plan w wątku tła); planer
                    # `object_change.py` i read-model zostają Qt-wolne
                    "gui/object_change_dialog.py",
+                   # AR-349: reguła kółka myszy dla pól wartości (polityka fokusu + filtr zdarzeń) - warstwa
+                   # widżetów; bramka AST owinięcia konstruktorów (`test_gui_kolko_bramka.py`) zostaje Qt-wolna
+                   "gui/kolko.py",
                    }
 
 

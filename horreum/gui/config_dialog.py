@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from horreum import repo
 from horreum.gui import i18n, queries, rows
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 
 # Tryb ogniskowej (AR-128): rola wiersza niosąca słownik grupy, wartownik pozycji „Dopisz nowy…"
 # w liście teleskopów i wartownik nie wybranego parku (`None` w `itemData` znaczy „nic nie
@@ -343,7 +344,7 @@ class AssignConfigDialog(QDialog):
             lay.addWidget(nota)
 
         lay.addWidget(QLabel(i18n.t("cfg.telescope")))
-        self.combo = QComboBox()
+        self.combo = kolko(QComboBox())
         lay.addWidget(self.combo)
         self._focal_dotkniete = False       # user zmienił ogniskową nowego teleskopu - nie nadpisujemy
         self._parki_ostatnie = None         # zbiór parków źródeł przy ostatniej przebudowie pola parku
@@ -423,7 +424,7 @@ class AssignConfigDialog(QDialog):
         self.new_focal = QLineEdit()
         self.new_f_ratio = QLineEdit()
         self.new_f_ratio.setPlaceholderText(i18n.t("cfg.new_f_ratio_hint"))
-        self.new_park = QComboBox()
+        self.new_park = kolko(QComboBox())
         form.addRow(i18n.t("cfg.new_name"), self.new_name)
         form.addRow(i18n.t("cfg.new_focal"), self.new_focal)
         form.addRow(i18n.t("cfg.new_f_ratio"), self.new_f_ratio)

@@ -155,7 +155,7 @@ ITEM_REASON_CODES = frozenset({
     "rename_flat_empty_group", "rename_flat_many_groups", "rename_no_present_copy",
     "rename_many_copies", "rename_frame_gone", "rename_no_time", "rename_unchanged",
     "rename_collision", "rename_tpl_bad_regex", "rename_tpl_trail_not_last", "rename_tpl_bad_case",
-    "rename_tpl_unknown_token",
+    "rename_tpl_unknown_token", "rename_tpl_bad_level",
     # --- błędy definicji makra i wyrażenia (AR-194, `expr.compile_expr`, `expr._eval`,
     # `macro.MacroDef.from_dict`)
     "expr_empty", "expr_syntax", "expr_bad_const", "expr_store", "expr_call_not_allowed",

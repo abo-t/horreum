@@ -1924,6 +1924,9 @@ CATALOG = {
               "when you come back here.",
     },
     "planner.no_site_action": {"pl": "Ustaw stanowisko…", "en": "Set a site…"},
+    # AR-334: planer zbudowany w biegu Dostawy nie liczy nocy na wpół zapisanej bazie - nagłówek nocy mówi, kiedy policzy.
+    "planner.after_intake": {"pl": "Plan nocy policzę po końcu Dostawy.",
+                             "en": "The night plan is computed when Intake finishes."},
 
     # --- panel celu (T5d, JEDYNE miejsce zapisu ekranu) + park -------------------------------
     "planner.panel": {"pl": "Zaznaczony cel", "en": "Selected target"},
@@ -2609,6 +2612,12 @@ CATALOG = {
     "grid.token.case_keep": {"pl": "jak w bazie", "en": "as stored"},
     "grid.token.case_upper": {"pl": "WIELKIE", "en": "UPPER"},
     "grid.token.case_lower": {"pl": "małe", "en": "lower"},
+    # AR-341: wiersz wzoru, który specyfikacji nie pokaże wiernie, mówi to zamiast podmieniać ją po cichu.
+    # `{tok}`, `{case}`, `{arg}` - `repr` wartości ze wzoru; `{token}` - etykieta typu tokenu (wyżej).
+    "grid.token.unknown": {"pl": "nieznany token: {tok}", "en": "unknown token: {tok}"},
+    "grid.token.case_unknown": {"pl": "nieznana wielkość liter: {case}", "en": "unknown letter case: {case}"},
+    "grid.token.arg_unknown": {"pl": "{token}: argument spoza edytora {arg}",
+                               "en": "{token}: an argument the editor cannot show {arg}"},
 
     # --- TemplateEditor ---
     "grid.tmpl.title": {"pl": "Wzór nazwy:", "en": "Name pattern:"},
@@ -8137,6 +8146,9 @@ CATALOG = {
                                         "en": "unknown letter case for token 'kind': {value}"},
     "objchg.item.rename_tpl_unknown_token": {"pl": "nieznany token szablonu: {value}",
                                              "en": "unknown pattern token: {value}"},
+    # AR-341: `n` tokenu folder, którego rdzeń nie weźmie jako liczby (wzór z zewnątrz - `validate_template`).
+    "objchg.item.rename_tpl_bad_level": {"pl": "zły poziom tokenu 'folder': {value}",
+                                         "en": "bad level of token 'folder': {value}"},
     # Błędy definicji makra i wyrażenia (AR-194, `expr.compile_expr`, `expr._eval`,
     # `macro.MacroDef.from_dict`). PL = zdanie rdzenia znak w znak (polskie znaki od AR-228, jak
     # `macro_*`).

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from horreum import naming
 from horreum.gui import i18n, rows
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui.rows import TwoPartDelegate
 from horreum.resolve.headers import FAKTY_NOWSZE, copy_facts_state
 from horreum.gui.grid_model import (
@@ -36,7 +37,7 @@ class FilterPanel(QWidget):
         self._rows = []
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
-        self.combo_op = QComboBox(); self.combo_op.addItems(["AND", "OR"])
+        self.combo_op = kolko(QComboBox()); self.combo_op.addItems(["AND", "OR"])
         top.addWidget(QLabel(i18n.t("grid.filter.join"))); top.addWidget(self.combo_op)
         btn_add = QPushButton(i18n.t("grid.filter.add_cond")); btn_add.clicked.connect(self.add_row); top.addWidget(btn_add)
         self.chk_invert = QCheckBox(i18n.t("grid.filter.invert"))
@@ -50,8 +51,8 @@ class FilterPanel(QWidget):
 
     def add_row(self):
         rw = QHBoxLayout()
-        kw = QComboBox(); kw.setEditable(True); kw.addItems(self._keywords)
-        op = QComboBox()
+        kw = kolko(QComboBox()); kw.setEditable(True); kw.addItems(self._keywords)
+        op = kolko(QComboBox())
         for label, _ in OPERATORS:
             op.addItem(i18n.t(label))
         val = QLineEdit()
@@ -271,9 +272,9 @@ class MacroBar(QWidget):
         # Przypisz (keyword op wartość)
         asg = QHBoxLayout()
         asg.addWidget(QLabel(i18n.t("grid.macro.assign")))
-        self.asg_kw = QComboBox(); self.asg_kw.setEditable(True); self.asg_kw.addItems(keywords)
+        self.asg_kw = kolko(QComboBox()); self.asg_kw.setEditable(True); self.asg_kw.addItems(keywords)
         self.asg_kw.setFixedWidth(160)
-        self.asg_op = QComboBox(); self.asg_op.addItems(["set", "add"])
+        self.asg_op = kolko(QComboBox()); self.asg_op.addItems(["set", "add"])
         self.asg_expr = QLineEdit(); self.asg_expr.setPlaceholderText(i18n.t("grid.macro.assign_ph"))
         # Komentarz karty (AR-47): pusty = zastany zostaje; wpisany - zapis razem z nim. Jedyna
         # droga z GUI dla karty FITS, której zastany komentarz nie mieści się przy nowej wartości.
@@ -353,16 +354,16 @@ class _TokenRow(QWidget):
     def __init__(self, spec="kind", parent=None):
         super().__init__(parent)
         lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
-        self.combo = QComboBox(); self.combo.setFixedWidth(170)     # stała kolumna typu (wiz #2 — bez ragged)
+        self.combo = kolko(QComboBox()); self.combo.setFixedWidth(170)   # stała kolumna typu (wiz #2 - bez ragged)
         for lbl, tid in self._TOKENS:
             self.combo.addItem(i18n.t(lbl), tid)
         lay.addWidget(self.combo)
-        self.level = QSpinBox(); self.level.setRange(1, 8); self.level.setPrefix(i18n.t("grid.token.level_prefix"))
+        self.level = kolko(QSpinBox()); self.level.setRange(1, 8); self.level.setPrefix(i18n.t("grid.token.level_prefix"))
         lay.addWidget(self.level)
         self.regex = QLineEdit(); self.regex.setPlaceholderText(i18n.t("grid.token.regex_ph"))
         self.regex.setMinimumWidth(160)
         lay.addWidget(self.regex)
-        self.case = QComboBox()
+        self.case = kolko(QComboBox())
         for lbl, val in self._CASES:
             self.case.addItem(i18n.t(lbl), val)
         lay.addWidget(self.case)
@@ -379,6 +380,25 @@ class _TokenRow(QWidget):
         self.regex.textChanged.connect(lambda *_: self.changed.emit())
         self.case.currentIndexChanged.connect(lambda *_: self.changed.emit())
         self.set_spec(spec)
+        # Pozycje obce (AR-341) żyją, dopóki człowiek ich nie opuści - podłączone PO `set_spec`, bo budowa wiersza
+        # nie jest gestem.
+        self.combo.currentIndexChanged.connect(lambda *_: self._zdejmij_obce(typ_zmieniony=True))
+        self.case.currentIndexChanged.connect(lambda *_: self._zdejmij_obce(typ_zmieniony=False))
+
+    def _zdejmij_obce(self, *, typ_zmieniony):
+        """Ręczna zmiana zdejmuje pozycje obce z `set_spec` (AR-341): pozycja obca typu tokenu znika, gdy człowiek
+        wybrał inny typ, a obca wielkość liter - gdy zmienił typ (argument wraca do „jak w bazie”) albo wybrał inną
+        wielkość. Bez tego obcy `case` przeżywał zmianę typu i powrót do `kind` (zwykły wybór znanego tokenu dawał
+        wzór, którego rdzeń odmówi), a nawigacja strzałkami po typach wracała na token spoza słownika."""
+        for i in range(self.combo.count() - 1, len(self._TOKENS) - 1, -1):
+            if i != self.combo.currentIndex():
+                self.combo.removeItem(i)
+        znane = len(self._CASES)
+        if self.case.count() > znane and (typ_zmieniony or self.case.currentIndex() < znane):
+            if self.case.currentIndex() >= znane:
+                self.case.setCurrentIndex(0)            # sygnał wróci tu i zdejmie pozycję sam
+            if self.case.count() > znane:
+                self.case.removeItem(znane)
 
     def _sync_args(self):
         tok = self.combo.currentData()
@@ -387,18 +407,46 @@ class _TokenRow(QWidget):
         self.case.setVisible(tok == "kind")
 
     def set_spec(self, spec):
+        """Wiersz pokazuje spec WIERNIE albo mówi, że nie umie - nigdy nie podmienia go po cichu (AR-341). Token
+        spoza słownika, `n` folderu nieliczbowe albo spoza pola poziomu i `re` niebędące napisem dostają pozycję
+        combo z ORYGINAŁEM jako danymi (`spec()` oddaje `currentData()` bez zmian), `case` spoza `_CASES` - pozycję
+        pola wielkości liter z surowym `case`; pozycja obca znika, gdy człowiek ją opuści (`_zdejmij_obce`).
+        „Podgląd” odmawia takiego wzoru drogą rdzenia (`naming.validate_template`) albo - gdy rdzeń wartość przyjmuje
+        (`n` = 0 czy 12) - liczy go wiernie. Dawniej combo zostawało na `datetime`, `case` przechodził w „jak
+        w bazie”, `n=12` w 8, `re=None` w wyrażenie „None”, a `n="abc"` wywracał konstruktor wiersza."""
         tok = spec.get("t") if isinstance(spec, dict) else spec
         args = spec if isinstance(spec, dict) else {}
-        i = self.combo.findData(tok)
-        if i >= 0:
-            self.combo.setCurrentIndex(i)
+        etykiety = {tid: lbl for lbl, tid in self._TOKENS}
+        poziom = None
         if tok == "folder":
-            self.level.setValue(int(args.get("n", 1)))
-        elif tok == "orig":
-            self.regex.setText(str(args.get("re", "")))
-        elif tok == "kind":
-            j = self.case.findData(args.get("case"))
-            self.case.setCurrentIndex(j if j >= 0 else 0)
+            try:
+                poziom = int(args.get("n", 1))          # ta sama konwersja co rdzeń (`naming._folder_segment`)
+            except (TypeError, ValueError, OverflowError):
+                poziom = None
+            if poziom is not None and not self.level.minimum() <= poziom <= self.level.maximum():
+                poziom = None                           # `setValue` przycięłoby go do zakresu pola
+        if not (isinstance(tok, str) and tok in etykiety):
+            obcy = i18n.t("grid.token.unknown", tok=repr(tok))
+        elif (tok == "folder" and poziom is None) or (tok == "orig" and not isinstance(args.get("re", ""), str)):
+            obcy = i18n.t("grid.token.arg_unknown", token=i18n.t(etykiety[tok]), arg=repr(spec))
+        else:
+            obcy = None
+        if obcy is not None:
+            self.combo.addItem(obcy, spec)              # dane = oryginał - `spec()` odda go bez zmian
+            self.combo.setCurrentIndex(self.combo.count() - 1)
+        else:
+            self.combo.setCurrentIndex(self.combo.findData(tok))
+            if tok == "folder":
+                self.level.setValue(poziom)
+            elif tok == "orig":
+                self.regex.setText(args.get("re", ""))
+            elif tok == "kind":
+                case = args.get("case")
+                znane = [val for _lbl, val in self._CASES]
+                if case not in znane:                   # surowy `case` zostaje - odmówi go walidacja rdzenia
+                    self.case.addItem(i18n.t("grid.token.case_unknown", case=repr(case)), case)
+                    znane.append(case)
+                self.case.setCurrentIndex(znane.index(case))
         self._sync_args()
 
     def opis(self):
@@ -572,13 +620,13 @@ class RenameBar(QWidget):
         # (1) polityka wsadu
         pol = QHBoxLayout()
         pol.addWidget(QLabel(i18n.t("grid.rename.source")))
-        self.src = QComboBox()
+        self.src = kolko(QComboBox())
         self.src.addItem("DATE-OBS", "date_obs")          # D2: default DATE-OBS (kw FITS — bez tłumaczenia)
         self.src.addItem(i18n.t("grid.rename.src_filename"), "filename")
         self.src.currentIndexChanged.connect(lambda *_: self.sourceChanged.emit())
         pol.addWidget(self.src)
         pol.addWidget(QLabel(i18n.t("grid.rename.offset")))
-        self.offset = QSpinBox(); self.offset.setRange(-24, 24); self.offset.setValue(0)
+        self.offset = kolko(QSpinBox()); self.offset.setRange(-24, 24); self.offset.setValue(0)
         self.offset.setSuffix(" h")                       # BEZ założenia strefy (§2): 0 default
         pol.addWidget(self.offset)
         self.fallback = QCheckBox(i18n.t("grid.rename.fallback")); self.fallback.setChecked(True)  # D1

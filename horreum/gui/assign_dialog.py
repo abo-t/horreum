@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from horreum import resolver
 from horreum.gui import facet_model, i18n, queries
 from horreum.gui.config_dialog import dopasuj_wysokosc   # wspólny pomocnik okien (AR-176)
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.resolve._text import LITERY_BEZ_ROZKLADU, norm_alnum
 from horreum.resolve.catalog import catalog_canon, header_form, xref, xref_aliases
 from horreum.resolve.objects import common_name_form, load_own_objects
@@ -279,7 +280,7 @@ class AssignObjectDialog(QDialog):
         self.search.setPlaceholderText(i18n.t("assign.search_placeholder"))
         self.search.setClearButtonEnabled(True)
         lay.addWidget(self.search)
-        self.combo = QComboBox()
+        self.combo = kolko(QComboBox())
         # Lista ma SUFIT wysokości: bez `combobox-popup: 0` styl Fusion pomija `maxVisibleItems`
         # i rozwija całą bibliotekę na wysokość ekranu (`_POZYCJI_NARAZ`).
         self.combo.setStyleSheet("QComboBox { combobox-popup: 0; }")

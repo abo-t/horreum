@@ -28,6 +28,7 @@ from horreum import db, derive, lineage, presence, scan
 from horreum.gui import i18n, queries, theme
 from horreum.gui.grid import PRESET_LINEAGE, PRESET_VANISHED
 from horreum.gui.grid_lineage import SciezkaLabel
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198)
                                    tekst_powodu, wiersz_systemu)
@@ -708,11 +709,9 @@ class PipelineView(QWidget):
         # przejęta od dawnego „Przetwórz wszystko" (jedna złota akcja na miejsce, wzorzec F3 #3).
         rec = QHBoxLayout()
         self.btn_receive = QPushButton(etykieta_przyjmij_nowe())
-        # Nazwa obiektu = selektor bursztynu złotej akcji w `theme.qss` (odbiór 0.19.0 DO6).
+        # Nazwa obiektu = selektor bursztynu i pogrubienia złotej akcji w `theme.qss` (odbiór 0.19.0 DO6, AR-347).
+        # Bez `setFont` przy widżecie: font sprzed pierwszego polerowania arkusz przywraca przy każdym `unpolish`.
         self.btn_receive.setObjectName(theme.ZLOTA_AKCJA_OBJECT_NAME)
-        _f = self.btn_receive.font()
-        _f.setBold(True)
-        self.btn_receive.setFont(_f)
         self.btn_receive.setMinimumHeight(34)
         self.btn_receive.clicked.connect(self._on_receive)
         rec.addWidget(self.btn_receive, 1)
@@ -752,7 +751,7 @@ class PipelineView(QWidget):
         self.lbl_root.setWordWrap(True)
         src.addWidget(self.lbl_root, 1)
         src.addWidget(QLabel(i18n.t("pipeline.tier_label")))
-        self.combo_tier = QComboBox()
+        self.combo_tier = kolko(QComboBox())
         for label, value in _TIERS:
             # "—" (value None) neutralne — nie klucz; reszta rozwiązuje etykietę z katalogu.
             self.combo_tier.addItem(i18n.t(label) if value is not None else label, value)
@@ -1260,10 +1259,12 @@ class PipelineView(QWidget):
 
     def _sync_akcentu(self):
         """AKCENT IDZIE ZA POWODEM WEJŚCIA (AR-327): linia powodu faktów kopii każe użyć
-        „Sprawdź bajty nagłówków (N)”, więc bursztyn złotej akcji (nazwa obiektu `theme.ZLOTA_AKCJA_OBJECT_NAME`
-        + pogrubienie) stoi wtedy na `btn_copy_facts`, a „Przyjmij nowe” jest zwykłym przyciskiem; bez powodu
-        (albo po zrobieniu roboty) - z powrotem na „Przyjmij nowe”. Zawsze dokładnie jedna złota akcja.
-        Selektor nazwy obiektu w arkuszu nie przelicza się sam - `unpolish`/`polish` przy zmianie."""
+        „Sprawdź bajty nagłówków (N)”, więc bursztyn złotej akcji (nazwa obiektu `theme.ZLOTA_AKCJA_OBJECT_NAME` -
+        kolor i pogrubienie z reguły arkusza) stoi wtedy na `btn_copy_facts`, a „Przyjmij nowe” jest zwykłym
+        przyciskiem; bez powodu (albo po zrobieniu roboty) - z powrotem na „Przyjmij nowe”. Zawsze dokładnie jedna
+        złota akcja. Selektor nazwy obiektu w arkuszu nie przelicza się sam - `unpolish`/`polish` przy zmianie.
+        Waga NIE idzie przez `setFont` (AR-347): `unpolish` przywraca font z pierwszego polerowania, więc gest powodu
+        zostawał złoty bez pogrubienia, a „Przyjmij nowe” pogrubione."""
         zlota = (self.btn_copy_facts if self._reason == REASON_COPY_FACTS and self._copy_facts_waiting > 0
                  else self.btn_receive)
         for przycisk in (self.btn_receive, self.btn_copy_facts):
@@ -1271,9 +1272,6 @@ class PipelineView(QWidget):
             if przycisk.objectName() == nazwa:
                 continue
             przycisk.setObjectName(nazwa)
-            f = przycisk.font()
-            f.setBold(przycisk is zlota)
-            przycisk.setFont(f)
             przycisk.style().unpolish(przycisk)
             przycisk.style().polish(przycisk)
 

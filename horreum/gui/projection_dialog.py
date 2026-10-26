@@ -70,6 +70,7 @@ from horreum import db, projection
 from horreum.gui import facet_model, i18n, queries, theme
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.i18n_catalog import CATALOG
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui.wb_worker import (   # błąd systemu w języku UI (AR-184), szczegół na pasek (AR-218)
     ZdanieZeSzczegolem, tekst_powodu, wiersz_systemu)
 # odmowy klingi z kodem (AR-200); jedna reguła wyjątku workera okna (AR-214)
@@ -925,7 +926,7 @@ class ProjectionDialog(QDialog):
         row_l = QHBoxLayout()
         layout_label = QLabel(i18n.t("proj.layout_label"))
         row_l.addWidget(layout_label)
-        self.combo_layout = QComboBox()
+        self.combo_layout = kolko(QComboBox())
         self.combo_layout.addItem(i18n.t("proj.layout_by_object"), "po-obiektach")
         self.combo_layout.addItem(i18n.t("proj.layout_wbpp"), "wbpp-feed")
         self.combo_layout.currentIndexChanged.connect(self._on_param_changed)
@@ -937,7 +938,7 @@ class ProjectionDialog(QDialog):
             layout_label.setVisible(False)
             self.combo_layout.setVisible(False)
             row_l.addWidget(QLabel(i18n.t("proj.obj.zestaw_label")))
-            self.combo_zestaw = QComboBox()
+            self.combo_zestaw = kolko(QComboBox())
             # Szerokość za treścią przy KAŻDEJ zmianie listy, nie raz przy pierwszym pokazaniu
             # (domyślna polityka): pozycje dochodzą z pierwszego planu, często już po pokazaniu
             # okna, a szerokość „Wszystkie" ucinała „A140R_ASI2600MC/MD/MM" do „A140R_AS" - trzy

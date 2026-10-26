@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
 
 from horreum import db, repo, sky, targets
 from horreum.gui import i18n, planner_model as pm, queries, theme
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198, AR-218)
                                    tekst_powodu, wiersz_systemu)
 from horreum.item_reasons import powod_okna   # jedna reguła wyjątku okna (AR-209, AR-214)
@@ -331,7 +332,7 @@ class ParkDialog(QDialog):
         # Data do MINUT, bez „T" — surowe ISO to szum (wzorzec `app._fmt_event_ts`, wiz T5 #18).
         last = (row["last_seen"] or "")[:16].replace("T", " ") or "—"
         self.table.setItem(r, self.COL_LAST, QTableWidgetItem(last))
-        combo = QComboBox()
+        combo = kolko(QComboBox())          # kółko bez fokusu przewija tabelę, nie zapisuje parku (AR-349)
         combo.addItem(i18n.t("planner.park_in"), 1)
         combo.addItem(i18n.t("planner.park_historic"), 0)
         # Trzeci stan ZAWSZE na liście — jest wyborem, nie etykietą (patrz docstring klasy).
@@ -367,7 +368,7 @@ class PlannerView(QWidget):
     open_sites = Signal()                # AR-48: pusty stan „bez stanowiska" → oś obserwatorium
 
     def __init__(self, con, db_path=None, now_fn=_utc_now_iso, parent=None, off_thread=True,
-                 theme_name=None):
+                 theme_name=None, w_biegu=False):
         super().__init__(parent)
         self._kolumny_zamowione = False  # przeliczenie szerokości po `FontChange` czeka w kolejce
         self.con = con
@@ -379,6 +380,9 @@ class PlannerView(QWidget):
         self._worker = None
         self._thread = None
         self._zatrzymany = False         # `zatrzymaj_pola` - widok znika, żadnego nowego biegu
+        # Bieg Dostawy to FAKT WIDOKU od konstruktora (AR-334): planer zbudowany w biegu nie liczy nocy na wpół
+        # zapisanej bazie, a każdy powód rachunku w biegu tylko podbija generację (`replan`, `_cleanup_thread`).
+        self._w_biegu = bool(w_biegu)
         self._result = None
         self._keep_canon = None          # cel, na który zaznaczenie ma wrócić po re-planie
         # Ostatni rachunek padł, bo baza nie zna stanowiska z GPS (AR-48). Publiczne, bo gospodarz
@@ -409,6 +413,7 @@ class PlannerView(QWidget):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(_DEBOUNCE_MS)
         self._debounce.timeout.connect(self.replan)
+        self.set_busy(self._w_biegu)
         self.replan()
 
     # ---------------------------------------------------------------- budowa
@@ -521,7 +526,7 @@ class PlannerView(QWidget):
         self.no_gaps_label = QLabel("")     # „✓ bez luk" = INFORMACJA, nigdy zapis (D-T4-d),
         #                                     przy KANONIE, bo to opis celu, nie akcja (wiz T5 #17)
         lay.addWidget(self.no_gaps_label)
-        self.panel_status = QComboBox()
+        self.panel_status = kolko(QComboBox())
         # PIERWSZA pozycja = „(bez oznaczenia)" z `data=None` (wiz T5 #1, P1): bez niej combo
         # trzymało status POPRZEDNIEGO celu, więc jeden klik w „Zapisz" wpisywał do bazy status,
         # którego user nie wybrał — a kolumna „Plan" pokazywała w tej samej chwili „—".
@@ -531,7 +536,7 @@ class PlannerView(QWidget):
         self.panel_status.currentIndexChanged.connect(self._sync_save_enabled)
         lay.addWidget(QLabel(i18n.t("planner.status")))
         lay.addWidget(self.panel_status)
-        self.panel_priority = QSpinBox()
+        self.panel_priority = kolko(QSpinBox())
         self.panel_priority.setRange(0, 99)
         self.panel_priority.setSpecialValueText(i18n.t("planner.priority_none"))   # 0 → NULL
         lay.addWidget(QLabel(i18n.t("planner.priority")))
@@ -751,7 +756,7 @@ class PlannerView(QWidget):
         lay = QHBoxLayout(body)
         lay.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
-        self.night_edit = QDateEdit()
+        self.night_edit = kolko(QDateEdit())
         self.night_edit.setCalendarPopup(True)
         self.night_edit.setSpecialValueText(i18n.t("planner.night_auto"))
         # Minimum = wartość specjalna „noc bieżąca": DOPÓKI user nie tknie pola, noc wybiera rdzeń
@@ -773,7 +778,7 @@ class PlannerView(QWidget):
         self.hide_pn.toggled.connect(self._on_hide_pn_toggled)
         form.addRow("", self.hide_pn)
 
-        self.status_combo = QComboBox()
+        self.status_combo = kolko(QComboBox())
         self.status_combo.addItem(i18n.t("planner.status_any"), None)
         for s in _STATUSES:
             self.status_combo.addItem(i18n.t(f"planner.status_{s}"), s)
@@ -799,7 +804,7 @@ class PlannerView(QWidget):
         self.max_cost_on = QCheckBox(i18n.t("planner.max_cost_on"))   # D-0731-14: domyślnie WYŁĄCZONY
         self.max_cost_on.setChecked(self._read_setting("max_cost_on", 0.0) == 1.0)
         self.max_cost_on.toggled.connect(self._on_max_cost_toggled)
-        self.max_cost = QDoubleSpinBox()
+        self.max_cost = kolko(QDoubleSpinBox())
         self.max_cost.setRange(1.0, 100.0)
         self.max_cost.setSingleStep(0.5)
         self.max_cost.setValue(self._read_setting("max_cost", _MAX_COST_DEFAULT))
@@ -813,14 +818,14 @@ class PlannerView(QWidget):
         right.addRow(i18n.t("planner.max_cost"), cost_row)
         # Filtr kadru OBOK progu kosztu i na jego wzór (D-0731-14): przełącznik z etykietą + pole,
         # domyślnie wyłączony, oba pamiętane w `QSettings`.
-        self.min_fill = QDoubleSpinBox()
+        self.min_fill = kolko(QDoubleSpinBox())
         self.min_fill.setRange(1.0, 100.0)
         self.min_fill.setSingleStep(5.0)
         self.min_fill.setDecimals(0)
         self.min_fill.setSuffix("%")             # jednostka W POLU: „30" bez niej czytało się jak liczba celów
         self.min_fill.setValue(self._read_setting("min_fill", _MIN_FILL_DEFAULT))
         self.min_fill_on = self._switched(right, "planner.min_fill", "min_fill_on", self.min_fill)
-        self.max_panels = QSpinBox()
+        self.max_panels = kolko(QSpinBox())
         self.max_panels.setRange(1, 99)
         self.max_panels.setValue(int(self._read_setting("max_panels", _MAX_PANELS_DEFAULT)))
         self.max_panels_on = self._switched(right, "planner.max_panels", "max_panels_on",
@@ -892,7 +897,9 @@ class PlannerView(QWidget):
         """Spinbox progu `name` — widełki, krok i wartość domyślna z `_THRESHOLDS` (SPOT), bieżąca
         wartość z `QSettings`. Rejestruje się w `_spins`, więc zapis i reset nie mają własnej listy."""
         key, default, lo, hi, step = _THRESHOLDS[name]
-        w = QDoubleSpinBox()
+        # Kółko bez fokusu nie przestawia progu (AR-349): `valueChanged` niżej zapisuje `QSettings` od razu,
+        # więc ząbek nad polem bez kliknięcia zmieniał próg na stałe (incydent `min_size` 6 → 8).
+        w = kolko(QDoubleSpinBox())
         w.setRange(lo, hi)
         w.setSingleStep(step)
         w.setValue(self._read_setting(name, default))
@@ -1045,7 +1052,7 @@ class PlannerView(QWidget):
         # porządek — czy lista ma iść za tym spojrzeniem. Do T5 chip zmieniał radę, ale nie
         # kolejność, więc „patrzę oczami RC8" zostawiało na górze cele wybrane dla A140R.
         self.chips_row.addWidget(QLabel(i18n.t("planner.order_label")))
-        self.order_combo = QComboBox()
+        self.order_combo = kolko(QComboBox())
         self.order_combo.addItem(i18n.t("planner.order_core"), pm.ORDER_CORE)
         self.order_combo.addItem(i18n.t("planner.order_lens"), pm.ORDER_LENS)
         self.order_combo.setCurrentIndex(0 if self._order == pm.ORDER_CORE else 1)
@@ -1103,6 +1110,12 @@ class PlannerView(QWidget):
         if self._keep_canon is None:
             self._keep_canon = self._selected_canon()
         self._gen += 1
+        if self._w_biegu:
+            # Bieg Dostawy (AR-334): rachunek czeka w generacji na koniec przebiegu (`set_busy`). Planer bez niczego
+            # na ekranie mówi, kiedy policzy - zamiast pustej listy pod nagłówkiem bez nocy.
+            if not self._shown_gen:
+                self.night_label.setText(i18n.t("planner.after_intake"))
+            return
         if self._worker is not None:
             return                       # wynik w biegu i tak przyjdzie ze STARĄ generacją → odrzucony
         self._start(self._gen)
@@ -1143,8 +1156,8 @@ class PlannerView(QWidget):
         self._worker = None
         self._thread = None
         self.busy.setVisible(False)
-        if self._pending_gen() and not self._zatrzymany:
-            self._start(self._gen)       # parametry zmieniły się w biegu → licz jeszcze raz
+        if self._pending_gen() and not self._zatrzymany and not self._w_biegu:
+            self._start(self._gen)       # parametry zmieniły się w biegu → licz jeszcze raz (w biegu Dostawy - po nim)
 
     def zatrzymaj_pola(self):
         """Widok znika (zamknięcie okna, przełączenie bazy - `MainWindow._zatrzymaj_watki_widokow`):
@@ -1447,7 +1460,21 @@ class PlannerView(QWidget):
         self.replan()
 
     def set_busy(self, running):
-        """W biegu pipeline'u ekran nie liczy planu na wpół zapisanej bazie (spójnie z osiami)."""
+        """W biegu Dostawy ekran nie liczy planu na wpół zapisanej bazie (AR-334): widok wygaszony (spójnie z osiami),
+        a każdy powód rachunku - wejście przy bazie bez stanowiska, ponowienie `no_site`, restart po wątku, debounce
+        sprzed biegu - tylko podbija generację (`replan`, `_cleanup_thread`). Rachunek wystartowany PRZED biegiem
+        dobiega końca i jego wynik staje na wygaszonym ekranie (bez bramki renderu - schowałaby prawdziwy wynik);
+        koniec biegu przelicza raz.
+
+        KONIEC BIEGU NIE LICZY TUTAJ. Liczy gospodarz - jednym `refresh` każdego zbudowanego planera po przebiegu
+        (`MainWindow._odswiez_widoki_po_przebiegu`, wołane po `set_busy(False)`). Rachunek tu dałby dwa: `refresh`
+        przy żywym wątku podbija generację, a `_cleanup_thread` liczy drugi raz; rachunek odłożony (`singleShot`)
+        doręczyłby się w fazie odświeżenia przed `refresh` - faza kręci pętlę zdarzeń (`busy.repaint`,
+        `ExcludeUserInputEvents`: zegary tak, kliki nie). Ta sama faza jest granicą tej reguły: wątek sprzed biegu,
+        który skończy się w niej, albo zegar (debounce, ponowienie `no_site`) doręczony w niej startuje rachunek, który
+        `refresh` unieważni, a `_cleanup_thread` powtórzy - jeden zbędny rachunek po końcu biegu, bez nieprawdy na
+        ekranie (dług w rejestrze)."""
+        self._w_biegu = bool(running)
         self.setEnabled(not running)
 
     def closeEvent(self, event):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QInputDialog, QLabel, QListWidget,
+    QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QListWidgetItem,
     QPushButton, QVBoxLayout, QWidget,
 )
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QDialogButtonBox      # okno wyboru kalibratora (`
 
 from horreum.gui import busy, i18n, queries
 from horreum.gui.grid_model import _COLORS
+from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui.grid_panels import ElidedLabel
 
 
@@ -102,7 +103,7 @@ class LineageBar(QWidget):
         nr = QHBoxLayout(self.night_row)
         nr.setContentsMargins(0, 0, 0, 0)
         nr.addWidget(QLabel(i18n.t("grid.lin.cand.night")))
-        self.combo_night = QComboBox()
+        self.combo_night = kolko(QComboBox())
         self.combo_night.currentIndexChanged.connect(self._on_night)
         nr.addWidget(self.combo_night, 1)
         lay.addWidget(self.night_row)
@@ -742,6 +743,9 @@ class LineageBar(QWidget):
         wstepna = biezacy if biezacy is not None else (self._offset_hint or 0)
         okno = QInputDialog(self)
         okno.setInputMode(QInputDialog.DoubleInput)
+        # Pole liczby powstaje w oknie Qt (`setInputMode`), nie konstruktorem w tym pliku - reguła kółka (AR-349)
+        # idzie na nie wprost, bo bramka AST (`test_gui_kolko_bramka`) widzi wyłącznie konstruktory.
+        kolko(okno.findChild(QDoubleSpinBox))
         okno.setWindowTitle(i18n.t("grid.lin.offset_title"))
         okno.setLabelText(i18n.t("grid.lin.offset_prompt"))
         okno.setDoubleRange(-14.0, 14.0)

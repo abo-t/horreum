@@ -273,9 +273,9 @@ def _ma_kolor(widget, hex_):
 def test_DO6_zlota_akcja_ma_bursztyn_z_motywu_a_wylaczona_wyglada_na_nieaktywna(qapp, tmp_path):
     """Odbiór 0.19.0 DO6: „Przyjmij nowe" maluje się ciemnym bursztynem z `theme.zlota_akcja`, w obu
     motywach, przez regułę arkusza po nazwie obiektu - przełączenie arkusza przemalowuje przycisk.
-    Wyłączony bierze tło przycisku palety, czyli wygląda jak każdy wygaszony przycisk. Waga pisma
-    i wysokość zostają przy widżecie. Arkusz idzie na widok, nie na `QApplication`, żeby nie zmieniać
-    stylu reszcie sesji testów.
+    Wyłączony bierze tło przycisku palety, czyli wygląda jak każdy wygaszony przycisk. Waga pisma idzie
+    z tej samej reguły (AR-347), wysokość zostaje przy widżecie. Arkusz idzie na widok, nie na `QApplication`,
+    żeby nie zmieniać stylu reszcie sesji testów.
     Falsyfikator: przycisk bez `setObjectName` - tło zostaje szare Fusion."""
     from horreum.gui import theme
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
@@ -2200,17 +2200,28 @@ def _zlote(view):
     return [b for b in view.findChildren(QPushButton) if b.objectName() == theme.ZLOTA_AKCJA_OBJECT_NAME]
 
 
+@pytest.mark.zmienia_motyw          # arkusz motywu na aplikacji (`apply_theme`) - przywraca `conftest`
 def test_akcent_zlotej_akcji_idzie_za_powodem_faktow_kopii(qapp, tmp_path):
-    """AR-327: z linią powodu faktów kopii złota akcja (nazwa obiektu reguły arkusza
-    + pogrubienie) stoi na geście powodu, „Przyjmij nowe” jest zwykłym przyciskiem; zwykłe wejście albo
-    robota zrobiona - z powrotem na „Przyjmij nowe”. Zawsze dokładnie jedna złota akcja. Kontrakt stanowy -
-    piksele akcentu mierzy sonda natywna. Falsyfikatory: akcent przypięty na stałe do `btn_receive` (stan
-    sprzed AR-327); brak powrotu akcentu po zwykłym wejściu."""
+    """AR-327, AR-347: z linią powodu faktów kopii złota akcja (nazwa obiektu reguły arkusza - kolor i pogrubienie)
+    stoi na geście powodu, „Przyjmij nowe” jest zwykłym przyciskiem; zwykłe wejście albo robota zrobiona - z powrotem
+    na „Przyjmij nowe”. Zawsze dokładnie jedna złota akcja. Pod arkuszem motywu NA APLIKACJI, jak w produkcji,
+    i z pierwszym polerowaniem (pokazanie widoku) PRZED przełączeniem: arkusz zapamiętuje font z pierwszego
+    polerowania i przywraca go przy `unpolish` - bez tego test nie widzi defektu. Piksele akcentu mierzy sonda
+    natywna. Falsyfikatory: akcent przypięty na stałe do `btn_receive` (stan sprzed AR-327); brak powrotu akcentu
+    po zwykłym wejściu; waga przez `setFont` przy widżecie zamiast reguły arkusza (stan sprzed AR-347: gest powodu
+    złoty bez pogrubienia, „Przyjmij nowe” pogrubione)."""
+    from horreum.gui import app as app_mod, theme
     from horreum.gui.pipeline import REASON_COPY_FACTS
+    app_mod.apply_theme(qapp, theme.DEFAULT)
+    regula = theme.qss(theme.DEFAULT).split(f"QPushButton#{theme.ZLOTA_AKCJA_OBJECT_NAME} {{", 1)[1].split("}", 1)[0]
+    assert "font-weight: bold" in regula, regula
     db_path, _kat = _kopie_bez_faktow(tmp_path)
     view = PipelineView(db_path, now_fn=lambda: NOW)
+    view.show()
+    qapp.processEvents()
     try:
         assert _zlote(view) == [view.btn_receive] and view.btn_receive.font().bold()
+        assert not view.btn_copy_facts.font().bold()
         view.show_reason(REASON_COPY_FACTS)
         assert _zlote(view) == [view.btn_copy_facts]
         assert view.btn_copy_facts.font().bold() and not view.btn_receive.font().bold()

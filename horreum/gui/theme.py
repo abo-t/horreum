@@ -256,8 +256,8 @@ def qss(name):
     WSZYSTKICH przełączników paska zbioru („Rodowód…", „Popraw nagłówki…", „Uporządkuj nazwy…"),
     bo to jedna klasa kontrolki, nie trzy osobne przypadki.
 
-    ZŁOTA AKCJA DOSTAWY (DO6) dostaje kolor reguły po nazwie obiektu, nie arkuszem widżetu: arkusz
-    aplikacji przełącza motyw sam, a waga pisma i wysokość zostają przy widżecie."""
+    ZŁOTA AKCJA DOSTAWY (DO6) dostaje kolor i wagę pisma z reguły po nazwie obiektu, nie arkuszem widżetu:
+    arkusz aplikacji przełącza motyw sam, a wysokość zostaje przy widżecie (AR-347)."""
     a = accents(name)
     tekst, tlo = recepta_wygaszona(name)
     return "".join(
@@ -278,12 +278,17 @@ def _qss_zlotej_akcji(name):
     WYŁĄCZNIE kolor ramki (ta sama grubość 1 px), więc rozmiar stoi. Kolejność reguł niesie
     pierwszeństwo przy równej szczegółowości: `:hover`/`:pressed` ruszają tylko tło, `:focus` tylko
     ramkę, a `:disabled` stoi OSTATNI i nadpisuje ramkę - wyłączony przycisk nie świeci fokusem.
-    Promień 5 px = sylwetka narożnika przycisku Fusion, zmierzona maską pikseli rogu na tle okna."""
+    Promień 5 px = sylwetka narożnika przycisku Fusion, zmierzona maską pikseli rogu na tle okna.
+
+    POGRUBIENIE W TEJ SAMEJ REGULE (AR-347, decyzja CEO), jak `QPushButton:checked` w `qss`: waga idzie za nazwą
+    obiektu, więc za akcentem przy każdym przepolerowaniu i zmianie motywu. `setFont` przy widżecie przegrywał
+    z arkuszem - `QStyleSheetStyle` zapamiętuje font z pierwszego polerowania i przywraca go przy `unpolish`
+    (Qt 6.9.2), więc gest powodu był złoty bez pogrubienia, a „Przyjmij nowe” zostawało pogrubione."""
     z = zlota_akcja(name)
     paleta = palette_spec(name)
     sel = f"QPushButton#{ZLOTA_AKCJA_OBJECT_NAME}"
     return (f"{sel} {{ background: {z['bg']}; color: {z['text']}; border: 1px solid {z['border']}; "
-            f"border-radius: 5px; padding: 3px 6px; }}"
+            f"font-weight: bold; border-radius: 5px; padding: 3px 6px; }}"
             f"{sel}:hover {{ background: {z['bg_hover']}; }}"
             f"{sel}:pressed {{ background: {z['bg_pressed']}; }}"
             f"{sel}:focus {{ border-color: {z['focus']}; }}"

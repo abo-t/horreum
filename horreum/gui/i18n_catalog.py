@@ -666,12 +666,13 @@ CATALOG = {
                "other": "Undoing the write (commit {id}) did not finish - {n} files are waiting; "
                         "“{finish}” finishes the undo."}},
     # Dokończenie cofnięcia podejmuje stan poprzedniej sesji, więc bierze wyłączność szuflady bazy
-    # (`<baza>.szuflada.lock`): trzyma ją inne okno Horreum - odmowa, recepta zostaje.
+    # (`<baza>.szuflada.lock`): trzyma ją inny proces Horreum - okno albo wiersz poleceń (blokada CLI,
+    # `horreum/blokada_szuflady.py`) - odmowa, recepta zostaje.
     "wb.undo_finish_foreign_owner": {
-        "pl": "Dokończenie cofnięcia (commit {id}) czeka - tę bazę trzyma inne okno Horreum (proces "
-              "{pid}); dokończ tam albo po jego zamknięciu.",
-        "en": "Finishing the undo (commit {id}) waits - another Horreum window holds this database "
-              "(process {pid}); finish it there or after that window closes."},
+        "pl": "Dokończenie cofnięcia (commit {id}) czeka - tę bazę trzyma inny proces Horreum (okno albo "
+              "wiersz poleceń, PID {pid}); dokończ tam albo po jego zakończeniu.",
+        "en": "Finishing the undo (commit {id}) waits - another Horreum process holds this database (a window "
+              "or the command line, PID {pid}); finish it there or after it ends."},
     # Droga cofnięcia commitu kart PO ZAMKNIĘCIU okna (AR-236, AR-283, AR-272): przycisku „Cofnij”
     # już nie ma, a commit cofa polecenie CLI (`horreum header-fix --undo`, `writeback.undo`). Zdanie
     # paska niesie polecenie KRÓTKIE (`wb.undo_cli_short` - po udanym zapisie członem `wb.undo_short`,
@@ -686,18 +687,19 @@ CATALOG = {
                         "en": "Undo commit {id} after closing the window (command line):\n{cli}"},
     # Recepta paska po zamknięciu okna kart (AR-296): cofnięcie commitu jednym kliknięciem z Porządków.
     "wb.undo_recipe": {"pl": "Cofnij zapis (commit {id})", "en": "Undo the write (commit {id})"},
-    # Odłożenie recepty osi (AR-296, AR-310): kolejka żyje w widoku tej bazy - zdanie nie obiecuje
-    # powrotu po przełączeniu bazy ani po zamknięciu programu.
+    # Odłożenie recepty osi (AR-296, AR-310, AR-321): kolejka należy do okna i tej bazy - przeżywa
+    # przełączenie bazy i wraca po powrocie do niej; zamknięcie programu ją kończy.
     "wb.undo_recipe_busy": {
         "pl": "Cofnięcie zapisu (commit {id}) czeka, aż skończy się etap Dostawy - po nim recepta wróci "
-              "na pasek, dopóki ta baza jest otwarta.",
+              "na pasek, także po powrocie do tej bazy, dopóki program jest otwarty.",
         "en": "Undoing the write (commit {id}) waits for the Intake stage to finish - the recipe comes back "
-              "on the status bar after it, while this database stays open."},
+              "on the status bar after it, also after you return to this database, while the program runs."},
     "wb.undo_recipe_foreign": {
         "pl": "Cofnięcie zapisu (commit {id}) czeka, aż skończy się zapis do plików w Zbiorach - po nim "
-              "recepta wróci na pasek, dopóki ta baza jest otwarta.",
+              "recepta wróci na pasek, także po powrocie do tej bazy, dopóki program jest otwarty.",
         "en": "Undoing the write (commit {id}) waits for the file write in Collections to finish - the "
-              "recipe comes back on the status bar after it, while this database stays open."},
+              "recipe comes back on the status bar after it, also after you return to this database, while "
+              "the program runs."},
     "wb.undo_recipe_ready": {
         "pl": "Cofnięcie zapisu (commit {id}) znów możliwe - recepta stoi w Porządkach.",
         "en": "Undoing the write (commit {id}) is possible again - the recipe is in Housekeeping."},
@@ -8777,16 +8779,16 @@ CATALOG = {
                "other": "{m}+ · {n} copies not yet checked"},
     },
     "tasks.header_nonprintable_unread_tip": {
-        "pl": {"one": "{n} kopia FITS czeka na sprawdzenie surowego nagłówka - zrobi to etap "
-                      "„{etap}” w Dostawie (sam odczyt nagłówków).",
-               "few": "{n} kopie FITS czekają na sprawdzenie surowego nagłówka - zrobi to etap "
-                      "„{etap}” w Dostawie (sam odczyt nagłówków).",
-               "many": "{n} kopii FITS czeka na sprawdzenie surowego nagłówka - zrobi to etap "
-                       "„{etap}” w Dostawie (sam odczyt nagłówków)."},
-        "en": {"one": "{n} FITS copy waits for its raw header to be checked - the “{etap}” stage "
+        "pl": {"one": "{n} kopia FITS czeka na sprawdzenie surowego nagłówka - zrobi to przycisk "
+                      "„{gest}” w Dostawie (sam odczyt nagłówków).",
+               "few": "{n} kopie FITS czekają na sprawdzenie surowego nagłówka - zrobi to przycisk "
+                      "„{gest}” w Dostawie (sam odczyt nagłówków).",
+               "many": "{n} kopii FITS czeka na sprawdzenie surowego nagłówka - zrobi to przycisk "
+                       "„{gest}” w Dostawie (sam odczyt nagłówków)."},
+        "en": {"one": "{n} FITS copy waits for its raw header to be checked - the “{gest}” button "
                       "in Intake does it (header reads only).",
-               "other": "{n} FITS copies wait for their raw headers to be checked - the “{etap}” "
-                        "stage in Intake does it (header reads only)."},
+               "other": "{n} FITS copies wait for their raw headers to be checked - the “{gest}” "
+                        "button in Intake does it (header reads only)."},
     },
     "perspective.header_nonprintable": {"pl": "Bajt spoza ASCII w nagłówku",
                                         "en": "Non-ASCII byte in header"},
@@ -8887,12 +8889,13 @@ CATALOG = {
         "pl": "Trwa etap Dostawy - cofnięcie dopisania zrobisz po jego końcu.",
         "en": "An Intake stage is running - you can undo the addition after it finishes."},
     # Recepta „Cofnij dopisanie” z paska odmówiona w biegu Dostawy (AR-310): oś ODKŁADA ją do końca
-    # etapu (kolejka recept osi, `ObjectAxisView._podaj_odlozone`) - tylko w tej otwartej bazie.
+    # etapu (kolejka recept osi, `ObjectAxisView._podaj_odlozone`) - kolejka okna i tej bazy (AR-321).
     "object.config_undo_add.deferred": {
         "pl": "Cofnięcie dopisania „{telescope}” czeka, aż skończy się etap Dostawy - po nim recepta "
-              "wróci na pasek, dopóki ta baza jest otwarta.",
+              "wróci na pasek, także po powrocie do tej bazy, dopóki program jest otwarty.",
         "en": "Undoing the addition of “{telescope}” waits for the Intake stage to finish - the recipe "
-              "comes back on the status bar after it, while this database stays open."},
+              "comes back on the status bar after it, also after you return to this database, while the "
+              "program runs."},
     "object.config_undo_add.ready": {
         "pl": "Cofnięcie dopisania „{telescope}” znów możliwe - recepta stoi w Porządkach.",
         "en": "Undoing the addition of “{telescope}” is possible again - the recipe is in Housekeeping."},

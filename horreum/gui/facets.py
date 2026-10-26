@@ -44,7 +44,7 @@ _COLORS: dict[str, QColor] = {}
 # WŁASNY tooltip wiersza z chwili budowy (godziny portfela, F7) — zapamiętany, bo szukajka dokleja
 # nad nim zdanie o trafionym aliasie (R-S3-9) i musi mieć do czego wrócić po skasowaniu frazy.
 # Rola poza pasmem `rows` (+1…+3) i poza `UserRole` (tam siedzi trójka facet/value/label).
-_TIP_BASE = Qt.UserRole + 4
+_TIP_BASE = rows.ROLA_PODPOWIEDZI_FACETU
 
 
 def use_theme(name):

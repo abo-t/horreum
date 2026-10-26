@@ -9,6 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db, repo, resolver, scan
+from horreum.gui import i18n
 from horreum.gui.app import STRONA_DOSTAWA, STRONA_ZBIORY, MainWindow
 from horreum.gui.tasks import PRESET_HEADER_NONPRINTABLE, _TASKS, _liczniki_osi
 
@@ -98,7 +99,7 @@ def test_kopie_niezbadane_wiersz_mowi_pytajnik_i_prowadzi_do_dostawy(qapp, tmp_p
         win.tasks_view.refresh_counts()
         it, liczba = _wiersz(win)
         assert liczba == "? · 1 kopia niesprawdzona  ›", liczba
-        assert "Fakty kopii" in it.toolTip()
+        assert i18n.t("pipeline.btn.copy_bytes", n=1) in it.toolTip(), it.toolTip()
         win.tasks_view.tasks.itemClicked.emit(it)
         assert win.stack.currentIndex() == STRONA_DOSTAWA
     finally:

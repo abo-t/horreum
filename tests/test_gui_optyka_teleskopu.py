@@ -934,3 +934,374 @@ def test_podpowiedzi_optyki_nazywaja_przycisk_szuflady(lang):
             assert przycisk in tekst and stare not in tekst, tekst
     finally:
         i18n.set_lang("pl")
+
+
+# ------------------------------------------------------------ AR-326: zapis optyki tylko ze zmiany tekstu
+
+def _zdarzenia_reki(con):
+    return con.execute("SELECT count(*) FROM event WHERE verb LIKE 'telescope.%_user_%'").fetchone()[0]
+
+
+def test_przemalowanie_komorki_optyki_poza_straza_nie_zapisuje_reki(qapp, tmp_path):
+    """AR-326: kolor, podpowiedź, font, tło i role danych komórek f/ i Ogniskowej ustawione POZA `_loading`
+    (`itemChanged` strzela przy każdym `setData`) nie zapisują werdyktu ręki - filtr ról `_on_data_changed`.
+    Falsyfikatory: podpięcie `itemChanged` zamiast `dataChanged`; filtr przepuszczający każdą rolę."""
+    from PySide6.QtGui import QBrush, QColor
+    from horreum.gui.app import ROLA_RODZAJU_KOLORU, _ROLA_WARTOSCI_EDYTORA
+    con, _obce, rc8 = _baza(tmp_path)
+    v = TelescopeAxisView(con, now_fn=lambda: NOW)
+    przed = _zdarzenia_reki(con)
+    r = _wiersz(v, rc8)
+    assert not v._loading
+    for c in (COL_FOCAL, COL_FRATIO):
+        item = v.table.item(r, c)
+        item.setForeground(QBrush(QColor("#f0b040")))
+        item.setToolTip("podpowiedź spoza odświeżenia")
+        item.setFont(item.font())
+        item.setBackground(QBrush(QColor("#000000")))
+        item.setData(ROLA_RODZAJU_KOLORU, "werdykt")
+        item.setData(_ROLA_WARTOSCI_EDYTORA, "999")
+    QApplication.processEvents()
+    assert _zdarzenia_reki(con) == przed
+    assert tuple(con.execute("SELECT focal_user, f_ratio_user FROM telescope WHERE id = ?",
+                             (rc8,)).fetchone()) == (None, None)
+    con.close()
+
+
+def test_zmiana_tekstu_przez_model_rola_edycji_zapisuje_reke(qapp, tmp_path):
+    """AR-326: zmiana tekstu komórki optyki przez MODEL (`setData(..., Qt.EditRole)` - droga domyślnego edytora
+    i kodu) przechodzi przez `dataChanged` z rolą edycji i zapisuje rękę. Delegat optyki omija model
+    (`_OptykaEdycja.setModelData`), więc tylko ten test obciąża filtr ról. Falsyfikator: filtr odcinający
+    `EditRole` (albo każdą rolę tekstu)."""
+    con, _obce, rc8 = _baza(tmp_path)
+    v = TelescopeAxisView(con, now_fn=lambda: NOW)
+    przed = _zdarzenia_reki(con)
+    idx = v.table.model().index(_wiersz(v, rc8), COL_FOCAL)
+    assert v.table.model().setData(idx, "1580", Qt.EditRole)
+    assert con.execute("SELECT focal_user FROM telescope WHERE id = ?", (rc8,)).fetchone()[0] == 1580.0
+    assert _zdarzenia_reki(con) == przed + 1
+    con.close()
+
+
+# ------------------------------------------------------------ AR-321: kolejka odłożeń u gospodarza, straż recepty
+
+def _baza_z_dopisanymi(tmp_path, ile=1):
+    """Baza `_baza` z `ile` teleskopami „Dopisz nowy…” (po jednej obcej klatce) - ścieżka i lista
+    `(teleskop, etykieta)`. Połączenie zamknięte: okno otwiera własne."""
+    con, obce, rc8 = _baza(tmp_path)
+    dopisane = []
+    for i in range(ile):
+        etykieta = f"RC8 0.{i + 5}x"
+        tid, _g = repo.user_assign_config_new_telescope(
+            con, frame_ids=[obce[i]], name=etykieta, focal_mm=800.0 + i, in_park=1,
+            source_telescope_id=rc8, now=NOW)
+        dopisane.append((tid, etykieta))
+    con.close()
+    return str(tmp_path / "o.db"), dopisane
+
+
+def _okno(sciezka, monkeypatch):
+    from horreum.gui.app import MainWindow
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    return MainWindow(sciezka)
+
+
+def _odloz_dopisanie(win, tid, etykieta):
+    """Klik recepty „Cofnij dopisanie” w biegu blokady osi - wpis do kolejki odłożeń okna."""
+    win.object_view._recepta_cofniecia_dopisania(tid, etykieta).czlony[0].wykonaj()
+    assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.deferred", telescope=etykieta)
+
+
+def _wycofany(win, tid):
+    """Czy teleskop zszedł z osi nagrobkiem (okno liczy czas zegarem, nie `NOW` testu)."""
+    return win.con.execute("SELECT retired_at FROM telescope WHERE id = ?", (tid,)).fetchone()[0] is not None
+
+
+def test_kolejka_odlozen_wraca_z_powrotem_do_bazy(qapp, tmp_path, monkeypatch):
+    """AR-321: recepta osi odłożona w bazie A przeżywa przełączenie A → B → A: na B nie ma jej zdania ani
+    recepty (B ma własną, pustą kolejkę), powrót do A podaje zdanie gotowości z receptą od razu po otwarciu,
+    a wykonanie recepty działa na osi NOWEGO montażu (teleskop A zdjęty nagrobkiem).
+    Falsyfikatory: kolejka w widoku (ginie z demontażem, stan sprzed AR-321); wpis jako domknięcie starego
+    widoku (wykonanie na zamkniętym połączeniu)."""
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    b = str(tmp_path / "b.db")
+    db.open_db(b).close()
+    win = _okno(a, monkeypatch)
+    try:
+        win.object_view.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        win.open_path(b)
+        assert win.db_path == b
+        assert str(win._pelny_komunikat) == i18n.t("main.db_loaded", path=b)
+        assert win._recepta_porzadkow_stan is None and not win.object_view.podaj_odlozone()
+        win.open_path(a)
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.ready", telescope=etykieta)
+        stan = win._recepta_porzadkow_stan
+        assert stan is not None
+        stan[0].czlony[0].wykonaj()
+        assert _wycofany(win, tid)
+        assert win._kolejki_osi[queries.klucz_bazy(a)] == []
+    finally:
+        win.close()
+
+
+def test_dwa_okna_jednego_procesu_maja_osobne_kolejki(qapp, tmp_path, monkeypatch):
+    """AR-321: kolejka jest atrybutem INSTANCJI okna - drugie okno tego procesu na tej samej bazie nie dostaje
+    odłożenia pierwszego (nie wykona cudzej recepty). Falsyfikator: magazyn kolejek na klasie okna."""
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    pierwsze = _okno(a, monkeypatch)
+    drugie = _okno(a, monkeypatch)
+    try:
+        pierwsze.object_view.set_busy(True)
+        _odloz_dopisanie(pierwsze, tid, etykieta)
+        assert pierwsze._kolejki_osi[queries.klucz_bazy(a)]
+        assert drugie._kolejki_osi.get(queries.klucz_bazy(a), []) == []
+        assert not drugie.object_view.podaj_odlozone()
+        assert str(drugie._pelny_komunikat) != i18n.t("object.config_undo_add.ready", telescope=etykieta)
+    finally:
+        pierwsze.close()
+        drugie.close()
+
+
+def test_kopia_bazy_to_inna_baza_a_zamkniecie_okna_konczy_kolejke(qapp, tmp_path, monkeypatch):
+    """AR-321: tożsamość kolejki = ścieżka bazy (`queries.klucz_bazy`) - kopia pliku pod inną nazwą to inna baza
+    (bez cudzego odłożenia); kolejka żyje, dopóki okno jest otwarte - nowe okno na tej samej bazie startuje
+    z pustą kolejką („dopóki program jest otwarty”). Falsyfikator: klucz po samej nazwie pliku albo po treści."""
+    import shutil
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    kopia = str(tmp_path / "kopia" / "o.db")
+    os.makedirs(os.path.dirname(kopia))
+    shutil.copyfile(a, kopia)
+    win = _okno(a, monkeypatch)
+    try:
+        win.object_view.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        win.open_path(kopia)
+        assert str(win._pelny_komunikat) == i18n.t("main.db_loaded", path=kopia)
+        assert not win.object_view.podaj_odlozone()
+    finally:
+        win.close()
+    nowe = _okno(a, monkeypatch)
+    try:
+        assert not nowe.object_view.podaj_odlozone()
+        assert nowe._recepta_porzadkow_stan is None
+    finally:
+        nowe.close()
+
+
+def test_koniec_zapisu_przy_stojacej_recepcie_nie_zmienia_paska(qapp, tmp_path, monkeypatch):
+    """AR-321: dwa wpisy w kolejce; koniec etapu podaje pierwszy (recepta stoi), a koniec zapisu Zbiorów
+    (`set_writeback_busy(False)`) NIE nadpisuje go drugim - pasek i stan recepty to te same obiekty. Wykonanie
+    pierwszej recepty daje jej wynik i gotowość drugiej jedną emisją. Falsyfikator: podanie bez straży
+    stojącej recepty (stan sprzed AR-321 - pierwsza recepta znikała na zawsze)."""
+    from horreum.gui.app import NAV_PORZADKI
+    a, [(t1, e1), (t2, e2)] = _baza_z_dopisanymi(tmp_path, ile=2)
+    win = _okno(a, monkeypatch)
+    ov = win.object_view
+    try:
+        win._show_view(NAV_PORZADKI)
+        ov.set_busy(True)
+        _odloz_dopisanie(win, t1, e1)
+        _odloz_dopisanie(win, t2, e2)
+        ov.set_busy(False)
+        pasek, stan = win._pelny_komunikat, win._recepta_porzadkow_stan
+        assert str(pasek) == i18n.t("object.config_undo_add.ready", telescope=e1)
+        assert stan is not None and win._czlony_recepty == stan[0].czlony   # recepta na przycisku paska
+        ov.set_writeback_busy(True)
+        ov.set_writeback_busy(False)
+        assert win._pelny_komunikat is pasek and win._recepta_porzadkow_stan is stan
+        stan[0].czlony[0].wykonaj()
+        assert _wycofany(win, t1) and not _wycofany(win, t2)
+        assert i18n.t("object.config_undo_add.ready", telescope=e2) in str(win._pelny_komunikat)
+        assert str(win._pelny_komunikat) != i18n.t("object.config_undo_add.ready", telescope=e2)  # z wynikiem
+    finally:
+        win.close()
+
+
+def test_recepta_zgaszona_bez_kliku_wraca_tylko_przy_wejsciu_w_porzadki_doklejona(qapp, tmp_path, monkeypatch):
+    """AR-321: podana recepta osi, którą zgasił cudzy raport bez kliku, nie ginie - wpis zostaje w kolejce do startu
+    swojego gestu i wraca przy wejściu w Porządki, DOKLEJONY do raportu odłożonego tam w międzyczasie (raport, który
+    na człowieka czekał, stoi pierwszy). Inne chwile podania już jej nie powtarzają i nie zastępują cudzego raportu:
+    start i koniec zapisu Zbiorów, koniec NASTĘPNEGO etapu (wpis drugi czeka na koniec etapu, który go odłożył, a ten
+    minął przy stojącej recepcie). Dawniej (ten test przed zmianą) gotowość wracała przy każdej chwili podania i
+    zastępowała raport na pasku. Falsyfikatory: wpis usuwany przy podaniu; podanie przy starcie blokady; koniec
+    blokady bez numeru biegu (podaje wpis cudzego etapu); wejście w Porządki zastępuje raport zamiast doklejać."""
+    from horreum.gui.app import NAV_PORZADKI, NAV_ZBIORY
+    a, [(t1, e1), (t2, e2)] = _baza_z_dopisanymi(tmp_path, ile=2)
+    win = _okno(a, monkeypatch)
+    ov = win.object_view
+    try:
+        win._show_view(NAV_PORZADKI)
+        ov.set_busy(True)
+        _odloz_dopisanie(win, t1, e1)
+        _odloz_dopisanie(win, t2, e2)
+        ov.set_busy(False)
+        gotowosc = i18n.t("object.config_undo_add.ready", telescope=e1)
+        assert str(win._pelny_komunikat) == gotowosc
+        win._flash("cudzy raport")
+        ov.set_writeback_busy(True)
+        ov.set_writeback_busy(False)
+        ov.set_busy(True)
+        ov.set_busy(False)
+        assert str(win._pelny_komunikat) == "cudzy raport", "chwila podania powtórzyła gotowość nad cudzym raportem"
+        win._show_view(NAV_ZBIORY)
+        ov.status_message.emit("raport osi")                  # odłożony do Porządków (`_raport_miejsca`)
+        win._show_view(NAV_PORZADKI)
+        assert str(win._pelny_komunikat) == "raport osi - " + gotowosc
+        win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
+        assert _wycofany(win, t1) and not _wycofany(win, t2)
+        assert str(win._pelny_komunikat).endswith(" - " + i18n.t("object.config_undo_add.ready", telescope=e2))
+    finally:
+        win.close()
+
+
+def test_otwarcie_bazy_nie_podaje_drugi_raz_podanego_wpisu(qapp, tmp_path, monkeypatch):
+    """AR-321: wpis podany już raz (koniec etapu) nie zastępuje „Baza: … wczytana” przy ponownym otwarciu tej samej
+    bazy - otwarcie podaje wyłącznie wpis niepodany (powrót do bazy z odłożeniem sprzed przełączenia,
+    `test_kolejka_odlozen_wraca_z_powrotem_do_bazy`); recepta dalej wraca przy wejściu w Porządki.
+    Falsyfikator: koniec otwarcia bazy podaje każdy wpis."""
+    from horreum.gui.app import NAV_PORZADKI
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    win = _okno(a, monkeypatch)
+    try:
+        win._show_view(NAV_PORZADKI)
+        win.object_view.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        win.object_view.set_busy(False)
+        gotowosc = i18n.t("object.config_undo_add.ready", telescope=etykieta)
+        assert str(win._pelny_komunikat) == gotowosc
+        win.open_path(a)
+        assert str(win._pelny_komunikat) == i18n.t("main.db_loaded", path=a)
+        win._show_view(NAV_PORZADKI)
+        assert str(win._pelny_komunikat) == gotowosc
+    finally:
+        win.close()
+
+
+def _wiersz_osi_teleskopu(win, tid):
+    """Oś teleskopu Porządków z zaznaczonym teleskopem `tid` (podstrona otwarta, tabela przeładowana)."""
+    win.tasks_view.otworz_os_teleskopu()
+    av = win.axis_view
+    av.refresh()
+    av.table.selectRow(_wiersz(av, tid))
+    return av
+
+
+def test_cofniecie_dopisania_osia_teleskopu_zdejmuje_wpis_kolejki(qapp, tmp_path, monkeypatch):
+    """AR-321: wpis „Cofnij dopisanie” odłożony i podany, potem gest zamknięty DROGĄ TRWAŁĄ tego okna - przycisk
+    „Cofnij dopisanie” Osi teleskopu: gospodarz zdejmuje od razu wpis z kolejki i podaną już receptę ze swojego stanu
+    (wejście w Porządki jej nie przywróci), a wejście w Porządki nie ogłasza „znów możliwe” gestu, którego już nie
+    ma. Falsyfikatory: droga trwała bez zdjęcia wpisu przez gospodarza (wpis zostaje w kolejce); zdjęcie wpisu bez
+    jego recepty (stan recepty Porządków trzyma martwy gest)."""
+    from horreum.gui.app import NAV_PORZADKI, NAV_ZBIORY
+    a, [(tid, etykieta)] = _baza_z_dopisanymi(tmp_path)
+    win = _okno(a, monkeypatch)
+    try:
+        win._show_view(NAV_PORZADKI)
+        win.object_view.set_busy(True)
+        _odloz_dopisanie(win, tid, etykieta)
+        win.object_view.set_busy(False)
+        gotowosc = i18n.t("object.config_undo_add.ready", telescope=etykieta)
+        assert str(win._pelny_komunikat) == gotowosc
+        martwa = win._recepta_porzadkow_stan[0]
+        av = _wiersz_osi_teleskopu(win, tid)
+        assert av.btn_undo_add.isEnabled()
+        av.btn_undo_add.click()
+        assert _wycofany(win, tid)
+        assert win._kolejki_osi[queries.klucz_bazy(a)] == [], "droga trwała zostawiła wpis w kolejce"
+        assert win._recepta_porzadkow_stan is None, "stan recepty Porządków trzyma martwy gest"
+        assert win._czlony_recepty is not martwa.czlony
+        win._show_view(NAV_ZBIORY)
+        win._show_view(NAV_PORZADKI)
+        assert gotowosc not in str(win._pelny_komunikat)
+        assert win._recepta_porzadkow_stan is None and win._czlony_recepty is not martwa.czlony
+        assert not win.object_view.podaj_odlozone()
+    finally:
+        win.close()
+
+
+def test_martwa_glowa_kolejki_nie_zaslania_wpisu_za_nia(qapp, tmp_path, monkeypatch):
+    """AR-321: dwa wpisy „Cofnij dopisanie”; pierwszy cofnięty poza tym oknem (drugie połączenie - jak CLI), więc baza
+    nie zostawia mu nic do cofnięcia: koniec etapu zdejmuje go po cichu i podaje DRUGI. Falsyfikatory: gotowość bez
+    pytania bazy (martwa głowa „znów możliwe” bez końca, wpis za nią zasłonięty)."""
+    a, [(t1, e1), (t2, e2)] = _baza_z_dopisanymi(tmp_path, ile=2)
+    win = _okno(a, monkeypatch)
+    try:
+        win.object_view.set_busy(True)
+        _odloz_dopisanie(win, t1, e1)
+        _odloz_dopisanie(win, t2, e2)
+        con = db.open_db(a)
+        try:
+            repo.undo_new_telescope(con, telescope_id=t1, now=NOW)
+        finally:
+            con.close()
+        win.object_view.set_busy(False)
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.ready", telescope=e2)
+        assert [w.klucz for w in win._kolejki_osi[queries.klucz_bazy(a)]] == [("dopisanie", t2)]
+    finally:
+        win.close()
+
+
+def test_martwy_podany_wpis_kart_nie_wraca_przy_wejsciu_w_porzadki(qapp, tmp_path, monkeypatch):
+    """AR-321: dwa wpisy (karty, potem dopisanie) odłożone w etapie; koniec etapu podaje pierwszy - jego recepta stoi na
+    pasku Porządków. Commit cofnięty poza tym oknem (drugie połączenie - jak `header-fix --undo`): wyjście z Porządków
+    i powrót nie przywraca martwej recepty ani jej „znów możliwe”, tylko podaje wpis drugi z jego receptą.
+    Falsyfikatory: przywrócenie recepty Porządków bez pytania bazy (straż stojącej recepty trzyma martwy gest i blokuje
+    drugi wpis); gospodarz bez zdjęcia recepty martwego wpisu."""
+    from horreum.gui.app import NAV_DOM, NAV_PORZADKI, MainWindow
+    from test_gui_grid_recepty import _naprawa_prawdziwym_exec, _okno_naprawy_z_kamera
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    win, path, _pliki = _okno_naprawy_z_kamera(tmp_path)
+    ov = win.object_view
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        karty = win._recepta_porzadkow_stan[0]
+        fids = [r[0] for r in win.con.execute("SELECT id FROM frame ORDER BY id")]
+        tid, _g = repo.user_assign_config_new_telescope(win.con, frame_ids=fids, name="RC8 0.5x", focal_mm=800.0,
+                                                         now=NOW)
+        ov.set_busy(True)
+        karty.czlony[0].wykonaj()
+        ov._recepta_cofniecia_dopisania(tid, "RC8 0.5x").czlony[0].wykonaj()
+        ov.set_busy(False)
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_ready", id=commit)
+        martwa = win._recepta_porzadkow_stan[0]
+        con = db.open_db(str(path))
+        try:
+            assert writeback.undo(con, commit, now=NOW).complete
+        finally:
+            con.close()
+        win._show_view(NAV_DOM)
+        win._show_view(NAV_PORZADKI)
+        assert str(win._pelny_komunikat) == i18n.t("object.config_undo_add.ready", telescope="RC8 0.5x")
+        stan = win._recepta_porzadkow_stan
+        assert stan is not None and stan[0] is not martwa
+        assert win.recipe_label.isVisible()
+        assert win.recipe_label.toolTip() == i18n.t("object.config_undo_add", telescope="RC8 0.5x")
+    finally:
+        win.close()
+
+
+def test_wpis_cofniecia_kart_bez_czego_cofac_schodzi_po_cichu(qapp, tmp_path, monkeypatch):
+    """AR-321: „Cofnij zapis (commit N)” odłożony w biegu etapu; commit cofnięty poza tym oknem (rdzeń
+    `writeback.undo` na drugim połączeniu - jak `header-fix --undo`): koniec etapu nie ogłasza „znów możliwe”,
+    wpis schodzi z kolejki. Falsyfikator: gotowość kart bez reguły rdzenia „commit ma co cofać”."""
+    from horreum.gui.app import MainWindow
+    from test_gui_grid_recepty import _naprawa_prawdziwym_exec, _okno_naprawy
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    win, path, _pliki = _okno_naprawy(tmp_path)
+    ov = win.object_view
+    try:
+        commit = _naprawa_prawdziwym_exec(win)
+        ov.set_busy(True)
+        win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_busy", id=commit)
+        con = db.open_db(str(path))
+        try:
+            assert writeback.undo(con, commit, now=NOW).complete
+        finally:
+            con.close()
+        ov.set_busy(False)
+        assert str(win._pelny_komunikat) != i18n.t("wb.undo_recipe_ready", id=commit)
+        assert win._kolejki_osi[queries.klucz_bazy(str(path))] == []
+    finally:
+        win.close()

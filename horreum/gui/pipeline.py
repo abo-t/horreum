@@ -521,6 +521,16 @@ def naglowek_etapu(name):
     return i18n.t("pipeline.fmt.head", stage=_nazwa_etapu(name))
 
 
+def etykieta_gestu_kopii(czeka):
+    """Napis gestu faktów kopii z `scan.CopyFactsWaiting` (AR-315) - JEDNO miejsce wyboru: przycisk Dostawy
+    (`PipelineView._sync_copy_facts`) i podpowiedź wiersza bajtów w Porządkach (AR-327) nazywają go tak samo."""
+    if czeka.facts and czeka.bytes:
+        return i18n.t("pipeline.btn.copy_both", fakty=czeka.facts, bajty=czeka.bytes)
+    if czeka.bytes:
+        return i18n.t("pipeline.btn.copy_bytes", n=czeka.bytes)
+    return i18n.t("pipeline.btn.copy_facts", n=czeka.facts)
+
+
 def etykieta_przyjmij_nowe():
     """Napis złotej akcji: nazwa „Przyjmij nowe” i łańcuch `ETAPY_PRZYJMIJ_NOWE` słowami etapów
     z `_nazwa_etapu` - tymi samymi, które stoją w nagłówkach linii logu. Nazwa bez łańcucha
@@ -655,6 +665,7 @@ class PipelineView(QWidget):
         self._copy_facts_waiting = 0       # kopie czekające na fakty (`_sync_copy_facts`)
         self._start_etapu = time.monotonic()   # start bieżącego etapu - tempo postępu (AR-315)
         self._reason = None                # powód wejścia z innej powierzchni (`show_reason`)
+        self._fokus_przy_pokazaniu = False  # jawna komenda z powodem → fokus na geście powodu (AR-327)
         self._parametry_przebiegu = None   # (etap, parametry) przebiegu w toku albo ostatniego
         self._parametry_ponowienia = None  # zamrożone przy liście nieprzeczytanych („Skanuj ponownie”)
         self._czeka_rodowod = 0            # „czeka na Ciebie” z rodowodu stosów TEGO logu (AR-115)
@@ -1222,12 +1233,7 @@ class PipelineView(QWidget):
                 con.close()
         n = czeka.copies
         self._copy_facts_waiting = n
-        if czeka.facts and czeka.bytes:
-            gest = i18n.t("pipeline.btn.copy_both", fakty=czeka.facts, bajty=czeka.bytes)
-        elif czeka.bytes:
-            gest = i18n.t("pipeline.btn.copy_bytes", n=czeka.bytes)
-        else:
-            gest = i18n.t("pipeline.btn.copy_facts", n=czeka.facts)
+        gest = etykieta_gestu_kopii(czeka)
         czas = zdanie_czasu(n * MS_NA_KOPIE / 1000)
         tip, why = [], []
         if czeka.facts:
@@ -1249,16 +1255,52 @@ class PipelineView(QWidget):
         else:
             self.lbl_reason.setText("")
         self.lbl_reason.setVisible(self._reason is not None)
+        self._sync_akcentu()
         self._sync_actions()
 
-    def show_reason(self, reason=None):
+    def _sync_akcentu(self):
+        """AKCENT IDZIE ZA POWODEM WEJŚCIA (AR-327): linia powodu faktów kopii każe użyć
+        „Sprawdź bajty nagłówków (N)”, więc bursztyn złotej akcji (nazwa obiektu `theme.ZLOTA_AKCJA_OBJECT_NAME`
+        + pogrubienie) stoi wtedy na `btn_copy_facts`, a „Przyjmij nowe” jest zwykłym przyciskiem; bez powodu
+        (albo po zrobieniu roboty) - z powrotem na „Przyjmij nowe”. Zawsze dokładnie jedna złota akcja.
+        Selektor nazwy obiektu w arkuszu nie przelicza się sam - `unpolish`/`polish` przy zmianie."""
+        zlota = (self.btn_copy_facts if self._reason == REASON_COPY_FACTS and self._copy_facts_waiting > 0
+                 else self.btn_receive)
+        for przycisk in (self.btn_receive, self.btn_copy_facts):
+            nazwa = theme.ZLOTA_AKCJA_OBJECT_NAME if przycisk is zlota else ""
+            if przycisk.objectName() == nazwa:
+                continue
+            przycisk.setObjectName(nazwa)
+            f = przycisk.font()
+            f.setBold(przycisk is zlota)
+            przycisk.setFont(f)
+            przycisk.style().unpolish(przycisk)
+            przycisk.style().polish(przycisk)
+
+    def show_reason(self, reason=None, *, fokus=False):
         """PUBLICZNE wejście dla powierzchni, która przyprowadza człowieka do Dostawy (Porządki:
         klik w wiersz „?", `TasksView.open_intake`). `reason` = stała `REASON_*` albo `None`
         (zwykłe wejście - linia gaśnie). Nieznany powód to błąd programisty, nie stan usera
-        (EXPECT). Licznik liczony od nowa: powód bez aktualnej liczby kłamałby o robocie."""
+        (EXPECT). Licznik liczony od nowa: powód bez aktualnej liczby kłamałby o robocie.
+
+        `fokus=True` (AR-327) - JAWNA komenda człowieka (klik wiersza „?”): fokus klawiatury trafia w gest
+        powodu przy pokazaniu widoku (ukryty widżet fokusu nie bierze). Zwykłe wejście - także strzałką
+        w sidebarze, gdy powód wciąż stoi - fokusu nie rusza (wzór ochrony nawigacji `MainWindow._on_nav_changed`)."""
         assert reason in (None, REASON_COPY_FACTS), reason
         self._reason = reason
+        self._fokus_przy_pokazaniu = fokus and reason is not None
         self._sync_copy_facts()
+        if self.isVisible():
+            self._daj_fokus_powodu()
+
+    def _daj_fokus_powodu(self):
+        """Fokus na geście powodu - jednorazowo po jawnej komendzie, wyłącznie na przycisku widocznym i czynnym
+        (w biegu Dostawy gest jest wygaszony, fokus zostaje tam, gdzie był)."""
+        if not self._fokus_przy_pokazaniu:
+            return
+        self._fokus_przy_pokazaniu = False
+        if self.btn_copy_facts.isVisible() and self.btn_copy_facts.isEnabled():
+            self.btn_copy_facts.setFocus(Qt.OtherFocusReason)
 
     def showEvent(self, event):
         # Licznik mógł się zmienić poza Dostawą (zapis nagłówków w Zbiorach dociąga fakty kopii
@@ -1268,6 +1310,7 @@ class PipelineView(QWidget):
             self._sync_copy_facts()
             self._sync_stacks_memo()       # gest w panelu rodowodu zmienia liczniki stosów
             self._sync_rodowod()           # …i zbiór „czeka na Ciebie”
+        self._daj_fokus_powodu()
 
     def _on_copy_facts(self):
         """„Zbierz fakty kopii (N)": fakty kopii, przejęcie zeznania i - wyłącznie po realnym
@@ -1854,11 +1897,12 @@ class PipelineView(QWidget):
 
         Dwie roboty osobno (AR-315): fakty („uzupełniono N z M” po kopiach z klasy faktów) i zbadanie
         bajtów nagłówka („sprawdzono bajty nagłówka N z M”, z resztą `bytes_unchecked`, gdy jest) -
-        przebieg po aktualizacji, który same bajty sprawdził, nie mówi „uzupełniono 15598 z 15598”."""
+        przebieg po aktualizacji, który same bajty sprawdził, nie mówi „uzupełniono 15598 z 15598”. Który
+        człon stoi, mówi `scan.CopyFactsSummary` (`czlon_faktow`, `czlon_bajtow`) - ten sam predykat co ogon CLI."""
         czesci = []
-        if s.rows_facts or not s.rows_bytes:
+        if s.czlon_faktow:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.written", n=s.facts_written, rows=s.rows_facts))
-        if s.rows_bytes:
+        if s.czlon_bajtow:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.bytes", n=s.bytes_checked, rows=s.rows_bytes))
         if s.bytes_unchecked:           # dalszy HDU nie do doczytania - kopia czeka na każdą Dostawę
             czesci.append(i18n.t("pipeline.fmt.copy_facts.bytes_unchecked", n=s.bytes_unchecked))

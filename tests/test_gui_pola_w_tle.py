@@ -700,9 +700,11 @@ def test_przylozenie_zamyka_menu_tabeli_otwarte_nad_starym_zbiorem(qapp, tmp_pat
 
 def test_start_okna_mowi_wczytuje_mimo_raportu_przed_podpieciem(qapp, tmp_path, monkeypatch):
     """Pierwsze „Wczytuję…" leci z `FramesView.__init__`, zanim gospodarz podepnie `load_report` -
-    gospodarz prosi o nie jeszcze raz (`ponow_raport_wczytania`).
+    gospodarz prosi o nie jeszcze raz (`ponow_raport_wczytania`). Strona Zbiorów powstaje przy pierwszym
+    wejściu (AR-325) - raport pada wtedy, nie przy otwarciu bazy (bez gridu nie ma czego wczytywać).
 
-    Falsyfikator: zdejmij `grid.ponow_raport_wczytania()` z `_mount_views` → brak raportu."""
+    Falsyfikator: zdejmij `grid.ponow_raport_wczytania()` z budowy strony Zbiorów → brak raportu."""
+    from horreum.gui.app import NAV_ZBIORY
     raporty = []
     oryginal = MainWindow._raport_wczytania_gridu
     monkeypatch.setattr(MainWindow, "_raport_wczytania_gridu",
@@ -710,6 +712,8 @@ def test_start_okna_mowi_wczytuje_mimo_raportu_przed_podpieciem(qapp, tmp_path, 
     brama, wszedl = _brama_na_pivot(monkeypatch)
     win = MainWindow(_baza(tmp_path))
     try:
+        assert raporty == [] and win._gotowy("grid_view") is None
+        win._show_view(NAV_ZBIORY)
         assert raporty[:1] == [i18n.t("busy.read_frames")], raporty
         brama.set()
         _czekaj_na_pola(win.grid_view)
@@ -2059,3 +2063,73 @@ def test_porazka_skladu_przy_otwartym_edytorze_ponawia_od_razu_wynik_czeka(qapp,
         assert len(przylozone) >= 1 and len(biegi_tla) == 2 and na_glownym == [], (biegi_tla, na_glownym)
     finally:
         _zamknij(view, con)
+
+
+# ======================================================================== AR-327: Porządki - faza przy liście, podpowiedź gestu
+
+def test_faza_przy_tytule_listy_do_pierwszego_wyniku_rachunku(qapp, tmp_path, monkeypatch):
+    """AR-327: do pierwszego wyniku rachunku liczników w tle etykieta fazy „Liczę Porządki…” stoi przy tytule
+    listy (nie tylko na pasku statusu, ~1870 px dalej - zmierzone natywnie); wynik ją chowa, porażka też (mówi
+    wiersz błędu). Kontrakt stanowy (widoczność, tekst) - geometrię mierzy sonda natywna.
+    Falsyfikatory: brak schowania po wyniku; etykieta widoczna bez serii biegów (tryb inline)."""
+    import sqlite3
+    path = _baza_obiektu(tmp_path)
+    brama, wszedl, _watki = _brama_na_licznikach(monkeypatch)
+    win = MainWindow(path)
+    try:
+        tasks = win.tasks_view
+        assert wszedl.wait(_BEZPIECZNIK_S), "rachunek montażu nie ruszył w tle"
+        assert not tasks.faza_licznikow.isHidden()
+        assert tasks.faza_licznikow.text() == i18n.t("busy.counting_tasks")
+        brama.set()
+        _czekaj(lambda: tasks._liczniki_thread is None and tasks.ma_rachunek(), "rachunek montażu")
+        assert tasks.faza_licznikow.isHidden()
+        tasks.refresh_counts(w_tle=True)                  # kolejna seria po wyniku - faza nie wraca
+        _czekaj(lambda: tasks._liczniki_thread is None, "druga seria")
+        assert tasks.faza_licznikow.isHidden()
+    finally:
+        brama.set()
+        win.close()
+
+    def _pada(con):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(queries, "tasks_state", _pada)
+    win = MainWindow(path)
+    try:
+        tasks = win.tasks_view
+        _czekaj(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(), "porażka")
+        assert tasks.faza_licznikow.isHidden()
+    finally:
+        win.close()
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    win = MainWindow(path)                                # inline: rachunek w montażu, serii nie ma
+    try:
+        assert win.tasks_view.faza_licznikow.isHidden()
+    finally:
+        win.close()
+
+
+def test_podpowiedz_wiersza_bajtow_nazywa_przycisk_dostawy(qapp, tmp_path, monkeypatch):
+    """AR-327: podpowiedź wiersza „Nagłówek z bajtem spoza ASCII” przy kopiach niezbadanych
+    nazywa PRZYCISK Dostawy jego napisem - tym samym, który stoi na `btn_copy_facts` tej bazy (fakty i bajty
+    naraz: „Zbierz fakty kopii (N) i sprawdź bajty (M)”), nie etap „Fakty kopii”. Falsyfikatory: parametr `etap`
+    (stan sprzed AR-327); napis liczony inaczej niż w Dostawie."""
+    from test_gui_pipeline import _kopie_bez_faktow
+    from horreum.gui.app import NAV_DOSTAWA
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    win = MainWindow(db_path)
+    try:
+        tip = _wiersz_tip(win.tasks_view, "header_nonprintable_frames")
+        win._show_view(NAV_DOSTAWA)
+        gest = win.pipeline_view.btn_copy_facts.text()
+        assert gest and f"„{gest}”" in tip, (gest, tip)
+        assert i18n.t("pipeline.stage.copy_facts") not in tip
+    finally:
+        win.close()
+
+
+def _wiersz_tip(tasks, klucz):
+    from horreum.gui import tasks as tasks_mod
+    row = next(i for i, (k, _l, _a) in enumerate(tasks_mod._TASKS) if k == klucz)
+    return tasks.tasks.item(row).toolTip()

@@ -2190,3 +2190,94 @@ def test_dluga_sciezka_bazy_nie_rozpycha_strony_dostawy(qapp, tmp_path, monkeypa
         view.close()
         wzor.close()
         i18n.set_lang("pl")
+
+
+# ------------------------------------------------------------ AR-327: akcent i fokus idą za powodem wejścia
+
+def _zlote(view):
+    from horreum.gui import theme
+    from PySide6.QtWidgets import QPushButton
+    return [b for b in view.findChildren(QPushButton) if b.objectName() == theme.ZLOTA_AKCJA_OBJECT_NAME]
+
+
+def test_akcent_zlotej_akcji_idzie_za_powodem_faktow_kopii(qapp, tmp_path):
+    """AR-327: z linią powodu faktów kopii złota akcja (nazwa obiektu reguły arkusza
+    + pogrubienie) stoi na geście powodu, „Przyjmij nowe” jest zwykłym przyciskiem; zwykłe wejście albo
+    robota zrobiona - z powrotem na „Przyjmij nowe”. Zawsze dokładnie jedna złota akcja. Kontrakt stanowy -
+    piksele akcentu mierzy sonda natywna. Falsyfikatory: akcent przypięty na stałe do `btn_receive` (stan
+    sprzed AR-327); brak powrotu akcentu po zwykłym wejściu."""
+    from horreum.gui.pipeline import REASON_COPY_FACTS
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        assert _zlote(view) == [view.btn_receive] and view.btn_receive.font().bold()
+        view.show_reason(REASON_COPY_FACTS)
+        assert _zlote(view) == [view.btn_copy_facts]
+        assert view.btn_copy_facts.font().bold() and not view.btn_receive.font().bold()
+        view.show_reason(None)
+        assert _zlote(view) == [view.btn_receive] and view.btn_receive.font().bold()
+        assert not view.btn_copy_facts.font().bold()
+    finally:
+        view.close()
+    pusta = PipelineView(_fresh_db(tmp_path, "pusta.db"), now_fn=lambda: NOW)
+    try:
+        pusta.show_reason(REASON_COPY_FACTS)          # nic nie czeka - powód gaśnie, akcent wraca
+        assert _zlote(pusta) == [pusta.btn_receive]
+    finally:
+        pusta.close()
+
+
+def _okno_z_kopiami(tmp_path, monkeypatch):
+    from horreum.gui.app import MainWindow
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    win = MainWindow(db_path)
+    win.resize(1500, 900)
+    win.show()
+    win.activateWindow()
+    QApplication.setActiveWindow(win)
+    QApplication.processEvents()
+    return win
+
+
+def test_fokus_na_gescie_powodu_tylko_po_jawnej_komendzie(qapp, tmp_path, monkeypatch):
+    """AR-327: jawna komenda „idź do Dostawy z powodem” (sygnał `open_intake` - klik wiersza „?” Porządków albo
+    pusta perspektywa kopii) daje fokus klawiatury gestowi powodu; przejście strzałką w sidebarze przez Dostawę,
+    gdy powód wciąż stoi, fokusu nie kradnie - zostaje na liście. Falsyfikatory: fokus przy każdym pokazaniu
+    z powodem (strzałki zatrzymują się w Dostawie); brak fokusu po komendzie."""
+    from PySide6.QtTest import QTest
+    from horreum.gui.app import NAV_DOM, NAV_DOSTAWA
+    win = _okno_z_kopiami(tmp_path, monkeypatch)
+    try:
+        pipeline = win.pipeline_view
+        win.tasks_view.open_intake.emit()
+        QApplication.processEvents()
+        assert win.nav.currentRow() == NAV_DOSTAWA
+        assert QApplication.focusWidget() is pipeline.btn_copy_facts, QApplication.focusWidget()
+        assert pipeline.lbl_reason.isVisible()
+        win._show_view(NAV_DOM)
+        win.nav.setFocus(Qt.OtherFocusReason)
+        QApplication.processEvents()
+        while win.nav.currentRow() != NAV_DOSTAWA:
+            QTest.keyClick(win.nav, Qt.Key_Down)
+            QApplication.processEvents()
+        assert pipeline.lbl_reason.isVisible(), "powód zgasł - test nie mierzy kradzieży fokusu"
+        assert win.nav.hasFocus(), QApplication.focusWidget()
+    finally:
+        win.close()
+
+
+def test_fokus_nie_idzie_na_wygaszony_gest_powodu(qapp, tmp_path, monkeypatch):
+    """AR-327: komenda z powodem przy wygaszonym geście (zapis do plików w toku - ta sama bramka `idle` co bieg
+    Dostawy) nie przenosi fokusu na nieczynny przycisk. Falsyfikator: `setFocus` bez sprawdzenia `isEnabled`."""
+    win = _okno_z_kopiami(tmp_path, monkeypatch)
+    try:
+        pipeline = win.pipeline_view
+        pipeline.set_writeback_busy(True)
+        assert not pipeline.btn_copy_facts.isEnabled()
+        win.tasks_view.open_intake.emit()
+        QApplication.processEvents()
+        assert QApplication.focusWidget() is not pipeline.btn_copy_facts
+    finally:
+        pipeline.set_writeback_busy(False)
+        win.close()

@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, object_change, repo, resolver, writeback
-from horreum.gui import i18n, queries
+from horreum.gui import i18n, queries, rows
 from horreum.gui.i18n_catalog import CATALOG
 # Zdania wspólne okien zapisu mieszkają w `wb_worker` (jeden dom: czytelny powód rdzenia, status
 # wiersza ze spadkiem na drogę atomową, podział powodu spadku); `grid` importuje go i tak.
@@ -86,7 +86,7 @@ _XISF = ".xisf"
 # Rola komórki ścieżki: długość GŁOWY pokazanego tekstu (kategoria i folder obiektu pod korzeniem
 # archiwum, `glowa_sciezki`) - delegat elizji (`_ElizjaSciezki`) trzyma ją w kadrze. Komórka bez
 # tej roli (powód pominięcia, „bez przeniesienia”) maluje się zwykłą elizją widoku.
-_GLOWA_ROLE = Qt.UserRole + 1
+_GLOWA_ROLE = rows.ROLA_GLOWY_SCIEZKI
 # Ile znaków nazwy pliku ma zostać obok głowy - przy mniejszym miejscu głowa ustępuje nazwie.
 _MIN_ZNAKOW_NAZWY = 12
 _WIELOKROPEK = "…"

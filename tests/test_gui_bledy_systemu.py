@@ -1964,27 +1964,43 @@ def test_wyjatek_otwarcia_bazy_startowej_chowa_okno_glowne_na_czas_okna_bledu(qa
 
 
 @pytest.mark.zmienia_motyw
-def test_montaz_przerwany_po_gridzie_zbiera_watki_gridu_przy_zamknieciu(qapp, monkeypatch, ustawienia, tmp_path):
-    """AR-302: baza startowa otwiera się, montaż widoków buduje grid (wątek składu zbioru w biegu) i pada na
-    KOLEJNYM widoku, zanim jakakolwiek strona trafi na stos. Zamknięcie okna po oknie błędu zbiera wątki
-    gridu (`zatrzymaj_pola`) - `QThread` skasowany w biegu to twardy abort zamiast kodu błędu. Falsyfikator:
-    zbieranie wątków gridu warunkowane niepustym stosem."""
+def test_dobudowa_zbiorow_przerwana_po_gridzie_zbiera_watki_gridu(qapp, monkeypatch, ustawienia, tmp_path):
+    """AR-302, AR-325: start z bazą - montaż widoków kończy się (strony leniwe na stosie jako zaślepki), a strona
+    Zbiorów dobudowuje się w pierwszym obrocie pętli zdarzeń (bezczynność po otwarciu, `_zbiory_w_bezczynnosci`):
+    grid powstaje z wątkiem składu zbioru w biegu i budowa pada na KOLEJNYM widoku strony. Straż mówi oknem błędu
+    programu, a wątek gridu jest zebrany (`zatrzymaj_pola`), zanim grid zniknie - `QThread` skasowany w biegu to
+    twardy abort zamiast okna; zaślepka zostaje, pętla `main` kończy się zwykłym kodem. Falsyfikator: obwódka
+    porażki budowy strony bez zbierania wątków widoków, które już powstały."""
+    import time
     from horreum import db
-    from horreum.gui import app as app_mod, planner as planner_mod
+    from horreum.gui import app as app_mod
+    from horreum.gui.flows import znajdz_view as znajdz_mod
     from horreum.gui.grid import FramesView
     baza = str(tmp_path / "start.db")
     db.open_db(baza).close()
 
     def _rzuca(self, *a, **k):
         _blad_programu_w_pakiecie()
-    monkeypatch.setattr(planner_mod.PlannerView, "__init__", _rzuca)
-    monkeypatch.setattr(app_mod.QApplication, "exec", lambda _self: 0)
+    monkeypatch.setattr(znajdz_mod.ZnajdzView, "__init__", _rzuca)
+    # Tryb produktu: wątki tła Zbiorów i dobudowa w bezczynności - ta druga z wartości klasy, bez podmiany.
+    monkeypatch.setattr(app_mod.MainWindow, "_pola_poza_watkiem", True)
+    widziane = []
+
+    def _exec(_self):
+        # Pętla zdarzeń programu do chwili, w której okno błędu stanęło (bezpiecznik je zamyka i notuje).
+        koniec = time.monotonic() + 30
+        while not widziane and time.monotonic() < koniec:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        return 0
+    monkeypatch.setattr(app_mod.QApplication, "exec", _exec)
     zebrane = []
     prawdziwe = FramesView.zatrzymaj_pola
 
     def _zatrzymaj(self):
-        zebrane.append(self)
-        return prawdziwe(self)
+        w_biegu = self._zbior_thread is not None
+        prawdziwe(self)
+        zebrane.append((w_biegu, self._zbior_thread is None))
     monkeypatch.setattr(FramesView, "zatrzymaj_pola", _zatrzymaj)
     glowne = []
     prawdziwy_show = app_mod.MainWindow.show
@@ -1993,7 +2009,6 @@ def test_montaz_przerwany_po_gridzie_zbiera_watki_gridu_przy_zamknieciu(qapp, mo
         glowne.append(self)
         return prawdziwy_show(self)
     monkeypatch.setattr(app_mod.MainWindow, "show", _show)
-    widziane = []
     zegar = _bezpiecznik_okien_bledu(widziane)
     try:
         kod = app_mod.main([baza])
@@ -2002,9 +2017,12 @@ def test_montaz_przerwany_po_gridzie_zbiera_watki_gridu_przy_zamknieciu(qapp, mo
         zegar.stop()
         for w in glowne:
             w.close()
-    assert kod == 1 and widziane == ["QDialog"], (kod, widziane)
-    assert len(glowne) == 1 and glowne[0].stack.count() == 0, "montaż doszedł do stosu - test nie mierzy szwu"
-    assert po_main and po_main[0] is glowne[0].grid_view, po_main
+    assert kod == 0 and widziane == ["QDialog"], (kod, widziane)
+    assert len(glowne) == 1 and glowne[0].stack.count() == 5, "montaż nie doszedł do stosu - test nie mierzy dobudowy"
+    okno = glowne[0]
+    assert po_main == [(True, True)], f"wątek składu gridu nie zebrany przed skasowaniem: {po_main}"
+    assert "grid_view" not in okno._strony
+    assert okno.stack.widget(app_mod.STRONA_ZBIORY) is okno._zaslepki[app_mod.STRONA_ZBIORY]
 
 
 @pytest.mark.zmienia_motyw

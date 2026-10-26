@@ -1504,12 +1504,13 @@ def test_cofnij_dopisanie_odlozone_przez_etap_dostawy_wraca_po_odswiezeniu(qapp,
         win.close()
 
 
-def test_odlozona_recepta_ginie_z_przelaczeniem_bazy_bez_emisji_na_nowej(qapp, tmp_path, bez_watkow,
-                                                                         monkeypatch):
-    """AR-310: odłożenie żyje w widoku tej bazy - zdanie mówi „dopóki ta baza jest otwarta”. Przełączenie
-    bazy w biegu etapu: po końcu etapu na pasku nowej bazy nie ma zdania gotowości starego wpisu ani
-    recepty, wyjątku na zamkniętym połączeniu też nie ma. Falsyfikator: kolejka przeżywa demontaż widoku
-    (stara recepta na pasku nowej bazy)."""
+def test_odlozona_recepta_nie_przechodzi_na_inna_baze_i_wraca_z_powrotem(qapp, tmp_path, bez_watkow,
+                                                                          monkeypatch):
+    """AR-310, AR-321: odłożenie należy do okna i TEJ bazy - zdanie mówi „także po powrocie do tej bazy, dopóki
+    program jest otwarty”. Przełączenie bazy w biegu etapu: po końcu etapu na pasku nowej bazy nie ma zdania
+    gotowości starego wpisu ani recepty, wyjątku na zamkniętym połączeniu też nie ma; powrót do pierwszej bazy
+    podaje zdanie gotowości. Falsyfikatory: kolejka wspólna dla baz (stara recepta na pasku nowej bazy);
+    kolejka w widoku (powrót bez recepty)."""
     druga = tmp_path / "druga.db"
     db.open_db(str(druga)).close()
     win, path, pliki = _okno_naprawy(tmp_path)
@@ -1518,7 +1519,8 @@ def test_odlozona_recepta_ginie_z_przelaczeniem_bazy_bez_emisji_na_nowej(qapp, t
         commit = _naprawa_prawdziwym_exec(win)
         _etap_start(win)
         win._recepta_porzadkow_stan[0].czlony[0].wykonaj()
-        assert "dopóki ta baza jest otwarta" in i18n.CATALOG["wb.undo_recipe_busy"]["pl"]
+        assert "także po powrocie do tej bazy, dopóki program jest otwarty" in i18n.CATALOG[
+            "wb.undo_recipe_busy"]["pl"]
         assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_busy", id=commit)
         win._open_path(str(druga))
         assert win.db_path == str(druga)
@@ -1528,6 +1530,9 @@ def test_odlozona_recepta_ginie_z_przelaczeniem_bazy_bez_emisji_na_nowej(qapp, t
             QApplication.processEvents()
         assert str(win._pelny_komunikat) != i18n.t("wb.undo_recipe_ready", id=commit)
         assert win._recepta_porzadkow_stan is None and not win.recipe_label.isVisible()
+        win._open_path(str(path))
+        assert str(win._pelny_komunikat) == i18n.t("wb.undo_recipe_ready", id=commit)
+        assert win._recepta_porzadkow_stan is not None
     finally:
         puszczona.set()
         win.close()

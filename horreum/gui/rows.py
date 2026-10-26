@@ -68,6 +68,33 @@ STRONG = Qt.UserRole + 3       # nadpisuje `strong` listy dla TEGO wiersza (None
 # rolę tutaj - pasmo modułu to zbiór {+1, +2, +3, +6}, nie przedział ciągły.
 INDENT = Qt.UserRole + 6      # poziom wcięcia (int; 0/None = brak) - px liczy `_indent_px` z fontu
 
+# REJESTR RÓL CAŁEGO PAKIETU (AR-326): każdy numer `Qt.UserRole + n` w `horreum/` stoi TUTAJ (bramka AST
+# `tests/test_gui_role_rows.py`), moduł konsumenta bierze stałą stąd. Numer jest unikalny w obrębie JEDNEJ
+# listy albo tabeli, nie pakietu - te same numery na RÓŻNYCH widżetach są zamierzone i opisane przy roli.
+# Pasmo delegata `TwoPartDelegate` (wyżej: {+1, +2, +3, +6}) wiąże każdą listę, która go bierze.
+# Lista facetów (`facets.FacetRail`, delegat wyżej): tooltip wiersza z chwili budowy - szukajka dokleja nad
+# nim zdanie o trafionym aliasie (R-S3-9). Poza pasmem delegata.
+ROLA_PODPOWIEDZI_FACETU = Qt.UserRole + 4
+# Kolejka przeglądu osi obiektu (`app.ObjectAxisView`, delegat wyżej): payload (`object_raw`) i powód
+# wiersza informacyjnego - poza pasmem delegata, bo pod +1/+2 delegat czytałby je jako człony.
+ROLA_PRZEGLADU_PAYLOAD = Qt.UserRole + 4
+ROLA_PRZEGLADU_INFO = Qt.UserRole + 5
+# Rodzaj koloru elementu (AR-175, `app.ROLA_RODZAJU_KOLORU`): kolejka przeglądu i komórki optyki osi
+# teleskopu - poza pasmem delegata i rolami kolejki.
+ROLA_RODZAJU_KOLORU = Qt.UserRole + 7
+# Komórka optyki osi teleskopu (`app.TelescopeAxisView`, tabela bez delegata wierszy): wartość do edytora
+# (liczba bez znacznika ręki).
+ROLA_WARTOSCI_EDYTORA = Qt.UserRole + 1
+# Lista perspektyw Zbiorów (`grid_model`): etykieta BAZOWA bez sufiksu „(zmieniona)” (FH-12).
+ROLA_ETYKIETY_PERSPEKTYWY = Qt.UserRole + 1
+# Komórka ścieżki okna zmiany obiektu (`object_change_dialog`): długość głowy pokazanego tekstu.
+ROLA_GLOWY_SCIEZKI = Qt.UserRole + 1
+# Lista grup okna zestawu (`config_dialog`): `UserRole` niesie `frame_ids`, +1 `camera_id`, +10 folder
+# wiersza, +11 słownik grupy.
+ROLA_KAMERY_GRUPY = Qt.UserRole + 1
+ROLA_FOLDERU_GRUPY = Qt.UserRole + 10
+ROLA_GRUPY = Qt.UserRole + 11
+
 _GAP = 12          # odstęp nazwa↔liczba; poniżej ~8 px człony się sklejają przy wąskiej listwie
 _PAD = 6           # zapas przy prawej ramce; bez niego ink „›" dotyka krawędzi (wizytator P1 #3)
 _INDENT_UNIT_SPACES = 8    # PARYTET z dawnym tekstowym `app._WCIECIE` (W-5) - patrz `_indent_px`

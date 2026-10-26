@@ -1238,7 +1238,8 @@ def test_przejscia_klawiatura_przy_otwartym_stagingu(okno_ze_stagingiem):
 def test_zamkniecie_i_zmiana_bazy_zbieraja_watki_Domu_i_gridu(qapp, tmp_path, monkeypatch):
     """Grid nie stoi już wprost na stosie (siedzi w kontenerze strony zbiorów) - gospodarz zbiera
     jego wątki tła jawnie, obok `zatrzymaj_pola` Domu. Bez tego zamknięcie okna w biegu składu
-    zbioru kasowałoby żywy `QThread`."""
+    zbioru kasowałoby żywy `QThread`. Strony zbudowane jawnie (`zbuduj_strony`, AR-325) - strona Zbiorów
+    niezbudowana nie ma wątków do zebrania."""
     monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", True)
     zebrane = []
     for klasa in (FramesView, HomeView):
@@ -1248,11 +1249,13 @@ def test_zamkniecie_i_zmiana_bazy_zbieraja_watki_Domu_i_gridu(qapp, tmp_path, mo
     path = str(tmp_path / "d.db")
     _baza_domu(path, _TRZY).close()
     win = MainWindow(path)
+    win.zbuduj_strony()
     stary_dom = win.home_view
     win._open_path(_s8(tmp_path, "b.db"))
     assert {"FramesView", "HomeView"} <= set(zebrane)
     assert stary_dom._thread is None and win.home_view is not stary_dom
     zebrane.clear()
+    win.zbuduj_strony()
     win.close()
     assert {"FramesView", "HomeView"} <= set(zebrane)
     assert win.home_view._thread is None

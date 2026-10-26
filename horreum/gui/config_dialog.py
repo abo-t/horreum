@@ -17,12 +17,12 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import repo
-from horreum.gui import i18n, queries
+from horreum.gui import i18n, queries, rows
 
 # Tryb ogniskowej (AR-128): rola wiersza niosąca słownik grupy, wartownik pozycji „Dopisz nowy…"
 # w liście teleskopów i wartownik nie wybranego parku (`None` w `itemData` znaczy „nic nie
 # powiedziano" - to legalna wartość parku, więc „nie wybrano" potrzebuje własnego znaku).
-GROUP_ROLE = Qt.UserRole + 11
+GROUP_ROLE = rows.ROLA_GRUPY
 NEW_TELESCOPE = "__nowy__"
 PARK_UNPICKED = "__wybierz__"
 _PARK_KEYS = {1: "cfg.park_yes", 0: "cfg.park_no", None: "cfg.park_unsaid"}
@@ -40,7 +40,8 @@ _PARK_KEYS = {1: "cfg.park_yes", 0: "cfg.park_no", None: "cfg.park_unsaid"}
 # ---------------------------------------------------------------------------------------------
 
 # Folder wiersza (człon elidowany środkiem). `UserRole` niesie frame_ids, `+1` - camera_id.
-FOLDER_ROLE = Qt.UserRole + 10
+FOLDER_ROLE = rows.ROLA_FOLDERU_GRUPY
+CAMERA_ROLE = rows.ROLA_KAMERY_GRUPY
 _SIZE_CHARS = 120          # szerokość domyślna okna w średnich znakach fontu
 _SIZE_LINES = 46           # wysokość domyślna w wierszach fontu
 _SCREEN_FRAC = 0.85        # sufit: część dostępnego ekranu
@@ -327,7 +328,7 @@ class AssignConfigDialog(QDialog):
             slabe = g["camera_id"] is None or g["folder"] is None or change
             it.setCheckState(Qt.Unchecked if slabe else Qt.Checked)
             it.setData(Qt.UserRole, g["frame_ids"])
-            it.setData(Qt.UserRole + 1, g["camera_id"])
+            it.setData(CAMERA_ROLE, g["camera_id"])
             it.setData(GROUP_ROLE, g)
             self.items.addItem(it)
         self.items.itemChanged.connect(lambda _it: self._sync_check_all())
@@ -438,7 +439,7 @@ class AssignConfigDialog(QDialog):
 
     def _zaznaczone_grupy(self):
         return [it.data(GROUP_ROLE) for it in visible_rows(self.items)
-                if it.checkState() == Qt.Checked and it.data(Qt.UserRole + 1) is not None]
+                if it.checkState() == Qt.Checked and it.data(CAMERA_ROLE) is not None]
 
     def _on_combo_changed(self, *_):
         """„Dopisz nowy…" wybrany → pola nowego teleskopu z wartościami startowymi zaznaczonych
@@ -542,7 +543,7 @@ class AssignConfigDialog(QDialog):
         wyłącznie wiersze WIDOCZNE po filtrze - „co widać, to się zapisze” (`FolderFilter`)."""
         out = []
         for it in visible_rows(self.items):
-            if it.checkState() == Qt.Checked and it.data(Qt.UserRole + 1) is not None:
+            if it.checkState() == Qt.Checked and it.data(CAMERA_ROLE) is not None:
                 out.extend(it.data(Qt.UserRole))
         return out
 

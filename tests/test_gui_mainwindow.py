@@ -38,8 +38,13 @@ def _pola_inline(monkeypatch):
     """Pokrycie pól Zbiorów INLINE (seam `MainWindow._pola_poza_watkiem`): testy tego pliku liczą
     odświeżenia i wejścia w `refresh`, a pierwszy wynik z wątku tła, doręczony w nieznanej chwili,
     dokładałby przeładowanie zbioru w środku pomiaru. Drogę produkcyjną (wątek, odcisk kart,
-    sprzątanie przy zamknięciu i przełączeniu bazy) sprawdza `test_gui_pola_w_tle.py`."""
+    sprzątanie przy zamknięciu i przełączeniu bazy) sprawdza `test_gui_pola_w_tle.py`.
+
+    Osie Porządków WCZYTANE OD RAZU (`_osie_leniwie`, AR-326 - osobny przełącznik): testy tego pliku czytają
+    tabele osi zaraz po `open_path`; osie leniwe w trybie bez wątków pinuje
+    `test_osie_leniwe_bez_watkow_tla_czytaja_baze_przy_wejsciu`."""
     monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+    monkeypatch.setattr(MainWindow, "_osie_leniwie", False)
 
 
 def _seeded_db(tmp_path, name="s8.db", *, object_axis=False):
@@ -1326,7 +1331,12 @@ def _pokazane(win):
     OPÓŹNIONE komunikaty (planer melduje „baza nie ma stanowiska z pozycją GPS…"), które docierają
     dopiero w drugim obrocie. Pierwsza wersja tych bramek przyjmowała jeden - i pierwszy raport
     testu gasła recepta, którą przed chwilą postawiła, bo cudzy komunikat wchodził w środek.
-    Ta sama pułapka przewróciła wcześniej sondę pomiarową na platformie natywnej."""
+    Ta sama pułapka przewróciła wcześniej sondę pomiarową na platformie natywnej.
+
+    WSZYSTKIE STRONY ZBUDOWANE (`zbuduj_strony`, AR-325): bramki tego bloku liczą pasek okna, którego minimum
+    trzyma strona Zbiorów, a raporty wczytania gridu - z gridem, który istnieje w trakcie przebiegu Dostawy.
+    Strony leniwe zdejmowałyby jedno i drugie do pierwszego wejścia w Zbiory."""
+    win.zbuduj_strony()
     win.resize(1400, 800)
     win.show()
     QApplication.processEvents()
@@ -1943,8 +1953,10 @@ _BEZPIECZNIK_LICZNIKOW_S = 15
 
 
 def _w_tle(monkeypatch):
-    """Tryb produkcyjny okna (wątki tła) - autouse `_pola_inline` stawia tryb bez wątków."""
+    """Tryb produkcyjny okna (wątki tła, osie leniwe) - autouse `_pola_inline` stawia tryb bez wątków i osie
+    wczytane od razu."""
     monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", True)
+    monkeypatch.setattr(MainWindow, "_osie_leniwie", True)
 
 
 def _brama_rachunku(monkeypatch, *, baza=None, pada=None):
@@ -2113,9 +2125,11 @@ def test_klik_w_wiersz_Porzadkow_przed_pierwszym_rachunkiem_czeka(qapp, tmp_path
 
 
 def test_porazka_licznikow_montazu_zdejmuje_faze_tla_i_stan_licze(qapp, tmp_path, monkeypatch):
-    """AR-175: rachunek montażu pada dwa razy (ponowienie w tle, AR-302) - faza tła gaśnie, plakietka
-    i kafel nie obiecują liczby („(…)” schodzi), wiersze zapalone, wiersz błędu mówi zdaniem.
-    Mutant: koniec serii bez obsługi w gospodarzu (`liczenie_w_toku(False)`) - faza wisi."""
+    """AR-175, AR-326: rachunek montażu pada dwa razy (ponowienie w tle, AR-302) - faza tła gaśnie, plakietka
+    i kafel nie obiecują liczby („(…)” schodzi) ani nie mówią zera: „Porządki (!)” i „Popraw · !” z podpowiedzią
+    = zdanie błędu; wiersze zapalone, wiersz błędu mówi zdaniem.
+    Mutanty: koniec serii bez obsługi w gospodarzu (`liczenie_w_toku(False)`) - faza wisi; gospodarz daje gołe
+    „Porządki” (`_on_tasks_counts(0)`, stan sprzed AR-326)."""
     import sqlite3
     from horreum.gui import i18n
     _w_tle(monkeypatch)
@@ -2128,10 +2142,63 @@ def test_porazka_licznikow_montazu_zdejmuje_faze_tla_i_stan_licze(qapp, tmp_path
         _pompuj()
         assert len([w for w in watki if w != glowny]) == 2, watki
         assert win.phase_label.text() == ""
-        assert win.nav.item(NAV_PORZADKI).text() == i18n.t("nav.porzadki")
-        assert win.home_view.tile_popraw.text() == i18n.t("home.tile.fix")
+        zdanie = win.tasks_view.blad_licznikow.text()
+        assert zdanie
+        assert win.nav.item(NAV_PORZADKI).text() == i18n.t("nav.porzadki_count", n="!")
+        assert win.nav.item(NAV_PORZADKI).toolTip() == zdanie
+        assert win.home_view.tile_popraw.text() == i18n.t("home.tile.fix_count", n="!")
+        assert win.home_view.tile_popraw.toolTip() == zdanie
         assert not win.tasks_view.blad_licznikow.isHidden()
         assert _task_item(win, "dup_frames").flags() & Qt.ItemIsEnabled
+    finally:
+        win.close()
+
+
+def test_porazka_rachunku_bez_watkow_daje_wykrzyknik_a_wynik_go_zdejmuje(qapp, tmp_path, monkeypatch):
+    """AR-326: pierwszy rachunek liczników w trybie bez wątków (rachunek synchroniczny montażu) pada - plakietka
+    „Porządki (!)” i kafel „Popraw · !” z podpowiedzią = zdanie błędu (dawniej plakietka zostawała gołe
+    „Porządki”, czytane jak zero); następny udany rachunek (wejście w Porządki) daje liczbę i zdejmuje
+    podpowiedź. Falsyfikatory: brak sygnału `rachunek_padl` z rachunku synchronicznego; brak zdjęcia podpowiedzi
+    przy liczbie."""
+    import sqlite3
+    from horreum.gui import i18n, tasks as tasks_mod
+    prawdziwy = tasks_mod._stan_licznikow
+    pada = {"tak": True}
+
+    def _stan(con):
+        if pada["tak"]:
+            raise sqlite3.OperationalError("database is locked")
+        return prawdziwy(con)
+    monkeypatch.setattr(tasks_mod, "_stan_licznikow", _stan)
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        item = win.nav.item(NAV_PORZADKI)
+        zdanie = win.tasks_view.blad_licznikow.text()
+        assert zdanie and item.text() == i18n.t("nav.porzadki_count", n="!"), item.text()
+        assert item.toolTip() == zdanie
+        assert win.home_view.tile_popraw.text() == i18n.t("home.tile.fix_count", n="!")
+        pada["tak"] = False
+        win._show_view(NAV_PORZADKI)
+        assert win.tasks_view.ma_rachunek()
+        assert "!" not in item.text() and item.toolTip() == ""
+        assert win.home_view.tile_popraw.toolTip() == i18n.t("home.tile.fix_tip")
+    finally:
+        win.close()
+
+
+def test_rachunek_padl_starego_widoku_nie_rusza_plakietki_nowej_bazy(qapp, tmp_path):
+    """AR-326: sygnał porażki z tokenem montażu sprzed przełączenia bazy nie stawia „!” na plakietce nowej bazy.
+    Falsyfikator: gospodarz bez porównania tokenu w `_on_rachunek_padl`."""
+    from horreum.gui import i18n
+    win = MainWindow(_seeded_db(tmp_path, "a.db", object_axis=True))
+    try:
+        stary = win.tasks_view
+        win.open_path(_seeded_db(tmp_path, "b.db", object_axis=True))
+        przed = win.nav.item(NAV_PORZADKI).text()
+        stary.rachunek_padl.emit(stary.montaz, "stare zdanie")
+        assert win.nav.item(NAV_PORZADKI).text() == przed != i18n.t("nav.porzadki_count", n="!")
+        win.tasks_view.rachunek_padl.emit(win.tasks_view.montaz, "nowe zdanie")
+        assert win.nav.item(NAV_PORZADKI).text() == i18n.t("nav.porzadki_count", n="!")
     finally:
         win.close()
 
@@ -2141,8 +2208,8 @@ def test_faza_tla_odrzuca_koniec_starego_widoku_i_ustepuje_fazie_pierwszego_plan
     """AR-175, dwa kanały fazy: spóźnione `liczenie_w_toku(False)` widoku sprzed przełączenia bazy nie
     gasi fazy tła nowej bazy; koniec tła w czasie fazy pierwszego planu nie zdejmuje jej - etykieta
     wraca do pustej dopiero po `_end_phase`.
-    Mutanty: slot bez sprawdzenia nadawcy (stary widok gasi fazę nowej); koniec tła pisze etykietę
-    wprost (faza pierwszego planu znika)."""
+    Mutanty: slot bez sprawdzenia tokenu montażu (stary widok gasi fazę nowej, AR-326); koniec tła pisze
+    etykietę wprost (faza pierwszego planu znika)."""
     from horreum.gui import i18n
     _w_tle(monkeypatch)
     brama, wszedl, _w, _g = _brama_rachunku(monkeypatch, baza="b.db")
@@ -2154,7 +2221,8 @@ def test_faza_tla_odrzuca_koniec_starego_widoku_i_ustepuje_fazie_pierwszego_plan
         win.open_path(_seeded_db(tmp_path, "b.db", object_axis=True))
         assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
         assert win.phase_label.text() == i18n.t("busy.counting_tasks")
-        stary.liczenie_w_toku.emit(seria, False)          # spóźniony koniec serii starej bazy
+        assert stary.montaz != win.tasks_view.montaz
+        stary.liczenie_w_toku.emit(stary.montaz, seria, False)   # spóźniony koniec serii starej bazy
         assert win.phase_label.text() == i18n.t("busy.counting_tasks")
         win._say_phase(i18n.t("busy.refresh_views"))
         assert win.phase_label.text() == i18n.t("busy.refresh_views")   # pierwszy plan przed tłem
@@ -2374,7 +2442,9 @@ def test_zmiana_motywu_nie_zapisuje_werdyktu_optyki_osi_teleskopu(qapp, tmp_path
     `itemChanged`, a ten w komórce optyki ZAPISUJE werdykt ręki (`_on_item_changed` → `_on_optics_edited`).
     Komórka ręki i komórka „nieaktualne” (kolumna automatu inna niż moda plików): zmiana motywu tam
     i z powrotem - zero zapisów optyki, zero odczytów osi, zero komunikatów, zdarzeń `telescope.*_user_set`
-    tyle samo, kolory z motywu. Mutant: `odswiez_motyw` bez `_loading`."""
+    tyle samo, kolory z motywu. Mutant: `odswiez_motyw` bez `_loading` RAZEM z podpięciem `itemChanged` zamiast
+    filtra ról `dataChanged` (AR-326 - każda z dwóch straży sama trzyma test zielonym; filtr pinuje
+    `test_gui_optyka_teleskopu.py::test_przemalowanie_komorki_optyki_poza_straza_nie_zapisuje_reki`)."""
     from horreum.gui import theme
     from horreum.gui.app import COL_FOCAL, ROLA_RODZAJU_KOLORU
     sciezka = _seeded_db(tmp_path, object_axis=True)
@@ -2533,4 +2603,67 @@ def test_klik_odlozony_przepada_z_porazka_rachunku(qapp, tmp_path, monkeypatch):
         assert tasks.pages.currentIndex() == 0
     finally:
         brama.set()
+        win.close()
+
+
+# ======================================================================== AR-326: osie leniwe osobnym przełącznikiem
+
+@pytest.mark.zmienia_motyw
+def test_osie_leniwe_bez_watkow_tla_czytaja_baze_przy_wejsciu(qapp, tmp_path, monkeypatch):
+    """AR-326: `_osie_leniwie` jest osobnym przełącznikiem - w trybie BEZ wątków tła (`_pola_poza_watkiem=False`)
+    osie mogą być leniwe: montaż ich nie czyta, klik w wiersz „Teleskopy bez etykiety” (prawdziwy `mouseClick`)
+    czyta oś teleskopu, a zmiana motywu przemalowuje wczytaną oś bez zapisu werdyktu ręki.
+    Falsyfikator: `TasksView(..., leniwie=self._pola_poza_watkiem)` (stan sprzed AR-326 - oś czyta w montażu)."""
+    from PySide6.QtTest import QTest
+    from horreum.gui import theme
+    monkeypatch.setattr(MainWindow, "_osie_leniwie", True)
+    sciezka = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(sciezka)
+    try:
+        os_tel = win.axis_view
+        assert os_tel._nieaktualny and os_tel.table.rowCount() == 0
+        assert win.object_view._nieaktualny
+        win.resize(1200, 800)
+        win.show()
+        win._show_view(NAV_PORZADKI)
+        tasks = win.tasks_view
+        rect = tasks.tasks.visualItemRect(_task_item(win, "telescopes_unlabeled"))
+        QTest.mouseClick(tasks.tasks.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+        _pompuj()
+        assert not os_tel._nieaktualny and os_tel.table.rowCount() > 0
+        przed = win.con.execute("SELECT count(*) FROM event WHERE verb LIKE 'telescope.%_user_%'").fetchone()[0]
+        for motyw in ("light", "dark"):
+            win._on_theme(motyw)
+        assert win.con.execute("SELECT count(*) FROM event WHERE verb LIKE 'telescope.%_user_%'"
+                               ).fetchone()[0] == przed
+    finally:
+        win._on_theme(theme.DEFAULT)
+        win.close()
+
+
+# ======================================================================== AR-327: raport paska bez cichego ucięcia
+
+def test_dlugi_raport_po_krotkim_ma_szerokosc_etykiety_od_razu(qapp, tmp_path):
+    """AR-327 („Baza: …” ucięte bez wielokropka tuż po otwarciu): zaraz po `_flash`, BEZ
+    obrotu pętli zdarzeń, etykieta raportu mieści swój tekst albo tekst kończy się wielokropkiem - układ paska
+    przeliczony przed malowaniem. Zmierzone natywnie przed zmianą: 259 px etykiety przy 626 px tekstu do
+    pierwszego `processEvents`. Kontrakt geometryczny bez pikseli (pierwszą klatkę mierzy sonda natywna).
+    Falsyfikator: `_wyswietl` bez `layout().activate()`."""
+    from PySide6.QtGui import QFontMetrics
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        win.resize(1600, 800)
+        win.show()
+        _pompuj()
+        win._flash("krótko", gest=False)
+        _pompuj()
+        # Zdanie dłuższe od poprzedniego, ale mieszczące się w pasku - bez elizji (zdanie za długie kończyłoby
+        # się wielokropkiem i test nie mierzyłby szerokości etykiety).
+        win._flash("Baza: X:\\katalog\\podkatalog\\pf4.db", gest=False)
+        rl = win.report_label
+        tekst = rl.text()
+        szerokosc = QFontMetrics(rl.font()).horizontalAdvance(tekst)
+        assert not tekst.endswith("…") and szerokosc < win.statusBar().width() // 2, "test nie mierzy etykiety"
+        assert rl.width() >= szerokosc, (rl.width(), szerokosc)
+    finally:
         win.close()

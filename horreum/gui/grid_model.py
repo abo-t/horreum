@@ -467,7 +467,7 @@ _PRESET_LABELS = {
 # jest czysty (`test_gui_grid`, `_PRESET_CZYSTY`).
 _PRESET_CZYSTY = "Przegląd"
 # Rola pozycji listy perspektyw z etykietą BAZOWĄ (bez sufiksu „(zmieniona)", FH-12).
-_ROLA_ETYKIETY = Qt.UserRole + 1
+_ROLA_ETYKIETY = rows.ROLA_ETYKIETY_PERSPEKTYWY
 # PARA FLAGA → ZAPYTANIE MA JEDNO MIEJSCE (BP-4): `refresh()` buduje z tej tabeli listę trimów,
 # a `_trim_aktywny()` odpowiada z niej recepcie powrotu. Wcześniej recepcie odpowiadał atrybut
 # instancji stawiany RAZ w `refresh()`: poprawny wyłącznie przez kolejność wywołań, bez strażnika.

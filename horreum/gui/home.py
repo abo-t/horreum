@@ -719,14 +719,19 @@ class HomeView(QWidget):
         zniwa.setToolTip(i18n.t("pipeline.refuse.delivery_running") if self._zniwa_bieg
                          else i18n.t("pipeline.refuse.writeback") if self._zniwa_zapis else "")
 
-    def ustaw_popraw(self, n):
+    def ustaw_popraw(self, n, powod=""):
         """Licznik kafla Popraw - ta sama liczba, co plakietka Porządków (gospodarz podaje ją z tego
         samego sygnału); przy zerze goły czasownik, jak goła plakietka. `None` = rachunek liczników
         jeszcze trwa (montaż z liczeniem w tle, AR-175): „Popraw · …” i podpowiedź, że liczę - goły
-        czasownik znaczy „nic do poprawy”, a tego jeszcze nie wiadomo."""
+        czasownik znaczy „nic do poprawy”, a tego jeszcze nie wiadomo. `"!"` = pierwszy rachunek padł
+        (AR-326): „Popraw · !” z podpowiedzią `powod` (zdanie błędu z Porządków) - liczby nie ma."""
         if n is None:
             self.tile_popraw.setText(i18n.t("home.tile.fix_count", n="…"))
             self.tile_popraw.setToolTip(i18n.t("busy.counting_tasks"))
+            return
+        if n == "!":
+            self.tile_popraw.setText(i18n.t("home.tile.fix_count", n="!"))
+            self.tile_popraw.setToolTip(powod)
             return
         self.tile_popraw.setText(i18n.t("home.tile.fix") if n == 0
                                  else i18n.t("home.tile.fix_count", n=n))

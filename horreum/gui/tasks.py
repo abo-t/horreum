@@ -378,9 +378,17 @@ def _stan_licznikow(con):
     `_CZEKA_NA_FAKTY_KOPII`. Bez widżetów: ten sam kod liczy wątek GUI (`refresh_counts`) i wątek
     tła (`_LicznikiWorker`) na własnym połączeniu. Predykat kopii ma jednego właściciela (ten sam
     SELECT steruje etapem Dostawy), tryb `porownywalne` odcina kandydatów, których fakty żadnego
-    porównania kopii nie ruszą."""
+    porównania kopii nie ruszą.
+
+    Kopie niezbadane wiersza bajtów (AR-327): podpowiedź nazywa gest Dostawy jego napisem
+    (`pipeline.etykieta_gestu_kopii`), a napis zależy od obu robót - `scan.copy_facts_waiting` liczy się tylko,
+    gdy wiersz ma kopie niezbadane (64-84 ms na kopii pf4): w wątku tła przy rachunku `w_tle`
+    (`_LicznikiWorker`), a na wątku GUI przy odczycie synchronicznym `refresh_counts` (wejście w Porządki,
+    powrót z podstrony, tryb bez wątków tła)."""
     state = queries.tasks_state(con)
     state.update(_liczniki_osi(con))       # AR-59/AR-41 - od właścicieli predykatów
+    if state.get("header_nonprintable_unread"):
+        state["copy_facts_waiting"] = scan.copy_facts_waiting(con)
     return state, scan.copy_facts_candidates(con, porownywalne=True)
 
 
@@ -600,15 +608,21 @@ class TasksView(QWidget):
     # SERIA BIEGÓW W TLE (AR-175): `(numer serii, True)` przy starcie pierwszego biegu, `(ten sam numer,
     # False)` po ostatnim biegu łańcucha - wynik, druga porażka albo zatrzymanie widoku. Ponowienie po
     # porażce i bieg zamówiony w trakcie należą do tej samej serii. Numer pozwala gospodarzowi odrzucić
-    # koniec serii, której fazy już nie pokazuje.
-    liczenie_w_toku = Signal(int, bool)
+    # koniec serii, której fazy już nie pokazuje. Pierwszy człon to TOKEN MONTAŻU widoku (`montaz`, AR-326):
+    # gospodarz rozpoznaje po nim widok bieżącej bazy, nie po `sender()`.
+    liczenie_w_toku = Signal(object, int, bool)
+    # Pierwszy rachunek padł, zanim jakikolwiek przyłożono (AR-326): `(token montażu, zdanie błędu)` - plakietka
+    # i kafel mówią „!”, nie gołe „Porządki”, które czyta się jak zero. Później porażka zostawia stan poprzedni.
+    rachunek_padl = Signal(object, str)
 
-    def __init__(self, con, now_fn=_utc_now_iso, parent=None, *, leniwie=False):
+    def __init__(self, con, now_fn=_utc_now_iso, parent=None, *, leniwie=False, montaz=None):
         """`leniwie=True` (gospodarz w trybie wątków tła, AR-175): osie teleskopu i obiektu nie czytają
         bazy w konstruktorze - odczyt przy pierwszym pokazaniu podstrony (wejście z wiersza i tak
-        czyta bazę od nowa). Domyślnie jak dotąd - widok samodzielny czyta od razu."""
+        czyta bazę od nowa). Domyślnie jak dotąd - widok samodzielny czyta od razu. `montaz` - token montażu
+        gospodarza (AR-326), niesiony w sygnałach `liczenie_w_toku` i `rachunek_padl`; widok samodzielny - `None`."""
         super().__init__(parent)
         self.con = con
+        self.montaz = montaz
         self._niewiadome = set()    # klucze wierszy w stanie „?" z ostatniego `refresh_counts`
         # Seria biegów w tle (`liczenie_w_toku`) i czy widok przyłożył już JAKIKOLWIEK rachunek - do
         # pierwszego wiersze akcyjne są wygaszone (klik w „?” bez rachunku szedłby do perspektywy).
@@ -679,7 +693,18 @@ class TasksView(QWidget):
         # strona 0: lista zadań
         list_page = QWidget()
         lv = QVBoxLayout(list_page)
-        lv.addWidget(QLabel(i18n.t("tasks.list_title")))
+        # FAZA PRZY TYTULE LISTY (AR-327): do pierwszego wyniku rachunku w tle wiersze są wygaszone, a „Liczę
+        # Porządki…” stało wyłącznie na pasku statusu - zmierzone natywnie ~1870 px od listy (okno 2560 px).
+        # Ten sam stan widoku (`_sync_fazy`) mówi więc też tu; pasek gospodarza zostaje drugim nośnikiem.
+        tytul = QHBoxLayout()
+        tytul.setContentsMargins(0, 0, 0, 0)
+        tytul.addWidget(QLabel(i18n.t("tasks.list_title")))
+        self.faza_licznikow = QLabel(i18n.t("busy.counting_tasks"))
+        self.faza_licznikow.setProperty("role", "secondary")
+        self.faza_licznikow.setVisible(False)
+        tytul.addWidget(self.faza_licznikow)
+        tytul.addStretch(1)
+        lv.addLayout(tytul)
         # Rachunek liczników na wątku GUI padł (każda droga `refresh_counts`, także ponowienie po
         # biegu w tle): lista zostaje przy stanie poprzednim, a ten wiersz mówi klasą błędu, ze
         # szczegółem pod kursorem (AR-198). Schowany do porażki, gaśnie przy przyłożonym rachunku.
@@ -863,7 +888,14 @@ class TasksView(QWidget):
         if w_toku:
             self._seria += 1
         self._liczy = w_toku
-        self.liczenie_w_toku.emit(self._seria, w_toku)
+        self._sync_fazy()
+        self.liczenie_w_toku.emit(self.montaz, self._seria, w_toku)
+
+    def _sync_fazy(self):
+        """Faza przy tytule listy (AR-327): widoczna, póki seria biegów w tle trwa, a żaden rachunek nie został
+        przyłożony ani nie padł - potem mówią liczby albo wiersz błędu."""
+        self.faza_licznikow.setVisible(self._liczy and not self._przylozony
+                                       and self.blad_licznikow.isHidden())
 
     def odswiez_przy_wejsciu(self):
         """Wejście w Porządki (gospodarz, `_on_nav_changed`): liczniki ze stanu, ale BEZ rachunku,
@@ -947,12 +979,15 @@ class TasksView(QWidget):
         i szczegół pod kursorem - JEDNO miejsce dla rachunku synchronicznego (`refresh_counts`) i drugiej
         porażki biegu w tle (`_on_liczniki_failed`). Porażka PIERWSZEGO rachunku zapala wiersze
         wygaszone do wyniku (AR-175): bez rachunku prowadzą tam, gdzie przed tą zmianą - zdanie błędu
-        mówi, że liczb nie ma."""
-        self.blad_licznikow.ustaw(i18n.t("tasks.counts_failed", msg=tekst_powodu(powod)),
-                                  wiersz_systemu(powod))
+        mówi, że liczb nie ma. Porażka bez żadnego przyłożonego rachunku mówi gospodarzowi `rachunek_padl`
+        (AR-326) - plakietka bez liczby czytałaby się jak zero."""
+        zdanie = i18n.t("tasks.counts_failed", msg=tekst_powodu(powod))
+        self.blad_licznikow.ustaw(zdanie, wiersz_systemu(powod))
         self.blad_licznikow.setVisible(True)
+        self._sync_fazy()
         if not self._przylozony:
             self._zapal_wiersze()
+            self.rachunek_padl.emit(self.montaz, zdanie)
 
     def _klik_w_wiersz(self, item):
         """Klik w wiersz listy. Wiersz WYGASZONY do pierwszego rachunku (AR-175) nie prowadzi nigdzie -
@@ -1157,6 +1192,7 @@ class TasksView(QWidget):
         self.blad_licznikow.setVisible(False)
         self._zapal_wiersze()          # wygaszone do pierwszego rachunku (AR-175)
         self._przylozony = True
+        self._sync_fazy()
         czeka = len(kandydaci)
         badge = 0
         self._niewiadome = set()
@@ -1218,8 +1254,12 @@ class TasksView(QWidget):
             if robota != n:                             # część liczby z decyzją - nie robota
                 tip += _zdanie_podzbioru(key, n - robota)
             if niezbadane:
+                # Podpowiedź nazywa PRZYCISK Dostawy jego napisem (AR-327) - nie etap „Fakty kopii”, którego
+                # w Dostawie nikt nie widzi. Stan spoza `_stan_licznikow` (atrapy) - napis z samych bajtów.
+                from horreum.gui.pipeline import etykieta_gestu_kopii
+                czekaja = state.get("copy_facts_waiting") or scan.CopyFactsWaiting(bytes=niezbadane)
                 kopie = i18n.t_plural("tasks.header_nonprintable_unread_tip", niezbadane,
-                                      etap=i18n.t("pipeline.stage.copy_facts"))
+                                      gest=etykieta_gestu_kopii(czekaja))
                 tip = f"{tip}\n{kopie}" if tip else kopie
             elif czesciowe:
                 kopie = zdanie_kopii_bez_zeznania(

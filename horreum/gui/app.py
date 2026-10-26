@@ -15,12 +15,13 @@ panelu), UI NIE KŁAMIE (akcja niemożliwa = przycisk wyłączony, nie klik→b�
 ETAP 2 (PLAN_gui_pipeline): okno aplikacji to `MainWindow` (menu Plik: Otwórz/Nowa baza, nawigacja
 między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY widok `TelescopeAxisView`;
 `TelescopeAxisWindow` zostaje jako cienka powłoka-okno (zgodność wstecz: `python -m horreum.gui` i testy)."""
+import itertools
 import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QLocale, QSettings, QTimer, QUrl, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QLocale, QSettings, QTimer, QUrl, Signal
 from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QFontMetrics, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -42,6 +43,7 @@ from horreum.gui.config_dialog import AssignConfigDialog, dopasuj_wysokosc
 from horreum.gui.flows.znajdz_view import PREZENTACJA_KLASYCZNA, PREZENTACJA_ZNAJDZ, ZnajdzView
 from horreum.gui.observatory_dialog import AssignObservatoryDialog
 from horreum.gui.map_view import SitesMapView
+from horreum.gui import rows
 from horreum.gui.rows import TwoPartDelegate
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import header_form
@@ -53,8 +55,8 @@ from horreum.resolve.paths import STACK_KIND, object_folder
 # przesunięcia wypisałoby `object_raw` w kolumnie liczby, a tooltip wiersza informacyjnego —
 # w kolumnie adnotacji. Nazwane stałe, bo ta kolizja jest niewidoczna w miejscu użycia.
 _REVIEW_TAG = Qt.UserRole                   # dispatch (`_selected_review`) — kontrakt sprzed zmiany
-_REVIEW_PAYLOAD = Qt.UserRole + 4
-_REVIEW_INFO = Qt.UserRole + 5
+_REVIEW_PAYLOAD = rows.ROLA_PRZEGLADU_PAYLOAD
+_REVIEW_INFO = rows.ROLA_PRZEGLADU_INFO
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
@@ -292,7 +294,9 @@ use_theme(theme.DEFAULT)             # init przy imporcie (QColor bez QApplicati
 # idzie za motywem, więc element zapisuje przy budowie, CZYM jest jego kolor (rodzaj, nie wartość),
 # a `odswiez_motyw` widoku przemalowuje z tej roli - bez ponownego odczytu bazy. Numer poza pasmem
 # `rows` ({+1, +2, +3, +6}) i rolami kolejki przeglądu (+4, +5); `config_dialog` zajmuje +10/+11.
-ROLA_RODZAJU_KOLORU = Qt.UserRole + 7
+ROLA_RODZAJU_KOLORU = rows.ROLA_RODZAJU_KOLORU
+# Wartość komórki optyki do edytora (liczba bez znacznika ręki) - rejestr ról w `rows`.
+_ROLA_WARTOSCI_EDYTORA = rows.ROLA_WARTOSCI_EDYTORA
 # Rodzaje elementów osi (kolejka przeglądu obiektów, komórki optyki osi teleskopu) → kolor z motywu.
 _RODZAJ_SZARY, _RODZAJ_WERDYKT = "szary", "werdykt"
 
@@ -360,7 +364,7 @@ class _OptykaEdycja(QStyledItemDelegate):
         return editor
 
     def setEditorData(self, editor, index):
-        editor.setText(index.data(Qt.UserRole + 1) or "")
+        editor.setText(index.data(_ROLA_WARTOSCI_EDYTORA) or "")
 
     def setModelData(self, editor, model, index):
         tid, kolumna, tekst = editor.property("telescope_id"), editor.property("kolumna"), editor.text()
@@ -467,6 +471,9 @@ class TelescopeAxisView(QWidget):
     czasu akcji (ISO-8601); domyślnie zegar UTC, wstrzykiwalne dla testów."""
 
     status_message = Signal(str)
+    # „Cofnij dopisanie” tej osi zamknął gest „Dopisz nowy…” teleskopu (id) - gospodarz zdejmuje jego wpis z kolejki
+    # odłożonych recept osi obiektu (AR-321, `MainWindow._na_cofniete_dopisanie`).
+    dopisanie_cofniete = Signal(int)
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None, *, leniwie=False):
         """`leniwie=True` (podstrona Porządków przy montażu w trybie wątków tła, AR-175): bez odczytu
@@ -483,6 +490,7 @@ class TelescopeAxisView(QWidget):
         self._dopisane = set()               # teleskopy z niecofniętym „Dopisz nowy…” (AR-133)
         self._sort = None                    # (kolumna, Qt.SortOrder) z kliku nagłówka; None = read-model
         self._z_zatwierdzenia = False        # refresh z zatwierdzenia komórki - edytor otwarty, wpis zapisany
+        self._przeladowan = 0                # licznik `refresh` - pętla `_on_data_changed` staje po przeładowaniu
         # Odczyt odłożony do pokazania (`leniwie`, wzór `ObjectAxisView.odswiez_gdy_widoczny`); każde
         # `refresh` znacznik zdejmuje.
         self._nieaktualny = False
@@ -528,7 +536,11 @@ class TelescopeAxisView(QWidget):
         self.table.verticalHeader().setVisible(False)
         self._edit_triggers = self.table.editTriggers()   # przywracane po set_busy(False) (wizytator T3)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        self.table.itemChanged.connect(self._on_item_changed)
+        # ZAPIS TYLKO ZE ZMIANY TEKSTU (AR-326): `itemChanged` strzela przy KAŻDYM `setData` elementu - kolor,
+        # podpowiedź, rola rodzaju - a w komórce optyki zapisuje werdykt ręki (`_on_optics_edited`). Sygnał
+        # modelu niesie role (zmierzone, PySide6 6.9.2: `setForeground` [9], `setToolTip` [3], `setText` i edycja
+        # [0, 2]), więc slot filtruje je u źródła; straż `_loading` zostaje drugą linią obrony.
+        self.table.model().dataChanged.connect(self._on_data_changed)
         # Edytor optyki zatwierdza WPIS, nie zmianę tekstu komórki (wizytacja N5): `itemChanged` nie
         # strzela, gdy user wpisze to, co komórka już pokazuje (1600 z plików), a to jest właśnie
         # potwierdzenie ręką - teleskop w Horreum to wartość potwierdzona ręką (D-1012-2).
@@ -607,6 +619,7 @@ class TelescopeAxisView(QWidget):
         przesuwają). Porządek z kliku nagłówka (`self._sort`) przeżywa przeładowanie: wiersze są
         układane przed wypełnieniem, więc numer wiersza w pętli = wiersz na ekranie. Otwarty edytor
         komórki przebudowa zamyka bez zapisu - pasek mówi wtedy, że wpis trzeba powtórzyć."""
+        self._przeladowan += 1
         prev = self._selected_telescope_id()
         przerwana = None if self._z_zatwierdzenia else _zdanie_przerwanej_edycji(self.table)
         self._nieaktualny = False            # odczyt odłożony przy montażu (`leniwie`, AR-175) - zrobiony
@@ -679,7 +692,7 @@ class TelescopeAxisView(QWidget):
         tekst = _fmt(value)
         self._set_cell(r, c, tekst, editable=True, align=_NUM_ALIGN)
         item = self.table.item(r, c)
-        item.setData(Qt.UserRole + 1, tekst)                 # wartość do edytora (bez znacznika)
+        item.setData(_ROLA_WARTOSCI_EDYTORA, tekst)          # wartość do edytora (bez znacznika)
         z_plikow = (i18n.t("axis.tel.files_focal" if c == COL_FOCAL else "axis.tel.files_f_ratio",
                            v=_fmt(files), n=files_n)
                     if files is not None else i18n.t("axis.tel.files_none"))
@@ -703,9 +716,9 @@ class TelescopeAxisView(QWidget):
         nie dotykał - bursztyn ciemnego motywu zostawał na białej bazie jasnego (~1,9:1) do najbliższego
         `refresh`. Bez odczytu bazy; komórki bez rodzaju mają kolor tekstu z palety.
 
-        POD `_loading`, jak wypełnianie w `refresh`: `setForeground` emituje `itemChanged`, a ten w komórce
-        optyki ZAPISUJE werdykt ręki (`_on_item_changed` → `_on_optics_edited`) - bez straży zmiana motywu
-        utrwalałaby wartość automatu jako zdanie człowieka."""
+        POD `_loading`, jak wypełnianie w `refresh`: przemalowanie nie jest zmianą tekstu, więc filtr ról
+        `_on_data_changed` (AR-326) i tak go nie przepuszcza do zapisu werdyktu ręki; straż zostaje drugą linią
+        obrony - każde przemalowanie pod tym samym strażnikiem co `refresh`."""
         self._loading = True
         try:
             for r in range(self.table.rowCount()):
@@ -810,6 +823,26 @@ class TelescopeAxisView(QWidget):
 
     def _flash(self, msg):
         self.status_message.emit(msg)
+
+    # Role, które znaczą „zmienił się tekst komórki” - tylko one docierają do zapisu (`_on_data_changed`).
+    _ROLE_TEKSTU = frozenset((int(Qt.DisplayRole), int(Qt.EditRole)))
+
+    def _on_data_changed(self, top_left, bottom_right, roles):
+        """`dataChanged` modelu tabeli (AR-326): zmiana tekstu komórki (rola wyświetlania albo edycji; pusta
+        lista ról = „wszystko się zmieniło”) idzie do `_on_item_changed`, zmiana koloru, podpowiedzi, fontu
+        albo roli danych - nie. Bez tego filtra każde `setForeground`/`setToolTip` poza `_loading` w kolumnie
+        optyki zapisywałoby werdykt ręki. Zapis komórki przeładowuje widok (`refresh` przebudowuje tabelę), więc
+        reszta zakresu mówi już o innych wierszach - pętla staje po pierwszym przeładowaniu."""
+        if roles and not self._ROLE_TEKSTU.intersection(int(r) for r in roles):
+            return
+        przeladowan = self._przeladowan
+        for r in range(top_left.row(), bottom_right.row() + 1):
+            for c in range(top_left.column(), bottom_right.column() + 1):
+                item = self.table.item(r, c)
+                if item is not None:
+                    self._on_item_changed(item)
+                    if self._przeladowan != przeladowan:
+                        return
 
     def _on_item_changed(self, item):
         """Edycja in-line etykiety → `repo.label_telescope`. Pusty label → `ValueError` (kasowanie
@@ -924,6 +957,8 @@ class TelescopeAxisView(QWidget):
             self._flash(zdanie_cofniecia_dopisania(wynik, nazwa))
         finally:
             self.refresh()
+        if tid not in self._dopisane:            # gest zamknięty (odmowa klingi zostawia go otwartym)
+            self.dopisanie_cofniete.emit(tid)
 
     def _zdanie_przywrocenia(self, row):
         """Podpowiedź „Przywróć z plików" PRZED zapisem (wizytacja N5): co zostanie w polu po zdjęciu
@@ -2261,6 +2296,33 @@ class RepairHeaderDialog(QDialog):
         super().done(r)
 
 
+class _Odlozona:
+    """Wpis kolejki odłożonych recept osi (AR-296, AR-310, AR-321) - DANE zamiaru, nie domknięcie: `klucz`
+    (`("karty", commit)` / `("dopisanie", teleskop)`), `zapis_plikow` (czeka też na koniec zapisu do plików),
+    `argumenty` (reszta zamiaru), `czeka` - bieg blokady, którego koniec wpis podaje: `(rodzaj, numer)`, rodzaj
+    `"etap"` (bieg Dostawy) albo `"zapis"` (zapis do plików Zbiorów), numer z `_NUMERY_BLOKAD`, i `podany` - koniec
+    blokady albo otwarcie bazy już go podały; potem podaje go wyłącznie wejście w Porządki i ogon gestu z recepty
+    (`ObjectAxisView._podaj_odlozone`). `recepta` - obiekt recepty z ostatniego podania, a `przed` - zdanie, do którego
+    dokleiło ono gotowość (wynik gestu, raport Porządków, `None`): wpis, któremu baza nic nie zostawiła, rozpoznaje po
+    nich swoją receptę na pasku gospodarza (`ObjectAxisView.oczysc_martwe`, po tożsamości obiektu)."""
+    __slots__ = ("klucz", "zapis_plikow", "argumenty", "czeka", "podany", "recepta", "przed")
+
+    def __init__(self, klucz, zapis_plikow, argumenty, czeka):
+        assert czeka[0] in ("etap", "zapis") and czeka[1] is not None, czeka
+        self.klucz = klucz
+        self.zapis_plikow = zapis_plikow
+        self.argumenty = argumenty
+        self.czeka = czeka
+        self.podany = False
+        self.recepta = None
+        self.przed = None
+
+
+# Numery biegów blokad osi obiektu (`ObjectAxisView._blokady`) - wspólne dla procesu, więc wpis kolejki, który przeżył
+# przemontowanie widoków (AR-321), nie trafi na bieg nowego widoku o tym samym numerze.
+_NUMERY_BLOKAD = itertools.count(1)
+
+
 class ObjectAxisView(QWidget):
     """Osadzalny widok osi OBIEKT (PLAN_gui_object + #8/P4): biblioteka (obiekty → klatki, filtr
     po teleskopie/kamerze/filtrze) + kolejka przeglądu (obiekt-review / kopie nieczytelne /
@@ -2297,6 +2359,9 @@ class ObjectAxisView(QWidget):
     # None) - JEDNĄ emisją: gospodarz stawia zdanie na pasku bez odkładania do Porządków i wiąże z nim
     # receptę (`MainWindow._wynik_cofniecia_osi`).
     wynik_cofniecia = Signal(object, object)
+    # (recepta, przed) wpisu kolejki odłożeń, któremu baza nie zostawiła nic do wykonania (gest zamknięty inną drogą):
+    # gospodarz zdejmuje tę receptę z paska i swojego stanu (`MainWindow._zdejmij_martwa_recepte`), AR-321.
+    recepta_martwa = Signal(object, object)
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None, *, leniwie=False):
         """`leniwie=True` (podstrona Porządków przy montażu w trybie wątków tła, AR-175): bez odczytu
@@ -2308,6 +2373,9 @@ class ObjectAxisView(QWidget):
         self._now = now_fn
         self._busy = False                    # pipeline w biegu → akcja zapisu wygaszona
         self._foreign_wb = False              # DRUGA powierzchnia writebacku pisze (mutex, D-PD-3)
+        # Bieżący bieg każdej blokady odkładającej recepty osi - `(rodzaj, numer)`, `None` poza biegiem (`_odloz`,
+        # `_koniec_blokady`): koniec biegu podaje wyłącznie wpisy, które odłożył TEN bieg.
+        self._blokady = {"etap": None, "zapis": None}
         self._copies_mode = False             # prawy panel w trybie „kopie" (Z6)
         self._loading = False                 # tłumi sygnały selekcji podczas programowego wypełniania
         # Otwarte okno piszące karty do plików: „Napraw nagłówek…" albo „Zatwierdź ze ścieżki…"
@@ -2322,12 +2390,18 @@ class ObjectAxisView(QWidget):
         self._wb_kart = None
         self._gen_kart = 0
         self._bieg_kart = (-1, None, "", False)   # (generacja, commit, nota, dokończenie) biegu
-        # JEDNO odłożenie recept osi (AR-296, AR-310): kolejka FIFO wpisów `(klucz, zapis_plikow,
-        # gotowosc)` odmówionych w biegu blokady - klucz `("karty", commit)` / `("dopisanie", teleskop)`,
-        # `zapis_plikow` = czeka też na zapis do plików, `gotowosc()` → (zdanie, recepta) przy podaniu.
-        # Żyje w widoku tej bazy: przełączenie bazy i zamknięcie programu ją kończą (drogi trwałe -
-        # wiersz Porządków, Oś teleskopu, CLI).
+        # JEDNO odłożenie recept osi (AR-296, AR-310): kolejka FIFO wpisów `_Odlozona` odmówionych w biegu
+        # blokady; zdanie i receptę składa przy podaniu BIEŻĄCY widok (`_gotowosc`), pytając bazę, czy zamiar ma
+        # jeszcze co wykonać. Wpis to DANE, nie domknięcie (AR-321): kolejka należy do gospodarza i tej bazy
+        # (`uzyj_kolejki`) i przeżywa przemontowanie widoków, a recepta związana ze starym widokiem wykonałaby się
+        # na zamkniętym połączeniu. Widok bez gospodarza ma własną listę. Wpis schodzi z kolejki przy starcie
+        # swojego gestu (`zdejmij_odlozona`), przy zamknięciu gestu drogą trwałą w tym oknie (Oś teleskopu - przez
+        # gospodarza) i po cichu przy podaniu, gdy baza mówi, że nie ma już czego cofać (wiersz Porządków, CLI).
+        # Podany, a zgaszony bez kliku, wraca przy wejściu w Porządki - doklejony do odłożonego tam raportu.
         self._odlozone = []
+        # Straż stojącej recepty (AR-321): gospodarz mówi, czy na pasku stoi recepta, którą ktoś czyta - podanie
+        # z końca blokady jej nie nadpisuje. Widok bez gospodarza - nic nie stoi.
+        self.recepta_stoi = lambda: False
         self._zapis_kart_trwa = False
         # Takt 3 (`Rozwiąż`) należy do Dostawy: gospodarz wstrzykuje wywołanie ISTNIEJĄCEJ,
         # bramkowanej drogi (`PipelineView.run_stage`). None = widok bez gospodarza (testy samego
@@ -3443,7 +3517,7 @@ class ObjectAxisView(QWidget):
 
         Odmowa przy biegu Dostawy i przy zapisie szuflady Zbiorów mówi zdaniem z numerem commitu (polecenie
         CLI w szczególe i w polu polecenia), a oś PAMIĘTA receptę i podaje ją ponownie, gdy blokada się
-        skończy (`set_busy(False)`, `set_writeback_busy(False)` -> `_podaj_odlozone`). Wyłączność BAJTÓW między
+        skończy (`set_busy(False)`, `set_writeback_busy(False)` -> `_koniec_blokady`). Wyłączność BAJTÓW między
         instancjami trzyma rdzeń (blokada pliku `writeback._exclusive`, region == wynik commitu,
         operacja cofnięcia pod `BEGIN IMMEDIATE`) - drugi wykonawca dostaje wynik rdzenia, który pasek
         mówi `ogon_cofniecia`. Bieg pamięta GENERACJĘ z chwili startu (`_bieg_kart`): demontaż widoku
@@ -3461,12 +3535,11 @@ class ObjectAxisView(QWidget):
         z paska - przycisk, który nic by nie zrobił, nie stoi czynny w biegu.
 
         DOKOŃCZENIE Z WIERSZA PORZĄDKÓW (`dokoncz`, AR-318): przed biegiem sprawdzenie wyłączności bazy
-        (`_obcy_wlasciciel_bazy`) - inne okno Horreum trzyma szufladę → zdanie z jego PID-em, recepta
+        (`_obcy_wlasciciel_bazy`) - inny proces Horreum (okno albo wiersz poleceń) trzyma szufladę → zdanie
+        z jego PID-em, recepta
         zostaje; etykieta recepty i zdania wyniku to „Dokończ cofnięcie (commit N)”."""
-        from functools import partial
         if self._busy or self._foreign_wb:
-            self._odloz(("karty", commit_id), True,
-                        partial(self._gotowosc_kart, commit_id, uwaga, dokoncz))
+            self._odloz(("karty", commit_id), True, (uwaga, dokoncz), self._blokady["etap" if self._busy else "zapis"])
             self.wynik_cofniecia.emit(self._zdanie_polecenia_kart(i18n.t(
                 "wb.undo_recipe_busy" if self._busy else "wb.undo_recipe_foreign", id=commit_id),
                 commit_id), None)
@@ -3485,7 +3558,7 @@ class ObjectAxisView(QWidget):
             self._wb_kart = WritebackRunner(queries.db_path_of(self.con), now_fn=self._now, parent=self)
             self._wb_kart.busy_changed.connect(self._na_zajetosc_kart)
             self._wb_kart.busy_changed.connect(self.writeback_busy)   # mutex gridu, Dostawy, Domu
-        self._zdejmij_odlozona(("karty", commit_id))
+        self.zdejmij_odlozona(("karty", commit_id))
         self._bieg_kart = (self._gen_kart, commit_id, uwaga, dokoncz)
         self.wynik_cofniecia.emit(i18n.t("wb.undo_recipe_started", id=commit_id), None)
         self._wb_kart.start("undo", commit_id, on_progress=self._postep_cofniecia_kart,
@@ -3503,36 +3576,115 @@ class ObjectAxisView(QWidget):
         return (self._zdanie_polecenia_kart(i18n.t("wb.undo_recipe_ready", id=commit_id), commit_id),
                 self._recepta_cofniecia_kart(commit_id, uwaga, dokoncz=dokoncz))
 
-    def _odloz(self, klucz, zapis_plikow, gotowosc):
-        """Recepta osi odmówiona w biegu blokady wchodzi na KONIEC kolejki odłożeń (FIFO); druga odmowa
-        tego samego zamiaru (klucz) zastępuje wpis i przesuwa go na koniec."""
-        self._zdejmij_odlozona(klucz)
-        self._odlozone.append((klucz, zapis_plikow, gotowosc))
+    def _zywy(self, wpis):
+        """Czy zamiar wpisu ma jeszcze co wykonać - stan z BAZY, nie z pamięci osi (gest zamknięty inną drogą: wiersz
+        Porządków, Oś teleskopu, drugie okno, CLI). Karty: choć jeden backup commitu bez trwałego dowodu zakończenia
+        cofnięcia (reguła rdzenia `writeback._cofniecie_zakonczone`, bez odczytu plików). Dopisanie: gest
+        „Dopisz nowy…” otwarty (`queries.open_telescope_adds`)."""
+        rodzaj, cel = wpis.klucz
+        if rodzaj == "karty":
+            from horreum import writeback      # lazy: rdzeń pisarza ciągnie astropy (`_cofnij_zapis_kart` też)
+            return not all(writeback._cofniecie_zakonczone(self.con, cel, b)
+                           for b in writeback.backups_for_commit(self.con, cel))
+        assert rodzaj == "dopisanie", wpis.klucz
+        return cel in queries.open_telescope_adds(self.con)
 
-    def _zdejmij_odlozona(self, klucz):
-        """Start gestu z recepty zdejmuje jej wpis z kolejki odłożeń - podany drugi raz nic by nie zrobił."""
-        self._odlozone = [w for w in self._odlozone if w[0] != klucz]
+    def oczysc_martwe(self):
+        """Wpisy kolejki, którym baza nie zostawiła nic do wykonania (`_zywy`), schodzą po cichu - KAŻDY, nie tylko
+        głowa - a recepta, którą taki wpis już podał, idzie do gospodarza (`recepta_martwa`): zdejmuje ją z paska
+        i ze swojego stanu, zanim cokolwiek ją przywróci albo poda następny wpis. Woła to każda chwila podania
+        (`_podaj_odlozone`, przed strażą stojącej recepty), wejście w Porządki przed przywróceniem recepty
+        i zamknięcie gestu drogą trwałą tego okna (`MainWindow._na_cofniete_dopisanie`)."""
+        for w in list(self._odlozone):
+            if not self._zywy(w):
+                self.zdejmij_odlozona(w.klucz)
+                if w.recepta is not None:
+                    self.recepta_martwa.emit(w.recepta, w.przed)
 
-    def _podaj_odlozone(self, *, po=None):
-        """Koniec blokady (etap Dostawy, zapis Zbiorów) albo koniec gestu z recepty: PIERWSZY wpis kolejki
-        bez blokady wraca ze zdaniem gotowości i receptą - jeden na wywołanie, bo pasek ma jeden przycisk
-        recepty (człon drugi recepty znaczy „potem” w czasie). Kanał `wynik_cofniecia` zdejmuje starszy
-        odłożony raport Porządków (`MainWindow._wynik_cofniecia_osi`).
+    def _odloz(self, klucz, zapis_plikow, argumenty, czeka):
+        """Recepta osi odmówiona w biegu blokady `czeka` (`(rodzaj, numer)` z `_blokady`) wchodzi na KONIEC kolejki
+        odłożeń (FIFO) jako wpis niepodany; druga odmowa tego samego zamiaru (klucz) zastępuje wpis i przesuwa go na
+        koniec."""
+        self.zdejmij_odlozona(klucz)
+        self._odlozone.append(_Odlozona(klucz, zapis_plikow, argumenty, czeka))
+
+    def zdejmij_odlozona(self, klucz):
+        """Wpis zamiaru `klucz` schodzi z kolejki odłożeń: start gestu z recepty (podany drugi raz nic by nie
+        zrobił), zamknięcie gestu drogą trwałą w tym oknie (gospodarz - `MainWindow._na_cofniete_dopisanie`),
+        podanie wpisu, któremu baza nie zostawiła nic do cofnięcia. W MIEJSCU: lista należy do gospodarza
+        (`uzyj_kolejki`), nowa lista zerwałaby to powiązanie."""
+        self._odlozone[:] = [w for w in self._odlozone if w.klucz != klucz]
+
+    def uzyj_kolejki(self, kolejka):
+        """Gospodarz podaje kolejkę odłożeń TEJ bazy (AR-321, `MainWindow._kolejki_osi`) - po powrocie do bazy
+        ta sama lista wraca do osi nowego montażu. Lista zastępuje własną listę widoku."""
+        self._odlozone = kolejka
+
+    def _gotowosc(self, wpis):
+        """Zdanie i recepta wpisu kolejki przy podaniu - składane przez BIEŻĄCY widok z danych wpisu (żywego -
+        `oczysc_martwe` biegnie przed podaniem)."""
+        klucz = wpis.klucz
+        if klucz[0] == "karty":
+            return self._gotowosc_kart(klucz[1], *wpis.argumenty)
+        assert klucz[0] == "dopisanie", klucz
+        return self._gotowosc_dopisania(klucz[1], *wpis.argumenty)
+
+    def podaj_odlozone(self, *, doklej=None, tylko_niepodane=False):
+        """Publiczne wejście gospodarza (AR-321) - `True`, gdy coś wyemitowano:
+
+          * wejście w Porządki (`doklej` = raport odłożony do Porządków, który właśnie stanął na pasku): pierwszy
+            wpis kolejki, także już podany, wraca z gotowością DOKLEJONĄ do tego raportu - recepta jest dostępna
+            do startu swojego gestu, a raport, który na człowieka czekał, nie znika pod nią;
+          * koniec otwarcia bazy (`tylko_niepodane`): wyłącznie wpis, którego żadna chwila jeszcze nie podała
+            (powrót do bazy z odłożeniem sprzed przełączenia) - podany nie zastępuje drugi raz „Baza: … wczytana”."""
+        return self._podaj_odlozone(doklej=doklej, wybor=(lambda w: not w.podany) if tylko_niepodane else None)
+
+    def _koniec_blokady(self, blokada):
+        """Koniec biegu blokady `blokada` (`(rodzaj, numer)`) podaje WYŁĄCZNIE wpisy, które odłożył ten bieg i których
+        jeszcze nic nie podało - każdy raz (`_Odlozona.podany`); wpisy innego biegu i podane już raz zostają przy
+        swoich chwilach (wejście w Porządki, ogon gestu), więc start i koniec zapisu Zbiorów albo koniec następnego
+        etapu nie zastępują cudzych raportów tą samą gotowością. Wpis tego biegu wciąż trzymany drugą blokadą (etap
+        w biegu, zapis do plików Zbiorów) czeka odtąd na koniec jej biegu."""
+        for w in self._odlozone:
+            if w.czeka == blokada and not w.podany:
+                if self._busy:
+                    w.czeka = self._blokady["etap"]
+                elif w.zapis_plikow and self._foreign_wb:
+                    w.czeka = self._blokady["zapis"]
+        self._podaj_odlozone(wybor=lambda w: w.czeka == blokada and not w.podany)
+
+    def _podaj_odlozone(self, *, po=None, doklej=None, wybor=None):
+        """Koniec blokady (`_koniec_blokady`), koniec gestu z recepty (`po`) albo chwila gospodarza
+        (`podaj_odlozone`): NAJPIERW wszystkie wpisy, którym baza nic nie zostawiła, schodzą z kolejki razem ze
+        swoją receptą na pasku gospodarza (`oczysc_martwe`) - martwa głowa nie zasłania wpisu za nią, a martwa
+        recepta nie trzyma straży. Potem PIERWSZY wpis kolejki (spośród `wybor`) bez blokady wraca ze zdaniem
+        gotowości i receptą - jeden na wywołanie, bo pasek ma jeden przycisk recepty (człon drugi recepty znaczy
+        „potem” w czasie) - i jest odtąd podany; wpis pamięta wyemitowaną receptę i zdanie, do którego ją dokleił.
+        Kanał `wynik_cofniecia` zdejmuje starszy odłożony raport Porządków (`MainWindow._wynik_cofniecia_osi`). Wpis
+        ZOSTAJE w kolejce do startu swojego gestu (AR-321).
+
+        STRAŻ STOJĄCEJ RECEPTY (AR-321): bez `po` nic nie pada, gdy gospodarz mówi, że recepta stoi
+        (`recepta_stoi`) - koniec zapisu Zbiorów po końcu etapu nadpisywał receptę podaną przed chwilą.
 
         `po` = zdanie wyniku gestu, który skończył się bez własnej recepty (cofnięcie domknięte, wynik
         cofnięcia dopisania): wynik i gotowość następnego wpisu idą JEDNĄ emisją - wynik nie znika pod
-        nowym zdaniem. W tym podaniu wpis czekający na zapis do plików pomija własny bieg osi
-        (`_zapis_kart_trwa`) - bieg właśnie się kończy, a klik i tak trafi po `busy_changed(False)`.
-        `True` - coś wyemitowano."""
-        if self._busy:
+        nowym zdaniem; gest właśnie zużył stojącą receptę, więc straż go nie zatrzymuje. W tym podaniu wpis
+        czekający na zapis do plików pomija własny bieg osi (`_zapis_kart_trwa`) - bieg właśnie się kończy,
+        a klik i tak trafi po `busy_changed(False)`. `doklej` = raport, który już stoi na pasku - gotowość
+        dochodzi do niego (wejście w Porządki). `True` - coś wyemitowano."""
+        self.oczysc_martwe()
+        if self._busy or (po is None and self.recepta_stoi()):
             return False
-        for i, (_klucz, zapis_plikow, gotowosc) in enumerate(self._odlozone):
-            if zapis_plikow and (self._foreign_wb or (self._zapis_kart_trwa and po is None)):
+        for w in self._odlozone:
+            if wybor is not None and not wybor(w):
                 continue
-            del self._odlozone[i]
-            zdanie, recepta = gotowosc()
-            if po is not None:
-                zdanie = zlacz_zdania(" - ", (po, zdanie))
+            if w.zapis_plikow and (self._foreign_wb or (self._zapis_kart_trwa and po is None)):
+                continue
+            zdanie, recepta = self._gotowosc(w)
+            przed = po if po is not None else doklej
+            if przed:
+                zdanie = zlacz_zdania(" - ", (przed, zdanie))
+            w.podany, w.recepta, w.przed = True, recepta, przed or None
             self.wynik_cofniecia.emit(zdanie, recepta)
             return True
         return False
@@ -3703,17 +3855,15 @@ class ObjectAxisView(QWidget):
         W TRAKCIE ETAPU DOSTAWY GEST JEST ODKŁADANY (AR-310): wpis `("dopisanie", teleskop)` wchodzi do
         tej samej kolejki odłożeń co cofnięcie zapisu kart (SPOT, `_odloz`), zdanie odmowy mówi, kiedy
         recepta wróci, a koniec etapu podaje ją kanałem `wynik_cofniecia` (`set_busy(False)` ->
-        `_podaj_odlozone`) - raporty odświeżenia po przebiegu już jej nie gaszą. Dopisanie czeka
+        `_koniec_blokady`) - raporty odświeżenia po przebiegu już jej nie gaszą. Dopisanie czeka
         wyłącznie na etap: to zapis do BAZY, poza mutexem zapisu plików (jak „Przypisz zestaw…”).
         Wynik gestu przy niepustej kolejce idzie razem z gotowością następnego wpisu."""
-        from functools import partial
         if self._busy:
-            self._odloz(("dopisanie", telescope_id), False,
-                        partial(self._gotowosc_dopisania, telescope_id, telescope_label))
+            self._odloz(("dopisanie", telescope_id), False, (telescope_label,), self._blokady["etap"])
             self.wynik_cofniecia.emit(i18n.t("object.config_undo_add.deferred",
                                              telescope=telescope_label), None)
             return
-        self._zdejmij_odlozona(("dopisanie", telescope_id))
+        self.zdejmij_odlozona(("dopisanie", telescope_id))
         wynik = repo.undo_new_telescope(self.con, telescope_id=telescope_id, now=self._now())
         zdanie = zdanie_cofniecia_dopisania(wynik, telescope_label)
         if not self._odlozone:
@@ -3866,18 +4016,33 @@ class ObjectAxisView(QWidget):
 
         OTWARTE okno naprawy jest MODALNE, więc poza zasięgiem tej metody (gasi widżety WIDOKU) —
         fakt przekazujemy mu wprost, inaczej „Zapisz karty" zostałby klikalny w trakcie biegu."""
+        bieg = self._przelacz_blokade("etap", busy)
         self._busy = busy
         self._sync_assign_enabled()
         if self._repair_dlg is not None:
             self._repair_dlg.set_pipeline_busy(busy)
-        self._podaj_odlozone()               # recepty osi odłożone przez etap (AR-296, AR-310)
+        if bieg is not None:
+            self._koniec_blokady(bieg)       # recepty osi odłożone przez ten etap (AR-296, AR-310)
 
     def set_writeback_busy(self, busy):
         """DRUGA powierzchnia writebacku (grid) pisze do plików — „Napraw nagłówek…" gaśnie
         (mutex, D-PD-3: dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`)."""
+        bieg = self._przelacz_blokade("zapis", busy)
         self._foreign_wb = busy
         self._sync_assign_enabled()
-        self._podaj_odlozone()               # …i przez zapis w Zbiorach (AR-296)
+        if bieg is not None:
+            self._koniec_blokady(bieg)       # …i przez ten zapis w Zbiorach (AR-296)
+
+    def _przelacz_blokade(self, rodzaj, w_biegu):
+        """Start biegu blokady `rodzaj` nadaje mu numer (`_blokady`); koniec zdejmuje go i zwraca `(rodzaj, numer)`
+        kończącego się biegu - inaczej (start, zgłoszenie bez zmiany stanu) `None`."""
+        bieg = self._blokady[rodzaj]
+        if w_biegu and bieg is None:
+            self._blokady[rodzaj] = (rodzaj, next(_NUMERY_BLOKAD))
+        elif not w_biegu and bieg is not None:
+            self._blokady[rodzaj] = None
+            return bieg
+        return None
 
 
 # ============================================================ oś OBSERWATORIUM (PLAN_os_obserwatorium §3)
@@ -4425,6 +4590,51 @@ _WIERSZ_PREZENTACJI = {prez: row for row, (_strona, prez) in _TRASY.items() if p
 # Postój na wierszu Dom przed jego odczytem przy przeglądaniu sidebara strzałkami - dłuższy niż
 # odstęp autopowtórzenia klawisza, krótszy niż chwila, po której człowiek czyta ekran.
 _DOM_POSTOJ_MS = 150
+# STRONY LENIWE (AR-325) i widoki, które każda z nich niesie - Dom i Porządki budują się w montażu (strona
+# startu; plakietka i aliasy osi), te trzy przy pierwszym wejściu albo pierwszym dostępie do atrybutu.
+class _PoMalowaniu(QObject):
+    """Kotwica „po pierwszym malowaniu” dobudowy Zbiorów (AR-325): zdarzenie o NISKIM priorytecie zamówione na końcu
+    otwarcia bazy Qt doręcza po `UpdateRequest` okna (malowanie, ten sam niski priorytet, wysłane wcześniej - w montażu),
+    więc wywołanie zwrotne biegnie po pierwszym malowaniu Domu. Zegar 0 ms (priorytet zwykły) wyprzedzał malowanie:
+    zmierzone natywnie z oknem na pulpicie - pierwsze malowanie Domu 628-1102 ms po `open_path` wobec 25-33 ms bez
+    dobudowy. Odwołanie: `QCoreApplication.removePostedEvents` z typem `TYP`."""
+    TYP = QEvent.Type(QEvent.registerEventType())
+
+    def __init__(self, zwrot, parent):
+        super().__init__(parent)
+        self._zwrot = zwrot
+
+    def zamow(self):
+        QCoreApplication.postEvent(self, QEvent(self.TYP), Qt.LowEventPriority.value)
+
+    def odwolaj(self):
+        QCoreApplication.removePostedEvents(self, self.TYP)
+
+    def event(self, ev):
+        if ev.type() == self.TYP:
+            self._zwrot()
+            return True
+        return super().event(ev)
+
+
+_WIDOKI_STRONY = {STRONA_ZBIORY: ("grid_view", "znajdz_view"),
+                  STRONA_DOSTAWA: ("pipeline_view", "przyjmij_view"),
+                  STRONA_PLANER: ("planner_view",)}
+_STRONA_WIDOKU = {nazwa: strona for strona, nazwy in _WIDOKI_STRONY.items() for nazwa in nazwy}
+
+
+def _widok_strony(nazwa):
+    """Atrybut widoku strony leniwej (AR-325, kontrakt K1): dostęp po montażu BUDUJE stronę, jeśli jeszcze jej
+    nie ma (`MainWindow._zbuduj_strone`) - kod i testy, które mówią „po `open_path` widoki istnieją”, dostają
+    widok. Bez bazy (przed montażem, po demontażu) - `None`. Kod gospodarza, który NIE ma budować (powiadomienia
+    stanu: koniec przebiegu, motyw, mutex, straż zamknięcia), czyta `MainWindow._gotowy`."""
+    def _get(self):
+        widok = self._strony.get(nazwa)
+        if widok is None and _STRONA_WIDOKU[nazwa] in self._zaslepki:
+            self._zbuduj_strone(_STRONA_WIDOKU[nazwa])
+            widok = self._strony.get(nazwa)
+        return widok
+    return property(_get, doc=f"Widok `{nazwa}` strony leniwej (AR-325) - buduje stronę przy pierwszym dostępie.")
 
 
 class MainWindow(QMainWindow):
@@ -4446,15 +4656,57 @@ class MainWindow(QMainWindow):
     # Ten sam przełącznik oddaje w tło skład zbioru gridu (`ZbiorWorker`, AR-27) - oba wątki tła
     # Zbiorów chodzą razem, więc test, który chce widoku przewidywalnego, wyłącza oba jednym ruchem.
     _pola_poza_watkiem = True
+    # Osie Porządków bez odczytu w montażu (AR-175) - OSOBNY przełącznik (AR-326): dawniej szły za
+    # `_pola_poza_watkiem`, więc testy bez wątków tła nigdy nie widziały osi leniwych. Test, który czyta oś
+    # zaraz po `open_path` bez wejścia w jej podstronę, wyłącza go jawnie.
+    _osie_leniwie = True
+    # Strony Zbiorów, Dostawy i Planera budowane przy pierwszym wejściu (AR-325) - zmierzone natywnie na kopii
+    # pf4: `open_path` 617-767 ms jednego przestoju pętli (5/5 biegów), dolna granica bez tych trzech stron
+    # 155-194 ms; o przestoju decydowała strona Zbiorów (jej wątki tła startowały w montażu i odbierały GIL
+    # reszcie montażu). `False` - montaż buduje wszystko od razu (`zbuduj_strony`).
+    _strony_leniwie = True
+    # Strona Zbiorów DOBUDOWANA W BEZCZYNNOŚCI zaraz po otwarciu bazy w pokazanym oknie (AR-325, `_zamow_dobudowe`) -
+    # zmierzone natywnie na kopii pf4: pierwsze wejście w niezbudowane Zbiory 290-326 ms (przestój ≥ 300 ms w 3 z 5
+    # biegów; pierwszy `sizeHint` przycisku w budowie strony, ~272 ms w zimnym procesie, cProfile). Budowa rusza po
+    # pierwszym malowaniu Domu i po serii liczników Porządków montażu (`_sprawdz_dobudowe`) - wcześniej przesuwała
+    # jedno i drugie. `False` - Zbiory czekają na pierwsze wejście (testy dróg „strona niezbudowana”: komendy,
+    # zatrzaski, porażka budowy).
+    _zbiory_w_bezczynnosci = True
+
+    grid_view = _widok_strony("grid_view")
+    znajdz_view = _widok_strony("znajdz_view")
+    pipeline_view = _widok_strony("pipeline_view")
+    przyjmij_view = _widok_strony("przyjmij_view")
+    planner_view = _widok_strony("planner_view")
 
     def __init__(self, db_path=None, now_fn=_utc_now_iso, on_db_changed=None, parent=None):
         super().__init__(parent)
         self.con = None
         self.db_path = None
-        self.pipeline_view = None       # montuje go `_mount_views`; menu Plik bywa wołane przed bazą
-        # Widoki z uchwytami zapisu do plików - przed montażem ich nie ma (straż zapisu w biegu,
-        # `_odmowa_w_biegu_zapisu`, pyta o nie już przy pierwszym `open_path`).
-        self.grid_view = None
+        # STRONY LENIWE (AR-325): widoki Zbiorów, Dostawy i Planera (`grid_view`, `znajdz_view`, `pipeline_view`,
+        # `przyjmij_view`, `planner_view`) mieszkają w słowniku i powstają przy pierwszym wejściu albo pierwszym
+        # dostępie do atrybutu (property `_widok_strony`); kod gospodarza, który NIE ma budować, czyta `_gotowy`.
+        # Przed montażem i po demontażu - `None` (menu Plik bywa wołane przed bazą, straż zapisu w biegu
+        # `_odmowa_w_biegu_zapisu` pyta już przy pierwszym `open_path`).
+        self._strony = {}
+        self._zaslepki = {}             # `STRONA_*` → pusta zaślepka na stosie, dopóki strona nie powstała
+        self._w_budowie = {}            # `STRONA_*` → widoki utworzone w trwającej budowie (zbieranie przy porażce)
+        # ZATRZASKI STANU (AR-325): bieg Dostawy i zapis do plików (oś, grid) ustawiane PRZED rozesłaniem
+        # do zbudowanych stron; strona budowana później przykłada je, zanim stanie się dostępna.
+        self._dostawa_w_biegu = False
+        self._zapis_w_biegu = {"os": False, "grid": False}
+        self._nav_ostatni = NAV_DOM     # wiersz sidebara ostatniego udanego wejścia (powrót po porażce budowy)
+        # Zegar dobudowy Zbiorów w bezczynności (`_zbiory_w_bezczynnosci`): jeden na okno, zatrzymywany przy budowie na
+        # żądanie, na początku otwarcia bazy i przy zamknięciu okna - stoi PRZED pierwszym `_open_path` konstruktora.
+        # Rusza dopiero po DWÓCH kotwicach montażu (`_sprawdz_dobudowe`): pierwsze malowanie Domu (`_PoMalowaniu`) i
+        # koniec serii liczników Porządków montażu (`_on_liczenie_w_toku`) - obie zdejmuje demontaż (`_clear_views`).
+        self._dobudowa_zbiorow = QTimer(self)
+        self._dobudowa_zbiorow.setSingleShot(True)
+        self._dobudowa_zbiorow.setInterval(0)
+        self._dobudowa_zbiorow.timeout.connect(self._dobuduj_zbiory)
+        self._po_malowaniu = _PoMalowaniu(self._na_malowanie_domu, self)
+        self._kotwica_malowania = False
+        self._kotwica_licznikow = False
         self.object_view = None
         # Recepta osi Porządków razem z raportem, z którym przyszła (`_recepta_porzadkow`, AR-296).
         self._recepta_porzadkow_stan = None
@@ -4480,6 +4732,18 @@ class MainWindow(QMainWindow):
         self._faza_pierwsza = ""
         self._faza_tla = ""
         self._seria_montazu = None
+        # TOKEN MONTAŻU (AR-326): numer bieżącego montażu widoków, niesiony w sygnałach `TasksView`
+        # (`liczenie_w_toku`, `rachunek_padl`) - spóźniony sygnał widoku sprzed przełączenia bazy ma cudzy token.
+        self._montaz = 0
+        # Plakietka Porządków mówi „!” (AR-326) - stan gospodarza ustawiany w `_on_tasks_counts`, nie czytany z napisu.
+        self._plakietka_padla = False
+        # KOLEJKI ODŁOŻONYCH RECEPT OSI (AR-321) per baza tego okna: `queries.klucz_bazy(ścieżka)` → lista wpisów
+        # (`ObjectAxisView._odloz`). Atrybut INSTANCJI - dwa okna w jednym procesie mają osobne kolejki; kolejka
+        # żyje, dopóki okno (program) jest otwarte, i przeżywa przełączenie bazy - powrót do tej samej ścieżki
+        # oddaje ją osi nowego montażu. Tożsamość bazy = napis ścieżki (`normcase(abspath)`), ta sama konwencja
+        # co rejestr przeglądów i blokada szuflady: ta sama baza przez junction albo inny alias ścieżki to inna
+        # kolejka (ograniczenie świadome - `realpath` zamieniłby literę dysku sieciowego na UNC).
+        self._kolejki_osi = {}
         # Numer wersji W TYTULE, bo wydanie jedzie do użytkownika jako JEDEN plik `horreum-gui.exe`
         # (onefile — CLI `horreum --version` nie powstaje) i okno jest wtedy jedyną powierzchnią,
         # na której da się sprawdzić, co się ma. Numer czytany, nie pisany (`horreum/__init__.py`).
@@ -4566,7 +4830,7 @@ class MainWindow(QMainWindow):
             return
         apply_theme(app, name, styl=False)   # Fusion stoi od `main` (AR-175)
         QSettings("Horreum", "Horreum").setValue("ui/theme", name)
-        grid_view = getattr(self, "grid_view", None)
+        grid_view = self._gotowy("grid_view")           # strona niezbudowana weźmie motyw przy budowie (AR-325)
         if grid_view is not None:
             grid_view.table.viewport().update()
             grid_view.facet_rail.refresh_theme()
@@ -4575,7 +4839,7 @@ class MainWindow(QMainWindow):
         obs = getattr(self, "observatory_view", None)   # mapa maluje QPainterem — paleta jej nie odświeży (F8)
         if obs is not None:
             obs.map_view.refresh_theme()
-        planner = getattr(self, "planner_view", None)   # akcenty planera są per MOTYW (T5, wiz R2):
+        planner = self._gotowy("planner_view")          # akcenty planera są per MOTYW (T5, wiz R2):
         if planner is not None:                        # wyszarzenie wiersza, ⚠ nota, „bez luk", chipy
             planner.use_theme(name)
         # KOLOR WYPALONY W ITEMIE NIE ŚLEDZI MOTYWU (wiz T2 N4). `_DIM["fg"]` odświeża się przy
@@ -4708,18 +4972,29 @@ class MainWindow(QMainWindow):
         rozstrzyga `_on_nav_changed` z `_TRASY`."""
         self.nav.setCurrentRow(idx)
 
+    def _wejdz(self, idx):
+        """KOMENDA prowadząca na wiersz `idx` (AR-325): strona leniwa powstaje PRZED przełączeniem wiersza. Porażka
+        budowy wychodzi z komendy wyjątkiem (jedno okno błędu programu) i zatrzymuje ją, zanim cokolwiek zmieni
+        sidebar albo stos - dawniej porażka w `_on_nav_changed` nie przerywała komendy, a jej następny krok budował
+        stronę drugi raz (drugie okno albo sidebar „Znajdź” nad Domem). Po udanej budowie przełączenie już nic nie
+        buduje."""
+        self._zbuduj_strone(_TRASY[idx][0])
+        self._show_view(idx)
+
     def show_find(self, query=None):
         """Wejście do strony zbiorów w prezentacji Znajdź - jedyna droga z Domu i z menu. `query`
         (gdy podane) zastępuje bieżący zbiór wynikiem zapytania; bez niego zbiór zostaje, jaki był.
         Wiersz sidebara przełącza stronę i prezentację (`_on_nav_changed`), a kontener dostaje
         wywołanie jeszcze raz WPROST: wejście z Domu i z menu to zamiar szukania, więc fokus ma
-        trafić w pole także wtedy, gdy przełączenie oddało go liście, która go trzymała."""
-        self._show_view(NAV_ZNAJDZ)
+        trafić w pole także wtedy, gdy przełączenie oddało go liście, która go trzymała. KOMENDA (`_wejdz`): po
+        porażce budowy strony nic dalej."""
+        self._wejdz(NAV_ZNAJDZ)
         self.znajdz_view.show_find(query)
 
     def show_classic(self):
-        """Wejście do strony zbiorów w prezentacji klasycznej (dzisiejszy ekran Zbiorów)."""
-        self._show_view(NAV_ZBIORY)
+        """Wejście do strony zbiorów w prezentacji klasycznej (dzisiejszy ekran Zbiorów) - KOMENDA (`_wejdz`):
+        wołający idą dalej do gridu wyłącznie po udanym wejściu."""
+        self._wejdz(NAV_ZBIORY)
 
     def _strona(self):
         """Bieżąca strona stosu (`STRONA_*`) - miejsce, z którym wiążą się raporty i recepta."""
@@ -4732,6 +5007,19 @@ class MainWindow(QMainWindow):
         if trasa is None:               # nagłówek „Więcej" - ręka go nie wybierze, kod nie powinien
             return
         strona, prezentacja = trasa
+        # Strona leniwa powstaje PRZED pokazaniem (AR-325) - zaślepka nigdy nie staje na ekranie. Porażka budowy
+        # (błąd programu - mówi straż oknem) cofa wiersz sidebara do ostatniego udanego wejścia: strona się nie
+        # zmieniła, a następne wejście buduje od nowa.
+        try:
+            self._zbuduj_strone(strona)
+        except BaseException:
+            self.nav.blockSignals(True)
+            try:
+                self.nav.setCurrentRow(self._nav_ostatni)
+            finally:
+                self.nav.blockSignals(False)
+            raise
+        self._nav_ostatni = row
         self.stack.setCurrentIndex(strona)
         if prezentacja == PREZENTACJA_ZNAJDZ:
             # `show_find` kładzie fokus w polu zapytania - dobrze, gdy człowiek przyszedł szukać, ale
@@ -4759,6 +5047,10 @@ class MainWindow(QMainWindow):
         # Recepta osi Porządków (AR-296, AR-133) mówi o Porządkach: schodzi także przy wejściu w Zbiory -
         # dawniej zostawała tam, gdy grid nie miał własnej recepty, a wynik jej wykonania szedł odłożony
         # do Porządków, czyli tam, gdzie człowieka nie było.
+        if strona == STRONA_PORZADKI:
+            # Przed przywróceniem recepty: wpis kolejki odłożeń, któremu baza nic nie zostawiła (gest zamknięty inną
+            # drogą - CLI, drugie okno), schodzi razem ze swoją receptą (`_zdejmij_martwa_recepte`, AR-321).
+            self.object_view.oczysc_martwe()
         stan = self._recepta_porzadkow_stan
         if strona != STRONA_ZBIORY or (stan is not None and self._czlony_recepty is stan[0].czlony):
             self._ustaw_recepte("")
@@ -4774,6 +5066,11 @@ class MainWindow(QMainWindow):
             # Recepta wraca razem z raportem, z którym przyszła - także odłożonym: `_flash` wyżej
             # postawił na pasku TEN SAM obiekt raportu (AR-296).
             self._pokaz_recepte(stan[0])
+        if strona == STRONA_PORZADKI:
+            # Recepta osi odłożona przez blokadę, która nie mogła paść (stała inna recepta, zgasła bez kliku),
+            # wraca przy wejściu tam, gdzie mieszka (AR-321) - o ile nic jej nie blokuje i nic nie stoi - doklejona
+            # do raportu odłożonego do Porządków, który właśnie stanął: nie zastępuje go.
+            self.object_view.podaj_odlozone(doklej=msg or None)
         if strona == STRONA_DOM:
             # Dom mówi o bazie w chwili wejścia. Przełączenie z listy (strzałki, klik) czeka na
             # postój - klik i Enter odczytują od razu w `_on_nav_wejscie`; z kodu (Dom, menu) od razu.
@@ -4799,7 +5096,10 @@ class MainWindow(QMainWindow):
         nie zmienia zbioru), Dom odczytuje się od razu, bez czekania na postój."""
         row = self.nav.row(item)
         if row == NAV_ZNAJDZ:
-            self.znajdz_view.show_find()
+            # Wejście nieudane (porażka budowy strony - `_on_nav_changed` cofnął wiersz) - nic dalej: odczyt widoku
+            # budowałby stronę drugi raz w tym samym geście.
+            if self.nav.currentRow() == NAV_ZNAJDZ:
+                self.znajdz_view.show_find()
         elif row == NAV_DOM:
             self._dom_po_postoju.stop()
             self._odswiez_dom()
@@ -4831,6 +5131,7 @@ class MainWindow(QMainWindow):
             self.nav.setCurrentRow(row)
         finally:
             self.nav.blockSignals(False)
+        self._nav_ostatni = row
 
     def _zatrzymaj_watki_widokow(self):
         """Zbierz wątki tła widoków, ZANIM widoki znikną (przełączenie bazy, zamknięcie okna).
@@ -4851,7 +5152,11 @@ class MainWindow(QMainWindow):
         # unieważnia spóźnione callbacki (AR-296), więc pytamy ją jawnie, jak grid. Warunkiem jest
         # ŻYWY widok, nie niepusty stos: montaż przerwany wyjątkiem (AR-302, start z bazą) zostawia
         # grid z wątkiem w biegu, zanim jakakolwiek strona trafi na stos.
-        widoki.extend(v for v in (self.grid_view, self.object_view) if v is not None and isValid(v))
+        # Strona leniwa (AR-325): grid tylko zbudowany (`_gotowy` - zbieranie wątków nie buduje strony), a widoki
+        # budowy w toku (zamknięcie w trakcie `_zbuduj_strone`) też.
+        widoki.extend(v for v in (self._gotowy("grid_view"), self.object_view) if v is not None and isValid(v))
+        for utworzone in self._w_budowie.values():
+            widoki.extend(v for v in utworzone if isValid(v))
         widoki.extend(self.findChildren(QDialog))
         for w in widoki:
             zatrzymaj = getattr(w, "zatrzymaj_pola", None)
@@ -4871,6 +5176,16 @@ class MainWindow(QMainWindow):
         self._recepta_strumienia = None
         self._recepta_porzadkow_stan = None  # wykonawca na osi, która zaraz zniknie (AR-296)
         self.home_view = None
+        # Strony leniwe i zatrzaski stanu (AR-325) mówią o bazie, która znika: widoki stron zbudowanych schodzą
+        # razem ze stosem (grid w kontenerze Znajdź, pipeline w kontenerze Dostawy), zaślepki też.
+        self._strony.clear()
+        self._zaslepki.clear()
+        self._wstrzymaj_dobudowe()           # zegar i kotwice dobudowy mówią o stronie, której już nie ma
+        self._kotwica_malowania = self._kotwica_licznikow = False
+        self._plakietka_padla = False        # „Porządki (!)” mówi o rachunku widoku, który znika (AR-326)
+        self._dostawa_w_biegu = False
+        self._zapis_w_biegu = {"os": False, "grid": False}
+        self._nav_ostatni = NAV_DOM
         self.nav.clear()
         self.nav.setVisible(False)
         while self.stack.count():
@@ -4886,81 +5201,40 @@ class MainWindow(QMainWindow):
         `_TRASY`. Importy widżetów lazy (wzorzec etapów; dla `TasksView`
         OBOWIĄZKOWO - `tasks.py` importuje z `app.py` module-level, F5R2#1: import na górze domknąłby
         cykl). Pod-widoki osi z `TasksView` ALIASOWANE na oknie - kontrakt `axis_view`/
-        `observatory_view`/`object_view` przeżywa przemontowanie bez zmian."""
-        from horreum.gui.pipeline import (                     # lazy: Qt-import tylko gdy montujemy
-            REASON_COPY_FACTS, PipelineView)
-        from horreum.gui.flows.przyjmij import PrzyjmijView
-        from horreum.gui.grid import FramesView
-        from horreum.gui.tasks import TasksView
-        from horreum.gui.planner import PlannerView
+        `observatory_view`/`object_view` przeżywa przemontowanie bez zmian.
+
+        STRONY LENIWE (AR-325): montaż buduje Dom (strona startu) i Porządki (plakietka, aliasy osi), a na
+        indeksach Zbiorów, Dostawy i Planera stawia puste zaślepki - te strony buduje `_zbuduj_strone` przy
+        pierwszym wejściu albo pierwszym dostępie do ich atrybutu. Wiązania z nimi idą przez gospodarza:
+        KOMENDY człowieka (wiersz przerwanej zmiany obiektu, „?” Porządków, „Wydaj” Domu, takt 3 naprawy) budują
+        adresata przed wykonaniem, POWIADOMIENIA stanu (mutex zapisu, koniec przebiegu, gest osi z raportu
+        Dostawy) dochodzą wyłącznie do stron zbudowanych (`_gotowy`). Kolejność stron na stosie = `STRONA_*`."""
+        from horreum.gui.tasks import TasksView                # lazy: Qt-import tylko gdy montujemy
         from horreum.gui.home import HomeView
 
         self._clear_views()
         motyw = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
-        pipeline = PipelineView(self.db_path, now_fn=self._now)
-        pipeline.status_message.connect(self._flash_dostawy)
-        pipeline.stage_status.connect(self._raport_etapu)   # „<etap>: gotowe.” ustępuje gestowi (AR-97)
-        # `stage_finished` ŚWIADOMIE NIEPODPIĘTE: widoki odświeża koniec PRZEBIEGU
-        # (`running_changed(False)`), nie koniec etapu - patrz `_odswiez_widoki_po_przebiegu`.
-        pipeline.running_changed.connect(self._on_pipeline_running)
-        pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
-        # „Wciągnij z WBPP…”: okno żniw potrzebuje połączenia z bazą, którego Dostawa nie trzyma.
-        pipeline.open_harvest.connect(self._on_open_harvest)
-        pipeline.set_work_root(self._work_wbpp())   # widok powstaje z każdą bazą, folder roboczy jest jeden
-        self.pipeline_view = pipeline
-        # Strona Dostawy: TEN SAM `PipelineView` w kontenerze z raportem „Co przyszło” (jak Znajdź
-        # nad gridem) - drugi widok Dostawy rozjechałby wątek etapów, mutex i przyciski.
-        przyjmij = PrzyjmijView(self.con, pipeline, now_fn=self._now)
-        przyjmij.status_message.connect(self._flash)
-        przyjmij.open_tasks.connect(self._on_kubelek_porzadkow)
-        self.przyjmij_view = przyjmij
 
-        grid = FramesView(self.con, now_fn=self._now, pola_poza_watkiem=self._pola_poza_watkiem)
-        grid.status_message.connect(self._flash_grid)
-        grid.load_report.connect(self._raport_wczytania_gridu)
-        grid.ponow_raport_wczytania()        # zbiór startu jedzie z wątku tła od `__init__` (AR-27)
-        grid.status_recipe.connect(self._recepta_gridu)   # recepta ma własny nośnik (FH-2)
-        grid.writeback_busy.connect(self._on_writeback_busy)
-        self.grid_view = grid
-
-        # Osie Porządków bez odczytu w montażu (AR-175) - ten sam przełącznik co wątki tła Zbiorów:
-        # test, który chce widoku przewidywalnego, dostaje osie wczytane od razu.
-        tasks = TasksView(self.con, now_fn=self._now, leniwie=self._pola_poza_watkiem)
+        # Osie Porządków bez odczytu w montażu (AR-175) - własny przełącznik `_osie_leniwie` (AR-326); token
+        # montażu w konstruktorze rozróżnia sygnały tego widoku od spóźnionych sygnałów widoku sprzed zmiany bazy.
+        self._montaz += 1
+        tasks = TasksView(self.con, now_fn=self._now, leniwie=self._osie_leniwie, montaz=self._montaz)
         self.tasks_view = tasks
         self.axis_view = tasks.axis_view
         self.observatory_view = tasks.observatory_view
         self.object_view = tasks.object_view
+        # Kolejka odłożonych recept osi należy do OKNA i tej bazy (AR-321): powrót do bazy oddaje ją nowej osi.
+        # Oś pyta gospodarza, czy recepta stoi na pasku, zanim poda następny wpis (straż stojącej recepty).
+        tasks.object_view.uzyj_kolejki(self._kolejki_osi.setdefault(queries.klucz_bazy(self.db_path), []))
+        tasks.object_view.recepta_stoi = self._recepta_stoi
         # Takt 3 P-D: okno naprawy nagłówka nie ma własnego resolvera — dostaje ISTNIEJĄCĄ drogę
         # etapu wraz z przełączeniem widoku na Dostawę (precedens „3→1"). Wstrzykiwane TU, bo tylko
         # gospodarz zna obie powierzchnie.
         tasks.object_view.run_stage_fn = self._resolve_after_repair
-        # …i to samo dla gestów panelu Rodowód (R2 oś stosu, E4-5 oś kalibracji): panel zmienia
-        # fakt, na którym stoi dobór, więc musi umieć domknąć własny gest - z NAZWĄ etapu. Bez tej
-        # linii user wędrował na inny ekran po przycisk stojący obok wyboru katalogu (firsthand 0808).
-        grid.run_stage_fn = self._etap_po_gescie_rodowodu
-        # Dwuklik w panelu rodowodu prowadzi do klatek w Zbiorach - nawigację zna gospodarz.
-        grid.show_frames_fn = self.show_frames_in_collections
-        tasks.object_view.writeback_busy.connect(grid.set_writeback_busy)   # mutex w drugą stronę
-        tasks.object_view.writeback_busy.connect(pipeline.set_writeback_busy)   # i Dostawa gaśnie
-        tasks.object_view.writeback_busy.connect(przyjmij.set_writeback_busy)   # …z gestem raportu
-        # CZWARTA POWIERZCHNIA gestu osi obiektu (S2b, §4/14c-f): gest z paska Zbiorów zmienia
-        # kolejkę przeglądu w oknie osi — a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna
-        # obie strony, więc to on je łączy (grid nie importuje osi, oś nie importuje gridu).
-        # Leniwie (AR-84): niewidoczna oś przeładuje się przy pokazaniu - gest pada w Zbiorach.
-        grid.object_axis_changed.connect(tasks.object_view.odswiez_gdy_widoczny)
-        grid.observatory_axis_changed.connect(tasks.observatory_view.refresh)   # przeniesione stanowisko
-        # …i PIĄTA: badge sidebara, widoczny CAŁY CZAS. Liczy `review_frame_ids`, czyli dokładnie
-        # populację, którą oba gesty zmieniają — bez tej linii licznik zadań pokazywał stan sprzed
-        # gestu aż do wejścia w Porządki, więc „stan widoczny bez klikania" przestawał być prawdą
-        # zaraz po akcji, która go zmieniła (adjudykacja recenzji S2b).
-        # Podpięte pod sygnał STANU PORZĄDKÓW, nie pod `object_axis_changed`: ten drugi milczał
-        # przy gestach osi żywotności klatki („Przywróć"/„Wycofaj"), więc plakietka zostawała przy
-        # starej liczbie. Jeden sygnał z ogona każdego gestu gridu, jedno podpięcie tutaj - bez
-        # drugiego podpięcia pod `object_axis_changed`, które odświeżałoby plakietkę dwa razy.
-        # W TLE (AR-84): liczniki po geście stały w ogonie gestu 557 ms na kopii pf4 - liczy je
-        # wątek tła, ten sam przełącznik co skład zbioru (test bez wątków tła liczy inline).
-        grid.stan_porzadkow_changed.connect(
-            lambda: tasks.refresh_counts(w_tle=self._pola_poza_watkiem))
+        # Zapis do plików z paska osi (AR-296) - zatrzask stanu i mutex do zbudowanych stron (AR-325): grid gasi
+        # szufladę, Dostawa i jej raport gasną. Wiązania gridu (gest Zbiorów → oś, plakietka) podpina budowniczy
+        # strony Zbiorów (`_zbuduj_zbiory`), bo grid powstaje później.
+        tasks.object_view.writeback_busy.connect(self._na_zapis_osi)
         # OSIE PORZĄDKÓW MÓWIĄ PRZY ODŚWIEŻENIU („Brak stanowisk na osi…”, „Brak obiektów dla tego
         # filtra…”), a odświeżają się też po przebiegu Dostawy - zdanie przykrywało wtedy status
         # etapu (AR-43), a odmowę kafla Przyjmij wypierało razem z czekającym „gotowe” (AR-97). Ta
@@ -4973,33 +5247,17 @@ class MainWindow(QMainWindow):
         tasks.object_view.status_recipe.connect(self._recepta_porzadkow)
         tasks.open_collection.connect(self._on_open_collection)
         # Wiersz „Przerwane zmiany obiektu” (AR-121) otwiera okno przebiegu przez Zbiory - tam
-        # mieszka mutex zapisu i odświeżenie zbioru oraz plakietki po zapisie albo cofnięciu.
-        tasks.open_object_change_run.connect(grid.otworz_przebieg_zmiany_obiektu)
+        # mieszka mutex zapisu i odświeżenie zbioru oraz plakietki po zapisie albo cofnięciu. KOMENDA (AR-325):
+        # gospodarz buduje Zbiory przed wykonaniem.
+        tasks.open_object_change_run.connect(self._on_przebieg_zmiany_obiektu)
         # Wiersz „?" Porządków prowadzi tam, gdzie jest jego robota - do Dostawy (AR-28 (b)) - i
         # niesie powód: linia nad akcjami mówi, po co człowiek tu jest. Obie drogi do sygnału
-        # (wiersz „?”, pusta perspektywa kopii) czekają na fakty kopii, więc powód jest jeden.
-        tasks.open_intake.connect(lambda: (pipeline.show_reason(REASON_COPY_FACTS),
-                                           self._show_view(NAV_DOSTAWA)))
-        # Pusta perspektywa kopii w Zbiorach mówi zdaniem tego wiersza i prowadzi tą samą drogą -
-        # sygnał na sygnał, więc droga do Dostawy ma jedno podpięcie.
-        grid.open_intake.connect(tasks.open_intake)
+        # (wiersz „?”, pusta perspektywa kopii) czekają na fakty kopii, więc powód jest jeden. KOMENDA (AR-325,
+        # `_on_open_intake`): Dostawa budowana przed wykonaniem.
+        tasks.open_intake.connect(self._on_open_intake)
         tasks.counts_changed.connect(self._on_tasks_counts)
         tasks.liczenie_w_toku.connect(self._on_liczenie_w_toku)   # faza tła (AR-175)
-
-        # Motyw PRZEKAZANY, nie czytany przez widok z rejestru (wiz T5 N4— jeden właściciel faktu).
-        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now, theme_name=motyw)
-        planner.status_message.connect(self._raport_planera)
-        planner.open_sites.connect(self._on_open_sites)                # AR-48: pusty stan → stanowiska
-        planner.show_frames_for.connect(self._on_show_target_frames)   # T5e: most planer → grid
-        self.planner_view = planner
-
-        # Strona zbiorów: TEN SAM grid w kontenerze z paskiem Znajdź - dwie prezentacje jednego
-        # stanu zbioru, nie dwa gridy (JEDEN-STAN-EKRANU).
-        znajdz = ZnajdzView(grid)
-        # Przełączenie prezentacji z wnętrza strony („Zbiory klasyczne" na pasku czasowników
-        # Znajdź) przesuwa wiersz sidebara - inaczej sidebar mówiłby „Znajdź" nad ekranem klasycznym.
-        znajdz.prezentacja_zmieniona.connect(self._on_prezentacja_zmieniona)
-        self.znajdz_view = znajdz
+        tasks.rachunek_padl.connect(self._on_rachunek_padl)       # „Porządki (!)” (AR-326)
 
         # Dom: zamiary człowieka → istniejące drogi. Teczki w tle chodzą razem z wątkami tła
         # Zbiorów - test, który wyłącza tamte, dostaje też przewidywalny Dom.
@@ -5007,31 +5265,28 @@ class MainWindow(QMainWindow):
                         poza_watkiem=self._pola_poza_watkiem)
         home.przyjmij.connect(self._on_przyjmij)
         home.znajdz.connect(lambda: self.show_find())
-        home.wydaj.connect(grid._open_object_release)
+        home.wydaj.connect(self._on_wydaj_domu)             # KOMENDA (AR-325): buduje Zbiory przed oknem wydania
         home.popraw.connect(lambda: self._show_view(NAV_PORZADKI))
-        # Cofnięcie zapisu kart z paska Porządków (AR-296) pisze do plików bez modalnego okna -
-        # „Wciągnij z WBPP…” gaśnie jak przy zapisie Zbiorów (`_on_writeback_busy`).
-        tasks.object_view.writeback_busy.connect(home.set_writeback_busy)
+        # Cofnięcie zapisu kart z paska Porządków (AR-296) pisze do plików bez modalnego okna - „Wciągnij z WBPP…”
+        # Domu gaśnie jak przy zapisie Zbiorów: JEDNA droga, `_na_zapis_osi` (podpięty wyżej), stawia mutex Domu.
         tasks.object_view.wynik_cofniecia.connect(self._wynik_cofniecia_osi)   # bez odkładania (AR-296)
+        tasks.object_view.recepta_martwa.connect(self._zdejmij_martwa_recepte)  # recepta martwego wpisu (AR-321)
+        # „Cofnij dopisanie” z Osi teleskopu - droga trwała zamyka gest; wpis kolejki odłożeń schodzi (AR-321).
+        tasks.axis_view.dopisanie_cofniete.connect(self._na_cofniete_dopisanie)
         home.teczka.connect(self._on_teczka_domu)
         home.wiecej.connect(self._on_wiecej_domu)
         home.recepta_klik.connect(
             lambda: self._wykonaj_recepte(czlony=self._recepta_strumienia.czlony
                                           if self._recepta_strumienia else ()))
-        # Teczki liczą godziny per obiekt - gest osi obiektu przenosi klatki między teczkami.
-        grid.object_axis_changed.connect(home.odswiez_teczki)
         self.home_view = home
-        # Gest „Przypisz obiekt…” z raportu dostawy zmienia tę samą oś, co gest Zbiorów - te same
-        # powierzchnie liczą się od nowa: kolejka osi, plakietka Porządków, teczki Domu i grid
-        # (facet Obiekt liczy się w `_refresh`, więc przeładowanie facetów niepotrzebne).
-        przyjmij.object_axis_changed.connect(tasks.object_view.odswiez_gdy_widoczny)
-        przyjmij.object_axis_changed.connect(   # liczniki w tle (AR-84), jak po geście Zbiorów
-            lambda: tasks.refresh_counts(w_tle=self._pola_poza_watkiem))
-        przyjmij.object_axis_changed.connect(home.odswiez_teczki)
-        # Gest z raportu nie nawiguje w Zbiorach - zaznaczenie tam zostaje (AR-172).
-        przyjmij.object_axis_changed.connect(lambda: grid.przeladuj_z_zaznaczeniem())
 
-        for widget in (home, znajdz, przyjmij, tasks, planner):      # kolejność = `STRONA_*`
+        # Kolejność = `STRONA_*`; strony leniwe dostają zaślepkę (AR-325), budowa podmienia ją w miejscu.
+        for strona, widget in ((STRONA_DOM, home), (STRONA_ZBIORY, None), (STRONA_DOSTAWA, None),
+                               (STRONA_PORZADKI, tasks), (STRONA_PLANER, None)):
+            if widget is None:
+                widget = QWidget()
+                self._zaslepki[strona] = widget
+            assert self.stack.count() == strona, "strony stosu muszą stać w kolejności STRONA_*"
             self.stack.addWidget(widget)
         # Wiersze i wiersz startu przy ZABLOKOWANYCH sygnałach listy: Dom właśnie policzył się
         # w konstruktorze, a `_on_nav_changed` zamówiłby drugi odczyt i drugi rachunek teczek
@@ -5066,6 +5321,270 @@ class MainWindow(QMainWindow):
         if tasks.liczy_w_tle():
             self.nav.item(NAV_PORZADKI).setText(i18n.t("nav.porzadki_count", n="…"))
             home.ustaw_popraw(None)
+        else:
+            self._kotwica_licznikow = True   # rachunek montażu policzony synchronicznie - kotwica dobudowy stoi
+        if not self._strony_leniwie:
+            self.zbuduj_strony()
+
+    # ---------------------------------------------------------------- strony leniwe (AR-325)
+
+    def _gotowy(self, nazwa):
+        """Widok strony leniwej, jeśli strona JUŻ powstała, inaczej `None` - BEZ budowania (AR-325). Dla
+        powiadomień stanu: strona niezbudowana przeczyta świeży stan przy budowie, a zatrzaski
+        (`_dostawa_w_biegu`, `_zapis_w_biegu`) przyłoży jej budowniczy."""
+        return self._strony.get(nazwa)
+
+    def zbuduj_strony(self):
+        """Zbuduj wszystkie strony leniwe tej bazy (AR-325) - jawne wejście dla testu, który chce całego okna,
+        i dla montażu z `_strony_leniwie = False`. Idempotentne: strona zbudowana zostaje."""
+        for strona in _WIDOKI_STRONY:
+            self._zbuduj_strone(strona)
+
+    def _zamow_dobudowe(self):
+        """Zamów dobudowę strony Zbiorów w bezczynności (`_zbiory_w_bezczynnosci`, AR-325) po otwarciu bazy w POKAZANYM
+        oknie: koniec `_open_path` (start z `main` - okno stoi przed bazą) albo `showEvent` (baza otwarta
+        w konstruktorze, okno pokazane później). Zamawia kotwicę malowania (`_PoMalowaniu`), o ile jej jeszcze nie
+        ma; zegar rusza w `_sprawdz_dobudowe`. Okno niepokazane, bez bazy albo ze stroną już zbudowaną - nic."""
+        if not self._dobudowa_mozliwa():
+            return
+        if self._kotwica_malowania:
+            self._sprawdz_dobudowe()
+        else:
+            self._po_malowaniu.zamow()
+
+    def _dobudowa_mozliwa(self):
+        """Warunek stanu dobudowy: przełącznik, otwarta baza, pokazane okno, strona Zbiorów jeszcze niezbudowana i nie
+        w budowie (zegar uzbrojony w fazie składu budowy na żądanie wszedłby w nią drugi raz)."""
+        return (self._zbiory_w_bezczynnosci and self.con is not None and self.isVisible()
+                and STRONA_ZBIORY in self._zaslepki and STRONA_ZBIORY not in self._w_budowie)
+
+    def _na_malowanie_domu(self):
+        """Kotwica malowania (`_PoMalowaniu`): Dom bazy, która właśnie się otworzyła, jest już namalowany."""
+        self._kotwica_malowania = True
+        self._sprawdz_dobudowe()
+
+    def _po_licznikach_montazu(self):
+        """Kotwica liczników: seria liczników Porządków montażu skończyła się (wynik albo porażka) albo liczyła się
+        synchronicznie. Dobudowa w trakcie serii odbierała jej GIL - zmierzone A/B przeplatane na kopii pf4: pierwszy
+        wynik Porządków 2177-3835 ms z dobudową wobec 1183-2362 ms bez niej."""
+        self._kotwica_licznikow = True
+        self._sprawdz_dobudowe()
+
+    def _sprawdz_dobudowe(self):
+        """Obie kotwice montażu stoją i stan pozwala - zegar dobudowy rusza (pierwszy wolny obrót pętli)."""
+        if self._kotwica_malowania and self._kotwica_licznikow and self._dobudowa_mozliwa():
+            self._dobudowa_zbiorow.start()
+
+    def _wstrzymaj_dobudowe(self):
+        """Zegar dobudowy i zamówiona kotwica malowania schodzą (otwarcie bazy, demontaż, zamknięcie okna)."""
+        self._dobudowa_zbiorow.stop()
+        self._po_malowaniu.odwolaj()
+
+    def _dobuduj_zbiory(self):
+        """Zegar dobudowy (`_zamow_dobudowe`). Strony zbudowanej w międzyczasie (klik w Zbiory, komenda) zegar nie
+        dotyka - budowa na żądanie go zatrzymuje, a `_zbuduj_strone` strony zbudowanej nie buduje drugi raz. Porażka
+        budowy to błąd programu (mówi straż oknem): zaślepka zostaje, następne wejście buduje od nowa, zegar nie
+        ponawia."""
+        self._zbuduj_strone(STRONA_ZBIORY)
+
+    def _zbuduj_strone(self, strona):
+        """Zbuduj stronę leniwą `strona` (`STRONA_*`) i podmień nią zaślepkę na stosie. Strona zbudowana,
+        strona nieleniwa i okno bez bazy - nic.
+
+        FAILURE-ATOMIC (AR-325): widoki strony powstają bez rodzica stosu i każdy trafia na listę budowy
+        (`_w_budowie`) zaraz po utworzeniu. Wyjątek w budowie zbiera wątki tła każdego już utworzonego widoku
+        (`zatrzymaj_pola` - `QThread` skasowany w biegu to twardy abort, `FramesView.zatrzymaj_pola`), kasuje je,
+        zostawia zaślepkę i słownik stron bez wpisu i leci dalej (błąd programu - mówi straż oknem); następne
+        wejście buduje od nowa. EXPECT: budowa tej samej strony w trakcie jej budowy to błąd programu."""
+        zaslepka = self._zaslepki.get(strona)
+        if zaslepka is None:
+            return
+        if strona == STRONA_ZBIORY:
+            # Budowa na żądanie przed zegarem dobudowy zdejmuje zegar, ZANIM ruszy: skład zbioru bez wątków tła idzie
+            # pod fazą (`busy.repaint` kręci pętlę), a zegar wszedłby w nią budową tej samej strony (asercja niżej).
+            self._dobudowa_zbiorow.stop()
+        assert strona not in self._w_budowie, f"strona {strona} budowana ponownie w trakcie budowy"
+        utworzone = self._w_budowie[strona] = []
+        budowniczy = {STRONA_ZBIORY: self._zbuduj_zbiory, STRONA_DOSTAWA: self._zbuduj_dostawe,
+                      STRONA_PLANER: self._zbuduj_planer}[strona]
+        try:
+            widoki, kontener = budowniczy(utworzone)
+        except BaseException:
+            for w in reversed(utworzone):
+                zatrzymaj = getattr(w, "zatrzymaj_pola", None)
+                if zatrzymaj is not None and isValid(w):
+                    zatrzymaj()
+            for w in reversed(utworzone):
+                if isValid(w):
+                    w.setParent(None)
+                    w.deleteLater()
+            raise
+        finally:
+            del self._w_budowie[strona]
+        # Krok świadomie BEZ obwódki: operacje na stosie i słowniku nie czytają danych i nie startują wątków,
+        # więc nie mają porażki, którą trzeba by zwijać (wyjątek tu byłby błędem Qt, nie stanem bazy).
+        self._strony.update(widoki)
+        indeks = self.stack.indexOf(zaslepka)
+        self.stack.insertWidget(indeks, kontener)
+        self.stack.removeWidget(zaslepka)
+        zaslepka.deleteLater()
+        del self._zaslepki[strona]
+
+    def _zbuduj_dostawe(self, utworzone):
+        """Strona Dostawy: TEN SAM `PipelineView` w kontenerze z raportem „Co przyszło” (jak Znajdź nad
+        gridem) - drugi widok Dostawy rozjechałby wątek etapów, mutex i przyciski. Zatrzaski przyłożone przed
+        udostępnieniem strony: zapis do plików w toku gasi Dostawę i jej raport, zatrzask biegu (zgłoszony
+        gospodarzowi, zanim strona powstała) gasi gest raportu."""
+        from horreum.gui.pipeline import PipelineView               # lazy: Qt-import tylko gdy budujemy
+        from horreum.gui.flows.przyjmij import PrzyjmijView
+        pipeline = PipelineView(self.db_path, now_fn=self._now)
+        utworzone.append(pipeline)
+        pipeline.status_message.connect(self._flash_dostawy)
+        pipeline.stage_status.connect(self._raport_etapu)   # „<etap>: gotowe.” ustępuje gestowi (AR-97)
+        # `stage_finished` ŚWIADOMIE NIEPODPIĘTE: widoki odświeża koniec PRZEBIEGU
+        # (`running_changed(False)`), nie koniec etapu - patrz `_odswiez_widoki_po_przebiegu`.
+        pipeline.running_changed.connect(self._on_pipeline_running)
+        pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
+        # „Wciągnij z WBPP…”: okno żniw potrzebuje połączenia z bazą, którego Dostawa nie trzyma.
+        pipeline.open_harvest.connect(self._on_open_harvest)
+        pipeline.set_work_root(self._work_wbpp())   # widok powstaje z każdą bazą, folder roboczy jest jeden
+        przyjmij = PrzyjmijView(self.con, pipeline, now_fn=self._now)
+        utworzone.append(przyjmij)
+        przyjmij.status_message.connect(self._flash)
+        przyjmij.open_tasks.connect(self._on_kubelek_porzadkow)
+        # Gest „Przypisz obiekt…” z raportu dostawy - POWIADOMIENIE przez gospodarza (`_po_osi_z_raportu`):
+        # Zbiory mogą jeszcze nie istnieć.
+        przyjmij.object_axis_changed.connect(self._po_osi_z_raportu)
+        if any(self._zapis_w_biegu.values()):
+            pipeline.set_writeback_busy(True)
+            przyjmij.set_writeback_busy(True)
+        if self._dostawa_w_biegu:
+            przyjmij.set_busy(True)
+        return {"pipeline_view": pipeline, "przyjmij_view": przyjmij}, przyjmij
+
+    def _zbuduj_zbiory(self, utworzone):
+        """Strona zbiorów: grid w kontenerze z paskiem Znajdź - dwie prezentacje jednego stanu zbioru, nie dwa
+        gridy (JEDEN-STAN-EKRANU). Grid startuje skład zbioru w wątku tła od `__init__` (AR-27) - to jego wątki
+        w montażu odbierały GIL reszcie otwarcia bazy (AR-325). Zatrzaski: bieg Dostawy i zapis z paska osi."""
+        from horreum.gui.grid import FramesView                      # lazy: Qt-import tylko gdy budujemy
+        tasks, home = self.tasks_view, self.home_view
+        grid = FramesView(self.con, now_fn=self._now, pola_poza_watkiem=self._pola_poza_watkiem)
+        utworzone.append(grid)
+        grid.status_message.connect(self._flash_grid)
+        grid.load_report.connect(self._raport_wczytania_gridu)
+        grid.ponow_raport_wczytania()        # zbiór startu jedzie z wątku tła od `__init__` (AR-27)
+        grid.status_recipe.connect(self._recepta_gridu)   # recepta ma własny nośnik (FH-2)
+        grid.writeback_busy.connect(self._on_writeback_busy)
+        # Gesty panelu Rodowód (R2 oś stosu, E4-5 oś kalibracji) domykają się etapem Dostawy z NAZWĄ etapu -
+        # bez tego user wędrował na inny ekran po przycisk stojący obok wyboru katalogu (firsthand 0808).
+        grid.run_stage_fn = self._etap_po_gescie_rodowodu
+        # Dwuklik w panelu rodowodu prowadzi do klatek w Zbiorach - nawigację zna gospodarz.
+        grid.show_frames_fn = self.show_frames_in_collections
+        # CZWARTA POWIERZCHNIA gestu osi obiektu (S2b, §4/14c-f): gest z paska Zbiorów zmienia kolejkę
+        # przeglądu w oknie osi - a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna obie strony, więc
+        # to on je łączy (grid nie importuje osi, oś nie importuje gridu). Leniwie (AR-84): niewidoczna oś
+        # przeładuje się przy pokazaniu - gest pada w Zbiorach. Teczki Domu liczą godziny per obiekt.
+        grid.object_axis_changed.connect(tasks.object_view.odswiez_gdy_widoczny)
+        grid.object_axis_changed.connect(home.odswiez_teczki)
+        grid.observatory_axis_changed.connect(tasks.observatory_view.refresh)   # przeniesione stanowisko
+        # …i PIĄTA: badge sidebara, widoczny CAŁY CZAS - sygnał STANU PORZĄDKÓW z ogona każdego gestu gridu
+        # (`object_axis_changed` milczał przy gestach żywotności klatki), liczony W TLE (AR-84: 557 ms
+        # w ogonie gestu na kopii pf4), ten sam przełącznik co skład zbioru.
+        grid.stan_porzadkow_changed.connect(
+            lambda: self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem))
+        # Pusta perspektywa kopii w Zbiorach mówi zdaniem wiersza „?” i prowadzi tą samą drogą - sygnał na
+        # sygnał, więc droga do Dostawy ma jedno podpięcie (komenda `_on_open_intake`).
+        grid.open_intake.connect(tasks.open_intake)
+        znajdz = ZnajdzView(grid)
+        utworzone.append(znajdz)
+        # Przełączenie prezentacji z wnętrza strony („Zbiory klasyczne" na pasku czasowników Znajdź) przesuwa
+        # wiersz sidebara - inaczej sidebar mówiłby „Znajdź" nad ekranem klasycznym.
+        znajdz.prezentacja_zmieniona.connect(self._on_prezentacja_zmieniona)
+        if self._dostawa_w_biegu:
+            grid.set_busy(True)
+        if self._zapis_w_biegu["os"]:
+            grid.set_writeback_busy(True)
+        return {"grid_view": grid, "znajdz_view": znajdz}, znajdz
+
+    def _zbuduj_planer(self, utworzone):
+        """Strona Planera. Motyw PRZEKAZANY, nie czytany przez widok z rejestru (wiz T5 N4 - jeden właściciel
+        faktu). Bieg Dostawy - planer wygaszony od chwili budowy (zatrzask, AR-325)."""
+        from horreum.gui.planner import PlannerView                  # lazy: Qt-import tylko gdy budujemy
+        motyw = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
+        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now, theme_name=motyw)
+        utworzone.append(planner)
+        planner.status_message.connect(self._raport_planera)
+        planner.open_sites.connect(self._on_open_sites)                # AR-48: pusty stan → stanowiska
+        planner.show_frames_for.connect(self._on_show_target_frames)   # T5e: most planer → grid
+        if self._dostawa_w_biegu:
+            planner.set_busy(True)
+        return {"planner_view": planner}, planner
+
+    def _on_przebieg_zmiany_obiektu(self, run_id):
+        """KOMENDA (AR-325): wiersz „Przerwane zmiany obiektu” Porządków otwiera okno przebiegu przez Zbiory -
+        strona Zbiorów powstaje przed wykonaniem."""
+        self.grid_view.otworz_przebieg_zmiany_obiektu(run_id)
+
+    def _on_open_intake(self):
+        """KOMENDA (AR-325, AR-327): wiersz „?” Porządków albo pusta perspektywa kopii w Zbiorach prowadzi do
+        Dostawy z powodem - strona Dostawy powstaje przed wykonaniem, linia powodu staje PRZED pokazaniem
+        strony, a klik to jawna komenda: fokus klawiatury trafia w gest powodu (`fokus=True`); zwykłe wejście
+        w Dostawę (sidebar, strzałki) fokusu nie rusza."""
+        from horreum.gui.pipeline import REASON_COPY_FACTS
+        self.pipeline_view.show_reason(REASON_COPY_FACTS, fokus=True)
+        self._show_view(NAV_DOSTAWA)
+
+    def _on_wydaj_domu(self):
+        """KOMENDA (AR-325): kafel „Wydaj” Domu otwiera okno wydania obiektu gridu - strona Zbiorów powstaje
+        przed wykonaniem (okno stoi nad Domem, strona się nie zmienia)."""
+        self.grid_view._open_object_release()
+
+    def _po_osi_z_raportu(self):
+        """POWIADOMIENIE (AR-325): gest „Przypisz obiekt…” z raportu dostawy zmienia tę samą oś, co gest
+        Zbiorów - kolejka osi, plakietka Porządków (w tle, AR-84), teczki Domu i grid, jeśli jest (facet Obiekt
+        liczy się w `_refresh`); gest z raportu nie nawiguje w Zbiorach - zaznaczenie zostaje (AR-172). Zbiory
+        niezbudowane przeczytają świeży stan przy budowie."""
+        self.tasks_view.object_view.odswiez_gdy_widoczny()
+        self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)
+        self.home_view.odswiez_teczki()
+        grid = self._gotowy("grid_view")
+        if grid is not None:
+            grid.przeladuj_z_zaznaczeniem()
+
+    def _na_cofniete_dopisanie(self, telescope_id):
+        """„Cofnij dopisanie” Osi teleskopu zamknął gest „Dopisz nowy…” teleskopu `telescope_id` (AR-133) - wpis tego
+        zamiaru schodzi z kolejki odłożonych recept osi obiektu tej bazy razem z receptą, którą już podał (AR-321,
+        `ObjectAxisView.oczysc_martwe` - baza mówi, że gest zamknięty): podany drugi raz ogłaszałby „znów możliwe”
+        gestu, którego już nie ma, i zasłaniał wpis za nim."""
+        self.object_view.oczysc_martwe()
+
+    def _zdejmij_martwa_recepte(self, recepta, przed):
+        """Wpis kolejki odłożeń, któremu baza nic nie zostawiła, podał wcześniej `recepta` (AR-321,
+        `ObjectAxisView.recepta_martwa`). Rozpoznanie po TOŻSAMOŚCI obiektu recepty, nie po tekście: stan recepty
+        Porządków schodzi (wejście w Porządki jej nie przywróci), przycisk paska też, a raport z jej zdaniem
+        gotowości, gdy wciąż stoi na pasku, ustępuje zdaniu, do którego go doklejono (`przed`), albo gaśnie."""
+        stan = self._recepta_porzadkow_stan
+        if stan is None or stan[0] is not recepta:
+            return
+        self._recepta_porzadkow_stan = None
+        if self._czlony_recepty is recepta.czlony:
+            self._ustaw_recepte("")
+        if stan[1] is self._pelny_komunikat:
+            if przed:
+                self._flash(przed, miejsce=None)
+            else:
+                self._wygas_raport()
+
+    def _na_zapis_osi(self, busy):
+        """Zapis do plików z paska osi obiektu (cofnięcie commitu kart, AR-296): zatrzask stanu PRZED
+        rozesłaniem (AR-325), potem mutex zbudowanych stron - szuflada Zbiorów, Dostawa i jej raport, Dom."""
+        self._zapis_w_biegu["os"] = bool(busy)
+        for nazwa in ("grid_view", "pipeline_view", "przyjmij_view"):
+            widok = self._gotowy(nazwa)
+            if widok is not None:
+                widok.set_writeback_busy(busy)
+        if self.home_view is not None:
+            self.home_view.set_writeback_busy(busy)
 
     def _odswiez_widoki_po_przebiegu(self):
         """Przebieg Dostawy się skończył (worker, własne połączenie) - read-modele w głównym wątku
@@ -5105,19 +5624,23 @@ class MainWindow(QMainWindow):
                     # Kolejka osi obiektu ~0,4 s na kopii pf4 - niewidoczna przeładuje się przy
                     # pokazaniu (AR-84), a człowiek stoi teraz w Dostawie.
                     self.object_view.odswiez_gdy_widoczny()
-                    self.grid_view._load_facets()
-                    # Skład zbioru w wątku tła (AR-27: 1,4-1,5 s na żywej bazie stało tu w oknie);
-                    # wraca od razu, tabela dostaje zbiór, gdy ten dojedzie. Zaznaczenie przeżywa
-                    # przebieg: reset modelu je zabierał, a zbiór jest ten sam. Przeładowanie
-                    # NIE-NAWIGACYJNE z generacją (AR-172): zmiana filtra przed końcem składu je
-                    # unieważnia - zwykły ogon przechodził na nowsze zlecenie i oddawał stare zaznaczenie.
-                    self.grid_view.przeladuj_z_zaznaczeniem()
+                    # Strony leniwe (AR-325) - wyłącznie zbudowane: niezbudowana przeczyta stan przy budowie.
+                    grid, planner = self._gotowy("grid_view"), self._gotowy("planner_view")
+                    if grid is not None:
+                        grid._load_facets()
+                        # Skład zbioru w wątku tła (AR-27: 1,4-1,5 s na żywej bazie stało tu w oknie);
+                        # wraca od razu, tabela dostaje zbiór, gdy ten dojedzie. Zaznaczenie przeżywa
+                        # przebieg: reset modelu je zabierał, a zbiór jest ten sam. Przeładowanie
+                        # NIE-NAWIGACYJNE z generacją (AR-172): zmiana filtra przed końcem składu je
+                        # unieważnia - zwykły ogon przechodził na nowsze zlecenie i oddawał stare zaznaczenie.
+                        grid.przeladuj_z_zaznaczeniem()
                     # Liczniki zadań + badge ze świeżego stanu (F5) - w wątku tła (AR-84: 1,2-1,9 s
                     # stało tu w oknie na kopii pf4).
                     self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)
                     # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc
                     # plan nocy policzony przed dostawą pokazywałby stare luki.
-                    self.planner_view.refresh()
+                    if planner is not None:
+                        planner.refresh()
                     # Dom: sumy i dziennik od razu, teczki tylko zamawiamy (wątek tła).
                     self._odswiez_dom()
                 if not self._odswiez_jeszcze_raz:
@@ -5205,8 +5728,8 @@ class MainWindow(QMainWindow):
         Odmowa (bieg w toku, zapis nagłówków, brak bazy) idzie na pasek, a strona z postępem biegu
         stoi wtedy przed oczami - drugi bieg nie rusza (`PipelineView.receive`). Menu „Więcej…”
         i wiersz „?" Porządków prowadzą na tę stronę dalej BEZ startu: to wejście po robotę
-        trybu zaawansowanego, nie zamiar dostawy."""
-        self._show_view(NAV_DOSTAWA)
+        trybu zaawansowanego, nie zamiar dostawy. KOMENDA (`_wejdz`): po porażce budowy strony nic dalej."""
+        self._wejdz(NAV_DOSTAWA)
         reason = self.pipeline_view.receive()
         if reason is not None:
             self._flash(reason)
@@ -5301,7 +5824,8 @@ class MainWindow(QMainWindow):
         Po zapisie - obiekt stosu wobec obiektu wydania (AR-103, `_rozjazdy_obiektu_wydania`):
         rozjazd albo brak obiektu staje NA POCZĄTKU raportu z gestem „Przypisz obiekt wydania”
         na pasku; zgodność milczy."""
-        widok, con = self.pipeline_view, self.con
+        widok, con = self._gotowy("pipeline_view"), self.con
+        assert widok is not None, "zapis rodowodu po przebiegu bez strony Dostawy"   # przebieg ją zbudował
         start = widok.last_run["since"]
 
         def po_przebiegu(zapis):
@@ -5327,7 +5851,9 @@ class MainWindow(QMainWindow):
                 rozjazdy = self._rozjazdy_obiektu_wydania(con, stosy)
             finally:
                 self._odswiez_widoki_po_przebiegu()
-                self.grid_view.refresh_lineage_panel()
+                grid = self._gotowy("grid_view")     # niezbudowane Zbiory przeczytają panel przy budowie (AR-325)
+                if grid is not None:
+                    grid.refresh_lineage_panel()
             if rozjazdy:
                 self._pokaz_gest_obiektu_wydania(con, rozjazdy, podsumowanie, zdanie)
             elif zdanie:
@@ -5504,17 +6030,30 @@ class MainWindow(QMainWindow):
         self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)   # liczniki w tle (AR-84)
         if self.home_view is not None:
             self.home_view.odswiez_teczki()
-        self.grid_view.przeladuj_z_zaznaczeniem()        # gest nie nawiguje w Zbiorach (AR-172)
-        self.grid_view.refresh_lineage_panel()
+        grid = self._gotowy("grid_view")                  # niezbudowane Zbiory - stan przy budowie (AR-325)
+        if grid is not None:
+            grid.przeladuj_z_zaznaczeniem()               # gest nie nawiguje w Zbiorach (AR-172)
+            grid.refresh_lineage_panel()
 
-    def _on_tasks_counts(self, n):
+    def _on_tasks_counts(self, n, powod=""):
         """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" - „(0)" to szum (F5R#8).
-        Ta sama liczba idzie na kafel „Popraw" Domu - jeden sygnał, dwa nośniki (SPOT)."""
+        Ta sama liczba idzie na kafel „Popraw" Domu - jeden sygnał, dwa nośniki (SPOT). `"!"` (AR-326) - pierwszy
+        rachunek padł: „Porządki (!)” z podpowiedzią `powod` (zdanie błędu z Porządków); gołe „Porządki”
+        czytałoby się jak zero. Udany rachunek zdejmuje podpowiedź."""
+        self._plakietka_padla = n == "!"
         item = self.nav.item(NAV_PORZADKI)
         if item is not None:
             item.setText(i18n.t("nav.porzadki") if n == 0 else i18n.t("nav.porzadki_count", n=n))
+            item.setToolTip(powod if n == "!" else "")
         if self.home_view is not None:
-            self.home_view.ustaw_popraw(n)
+            self.home_view.ustaw_popraw(n, powod)
+
+    def _on_rachunek_padl(self, montaz, zdanie):
+        """Pierwszy rachunek liczników Porządków padł (`TasksView.rachunek_padl`, AR-326) - plakietka i kafel
+        mówią „!” ze zdaniem błędu w podpowiedzi. Sygnał widoku sprzed przełączenia bazy (cudzy token) - nic."""
+        if montaz != self._montaz:
+            return
+        self._on_tasks_counts("!", zdanie)
 
     def _resolve_after_repair(self):
         """Takt 3 P-D wołany z okna „Napraw nagłówek…": ISTNIEJĄCY etap Dostawy. Zwraca POWÓD
@@ -5553,24 +6092,39 @@ class MainWindow(QMainWindow):
         gaśnie; okno naprawy pisze → gaśnie Zatwierdź/Odrzuć/Cofnij gridu. Bez tego oba commity
         spotkałyby się na `BEGIN IMMEDIATE` (`busy_timeout` 5 s) i jeden wróciłby jako 'failed'.
         Trzecia strona mutexu: Dostawa gaśnie przy zapisie Z KAŻDEJ z dwóch powierzchni - razem
-        z gestem raportu „co przyszło” (zapis osi obiektu w trakcie zapisu kart do plików)."""
+        z gestem raportu „co przyszło” (zapis osi obiektu w trakcie zapisu kart do plików).
+
+        Zatrzask stanu PRZED rozesłaniem (AR-325): Dostawa zbudowana w trakcie zapisu Zbiorów dostaje go od
+        budowniczego; tu tylko strony zbudowane (`_gotowy`)."""
+        self._zapis_w_biegu["grid"] = bool(busy)
         self.object_view.set_writeback_busy(busy)
-        self.pipeline_view.set_writeback_busy(busy)
-        self.przyjmij_view.set_writeback_busy(busy)
+        for nazwa in ("pipeline_view", "przyjmij_view"):
+            widok = self._gotowy(nazwa)
+            if widok is not None:
+                widok.set_writeback_busy(busy)
         if self.home_view is not None:
             self.home_view.set_writeback_busy(busy)    # „Wciągnij z WBPP…” gaśnie jak w biegu
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
-        user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu)."""
+        user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu).
+
+        Zatrzask biegu PRZED rozesłaniem (AR-325): Zbiory i Planer zbudowane w trakcie biegu dostają go od
+        budowniczego; tu tylko strony zbudowane (`_gotowy`). Dostawa biegnie, więc jej strona jest."""
+        self._dostawa_w_biegu = bool(running)
         self.axis_view.set_busy(running)
         self.observatory_view.set_busy(running)
         if running:
             self.object_view.set_busy(True)     # „Przypisz obiekt…" (#8/P4) - zapis, gatowany jak inne
-        self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
-        self.planner_view.set_busy(running)  # planer czyta CAŁE archiwum — nie liczmy nocy na wpół zapisanej bazie
+        grid, planner = self._gotowy("grid_view"), self._gotowy("planner_view")
+        if grid is not None:
+            grid.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) - gatuj (wizytator C1)
+        if planner is not None:
+            planner.set_busy(running)  # planer czyta CAŁE archiwum - nie liczmy nocy na wpół zapisanej bazie
         self.home_view.set_busy(running)     # „Wydaj do WBPP" Domu gaśnie jak „Wydaj obiekt…" gridu
-        self.przyjmij_view.set_busy(running)  # „Przypisz obiekt…” raportu dostawy - zapis osi
+        przyjmij = self._gotowy("przyjmij_view")
+        if przyjmij is not None:
+            przyjmij.set_busy(running)  # „Przypisz obiekt…” raportu dostawy - zapis osi
         if not running:
             # KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki. Bez warunku
             # „czy etap coś zapisał": przebieg przerwany albo zakończony błędem też mógł zapisać
@@ -5589,7 +6143,9 @@ class MainWindow(QMainWindow):
                 # zostawał z zapisem sprzed niego i etykietą „nieaktualny", a user nie miał jak jej zdjąć
                 # inaczej niż przeklikaniem zaznaczenia. Odświeżamy po KAŻDYM etapie, nie tylko po
                 # rodowodzie - `resolve` i `group` też ruszają fakty, na których stoi powód.
-                self.grid_view.refresh_lineage_panel()
+                grid = self._gotowy("grid_view")
+                if grid is not None:
+                    grid.refresh_lineage_panel()
             finally:
                 if not self._odswiezam_widoki:
                     self.object_view.set_busy(False)
@@ -5634,8 +6190,9 @@ class MainWindow(QMainWindow):
         ustawienia.setValue("work/root", root)
         wbpp = projection.work_wbpp_root(root)
         projection_dialog.remember_target(i18n.t("proj.work_card"), wbpp)
-        if self.pipeline_view is not None:
-            self.pipeline_view.set_work_root(wbpp)
+        pipeline = self._gotowy("pipeline_view")       # niezbudowana Dostawa weźmie folder przy budowie (AR-325)
+        if pipeline is not None:
+            pipeline.set_work_root(wbpp)
         self._flash(i18n.t("status.work_root_set", path=wbpp))
 
     def open_path(self, path):
@@ -5674,6 +6231,9 @@ class MainWindow(QMainWindow):
         if self._odmowa_w_biegu_zapisu(lambda _tekst: self._flash(i18n.t("wb.undo_switch_refused")),
                                        przerwij=False):
             return
+        # Dobudowa Zbiorów (AR-325) czeka na koniec otwarcia: fazy otwarcia kręcą pętlę (`busy.repaint`), a zegar
+        # zbudowałby w nich stronę bazy, która właśnie znika. Odmowa bazy - zegar wraca dla bazy, która zostaje.
+        self._wstrzymaj_dobudowe()
         name = Path(path).name
         with busy.busy(self._say_phase, i18n.t("busy.open_db", name=name)) as faza:
             try:
@@ -5696,12 +6256,17 @@ class MainWindow(QMainWindow):
                     old.close()
         if odmowa is not None:
             self._end_phase()
+            self._zamow_dobudowe()
             QMessageBox.warning(self, i18n.t("dialog.open_db_title"), odmowa)
             return
         self._end_phase()
         if self._on_db_changed is not None:        # zapamiętaj ostatnią bazę (trwałe ustawienia)
             self._on_db_changed(path)
         self._flash(i18n.t("main.db_loaded", path=path), gest=False)   # stan okna, nie gest (AR-97)
+        # Powrót do bazy z odłożoną receptą osi (AR-321): kolejka tej bazy przeżyła przełączenie - mówi od razu
+        # wpisem, którego nic jeszcze nie podało (podany raz nie zastępuje drugi raz „Baza: … wczytana”).
+        self.object_view.podaj_odlozone(tylko_niepodane=True)
+        self._zamow_dobudowe()
 
     def _say_phase(self, text):
         """Ujście fazy dla operacji CAŁEGO OKNA (F-1) — własna etykieta paska statusu, a przy
@@ -5734,18 +6299,19 @@ class MainWindow(QMainWindow):
         self.phase_label.setText(self._faza_pierwsza or self._faza_tla)
         self._przelicz_pasek()
 
-    def _on_liczenie_w_toku(self, seria, w_toku):
+    def _on_liczenie_w_toku(self, montaz, seria, w_toku):
         """Seria biegów liczników Porządków w tle (`TasksView.liczenie_w_toku`, AR-175). Faza tła
         należy do PIERWSZEJ serii po montażu: późniejsze serie (gest Zbiorów, koniec Dostawy) mają
         plakietkę ze stanem poprzednim i własny ogon gestu, a „Liczę…” po każdym geście byłoby szumem.
-        Sygnał spoza aktualnego `tasks_view` (widok w demontażu) i koniec cudzej serii są odrzucane -
-        spóźnione `False` starej bazy nie gasi fazy nowej.
+        Sygnał z cudzym tokenem montażu (widok w demontażu, AR-326 - dawniej `sender()`) i koniec cudzej
+        serii są odrzucane - spóźnione `False` starej bazy nie gasi fazy nowej.
 
-        Koniec serii bez żadnego przyłożonego rachunku (druga porażka) zdejmuje też stan „liczę”
-        z plakietki i kafla - zdanie błędu stoi w Porządkach, a „(…)” obiecywałoby liczbę, która nie
-        przyjdzie."""
+        Koniec serii bez żadnego przyłożonego rachunku zdejmuje też stan „liczę” z plakietki i kafla:
+        porażkę mówi `rachunek_padl` („!”, `_on_rachunek_padl`); seria, która skończyła się bez wyniku i bez
+        tego sygnału, też dostaje „!” - „(…)” obiecywałoby liczbę, która nie przyjdzie, a gołe „Porządki”
+        mówiłoby zero."""
         tasks_view = getattr(self, "tasks_view", None)
-        if tasks_view is None or self.sender() is not tasks_view:
+        if tasks_view is None or montaz != self._montaz:
             return
         if w_toku:
             if self._seria_montazu is None:
@@ -5757,8 +6323,9 @@ class MainWindow(QMainWindow):
             return
         self._faza_tla = ""
         self._pokaz_faze()
-        if not tasks_view.ma_rachunek():
-            self._on_tasks_counts(0)
+        if not tasks_view.ma_rachunek() and not self._plakietka_padla:
+            self._on_tasks_counts("!", tasks_view.blad_licznikow.text())
+        self._po_licznikach_montazu()        # kotwica dobudowy Zbiorów (AR-325)
 
     def _sync_db_state(self):
         has = self.con is not None
@@ -5966,6 +6533,17 @@ class MainWindow(QMainWindow):
         if recepta and self._strona() == STRONA_PORZADKI:
             self._pokaz_recepte(recepta)
 
+    def _recepta_stoi(self):
+        """Czy na pasku stoi recepta, którą ktoś czyta (AR-321, straż `ObjectAxisView._podaj_odlozone`): przycisk
+        recepty widoczny (recepta gridu w Zbiorach, osi w Porządkach) ALBO recepta Porządków żywa razem ze swoim
+        raportem - na pasku albo odłożonym do wejścia w Porządki (ta sama reguła co `_on_nav_changed`). Recepta,
+        której raport ustąpił nowszemu, już nie stoi."""
+        if self._czlony_recepty:
+            return True
+        stan = self._recepta_porzadkow_stan
+        return stan is not None and (stan[1] is self._pelny_komunikat
+                                     or stan[1] is self._odlozone_raporty.get(STRONA_PORZADKI))
+
     def _recepta_gridu(self, recepta):
         """Recepta z gridu - na pasek tylko przy widocznych Zbiorach (FH-2e). Grid składa ją ze
         stanu przy KAŻDYM przeładowaniu, także po przebiegu Dostawy, a recepta mówi o Zbiorach;
@@ -6037,10 +6615,18 @@ class MainWindow(QMainWindow):
         stawia `_flash`, więc ponowny pomiar (`_przelicz_pasek`) nie przedłuża życia raportu. Pole
         pokazuje skrót, „Kopiuj zdanie” bierze pełne zdanie (`pelne`). PODPOWIEDŹ JEST JEDNA - paska
         (zdanie, recepta, szczegół; `_zwezone`): podpowiedź pola zasłaniałaby ją nad etykietą bez
-        członu recepty, więc schodzi zaraz po `ustaw`."""
+        członu recepty, więc schodzi zaraz po `ustaw`.
+
+        UKŁAD PASKA OD RAZU (AR-327): elizja liczy zapas z szerokości PASKA, a etykieta raportu dostaje swoją
+        szerokość dopiero przy przeliczeniu układu - do tego czasu rysowałaby nowe zdanie w szerokości starego,
+        ucięte bez wielokropka (zmierzone natywnie po `open_path`: 259 px etykiety przy 626 px „Baza: …”, do
+        pierwszego obrotu pętli). `activate` przelicza układ paska teraz, przed malowaniem."""
         self.report_label.ustaw(self._zwezone(msg), szczegol_zdania(msg), pelne=msg,
                                 polecenie=polecenie_zdania(msg))   # „Kopiuj polecenie” (AR-309)
         self.report_label.setToolTip("")
+        uklad = self.statusBar().layout()
+        if uklad is not None:
+            uklad.activate()
 
     def _przelicz_pasek(self):
         """Przemierz elizję ŻYWEGO raportu - po każdej zmianie szerokości widżetów obok niego.
@@ -6179,11 +6765,16 @@ class MainWindow(QMainWindow):
         baza) - `False` bez dotykania widoków, których jeszcze nie ma."""
         if self.con is None:
             return False
-        grid = getattr(self, "grid_view", None)
+        grid = self._gotowy("grid_view")               # niezbudowane Zbiory nic nie piszą (AR-325)
         if grid is not None and grid._wb.refuse_close(say, przerwij=przerwij):
             return True
         osi = getattr(self, "object_view", None)
         return osi is not None and osi.refuse_close(say, przerwij=przerwij)
+
+    def showEvent(self, event):
+        """Okno z bazą otwartą przed pokazaniem (konstruktor z bazą) zamawia dobudowę Zbiorów (`_zamow_dobudowe`)."""
+        super().showEvent(event)
+        self._zamow_dobudowe()
 
     def closeEvent(self, event):
         # ZAPIS DO PLIKÓW W TOKU (szuflada Zbiorów) - okno ZOSTAJE, zamknięcie = żądanie anulowania po
@@ -6196,6 +6787,7 @@ class MainWindow(QMainWindow):
         if self._odmowa_w_biegu_zapisu(self._flash):
             event.ignore()
             return
+        self._wstrzymaj_dobudowe()             # zamknięte okno niczego nie dobudowuje (AR-325)
         # Top-level apka jest właścicielem połączenia - zamyka je przy zamknięciu okna. Wątki tła
         # widoków PRZED połączeniem: wynik doręczony po zamknięciu nie ma prawa go dotknąć.
         self._zatrzymaj_watki_widokow()

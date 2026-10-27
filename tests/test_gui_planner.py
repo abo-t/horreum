@@ -1328,6 +1328,68 @@ def test_noc_minimum_rok_wstecz_od_zegara_widoku(pokazany):
     assert pokazany.night_edit.minimumDate() == QDate(2025, 7, 31)
 
 
+def test_noc_klik_w_pole_nie_przestawia_daty_ani_przelacznika(pokazany):
+    """Klik myszą w pole „Noc” poza strzałką kalendarza nie robi kroku daty: pole z kalendarzem trafia klik stylem combo,
+    a krok myszą spinboxa porównywał wynik ze stałymi spinboxa (ramka combo = „w górę”, pole tekstu = „w dół”). Prawdziwa
+    droga przez okno: środek tekstu (dostaje go pole linii) i ramka pola - lewa, górna, dolna (dostaje ją samo pole);
+    do tego klik doręczony wprost polu w środek tekstu. Po każdym: data, przełącznik i noc programu bez zmian, zero
+    rachunków. Falsyfikator: pole bez `setButtonSymbols(NoButtons)` (ramka: noc +1 doba albo +1 rok, przełącznik zdjęty;
+    tekst doręczony polu: noc -1 doba)."""
+    import time
+
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+    v = pokazany
+    pole = v.night_edit
+    data, gen = pole.date(), v._gen
+    opt = QStyleOptionComboBox()
+    opt.initFrom(pole)
+    opt.editable = True
+    opt.frame = True
+    opt.subControls = QStyle.SC_All
+    tekst = pole.style().subControlRect(QStyle.CC_ComboBox, opt, QStyle.SC_ComboBoxEditField, pole)
+    assert pole.style().hitTestComplexControl(QStyle.CC_ComboBox, opt, tekst.center(), pole) == \
+        QStyle.SC_ComboBoxEditField
+    srodek = tekst.center()
+    punkty = (srodek, QPoint(0, srodek.y()), QPoint(srodek.x(), 0), QPoint(srodek.x(), pole.height() - 1))
+
+    def _stan():
+        return pole.date(), v.night_auto.isChecked(), v._params()["night"]
+    for punkt in punkty:
+        QTest.mouseClick(v.windowHandle(), Qt.LeftButton, Qt.NoModifier, pole.mapTo(v, punkt))
+        _pompuj()
+        assert _stan() == (data, True, None), (punkt, _stan())
+    QTest.mouseClick(pole, Qt.LeftButton, Qt.NoModifier, srodek)
+    _pompuj()
+    assert _stan() == (data, True, None), ("wprost", _stan())
+    time.sleep(0.4)                                      # debounce (300 ms) miałby czas odpalić
+    _pompuj()
+    assert v._gen == gen and not v._pending_gen()
+
+
+def test_noc_kolko_z_fokusem_dalej_zmienia_date(pokazany):
+    """Pole „Noc” bez przycisków kroku dalej przyjmuje kółko z fokusem (`kolko`, AR-349): ząbek po kliknięciu w pole
+    zmienia datę i zdejmuje przełącznik. Falsyfikator: wyłączenie kroków, które zabiera też kółko."""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDateTimeEdit
+    v = pokazany
+    pole = v.night_edit
+    QTest.mouseClick(pole.lineEdit(), Qt.LeftButton)
+    _pompuj()
+    assert pole.hasFocus()
+    pole.setCurrentSection(QDateTimeEdit.Section.YearSection)   # sekcja bez sufitu - ząbek zawsze zmienia
+    przed = pole.date()
+    srodek = pole.rect().center()
+    ev = QWheelEvent(QPointF(srodek), QPointF(pole.mapToGlobal(srodek)), QPoint(), QPoint(0, 120), Qt.NoButton,
+                     Qt.NoModifier, Qt.NoScrollPhase, False)
+    QApplication.sendEvent(pole, ev)
+    _pompuj()
+    assert pole.date() > przed and not v.night_auto.isChecked()
+
+
 # ───────────────────────── AR-366: „Porządek” i chipy budowane raz
 
 def test_porzadek_przezywa_przeliczenie_z_fokusem_i_otwarta_lista(pokazany):

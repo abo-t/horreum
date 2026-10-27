@@ -24,8 +24,8 @@ from datetime import date, datetime, timezone
 from PySide6.QtCore import (QAbstractTableModel, QDate, QEvent, QModelIndex, QObject, QSettings,
                             Qt, QThread, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QFontMetricsF
-from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit,
-                               QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QButtonGroup, QCheckBox, QComboBox,
+                               QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QStyle,
                                QTableView, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
@@ -811,6 +811,13 @@ class PlannerView(QWidget):
         self.night_auto.toggled.connect(self._queue_replan)
         self.night_edit = kolko(QDateEdit())
         self.night_edit.setCalendarPopup(True)
+        # Bez przycisków kroku: pole z kalendarzem trafia klik stylem combo (`SC_ComboBoxFrame` = 1,
+        # `SC_ComboBoxEditField` = 2), a `QAbstractSpinBox::mousePressEvent` porównuje wynik ze stałymi spinboxa
+        # (`SC_SpinBoxUp` = 1, `SC_SpinBoxDown` = 2) - naciśnięcie, które trafia w samo pole (ramka, zdarzenie doręczone
+        # polu), robiło krok daty i zdejmowało przełącznik. `NoButtons` wyłącza wyłącznie kroki wywołane naciśnięciem
+        # obszarów spinboxa (Qt 6.9.2): klawisze, kółko z fokusem i kalendarz bez zmian; pole z kalendarzem przycisków
+        # kroku i tak nie rysuje (zrzut przy stylu Fusion programu, QPA Windows, przed i po - te same piksele).
+        self.night_edit.setButtonSymbols(QAbstractSpinBox.NoButtons)
         # Minimum „dziś minus rok” z zegara WIDOKU (`now_fn`, ten sam co zapis kurateli) - bez niego wpis z 1970 ręką
         # dawał plan bez słowa. Data startowa z tego zegara stoi tylko do pierwszego wyniku; parametr przy
         # zaznaczonym przełączniku i tak jest `None`, więc rdzeń zostaje jedynym właścicielem faktu „która to noc”.

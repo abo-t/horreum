@@ -357,6 +357,14 @@ class PlanResult:
     # Przełącznik kandydatek i mimik PN (`DOUBTFUL_PN_STATUSES`): `off` (nie proszono) · `on`
     # (chowa, licznik `counts['hidden_by_pn']`) · `find` (tryb szukania go pomija, jak filtr kadru).
     pn_filter: str = "off"
+    # Filtr statusu kurateli i próg kosztu Z WOŁANIA (AR-385), jak progi filtra kadru wyżej: zdanie pustego stanu ekranu
+    # nazywa cięcie POLICZONEGO wyniku (liczniki `counts['hidden_by_status_filter']`, `counts['hidden_by_cost']`), a nie
+    # kontrolki, które w biegu Dostawy albo w debounce stoją już inaczej.
+    status: str | None = None
+    max_cost: float | None = None
+    # Szukana nazwa Z WOŁANIA (tryb `find`) - echo parametru jak `status`/`max_cost`: pusty stan ekranu mówi o nazwie,
+    # z którą wynik policzono, nie o polu szukania, które w debounce stoi już inaczej (AR-385).
+    find: str | None = None
 
     @property
     def find_hits(self):
@@ -1125,7 +1133,12 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     jest silniejsze niż stan trwały. Cel oznaczony `skip` znika z listy Z LICZNIKIEM
     (`counts['hidden_by_status']`) — ale nie znika przed `find` ani przed jawnym `status='skip'`:
     własne skreślenie nie ma prawa zasłonić odpowiedzi na pytanie wprost. `done` NIE ukrywa —
-    cel domknięty w Ha może mieć lukę w SII i planer ma prawo to pokazać."""
+    cel domknięty w Ha może mieć lukę w SII i planer ma prawo to pokazać.
+
+    KAŻDE CIĘCIE MA LICZNIK (AR-385): jawny `status` - `counts['hidden_by_status_filter']`, `max_cost` -
+    `counts['hidden_by_cost']`; klucze WYŁĄCZNIE przy włączonym cięciu (domyślna odpowiedź bit w bit ta sama). Bez
+    `only_gaps`/`only_new` cel puli trafia do dokładnie jednego kubełka: wiersz albo jeden z liczników - pusta lista
+    ma więc liczbę przy dźwigni, która ją wyzerowała."""
     site = site or sky.default_site(con)
     if site is None:
         raise BrakStanowiska("targets: baza nie ma stanowiska z pozycją GPS - planer bez pozycji "
@@ -1193,6 +1206,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                 if 90.0 - abs(site.lat_deg - t.dec_deg) >= min_alt - _CUT_MARGIN]
 
     rows, hidden_by_status, hidden_by_pn = [], 0, 0
+    hidden_by_status_filter, hidden_by_cost = 0, 0
     for t in pool:
         # Kuratela ROZSTRZYGA PRZED rachunkiem nieba (najdroższym krokiem): cel skreślony nie ma
         # po co przechodzić przez siatkę Słońca. `find` i jawny `status` przebijają ukrycie.
@@ -1200,6 +1214,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
         mark_status = mark["status"] if mark is not None else None
         if status is not None:
             if mark_status != status:
+                hidden_by_status_filter += 1
                 continue
         elif mark_status == "skip" and not find:
             hidden_by_status += 1
@@ -1225,6 +1240,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
         channel, reason = recommend_channel(coverage, cost, best)
         if max_cost is not None and channel is not None and \
                 cost[PALETTE_OF_CHANNEL[channel]] > max_cost:
+            hidden_by_cost += 1
             continue
         rows.append(TargetRow(target=t, window=window, framing=framing, best_rig=best,
                               coverage=coverage, cost=cost, recommend=channel,
@@ -1252,6 +1268,10 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
         counts["hidden_by_rig"] = after_type - after_thresholds
     if pn_filter == "on":
         counts["hidden_by_pn"] = hidden_by_pn
+    if status is not None:
+        counts["hidden_by_status_filter"] = hidden_by_status_filter
+    if max_cost is not None:
+        counts["hidden_by_cost"] = hidden_by_cost
     hidden = 0
     if limit is not None and len(rows) > limit:
         hidden = len(rows) - limit
@@ -1274,7 +1294,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                       orphan_marks=orphan_marks(con),
                       min_fill=min_fill, max_panels=max_panels, rig_filter=rig_filter,
                       find_exact=exact_canons, find_outside=outside, find_via=find_via,
-                      pn_filter=pn_filter)
+                      pn_filter=pn_filter, status=status, max_cost=max_cost, find=find)
 
 
 def _night_moon(site, nw, *, v_zen, k_ext):

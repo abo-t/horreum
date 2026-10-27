@@ -567,13 +567,14 @@ def night_window(site, night_date, *, step_min=5):
                        astro_idx=astro_idx, darkness=darkness, step_min=step_min)
 
 
-def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt=30.0, step_min=5,
+def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt, step_min=5,
                       v_zen=V_ZEN_DEFAULT, k_ext=K_EXT_DEFAULT, night=None):
     """Okno nocy dla celu: jak wysoko wejdzie, ile godzin utrzyma próg i jak drogi jest Księżyc.
 
     ZAKRESEM ROZWAŻAŃ JEST NOC ŻEGLARSKA (☉ ≤ −12°) — zawsze, nie tylko latem jako awaryjny
     zamiennik. Miarą widoczności jest MAKSYMALNA wysokość osiągnięta w tym oknie (`max_alt_deg`),
-    a `min_alt` jest progiem-suwakiem, nie stałą. Noc astronomiczna zostaje raportowana osobno
+    a `min_alt` jest progiem-suwakiem, nie stałą - argument WYMAGANY (AR-374): wartość domyślną progu ma jeden
+    właściciel, `targets.DEFAULT_THRESHOLDS`, a warstwa nieba nie trzyma jej kopii. Noc astronomiczna zostaje raportowana osobno
     (`astro_*`, `darkness`, `no_astro_night`), bo mówi o jakości nieba, a nie o dostępności celu.
 
     `night` = gotowy `NightWindow` (SPOT: ta sama siatka dla wielu celów jednej nocy); None =

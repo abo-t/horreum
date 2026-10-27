@@ -1824,11 +1824,13 @@ CATALOG = {
     },
     "planner.reset_thresholds": {"pl": "Przywróć domyślne", "en": "Restore defaults"},
     # AR-371: wartości z `targets.DEFAULT_THRESHOLDS` (jedno źródło), człon PN - reset gasi też przełącznik PN.
+    # AR-385: reset zdejmuje wszystko, co tytuł paska nazywa cięciem - także filtr statusu.
     "planner.reset_thresholds_tip": {
         "pl": "Progi wracają do {size}′ rozmiaru, {dark}′ dla ciemnych, {mag} mag dla galaktyk, {alt}° wysokości\n"
-              "i {hours} h na kanał; próg kosztu Księżyca, filtr kadru i przełącznik PN wyłączone.",
+              "i {hours} h na kanał; próg kosztu Księżyca, filtr kadru, przełącznik PN i filtr statusu wyłączone.",
         "en": "Thresholds return to {size}′ size, {dark}′ for dark nebulae, {mag} mag for galaxies, {alt}° altitude\n"
-              "and {hours} h per channel; the Moon cost threshold, the framing filter and the PN switch go off.",
+              "and {hours} h per channel; the Moon cost threshold, the framing filter, the PN switch and the status "
+              "filter go off.",
     },
     "planner.chips_label": {"pl": "Patrzę oczami zestawu:", "en": "Seen through the rig:"},
     "planner.chip_tip": {
@@ -1944,9 +1946,37 @@ CATALOG = {
         "pl": "Tej nocy nie wychodzi nad przyjęty horyzont — wiersz zostaje, żeby było widać dlaczego.",
         "en": "Does not rise above the chosen horizon tonight — the row stays so you can see why.",
     },
+    # AR-385: pusta lista mówi dźwignię, która ją wyzerowała (`planner_model.empty_text`, liczniki `targets.plan`) -
+    # progi typu nie zależą od wysokości, ta ma własne zdanie; cięcia z licznikiem - zdanie z liczbą każde.
     "planner.empty": {
-        "pl": "Żaden cel nie przeszedł bieżących progów — poluzuj rozmiar, magnitudo albo wysokość.",
-        "en": "No target passed the current thresholds — relax size, magnitude or altitude.",
+        "pl": "Żaden cel nie przeszedł progów rozmiaru i jasności - poluzuj rozmiar albo magnitudo.",
+        "en": "No target passed the size and brightness thresholds - relax size or magnitude.",
+    },
+    # Rezerwa: lista pusta bez licznika przy żadnym cięciu (wołanie z filtrami spoza ekranu) - bez zgadywanej dźwigni.
+    "planner.empty_other": {"pl": "Żaden cel nie przeszedł bieżących filtrów.",
+                            "en": "No target passed the current filters."},
+    "planner.empty_alt": {
+        "pl": {"one": "{n} cel po progach nie sięga wymaganej wysokości - poluzuj próg wysokości.",
+               "few": "{n} cele po progach nie sięgają wymaganej wysokości - poluzuj próg wysokości.",
+               "many": "{n} celów po progach nie sięga wymaganej wysokości - poluzuj próg wysokości."},
+        "en": {"one": "{n} target past the thresholds does not reach the required altitude - relax the altitude "
+                      "threshold.",
+               "other": "{n} targets past the thresholds do not reach the required altitude - relax the altitude "
+                        "threshold."},
+    },
+    "planner.empty_by_status": {
+        "pl": {"one": "Filtr statusu „{status}” schował {n} cel - wybierz „{any}”.",
+               "few": "Filtr statusu „{status}” schował {n} cele - wybierz „{any}”.",
+               "many": "Filtr statusu „{status}” schował {n} celów - wybierz „{any}”."},
+        "en": {"one": "The status filter “{status}” hid {n} target - choose “{any}”.",
+               "other": "The status filter “{status}” hid {n} targets - choose “{any}”."},
+    },
+    "planner.empty_by_cost": {
+        "pl": {"one": "Próg kosztu ≤{cost} schował {n} cel - podnieś go albo wyłącz.",
+               "few": "Próg kosztu ≤{cost} schował {n} cele - podnieś go albo wyłącz.",
+               "many": "Próg kosztu ≤{cost} schował {n} celów - podnieś go albo wyłącz."},
+        "en": {"one": "The cost threshold ≤{cost} hid {n} target - raise it or turn it off.",
+               "other": "The cost threshold ≤{cost} hid {n} targets - raise it or turn it off."},
     },
     # AR-48: baza bez stanowiska z GPS to STAN ekranu planera (pusty stan z gestem), nie surowe
     # zdanie rdzenia na pasku nad cudzym ekranem. Tytuł idzie na nagłówek nocy i na pasek (tylko
@@ -1966,6 +1996,9 @@ CATALOG = {
     # AR-334: planer zbudowany w biegu Dostawy nie liczy nocy na wpół zapisanej bazie - nagłówek nocy mówi, kiedy policzy.
     "planner.after_intake": {"pl": "Plan nocy policzę po końcu Dostawy.",
                              "en": "The night plan is computed when Intake finishes."},
+    # AR-386: powód na sześciu zgaszonych w biegu gestach zapisu do bazy - gest nie ruszy sam po końcu biegu.
+    "planner.busy_write_tip": {"pl": "Trwa etap Dostawy - zapiszesz po jego zakończeniu.",
+                               "en": "An Intake stage is running - you can save after it finishes."},
 
     # --- panel celu (T5d, JEDYNE miejsce zapisu ekranu) + park -------------------------------
     "planner.panel": {"pl": "Zaznaczony cel", "en": "Selected target"},

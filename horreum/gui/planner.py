@@ -100,14 +100,14 @@ _THRESHOLDS = {"min_size": ("planner.min_size", targets.DEFAULT_THRESHOLDS["min_
                "max_mag": ("planner.max_mag", targets.DEFAULT_THRESHOLDS["max_mag"], 0.0, 25.0, 0.5),
                "min_alt": ("planner.min_alt", targets.DEFAULT_THRESHOLDS["min_alt"], 0.0, 89.0, 5.0),
                "min_hours": ("planner.min_hours", targets.DEFAULT_THRESHOLDS["min_hours"], 0.0, 100.0, 0.5)}
-# Tytuł paska progów (AR-371): (próg, pole szablonu `planner.controls_state`, format wartości, klucz dopisku wartości
-# domyślnej). Odchylenie liczone na TEKŚCIE sformatowanym - próg 6,5 tytuł pokazuje „≥6′”, więc dopisek
-# „(domyślnie 6′)” obok niego byłby sprzecznością na ekranie.
-_TYTUL_PROGOW = (("min_size", "size", ".0f", "planner.controls_default_arcmin"),
-                 ("min_dark", "dark", ".0f", "planner.controls_default_arcmin"),
-                 ("max_mag", "mag", ".1f", "planner.controls_default"),
-                 ("min_alt", "alt", ".0f", "planner.controls_default_deg"),
-                 ("min_hours", "hours", ".1f", "planner.controls_default"))
+# Tytuł paska progów (AR-371): (próg, pole szablonu `planner.controls_state`, klucz dopisku wartości domyślnej). Liczby
+# jednym formaterem z prawdziwą precyzją wpisu (`planner_model.tekst_progu`, AR-375): próg 6,5 to „≥6.5′ (domyślnie
+# 6′)”, a nie „≥6′” udające domyślną; tekst jest dokładny, więc odchylenie liczone na tekście = odchylenie wartości.
+_TYTUL_PROGOW = (("min_size", "size", "planner.controls_default_arcmin"),
+                 ("min_dark", "dark", "planner.controls_default_arcmin"),
+                 ("max_mag", "mag", "planner.controls_default"),
+                 ("min_alt", "alt", "planner.controls_default_deg"),
+                 ("min_hours", "hours", "planner.controls_default"))
 _MAX_COST_DEFAULT = 3.0
 # Filtr kadru (dług T5, PL-1, PL-2) - jak próg kosztu: domyślnie WYŁĄCZONY, wartość pamiętana obok
 # przełącznika. Wypełnienie w PROCENTACH na ekranie (kolumna mówi „58%"), w rdzeniu ułamek 0..1.
@@ -129,6 +129,13 @@ _PARK_UNSAID = "unsaid"
 
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _tresc_notatki(tekst):
+    """Treść notatki kurateli do porównania pola panelu ze źródłem (AR-376): bez spacji brzegowych po OBU stronach -
+    zapis z panelu je obcina, ale notatka z konsoli (`horreum target --note`) stoi w bazie dosłownie. Brak notatki =
+    pusta treść."""
+    return (tekst or "").strip()
 
 
 class PlanWorker(QObject):
@@ -594,20 +601,32 @@ class PlannerView(QWidget):
     def _sync_save_enabled(self):
         """„Zapisz oznaczenie" żyje TYLKO przy wybranym statusie — przy „(bez oznaczenia)" nie ma
         czego zapisać, a szczery disabled mówi to bez komunikatu (wiz T5 #1). W biegu Dostawy gaśnie
-        jak każdy zapis do bazy (AR-366)."""
-        self.save_btn.setEnabled(self.panel_status.currentData() is not None and not self._w_biegu)
+        jak każdy zapis do bazy (AR-366) - z powodem w podpowiedzi (AR-386)."""
+        powod = self._powod_wygaszenia()
+        self.save_btn.setEnabled(self.panel_status.currentData() is not None and powod is None)
+        self.save_btn.setToolTip(powod or "")
+
+    def _powod_wygaszenia(self):
+        """Zdanie, dla którego gesty zapisu do bazy są teraz zgaszone, albo `None` (AR-386, wzór
+        `flows/przyjmij.py` `_powod_wygaszenia`). Jeden powód na wszystkich sześciu gestach - Zapisz, Zdejmij, „Park…”
+        i trzy gesty sierot: w biegu Dostawy gest nie ruszy sam po końcu biegu, więc zdanie mówi „zapiszesz”, a po
+        końcu biegu wracają własne podpowiedzi gestów."""
+        return i18n.t("planner.busy_write_tip") if self._w_biegu else None
 
     def _sync_gestow_zapisu(self):
         """Gesty ZAPISU DO BAZY ekranu - kuratela celu, park, sieroty - gasną w biegu Dostawy (AR-366, spójnie
         z osiami: `TelescopeAxisView.set_busy` gasi same zapisy). Pola panelu (status, priorytet, notatka) zostają
         nietknięte: wpisana notatka przeżywa bieg. Otwarte okno parku gaśnie wprost - dawniej gasło z wygaszonym
         rodzicem (`setEnabled(False)` widoku), a bieg ruszający przy otwartym oknie zostawiłby czynny zapis parku."""
-        wolno = not self._w_biegu
+        powod = self._powod_wygaszenia()
+        wolno = powod is None
         self.park_btn.setEnabled(wolno)
+        self.park_btn.setToolTip(powod or "")
         if self._park_dlg is not None:
             self._park_dlg.setEnabled(wolno)
         row = self.selected_row()
         self.clear_btn.setEnabled(wolno and row is not None and row.source.plan_status is not None)
+        self.clear_btn.setToolTip(powod or "")
         self._sync_save_enabled()
         self._sync_orphan_buttons()
 
@@ -658,8 +677,7 @@ class PlannerView(QWidget):
         self.orphan_clear_btn.clicked.connect(self._on_orphan_clear)
         row.addWidget(self.orphan_clear_btn)
         self.orphan_undo_btn = QPushButton(i18n.t("planner.orphan_undo"))
-        self.orphan_undo_btn.setFlat(True)
-        self.orphan_undo_btn.setToolTip(i18n.t("planner.orphan_undo_tip"))
+        self.orphan_undo_btn.setFlat(True)            # podpowiedź stawia `_sync_orphan_buttons` (w biegu - powód)
         self.orphan_undo_btn.clicked.connect(self._on_orphan_undo)
         row.addWidget(self.orphan_undo_btn)
         row.addStretch(1)
@@ -710,8 +728,12 @@ class PlannerView(QWidget):
 
     def _sync_orphan_buttons(self):
         dane = self._selected_orphan()
-        wolno = not self._w_biegu            # trzy gesty zapisu do bazy - w biegu Dostawy zgaszone (AR-366)
+        # Trzy gesty zapisu do bazy - w biegu Dostawy zgaszone (AR-366) z powodem w podpowiedzi (AR-386): wygaszony
+        # „Przenieś” nie obiecuje wtedy gestu, a „Cofnij zdjęcie” nie opisuje funkcji, której teraz nie da się użyć.
+        powod = self._powod_wygaszenia()
+        wolno = powod is None
         self.orphan_clear_btn.setEnabled(dane is not None and wolno)
+        self.orphan_clear_btn.setToolTip(powod or "")
         moved = dane is not None and dane[1] == targets.ORPHAN_MOVED
         # ZAPOWIEDŹ NIE MA PRAWA OBIECYWAĆ GESTU, KTÓRY GUARD ZARAZ ODMÓWI (G2-9d, treść rejestru):
         # gdy cel `gdzie` ma już własną kuratelę, guzik gaśnie z POWODEM w tooltipie zamiast stać
@@ -719,13 +741,16 @@ class PlannerView(QWidget):
         # ZOSTAJE - to obrona w głąb, nie duplikat do usunięcia.
         blocked = moved and self._orphan_move_blocked(dane[2])
         self.orphan_move_btn.setEnabled(moved and not blocked and wolno)
-        if blocked:
+        if powod is not None:
+            self.orphan_move_btn.setToolTip(powod)
+        elif blocked:
             self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip_taken", where=dane[2]))
         elif dane and dane[2]:
             self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip", where=dane[2]))
         else:
             self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip_none"))
         self.orphan_undo_btn.setEnabled(self._orphan_undo is not None and wolno)
+        self.orphan_undo_btn.setToolTip(powod or i18n.t("planner.orphan_undo_tip"))
 
     def _on_orphan_clear(self):
         dane = self._selected_orphan()
@@ -900,9 +925,10 @@ class PlannerView(QWidget):
         # w jedną stronę, a user nie ma skąd znać wartości domyślnych (są w kodzie, nie na ekranie).
         self.reset_btn = QPushButton(i18n.t("planner.reset_thresholds"))
         # Wartości w podpowiedzi z jednego źródła (AR-371) - proza z liczbami przepisanymi ręcznie rozjechałaby się
-        # z rdzeniem przy pierwszej zmianie domyślnej.
+        # z rdzeniem przy pierwszej zmianie domyślnej. Liczby tym samym formaterem co tytuł paska (AR-375).
         self.reset_btn.setToolTip(i18n.t("planner.reset_thresholds_tip", **{
-            pole: f"{targets.DEFAULT_THRESHOLDS[name]:g}" for name, pole, _fmt, _klucz in _TYTUL_PROGOW}))
+            pole: pm.tekst_progu(targets.DEFAULT_THRESHOLDS[name], pm.MIEJSCA_PROGU)
+            for name, pole, _klucz in _TYTUL_PROGOW}))
         self.reset_btn.clicked.connect(self._on_reset_thresholds)
         right.addRow("", self.reset_btn)
         lay.addLayout(right)
@@ -941,7 +967,8 @@ class PlannerView(QWidget):
     def _on_reset_thresholds(self):
         """Wszystkie progi na domyślne + JEDEN re-plan. `_loading` tłumi sygnały pośrednie, więc
         pięć `setValue` nie startuje pięciu rachunków nocy (debounce by je scalił, ale liczenie
-        na przypadek nie jest kontraktem)."""
+        na przypadek nie jest kontraktem). Reset zdejmuje WSZYSTKO, co tytuł paska nazywa cięciem (AR-385) - także
+        filtr statusu: z nim „Przywróć domyślne” zostawiało pustą listę (u CEO filtr „zrobiony” tnie zawsze do zera)."""
         self._loading = True
         try:
             for name, (_key, default, _lo, _hi, _step) in _THRESHOLDS.items():
@@ -953,6 +980,7 @@ class PlannerView(QWidget):
             self.max_panels_on.setChecked(False)
             self.max_panels.setValue(_MAX_PANELS_DEFAULT)
             self.hide_pn.setChecked(False)
+            self.status_combo.setCurrentIndex(0)         # „(dowolny)” - `findData(None)` w Qt daje -1
         finally:
             self._loading = False
         self.max_cost.setEnabled(False)
@@ -1032,14 +1060,15 @@ class PlannerView(QWidget):
         Próg kosztu i filtr statusu tną listę jak progi, więc włączone też stoją w tytule. Pełny tekst
         idzie też do podpowiedzi przycisku: przy minimalnym oknie najdłuższy tytuł się ucina."""
         kw = {}
-        for name, pole, fmt, klucz in _TYTUL_PROGOW:
-            tekst = format(self._spins[name].value(), fmt)
-            domyslna = format(_THRESHOLDS[name][1], fmt)
+        for name, pole, klucz in _TYTUL_PROGOW:
+            tekst = pm.tekst_progu(self._spins[name].value(), pm.MIEJSCA_PROGU)
+            domyslna = pm.tekst_progu(_THRESHOLDS[name][1], pm.MIEJSCA_PROGU)
             kw[pole] = tekst
             kw[pole + "_def"] = "" if tekst == domyslna else i18n.t(klucz, n=domyslna)
         text = i18n.t("planner.controls_state", **kw)
         if self.max_cost_on.isChecked():
-            text += i18n.t("planner.controls_state_cost", cost=f"{self.max_cost.value():g}")
+            text += i18n.t("planner.controls_state_cost",
+                           cost=pm.tekst_progu(self.max_cost.value(), pm.MIEJSCA_PROGU))
         # Filtr kadru CHOWA cele, więc zwinięty pasek musi go nazwać - ale tylko włączony:
         # domyślny tytuł zostaje ten sam co przed filtrem.
         parts = []
@@ -1144,7 +1173,7 @@ class PlannerView(QWidget):
 
     def _on_order(self, _index):
         """Zmiana porządku = PRZERYSOWANIE, nie nowy rachunek nocy (jak chip): ten sam `PlanResult`,
-        inne ułożenie gotowych wierszy."""
+        inne ułożenie gotowych wierszy. Zaznaczony cel i niezapisane pola panelu przeżywają je (`_render_rows`, AR-376)."""
         self._order = self.order_combo.currentData()
         self._render_rows()
 
@@ -1178,10 +1207,10 @@ class PlannerView(QWidget):
         self._debounce.stop()
         if self._zatrzymany:
             return                       # widok znika (`zatrzymaj_pola`) - nowego wątku nie zakładamy
-        # Zaznaczenie przeżywa KAŻDE przeliczenie, nie tylko zapis (wiz T5 #10): zmiana progu
-        # gasiła panel, a wpisana notatka przepadała bez śladu.
-        if self._keep_canon is None:
-            self._keep_canon = self._selected_canon()
+        # Zaznaczenie przeżywa KAŻDE przeliczenie, ale NIE zatrzaskiem tutaj: cel i niezapisane pola panelu
+        # bierze `_render_rows` w chwili wyniku (AR-376) - zatrzask z chwili startu cofał zaznaczenie wybrane w trakcie
+        # rachunku i oddawał notatkę wpisaną przy nim panelowi innego celu. `_keep_canon` stawia wyłącznie
+        # `_replan_keeping` (zapis, zdjęcie, przeniesienie sieroty).
         self._gen += 1
         if self._w_biegu:
             # Bieg Dostawy (AR-334): rachunek czeka w generacji na koniec przebiegu (refresh gospodarza). Planer bez
@@ -1384,34 +1413,31 @@ class PlannerView(QWidget):
         self.notes_label.setVisible(bool(infos))
 
     def _render_rows(self):
+        """JEDNA DROGA PRZERYSOWANIA listy - wynik rachunku, chip soczewki, „Porządek” (AR-376). Reset modelu zabiera
+        zaznaczenie, więc cel i NIEZAPISANE pola panelu (status, priorytet, notatka) zrzucamy przed nim
+        i oddajemy po nim: cel jawny `_replan_keeping`, inaczej cel, który panel pokazuje. Pola wracają wyłącznie na
+        TEN SAM cel, którego panel je trzymał - nigdy do panelu innego celu."""
         if self._result is None:
             return
         rows = pm.view_rows(self._result, self._rig_chip, order=self._order)
-        # Niezapisana notatka nie ma prawa zniknąć przy przeliczeniu (wiz T5 #10): trzymamy ją
-        # razem z kanonem i oddajemy, gdy zaznaczenie wróci na TEN SAM cel.
-        typed = (self._keep_canon, self.panel_note.text()) if self.panel_note.isModified() else None
+        niezapisane = self._niezapisane_w_panelu()
+        keep = self._keep_canon if self._keep_canon is not None else (niezapisane[0] if niezapisane else None)
         self.model.set_rows(rows)
         self._dopasuj_kolumny()
         empty = not rows
-        self.empty_note.setText(pm.empty_find_text(self._result, self.find_edit.text().strip())
-                                if self.find_edit.text().strip()
-                                else i18n.t("planner.empty_rig" if self._result.rig_filter == "on"
-                                            else "planner.empty"))
+        # Pusta lista mówi dźwignię z liczb rdzenia, o POLICZONYM wyniku (AR-385); tryb szukania - zdanie szukajki.
+        self.empty_note.setText(pm.empty_text(self._result))
         self.empty_note.setVisible(empty)
         self.table.setVisible(not empty)
         # Zaznaczenie wraca na TEN SAM cel, o ile został na liście: `skip` go z niej zdejmuje
         # i wtedy pusty panel jest UCZCIWĄ odpowiedzią („skreśliłeś go", nie „zgubiłem").
-        keep = self._keep_canon
         if keep is not None:
             for r, v in enumerate(rows):
                 if v.canon == keep:
                     self.table.selectRow(r)
                     break
             self._keep_canon = None
-        self._sync_panel()
-        if typed is not None and typed[0] == keep and self._selected_canon() == keep:
-            self.panel_note.setText(typed[1])
-            self.panel_note.setModified(True)
+        self._sync_panel(niezapisane)
 
     def _dopasuj_kolumny(self):
         """Szerokości kolumn listy do treści (`szerokosci.szerokosci_kolumn`, AR-175) - raz na wynik, przy
@@ -1446,6 +1472,7 @@ class PlannerView(QWidget):
     # ---------------------------------------------------------------- panel wiersza (ZAPIS)
 
     def _on_row_selected(self, *_a):
+        self._keep_canon = None          # wybór człowieka bije cel odłożony przez zapis/zdjęcie/przeniesienie (AR-376)
         self._sync_panel()
 
     def _on_row_double_clicked(self, _index):
@@ -1453,11 +1480,13 @@ class PlannerView(QWidget):
         miejsce na tę akcję; bez pokrycia jest no-opem, bo przycisk też jest wtedy nieaktywny."""
         self._on_show_frames()
 
-    def _sync_panel(self):
+    def _sync_panel(self, niezapisane=None):
         """Panel odbija ZAZNACZONY wiersz. Brak zaznaczenia = szczery disabled (UI nie kłamie);
         „Pokaż klatki celu" gaśnie osobno, gdy cel nie ma pokrycia — pusty filtr pokazałby
-        w gridzie pełną bazę."""
+        w gridzie pełną bazę. `niezapisane` - zrzut `_niezapisane_w_panelu` sprzed przerysowania (AR-376): pola wracają
+        na wypełniony panel, gdy dotyczą TEGO celu."""
         row = self.selected_row()
+        self._panel_wiersz = row          # cel, który panel pokazuje - kotwica zrzutu niezapisanych pól
         self.panel.setEnabled(row is not None)
         if row is None:
             self.panel.setTitle(i18n.t("planner.panel"))
@@ -1486,6 +1515,35 @@ class PlannerView(QWidget):
         # Podpowiedź, nie automat (D-T4-d): status jest zdaniem CZŁOWIEKA, a luka zależy od suwaka
         # `min_hours` — automatyczne `done` czyniłoby trwały status funkcją parametru runtime.
         self.no_gaps_label.setText("" if src.coverage.gaps else i18n.t("planner.no_gaps"))
+        if niezapisane is None or niezapisane[0] != row.canon:
+            return
+        pola = niezapisane[1]
+        if "status" in pola:             # `currentIndexChanged` → `_sync_save_enabled` (także w biegu - zgaszone)
+            self.panel_status.setCurrentIndex(max(0, self.panel_status.findData(pola["status"])))
+        if "priority" in pola:
+            self.panel_priority.setValue(pola["priority"])
+        if "note" in pola:
+            self.panel_note.setText(pola["note"])
+            # Niezapisana wobec NOWEGO źródła - po „Zapisz” notatka zapisana jest już stanem bazy.
+            self.panel_note.setModified(_tresc_notatki(pola["note"]) != _tresc_notatki(src.note))
+
+    def _niezapisane_w_panelu(self):
+        """`(kanon, {pole: wartość})` celu, który panel pokazuje, albo None bez celu (AR-376). Wyłącznie pola RÓŻNE od
+        źródła tego wiersza, jedną regułą dla statusu, priorytetu i notatki (notatka - TREŚCIĄ, `_tresc_notatki` po obu
+        stronach): po „Zdejmij” status ani notatka sprzed zdjęcia nie wracają nad wierszem bez oznaczenia, a po
+        „Zapisz” wartości zapisane są nowym źródłem. Kotwicą jest wiersz PANELU, nie zaznaczenie: po nieudanym
+        rachunku tabela jest pusta, a panel dalej mówi o swoim celu - następny wynik oddaje mu wpisane pola."""
+        w = self._panel_wiersz
+        if w is None:
+            return None
+        src, pola = w.source, {}
+        if self.panel_status.currentData() != src.plan_status:
+            pola["status"] = self.panel_status.currentData()
+        if self.panel_priority.value() != (src.priority or 0):
+            pola["priority"] = self.panel_priority.value()
+        if _tresc_notatki(self.panel_note.text()) != _tresc_notatki(src.note):
+            pola["note"] = self.panel_note.text()
+        return w.canon, pola
 
     def _selected_canon(self):
         row = self.selected_row()

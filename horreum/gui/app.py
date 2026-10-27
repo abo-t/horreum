@@ -4789,6 +4789,10 @@ class MainWindow(QMainWindow):
     # jedno i drugie. `False` - Zbiory czekają na pierwsze wejście (testy dróg „strona niezbudowana”: komendy,
     # zatrzaski, porażka budowy).
     _zbiory_w_bezczynnosci = True
+    # OGON BIEGU (AR-373): `(since, {pisarze})` przebiegu Dostawy, którego koniec zapisują jeszcze pisarze po
+    # `run_finished` (dziś rodowód stosów ze żniw), albo None. Wtedy odświeżenie widoków robi ostatni pisarz, raz -
+    # `running_changed(False)` go nie powtarza (`_on_pipeline_running`). Stan instancji; tu wartość startowa.
+    _ogon_biegu = None
 
     grid_view = _widok_strony("grid_view")
     znajdz_view = _widok_strony("znajdz_view")
@@ -5959,11 +5963,14 @@ class MainWindow(QMainWindow):
         odsłoni przyjęcie jeszcze raz (AR-104). Zmiana bazy w trakcie biegu też kasuje zapis - `con`
         jest już inne niż to, na którym żniwa się odbyły; tamto zdanie nie dotyczy bazy na ekranie.
 
-        Po zapisie widoki odświeżają się TĄ SAMĄ drogą co po każdym przebiegu: zapis idzie PO
-        odświeżeniu gospodarza, więc bez tego panel rodowodu pokazywałby rodowód okna jako
-        aktualny. Odświeżenie jest w `finally` - wyjątek zapisu (inny niż `ValueError` per stos)
-        leci dalej, ale nie zostawia widoków ze stanem sprzed zapisu. Zdanie rodowodu DOKLEJA się
-        do podsumowania okna żniw, nie zastępuje go.
+        JEDNO ODŚWIEŻENIE PO ZAPISIE (AR-373): rodowód jest PISARZEM OGONA biegu (`_dopisz_do_ogona`), więc koniec
+        przebiegu (`running_changed(False)`) nie odświeża widoków - drugi rachunek Planera czytał `integration_input`
+        przed zapisem i szedł do kosza. Odświeża KAŻDE wyjście nasłuchu tego biegu (`_domknij_ogon` → TA SAMA droga co
+        po każdym przebiegu, `_odswiez_i_zwolnij_po_biegu`): po zapisie w `finally` - wyjątek zapisu (inny niż
+        `ValueError` per stos) leci dalej, ale nie zostawia widoków ze stanem sprzed zapisu, a Planera z zamkniętą
+        bramą; przy przebiegu bez sukcesu PRZED zdaniem utraty rodowodu - raporty osi z odświeżenia go nie nadpiszą.
+        Inna baza: `_open_path` zmontował widoki od nowa (`_mount_views` → `_clear_views`), więc nasłuch tylko zdejmuje
+        swój ogon. Zdanie rodowodu DOKLEJA się do podsumowania okna żniw, nie zastępuje go.
 
         Po zapisie - obiekt stosu wobec obiektu wydania (AR-103, `_rozjazdy_obiektu_wydania`):
         rozjazd albo brak obiektu staje NA POCZĄTKU raportu z gestem „Przypisz obiekt wydania”
@@ -5971,14 +5978,17 @@ class MainWindow(QMainWindow):
         widok, con = self._gotowy("pipeline_view"), self.con
         assert widok is not None, "zapis rodowodu po przebiegu bez strony Dostawy"   # przebieg ją zbudował
         start = widok.last_run["since"]
+        self._dopisz_do_ogona(start, "rodowod")
 
         def po_przebiegu(zapis):
             if zapis["since"] != start:
                 return
             widok.run_finished.disconnect(po_przebiegu)
             if con is not self.con:
+                self._domknij_ogon(start, "rodowod", odswiez=False)
                 return
             if zapis["failed"] or zapis["cancelled"] or zapis["refused"]:
+                self._domknij_ogon(start, "rodowod")
                 # Przebieg bez sukcesu: zdanie utraty rodowodu (instrukcja ratunku) NA POCZĄTKU - pasek
                 # ucina koniec. Zastępuje raport Dostawy i podsumowanie żniw, więc niesie oba (AR-218):
                 # wiersz awarii z jej szczegółem systemu z zapisu przebiegu (`failed`, `failed_tip` -
@@ -5994,16 +6004,65 @@ class MainWindow(QMainWindow):
                 zdanie = self._zdanie_rodowodu(con, stosy)
                 rozjazdy = self._rozjazdy_obiektu_wydania(con, stosy)
             finally:
-                self._odswiez_widoki_po_przebiegu()
-                grid = self._gotowy("grid_view")     # niezbudowane Zbiory przeczytają panel przy budowie (AR-325)
-                if grid is not None:
-                    grid.refresh_lineage_panel()
+                self._domknij_ogon(start, "rodowod")
             if rozjazdy:
                 self._pokaz_gest_obiektu_wydania(con, rozjazdy, podsumowanie, zdanie)
             elif zdanie:
                 self._flash(zlacz_zdania(" - ", (podsumowanie, zdanie)))
 
         widok.run_finished.connect(po_przebiegu)
+
+    def _ogon_trwa(self, since):
+        """Czy koniec przebiegu `since` ma jeszcze pisarzy ogona (AR-373) - wtedy odświeżenie widoków robi ostatni
+        z nich, nie `running_changed(False)`. `since=None` (przebieg bez startu) - nigdy."""
+        return since is not None and self._ogon_biegu is not None and self._ogon_biegu[0] == since
+
+    def _dopisz_do_ogona(self, since, pisarz):
+        """Pisarz zapisu PO `run_finished` przebiegu `since` (AR-373). Woła go gospodarz synchronicznie po starcie
+        przebiegu (`run_all_on`), zanim pętla zdarzeń doręczy jego koniec. Ogon innego przebiegu (porzucony
+        przełączeniem bazy) ustępuje nowemu."""
+        if not self._ogon_trwa(since):
+            self._ogon_biegu = (since, set())
+        self._ogon_biegu[1].add(pisarz)
+
+    def _domknij_ogon(self, since, pisarz, *, odswiez=True):
+        """Pisarz ogona skończył - KAŻDĄ drogą (AR-373). Ostatni zdejmuje ogon i robi JEDNO odświeżenie końca
+        przebiegu (`_odswiez_i_zwolnij_po_biegu`); `odswiez=False` - widoki zmontowane od nowa (inna baza), nie ma
+        czego odświeżać ani zwalniać."""
+        if not self._ogon_trwa(since):
+            return
+        self._ogon_biegu[1].discard(pisarz)
+        if self._ogon_biegu[1]:
+            return
+        self._ogon_biegu = None
+        if odswiez:
+            self._odswiez_i_zwolnij_po_biegu()
+
+    def _odswiez_i_zwolnij_po_biegu(self):
+        """KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki, potem panel rodowodu, a oś obiektu
+        zwalnia się OSTATNIA (AR-296). Woła je `_on_pipeline_running(False)`, a przy ogonie biegu (AR-373) - ostatni
+        pisarz ogona (`_domknij_ogon`).
+
+        PANEL RODOWODU CZYTA STAN, KTÓRY ETAP WŁAŚNIE PRZEPISAŁ (bramka pakietu, zarzut 7). Bez tego takt 3 kończył
+        się gorzej, niż zaczynał: gest uruchamiał przeliczenie, panel zostawał z zapisem sprzed niego i etykietą
+        „nieaktualny”, a user nie miał jak jej zdjąć inaczej niż przeklikaniem zaznaczenia. Odświeżamy po KAŻDYM
+        etapie, nie tylko po rodowodzie - `resolve` i `group` też ruszają fakty, na których stoi powód.
+
+        Oś obiektu zwalnia się OSTATNIA (AR-296): koniec blokady podaje receptę cofnięcia zapisu kart odłożoną przez
+        odmowę w biegu, a raporty osi z odświeżenia („Brak teleskopów na osi…”) padają wcześniej - zwolnienie przed
+        odświeżeniem dawało zdanie „recepta wróciła” i receptę zgaszoną w tym samym obrocie. W `finally`: wyjątek
+        odświeżenia nie zostawia osi zablokowanej. Koniec przebiegu doręczony W ŚRODKU odświeżenia (nowy krótki
+        przebieg pod `processEvents` fazy) tylko zamawia kolejny obrót - oś zwalnia wywołanie zewnętrzne, po ostatnim
+        obrocie. Bieg, który w pompie fazy RUSZYŁ i jeszcze trwa (`_dostawa_w_biegu`), trzyma oś zajętą - zwolni ją
+        koniec TEGO biegu; dawniej oś wracała czynna przy pracującym pisarzu Dostawy."""
+        try:
+            self._odswiez_widoki_po_przebiegu()
+            grid = self._gotowy("grid_view")     # niezbudowane Zbiory przeczytają panel przy budowie (AR-325)
+            if grid is not None:
+                grid.refresh_lineage_panel()
+        finally:
+            if not self._odswiezam_widoki and not self._dostawa_w_biegu:
+                self.object_view.set_busy(False)
 
     def _zdanie_rodowodu(self, con, stosy):
         """Zapisuje rodowód stosów (`stacks.record_harvest_inputs`, per stos) i zwraca zdanie dla
@@ -6257,7 +6316,13 @@ class MainWindow(QMainWindow):
         budowniczego; tu tylko strony zbudowane (`_gotowy`). Dostawa biegnie, więc jej strona jest.
 
         Planer zamyka bramę tutaj, a otwiera ją WYŁĄCZNIE faza odświeżenia razem z rachunkiem (AR-350,
-        `_odswiez_widoki_po_przebiegu`) - otwarcie tutaj zostawiało pompę fazy między bramą a `refresh`."""
+        `_odswiez_widoki_po_przebiegu`) - otwarcie tutaj zostawiało pompę fazy między bramą a `refresh`.
+
+        OGON BIEGU (AR-373): gdy koniec tego przebiegu zapisują jeszcze pisarze po `run_finished` (rodowód żniw,
+        `_zapisz_rodowod_po_przebiegu`), odświeżenie i zwolnienie osi robi ostatni z nich - tu tylko zatrzaski. Dawniej
+        żniwa ze stosami odświeżały widoki dwa razy, a pierwszy rachunek Planera czytał bazę sprzed zapisu rodowodu.
+        Przebieg rozpoznaje zapis WIDOKU Dostawy (`last_run["since"]` - migawka przed `running_changed(False)`),
+        czytany wyłącznie ze strony zbudowanej (`_gotowy`, AR-325): bez niej droga jak bez ogona."""
         self._dostawa_w_biegu = bool(running)
         self.axis_view.set_busy(running)
         self.observatory_view.set_busy(running)
@@ -6273,29 +6338,13 @@ class MainWindow(QMainWindow):
         if przyjmij is not None:
             przyjmij.set_busy(running)  # „Przypisz obiekt…” raportu dostawy - zapis osi
         if not running:
-            # KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki. Bez warunku
-            # „czy etap coś zapisał": przebieg przerwany albo zakończony błędem też mógł zapisać
-            # (etapy łańcucha przed błędem, częściowy skan), a `running_changed(False)` przychodzi
-            # w każdej z tych dróg - `_cleanup_thread` woła je po KAŻDYM końcu wątku.
-            # Oś obiektu zwalnia się OSTATNIA (AR-296): koniec blokady podaje receptę cofnięcia zapisu kart
-            # odłożoną przez odmowę w biegu, a raporty osi z odświeżenia („Brak teleskopów na osi…”) padają
-            # wcześniej - zwolnienie przed odświeżeniem dawało zdanie „recepta wróciła” i receptę zgaszoną
-            # w tym samym obrocie. W `finally`: wyjątek odświeżenia nie zostawia osi zablokowanej. Koniec
-            # przebiegu doręczony W ŚRODKU odświeżenia (nowy krótki przebieg pod `processEvents` fazy) tylko
-            # zamawia kolejny obrót - oś zwalnia wywołanie zewnętrzne, po ostatnim obrocie.
-            try:
-                self._odswiez_widoki_po_przebiegu()
-                # PANEL RODOWODU CZYTA STAN, KTÓRY ETAP WŁAŚNIE PRZEPISAŁ (bramka pakietu, zarzut 7).
-                # Bez tego takt 3 kończył się gorzej, niż zaczynał: gest uruchamiał przeliczenie, panel
-                # zostawał z zapisem sprzed niego i etykietą „nieaktualny", a user nie miał jak jej zdjąć
-                # inaczej niż przeklikaniem zaznaczenia. Odświeżamy po KAŻDYM etapie, nie tylko po
-                # rodowodzie - `resolve` i `group` też ruszają fakty, na których stoi powód.
-                grid = self._gotowy("grid_view")
-                if grid is not None:
-                    grid.refresh_lineage_panel()
-            finally:
-                if not self._odswiezam_widoki:
-                    self.object_view.set_busy(False)
+            # KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki (`_odswiez_i_zwolnij_po_biegu`). Bez
+            # warunku „czy etap coś zapisał": przebieg przerwany albo zakończony błędem też mógł zapisać (etapy
+            # łańcucha przed błędem, częściowy skan), a `running_changed(False)` przychodzi w każdej z tych dróg -
+            # `_cleanup_thread` woła je po KAŻDYM końcu wątku. Przy ogonie biegu (AR-373) odświeża ostatni pisarz.
+            dostawa = self._gotowy("pipeline_view")
+            if dostawa is None or not self._ogon_trwa(dostawa.last_run["since"]):
+                self._odswiez_i_zwolnij_po_biegu()
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 

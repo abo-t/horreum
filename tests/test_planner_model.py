@@ -575,3 +575,78 @@ def test_zdanie_pudla_cel_warstwy_niewczytanej_przy_trafieniach_podciagu(con):
         "planner.find_hits_layer", name=i18n.t("planner.find_self", needle="LBN 1"), type="EmN",
         layer=i18n.t("planner.layer_cirrus"), needle="LBN 1")
     assert "(EmN)" in pm.find_miss_text(res, "LBN 1")
+
+
+# ─────────────── AR-375: jedna forma liczby progu · AR-385: pusta lista mówi dźwignię z liczb rdzenia
+
+@pytest.mark.parametrize("v, miejsc, tekst", [
+    (6.5, 2, "6.5"), (6.0, 2, "6"), (6.25, 2, "6.25"), (13.0, 2, "13"), (12.75, 2, "12.75"), (1.0, 2, "1"),
+    (32.5, 2, "32.5"), (100.0, 2, "100"), (0.0, 2, "0"), (3.333, 2, "3.33"), (30.0, 0, "30")])
+def test_tekst_progu_prawdziwa_precyzja_bez_zer_koncowych(v, miejsc, tekst):
+    """AR-375 (decyzja Zdzinia: prawdziwa precyzja wpisu, „13 mag” zamiast dwóch form): tyle miejsc, ile trzyma pole
+    progu, zera końcowe obcięte. Falsyfikatory: `:g` (bez sufitu precyzji pola), `.0f`/`.1f` (zaokrąglenie wpisu),
+    obcięcie zer bez kropki (`30` → `3`)."""
+    assert pm.tekst_progu(v, miejsc) == tekst
+
+
+_LICZNIKI = {"pool": 1692, "feasible": 854, "above_horizon": 485, "matched": 0, "visible": 0, "rows": 0, "marked": 0,
+             "hidden_by_status": 0}
+
+
+def _pusty(res, rows=(), **pola):
+    """Wynik bez wierszy z licznikami `pola` (klucze `counts`) i parametrami cięcia (`status`, `max_cost`,
+    `rig_filter`) - wejście reguły zdania pustej listy bez rachunku nieba."""
+    wynik = {k: pola.pop(k) for k in ("status", "max_cost", "rig_filter") if k in pola}
+    return replace(res, rows=rows, counts={**_LICZNIKI, **pola}, **wynik)
+
+
+def test_pusta_lista_mowi_dzwignie_z_licznikow_rdzenia(res):
+    """AR-385: zdanie pustej listy wybiera krok lejka z liczb rdzenia - progi typu (filtr kadru tylko, gdy coś
+    ściął), wysokość, a dalej każde cięcie z licznikiem zdaniem z liczbą, w kolejności rdzenia. Szukana nazwa, status
+    i próg kosztu z WYNIKU, liczba progu formaterem tytułu. Falsyfikatory: zdanie progów przy filtrze statusu (stan sprzed
+    AR-385); brak kroku wysokości; zła kolejność; koszt w drugiej formie liczby; zdanie progów jako rezerwa bez
+    liczników (fałszywa dźwignia)."""
+    i18n.set_lang("pl")
+    progi = "Żaden cel nie przeszedł progów rozmiaru i jasności - poluzuj rozmiar albo magnitudo."
+    assert pm.empty_text(_pusty(res, feasible=0, above_horizon=0)) == progi
+    assert pm.empty_text(_pusty(res, feasible=0, above_horizon=0, rig_filter="on", hidden_by_rig=0)) == progi
+    assert pm.empty_text(_pusty(res, feasible=0, above_horizon=0, rig_filter="on", hidden_by_rig=7)) == \
+        i18n.t("planner.empty_rig")
+    assert pm.empty_text(_pusty(res, feasible=22, above_horizon=0)) == \
+        "22 cele po progach nie sięgają wymaganej wysokości - poluzuj próg wysokości."
+    status = pm.empty_text(_pusty(res, status="done", hidden_by_status_filter=485))
+    assert status == "Filtr statusu „zrobiony” schował 485 celów - wybierz „(dowolny)”."
+    koszt = pm.empty_text(_pusty(res, max_cost=4.5, hidden_by_cost=2))
+    assert koszt == "Próg kosztu ≤4.5 schował 2 cele - podnieś go albo wyłącz."
+    razem = _pusty(res, status="planned", max_cost=3.0, hidden_by_status_filter=1, hidden_by_status=2,
+                   hidden_by_pn=5, hidden_by_cost=12)
+    assert pm.empty_text(razem) == " ".join((
+        "Filtr statusu „zaplanowany” schował 1 cel - wybierz „(dowolny)”.",
+        i18n.t("planner.hidden_by_status", n=2), i18n.t_plural("planner.pn_hidden", 5),
+        "Próg kosztu ≤3 schował 12 celów - podnieś go albo wyłącz."))
+    # Lista widoku pusta przy wierszach wyniku = soczewka filtra kadru; bez liczników (`only_gaps` spoza ekranu) - zdanie
+    # neutralne, bez dźwigni, której wynik nie zna; tryb szukania - nazwa z WYNIKU (`PlanResult.find`).
+    assert pm.empty_text(_pusty(res, rows=res.rows[:1], rig_filter="on")) == i18n.t("planner.empty_rig")
+    assert pm.empty_text(_pusty(res)) == "Żaden cel nie przeszedł bieżących filtrów."
+    assert pm.empty_text(replace(res, find="NGC 7000")) == pm.empty_find_text(res, "NGC 7000")
+    i18n.set_lang("en")
+    assert pm.empty_text(_pusty(res, status="done", hidden_by_status_filter=1)) == \
+        "The status filter “done” hid 1 target - choose “(any)”."
+
+
+@pytest.mark.parametrize("n, cele", [(1, "cel"), (2, "cele"), (5, "celów"), (12, "celów"), (22, "cele")])
+def test_pusta_lista_odmiana_liczebnika(res, n, cele):
+    """Odmiana przez katalog (`t_plural`): 1 · 2-4 · 5 · 12-14 · 22 - zdanie statusu i kosztu."""
+    i18n.set_lang("pl")
+    assert f"schował {n} {cele} -" in pm.empty_text(_pusty(res, status="skip", hidden_by_status_filter=n))
+    assert f"schował {n} {cele} -" in pm.empty_text(_pusty(res, max_cost=2.0, hidden_by_cost=n))
+
+
+def test_pusta_lista_przy_filtrze_statusu_z_prawdziwego_rachunku(con):
+    """AR-385 na prawdziwym rdzeniu: filtr „zrobiony” bez oznaczeń (stan bazy Zdzinia: 0 oznaczeń `done`) daje pustą
+    listę, a zdanie nazywa status i liczbę celów, które schował - wszystkie nad horyzontem."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), status="done", limit=None)
+    assert res.rows == () and res.counts["hidden_by_status_filter"] == res.counts["above_horizon"] > 0
+    assert pm.empty_text(res) == i18n.t_plural("planner.empty_by_status", res.counts["above_horizon"],
+                                               status="zrobiony", any="(dowolny)")

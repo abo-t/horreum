@@ -148,7 +148,7 @@ def test_pasek_progow_zwija_sie_i_niesie_stan(view):
     więc zwinięty pasek nadal mówi, czym tniesz listę."""
     body = view._controls_body
     assert body.isHidden() is False       # `isVisible` byłoby False także dla niepokazanego okna
-    assert "6′" in view.controls_toggle.text() and "13.0" in view.controls_toggle.text()
+    assert "6′" in view.controls_toggle.text() and "mag ≤13," in view.controls_toggle.text()   # AR-375: jedna forma
     view.controls_toggle.setChecked(False)
     assert body.isHidden() is True
     assert "Progi" in view.controls_toggle.text()          # stan widoczny MIMO zwinięcia
@@ -1128,9 +1128,9 @@ def test_szukanie_M_4_na_ekranie_planera(view, lang):
 
 _ODCHYLENIA = (("min_size", 8.0, "≥8′ (domyślnie 6′)", "≥8′ (default 6′)"),
                ("min_dark", 20.0, "≥20′ (domyślnie 15′)", "≥20′ (default 15′)"),
-               ("max_mag", 12.5, "≤12.5 (domyślnie 13.0)", "≤12.5 (default 13.0)"),
+               ("max_mag", 12.5, "≤12.5 (domyślnie 13)", "≤12.5 (default 13)"),
                ("min_alt", 35.0, "≥35° (domyślnie 30°)", "≥35° (default 30°)"),
-               ("min_hours", 2.0, "2.0 h/kanał (domyślnie 1.0)", "2.0 h/channel (default 1.0)"))
+               ("min_hours", 2.0, "2 h/kanał (domyślnie 1)", "2 h/channel (default 1)"))
 
 
 def _widok_inline(tmp_path, nazwa="tytul.db"):
@@ -1166,12 +1166,15 @@ def test_tytul_progow_dopisuje_wartosc_domyslna_przy_odchyleniu(qapp, tmp_path, 
 
 
 def test_tytul_progow_odchylenie_na_tekscie_sformatowanym(view):
-    """AR-371: próg 6,5 tytuł pokazuje „≥6′”, więc dopisek „(domyślnie 6′)” obok byłby sprzecznością; 6,6 to już
-    „≥7′ (domyślnie 6′)”. Falsyfikator: odchylenie liczone na surowej wartości progu."""
+    """AR-375 (decyzja Zdzinia: prawdziwa precyzja wpisu, jedna forma liczby): próg 6,5 tytuł pokazuje „≥6.5′” z dopiskiem
+    domyślnej - dawniej „≥6′” bez dopisku udawał domyślną; 6,6 to „≥6.6′”, nie „≥7′”. Tekst jest dokładny, więc
+    odchylenie liczone na tekście = odchylenie wartości. Falsyfikator: format z zaokrągleniem do jedności."""
     view.min_size.setValue(6.5)
-    assert "≥6′" in view.controls_toggle.text() and "(domyślnie" not in view.controls_toggle.text()
+    assert "≥6.5′ (domyślnie 6′)" in view.controls_toggle.text()
     view.min_size.setValue(6.6)
-    assert "≥7′ (domyślnie 6′)" in view.controls_toggle.text()
+    assert "≥6.6′ (domyślnie 6′)" in view.controls_toggle.text()
+    view.min_size.setValue(6.0)
+    assert "≥6′," in view.controls_toggle.text() and "(domyślnie" not in view.controls_toggle.text()
 
 
 def test_tytul_progow_mowi_o_progu_kosztu_i_statusie(view):
@@ -1193,12 +1196,13 @@ def test_tytul_progow_mowi_o_progu_kosztu_i_statusie(view):
 def test_przywroc_domyslne_podpowiedz_z_jednego_zrodla(view):
     """AR-371: podpowiedź „Przywróć domyślne” formatowana z wartości rdzenia, z członem przełącznika PN, który
     reset gasi; progi GUI biorą domyślne z `targets.DEFAULT_THRESHOLDS`. Liczby w asercji to pin decyzji, nie kopia
-    stałej. Falsyfikator: proza z liczbami przepisanymi ręcznie, bez PN."""
+    stałej - ta sama forma co w tytule paska (AR-375). Człon filtra statusu: reset go zdejmuje (AR-385). Falsyfikator:
+    proza z liczbami przepisanymi ręcznie, bez PN, bez statusu."""
     from horreum.gui import i18n
     from horreum.gui import planner as P
     assert view.reset_btn.toolTip() == i18n.t("planner.reset_thresholds_tip", size="6", dark="15", mag="13",
                                               alt="30", hours="1")
-    assert "PN" in view.reset_btn.toolTip()
+    assert "PN" in view.reset_btn.toolTip() and "filtr statusu" in view.reset_btn.toolTip()
     assert {n: spec[1] for n, spec in P._THRESHOLDS.items()} == dict(targets.DEFAULT_THRESHOLDS)
 
 
@@ -1514,3 +1518,342 @@ def test_rachunek_planera_w_watku_czyta_jedna_migawke(qapp, tmp_path, ustawienia
         assert targets.plan_marks(con)[cel]["status"] == "planned"
     finally:
         con.close()
+
+
+# ───────────────────────── AR-376: cel i niezapisane pola panelu przeżywają chip, porządek i przeliczenie
+
+def _klik_wiersz(v, r):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    rect = v.table.visualRect(v.model.index(r, 0))
+    QTest.mouseClick(v.table.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    _pompuj()
+
+
+def _wpisz_w_panel(v, notatka):
+    """Niezapisane pola panelu prawdziwymi klawiszami: status o pozycję w dół („zaplanowany” przy celu bez
+    oznaczenia), priorytet o krok w górę (1), notatka."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    QTest.keyClick(v.panel_status, Qt.Key_Down)
+    QTest.keyClick(v.panel_priority, Qt.Key_Up)
+    QTest.mouseClick(v.panel_note, Qt.LeftButton)
+    QTest.keyClicks(v.panel_note, notatka)
+    _pompuj()
+
+
+def _panel(v):
+    row = v.selected_row()
+    return (row.canon if row else None, v.panel.isEnabled(), v.panel_status.currentData(),
+            v.panel_priority.value(), v.panel_note.text(), v.panel_note.isModified())
+
+
+@pytest.mark.parametrize("gest", ["chip", "porzadek"])
+def test_chip_i_porzadek_zostawiaja_cel_i_niezapisany_panel(pokazany, gest):
+    """AR-376: klik chipa soczewki i zmiana „Porządku” to przerysowanie tego samego wyniku - zaznaczony cel zostaje,
+    a niezapisane status, priorytet i notatka stoją w CZYNNYM panelu przy tym celu („Zapisz” czynne). Dwa
+    przerysowania z rzędu: notatka zostaje niezapisana także po drugim. Prawdziwe kliki i klawisze. Falsyfikatory:
+    przerysowanie bez celu (panel wygaszony - stan sprzed AR-376); zwrot bez statusu albo priorytetu; notatka
+    oddana bez znacznika `isModified` (drugie przerysowanie ją gubi)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v = pokazany
+    _klik_wiersz(v, 1)
+    cel = v.selected_row().canon
+    _wpisz_w_panel(v, "domknac SII")
+    oczekiwany = (cel, True, "planned", 1, "domknac SII", True)
+    assert _panel(v) == oczekiwany
+    for krok in range(2):
+        if gest == "chip":
+            QTest.mouseClick(v._chip_group.buttons()[1 - krok], Qt.LeftButton)
+        else:
+            QTest.keyClick(v.order_combo, Qt.Key_Down if krok == 0 else Qt.Key_Up)
+        _pompuj()
+        assert _panel(v) == oczekiwany, krok
+        assert v.save_btn.isEnabled()
+
+
+def test_przeliczenie_zostawia_cel_i_niezapisany_status_i_priorytet(pokazany):
+    """AR-376: przeliczenie nocy (próg zmieniony klawiszem) zostawia cel z niezapisanym statusem i priorytetem -
+    dawniej przeżywała je sama notatka. Falsyfikator: zwrot pól panelu bez statusu i priorytetu."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v = pokazany
+    _klik_wiersz(v, 1)
+    cel = v.selected_row().canon
+    _wpisz_w_panel(v, "x")
+    gen = v._shown_gen
+    QTest.keyClick(v.min_hours, Qt.Key_Up)               # próg godzin nie tnie listy - zmienia luki
+    _czekaj_na(lambda: v._shown_gen > gen and not v._pending_gen(), "przeliczenie po zmianie progu")
+    assert _panel(v) == (cel, True, "planned", 1, "x", True)
+
+
+def test_zdjecie_oznaczenia_pokazuje_stan_bazy(pokazany):
+    """AR-376: niezapisane wraca WYŁĄCZNIE, gdy różni się od kurateli wiersza - jedną regułą dla statusu, priorytetu
+    i notatki: po „Zapisz” wartości zapisane są nowym stanem (notatka już nie „niezapisana”), a po „Zdejmij” panel mówi
+    „(bez oznaczenia)” bez notatki, nie stan sprzed zdjęcia nad wierszem bez oznaczenia (status, którego użytkownik
+    nie wybrał, czekałby na „Zapisz”). Falsyfikatory: zwrot pól bez porównania z kuratelą wiersza; notatka porównywana
+    znacznikiem edycji, nie źródłem."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v = pokazany
+    _klik_wiersz(v, 0)
+    cel = v.selected_row().canon
+    QTest.keyClick(v.panel_status, Qt.Key_Down)
+    QTest.keyClick(v.panel_priority, Qt.Key_Up)
+    QTest.keyClick(v.panel_priority, Qt.Key_Up)
+    QTest.mouseClick(v.panel_note, Qt.LeftButton)
+    QTest.keyClicks(v.panel_note, "domknac SII")
+    QTest.mouseClick(v.save_btn, Qt.LeftButton)
+    _pompuj()
+    assert _panel(v) == (cel, True, "planned", 2, "domknac SII", False)
+    assert v.selected_row().plan == "zaplanowany 2"
+    QTest.mouseClick(v.clear_btn, Qt.LeftButton)
+    _pompuj()
+    assert _panel(v) == (cel, True, None, 0, "", False)
+    assert not v.save_btn.isEnabled() and not v.clear_btn.isEnabled()
+    assert v.con.execute("SELECT count(*) FROM target_plan WHERE canon = ?", (cel,)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("zapisana, edycja", [(" nota ", False), ("nota", True)])
+def test_zdjecie_oznaczenia_z_notatka_o_tej_samej_tresci_czysci_panel(pokazany, zapisana, edycja):
+    """AR-376: notatka w panelu o TEJ SAMEJ treści co kuratela wiersza nie jest niezapisana, więc po „Zdejmij” panel
+    zostaje bez notatki i bez znacznika zmiany - także gdy notatkę zapisała konsola ze spacjami brzegowymi (porównanie
+    obcina je po obu stronach) i gdy człowiek dopisał znak i go skasował (znacznik edycji stoi, treść ta sama).
+    Falsyfikatory: obcięcie spacji tylko po stronie panelu; notatka niezapisana po znaczniku edycji, nie po treści."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v = pokazany
+    cel = v.model.row_at(0).canon
+    repo.set_target_plan(v.con, canon=cel, status="planned", priority=None, note=zapisana, now=NOW)
+    v.refresh()
+    _klik_wiersz(v, next(r for r in range(v.model.rowCount()) if v.model.row_at(r).canon == cel))
+    assert _panel(v) == (cel, True, "planned", 0, zapisana, False)
+    if edycja:
+        QTest.mouseClick(v.panel_note, Qt.LeftButton)
+        QTest.keyClick(v.panel_note, Qt.Key_End)
+        QTest.keyClicks(v.panel_note, "x")
+        QTest.keyClick(v.panel_note, Qt.Key_Backspace)
+        assert v.panel_note.text() == zapisana and v.panel_note.isModified()
+    QTest.mouseClick(v.clear_btn, Qt.LeftButton)
+    _pompuj()
+    assert _panel(v) == (cel, True, None, 0, "", False)
+    assert v.con.execute("SELECT count(*) FROM target_plan WHERE canon = ?", (cel,)).fetchone()[0] == 0
+
+
+def test_notatka_wpisana_wraca_bez_znacznika_gdy_baza_ma_te_sama_tresc(pokazany):
+    """AR-376: notatka wpisana w panelu wraca po przeliczeniu; gdy w tym czasie konsola zapisała celowi tę samą treść ze
+    spacjami brzegowymi, wraca jako ZGODNA z bazą (bez znacznika zmiany) - porównanie zwrotu obcina spacje po obu
+    stronach. Falsyfikator: obcięcie spacji tylko po stronie panelu przy zwrocie."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v = pokazany
+    _klik_wiersz(v, 1)
+    cel = v.selected_row().canon
+    QTest.mouseClick(v.panel_note, Qt.LeftButton)
+    QTest.keyClicks(v.panel_note, "nota")
+    repo.set_target_plan(v.con, canon=cel, status="planned", priority=None, note=" nota ", now=NOW)   # konsola
+    v.refresh()
+    assert _panel(v) == (cel, True, "planned", 0, "nota", False)
+
+
+def test_notatka_po_bledzie_rachunku_wraca_na_ten_sam_cel(pokazany, monkeypatch):
+    """AR-376: rachunek, który padł (błąd bazy), opróżnia listę, ale panel dalej trzyma swój cel - następny udany
+    rachunek oddaje mu wpisaną notatkę. Falsyfikator: zrzut pól po zaznaczeniu tabeli zamiast po celu panelu (po
+    błędzie zaznaczenia nie ma, notatka przepada)."""
+    import sqlite3
+    v = pokazany
+    _klik_wiersz(v, 1)
+    cel = v.selected_row().canon
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(v.panel_note, Qt.LeftButton)
+    QTest.keyClicks(v.panel_note, "po bledzie")
+    prawdziwy = targets.plan
+
+    def _pada(_con, **_kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(targets, "plan", _pada)
+    v.refresh()
+    assert v.model.rowCount() == 0 and v._result is None
+    monkeypatch.setattr(targets, "plan", prawdziwy)
+    v.refresh()
+    assert _panel(v) == (cel, True, None, 0, "po bledzie", True)
+
+
+def test_zaznaczenie_w_trakcie_rachunku_zostaje_z_notatka(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-376: rachunek w wątku tła trwa, człowiek zaznacza inny cel i pisze notatkę - wynik zostawia TEN cel z jego
+    notatką. Dawniej cel zatrzaśnięty przy starcie rachunku wracał, a notatka drugiego celu lądowała w jego panelu
+    („Zapisz” wpisałby ją cudzemu celowi). Rachunek wstrzymany bramą. Falsyfikatory: zatrzask celu w `replan`;
+    zrzut notatki pod celem zatrzaśniętym zamiast celu panelu."""
+    import threading
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    sciezka = str(tmp_path / "wyscig.db")
+    con = _seed(sciezka)
+    v = PlannerView(con, db_path=sciezka, now_fn=lambda: NOW)
+    v.resize(1400, 800)
+    v.show()
+    brama = threading.Event()
+    try:
+        _czekaj_na(lambda: v._worker is None and v._result is not None and not v._pending_gen(), "plan nocy", 30)
+        _klik_wiersz(v, 0)
+        prawdziwy = targets.plan
+
+        def _plan(c, **kw):
+            brama.wait(20)
+            return prawdziwy(c, **kw)
+        monkeypatch.setattr(targets, "plan", _plan)
+        v.refresh()                                       # rachunek w wątku, wstrzymany
+        assert v._worker is not None
+        _klik_wiersz(v, 2)
+        cel = v.selected_row().canon
+        QTest.mouseClick(v.panel_note, Qt.LeftButton)
+        QTest.keyClicks(v.panel_note, "dla tego celu")
+        brama.set()
+        _czekaj_na(lambda: v._worker is None and not v._pending_gen(), "wynik rachunku", 30)
+        _pompuj()
+        assert _panel(v) == (cel, True, None, 0, "dla tego celu", True)
+    finally:
+        brama.set()
+        v.zatrzymaj_pola()
+        v.close()
+        con.close()
+
+
+def test_wybor_po_zapisie_w_trakcie_rachunku_bije_cel_zapisu(qapp, tmp_path, ustawienia, monkeypatch):
+    """AR-376: „Zapisz” przy celu A odkłada A jako cel przerysowania (`_replan_keeping`), rachunek w wątku tła trwa,
+    człowiek zaznacza B i pisze notatkę - wynik zostawia B z notatką: wybór człowieka bije cel odłożony przez zapis.
+    Rachunek wstrzymany bramą, prawdziwe kliki i klawisze. Falsyfikator: zaznaczenie bez zdjęcia odłożonego celu (wynik
+    wraca na A, notatka B przepada)."""
+    import threading
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    sciezka = str(tmp_path / "zapis_wybor.db")
+    con = _seed(sciezka)
+    v = PlannerView(con, db_path=sciezka, now_fn=lambda: NOW)
+    v.resize(1400, 800)
+    v.show()
+    brama = threading.Event()
+    try:
+        _czekaj_na(lambda: v._worker is None and v._result is not None and not v._pending_gen(), "plan nocy", 30)
+        _klik_wiersz(v, 0)
+        a = v.selected_row().canon
+        QTest.keyClick(v.panel_status, Qt.Key_Down)
+        prawdziwy = targets.plan
+
+        def _plan(c, **kw):
+            brama.wait(20)
+            return prawdziwy(c, **kw)
+        monkeypatch.setattr(targets, "plan", _plan)
+        QTest.mouseClick(v.save_btn, Qt.LeftButton)       # zapis A, rachunek w wątku wstrzymany
+        assert v._worker is not None and v._keep_canon == a
+        _klik_wiersz(v, 2)
+        b = v.selected_row().canon
+        QTest.mouseClick(v.panel_note, Qt.LeftButton)
+        QTest.keyClicks(v.panel_note, "dla B")
+        brama.set()
+        _czekaj_na(lambda: v._worker is None and not v._pending_gen(), "wynik rachunku", 30)
+        _pompuj()
+        assert b != a and _panel(v) == (b, True, None, 0, "dla B", True)
+        assert targets.plan_marks(con)[a]["status"] == "planned"
+    finally:
+        brama.set()
+        v.zatrzymaj_pola()
+        v.close()
+        con.close()
+
+
+def test_precyzja_liczby_progu_z_jednego_zrodla(view):
+    """AR-375: tytuł paska, podpowiedź resetu i pusty stan formatują liczbę progu precyzją `planner_model.MIEJSCA_PROGU`
+    - tą samą, którą trzymają pola progów i progu kosztu (wpis z klawiatury dostaje dokładnie tyle miejsc), a formater
+    nie ma precyzji domyślnej. Falsyfikator: pole o innej precyzji niż stała (tytuł przekłamałby wpis)."""
+    import inspect
+
+    from horreum.gui import planner_model as pm
+    assert {w.decimals() for w in list(view._spins.values()) + [view.max_cost]} == {pm.MIEJSCA_PROGU}
+    assert inspect.signature(pm.tekst_progu).parameters["miejsc"].default is inspect.Parameter.empty
+
+
+def test_przeniesienie_sieroty_nie_niesie_notatki_innego_celu(qapp, tmp_path, ustawienia):
+    """AR-376: „Przenieś” sieroty wraca zaznaczeniem na cel, który przejął nazwę (jawny cel przerysowania), a notatka
+    wpisana przy INNYM celu nie przechodzi do jego panelu - pola wracają wyłącznie na cel, którego panel je trzymał.
+    Falsyfikator: zwrot niezapisanych pól bez sprawdzenia celu (notatka trafia do panelu celu przeniesienia)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    con = _seed(str(tmp_path / "sierota.db"))
+    con.execute("INSERT INTO target_plan(canon, status, priority, note, created_at, updated_at) "
+                "VALUES ('LBN529', 'planned', NULL, NULL, ?, ?)", (NOW, NOW))
+    con.commit()
+    v = PlannerView(con, db_path=None, now_fn=lambda: NOW)
+    v.resize(1400, 800)
+    v.show()
+    _pompuj()
+    try:
+        r = next(i for i in range(v.model.rowCount()) if v.model.row_at(i).canon != "C9")
+        _klik_wiersz(v, r)
+        inny = v.selected_row().canon
+        QTest.mouseClick(v.panel_note, Qt.LeftButton)
+        QTest.keyClicks(v.panel_note, "notatka innego celu")
+        v.orphan_list.setCurrentRow(0)                   # LBN529 - alias katalogowy C9
+        QTest.mouseClick(v.orphan_move_btn, Qt.LeftButton)
+        _pompuj()
+        assert v.selected_row().canon == "C9" != inny
+        assert v.panel_note.text() == "" and v.panel_status.currentData() == "planned"
+    finally:
+        v.zatrzymaj_pola()
+        v.close()
+        con.close()
+
+
+# ───────────────────────── AR-385: pusta lista przy filtrze statusu nazywa go, a „Przywróć domyślne” go zdejmuje
+
+def test_pusta_lista_przy_filtrze_statusu_nazywa_go_a_reset_go_zdejmuje(pokazany):
+    """AR-385: filtr „zrobiony” bez oznaczeń (u Zdzinia 0 oznaczeń `done`) daje pustą listę, a zdanie w jej miejscu
+    nazywa filtr statusu i liczbę celów, które schował - nie „poluzuj rozmiar…”. „Przywróć domyślne” zdejmuje filtr
+    statusu (tytuł paska nazywa go cięciem) i lista wraca jednym klikiem. Prawdziwe klawisze i klik. Falsyfikatory:
+    zdanie progów przy filtrze statusu; reset bez filtra statusu."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from horreum.gui import i18n
+    v = pokazany
+    wiersze = v.model.rowCount()
+    assert wiersze > 0
+    for _ in range(4):
+        if v.status_combo.currentData() == "done":
+            break
+        QTest.keyClick(v.status_combo, Qt.Key_Down)
+    assert v.status_combo.currentData() == "done"
+    gen = v._shown_gen
+    _czekaj_na(lambda: v._shown_gen > gen and not v._pending_gen(), "rachunek z filtrem statusu")
+    assert v.model.rowCount() == 0 and not v.empty_note.isHidden() and v.table.isHidden()
+    n = v._result.counts["above_horizon"]
+    assert v.empty_note.text() == i18n.t_plural("planner.empty_by_status", n, status="zrobiony", any="(dowolny)")
+    QTest.mouseClick(v.reset_btn, Qt.LeftButton)
+    _pompuj()
+    assert v.status_combo.currentData() is None
+    assert v.model.rowCount() == wiersze and v.empty_note.isHidden()
+    assert "status:" not in v.controls_toggle.text()
+
+
+# ───────────────────────── AR-375: tytuł paska progów mówi wartość wpisaną z klawiatury
+
+@pytest.mark.parametrize("calk, ulamek, czlon", [("6", "5", "≥6.5′ (domyślnie 6′)"), ("7", "5", "≥7.5′ (domyślnie 6′)"),
+                                                ("6", "25", "≥6.25′ (domyślnie 6′)")])
+def test_tytul_progow_wpis_z_klawiatury_mowi_prawdziwa_wartosc(pokazany, calk, ulamek, czlon):
+    """AR-375: próg wpisany klawiszami z separatorem dziesiętnym pola (locale pola, nie stała kropka) stoi w tytule
+    paska z prawdziwą precyzją wpisu - dawniej 6,5 dawało „≥6′” bez dopisku, a 7,5 „≥8′ (domyślnie 6′)”. Pełny tekst
+    w podpowiedzi przycisku. Falsyfikator: format z zaokrągleniem do jedności."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    pole = pokazany.min_size
+    QTest.mouseClick(pole.lineEdit(), Qt.LeftButton)
+    QTest.keyClick(pole.lineEdit(), Qt.Key_A, Qt.ControlModifier)
+    QTest.keyClicks(pole.lineEdit(), calk)
+    QTest.keyClicks(pole.lineEdit(), pole.locale().decimalPoint())
+    QTest.keyClicks(pole.lineEdit(), ulamek)
+    QTest.keyClick(pole.lineEdit(), Qt.Key_Return)
+    _pompuj()
+    tytul = pokazany.controls_toggle.text()
+    assert czlon in tytul and pokazany.controls_toggle.toolTip() == tytul

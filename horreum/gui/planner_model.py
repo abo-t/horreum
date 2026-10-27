@@ -421,6 +421,58 @@ def empty_find_text(result, needle):
                   layer=i18n.t(klucz) if klucz else out.target.layer)
 
 
+# Miejsca po przecinku, które trzyma pole progu planera (`QDoubleSpinBox.decimals()` - domyślne 2; ekran go nie zmienia,
+# a `setValue` zaokrągla do niego) - JEDNO źródło precyzji liczby progu dla tytułu paska, podpowiedzi resetu i zdania
+# pustego stanu (AR-375). Zgodność z polami pinuje test widoku.
+MIEJSCA_PROGU = 2
+
+
+def tekst_progu(v, miejsc):
+    """Liczba progu na ekranie planera (AR-375): prawdziwa precyzja wpisu - `miejsc` (`MIEJSCA_PROGU`), zera końcowe
+    obcięte: „6.5”, „6.25”, „13”, „1”. Jedna forma tej samej liczby w tytule paska progów, dopisku wartości domyślnej,
+    podpowiedzi „Przywróć domyślne” i zdaniu pustego stanu. Kropka dziesiętna - jak dotąd w tytule paska."""
+    tekst = f"{v:.{miejsc}f}"
+    return tekst.rstrip("0").rstrip(".") if "." in tekst else tekst
+
+
+def empty_text(result):
+    """Zdanie pustej listy planera (AR-385): DŹWIGNIA Z LICZB RDZENIA, nie zgadywanie. Tryb `find` (`PlanResult.find`) -
+    `empty_find_text`. Poza nim krok lejka, który wyzerował listę:
+
+    * wiersze wyniku są, a pusta jest lista widoku - soczewka filtra kadru schowała resztę (`planner.empty_rig`);
+    * nic nie przeszło progów typu (`feasible`) - rozmiar i jasność, a gdy filtr kadru coś ściął, także on;
+    * nic po progach nie sięga wymaganej wysokości (przedcięcie deklinacją, `above_horizon`);
+    * reszta - cięcia z licznikiem `targets.plan` (filtr statusu, skreślenie „pominięty”, przełącznik PN, próg kosztu),
+      zdanie z liczbą każde, w kolejności rdzenia. Wynik bez nich (wołanie z `only_gaps`/`only_new` spoza ekranu)
+      dostaje zdanie neutralne - bez dźwigni, której nie znamy.
+
+    Szukana nazwa, status i próg kosztu czytane z WYNIKU (`PlanResult.find`, `status`, `max_cost`), nie z kontrolek:
+    zdanie opisuje policzoną listę także wtedy, gdy kontrolki stoją już inaczej (debounce, bieg Dostawy)."""
+    if result.find:
+        return empty_find_text(result, result.find)
+    c = result.counts
+    if result.rows:
+        return i18n.t("planner.empty_rig")
+    if not c["feasible"]:
+        return i18n.t("planner.empty_rig" if result.rig_filter == "on" and c.get("hidden_by_rig")
+                      else "planner.empty")
+    if not c["above_horizon"]:
+        return i18n.t_plural("planner.empty_alt", c["feasible"])
+    zdania = []
+    if c.get("hidden_by_status_filter"):
+        zdania.append(i18n.t_plural("planner.empty_by_status", c["hidden_by_status_filter"],
+                                    status=i18n.t(f"planner.status_{result.status}"),
+                                    any=i18n.t("planner.status_any")))
+    if c.get("hidden_by_status"):
+        zdania.append(i18n.t("planner.hidden_by_status", n=c["hidden_by_status"]))
+    if c.get("hidden_by_pn"):
+        zdania.append(i18n.t_plural("planner.pn_hidden", c["hidden_by_pn"]))
+    if c.get("hidden_by_cost"):
+        zdania.append(i18n.t_plural("planner.empty_by_cost", c["hidden_by_cost"],
+                                    cost=tekst_progu(result.max_cost, MIEJSCA_PROGU)))
+    return " ".join(zdania) or i18n.t("planner.empty_other")
+
+
 def find_miss_text(result, needle):
     """Zdanie nad listą trybu `find`, gdy wpisaną nazwę zna katalog, a lista ma WYŁĄCZNIE trafienia
     podciągu (AR-175; `PlanResult.find_outside` przy niepustej liście): „„M 4” = NGC6121, poza celami

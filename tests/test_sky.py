@@ -282,7 +282,7 @@ def test_brak_nocy_astronomicznej_latem_ma_powod():
     """53,4° N: od ~połowy maja do ~końca lipca ☉ nie schodzi poniżej −18°. Okno ŻEGLARSKIE
     istnieje mimo to i to ono jest zakresem rozważań — brak twardej ciemności opisuje jakość
     nieba, nie dostępność celu."""
-    w = sky.visibility_window(350.3, 62.7, BEDARGOWO, date(2026, 6, 15))
+    w = sky.visibility_window(350.3, 62.7, BEDARGOWO, date(2026, 6, 15), min_alt=30.0)
     assert w.darkness == "nautical" and w.reason == "no_astro_night"
     assert w.astro_start is None and w.dark_start is not None and w.hours_above > 0
 
@@ -290,26 +290,26 @@ def test_brak_nocy_astronomicznej_latem_ma_powod():
 def test_okno_to_noc_zeglarska_takze_zima():
     """Zimą noc astronomiczna ISTNIEJE, ale zakresem rozważań pozostaje żeglarska — okno musi
     być SZERSZE od astronomicznego, inaczej cel na skraju nocy zniknąłby bez powodu."""
-    w = sky.visibility_window(350.3, 62.7, BEDARGOWO, date(2026, 1, 15))
+    w = sky.visibility_window(350.3, 62.7, BEDARGOWO, date(2026, 1, 15), min_alt=30.0)
     assert w.darkness == "astronomical" and w.astro_start is not None
     assert w.dark_start < w.astro_start and w.dark_end > w.astro_end
 
 
 def test_widoczny_to_maksimum_nocy_zeglarskiej_wobec_suwaka():
     """`visible` = max_alt >= min_alt; próg jest SUWAKIEM, nie stałą (D-0731-10)."""
-    w30 = sky.visibility_window(313.0, 31.0, BEDARGOWO, date(2026, 8, 20))
+    w30 = sky.visibility_window(313.0, 31.0, BEDARGOWO, date(2026, 8, 20), min_alt=30.0)
     w80 = sky.visibility_window(313.0, 31.0, BEDARGOWO, date(2026, 8, 20), min_alt=80.0)
     assert w30.visible and not w80.visible
     assert w30.max_alt_deg == pytest.approx(w80.max_alt_deg, abs=0.01)   # miara się nie zmienia
 
 
 def test_okoloobiegunowy_nie_zachodzi():
-    w = sky.visibility_window(0.0, 75.0, BEDARGOWO, date(2026, 1, 15))
+    w = sky.visibility_window(0.0, 75.0, BEDARGOWO, date(2026, 1, 15), min_alt=30.0)
     assert w.reason == "circumpolar" and w.hours_above > 5
 
 
 def test_nigdy_nie_wschodzi():
-    w = sky.visibility_window(0.0, -60.0, BEDARGOWO, date(2026, 1, 15))
+    w = sky.visibility_window(0.0, -60.0, BEDARGOWO, date(2026, 1, 15), min_alt=30.0)
     assert w.reason == "never_rises" and w.hours_above == 0.0
 
 
@@ -454,3 +454,15 @@ def test_arbiter_best_month(astropy_bits):
                 AltAz(obstime=Time(when), location=loc)).alt.deg
         ref = max(alts, key=lambda m: alts[m])
         assert abs((sky.best_month(ra) - ref + 6) % 12 - 6) <= 1
+
+
+# ─────────────────────────────────────────────────────────────── AR-374: próg wysokości bez kopii w warstwie nieba
+
+def test_okno_widocznosci_bez_domyslnego_progu_wysokosci():
+    """AR-374: `min_alt` to próg-suwak - wartość domyślną ma jeden właściciel (`targets.DEFAULT_THRESHOLDS`), więc
+    `visibility_window` jej nie zna: argument nazwany bez domyślnej, wołanie bez niego to błąd. Falsyfikator:
+    `min_alt=30.0` w sygnaturze (szósta kopia domyślnej progu)."""
+    import inspect
+    assert inspect.signature(sky.visibility_window).parameters["min_alt"].default is inspect.Parameter.empty
+    with pytest.raises(TypeError, match="min_alt"):
+        sky.visibility_window(313.0, 31.0, BEDARGOWO, date(2026, 8, 20))

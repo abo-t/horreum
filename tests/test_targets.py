@@ -682,8 +682,8 @@ def test_night_window_daje_te_same_granice_co_okno_celu():
     """Wydzielenie ma być PRZENIESIENIEM kodu, nie zmianą zachowania."""
     dzien = date(2026, 8, 15)
     nw = sky.night_window(BEDARGOWO, dzien)
-    z_siatka = sky.visibility_window(310.0, 45.0, BEDARGOWO, dzien, night=nw)
-    bez = sky.visibility_window(310.0, 45.0, BEDARGOWO, dzien)
+    z_siatka = sky.visibility_window(310.0, 45.0, BEDARGOWO, dzien, min_alt=30.0, night=nw)
+    bez = sky.visibility_window(310.0, 45.0, BEDARGOWO, dzien, min_alt=30.0)
     assert z_siatka == bez
     assert nw.dark_start == bez.dark_start and nw.dark_end == bez.dark_end
 
@@ -1111,3 +1111,68 @@ def test_cli_nazwa_trafienia_spoza_ascii_idzie_przez_norm_ascii(con, tmp_path, c
     out = capsys.readouterr().out
     out.encode("cp1250")
     assert "NGC1976 (ORION" in out
+
+
+# ─────────────────────────────────────────────── AR-385: każde cięcie listy ma licznik (pusty stan mówi dźwignię)
+
+_ZLOTA_NOC, _ZLOTY_PARK = date(2026, 8, 24), ["A140R", "RC8"]
+
+
+def _kubelki(res):
+    """Wiersze + każdy licznik cięcia - przy `only_gaps=only_new=False` i bez limitu to cała pula (`above_horizon`)."""
+    c = res.counts
+    return (len(res.rows) + c["hidden_by_status"] + c.get("hidden_by_status_filter", 0)
+            + c.get("hidden_by_pn", 0) + c.get("hidden_by_cost", 0))
+
+
+def _prog_kosztu(res):
+    """Próg kosztu równy najtańszej palecie rady na liście - tnie każdy droższy wiersz z radą."""
+    koszty = sorted(r.cost[targets.PALETTE_OF_CHANNEL[r.recommend]] for r in res.rows if r.recommend)
+    assert koszty and koszty[-1] > koszty[0], "fixture bez rozrzutu kosztu - test straciłby sens"
+    return koszty[0]
+
+
+def test_liczniki_ciecia_statusem_i_kosztem(con, monkeypatch):
+    """AR-385: jawny filtr statusu i próg kosztu tną listę Z LICZNIKIEM (`hidden_by_status_filter`, `hidden_by_cost`),
+    a wynik niesie parametry cięcia (`status`, `max_cost`) - zdanie pustego stanu nazywa policzone cięcie, nie
+    kontrolki. Klucze WYŁĄCZNIE przy włączonym cięciu (złoty wynik bez nich). Falsyfikatory: `continue` bez licznika;
+    klucz przy cięciu wyłączonym; wynik bez parametrów cięcia."""
+    _zloty_park(con, monkeypatch)
+    bazowy = targets.plan(con, night=_ZLOTA_NOC, park=_ZLOTY_PARK)
+    assert not {"hidden_by_status_filter", "hidden_by_cost"} & set(bazowy.counts)
+    assert bazowy.status is None and bazowy.max_cost is None
+    done = targets.plan(con, night=_ZLOTA_NOC, park=_ZLOTY_PARK, status="done")
+    assert done.rows == () and done.status == "done" and "hidden_by_cost" not in done.counts
+    assert done.counts["hidden_by_status_filter"] == done.counts["above_horizon"] == 10
+    planned = targets.plan(con, night=_ZLOTA_NOC, park=_ZLOTY_PARK, status="planned")
+    assert [r.target.canon for r in planned.rows] == ["SYN-PN-7"]
+    assert planned.counts["hidden_by_status_filter"] == planned.counts["above_horizon"] - 1
+    prog = _prog_kosztu(bazowy)
+    tani = targets.plan(con, night=_ZLOTA_NOC, park=_ZLOTY_PARK, max_cost=prog)
+    assert tani.max_cost == prog and tani.status is None and "hidden_by_status_filter" not in tani.counts
+    assert tani.counts["hidden_by_cost"] == len(bazowy.rows) - len(tani.rows) > 0
+
+
+def test_kazde_ciecie_listy_ma_licznik(con, monkeypatch):
+    """AR-385: cel puli trafia do DOKŁADNIE jednego kubełka - wiersz albo licznik cięcia (skreślenie `skip`, filtr
+    statusu, przełącznik PN, próg kosztu) - w każdym złożeniu filtrów ekranu, także w trybie szukania. Nowe cięcie bez
+    licznika = pusta lista bez dźwigni. Kandydatka PN w katalogu, żeby przełącznik miał co chować. Falsyfikator:
+    `continue` bez licznika w dowolnym kubełku."""
+    _zloty_park(con, monkeypatch)
+    katalog = tuple(dataclasses.replace(t, status="candidate") if t.canon == "SYN-PN-7" else t
+                    for t in ZLOTY_KATALOG)
+    monkeypatch.setattr(targets, "load_targets", lambda layers=targets.DEFAULT_LAYERS: katalog)
+    prog = _prog_kosztu(targets.plan(con, night=_ZLOTA_NOC, park=_ZLOTY_PARK))
+    sprawdzone = 0
+    for find in (None, "SYN"):
+        for status in (None, "planned", "done", "skip"):
+            for max_cost in (None, prog):
+                for pn in (False, True):
+                    res = targets.plan(con, night=_ZLOTA_NOC, park=_ZLOTY_PARK, find=find, status=status,
+                                       max_cost=max_cost, hide_doubtful_pn=pn)
+                    assert _kubelki(res) == res.counts["above_horizon"], (find, status, max_cost, pn, res.counts)
+                    assert (res.find, res.status, res.max_cost) == (find, status, max_cost)   # echo wołania
+                    sprawdzone += 1
+    assert sprawdzone == 32
+    pn = targets.plan(con, night=_ZLOTA_NOC, park=_ZLOTY_PARK, hide_doubtful_pn=True)
+    assert pn.counts["hidden_by_pn"] == 1, "kandydatka nie dotarła do przełącznika - test straciłby sens"

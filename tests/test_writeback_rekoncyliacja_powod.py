@@ -112,7 +112,9 @@ _ZRODLA_ODMOWY = (*_FUNKCJE_REKONCYLIACJI, "_dysk_milczy")
 
 
 def _nazwa_wolania(w):
-    """Nazwa wołanej klasy/funkcji: `Nazwa(...)` i `modul.Nazwa(...)`; wyrażenie, które nie jest wołaniem → None."""
+    """Nazwa wołanej klasy/funkcji: `Nazwa(...)` i `x.Nazwa(...)` (atrybut DOWOLNEGO obiektu - nazwy `FileResult`
+    i `PowodPozycji` są w repo jednoznaczne, a obca klasa o tej nazwie dałaby czerwień SPOT, nie ciszę); wyrażenie,
+    które nie jest wołaniem → None."""
     if isinstance(w, ast.Call):
         if isinstance(w.func, ast.Name):
             return w.func.id
@@ -149,8 +151,8 @@ def _drzewo_writeback(zrodlo=None):
 
 
 def _kody_wyrazenia(w, funkcje, stale):
-    """Kody powodu wyrażenia: `PowodPozycji(..., "kod")`, stała-powód modułu albo wołanie funkcji modułu
-    (kody jej `return`); inne wyrażenie (powód liczony z wyjątku) → None."""
+    """Kody powodu wyrażenia: `PowodPozycji(..., "kod")`, stała-powód modułu albo wołanie funkcji modułu WYŁĄCZNIE
+    po gołej nazwie (kody jej `return`); inne wyrażenie (powód liczony z wyjątku, metoda obiektu) → None."""
     if _nazwa_wolania(w) == "PowodPozycji":
         return {_kod_powodu(w)}
     if isinstance(w, ast.Name) and w.id in stale:
@@ -164,14 +166,20 @@ def _kody_wyrazenia(w, funkcje, stale):
 
 
 def _kody_blocked_rekoncyliacji(zrodlo=None):
-    """Kody każdego `FileResult(..., "blocked", <powód>)` funkcji rekoncyliacji (status i powód pozycyjnie
-    albo słowem kluczowym, wołanie także przez moduł); powód bez kodu w źródle (liczony z wyjątku), brak
-    powodu i status spoza literału to błąd z linią - zbiór musiałby zgadywać."""
+    """Kody każdego `FileResult(..., "blocked", <powód>)` i `dataclasses.replace(<wynik>, status=..., ...)` funkcji
+    rekoncyliacji (status i powód pozycyjnie albo słowem kluczowym, wołanie także przez moduł); powód bez kodu
+    w źródle (liczony z wyjątku), brak powodu i status spoza literału to błąd z linią - zbiór musiałby zgadywać."""
     funkcje, stale = _drzewo_writeback(zrodlo)
     kody, nierozpoznane = set(), []
     for nazwa in _FUNKCJE_REKONCYLIACJI:
         for w in ast.walk(funkcje[nazwa]):
-            if _nazwa_wolania(w) != "FileResult":
+            wolanie = _nazwa_wolania(w)
+            if wolanie == "replace":
+                # `replace` bez `status` zostawia status wyniku, którego konstrukcję helper liczy osobno; ze `status`
+                # to nowa odmowa - status i powód wyłącznie słowami kluczowymi (`replace(obj, /, **zmiany)`).
+                if not any(k.arg == "status" for k in w.keywords):
+                    continue
+            elif wolanie != "FileResult":
                 continue
             status = _argument(w, 2, "status")
             if not isinstance(status, ast.Constant):
@@ -242,6 +250,8 @@ def reconcile_renames():
     FileResult(1, "p", "blocked", reason=PowodPozycji("tekst", "kod_slowem"))
     FileResult(1, "p", status="blocked", reason=POWOD_STALY)
     writeback.FileResult(1, "p", "blocked", _dysk_milczy())
+    dataclasses.replace(wynik, status="blocked", reason=PowodPozycji("tekst", "kod_zamiany"))
+    dataclasses.replace(wynik, reason="dopisek")
     FileResult(1, "p", "applied", None)
 
 
@@ -254,7 +264,8 @@ def test_helpery_ast_widza_slowa_kluczowe_wolanie_przez_modul_i_stale():
     """Helper zbioru kodów 'blocked' nie gubi postaci, którą dopuszcza dataclass `FileResult` (słowa kluczowe,
     trzy argumenty pozycyjne) ani wołania przez moduł - inaczej kod pominięty po cichu wypadłby ze zbioru
     szuflady, a test SPOT zostałby zielony (AR-342)."""
-    assert _kody_blocked_rekoncyliacji(_ZRODLO_PROBNE) == {"kod_pozycyjny", "kod_slowem", "kod_staly", "kod_dysku"}
+    assert _kody_blocked_rekoncyliacji(_ZRODLO_PROBNE) == {"kod_pozycyjny", "kod_slowem", "kod_staly", "kod_dysku",
+                                                         "kod_zamiany"}
 
 
 def test_helpery_ast_melduja_nierozpoznane_wolanie_z_linia():
@@ -265,7 +276,9 @@ def test_helpery_ast_melduja_nierozpoznane_wolanie_z_linia():
                    'FileResult(1, "p", "blocked")',
                    'FileResult(1, "p", "blocked", reason=powod_wyjatku(e))',
                    'FileResult(1, "p", "blocked", PowodPozycji("tekst", kod))',
-                   'FileResult(1, "p", "blocked", obj._rozstrzygnij_zamiar())'):
+                   'FileResult(1, "p", "blocked", obj._rozstrzygnij_zamiar())',
+                   'dataclasses.replace(wynik, status="blocked")',
+                   'dataclasses.replace(wynik, status=status, reason=None)'):
         zrodlo = (f"def reconcile_renames():\n    pass\n    {wiersz}\n\n\n"
                   f"def _rozstrzygnij_zamiar():\n    return PowodPozycji(\"tekst\", \"kod_funkcji\")\n")
         with pytest.raises(AssertionError, match=r"reconcile_renames:3|linia 3"):

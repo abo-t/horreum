@@ -4377,7 +4377,11 @@ def test_zaznaczenie_calosci_NIE_jest_kwadratowe_ASERCJA_CZASOWA(qapp, tmp_path,
 
     Stąd n=4000 i próg **50 ms**: stara droga przekracza go 3× (147 ms), nowa ma pod nim 6×
     zapasu (7,8 ms). Pierwsza wersja tej bramki miała próg 300 ms i była OZDOBĄ — stara droga
-    mieściła się w nim swobodnie, więc test przechodził niezależnie od implementacji."""
+    mieściła się w nim swobodnie, więc test przechodził niezależnie od implementacji.
+
+    NAJLEPSZY Z 5 POMIARÓW (AR-363): jeden strzał padał w pełnej baterii pod obciążeniem (122 ms
+    przy progu 50, pojedynczo zielony) - przestój obcego procesu nie trwa przez pięć strzałów, a koszt
+    starej drogi siedzi w `selectedRows()`, którego kolejne wywołanie nie skraca."""
     import time
     v, con = _grid_z_iloscia(qapp, tmp_path, monkeypatch, 4000)
     try:
@@ -4387,11 +4391,15 @@ def test_zaznaczenie_calosci_NIE_jest_kwadratowe_ASERCJA_CZASOWA(qapp, tmp_path,
         v.table.selectAll()
         QApplication.processEvents()
 
-        t = time.perf_counter()
-        v._update_count()
-        dt = (time.perf_counter() - t) * 1000
+        czasy = []
+        for _ in range(5):
+            t = time.perf_counter()
+            v._update_count()
+            czasy.append((time.perf_counter() - t) * 1000)
+        dt = min(czasy)
         assert len(v._selected_data_rows()) == 4000, "fikstura nie zaznaczyła całości"
-        assert dt < 50, f"_update_count przy pełnym zaznaczeniu: {dt:.0f} ms (kwadrat wrócił)"
+        assert dt < 50, (f"_update_count przy pełnym zaznaczeniu: najlepszy z 5 {dt:.0f} ms "
+                         f"({', '.join(f'{c:.0f}' for c in czasy)}; kwadrat wrócił)")
     finally:
         v.close()
         con.close()

@@ -19,6 +19,8 @@ import inspect
 import os
 import sqlite3
 
+import pytest
+
 from horreum import repo, writeback
 from horreum.item_reasons import ITEM_REASON_CODES, KODY_ODMOWY_REKONCYLIACJI, PowodPozycji
 from test_rename import NOW, _rozdarty
@@ -109,42 +111,76 @@ _FUNKCJE_REKONCYLIACJI = ("reconcile_renames", "_rozstrzygnij_zamiar")
 _ZRODLA_ODMOWY = (*_FUNKCJE_REKONCYLIACJI, "_dysk_milczy")
 
 
-def _drzewo_writeback():
-    """Funkcje i stałe-powody (`NAZWA = PowodPozycji(...)`) najwyższego poziomu modułu `writeback`."""
-    drzewo = ast.parse(inspect.getsource(writeback))
+def _nazwa_wolania(w):
+    """Nazwa wołanej klasy/funkcji: `Nazwa(...)` i `modul.Nazwa(...)`; wyrażenie, które nie jest wołaniem → None."""
+    if isinstance(w, ast.Call):
+        if isinstance(w.func, ast.Name):
+            return w.func.id
+        if isinstance(w.func, ast.Attribute):
+            return w.func.attr
+    return None
+
+
+def _argument(w, pozycja, slowo):
+    """Argument wołania podany pozycyjnie albo słowem kluczowym (`FileResult` to dataclass); brak → None."""
+    if len(w.args) > pozycja:
+        return w.args[pozycja]
+    return next((k.value for k in w.keywords if k.arg == slowo), None)
+
+
+def _kod_powodu(w):
+    """Kod wołania `PowodPozycji(tekst, "kod", ...)` - kod wyłącznie pozycyjnie (`/` w `__new__`). Kod spoza
+    literału albo brak kodu = porażka z linią, nie `IndexError`/`AttributeError` bez miejsca."""
+    kod = w.args[1] if len(w.args) > 1 else None
+    assert isinstance(kod, ast.Constant) and isinstance(kod.value, str), \
+        f"kod PowodPozycji nie jest literałem: linia {w.lineno}"
+    return kod.value
+
+
+def _drzewo_writeback(zrodlo=None):
+    """Funkcje i stałe-powody (`NAZWA = PowodPozycji(...)`) najwyższego poziomu modułu `writeback` (albo
+    źródła podanego wprost - test samych helperów)."""
+    drzewo = ast.parse(inspect.getsource(writeback) if zrodlo is None else zrodlo)
     funkcje = {n.name: n for n in drzewo.body if isinstance(n, ast.FunctionDef)}
-    stale = {n.targets[0].id: n.value.args[1].value for n in drzewo.body
+    stale = {n.targets[0].id: _kod_powodu(n.value) for n in drzewo.body
              if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
-             and isinstance(n.value, ast.Call) and getattr(n.value.func, "id", None) == "PowodPozycji"}
+             and _nazwa_wolania(n.value) == "PowodPozycji"}
     return funkcje, stale
 
 
 def _kody_wyrazenia(w, funkcje, stale):
     """Kody powodu wyrażenia: `PowodPozycji(..., "kod")`, stała-powód modułu albo wołanie funkcji modułu
     (kody jej `return`); inne wyrażenie (powód liczony z wyjątku) → None."""
-    if isinstance(w, ast.Call) and getattr(w.func, "id", None) == "PowodPozycji":
-        return {w.args[1].value}
+    if _nazwa_wolania(w) == "PowodPozycji":
+        return {_kod_powodu(w)}
     if isinstance(w, ast.Name) and w.id in stale:
         return {stale[w.id]}
-    if isinstance(w, ast.Call) and getattr(w.func, "id", None) in funkcje:
+    # Funkcja modułu wyłącznie po gołej nazwie: `obj.metoda()` o nazwie funkcji modułu to inne wołanie.
+    if isinstance(w, ast.Call) and isinstance(w.func, ast.Name) and w.func.id in funkcje:
         kody = [_kody_wyrazenia(r.value, funkcje, stale) for r in ast.walk(funkcje[w.func.id])
                 if isinstance(r, ast.Return) and r.value is not None]
         return None if not kody or None in kody else set().union(*kody)
     return None
 
 
-def _kody_blocked_rekoncyliacji():
-    """Kody każdego `FileResult(..., "blocked", <powód>)` funkcji rekoncyliacji; powód bez kodu w źródle
-    (liczony z wyjątku) to błąd - zbiór musiałby zgadywać."""
-    funkcje, stale = _drzewo_writeback()
+def _kody_blocked_rekoncyliacji(zrodlo=None):
+    """Kody każdego `FileResult(..., "blocked", <powód>)` funkcji rekoncyliacji (status i powód pozycyjnie
+    albo słowem kluczowym, wołanie także przez moduł); powód bez kodu w źródle (liczony z wyjątku), brak
+    powodu i status spoza literału to błąd z linią - zbiór musiałby zgadywać."""
+    funkcje, stale = _drzewo_writeback(zrodlo)
     kody, nierozpoznane = set(), []
     for nazwa in _FUNKCJE_REKONCYLIACJI:
         for w in ast.walk(funkcje[nazwa]):
-            if not (isinstance(w, ast.Call) and getattr(w.func, "id", None) == "FileResult"
-                    and len(w.args) >= 4 and isinstance(w.args[2], ast.Constant)
-                    and w.args[2].value == "blocked"):
+            if _nazwa_wolania(w) != "FileResult":
                 continue
-            k = _kody_wyrazenia(w.args[3], funkcje, stale)
+            status = _argument(w, 2, "status")
+            if not isinstance(status, ast.Constant):
+                nierozpoznane.append(f"{nazwa}:{w.lineno}")
+                continue
+            if status.value != "blocked":
+                continue
+            powod = _argument(w, 3, "reason")
+            k = None if powod is None else _kody_wyrazenia(powod, funkcje, stale)
             if k is None:
                 nierozpoznane.append(f"{nazwa}:{w.lineno}")
             else:
@@ -163,7 +199,7 @@ def _kody_poza_zrodlami_odmowy():
         pomin = {id(w) for n in drzewo.body if isinstance(n, ast.FunctionDef) and n.name in _ZRODLA_ODMOWY
                  for w in ast.walk(n)}
         for w in ast.walk(drzewo):
-            if not (isinstance(w, ast.Call) and getattr(w.func, "id", None) == "PowodPozycji") or id(w) in pomin:
+            if _nazwa_wolania(w) != "PowodPozycji" or id(w) in pomin:
                 continue
             kod = w.args[1] if len(w.args) > 1 else None
             if isinstance(kod, ast.Constant) and isinstance(kod.value, str):
@@ -189,3 +225,48 @@ def test_kody_odmowy_rekoncyliacji_rozlaczne_z_reszta_powodow_i_znane():
             "intent_dropped"} <= reszta, reszta
     assert not KODY_ODMOWY_REKONCYLIACJI & reszta, KODY_ODMOWY_REKONCYLIACJI & reszta
     assert KODY_ODMOWY_REKONCYLIACJI <= ITEM_REASON_CODES, KODY_ODMOWY_REKONCYLIACJI - ITEM_REASON_CODES
+
+
+# Źródło próbne helperów AST: każda dozwolona postać `FileResult(..., "blocked", <powód>)` - powód pozycyjnie
+# i słowem kluczowym, status słowem kluczowym, stała-powód modułu, wołanie przez moduł, kody przez funkcję.
+_ZRODLO_PROBNE = '''
+POWOD_STALY = PowodPozycji("tekst", "kod_staly")
+
+
+def _dysk_milczy():
+    return item_reasons.PowodPozycji("tekst", "kod_dysku")
+
+
+def reconcile_renames():
+    FileResult(1, "p", "blocked", PowodPozycji("tekst", "kod_pozycyjny"))
+    FileResult(1, "p", "blocked", reason=PowodPozycji("tekst", "kod_slowem"))
+    FileResult(1, "p", status="blocked", reason=POWOD_STALY)
+    writeback.FileResult(1, "p", "blocked", _dysk_milczy())
+    FileResult(1, "p", "applied", None)
+
+
+def _rozstrzygnij_zamiar():
+    FileResult(1, "p", "reconciled", None)
+'''
+
+
+def test_helpery_ast_widza_slowa_kluczowe_wolanie_przez_modul_i_stale():
+    """Helper zbioru kodów 'blocked' nie gubi postaci, którą dopuszcza dataclass `FileResult` (słowa kluczowe,
+    trzy argumenty pozycyjne) ani wołania przez moduł - inaczej kod pominięty po cichu wypadłby ze zbioru
+    szuflady, a test SPOT zostałby zielony (AR-342)."""
+    assert _kody_blocked_rekoncyliacji(_ZRODLO_PROBNE) == {"kod_pozycyjny", "kod_slowem", "kod_staly", "kod_dysku"}
+
+
+def test_helpery_ast_melduja_nierozpoznane_wolanie_z_linia():
+    """Status spoza literału, 'blocked' bez powodu, powód liczony z wyjątku, kod `PowodPozycji` spoza literału
+    i metoda obiektu o nazwie funkcji modułu = porażka helpera z miejscem (linia 3 źródła), nie pominięcie,
+    cudze kody ani `AttributeError` bez linii (AR-342)."""
+    for wiersz in ('FileResult(1, "p", status, None)',
+                   'FileResult(1, "p", "blocked")',
+                   'FileResult(1, "p", "blocked", reason=powod_wyjatku(e))',
+                   'FileResult(1, "p", "blocked", PowodPozycji("tekst", kod))',
+                   'FileResult(1, "p", "blocked", obj._rozstrzygnij_zamiar())'):
+        zrodlo = (f"def reconcile_renames():\n    pass\n    {wiersz}\n\n\n"
+                  f"def _rozstrzygnij_zamiar():\n    return PowodPozycji(\"tekst\", \"kod_funkcji\")\n")
+        with pytest.raises(AssertionError, match=r"reconcile_renames:3|linia 3"):
+            _kody_blocked_rekoncyliacji(zrodlo)

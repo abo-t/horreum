@@ -2789,9 +2789,9 @@ def test_wejscie_po_zapisie_liczy_w_tle_lista_nieaktualna_klik_po_wyniku(qapp, t
 
 def test_powrot_z_podstrony_po_zapisie_liczy_w_tle(qapp, tmp_path, monkeypatch):
     """AR-337 (rachunek wejścia w tle): „← Porządki” idzie drogą wejścia TYM SAMYM trybem co wejście gospodarza
-    (`_wejscie_w_tle`) - po zapisie w trakcie pracy w podstronie liczy w tle z listą nieaktualną (prawdziwy klik
-    przycisku powrotu).
-    Mutant: `_on_back` bez trybu wejścia (rachunek na wątku GUI)."""
+    (tryb widoku od montażu, `TasksView(w_tle=…)`, AR-380) - po zapisie w trakcie pracy w podstronie liczy w tle z listą
+    nieaktualną (prawdziwy klik przycisku powrotu).
+    Mutant: widok bez trybu z montażu (rachunek na wątku GUI)."""
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QPushButton
     from horreum.gui import i18n, tasks as tasks_mod

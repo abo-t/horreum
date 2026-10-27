@@ -4988,7 +4988,10 @@ class MainWindow(QMainWindow):
         # Klik albo Enter na wierszu = „idę tam pracować" (fokus wchodzi na stronę), same strzałki
         # = przeglądanie sidebara (fokus zostaje w liście) - patrz `_on_nav_changed`.
         self.nav.itemClicked.connect(self._on_nav_wejscie)
-        self.nav.itemActivated.connect(self._on_nav_wejscie)
+        # Aktywacja niesie znacznik klawisza: fokus listy Porządków tylko z klawiatury (AR-377). Dwuklik myszą też
+        # aktywuje wiersz - w chwili aktywacji z dwukliku przycisk myszy jest wciśnięty, przy Enterze nie.
+        self.nav.itemActivated.connect(
+            lambda item: self._on_nav_wejscie(item, klawisz=QApplication.mouseButtons() == Qt.NoButton))
         # Odczyt Domu (~0,1 s na żywej bazie, teczki osobno w tle) dopiero po POSTOJU na wierszu:
         # strzałki w sidebarze mijają Dom w drodze do Znajdź i nie mają za każdym razem czekać.
         # Kolejny ruch restartuje zegar, a po nim odczyt idzie tylko, gdy Dom wciąż jest na ekranie.
@@ -5203,8 +5206,8 @@ class MainWindow(QMainWindow):
                 self._odswiez_dom()
         if strona == STRONA_PORZADKI:   # wejście w Porządki = świeży stan liczników zadań
             # Bez rachunku, gdy baza bez zmian (AR-84); przy zmianie w trybie wątków tła - rachunek w tle
-            # z listą nieaktualną do wyniku (AR-337, rachunek wejścia w tle).
-            self.tasks_view.odswiez_przy_wejsciu(w_tle=self._pola_poza_watkiem)
+            # z listą nieaktualną do wyniku (AR-337, rachunek wejścia w tle; tryb zna widok od montażu, AR-380).
+            self.tasks_view.odswiez_przy_wejsciu()
         if strona == STRONA_DOSTAWA:
             # Raport „co przyszło” liczy się ze stanu, a nazwę mogła nadać ręka w Porządkach albo
             # w Zbiorach - wiersz „nie rozpoznałem” po powrocie kłamałby o niej (jedno zapytanie
@@ -5216,9 +5219,15 @@ class MainWindow(QMainWindow):
             # że plan policzy się po powrocie.
             self.planner_view.refresh()
 
-    def _on_nav_wejscie(self, item):
+    def _on_nav_wejscie(self, item, *, klawisz=False):
         """Klik albo Enter na wierszu: Znajdź oddaje fokus polu zapytania (`show_find` bez zapytania
-        nie zmienia zbioru), Dom odczytuje się od razu, bez czekania na postój."""
+        nie zmienia zbioru), Dom odczytuje się od razu, bez czekania na postój.
+
+        Porządki - WYŁĄCZNIE z klawiatury (`klawisz=True`, aktywacja wiersza Enterem, AR-377): fokus tam, gdzie człowiek
+        na Porządkach pracuje (`TasksView.fokus_z_klawiatury` - lista albo „← Porządki” podstrony), więc następny Enter
+        działa bez Tab (pętla Popraw z klawiatury). Klik i dwuklik myszą fokusu nie przenoszą - lista z fokusem pokazuje
+        natywną obwódkę bieżącego wiersza (zmierzone natywnie w obu motywach), a dla myszy byłby to nowy widoczny stan
+        po każdym wejściu."""
         row = self.nav.row(item)
         if row == NAV_ZNAJDZ:
             # Wejście nieudane (porażka budowy strony - `_on_nav_changed` cofnął wiersz) - nic dalej: odczyt widoku
@@ -5228,6 +5237,8 @@ class MainWindow(QMainWindow):
         elif row == NAV_DOM:
             self._dom_po_postoju.stop()
             self._odswiez_dom()
+        elif row == NAV_PORZADKI and klawisz and self.nav.currentRow() == NAV_PORZADKI:
+            self.tasks_view.fokus_z_klawiatury()
 
     def _odswiez_dom(self):
         """Wejście na Dom: „Co mam" i dziennik od razu, teczki zamówione w tle. Teczki przy KAŻDYM
@@ -5343,7 +5354,8 @@ class MainWindow(QMainWindow):
         # Osie Porządków bez odczytu w montażu (AR-175) - własny przełącznik `_osie_leniwie` (AR-326); token
         # montażu w konstruktorze rozróżnia sygnały tego widoku od spóźnionych sygnałów widoku sprzed zmiany bazy.
         self._montaz += 1
-        tasks = TasksView(self.con, now_fn=self._now, leniwie=self._osie_leniwie, montaz=self._montaz)
+        tasks = TasksView(self.con, now_fn=self._now, leniwie=self._osie_leniwie, montaz=self._montaz,
+                          w_tle=self._pola_poza_watkiem)        # tryb rachunku wejścia od montażu (AR-380)
         self.tasks_view = tasks
         self.axis_view = tasks.axis_view
         self.observatory_view = tasks.observatory_view
@@ -6348,15 +6360,29 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 
+    def _katalog_okna_bazy(self):
+        """Katalog startowy „Otwórz bazę…” i „Nowa baza…” (AR-378): katalog bieżącej bazy, katalog ostatniej bazy
+        (`_KLUCZ_OSTATNIEJ_BAZY` - okno bez bazy po nieudanym otwarciu), Dokumenty, w końcu folder domowy - reguła
+        `okna_wyboru.katalog_startowy`. Dawniej pusty start: pierwsze okno procesu otwierało katalog uruchomienia
+        programu (onefile: obok pliku exe), każde następne - folder ostatniego dowolnego okna wyboru, np. drzewo
+        archiwum po wskazaniu źródła Dostawy (Qt `lastVisitedDir`, zmierzone natywnie). Start to KATALOG - „Nowa
+        baza…” nie podpowiada nazwy pliku."""
+        from horreum.gui import okna_wyboru
+        ostatnia = QSettings("Horreum", "Horreum").value(_KLUCZ_OSTATNIEJ_BAZY, None)
+        return okna_wyboru.katalog_startowy(
+            os.path.dirname(self.db_path) if self.db_path else None,
+            os.path.dirname(ostatnia) if ostatnia else None,
+            QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+
     def _on_open_db(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, i18n.t("dialog.open_db_title"), "", i18n.t("dialog.open_db_filter"))
+            self, i18n.t("dialog.open_db_title"), self._katalog_okna_bazy(), i18n.t("dialog.open_db_filter"))
         if path:
             self._open_path(path)
 
     def _on_new_db(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, i18n.t("dialog.new_db_title"), "", i18n.t("dialog.new_db_filter"))
+            self, i18n.t("dialog.new_db_title"), self._katalog_okna_bazy(), i18n.t("dialog.new_db_filter"))
         if path:
             self._open_path(path)
 
@@ -6376,11 +6402,13 @@ class MainWindow(QMainWindow):
         ZERO DYSKU W SLOCIE (jak „Przyjmij nowe" i „Wciągnij stosy…"): nic nie zakłada ani nie
         sprawdza. `_WBPP`,
         `OBJECTS\\<obiekt>` i `out` powstają przy pierwszym wydaniu obiektu, w klindze `apply`
-        na wątku tła - katalog wskazany na odłączonym udziale nie zawiesi okna."""
-        from horreum.gui import projection_dialog
+        na wątku tła - katalog wskazany na odłączonym udziale nie zawiesi okna. Start okna (AR-378): zapamiętany
+        folder, gdy jest albo jest jego rodzic, inaczej folder domowy - sprawdza wątek sondy z budżetem
+        (`okna_wyboru.katalog_startowy`), nie ten slot."""
+        from horreum.gui import okna_wyboru, projection_dialog
         ustawienia = QSettings("Horreum", "Horreum")
         start = str(ustawienia.value("work/root", "") or "")
-        root = QFileDialog.getExistingDirectory(self, i18n.t("proj.work_card"), start)
+        root = QFileDialog.getExistingDirectory(self, i18n.t("proj.work_card"), okna_wyboru.katalog_startowy(start))
         if not root:
             return
         ustawienia.setValue("work/root", root)
@@ -7448,19 +7476,24 @@ def main(argv=None):
             tlumacz.deleteLater()
 
 
+# Klucz ustawień ostatnio otwartej bazy: pisze go `_start_okna` (start z ostatnią bazą), czyta też katalog startowy
+# okien bazy (`MainWindow._katalog_okna_bazy`, AR-378) - jedno miejsce nazwy.
+_KLUCZ_OSTATNIEJ_BAZY = "ostatnia_baza"
+
+
 def _start_okna(argv, settings, okna):
     """Start synchroniczny `main` (pod strażą i tłumaczem): baza startowa i okno - dopisane do `okna`, zanim
     cokolwiek może rzucić po jego pokazaniu. Pętlę zdarzeń kręci `main`."""
     if argv:
         start = argv[0]
     else:
-        start = settings.value("ostatnia_baza", None)
+        start = settings.value(_KLUCZ_OSTATNIEJ_BAZY, None)
         # Ostatnia baza mogła zostać przeniesiona/usunięta — wtedy startujemy bez bazy (nie wybuchamy).
         if start and not Path(start).exists():
             start = None
 
     def zapamietaj_baze(path):
-        settings.setValue("ostatnia_baza", path)
+        settings.setValue(_KLUCZ_OSTATNIEJ_BAZY, path)
 
     # OKNO STAJE PRZED CZYTANIEM BAZY (F-1). Do tej zmiany `MainWindow(start)` otwierał bazę
     # i montował cztery widoki W KONSTRUKTORZE, a `show()` szedł dopiero po nim — zmierzone

@@ -67,7 +67,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, projection
-from horreum.gui import facet_model, i18n, queries, theme
+from horreum.gui import facet_model, i18n, okna_wyboru, queries, theme
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.i18n_catalog import CATALOG
 from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
@@ -1129,7 +1129,10 @@ class ProjectionDialog(QDialog):
         return None
 
     def _on_add_target(self):
-        path = QFileDialog.getExistingDirectory(self, i18n.t("proj.dlg.pick_target"))
+        """„Dodaj cel…”: start okna przy zaznaczonej karcie (nowy cel leży zwykle obok), bez niej - folder domowy
+        (`okna_wyboru.katalog_startowy`, AR-378 - dawniej katalog uruchomienia programu)."""
+        path = QFileDialog.getExistingDirectory(self, i18n.t("proj.dlg.pick_target"),
+                                                okna_wyboru.katalog_startowy(self._current_root()))
         if not path:
             return
         # Przyciski z katalogu (AR-278): statyczne `getText` mówiło „Cancel” w polskim oknie.

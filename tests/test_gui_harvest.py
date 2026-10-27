@@ -3635,15 +3635,6 @@ def _dom(tmp_path, monkeypatch):
     return str(dom)
 
 
-def test_katalog_startowy_pierwszy_niepusty_kandydat_albo_folder_domowy(tmp_path, monkeypatch):
-    """AR-370: pierwszy niepusty kandydat w kolejności wołającego, bez sprawdzania dysku; bez kandydatów - folder
-    domowy, nigdy pusty napis. Falsyfikator: zwrot `""` bez kandydatów."""
-    dom = _dom(tmp_path, monkeypatch)
-    assert hd_mod.katalog_startowy("", r"X:\ARCH") == r"X:\ARCH"
-    assert hd_mod.katalog_startowy(r"X:\WY", r"X:\ARCH") == r"X:\WY"
-    assert hd_mod.katalog_startowy("", "") == hd_mod.katalog_startowy() == dom
-
-
 def test_pierwszy_wybor_bez_wyjscia_i_archiwum_startuje_w_folderze_domowym(qapp, tmp_path, ustawienia, monkeypatch,
                                                                           wybor_katalogu):
     """AR-370 (wizytacja natywna): baza bez masterflatów w archiwum, bez pierwszej dostawy i bez pamięci wyjścia -

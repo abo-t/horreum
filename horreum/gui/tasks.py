@@ -35,7 +35,7 @@ import sqlite3
 import threading
 import time
 
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QStackedWidget, QVBoxLayout,
@@ -639,11 +639,14 @@ class TasksView(QWidget):
     # i kafel mówią „!”, nie gołe „Porządki”, które czyta się jak zero. Później porażka zostawia stan poprzedni.
     rachunek_padl = Signal(object, str)
 
-    def __init__(self, con, now_fn=_utc_now_iso, parent=None, *, leniwie=False, montaz=None):
+    def __init__(self, con, now_fn=_utc_now_iso, parent=None, *, leniwie=False, montaz=None, w_tle=False):
         """`leniwie=True` (gospodarz w trybie wątków tła, AR-175): osie teleskopu i obiektu nie czytają
         bazy w konstruktorze - odczyt przy pierwszym pokazaniu podstrony (wejście z wiersza i tak
         czyta bazę od nowa). Domyślnie jak dotąd - widok samodzielny czyta od razu. `montaz` - token montażu
-        gospodarza (AR-326), niesiony w sygnałach `liczenie_w_toku` i `rachunek_padl`; widok samodzielny - `None`."""
+        gospodarza (AR-326), niesiony w sygnałach `liczenie_w_toku` i `rachunek_padl`; widok samodzielny - `None`.
+        `w_tle=True` (gospodarz w trybie wątków tła, AR-380): rachunek wejścia w Porządki i powrotu z podstrony
+        liczy w tle z listą nieaktualną - JEDNO źródło trybu od montażu; dawniej tryb zapamiętywało dopiero pierwsze
+        wejście, więc powrót przed nim liczył na wątku GUI. Domyślnie synchronicznie (widok samodzielny)."""
         super().__init__(parent)
         self.con = con
         self.montaz = montaz
@@ -655,11 +658,11 @@ class TasksView(QWidget):
         self._przylozony = False
         self._klik_czeka = None     # klucz wiersza klikniętego, gdy lista była wygaszona (`_klik_w_wiersz`)
         # STAN NIEAKTUALNY (AR-337, rachunek wejścia w tle): wejście albo powrót przy zmienionej bazie liczy w tle,
-        # a lista do wyniku wygląda jak przed pierwszym rachunkiem (`_wygas_wiersze`). Tryb wejścia podaje gospodarz
-        # (`odswiez_przy_wejsciu(w_tle=…)`), powrót z podstrony liczy tym samym (`_wejscie_w_tle`). Ostatni przyłożony
-        # rachunek (`_ostatni_stan`) wraca na listę, gdy rachunek wejścia padnie (`_pokaz_blad_licznikow`).
+        # a lista do wyniku wygląda jak przed pierwszym rachunkiem (`_wygas_wiersze`). Tryb wejścia i powrotu
+        # z podstrony zna widok od montażu (`w_tle`, AR-380). Ostatni przyłożony rachunek (`_ostatni_stan`) wraca na
+        # listę, gdy rachunek wejścia padnie (`_pokaz_blad_licznikow`).
         self._nieaktualny = False
-        self._wejscie_w_tle = False
+        self._w_tle = w_tle
         self._ostatni_stan = None
         # Liczniki w wątku tła (`refresh_counts(w_tle=True)`, AR-84): jeden bieg naraz, generacja
         # wyrzuca wynik wyprzedzony odczytem nowszym; `:memory:` nie ma ścieżki - liczy inline.
@@ -781,6 +784,8 @@ class TasksView(QWidget):
         self.tasks.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # elizja zamiast scrolla
         self.tasks.setMaximumWidth(_LIST_MAX_W)
         self.tasks.itemClicked.connect(self._klik_w_wiersz)
+        # Enter na wierszu = klik (AR-377) - filtr zdarzeń, nie `itemActivated` (`eventFilter`).
+        self.tasks.installEventFilter(self)
         for key, label, action in _TASKS:
             it = QListWidgetItem(i18n.t(label))
             if action is None:
@@ -933,26 +938,26 @@ class TasksView(QWidget):
         self.faza_licznikow.setVisible(self._liczy and (not self._przylozony or self._nieaktualny)
                                        and self.blad_licznikow.isHidden())
 
-    def odswiez_przy_wejsciu(self, *, w_tle=False):
+    def odswiez_przy_wejsciu(self):
         """Wejście w Porządki (gospodarz, `_on_nav_changed`) i powrót z podstrony (`_on_back`): liczniki ze stanu,
         ale BEZ rachunku, gdy odcisk bazy (`queries.odcisk_bazy`) nie zmienił się od ostatniego przyłożonego - lista
         mówi wtedy prawdę, a rachunek kosztował na wejściu 0,7-1,9 s na kopii pf4, choć tło po geście już go zrobiło
         (AR-84). Wysokość listy mierzy się i tak: metryki fontu są prawdziwe dopiero po pokazaniu.
 
-        PRZY ZMIANIE - RACHUNEK W TLE, LISTA NIEAKTUALNA (AR-337; `w_tle=True` podaje gospodarz w trybie wątków
-        tła): rachunek synchroniczny zamrażał okno przy każdym wejściu i powrocie po zmianie - natywnie 825-1091 ms od
+        PRZY ZMIANIE - RACHUNEK W TLE, LISTA NIEAKTUALNA (AR-337; tryb wątków tła widoku `w_tle` - od montażu, AR-380):
+        rachunek synchroniczny zamrażał okno przy każdym wejściu i powrocie po zmianie - natywnie 825-1091 ms od
         kliku „Porządki” do pierwszego obrotu pętli na kopii pf4 v47, w tle 3,5-5,0 ms. Do wyniku lista wygląda jak
         przed pierwszym rachunkiem (AR-175): kolumna liczb pusta, wiersze akcyjne wygaszone, faza przy tytule
         (`_wygas_wiersze`) - nie pokazuje liczby, której nie umie obronić; klik w wiersz czeka na wynik
-        (`_klik_w_wiersz`). `w_tle=False` (tryb bez wątków, widok samodzielny) - rachunek synchroniczny jak dotąd.
-        Tryb jest zapamiętany dla powrotu z podstrony (`_wejscie_w_tle`).
+        (`_klik_w_wiersz`). Widok bez trybu wątków (samodzielny) - rachunek synchroniczny jak dotąd.
 
         NOWA WIZYTA LISTY: klik odłożony w poprzedniej wizycie przepada - inaczej klik → Dom → powrót → wynik otwierał
         cel kliku bez gestu w nowej wizycie. Każdy powrót na listę idzie tędy (wejście gospodarza, „← Porządki”).
 
-        Skrót tylko przy SCHOWANYM wierszu błędu: po porażce rachunku lista nie mówi prawdy, choćby
-        odcisk się nie zmienił. Odcisk, którego nie da się przeczytać, też nie jest „bez zmian” -
-        pełny rachunek powie błąd zdaniem (`refresh_counts`, AR-198).
+        Skrót tylko przy SCHOWANYM wierszu błędu i liście AKTUALNEJ: po porażce rachunku lista nie mówi prawdy, choćby
+        odcisk się nie zmienił, a lista nieaktualna bez rachunku w drodze (AR-380) zostałaby wygaszona do zmiany bazy.
+        Odcisk, którego nie da się przeczytać, też nie jest „bez zmian” - pełny rachunek powie błąd zdaniem
+        (`refresh_counts`, AR-198).
 
         Wejście zleca też przegląd KOPII zostawionych do oka (AR-246) PRZED skrótem: człowiek usuwa albo
         przywraca je poza programem, a odcisk bazy tego nie widzi. Śladów cofnięcia wejście NIE przegląda
@@ -966,8 +971,12 @@ class TasksView(QWidget):
         do kosza). Gdy odcisk bazy jest ten, z którym bieg ruszył, jego wynik powie prawdę - wejście czeka
         na niego z listą NIEAKTUALNĄ (stare liczby nie stoją czynne, AR-337), zamiast liczyć. Bieg, który oddał już
         porażkę i czeka tylko na sprzątnięcie wątku, wyniku nie przyniesie (`_bieg_czeka_na_wynik`) - wejście
-        liczy wtedy od nowa."""
-        self._wejscie_w_tle = w_tle
+        liczy wtedy od nowa. Tak samo bieg WYPRZEDZONY (AR-380): rachunek synchroniczny w trakcie biegu podbił
+        generację, więc wynik biegu idzie do kosza (`_on_liczniki`) - czekanie na niego zostawiało listę wygaszoną bez
+        fazy i bez błędu, a klik odłożony nie wykonywał się nigdy.
+
+        Każde wyjście sprawdza inwariant listy nieaktualnej (`_inwariant_listy_nieaktualnej`)."""
+        w_tle = self._w_tle
         self._klik_czeka = None
         if self._db_path:
             try:
@@ -979,15 +988,16 @@ class TasksView(QWidget):
                 self._przejrzyj_slady(pelny=False)
             elif slady is False and self._przeglad is None:
                 self._ustaw_wiersz_sladow("schowany")
-        if self._odcisk_licznikow is not None and self.blad_licznikow.isHidden():
+        if self._odcisk_licznikow is not None and self.blad_licznikow.isHidden() and not self._nieaktualny:
             try:
                 bez_zmian = queries.odcisk_bazy(self.con) == self._odcisk_licznikow
             except (sqlite3.Error, OSError):
                 bez_zmian = False
             if bez_zmian:
                 self._fit_task_list()
+                self._inwariant_listy_nieaktualnej()
                 return
-        if self._liczniki_thread is not None and self._bieg_czeka_na_wynik and not self._liczniki_ponow:
+        if self._bieg_biezacy_w_drodze() and not self._liczniki_ponow:
             try:
                 w_drodze = queries.odcisk_bazy(self.con) == self._odcisk_biegu
             except (sqlite3.Error, OSError):
@@ -995,13 +1005,32 @@ class TasksView(QWidget):
             if w_drodze:
                 self._wygas_wiersze()
                 self._fit_task_list()
+                self._inwariant_listy_nieaktualnej()
                 return
         if w_tle and self._db_path and not self._liczniki_stop:
             self._wygas_wiersze()
             self.refresh_counts(w_tle=True)
             self._fit_task_list()
+            self._inwariant_listy_nieaktualnej()
             return
         self.refresh_counts()
+        self._inwariant_listy_nieaktualnej()
+
+    def _bieg_biezacy_w_drodze(self):
+        """Bieg w tle, który jeszcze odda wynik (`_bieg_czeka_na_wynik`) i ten wynik zostanie PRZYŁOŻONY: jego generacja
+        to bieżąca (`_LicznikiWorker._gen` wobec `_liczniki_gen`) - wynik biegu wyprzedzonego idzie do kosza
+        (`_on_liczniki`, AR-380)."""
+        return (self._liczniki_thread is not None and self._bieg_czeka_na_wynik
+                and self._liczniki_worker._gen == self._liczniki_gen)
+
+    def _inwariant_listy_nieaktualnej(self):
+        """EXPECT (AR-380): lista NIEAKTUALNA (wygaszona do wyniku, `_wygas_wiersze`) ma w drodze bieg bieżącej
+        generacji albo zamówione ponowienie (`_liczniki_ponow`) - inaczej nikt jej nie zapali: bez fazy, bez błędu, klik
+        odłożony nie wykona się nigdy. Wołane na każdym wyjściu wejścia w Porządki i przy końcu biegu
+        (`_sprzataj_liczniki`)."""
+        assert not self._nieaktualny or self._liczniki_ponow or self._bieg_biezacy_w_drodze(), (
+            "lista Porządków nieaktualna bez rachunku w drodze", self._liczniki_gen,
+            self._liczniki_worker._gen if self._liczniki_worker is not None else None)
 
     def _start_licznikow(self):
         try:
@@ -1059,19 +1088,59 @@ class TasksView(QWidget):
             self._zapal_wiersze()
             self.rachunek_padl.emit(self.montaz, zdanie)
 
+    def eventFilter(self, obj, event):
+        """ENTER NA WIERSZU LISTY = KLIK (AR-377): `Key_Return`/`Key_Enter` na liście idzie drogą kliku
+        (`_klik_w_wiersz` z bieżącym wierszem - także odłożenie do wyniku rachunku) i jest ZJEDZONY, więc Qt nie emituje
+        `activated` ani nie oddaje klawisza rodzicom. Filtr, nie `itemActivated`: dwuklik i style z aktywacją jednym
+        klikiem doręczają `activated` OBOK `clicked` (Qt 6.9.2 `qabstractitemview.cpp`), a `_on_task_clicked` nie jest
+        idempotentne - drugie doręczenie otwierałoby cel drugi raz. Auto-powtórzenie przytrzymanego klawisza zjedzone
+        bez akcji z tego samego powodu (widok, który nie zmienia strony, otwierałby raz na powtórzenie). Reszta zdarzeń
+        - `super()`."""
+        if (obj is self.tasks and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            if not event.isAutoRepeat():
+                self._klik_w_wiersz(self.tasks.currentItem())
+            return True
+        return super().eventFilter(obj, event)
+
     def _klik_w_wiersz(self, item):
-        """Klik w wiersz listy. Wiersz WYGASZONY (do pierwszego rachunku, AR-175, i w stanie nieaktualnym,
-        AR-337) nie prowadzi nigdzie od razu - Qt doręcza `itemClicked` także dla elementu bez
-        `ItemIsEnabled`, więc wygaszenie samo kliku nie zatrzymuje. Reszta - `_on_task_clicked`.
+        """Klik albo Enter (`eventFilter`) w wiersz listy. Wiersz WYGASZONY (do pierwszego rachunku, AR-175, i w stanie
+        nieaktualnym, AR-337) nie prowadzi nigdzie od razu - Qt doręcza `itemClicked` także dla elementu bez
+        `ItemIsEnabled`, więc wygaszenie samo kliku nie zatrzymuje. Reszta - `_on_task_clicked`. Enter bez bieżącego
+        wiersza (`None`) nie robi nic.
 
         Klik w wiersz wygaszony NIE PRZEPADA: klucz czeka na wynik rachunku, a `_przyloz_liczniki`
         wykonuje go na świeżym `_niewiadome` („?” prowadzi do Dostawy), o ile lista jest wciąż na ekranie.
         Przepada z porażką rachunku (`_pokaz_blad_licznikow`) i z końcem wizyty listy (`odswiez_przy_wejsciu`).
-        Odłożenie dotyczy kliku myszą - lista nie podpina aktywacji klawiaturą (`itemActivated`)."""
+        Wiersz odłożony staje się BIEŻĄCYM od razu (AR-377): Qt nie ustawia bieżącego przy kliku w element bez
+        `ItemIsEnabled` (i `setCurrentItem` go odrzuca - stąd model zaznaczenia), a „← Porządki” po odłożonym otwarciu
+        wraca na wiersz, z którego człowiek wszedł."""
+        if item is None:
+            return
         if item.flags() & Qt.ItemIsEnabled:
             self._on_task_clicked(item)
         elif item.data(Qt.UserRole) is not None:
             self._klik_czeka = item.data(Qt.UserRole)
+            self.tasks.selectionModel().setCurrentIndex(self.tasks.indexFromItem(item),
+                                                        QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def fokus_z_klawiatury(self):
+        """Fokus klawiatury tam, gdzie człowiek na Porządkach pracuje (AR-377, pętla Popraw z klawiatury) - wejście
+        Enterem z paska nawigacji (`MainWindow._on_nav_wejscie`) i powrót „← Porządki” (`_on_back`): przy liście -
+        lista, a bez bieżącego wiersza bieżącym zostaje PIERWSZY WIERSZ AKCYJNY (także wygaszony w stanie nieaktualnym -
+        Enter na nim czeka na wynik jak klik; sam Qt przy fokusie wybiera pierwszy CZYNNY, czyli wiersz informacyjny);
+        przy podstronie osi - jej „← Porządki”, bo lista jest wtedy schowana, a Enter na schowanej liście otwierałby
+        wiersz, którego człowiek nie widzi."""
+        if self.pages.currentIndex() != _PAGE_LIST:
+            wstecz = next(b for b in self.pages.currentWidget().findChildren(
+                QPushButton, options=Qt.FindChildOption.FindDirectChildrenOnly) if b.text() == i18n.t("tasks.back"))
+            wstecz.setFocus(Qt.OtherFocusReason)
+            return
+        if self.tasks.currentRow() < 0:
+            pierwszy = next(r for r, (_k, _l, akcja) in enumerate(_TASKS) if akcja is not None)
+            self.tasks.selectionModel().setCurrentIndex(self.tasks.model().index(pierwszy, 0),
+                                                        QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.tasks.setFocus(Qt.OtherFocusReason)
 
     def _zapal_wiersze(self):
         """Wiersze akcyjne wygaszone do pierwszego rachunku (`_build_ui`) - zapalone, bez podpowiedzi
@@ -1132,7 +1201,10 @@ class TasksView(QWidget):
 
     def _sprzataj_liczniki(self):
         """Koniec wątku liczników. ŚWIĘTA KOLEJNOŚĆ jak w `FramesView._sprzataj_pola` (deadlock AB-BA
-        GIL × ~QThread): worker.deleteLater → wait → thread.deleteLater."""
+        GIL × ~QThread): worker.deleteLater → wait → thread.deleteLater. Po decyzji o ponowieniu i po zgaszeniu
+        fazy liczenia - inwariant listy nieaktualnej (AR-380): wynik albo porażka tego biegu przyszły przed tym
+        slotem (kolejka zdarzeń wątku GUI), więc lista wciąż nieaktualna bez nowego biegu = droga, która ją
+        porzuciła. Widok zatrzymany (`_liczniki_stop`) znika - jego lista nikogo nie obchodzi."""
         if self._liczniki_thread is None:
             return
         self._liczniki_worker.deleteLater()
@@ -1145,6 +1217,9 @@ class TasksView(QWidget):
             self._start_licznikow()          # generacja ostatniego zlecenia
         if self._liczniki_thread is None:
             self._ustaw_liczenie(False)      # ostatni bieg serii (AR-175)
+        # PO końcu serii: faza i sygnał gospodarza stoją, zanim asercja przerwie slot.
+        if not self._liczniki_stop:
+            self._inwariant_listy_nieaktualnej()
 
     def zatrzymaj_pola(self):
         """Widok znika (zmiana bazy, zamknięcie okna - `MainWindow._zatrzymaj_watki_widokow` woła tę
@@ -1481,7 +1556,10 @@ class TasksView(QWidget):
 
     def _on_back(self):
         self.pages.setCurrentIndex(_PAGE_LIST)
-        # Stan mógł się zmienić w podstronie - ta sama droga co wejście w Porządki (AR-175), tym samym trybem
-        # (AR-337): bez rachunku, gdy odcisk bazy bez zmian, w trybie wątków tła - rachunek w tle z listą
+        # Stan mógł się zmienić w podstronie - ta sama droga co wejście w Porządki (AR-175), trybem widoku od montażu
+        # (AR-337, AR-380): bez rachunku, gdy odcisk bazy bez zmian, w trybie wątków tła - rachunek w tle z listą
         # nieaktualną, a w pierwszej sekundzie po montażu czeka na bieg w drodze.
-        self.odswiez_przy_wejsciu(w_tle=self._wejscie_w_tle)
+        self.odswiez_przy_wejsciu()
+        # Fokus wraca na listę, na wiersz, z którego człowiek wszedł (AR-377 - pętla Popraw z klawiatury: strzałka,
+        # Enter, „← Porządki”). Dotąd lista dostawała go przypadkiem łańcucha fokusu po schowaniu przycisku powrotu.
+        self.fokus_z_klawiatury()

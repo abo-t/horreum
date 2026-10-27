@@ -736,7 +736,7 @@ def test_stacks_pamieta_korzen_i_podpowiada_go(qapp, tmp_path, monkeypatch, usta
     loop.exec()
     assert ustawienia.value("stacks/last_root") == tree
     assert tree in view.lbl_stacks_memo.text()
-    assert widziane == [""]                            # pierwszy raz: brak podpowiedzi
+    assert widziane == [os.path.expanduser("~")]       # pierwszy raz: bez pamięci - folder domowy (AR-378)
     view._on_stacks()                                  # drugi raz: dialog startuje OD zapamiętanego
     assert widziane[-1] == tree
     assert not ustawienia.contains("pipeline/last_source")   # pamięci są ROZDZIELNE

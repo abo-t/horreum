@@ -1995,8 +1995,15 @@ def test_wejscie_w_porzadki_i_gest_w_tle_na_bazie_ktora_nie_jest_baza_mowia_zdan
         tasks.refresh_counts(w_tle=True)             # gest Zbiorów: odcisk biegu na połączeniu okna
         assert tasks._liczniki_thread is None and tasks.blad_licznikow.text() == zdanie
         tasks.con = prawdziwe
-        tasks.odswiez_przy_wejsciu()                 # odcisk bez zmian, ale wiersz widoczny - liczy
+        seria = tasks._seria
+        tasks.odswiez_przy_wejsciu()                 # odcisk bez zmian, ale wiersz widoczny - liczy (okno: w tle)
+        _czekaj(lambda: tasks._liczniki_thread is None, "rachunek wejścia po naprawie połączenia")
+        from horreum.gui import tasks as tasks_mod
         assert tasks.blad_licznikow.isHidden() and tasks.blad_licznikow.szczegol() == ""
+        assert tasks._seria > seria, "wejście nie policzyło - wiersz błędu zgasiło samo wygaszenie listy"
+        assert tasks._odcisk_licznikow == queries.odcisk_bazy(tasks.con) and not tasks._nieaktualny
+        assert all(tasks.tasks.item(r).flags() & Qt.ItemIsEnabled
+                   for r, (_k, _l, akcja) in enumerate(tasks_mod._TASKS) if akcja is not None)
     finally:
         tasks.con = prawdziwe
         win.close()

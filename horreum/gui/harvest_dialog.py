@@ -86,7 +86,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, harvest, projection
-from horreum.gui import i18n, queries
+from horreum.gui import i18n, okna_wyboru, queries   # start okien wyboru - jedna reguła (AR-378)
 from horreum.gui.grid_panels import ElidedLabel
 from horreum.gui.projection_dialog import _COLORS, _elide_path
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # błąd systemu w języku UI
@@ -202,15 +202,6 @@ def clean_path(text):
     if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
         p = p[1:-1].strip()
     return p
-
-
-def katalog_startowy(*kandydaci):
-    """Katalog startowy okna wyboru (AR-370): pierwszy niepusty kandydat, inaczej folder domowy - NIGDY pusty
-    napis, z którym natywny wybór startuje w katalogu roboczym procesu (w wydaniu onefile: katalog uruchomienia).
-    Kandydatów nie sprawdza na dysku (`isdir` na zerwanym udziale stałby w wątku GUI). Kandydat, którego już nie ma,
-    wciąż może skończyć w katalogu roboczym: natywny wybór schodzi z nieistniejącego startu tylko o JEDEN poziom
-    (do rodzica), a gdy i rodzica nie ma - startuje w katalogu roboczym procesu (sonda natywna Qt 6, 2026-10-27)."""
-    return next((k for k in kandydaci if k), os.path.expanduser("~"))
 
 
 def norm_path(path):
@@ -1296,14 +1287,13 @@ class HarvestDialog(QDialog):
     def _pick_start(self):
         """Katalog startowy „Wskaż…”: `<folder roboczy>\\OBJECTS`, gdy istnieje - tam leżą wyjścia
         wszystkich wydań; inaczej ostatnie wyjście z pola, a bez niego archiwum (gospodarz podaje archiwum
-        z bazy albo źródło Dostawy `pipeline/last_source`), a bez niego folder domowy (`katalog_startowy`,
-        AR-370 - nie katalog roboczy procesu). Jedno `isdir` tuż przed oknem wyboru, które i tak czyta ten
-        katalog w wątku GUI - nic nie zakłada."""
-        if self._work_root:
-            objects = os.path.join(self._work_root, projection.OBJECT_NAMESPACE)
-            if os.path.isdir(objects):
-                return objects
-        return katalog_startowy(clean_path(self.edit_output.text()), self._archive_root)
+        z bazy albo źródło Dostawy `pipeline/last_source`), a bez niego folder domowy - jedna reguła okien wyboru
+        (`okna_wyboru.katalog_startowy`, AR-378). `OBJECTS` jest kandydatem ŚCISŁYM (`Scisly`): liczy się, gdy sam
+        istnieje, nie gdy istnieje tylko folder roboczy. Sprawdzenie dysku poza wątkiem okna, z budżetem (folder
+        roboczy bywa na udziale) - nic nie zakłada."""
+        objects = os.path.join(self._work_root, projection.OBJECT_NAMESPACE) if self._work_root else ""
+        return okna_wyboru.katalog_startowy(okna_wyboru.Scisly(objects), clean_path(self.edit_output.text()),
+                                            self._archive_root)
 
     def _on_pick_output(self):
         path = QFileDialog.getExistingDirectory(self, i18n.t("harvest.dlg.pick_output"), self._pick_start())
@@ -1322,9 +1312,9 @@ class HarvestDialog(QDialog):
         wynik z pętli niczego tu nie blokuje. Blokadę niesie wyłącznie kopia wciągnięta w tym oknie,
         a bieg, który ją kładzie, trzyma „Zmień…” wygaszone do swojego końca i nie rusza przy
         otwartym (modalnym) oknie wyboru - strażnikiem obejścia jest asercja `_set_archive`. Start: archiwum
-        okna, bez niego folder domowy (`katalog_startowy`, AR-370)."""
+        okna, bez niego folder domowy (`okna_wyboru.katalog_startowy`, AR-378)."""
         path = QFileDialog.getExistingDirectory(self, i18n.t("harvest.dlg.pick_archive"),
-                                                katalog_startowy(self._archive_root))
+                                                okna_wyboru.katalog_startowy(self._archive_root))
         if path:
             self._set_archive(path)
 

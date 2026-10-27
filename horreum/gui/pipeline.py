@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
     QVBoxLayout, QWidget,
@@ -33,6 +33,7 @@ from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.gui.wb_worker import (EtykietaBledu, ZdanieZeSzczegolem,   # zdanie + szczegół (AR-198)
                                    tekst_powodu, wiersz_systemu)
 from horreum.gui import dostawa_bramka   # bramka biegu i napis gestu kopii bez Qt - czytają je też gospodarz i Porządki
+from horreum.gui import okna_wyboru      # start okien wyboru - jedna reguła, dysk poza wątkiem okna (AR-378)
 from horreum.item_reasons import powod_okna       # wyjątek etapu jedną regułą okna (AR-264)
 from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
@@ -1047,7 +1048,10 @@ class PipelineView(QWidget):
         self._sync_actions()
 
     def _on_pick_dir(self):
-        path = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_scan"))
+        """„Wskaż katalog…” - start okna przy wskazanym katalogu, bez niego przy źródle „Przyjmij nowe”
+        (`okna_wyboru.katalog_startowy`, AR-378: dysk sprawdza wątek sondy z budżetem, nie wątek okna)."""
+        path = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_scan"), okna_wyboru.katalog_startowy(
+            self._root, self._settings().value("pipeline/last_source", None)))
         if not path:
             return
         if self._thread is not None:    # PRZED pamięcią: inaczej pamięć wskaże B, a korzeń zostanie A
@@ -1058,10 +1062,23 @@ class PipelineView(QWidget):
 
     # ---------------------------------------------------------------- korzeń stosów (I-2b)
 
-    def _sync_stacks_memo(self):
+    def _odczyt_bazy(self, con, odczyt):
+        """`odczyt(con)` na połączeniu wołającego (wejście w widok - jedna migawka trzech synchronizacji, `showEvent`,
+        AR-379) albo na krótkim WŁASNYM połączeniu w jednym `BEGIN` (odczyt kilkoma SELECT-ami z jednej chwili bazy;
+        zamknięcie zwalnia migawkę każdą drogą - wiszący czytelnik WAL)."""
+        if con is not None:
+            return odczyt(con)
+        con = db.connect(self._db_path)
+        try:
+            con.execute("BEGIN")
+            return odczyt(con)
+        finally:
+            con.close()
+
+    def _sync_stacks_memo(self, *, con=None):
         """JEDYNY właściciel treści memo stosów (wzorzec `_sync_source_memo`): korzeń i liczniki
         rodowodu - wołane z `__init__`, po KAŻDYM zapisie `stacks/last_root`, po przebiegu piszącym
-        i przy wejściu w widok."""
+        i przy wejściu w widok (`con` - połączenie wejścia, `_odczyt_bazy`)."""
         root = self._settings().value("stacks/last_root", None)
         memo = (i18n.t("pipeline.stacks_last", root=root) if root
                 else i18n.t("pipeline.stacks_first"))
@@ -1071,11 +1088,7 @@ class PipelineView(QWidget):
         # `_sync_copy_facts`; wołane też po każdym przebiegu piszącym i przy wejściu w widok.
         tip = ""
         if self._db_path is not None:
-            con = db.connect(self._db_path)
-            try:
-                n = queries.stack_lineage_counts(con)
-            finally:
-                con.close()
+            n = self._odczyt_bazy(con, queries.stack_lineage_counts)
             memo += "\n" + i18n.t("pipeline.stacks_counts", all=n["all"],
                                   with_inputs=n["with_inputs"], without=n["without_inputs"],
                                   uncounted=n["uncounted"])
@@ -1083,18 +1096,14 @@ class PipelineView(QWidget):
         self.lbl_stacks_memo.setText(memo)
         self.lbl_stacks_memo.setToolTip(tip)
 
-    def _sync_rodowod(self):
+    def _sync_rodowod(self, *, con=None):
         """JEDYNY właściciel wiersza „czeka na Ciebie” (sekcja 4d): widoczny, gdy log meldował
         rodowód stosów czekający na rękę I stan wciąż ma obrazy w perspektywie. Zbiór perspektywy
-        liczy tylko wtedy, gdy log ma ten człon - bez niego nie ma czego prowadzić. Krótkie WŁASNE
-        połączenie jak `_sync_stacks_memo`; wołane po przebiegu piszącym i przy wejściu w widok."""
+        liczy tylko wtedy, gdy log ma ten człon - bez niego nie ma czego prowadzić. Połączenie jak
+        `_sync_stacks_memo` (`_odczyt_bazy`); wołane po przebiegu piszącym i przy wejściu w widok."""
         n = 0
         if self._czeka_rodowod and self._db_path is not None:
-            con = db.connect(self._db_path)
-            try:
-                n = len(queries.lineage_pending_frame_ids(con))
-            finally:
-                con.close()
+            n = len(self._odczyt_bazy(con, queries.lineage_pending_frame_ids))
         self.lbl_lineage.setText(i18n.t_plural("pipeline.lineage_waiting", n,
                                                where=i18n.t("perspective.lineage")) if n else "")
         self.box_lineage.setVisible(n > 0)
@@ -1133,8 +1142,11 @@ class PipelineView(QWidget):
         wskaż katalog", a przycisk pod nim pyta znów o korzeń stosów (`_on_source_pick`)."""
         if self._db_path is None or self._thread is not None:
             return
+        # Start okna (AR-378): zapamiętany korzeń, gdy jest albo jest jego rodzic, inaczej folder domowy - sprawdza
+        # wątek sondy z budżetem (`okna_wyboru`), nie ten slot.
         last = str(self._settings().value("stacks/last_root", "") or "")
-        root = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_stacks"), last)
+        root = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_stacks"),
+                                                okna_wyboru.katalog_startowy(last))
         if not root:
             return
         # PRZED zapamiętaniem korzenia i przed startem: odmowa nie może zostawić śladu (ani
@@ -1182,7 +1194,13 @@ class PipelineView(QWidget):
 
     # ---------------------------------------------------------------- fakty kopii (0021)
 
-    def _sync_copy_facts(self):
+    # Ostatni rachunek kopii czekających (`_sync_copy_facts`) i czy jest ŚWIEŻY: policzony w TYM obrocie pętli zdarzeń
+    # (AR-379) - do końca obrotu nic poza gestem, który właśnie trwa, bazy nie zmieniło (`_zestarz_rachunek_kopii`).
+    # Atrybuty KLASY: pierwszy rachunek idzie z `__init__`, zanim cokolwiek je przeczyta.
+    _rachunek_kopii = None
+    _rachunek_swiezy = False
+
+    def _sync_copy_facts(self, czeka=None, *, con=None):
         """JEDYNY właściciel licznika kopii czekających na fakty, przycisku „Zbierz fakty kopii (N)"
         i linii powodu. Wołane z `__init__`, po każdym przebiegu (`_set_running(False)`), po zapisie
         nagłówków (`set_writeback_busy`), przy pokazaniu widoku i z `show_reason`.
@@ -1190,8 +1208,15 @@ class PipelineView(QWidget):
         LICZBA Z BAZY, NIE Z DYSKU: ten sam predykat co wiersz „?" w Porządkach
         (`scan.copy_facts_candidates` BEZ korzenia - sam SELECT, bez `canonize_root`), więc slot
         okna nie dotyka drzewa źródła (AR-31 (3)), a „N" na przycisku znaczy dokładnie „etap ma
-        N do zrobienia". Krótkie WŁASNE połączenie (F5R2#4: baza już zmigrowana → `db.connect`;
-        finally zamyka - wiszący czytelnik WAL).
+        N do zrobienia". Połączenie wołającego (`con`, wejście w widok) albo krótkie WŁASNE w jednym `BEGIN`
+        (`_odczyt_bazy`): `copy_facts_waiting` to kilka SELECT-ów, które w autocommit czytały fakty i bajty z dwóch
+        chwil bazy (AR-379).
+
+        JEDEN RACHUNEK NA GEST „?” (AR-379): `czeka` podany - samo przyłożenie rachunku już policzonego
+        (`show_reason` przy widoku ukrytym). Rachunek zostaje ostatnim (`_rachunek_kopii`) i jest ŚWIEŻY do końca
+        bieżącego obrotu pętli - `showEvent` w tym samym geście (budowa strony → powód → pokazanie) go nie powtarza.
+        Zmierzone na kopii pf4 v47 (15 598 kopii czeka na bajty): 95 ms mediany na rachunek, gest „?” liczył 3 razy
+        przy niezbudowanej Dostawie i 2 przy zbudowanej.
 
         DWIE ROBOTY OSOBNO (AR-315): po aktualizacji programu kopie FITS czekają na jednorazowe
         sprawdzenie bajtów nagłówka, nie na fakty - napis, podpowiedź i linia powodu mówią, ile
@@ -1199,13 +1224,14 @@ class PipelineView(QWidget):
         (`MS_NA_KOPIE`); „15598 kopii czeka na fakty” było nieprawdą o każdej z nich. Liczby robót
         (`facts`, `bytes`) są pełne - kopia FITS czekająca na oba liczy się w obu; widoczność gestu
         i czas liczą kopie do przeczytania (`copies`), bo każdą czyta się raz."""
-        czeka = scan.CopyFactsWaiting()
-        if self._db_path is not None:
-            con = db.connect(self._db_path)
-            try:
-                czeka = scan.copy_facts_waiting(con)
-            finally:
-                con.close()
+        if czeka is None:
+            czeka = scan.CopyFactsWaiting()
+            if self._db_path is not None:
+                czeka = self._odczyt_bazy(con, scan.copy_facts_waiting)
+            self._rachunek_kopii = czeka
+            if not self._rachunek_swiezy:
+                self._rachunek_swiezy = True
+                QTimer.singleShot(0, self, self._zestarz_rachunek_kopii)
         n = czeka.copies
         self._copy_facts_waiting = n
         gest = dostawa_bramka.etykieta_gestu_kopii(czeka)
@@ -1233,6 +1259,12 @@ class PipelineView(QWidget):
         self._sync_akcentu()
         self._sync_actions()
 
+    def _zestarz_rachunek_kopii(self):
+        """Pierwszy obrót pętli po rachunku (`_sync_copy_facts`): rachunek przestaje być świeży - następne pokazanie
+        widoku liczy od nowa (strona zbudowana bez pokazania, np. etap z gestu rodowodu, nie wyświetli starych
+        liczb)."""
+        self._rachunek_swiezy = False
+
     def _sync_akcentu(self):
         """AKCENT IDZIE ZA POWODEM WEJŚCIA (AR-327): linia powodu faktów kopii każe użyć
         „Sprawdź bajty nagłówków (N)”, więc bursztyn złotej akcji (nazwa obiektu `theme.ZLOTA_AKCJA_OBJECT_NAME` -
@@ -1255,7 +1287,13 @@ class PipelineView(QWidget):
         """PUBLICZNE wejście dla powierzchni, która przyprowadza człowieka do Dostawy (Porządki:
         klik w wiersz „?", `TasksView.open_intake`). `reason` = stała `REASON_*` albo `None`
         (zwykłe wejście - linia gaśnie). Nieznany powód to błąd programisty, nie stan usera
-        (EXPECT). Licznik liczony od nowa: powód bez aktualnej liczby kłamałby o robocie.
+        (EXPECT).
+
+        JEDEN RACHUNEK NA GEST (AR-379): widok ukryty i bez biegu przykłada OSTATNI rachunek (`_rachunek_kopii`) -
+        powód stoi PRZED pokazaniem strony, a pokazanie (`QShowEvent` przychodzi synchronicznie z przełączeniem stosu)
+        liczy świeżo w `showEvent`, chyba że ostatni rachunek padł w tym samym obrocie pętli (strona zbudowana tym
+        gestem). Widok widoczny albo w biegu (wtedy `showEvent` nie liczy) - rachunek tu: powód bez aktualnej
+        liczby kłamałby o robocie.
 
         `fokus=True` (AR-327) - JAWNA komenda człowieka (klik wiersza „?”): fokus klawiatury trafia w gest
         powodu przy pokazaniu widoku (ukryty widżet fokusu nie bierze). Zwykłe wejście - także strzałką
@@ -1263,7 +1301,10 @@ class PipelineView(QWidget):
         assert reason in (None, REASON_COPY_FACTS), reason
         self._reason = reason
         self._fokus_przy_pokazaniu = fokus and reason is not None
-        self._sync_copy_facts()
+        if self.isVisible() or self._thread is not None or self._rachunek_kopii is None:
+            self._sync_copy_facts()
+        else:
+            self._sync_copy_facts(self._rachunek_kopii)
         if self.isVisible():
             self._daj_fokus_powodu()
 
@@ -1278,12 +1319,25 @@ class PipelineView(QWidget):
 
     def showEvent(self, event):
         # Licznik mógł się zmienić poza Dostawą (zapis nagłówków w Zbiorach dociąga fakty kopii
-        # re-syncem pisarza) - wejście w widok odświeża go tanim SELECT-em.
+        # re-syncem pisarza) - wejście w widok odświeża go. JEDNO połączenie w jednym `BEGIN` na trzy
+        # synchronizacje (AR-379): liczby przycisku, memo stosów i „czeka na Ciebie” z tej samej chwili bazy,
+        # zamiast trzech połączeń. Rachunek kopii świeży (ten sam obrót pętli - strona zbudowana tym gestem) nie
+        # liczy się drugi raz.
         super().showEvent(event)
         if self._thread is None:
-            self._sync_copy_facts()
-            self._sync_stacks_memo()       # gest w panelu rodowodu zmienia liczniki stosów
-            self._sync_rodowod()           # …i zbiór „czeka na Ciebie”
+            con = None
+            if self._db_path is not None:
+                con = db.connect(self._db_path)
+            try:
+                if con is not None:
+                    con.execute("BEGIN")
+                if not self._rachunek_swiezy:
+                    self._sync_copy_facts(con=con)
+                self._sync_stacks_memo(con=con)    # gest w panelu rodowodu zmienia liczniki stosów
+                self._sync_rodowod(con=con)        # …i zbiór „czeka na Ciebie”
+            finally:
+                if con is not None:
+                    con.close()
         self._daj_fokus_powodu()
 
     def _on_copy_facts(self):
@@ -1377,11 +1431,14 @@ class PipelineView(QWidget):
 
     def _pick_and_scan(self, stage):
         """Pytanie o katalog (pierwsza dostawa albo źródło niedostępne), zapamiętanie go jak
-        w „Wskaż katalog…" i sekwencja `stage` na nim - bez dotykania dysku w oknie."""
+        w „Wskaż katalog…" i sekwencja `stage` na nim - bez dotykania dysku w oknie. Start okna: źródło
+        „Przyjmij nowe”, wskazany katalog, inaczej folder domowy (AR-378 - pierwsza dostawa startowała w katalogu
+        uruchomienia programu); źródło niedostępne odpada w budżecie sondy (`okna_wyboru`)."""
         if self._db_path is None or self._thread is not None:
             return
         tytul = "pipeline.dlg.pick_scan" if stage == "scan" else "pipeline.dlg.pick_delivery"
-        source = QFileDialog.getExistingDirectory(self, i18n.t(tytul))
+        source = QFileDialog.getExistingDirectory(self, i18n.t(tytul), okna_wyboru.katalog_startowy(
+            self._settings().value("pipeline/last_source", None), self._root))
         if not source:
             return
         self._remember_source(source)
@@ -1507,10 +1564,13 @@ class PipelineView(QWidget):
         ZERO DOTKNIĘĆ DYSKU W TYM SLOCIE (jak `_on_presence`): katalog jedzie do etapu bez serialu,
         a to, czy jest osiągalny, i jego wolumin sprawdza wątek tła (`PipelineWorker._zrodlo`).
         Wskazanym katalogiem zostaje dopiero PO sondzie (`_on_source_ready`) - dawny `_set_root`
-        mierzył serial tutaj, a katalog z dialogu bywa udziałem sieciowym, który odpadł po wyborze."""
+        mierzył serial tutaj, a katalog z dialogu bywa udziałem sieciowym, który odpadł po wyborze. Start okna:
+        wskazany katalog, źródło „Przyjmij nowe”, inaczej folder domowy (AR-378, sonda dysku poza wątkiem okna)."""
         if self._db_path is None or self._thread is not None:
             return
-        source = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_presence"))
+        source = QFileDialog.getExistingDirectory(
+            self, i18n.t("pipeline.dlg.pick_presence"),
+            okna_wyboru.katalog_startowy(self._root, self._settings().value("pipeline/last_source", None)))
         if not source:
             return
         self._start_presence(source)

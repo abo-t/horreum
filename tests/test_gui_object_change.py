@@ -2201,7 +2201,8 @@ def test_czytelny_powod_plik_zajety_slowami_a_sciezki_bez_podwojnych_ukosnikow(l
         f"{zajety_txt} - przerwano na żądanie")
     inny = _blad_os(FileNotFoundError, 2, "Nie można odnaleźć określonego pliku",
                     r"R:\ASTRO_\LIGHTS\b.fits")
-    assert czytelny_powod(inny) == inny.replace("\\\\", "\\")
+    # Inny błąd systemu (proza sprzed kodów) - numer i komunikat systemu bez nazwy klasy Pythona (AR-388).
+    assert czytelny_powod(inny) == inny.replace("\\\\", "\\").removeprefix("FileNotFoundError: ")
     assert "\\\\" not in czytelny_powod(inny)
     assert czytelny_powod("karta OBJECT = 'NGC 2632'") == "karta OBJECT = 'NGC 2632'"
     assert czytelny_powod(None) is None

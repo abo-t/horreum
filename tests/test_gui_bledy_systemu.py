@@ -383,8 +383,9 @@ def test_zniwa_siedziba_nieczytelna_zdanie_w_jezyku_UI(jezyk, lang):
 
 
 def test_wiersz_systemu_tylko_dla_klasy():
-    """Pomocnik podpowiedzi: wiersz wyłącznie przy błędzie systemu klasą; tekst spoza klas i brak
-    powodu - pusty (bez zmyślonego szczegółu)."""
+    """Pomocnik podpowiedzi: wiersz przy błędzie systemu klasą; tekst bez numeru systemu, zajętość
+    i brak powodu - pusty (bez zmyślonego szczegółu). Surowy wyjątek z numerem - AR-388,
+    `test_powody_pisarza.py`."""
     assert wiersz_systemu(blad_systemu(OSError(None, _KOMUNIKAT, r"X:\L\a.fits", 5))) == _tip()
     assert wiersz_systemu(blad_systemu(OSError(None, "zajęty", r"X:\L\a.fits", 32))) == ""
     assert wiersz_systemu(None) == "" and wiersz_systemu("OSError: x") == ""

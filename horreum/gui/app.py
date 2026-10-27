@@ -1524,15 +1524,44 @@ class ConfirmPathObjectsDialog(QDialog):
 
     def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera: staging tego runu jest sierotą (C1) - sprzątamy go od razu, nie przy
-        zamknięciu okna. „Zatwierdź" wraca, bo nie wiemy, czy karty stoją w plikach. Szczegół
-        systemu (`podpowiedz`, AR-185) - pod kursorem pola błędu; następne zdanie go zdejmuje. Fakty tej
-        operacji (`_na_czesc`, AR-359) schodzą - nie wiszą do następnego zapisu."""
-        self._czesc = None
+        zamknięciu okna. Szczegół systemu (`podpowiedz`, AR-185) - pod kursorem zdania; następne zdanie
+        go zdejmuje. Fakty tej operacji (`_na_czesc`, AR-359) zużywa ta porażka - nie wiszą do następnego zapisu.
+
+        WYJĄTEK ZAPISU PO PODMIANIE (AR-384; wyłącznie `op` `commit` - ten odbiorca łapie też porażkę
+        cofnięcia): fakty wykonawcy znają pliki tej operacji → zdanie jak w szufladzie („N z M zapisane,
+        potem błąd: … - „Cofnij karty” cofa zapisane (commit N)”, `zdanie_porazki_okna_kart`), „Cofnij karty”
+        i „Rozwiąż teraz” z zakresu rdzenia, „Zatwierdź” milczy (karty stoją w plikach), wariant paska po
+        zamknięciu i recepta gospodarza jak po sukcesie. Pole błędu nietknięte - odmowa klingi z tego
+        kliknięcia zostaje. Wyjątek bez pliku tej operacji - „BŁĄD: …” w polu błędu, a „Zatwierdź” wraca,
+        chyba że wcześniejszy commit czeka na „Cofnij”."""
+        czesc, self._czesc = self._czesc, None
         self._porzuc_staging()
-        self._domkniety = self._commit_id is not None
+        from horreum.gui.wb_worker import czytelny_powod, zdanie_porazki_okna_kart   # zajętość słowami, bez `repr`
+        porazka = (zdanie_porazki_okna_kart(czesc, czytelny_powod(msg), przycisk=i18n.t("path.undo_cards_btn"))
+                   if op == "commit" else None)
+        if porazka is None:
+            self._domkniety = self._commit_id is not None
+            self._end_progress()
+            self.error.ustaw(i18n.t("grid.wb.error", msg=czytelny_powod(msg)), podpowiedz)
+            self.changed.emit()
+            return
+        zdanie, cofnij = porazka
+        if cofnij is not None:
+            self._commit_id = cofnij
+            self.undo_btn.setVisible(True)
+            self.resolve_btn.setVisible(True)
+        self._domkniety = True                   # zapis ruszył pliki - ponowny trafiłby w kartę albo izolację
         self._end_progress()
-        from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
-        self.error.ustaw(i18n.t("grid.wb.error", msg=czytelny_powod(msg)), podpowiedz)
+        glowa = self.status.text()               # zdanie bazy tego kliknięcia (postęp kart pisze tylko pasek)
+        okno = glowa + "\n" + zdanie
+        self.status.ustaw(okno, podpowiedz)      # POLE zdania porażki - jedna linia (pole `error`: decyzja wyglądu)
+        self.po_zamknieciu = None
+        if cofnij is not None:                   # pasek po zamknięciu: polecenie CLI, wzór `_after_commit` (AR-283)
+            cli = i18n.t("wb.undo_cli_short", id=cofnij)
+            pasek = (glowa + "\n" + zdanie_porazki_okna_kart(czesc, czytelny_powod(msg), przycisk=cli)[0]
+                     + i18n.t("wb.undo_short", cmd=cli))
+            self.po_zamknieciu = _wariant_paska_kart(okno, pasek, self._db_path, cofnij)
+        dopasuj_wysokosc(self)
         self.changed.emit()
 
     def _porzuc_staging(self):
@@ -2246,16 +2275,42 @@ class RepairHeaderDialog(QDialog):
 
     def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera: staging runu jest sierotą (C1) - sprzątany od razu, nie przy zamknięciu.
-        Szczegół systemu (`podpowiedz`, AR-185) - razem ze zdaniem błędu (`_fail`, protokół pola
-        AR-204); następne zdanie pola go zdejmuje. Fakty tej operacji (`_na_czesc`, AR-359) schodzą."""
-        self._czesc = None
+        Szczegół systemu (`podpowiedz`, AR-185) - razem ze zdaniem (protokół pola AR-204); następne zdanie
+        pola go zdejmuje. Fakty tej operacji (`_na_czesc`, AR-359) zużywa ta porażka.
+
+        WYJĄTEK ZAPISU PO PODMIANIE (AR-384; wyłącznie `op` `commit` - ten odbiorca łapie też porażkę
+        cofnięcia): zdanie jak w szufladzie z faktów wykonawcy (`zdanie_porazki_okna_kart`), „Cofnij”
+        i „Rozwiąż teraz” z zakresu rdzenia, „Zapisz karty” milczy (`_committed` - karty stoją w plikach),
+        wariant paska po zamknięciu i recepta gospodarza jak po sukcesie; zdanie zastępuje w `status`
+        postęp ostatniego pliku. Wyjątek bez pliku tej operacji - „BŁĄD: …” w polu błędu (`_fail`)."""
+        czesc, self._czesc = self._czesc, None
         self._porzuc_staging()
+        from horreum.gui.wb_worker import czytelny_powod, zdanie_porazki_okna_kart   # zajętość słowami, bez `repr`
+        porazka = (zdanie_porazki_okna_kart(czesc, czytelny_powod(msg), przycisk=i18n.t("grid.action.undo"))
+                   if op == "commit" else None)
+        if porazka is not None:
+            zdanie, cofnij = porazka
+            if cofnij is not None:
+                self._commit_id = cofnij
+                self.undo_btn.setVisible(True)
+                self.resolve_btn.setVisible(True)
+            self._committed = True               # PRZED `_sync_preview`: ten liczy „Zapisz karty”
         self.bar.setVisible(False)
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
-        self._sync_preview()                     # PRZED `_fail`: podgląd czyści pole błędu
-        from horreum.gui.wb_worker import czytelny_powod   # plik zajęty słowami okna, bez `repr`
-        self._fail(i18n.t("grid.wb.error", msg=czytelny_powod(msg)), podpowiedz)
+        self._sync_preview()                     # PRZED zdaniem: podgląd czyści pole błędu
+        if porazka is None:
+            self._fail(i18n.t("grid.wb.error", msg=czytelny_powod(msg)), podpowiedz)
+            self.changed.emit()
+            return
+        self.status.ustaw(zdanie, podpowiedz)    # POLE zdania porażki - jedna linia (pole `error`: decyzja wyglądu)
+        self.po_zamknieciu = None
+        if cofnij is not None:                   # pasek po zamknięciu: polecenie CLI, wzór `_after_commit` (AR-283)
+            cli = i18n.t("wb.undo_cli_short", id=cofnij)
+            pasek = (zdanie_porazki_okna_kart(czesc, czytelny_powod(msg), przycisk=cli)[0]
+                     + i18n.t("wb.undo_short", cmd=cli))
+            self.po_zamknieciu = _wariant_paska_kart(zdanie, pasek, self._db_path, cofnij)
+        dopasuj_wysokosc(self)
         self.changed.emit()
 
     def _porzuc_staging(self):

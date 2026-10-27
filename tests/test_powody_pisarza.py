@@ -2636,3 +2636,168 @@ def test_cofniecie_commitu_bez_bramki_na_END_z_ogonem_przed_kanonicznym_odmawia_
     assert u.blocked[0].reason.code == "header_end_bounds", u.blocked[0].reason
     assert p.read_bytes() == przed
     con.close()
+
+
+# ============================================================ AR-388 - nazwa klasy Pythona w zdaniu (prezentacja)
+# Rdzeń trzyma tekst systemu spoza klas znak w znak (`test_nieznany_blad_systemu_zostaje_uczciwy`, AR-168); zdanie
+# (`wb_worker.czytelny_powod`) zdejmuje z niego nazwę klasy, szczegół (`wiersz_systemu`) ją niesie. Gramatyka surowego
+# wyjątku na granicy członu, nigdy w cudzysłowie ani w ścieżce.
+
+_SUROWY_87 = "OSError: [WinError 87] Parametr jest niepoprawny"
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("tekst, zdanie", [
+    (_SUROWY_87, "[WinError 87] Parametr jest niepoprawny"),
+    ("OSError: [Errno 5] Input/output error", "[Errno 5] Input/output error"),
+    (f"{_SUROWY_87}; podmiana niepotwierdzona", "[WinError 87] Parametr jest niepoprawny; podmiana niepotwierdzona"),
+    (f"karta odbita: {_SUROWY_87} · przebieg abc", "karta odbita: [WinError 87] Parametr jest niepoprawny · przebieg abc"),
+    (f"zapis padł - {_SUROWY_87}", "zapis padł - [WinError 87] Parametr jest niepoprawny"),
+    (f"zapis padł ({_SUROWY_87})", "zapis padł ([WinError 87] Parametr jest niepoprawny)"),
+    ("ValueError: OSError: [Errno 22] Invalid argument", "[Errno 22] Invalid argument"),
+    ("OSError: [WinError 87] Parametr: zły", "[WinError 87] Parametr: zły"),
+    ("OSError: [WinError 1117] Błąd urządzenia: 'X:\\\\L\\\\a.fits'", "[WinError 1117] Błąd urządzenia: 'X:\\L\\a.fits'"),
+    # negatywy: bez numeru systemu, zwykła proza, ścieżki, cytowana treść innego wyjątku
+    ("OSError: gołe", "OSError: gołe"),
+    ("ValueError: nie system", "ValueError: nie system"),
+    ("w nagłówku stoi ParseError: [Errno 5] jako tekst", "w nagłówku stoi ParseError: [Errno 5] jako tekst"),
+    ("plik /dane/OSError: [Errno 5] x.fits nieczytelny", "plik /dane/OSError: [Errno 5] x.fits nieczytelny"),
+    ("plik 'X:\\L\\OSError: [Errno 5] b.fits' nieczytelny", "plik 'X:\\L\\OSError: [Errno 5] b.fits' nieczytelny"),
+    ("plik 'X:\\L\\a - OSError: [Errno 5] b.fits' nieczytelny",
+     "plik 'X:\\L\\a - OSError: [Errno 5] b.fits' nieczytelny"),
+    ("RuntimeError: 'OSError: [WinError 87] x'", "RuntimeError: 'OSError: [WinError 87] x'"),
+    ('RuntimeError: "OSError: [WinError 87] x"', 'RuntimeError: "OSError: [WinError 87] x"'),
+    # wyjątek w komunikacie innego - oba zdjęte w jednym przejściu; wyjątek za cytatem, który sam go zawiera
+    ("OSError: [WinError 87] komunikat: OSError: [Errno 5] dane", "[WinError 87] komunikat: [Errno 5] dane"),
+    ('opis: "tekst: OSError: [Errno 5] cytat": OSError: [WinError 87] awaria',
+     'opis: "tekst: OSError: [Errno 5] cytat": [WinError 87] awaria'),
+], ids=["winerror", "errno", "przed_srednikiem", "w_srodku_zdania", "po_mysliniku", "w_nawiasie", "lancuch_klas",
+        "dwukropek_w_komunikacie", "sciezka_repr", "bez_numeru", "spoza_systemu", "proza", "sciezka_posix",
+        "sciezka_windows", "sciezka_z_separatorem", "cytat_apostrof", "cytat_cudzyslow", "wyjatek_w_komunikacie",
+        "wyjatek_za_cytatem"])
+def test_czytelny_powod_bez_nazwy_klasy_przed_numerem_systemu(lang, tekst, zdanie):
+    """Zdanie mówi numer i komunikat systemu bez nazwy klasy Pythona wyłącznie dla surowego wyjątku na granicy członu
+    (początek, `: `, `; `, `(`, ` - `); reszta znak w znak, ścieżki z `repr` bez podwojeń; idempotentna (okna wołają
+    ją drugi raz na zdaniu wykonawcy). Falsyfikatory: zdjęcie bez numeru systemu (`ValueError: nie system`), zdjęcie
+    w ścieżce albo cytacie, zdjęcie jednej klasy z łańcucha (druga przejściówka zdjęłaby następną)."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import czytelny_powod
+    i18n.set_lang(lang)
+    assert czytelny_powod(tekst) == zdanie
+    assert czytelny_powod(czytelny_powod(tekst)) == zdanie
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_czytelny_powod_zajetosc_przed_zdjeciem_klasy(lang):
+    """Zajętość 32/33 mówi swoje zdanie jak dotąd (jej wzorzec niesie klasę, więc stoi PRZED zdjęciem klasy), obok
+    zdjęcie klasy innego numeru. Falsyfikator: zdjęcie klasy przed zajętością - surowe „[WinError 32] …”."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import czytelny_powod
+    i18n.set_lang(lang)
+    zajety = writeback._blad_systemu(OSError(None, "Proces nie może uzyskać dostępu do pliku", None, 32))
+    assert czytelny_powod(f"{zajety}; {_SUROWY_87}") == (
+        f"{i18n.t('objchg.reason.busy')}; [WinError 87] Parametr jest niepoprawny")
+
+
+def test_wiersz_systemu_surowego_wyjatku_z_numerem():
+    """Szczegół niesie surowy tekst z nazwą klasy, którą zdanie zdjęło: powód gołym tekstem (`blad_systemu` spoza
+    klas) i parametr powodu z kodem (`replace_unconfirmed` z `inner`); zajętość 32, tekst bez numeru, ścieżka i cytat -
+    bez szczegółu. Falsyfikatory: `_surowy_systemu` bez węzła tekstowego; bez wyłączenia zajętości."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import wiersz_systemu
+    surowy = writeback._blad_systemu(OSError(None, "awaria podmiany", None, 87))
+    tip = i18n.t("wb.os_detail_tip", detail="OSError: [WinError 87] awaria podmiany")
+    assert surowy == "OSError: [WinError 87] awaria podmiany" and wiersz_systemu(surowy) == tip
+    powod = PowodPozycji(f"{surowy}; podmiana niepotwierdzona, backup do cofnięcia zapisany w commicie 1",
+                         "replace_unconfirmed", inner=surowy, commit_id=1)
+    assert wiersz_systemu(powod) == tip
+    assert wiersz_systemu(f"zapis padł - {surowy}; dalej") == tip
+    assert wiersz_systemu("OSError: [WinError 87] Parametr: zły") == i18n.t(
+        "wb.os_detail_tip", detail="OSError: [WinError 87] Parametr: zły")
+    assert wiersz_systemu(writeback._blad_systemu(OSError(None, "zajęty", None, 32))) == ""
+    assert wiersz_systemu("OSError: gołe") == "" and wiersz_systemu("ValueError: x") == ""
+    assert wiersz_systemu("plik 'X:\\L\\a - OSError: [Errno 5] b.fits' nieczytelny") == ""
+    assert wiersz_systemu("RuntimeError: 'OSError: [WinError 87] x'") == ""
+
+
+def test_szczegol_niesie_kazdy_wyjatek_ktorego_klase_zdjeto():
+    """Każdy surowy wyjątek, z którego zdanie zdjęło nazwę klasy, ma tekst w szczególe: dwa wyjątki w jednym powodzie -
+    dwa wiersze; wyjątek w komunikacie innego - jeden wiersz z oboma (tekst zewnętrzny zawiera wewnętrzny); wyjątek za
+    cytatem, który sam go zawiera - tekst zewnętrzny, nie cytat. Wynik zapisu z kilkoma RÓŻNYMI powodami - wiersz
+    każdego (zdanie i podpowiedź powodów mówią pierwszą pozycję każdego); ten sam powód w dwóch plikach - wiersz
+    pierwszej pozycji, jak podpowiedź powodów. Falsyfikatory: szczegół z pierwszego wyjątku (`next`); podpowiedź wyniku
+    z pierwszej pozycji."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.wb_worker import podpowiedz_systemu, wiersz_systemu
+
+    def _tip(surowy):
+        return i18n.t("wb.os_detail_tip", detail=surowy)
+    assert wiersz_systemu("OSError: [WinError 87] pierwszy; OSError: [WinError 1117] drugi") == (
+        _tip("OSError: [WinError 87] pierwszy") + "\n" + _tip("OSError: [WinError 1117] drugi"))
+    assert wiersz_systemu("OSError: [WinError 87] komunikat: OSError: [Errno 5] dane") == _tip(
+        "OSError: [WinError 87] komunikat: OSError: [Errno 5] dane")
+    assert wiersz_systemu('opis: "tekst: OSError: [Errno 5] cytat": OSError: [WinError 87] awaria') == _tip(
+        "OSError: [WinError 87] awaria")
+    # separator członu WEWNĄTRZ cytowanej ścieżki nie kończy tekstu wyjątku (cytat wyłączony przed wyszukaniem)
+    assert wiersz_systemu("OSError: [WinError 1117] Błąd urządzenia: 'X:\\L\\a - b.fits'; dalej") == _tip(
+        "OSError: [WinError 1117] Błąd urządzenia: 'X:\\L\\a - b.fits'")
+    # dwa ROZŁĄCZNE wyjątki, tekst jednego jest prefiksem drugiego - dwa wiersze (powtórzenie = równość, nie podciąg)
+    assert wiersz_systemu("OSError: [Errno 5] a; OSError: [Errno 5] ab") == (
+        _tip("OSError: [Errno 5] a") + "\n" + _tip("OSError: [Errno 5] ab"))
+    assert wiersz_systemu("OSError: [Errno 5] a; OSError: [Errno 5] a") == _tip("OSError: [Errno 5] a")
+
+    def _niepotwierdzona(lid, surowy):
+        return writeback.FileResult(lid, f"X:/L/{lid}.fits", "failed", PowodPozycji(
+            f"{surowy}; podmiana niepotwierdzona, backup do cofnięcia zapisany w commicie 1", "replace_unconfirmed",
+            inner=surowy, commit_id=1))
+    rozne = writeback.FileResult(3, "X:/L/3.fits", "failed", "OSError: [WinError 1117] urządzenie")
+    res = writeback.CommitResult("r", 1, [], [], [_niepotwierdzona(1, "OSError: [WinError 87] a"),
+                                                  _niepotwierdzona(2, "OSError: [WinError 87] b"), rozne], [])
+    assert podpowiedz_systemu(res) == (_tip("OSError: [WinError 87] a") + "\n"
+                                       + _tip("OSError: [WinError 1117] urządzenie"))
+    prefiks = writeback.CommitResult("r", 1, [], [], [
+        writeback.FileResult(i, f"X:/L/{i}.fits", "failed", tekst)
+        for i, tekst in enumerate(("OSError: [Errno 5] a", "OSError: [Errno 5] ab"))], [])
+    assert podpowiedz_systemu(prefiks) == _tip("OSError: [Errno 5] a") + "\n" + _tip("OSError: [Errno 5] ab")
+
+
+def test_szczegol_wielu_rozlacznych_wyjatkow_w_czasie_liniowym():
+    """4 000 ROZŁĄCZNYCH wyjątków w jednym powodzie i 4 000 różnych powodów w wyniku: zdanie, szczegół powodu
+    i podpowiedź wyniku z wierszem każdego - luźny próg 0,25 s na trzy wołania (zmierzone: około 50 ms; agregacja
+    przez podciąg - porównanie z każdym już wziętym tekstem - około 0,7 s na sam szczegół powodu). Falsyfikator:
+    powtórzenie po podciągu albo po liście zamiast zbioru dokładnych tekstów."""
+    pytest.importorskip("PySide6")
+    import time
+    from horreum.gui.wb_worker import czytelny_powod, podpowiedz_systemu, wiersz_systemu
+    n = 4000
+    tekst = "; ".join(f"OSError: [Errno 5] x{i}" for i in range(n))
+    res = writeback.CommitResult("r", 1, [], [], [writeback.FileResult(i, f"X:/L/{i}.fits", "failed",
+                                                                       f"OSError: [Errno 5] x{i}") for i in range(n)], [])
+    start = time.perf_counter()
+    zdanie, szczegol, podpowiedz = czytelny_powod(tekst), wiersz_systemu(tekst), podpowiedz_systemu(res)
+    assert time.perf_counter() - start < 0.25
+    assert "OSError" not in zdanie and szczegol.count("\n") == podpowiedz.count("\n") == n - 1
+
+
+@pytest.mark.parametrize("tekst", ["OSError: " * 2000 + "koniec", "(OSError: [Errno 5] a" * 2000],
+                         ids=["lancuch_bez_numeru", "wyjatki_w_nawiasach"])
+def test_gramatyka_wyjatku_liniowa_na_dlugim_tekscie(tekst):
+    """Tekst z 2 000 nazw klas (łańcuch bez numeru) i 2 000 wyjątków w nawiasach: zdanie i szczegół w czasie
+    liniowym - luźny próg 0,1 s na oba wołania (zmierzone: około 1 ms; wzorzec, który próbuje łańcucha od każdej
+    kolejnej klasy, potrzebuje na łańcuch 2 000 klas około 0,2 s na jedno wołanie, dla 4 000 - czterokrotnie więcej).
+    Wynik też: łańcuch bez numeru zostaje znak w znak, z wyjątków w nawiasach znika każda nazwa klasy."""
+    pytest.importorskip("PySide6")
+    import time
+    from horreum.gui.wb_worker import czytelny_powod, wiersz_systemu
+    start = time.perf_counter()
+    zdanie = czytelny_powod(tekst)
+    szczegol = wiersz_systemu(tekst)
+    assert time.perf_counter() - start < 0.1
+    if tekst.startswith("OSError"):
+        assert zdanie == tekst and szczegol == ""
+    else:
+        assert "OSError" not in zdanie and zdanie.count("[Errno 5]") == 2000 and szczegol

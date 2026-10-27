@@ -2561,9 +2561,15 @@ def _cmd_header_fix(args):
             # tekstowy przyjęty skanem (AR-229) ma osobny wiersz: reszty pliku nikt nie sprawdził.
             tekstowe = [fr for fr in res.already
                         if getattr(fr.reason, "code", None) == "undo_already_text"]
-            if len(res.already) > len(tekstowe):
-                lines.append(f"  juz cofniete {len(res.already) - len(tekstowe)} - wynik cofniecia "
+            # AR-388: backup rozstrzygnięty z dyskiem bez dowodu podmiany - plik nie niesie wersji z tego commitu
+            # (wersja sprzed zapisu albo trzecia), to nie „już cofnięte”; ten sam fakt co człon okien i paska.
+            juz = len(res.already) - len(tekstowe) - len(res.not_replaced)
+            if juz:
+                lines.append(f"  juz cofniete {juz} - wynik cofniecia "
                              f"jest juz na dysku i w bazie, nie ma czego cofac")
+            if res.not_replaced:
+                lines.append(f"  bez wersji z commitu {len(res.not_replaced)} - plik nie niesie wersji z tego commitu "
+                             f"(rekoncyliacja z dyskiem), nie ma czego cofac")
             if tekstowe:
                 lines.append(f"  juz cofniete {len(tekstowe)} - naglowek i baza opisuja stan sprzed "
                              f"commitu; reszty pliku backup tekstowy nie pozwala sprawdzic")

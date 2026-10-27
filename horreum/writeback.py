@@ -152,6 +152,10 @@ CODE_POWROT_WYPARTEJ = "displaced_return"
 # w miejscu zastało region nagłówka już równy stanowi sprzed commitu - o „już cofnięte” rozstrzyga
 # orkiestracja dowodem całego pliku i bazy (`_cofnij_lokacje`), nie pisarz.
 CODE_REGION_SPRZED = "undo_already_region"
+# `CODE_BEZ_WERSJI_ZAPISU` (AR-388): cofnięcie zastało backup rozstrzygnięty z dyskiem bez dowodu podmiany
+# (`unreplaced_at`: pod ścieżką wersja sprzed zapisu albo trzecia) - plik nie niesie wersji z tego commitu, nie ma czego
+# cofać. Kod powodu `_cofnij_lokacje` (literał - bramka kodów `PowodPozycji`) i źródło `UndoResult.not_replaced`.
+CODE_BEZ_WERSJI_ZAPISU = "undo_not_replaced"
 PREFIKS_DROGI_ATOMOWEJ = "droga dotychczasowa"
 
 # Powody-stałe pisarza (AR-148): to samo zdanie w wielu bramkach, z kodem dla okna.
@@ -3126,9 +3130,13 @@ class UndoResult:
     # Podzbiór `restored`, którego nagłówek wrócił, a zeznanie klatki NIE (AR-82) - głosem klatki
     # mówi inna kopia; `FileResult.code` = `CODE_ZEZNANIE_WSTRZYMANE`.
     withheld: list[FileResult] = dataclasses.field(default_factory=list)
-    # Podzbiór `blocked`, w którym stan sprzed commitu JUŻ leży na dysku i w bazie („już cofnięte”,
-    # commit, który pliku nie podmienił - `_CofniecieLokacji.juz`): nie ma czego cofać (AR-160).
+    # Podzbiór `blocked`, w którym nie ma czego cofać (`_CofniecieLokacji.juz`, AR-160): stan sprzed commitu JUŻ
+    # leży na dysku i w bazie („już cofnięte”) albo plik nie niesie wersji z tego commitu (`not_replaced`).
     already: list[FileResult] = dataclasses.field(default_factory=list)
+    # Podzbiór `already`, którego backup rekoncyliacja z dyskiem rozstrzygnęła bez dowodu podmiany
+    # (`CODE_BEZ_WERSJI_ZAPISU`, AR-388): plik nie niesie wersji z tego commitu - to nie „już cofnięte”, choć
+    # cofania też nie ma; `complete` liczy go razem z `already`.
+    not_replaced: list[FileResult] = dataclasses.field(default_factory=list)
     # Przy przerwaniu (`cancelled`) - ile nieprzetworzonych backupów nie ma trwałego dowodu
     # zakończenia (`_cofniecie_zakonczone`, AR-176), czyli wymaga sprawdzenia ponowieniem; `None` =
     # pętla nie przerwana albo wynik bez tej wiedzy (`undo_renames`). Zdanie okna mówi liczbę albo
@@ -5190,6 +5198,8 @@ def _cofnij_backupy(con, wynik_id, pozycje, *, now, progress, should_cancel) -> 
                       semantic=[c.wynik for c in wyniki if c.semantycznie],
                       withheld=[c.wynik for c in wyniki if c.wstrzymane],
                       already=[c.wynik for c in wyniki if c.juz], remaining=remaining,
+                      not_replaced=[c.wynik for c in wyniki
+                                    if c.juz and getattr(c.wynik.reason, "code", None) == CODE_BEZ_WERSJI_ZAPISU],
                       untouched=untouched,
                       objects_restored=tuple(f for f, (_c, w) in obiekty.items() if w == "wrocil"),
                       objects_kept=tuple(f for f, (_c, w) in obiekty.items() if w == "zostaje"),
@@ -5753,11 +5763,14 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         if powod is not None:
             return _blok(loc, path, powod)
         loc = _location(con, loc["id"])
+        # `unreplaced_at` stawia rekoncyliacja przy wersji sprzed zapisu ORAZ przy trzeciej (zmiana poza programem,
+        # `repo.settle_pending_backup(replaced=None)`, zamiar `kept`) - zdanie mówi stan teraz, prawdziwy w obu
+        # (AR-388); kod = `CODE_BEZ_WERSJI_ZAPISU`.
         if con.execute("SELECT unreplaced_at FROM header_backups WHERE id = ?",
                        (b["id"],)).fetchone()[0] is not None:
             return _blok(loc, path, PowodPozycji(
-                "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na dysku nagłówek sprzed "
-                "commitu) - nie ma czego cofać", "undo_not_replaced"), juz=True)
+                "rekoncyliacja z dyskiem: plik nie niesie wersji z tego commitu - nie ma czego cofać",
+                "undo_not_replaced"), juz=True)
     # BRAMKA ŚLADÓW COFNIĘCIA (AR-127): pliki zostawione obok ścieżki przez przerwane cofnięcie tej
     # lokacji (dowolnego commitu) dostają werdykt `kept` i wiersz Porządków - raz, przed tym cofnięciem.
     powod = _rekoncyliuj_slady(con, loc, now=now)

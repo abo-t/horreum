@@ -550,27 +550,51 @@ def podpowiedz_cofniecia(res):
 
 
 def szczegol_systemu(powod):
-    """Surowy tekst systemu albo bazy (`Typ: [WinError N] opis`) pierwszego błędu klasą
+    """Surowy tekst systemu albo bazy (`Typ: [WinError N] opis`) błędów klasą
     (`item_reasons.SYSTEM_REASON_CODES`) w drzewie powodu - parametry-powody, listy, uwagi - albo
-    None. Zdanie mówi klasę i numer w języku UI, komunikat systemu (w języku systemu) schodzi tu."""
-    surowy = _surowy_systemu(powod)
-    return None if surowy is None else _bez_repr_sciezek(surowy)
+    None. Zdanie mówi klasę i numer w języku UI, komunikat systemu (w języku systemu) schodzi tu.
+    Błąd spoza klas z numerem systemu (`OSError: [WinError 87] …`) też: zdanie mówi numer i komunikat
+    bez nazwy klasy Pythona (`czytelny_powod`), surowy tekst z klasą stoi tu (AR-388); kilka surowych
+    tekstów w drzewie - wiersz pod wierszem (`_surowy_systemu`)."""
+    surowe = _surowy_systemu(powod)
+    return "\n".join(_bez_repr_sciezek(s) for s in surowe) if surowe else None
 
 
 def _surowy_systemu(powod):
-    """`detail` pierwszego błędu klasą (system, baza) w drzewie powodu (tekst jak od systemu) albo
-    None."""
-    if not isinstance(powod, PowodPozycji):
-        return None
-    if powod.code in SYSTEM_REASON_CODES:
-        detail = dict(powod.params).get("detail")
-        return detail if isinstance(detail, str) else None
-    for _nazwa, wartosc in powod.params:
-        for w in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
-            znaleziony = _surowy_systemu(w)
-            if znaleziony is not None:
-                return znaleziony
-    return None
+    """LISTA surowych tekstów systemu w drzewie powodu (parametry-powody, listy, uwagi), w kolejności
+    drzewa: `detail` każdego błędu klasą (system, baza) i w węźle tekstowym (powód gołym tekstem, parametr
+    `inner`…) KAŻDY surowy wyjątek systemu spoza klas, z którego zdanie zdejmuje nazwę klasy
+    (`_surowe_wyjatki`, AR-388) - zajętość 32/33 mówi własne zdanie, bez szczegółu. Bez powtórzeń: wyjątek
+    w komunikacie innego (przedział zagnieżdżony w tym samym tekście) - po pozycjach, ten sam tekst - raz
+    (równość, nie podciąg: `… a` i `… ab` to dwa wyjątki)."""
+    wynik, widziane = [], set()
+
+    def _idz(w):
+        if isinstance(w, PowodPozycji):
+            if w.code in SYSTEM_REASON_CODES:
+                detail = dict(w.params).get("detail")
+                teksty = [detail] if isinstance(detail, str) else []
+            else:
+                for _nazwa, wartosc in w.params:
+                    for x in (wartosc if isinstance(wartosc, (list, tuple)) else (wartosc,)):
+                        _idz(x)
+                return
+        elif isinstance(w, str):
+            teksty, zasieg = [], -1
+            for poczatek, _klasy, koniec, numer in _surowe_wyjatki(w):
+                # zajętość; tekst zawarty we wcześniejszym (wyjątek w komunikacie innego) - po pozycjach, bez wycinków
+                if numer in _NUMERY_ZAJETOSCI or koniec <= zasieg:
+                    continue
+                teksty.append(w[poczatek:koniec])
+                zasieg = koniec
+        else:
+            return
+        for tekst in teksty:
+            if tekst not in widziane:
+                widziane.add(tekst)
+                wynik.append(tekst)
+    _idz(powod)
+    return wynik
 
 
 def wiersz_szczegolu(surowy):
@@ -583,8 +607,10 @@ def wiersz_szczegolu(surowy):
 def wiersz_systemu(powod):
     """Wiersz podpowiedzi „Szczegół systemu: …” powodu z błędem systemu klasą (`szczegol_systemu`)
     albo `""` - jeden dla wyniku zapisu, awarii całej operacji (AR-185), kopii wiodącej i okien
-    wydania, żniw i zmiany obiektu (AR-184). Powód bez klasy (tekst systemu, wyjątek spoza klas) nie
-    dostaje wymyślonego szczegółu.
+    wydania, żniw i zmiany obiektu (AR-184). Wyjątek spoza klas z numerem systemu dostaje swój surowy
+    tekst (zdanie zdjęło z niego nazwę klasy, AR-388) - każdy, wiersz na tekst (`_surowy_systemu`); powód
+    bez klasy i bez numeru (tekst systemu bez `[WinError N]`/`[Errno N]`, wyjątek spoza systemu) nie dostaje
+    wymyślonego szczegółu.
 
     Błąd PROGRAMU z kodem (`prog_error`, `item_reasons.powod_okna`) to nie błąd systemu (nie stoi
     w `SYSTEM_REASON_CODES`), ale jego zdanie odsyła pod kursor - wiersz „Szczegół techniczny: …”
@@ -593,17 +619,22 @@ def wiersz_systemu(powod):
     if isinstance(powod, PowodPozycji) and powod.code == "prog_error":
         detail = dict(powod.params).get("detail")
         return i18n.t("objchg.st.detail_tip", detail=detail) if isinstance(detail, str) and detail else ""
-    return wiersz_szczegolu(_surowy_systemu(powod))
+    return "\n".join(wiersz_szczegolu(s) for s in _surowy_systemu(powod))
 
 
 def podpowiedz_systemu(res):
-    """Wiersz podpowiedzi „Szczegół systemu: …” dla pierwszej pozycji wyniku z błędem systemu
-    (błąd przed wstrzymaniem przed blokadą, jak w zdaniu wyniku) albo `""`."""
+    """Wiersze podpowiedzi „Szczegół systemu: …” pozycji wyniku z błędem systemu (błąd przed wstrzymaniem
+    przed blokadą, jak w zdaniu wyniku): pierwsza taka pozycja KAŻDEGO różnego powodu (`_klucz_powodu`) -
+    zdanie i podpowiedź powodów mówią pierwszą pozycję każdego różnego powodu bez nazwy klasy Pythona,
+    więc szczegół niesie każdy z tych surowych tekstów (AR-388); bez powtórzeń wierszy; albo `""`."""
+    klucze, wiersze = set(), {}                          # słownik = zbiór z kolejnością dopisania
     for fr in res.failed + list(getattr(res, "withheld", [])) + res.blocked:
         wiersz = wiersz_systemu(fr.reason)
-        if wiersz:
-            return wiersz
-    return ""
+        if not wiersz or _klucz_powodu(fr.reason) in klucze:
+            continue
+        klucze.add(_klucz_powodu(fr.reason))
+        wiersze.update(dict.fromkeys(wiersz.split("\n")))
+    return "\n".join(wiersze)
 
 
 # Miejsce łamania wiersza po `\` w tekście MALOWANYM pola zdania (AR-221): U+200B, niewidoczny
@@ -1025,6 +1056,44 @@ _OS_ZAJETY = re.compile(
     r"(?:: '(?P<sciezka>(?:[^'\\]|\\.)*)'(?: -> '(?:[^'\\]|\\.)*')?)?")
 # Ścieżka w zapisie `repr` z podwojonymi ukośnikami (`'R:\\ASTRO_\\…'` z `str(OSError)`).
 _REPR_SCIEZKI = re.compile(r"'((?:[^'\\]|\\.)*\\\\(?:[^'\\]|\\.)*)'")
+# Surowy wyjątek systemu spoza klas rdzenia (`item_reasons.blad_systemu`: `f"{type(exc).__name__}: {exc}"`, AR-168,
+# AR-388) - GRAMATYKA, nie podciąg: łańcuch nazw klas `[A-Z]…Error: ` (`ValueError: OSError: `) zaczęty na granicy
+# członu zdania (początek tekstu albo po `: `, `; `, `(`, ` - `; łańcuch zaczęty poza granicą liczy się od drugiej
+# klasy - każda następna stoi po `: `) i tuż za nim numer `[WinError N]`/`[Errno N]`. Tekst wyjątku do końca członu
+# (`; `, ` · `, ` - `, `)`, koniec wiersza). Cytaty (`'…'`, `"…"` - ścieżka w zapisie `repr`, cytowana wartość albo
+# treść innego wyjątku, nazwa pliku `'X:\L\OSError: [Errno 5].fits'`) wyłączone PRZED wyszukaniem, z zachowaniem
+# pozycji. Jedno przejście: łańcuch klas dopasowany raz, w całości - koszt liniowy także dla „OSError: ” × tysiące.
+_KLASA = re.compile(r"\b[A-Z]\w*?Error: ")
+_LANCUCH_KLAS = re.compile(r"(?:\b[A-Z]\w*?Error: )+")
+_NUMER_SYSTEMU = re.compile(r"\[(?P<numer>(?:WinError|Errno) \d+)\]")
+_NUMERY_ZAJETOSCI = ("WinError 32", "WinError 33")     # zajętość - własne zdanie (`_OS_ZAJETY`), bez szczegółu
+_GRANICE_CZLONU = (": ", "; ", "(", " - ")
+_KONIEC_CZLONU = re.compile(r"; | · | - |\)|\n")
+# Cytat w tekście powodu - ścieżka w zapisie `repr`, cytowana wartość albo treść (`'…'`, `"…"`).
+_CYTAT = re.compile(r"'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"")
+
+
+def _surowe_wyjatki(tekst):
+    """Surowe wyjątki systemu poza cytatem → `[(początek, koniec klas, koniec tekstu wyjątku, numer)]`, rosnąco:
+    `tekst[początek:koniec klas]` - nazwy klas, które zdejmuje zdanie (`czytelny_powod`), `tekst[początek:koniec
+    tekstu wyjątku]` - surowy tekst do szczegółu (`_surowy_systemu`), `numer` - `WinError N`/`Errno N`. Jedna
+    gramatyka zdania i szczegółu; cytaty, łańcuchy klas i końce członów - po jednym przejściu."""
+    maska = _CYTAT.sub(lambda m: "\0" * len(m.group(0)), tekst)     # wnętrze cytatu bez granic i klas, pozycje te same
+    konce = [m.start() for m in _KONIEC_CZLONU.finditer(maska)]
+    wynik, k = [], 0
+    for m in _LANCUCH_KLAS.finditer(maska):
+        numer = _NUMER_SYSTEMU.match(maska, m.end())
+        if numer is None:
+            continue
+        poczatek = m.start()
+        if poczatek and not maska.endswith(_GRANICE_CZLONU, 0, poczatek):
+            poczatek = _KLASA.match(maska, poczatek).end()           # pierwsza klasa poza granicą członu
+            if poczatek == m.end():
+                continue
+        while k < len(konce) and konce[k] < numer.end():
+            k += 1
+        wynik.append((poczatek, m.end(), konce[k] if k < len(konce) else len(tekst), numer.group("numer")))
+    return wynik
 
 
 def _bez_repr(sciezka):
@@ -1045,7 +1114,13 @@ def czytelny_powod(tekst):
     zdaniem dla człowieka, a przekład innych błędów systemu robi rdzeń (`item_reasons.blad_systemu`,
     AR-168, AR-184: odmowa dostępu, brak pliku, brak miejsca, udział - z kodem). Zajętość zostaje tutaj:
     rdzeń jej nie koduje, a wiersze bazy sprzed kodów są surowe. Jedna funkcja dla okien zapisu
-    (zdanie wyniku `zdanie_wyniku_zapisu`, statusy okna zmiany obiektu)."""
+    (zdanie wyniku `zdanie_wyniku_zapisu`, statusy okna zmiany obiektu).
+
+    Wyjątek systemu spoza klas (`OSError: [WinError 87] …`, AR-388) mówi numer i komunikat systemu BEZ
+    nazwy klasy Pythona (`_surowe_wyjatki`; tekst z klasą stoi w szczególe, `_surowy_systemu`) - rdzeń
+    trzyma go znak w znak (AR-168), zdejmuje go dopiero zdanie: KAŻDY wyjątek tekstu w jednym przejściu, także
+    wyjątek w komunikacie innego. Po zajętości (jej wzorzec niesie klasę). Idempotentna: wykonawca i okno
+    przetwarzają to samo zdanie kolejno."""
     if not tekst:
         return tekst
 
@@ -1054,7 +1129,11 @@ def czytelny_powod(tekst):
         return i18n.t("objchg.reason.busy") + (f" ({_bez_repr(sciezka)})" if sciezka else "")
 
     tekst = _OS_ZAJETY.sub(_zajety, tekst)
-    return _bez_repr_sciezek(tekst)
+    czesci, poz = [], 0
+    for poczatek, klasy, _koniec, _numer in _surowe_wyjatki(tekst):
+        czesci.append(tekst[poz:poczatek])
+        poz = klasy
+    return _bez_repr_sciezek("".join(czesci) + tekst[poz:])
 
 
 def tekst_powodu(powod):
@@ -1164,14 +1243,20 @@ def zdanie_commitu_kart(res, applied_key, czesc=None, *, przycisk=None):
 def zdanie_undo_kart(res):
     """Zdanie wyniku cofnięcia - wspólne dla okien piszących karty. Plik „już cofnięty”
     (`UndoResult.already`) to nie blokada, tylko stan docelowy: liczy się osobnym członem, inaczej
-    dokończone ponowienie brzmiało jak porażka („1 przywrócony · 33 zablokowane”)."""
+    dokończone ponowienie brzmiało jak porażka („1 przywrócony · 33 zablokowane”). Plik bez wersji
+    z tego commitu (`UndoResult.not_replaced`, AR-388 - backup rozstrzygnięty z dyskiem bez dowodu
+    podmiany) ma własny człon: „już cofnięte” mówiło o pliku, w którym wersji z tego commitu nie ma."""
     msg = _liczba("grid.wb.restored", len(res.restored))
     if res.semantic:
         msg += " · " + _liczba("grid.wb.semantic", len(res.semantic))
     if res.withheld:                                     # AR-82: nagłówek wrócił, zeznanie nie
         msg += " · " + _liczba("grid.wb.undo_withheld", len(res.withheld))
-    if res.already:
-        msg += " · " + _liczba("wb.undo_already", len(res.already))
+    bez_wersji = getattr(res, "not_replaced", ())       # wynik bez tej wiedzy (atrapa) - całe `already` „już cofnięte”
+    juz = [fr for fr in res.already if fr not in bez_wersji]
+    if juz:
+        msg += " · " + _liczba("wb.undo_already", len(juz))
+    if bez_wersji:
+        msg += " · " + _liczba("wb.undo_not_replaced", len(bez_wersji))
     zablokowane = [fr for fr in res.blocked if fr not in res.already]
     if zablokowane:
         msg += " · " + _liczba("grid.wb.blocked", len(zablokowane))
@@ -1223,7 +1308,8 @@ def ogon_cofniecia(res, przycisk):
     zostaje w stanie po zapisie, M wymaga sprawdzenia; „Cofnij” dokończy cofnięcie”."""
     from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
     msg = zdanie_undo_kart(res)
-    # Powód „już cofnięte” nie mówi niczego, co człon „N już cofniętych” nie powiedział (AR-160).
+    # Powód „już cofnięte” nie mówi niczego, co człon „N już cofniętych” nie powiedział (AR-160); powód pliku bez wersji
+    # z tego commitu - to, co człon `wb.undo_not_replaced` (AR-388).
     detail = next((fr for fr in res.failed + res.blocked
                    if fr.reason and fr not in res.already), None)
     if detail is not None:
@@ -1300,3 +1386,28 @@ def zdanie_czesci_zapisu(op, czesc, msg, *, czeka, cofnij, przycisk):
     return (i18n.t_plural(klucz, n, m=czesc.wszystkie, msg=msg)
             + czlony_niepewnych(czesc.do_sprawdzenia, czesc.otwarte, przycisk=przycisk)
             + ogon_czesci_zapisu(czeka, blad=True, cofnij=cofnij, nazwy=nazwy))
+
+
+def zdanie_porazki_okna_kart(czesc, msg, *, przycisk):
+    """Porażka zapisu kart OKNA („Napraw nagłówek…”, „Zatwierdź ze ścieżki…”), który zdążył ruszyć pliki (AR-384) →
+    `(zdanie, commit do cofnięcia | None)`, albo None, gdy fakty wykonawcy nie znają żadnego pliku tej operacji (okno
+    mówi wtedy samo „BŁĄD: …”). Wynik niepusty = zapis ruszył pliki: przycisk zapisu milczy jak po sukcesie.
+
+    Te same fakty i ta sama głowa co szuflada (`zdanie_czesci_zapisu`: „N z M zapisane, potem błąd: …” + człony
+    niepewnych), ale okno zdejmuje staging (`_porzuc_staging`), więc czekające się nie liczą (`czeka=0`) - przebiegu
+    do dokończenia nie ma i „N do dokończenia” byłoby fałszem. „Cofnij” z zakresu rdzenia (`commit_do_cofniecia`
+    z faktami, nie z wyniku, którego po wyjątku nie ma) z kotwicą commitu; fakty nieznane (odczyt klas padł,
+    „co najmniej N” z postępu) - człon `wb.write_facts_unknown`, bez „Cofnij”. `przycisk` = etykieta uchwytu
+    cofnięcia, którą zdanie nazywa (przycisk okna, po zamknięciu - polecenie CLI). `msg` - powód w języku UI."""
+    if czesc is None:
+        return None
+    cofnij = commit_do_cofniecia(None, czesc)
+    zdanie = zdanie_czesci_zapisu("commit", czesc, msg, czeka=0,
+                                  cofnij=przycisk if cofnij is not None else None, przycisk=przycisk)
+    if zdanie is None:
+        return None
+    if not czesc.zakres_znany:
+        zdanie += i18n.t("wb.write_facts_unknown")
+    if cofnij is not None:
+        zdanie += i18n.t("grid.wb.commit_id", id=cofnij)
+    return zdanie, cofnij

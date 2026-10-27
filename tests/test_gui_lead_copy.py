@@ -365,13 +365,14 @@ def test_wiersz_zeznania_z_nieobecnej_kopii_przy_kopiach_bez_zeznania(qapp, tmp_
 
 def test_zdanie_odmowy_mowi_ze_nic_nie_zapisano():
     """Czysta funkcja zdania: odmowa niesie ścieżkę kopii (katalog i nazwa) i powód odczytu; diagnoza
-    skanu bez kodu (proza) mówi znak w znak, bez podpowiedzi."""
+    skanu bez kodu (proza) z surowym wyjątkiem systemu mówi numer i komunikat bez nazwy klasy Pythona,
+    a surowy tekst z klasą stoi w podpowiedzi (AR-388)."""
     from horreum.lead_copy import LeadCopyResult
     res = LeadCopyResult("failed", 1, r"X:\X\B_CLS\m.xisf", reason="OSError: [WinError 64] x")
     zdanie, podpowiedz = grid_mod._zdanie_kopii_wiodacej(res)
-    assert zdanie == ("Nie udało się przeczytać kopii B_CLS\\m.xisf: OSError: [WinError 64] x "
+    assert zdanie == ("Nie udało się przeczytać kopii B_CLS\\m.xisf: [WinError 64] x "
                       "- nic nie zapisano.")
-    assert podpowiedz == ""
+    assert podpowiedz == i18n.t("wb.os_detail_tip", detail="OSError: [WinError 64] x")
     bez_powrotu, _ = grid_mod._zdanie_kopii_wiodacej(LeadCopyResult("adopted", 1, "/a/C/m.xisf"))
     assert bez_powrotu.endswith(i18n.t("grid.lead.no_back"))
 

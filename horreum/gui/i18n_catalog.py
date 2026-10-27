@@ -733,6 +733,14 @@ CATALOG = {
     "wb.undo_already": {
         "pl": {"one": "{n} już cofnięty", "few": "{n} już cofnięte", "many": "{n} już cofniętych"},
         "en": {"one": "{n} already undone", "other": "{n} already undone"}},
+    # Plik bez wersji z cofanego commitu (`UndoResult.not_replaced`, AR-388): backup rozstrzygnięty z dyskiem bez dowodu
+    # podmiany - stan teraz (wersja sprzed zapisu albo trzecia), nie „już cofnięte” i nie historia podmiany.
+    "wb.undo_not_replaced": {
+        "pl": {"one": "{n} nie niesie wersji z tego zapisu - nie ma czego cofać",
+               "few": "{n} nie niosą wersji z tego zapisu - nie ma czego cofać",
+               "many": "{n} nie niesie wersji z tego zapisu - nie ma czego cofać"},
+        "en": {"one": "{n} does not hold the version from this write - nothing to undo",
+               "other": "{n} do not hold the version from this write - nothing to undo"}},
     "path.item": {"pl": "{canon}  ·  {frames}", "en": "{canon}  ·  {frames}"},
     "path.new_badge": {"pl": "NOWA w bazie", "en": "NEW in the database"},
     "path.known_badge": {"pl": "kanon znany", "en": "canon known"},
@@ -7974,10 +7982,9 @@ CATALOG = {
         "en": "header RESTORED, but {inner}; the location is isolated from the scan - another "
               "undo will finish only the database synchronization"},
     "objchg.item.undo_not_replaced": {
-        "pl": "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na dysku nagłówek sprzed "
-              "commitu) - nie ma czego cofać",
-        "en": "reconciliation with the disk: the commit did not replace this file (the disk holds "
-              "the header from before the commit) - nothing to undo"},
+        "pl": "rekoncyliacja z dyskiem: plik nie niesie wersji z tego commitu - nie ma czego cofać",
+        "en": "reconciliation with the disk: the file does not hold the version from this commit - "
+              "nothing to undo"},
     "objchg.item.undo_open_op": {
         "pl": "przerwany zapis w miejscu (operacja {op_id}, {op_kind}) - lokacja izolowana; "
               "najpierw {way}",

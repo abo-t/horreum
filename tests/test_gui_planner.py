@@ -1228,17 +1228,24 @@ def _czekaj_na(warunek, opis, limit_s=10):
         time.sleep(0.01)
 
 
-def _klik_strzalki_daty(pole):
-    """Klik w strzałkę kalendarza pola daty - punkt trafienia stylem, jak `QDateTimeEdit::mousePressEvent` (kalendarza
-    nie otwiera ani F4, ani Alt+strzałka w dół - ta druga przestawia datę)."""
-    from PySide6.QtCore import QPoint, Qt
-    from PySide6.QtTest import QTest
+def _opcja_pola_daty(pole):
+    """Opcja stylu pola daty z kalendarzem - `QDateTimeEdit` trafia klik stylem combo (`hitTestComplexControl`)."""
     from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
     opt = QStyleOptionComboBox()
     opt.initFrom(pole)
     opt.editable = True
     opt.frame = True
     opt.subControls = QStyle.SC_All
+    return opt
+
+
+def _klik_strzalki_daty(pole):
+    """Klik w strzałkę kalendarza pola daty - punkt trafienia stylem, jak `QDateTimeEdit::mousePressEvent` (kalendarza
+    nie otwiera ani F4, ani Alt+strzałka w dół - ta druga przestawia datę)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QStyle
+    opt = _opcja_pola_daty(pole)
     xs = [x for x in range(pole.width() // 2, pole.width())
           if pole.style().hitTestComplexControl(QStyle.CC_ComboBox, opt, QPoint(x, pole.height() // 2), pole)
           == QStyle.SC_ComboBoxArrow]
@@ -1328,41 +1335,65 @@ def test_noc_minimum_rok_wstecz_od_zegara_widoku(pokazany):
     assert pokazany.night_edit.minimumDate() == QDate(2025, 7, 31)
 
 
-def test_noc_klik_w_pole_nie_przestawia_daty_ani_przelacznika(pokazany):
+def _trafienie_pola_daty(okno, pole, punkt, *, wprost=False):
+    """Klik w `punkt` pola daty: przez okno (Qt wybiera widżet pod kursorem) albo doręczony wprost polu. Zwraca
+    pod-kontrolkę stylu combo pod punktem i PIERWSZEGO odbiorcę wciśnięcia (`"pole"` albo `"tekst"` - pole linii)."""
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QStyle
+
+    class _Odbiorca(QObject):
+        def __init__(self):
+            super().__init__()
+            self.kto = []
+
+        def eventFilter(self, obj, ev):
+            if ev.type() == QEvent.Type.MouseButtonPress:
+                self.kto.append("pole" if obj is pole else "tekst")
+            return False
+    filtr = _Odbiorca()
+    pole.installEventFilter(filtr)
+    pole.lineEdit().installEventFilter(filtr)
+    try:
+        kontrolka = pole.style().hitTestComplexControl(QStyle.CC_ComboBox, _opcja_pola_daty(pole), punkt, pole)
+        if wprost:
+            QTest.mouseClick(pole, Qt.LeftButton, Qt.NoModifier, punkt)
+        else:
+            QTest.mouseClick(okno.windowHandle(), Qt.LeftButton, Qt.NoModifier, pole.mapTo(okno, punkt))
+        _pompuj()
+    finally:
+        pole.removeEventFilter(filtr)
+        pole.lineEdit().removeEventFilter(filtr)
+    return kontrolka, (filtr.kto[0] if filtr.kto else None)
+
+
+@pytest.mark.parametrize("miejsce", ["srodek", "lewa", "gorna", "dolna", "wprost"])
+def test_noc_klik_w_pole_nie_przestawia_daty_ani_przelacznika(pokazany, miejsce):
     """Klik myszą w pole „Noc” poza strzałką kalendarza nie robi kroku daty: pole z kalendarzem trafia klik stylem combo,
     a krok myszą spinboxa porównywał wynik ze stałymi spinboxa (ramka combo = „w górę”, pole tekstu = „w dół”). Prawdziwa
     droga przez okno: środek tekstu (dostaje go pole linii) i ramka pola - lewa, górna, dolna (dostaje ją samo pole);
-    do tego klik doręczony wprost polu w środek tekstu. Po każdym: data, przełącznik i noc programu bez zmian, zero
-    rachunków. Falsyfikator: pole bez `setButtonSymbols(NoButtons)` (ramka: noc +1 doba albo +1 rok, przełącznik zdjęty;
-    tekst doręczony polu: noc -1 doba)."""
+    do tego klik doręczony wprost polu w środek tekstu. Każdy punkt osobno, z asercją pod-kontrolki stylu i odbiorcy
+    wciśnięcia (punkt, który trafiłby gdzie indziej, nie dowodzi niczego). Po kliku: data, przełącznik i noc programu
+    bez zmian, zero rachunków. Falsyfikator: pole bez `setButtonSymbols(NoButtons)` (ramka: noc +1 doba albo +1 rok,
+    przełącznik zdjęty; tekst doręczony polu: noc -1 doba)."""
     import time
 
-    from PySide6.QtCore import QPoint, Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QStyle
     v = pokazany
     pole = v.night_edit
     data, gen = pole.date(), v._gen
-    opt = QStyleOptionComboBox()
-    opt.initFrom(pole)
-    opt.editable = True
-    opt.frame = True
-    opt.subControls = QStyle.SC_All
-    tekst = pole.style().subControlRect(QStyle.CC_ComboBox, opt, QStyle.SC_ComboBoxEditField, pole)
-    assert pole.style().hitTestComplexControl(QStyle.CC_ComboBox, opt, tekst.center(), pole) == \
-        QStyle.SC_ComboBoxEditField
+    tekst = pole.style().subControlRect(QStyle.CC_ComboBox, _opcja_pola_daty(pole), QStyle.SC_ComboBoxEditField, pole)
     srodek = tekst.center()
-    punkty = (srodek, QPoint(0, srodek.y()), QPoint(srodek.x(), 0), QPoint(srodek.x(), pole.height() - 1))
-
-    def _stan():
-        return pole.date(), v.night_auto.isChecked(), v._params()["night"]
-    for punkt in punkty:
-        QTest.mouseClick(v.windowHandle(), Qt.LeftButton, Qt.NoModifier, pole.mapTo(v, punkt))
-        _pompuj()
-        assert _stan() == (data, True, None), (punkt, _stan())
-    QTest.mouseClick(pole, Qt.LeftButton, Qt.NoModifier, srodek)
-    _pompuj()
-    assert _stan() == (data, True, None), ("wprost", _stan())
+    punkt, kontrolka, odbiorca = {
+        "srodek": (srodek, QStyle.SC_ComboBoxEditField, "tekst"),
+        "lewa": (QPoint(0, srodek.y()), QStyle.SC_ComboBoxFrame, "pole"),
+        "gorna": (QPoint(srodek.x(), 0), QStyle.SC_ComboBoxFrame, "pole"),
+        "dolna": (QPoint(srodek.x(), pole.height() - 1), QStyle.SC_ComboBoxFrame, "pole"),
+        "wprost": (srodek, QStyle.SC_ComboBoxEditField, "pole"),
+    }[miejsce]
+    assert _trafienie_pola_daty(v, pole, punkt, wprost=miejsce == "wprost") == (kontrolka, odbiorca)
+    assert (pole.date(), v.night_auto.isChecked(), v._params()["night"]) == (data, True, None)
     time.sleep(0.4)                                      # debounce (300 ms) miałby czas odpalić
     _pompuj()
     assert v._gen == gen and not v._pending_gen()

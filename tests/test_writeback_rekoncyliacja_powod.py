@@ -105,10 +105,14 @@ def test_porazka_zapisu_powodu_nie_zmienia_wyniku_zamiaru(tmp_path, monkeypatch)
     con.close()
 
 
+# Korzenie rekoncyliacji - helper skanuje je RAZEM z domknięciem funkcji modułu, do których sięgają gołą nazwą
+# (`_utrwal_odmowe_zamiaru` zmienia wynik 'blocked' po rozstrzygnięciu, AR-372).
 _FUNKCJE_REKONCYLIACJI = ("reconcile_renames", "_rozstrzygnij_zamiar")
 # Źródła kodów odmowy rekoncyliacji - poza nimi żaden literał kodu `PowodPozycji` w `writeback`/`repo` nie może
 # nieść kodu ze zbioru (szuflada wzięłaby powód próby renamu za odmowę rekoncyliacji).
 _ZRODLA_ODMOWY = (*_FUNKCJE_REKONCYLIACJI, "_dysk_milczy")
+# Pola wyniku, których zmiana przez `dataclasses.replace` zmienia odmowę (status, powód z kodem, kod `CODE_*`).
+_POLA_ODMOWY = {"status", "reason", "code"}
 
 
 def _nazwa_wolania(w):
@@ -140,14 +144,61 @@ def _kod_powodu(w):
 
 
 def _drzewo_writeback(zrodlo=None):
-    """Funkcje i stałe-powody (`NAZWA = PowodPozycji(...)`) najwyższego poziomu modułu `writeback` (albo
-    źródła podanego wprost - test samych helperów)."""
+    """Funkcje, stałe-powody (`NAZWA = PowodPozycji(...)`) i nazwy `dataclasses.replace` najwyższego poziomu modułu
+    `writeback` (albo źródła podanego wprost - test samych helperów)."""
     drzewo = ast.parse(inspect.getsource(writeback) if zrodlo is None else zrodlo)
     funkcje = {n.name: n for n in drzewo.body if isinstance(n, ast.FunctionDef)}
     stale = {n.targets[0].id: _kod_powodu(n.value) for n in drzewo.body
              if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
              and _nazwa_wolania(n.value) == "PowodPozycji"}
-    return funkcje, stale
+    return funkcje, stale, _nazwy_replace(drzewo)
+
+
+def _nazwy_replace(drzewo):
+    """Nazwy modułu, pod którymi siedzi `dataclasses.replace`: moduł `dataclasses` pod swoją nazwą albo aliasem
+    (`import dataclasses as dc` → `dc.replace`) i sama funkcja (`from dataclasses import replace [as x]`,
+    `x = dataclasses.replace`). Zwraca (nazwy modułu, gołe nazwy funkcji)."""
+    moduly, funkcje = {"dataclasses"}, set()
+    for n in drzewo.body:
+        if isinstance(n, ast.Import):
+            moduly |= {a.asname or a.name for a in n.names if a.name == "dataclasses"}
+        elif isinstance(n, ast.ImportFrom) and n.module == "dataclasses":
+            funkcje |= {a.asname or a.name for a in n.names if a.name == "replace"}
+    for n in drzewo.body:
+        if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                and _to_replace(n.value, moduly, funkcje)):
+            funkcje.add(n.targets[0].id)
+    return moduly, funkcje
+
+
+def _to_replace(w, moduly, funkcje):
+    """Wyrażenie wskazuje `dataclasses.replace` (nie `os.replace`, nie `str.replace`)."""
+    if isinstance(w, ast.Attribute):
+        return w.attr == "replace" and isinstance(w.value, ast.Name) and w.value.id in moduly
+    return isinstance(w, ast.Name) and w.id in funkcje
+
+
+def _domkniecie(funkcje, korzenie):
+    """Korzenie i każda funkcja modułu osiągalna z nich gołą nazwą (wołana albo podana jako obiekt)."""
+    znane, kolejka = set(), [k for k in korzenie if k in funkcje]
+    while kolejka:
+        nazwa = kolejka.pop()
+        if nazwa in znane:
+            continue
+        znane.add(nazwa)
+        kolejka += [w.id for w in ast.walk(funkcje[nazwa]) if isinstance(w, ast.Name) and w.id in funkcje]
+    return sorted(znane)
+
+
+def _dopisek_do_wlasnego_powodu(w):
+    """`replace(<wynik>, reason=_dopisz(<wynik>.reason, ...))` - dopisek do powodu TEGO SAMEGO wyniku: kod powodu
+    zostaje (`item_reasons.dopisz`), więc zbiór kodów się nie zmienia (jedyny nazwany wyjątek)."""
+    if [k.arg for k in w.keywords] != ["reason"] or len(w.args) != 1 or not isinstance(w.args[0], ast.Name):
+        return False
+    d = w.keywords[0].value
+    return (isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "_dopisz" and d.args
+            and isinstance(d.args[0], ast.Attribute) and d.args[0].attr == "reason"
+            and isinstance(d.args[0].value, ast.Name) and d.args[0].value.id == w.args[0].id)
 
 
 def _kody_wyrazenia(w, funkcje, stale):
@@ -166,20 +217,25 @@ def _kody_wyrazenia(w, funkcje, stale):
 
 
 def _kody_blocked_rekoncyliacji(zrodlo=None):
-    """Kody każdego `FileResult(..., "blocked", <powód>)` i `dataclasses.replace(<wynik>, status=..., ...)` funkcji
-    rekoncyliacji (status i powód pozycyjnie albo słowem kluczowym, wołanie także przez moduł); powód bez kodu
-    w źródle (liczony z wyjątku), brak powodu i status spoza literału to błąd z linią - zbiór musiałby zgadywać."""
-    funkcje, stale = _drzewo_writeback(zrodlo)
+    """Kody każdego `FileResult(..., "blocked", <powód>)` i `dataclasses.replace(<wynik>, status="blocked", ...)`
+    funkcji rekoncyliacji i ich domknięcia (status i powód pozycyjnie albo słowem kluczowym, wołanie także przez
+    moduł, `replace` także przez alias); powód bez kodu w źródle (liczony z wyjątku), brak powodu, status spoza
+    literału, `**` w `replace` i zmiana powodu albo kodu bez nowego statusu to błąd z linią - zbiór musiałby
+    zgadywać. Jedyny wyjątek: dopisek do powodu tego samego wyniku (`_dopisek_do_wlasnego_powodu`)."""
+    funkcje, stale, (moduly, nazwy) = _drzewo_writeback(zrodlo)
     kody, nierozpoznane = set(), []
-    for nazwa in _FUNKCJE_REKONCYLIACJI:
+    for nazwa in _domkniecie(funkcje, _FUNKCJE_REKONCYLIACJI):
         for w in ast.walk(funkcje[nazwa]):
-            wolanie = _nazwa_wolania(w)
-            if wolanie == "replace":
-                # `replace` bez `status` zostawia status wyniku, którego konstrukcję helper liczy osobno; ze `status`
-                # to nowa odmowa - status i powód wyłącznie słowami kluczowymi (`replace(obj, /, **zmiany)`).
-                if not any(k.arg == "status" for k in w.keywords):
+            if isinstance(w, ast.Call) and _to_replace(w.func, moduly, nazwy):
+                # `replace(obj, /, **zmiany)`: pola wyłącznie słowami kluczowymi; `**` ukrywa, które pole zmienia.
+                # Nowy powód albo kod bez `status` niżej = status spoza literału (AST nie zna statusu wyniku).
+                zmiany = {k.arg for k in w.keywords}
+                if None in zmiany:
+                    nierozpoznane.append(f"{nazwa}:{w.lineno}")
                     continue
-            elif wolanie != "FileResult":
+                if not zmiany & _POLA_ODMOWY or _dopisek_do_wlasnego_powodu(w):
+                    continue
+            elif _nazwa_wolania(w) != "FileResult":
                 continue
             status = _argument(w, 2, "status")
             if not isinstance(status, ast.Constant):
@@ -236,13 +292,28 @@ def test_kody_odmowy_rekoncyliacji_rozlaczne_z_reszta_powodow_i_znane():
 
 
 # Źródło próbne helperów AST: każda dozwolona postać `FileResult(..., "blocked", <powód>)` - powód pozycyjnie
-# i słowem kluczowym, status słowem kluczowym, stała-powód modułu, wołanie przez moduł, kody przez funkcję.
+# i słowem kluczowym, status słowem kluczowym, stała-powód modułu, wołanie przez moduł, kody przez funkcję;
+# `replace` przez moduł, alias modułu i alias funkcji, pomocnik w domknięciu; kontrpróby obok (inny status, dopisek
+# do własnego powodu, pole spoza odmowy, `os.replace`/`str.replace`/metoda `replace` obcego obiektu, funkcja spoza
+# domknięcia).
 _ZRODLO_PROBNE = '''
+import dataclasses as dc
+from dataclasses import replace as zamien
+
 POWOD_STALY = PowodPozycji("tekst", "kod_staly")
+podmien = dataclasses.replace
 
 
 def _dysk_milczy():
     return item_reasons.PowodPozycji("tekst", "kod_dysku")
+
+
+def _pomocnik(w):
+    return dataclasses.replace(w, status="blocked", reason=PowodPozycji("tekst", "kod_pomocnika"))
+
+
+def _spoza_domkniecia():
+    FileResult(1, "p", "blocked", PowodPozycji("tekst", "kod_obcy"))
 
 
 def reconcile_renames():
@@ -251,7 +322,16 @@ def reconcile_renames():
     FileResult(1, "p", status="blocked", reason=POWOD_STALY)
     writeback.FileResult(1, "p", "blocked", _dysk_milczy())
     dataclasses.replace(wynik, status="blocked", reason=PowodPozycji("tekst", "kod_zamiany"))
-    dataclasses.replace(wynik, reason="dopisek")
+    dc.replace(wynik, status="blocked", reason=PowodPozycji("tekst", "kod_modulu"))
+    zamien(wynik, status="blocked", reason=PowodPozycji("tekst", "kod_aliasu"))
+    podmien(wynik, status="blocked", reason=PowodPozycji("tekst", "kod_przypisania"))
+    _pomocnik(wynik)
+    dataclasses.replace(wynik, reason=_dopisz(wynik.reason, "dopisek"))
+    dataclasses.replace(wynik, status="applied", reason=PowodPozycji("tekst", "kod_zastosowany"))
+    dataclasses.replace(wynik, byte_exact=True)
+    os.replace("a", "b")
+    "a".replace("a", "b")
+    obj.replace(reason="tekst")
     FileResult(1, "p", "applied", None)
 
 
@@ -262,24 +342,41 @@ def _rozstrzygnij_zamiar():
 
 def test_helpery_ast_widza_slowa_kluczowe_wolanie_przez_modul_i_stale():
     """Helper zbioru kodów 'blocked' nie gubi postaci, którą dopuszcza dataclass `FileResult` (słowa kluczowe,
-    trzy argumenty pozycyjne) ani wołania przez moduł - inaczej kod pominięty po cichu wypadłby ze zbioru
-    szuflady, a test SPOT zostałby zielony (AR-342)."""
-    assert _kody_blocked_rekoncyliacji(_ZRODLO_PROBNE) == {"kod_pozycyjny", "kod_slowem", "kod_staly", "kod_dysku",
-                                                         "kod_zamiany"}
+    trzy argumenty pozycyjne) ani wołania przez moduł, `replace` pod aliasem i odmowy złożonej w funkcji pomocniczej
+    rekoncyliacji - inaczej kod pominięty po cichu wypadłby ze zbioru szuflady, a test SPOT zostałby zielony (AR-342,
+    AR-372). Funkcja, do której rekoncyliacja nie sięga, nie dokłada kodów."""
+    assert _kody_blocked_rekoncyliacji(_ZRODLO_PROBNE) == {
+        "kod_pozycyjny", "kod_slowem", "kod_staly", "kod_dysku", "kod_zamiany", "kod_modulu", "kod_aliasu",
+        "kod_przypisania", "kod_pomocnika"}
+
+
+def test_helpery_ast_domkniecie_obejmuje_funkcje_zmieniajaca_wynik_odmowy():
+    """Na prawdziwym `writeback` domknięcie korzeni sięga do `_utrwal_odmowe_zamiaru` (dopisek po porażce zapisu
+    powodu) i `_dysk_milczy` - funkcji, które zmieniają albo składają powód wyniku 'blocked' poza korzeniami (AR-372)."""
+    funkcje, _stale, _replace = _drzewo_writeback()
+    assert {"_utrwal_odmowe_zamiaru", "_dysk_milczy"} <= set(_domkniecie(funkcje, _FUNKCJE_REKONCYLIACJI))
 
 
 def test_helpery_ast_melduja_nierozpoznane_wolanie_z_linia():
-    """Status spoza literału, 'blocked' bez powodu, powód liczony z wyjątku, kod `PowodPozycji` spoza literału
-    i metoda obiektu o nazwie funkcji modułu = porażka helpera z miejscem (linia 3 źródła), nie pominięcie,
-    cudze kody ani `AttributeError` bez linii (AR-342)."""
+    """Status spoza literału, 'blocked' bez powodu, powód liczony z wyjątku, kod `PowodPozycji` spoza literału,
+    metoda obiektu o nazwie funkcji modułu, `**` w `replace` (także pod aliasem) i nowy powód albo kod bez
+    nowego statusu (dopisek do CUDZEGO powodu też) = porażka helpera z miejscem (linia 3 źródła), nie pominięcie,
+    cudze kody ani `AttributeError` bez linii (AR-342, AR-372)."""
     for wiersz in ('FileResult(1, "p", status, None)',
                    'FileResult(1, "p", "blocked")',
                    'FileResult(1, "p", "blocked", reason=powod_wyjatku(e))',
                    'FileResult(1, "p", "blocked", PowodPozycji("tekst", kod))',
                    'FileResult(1, "p", "blocked", obj._rozstrzygnij_zamiar())',
                    'dataclasses.replace(wynik, status="blocked")',
-                   'dataclasses.replace(wynik, status=status, reason=None)'):
+                   'dataclasses.replace(wynik, status=status, reason=None)',
+                   'dataclasses.replace(wynik, **{"status": "blocked", "reason": PowodPozycji("t", "kod_gwiazdki")})',
+                   'zamien(wynik, **zmiany)',
+                   'dataclasses.replace(wynik, reason=PowodPozycji("t", "kod_podmiany"))',
+                   'dataclasses.replace(wynik, reason="dopisek")',
+                   'dataclasses.replace(wynik, reason=_dopisz(inny.reason, "dopisek"))',
+                   'dataclasses.replace(wynik, code="x")'):
         zrodlo = (f"def reconcile_renames():\n    pass\n    {wiersz}\n\n\n"
-                  f"def _rozstrzygnij_zamiar():\n    return PowodPozycji(\"tekst\", \"kod_funkcji\")\n")
+                  f"def _rozstrzygnij_zamiar():\n    return PowodPozycji(\"tekst\", \"kod_funkcji\")\n\n\n"
+                  f"from dataclasses import replace as zamien\n")
         with pytest.raises(AssertionError, match=r"reconcile_renames:3|linia 3"):
             _kody_blocked_rekoncyliacji(zrodlo)

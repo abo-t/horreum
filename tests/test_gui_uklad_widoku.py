@@ -305,7 +305,8 @@ def test_AR36_chip_soczewki_planera_przezywa_restart_i_wraca_do_domyslnego_bez_z
     widoki = []
 
     def _okno():
-        v = PlannerView(con, db_path=None)
+        # Zegar widoku z 2026: minimum pola nocy to „dziś minus rok” (AR-365), noc jawna nie spada na klamrę.
+        v = PlannerView(con, db_path=None, now_fn=lambda: "2026-07-31T12:00:00+00:00")
         v.night_edit.setDate(QDate(2026, 8, 15))
         v.replan()
         widoki.append(v)

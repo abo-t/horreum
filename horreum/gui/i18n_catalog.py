@@ -1764,7 +1764,15 @@ CATALOG = {
     "planner.col_note": {"pl": "Notatka", "en": "Note"},
     "planner.controls": {"pl": "Wyszukiwanie", "en": "Search"},
     "planner.night": {"pl": "Noc", "en": "Night"},
-    "planner.night_auto": {"pl": "(bieżąca noc)", "en": "(current night)"},
+    # AR-365: przełącznik „bieżąca noc” w wierszu „Noc” (dawniej tekst wartości specjalnej pola daty).
+    "planner.night_auto": {"pl": "bieżąca noc", "en": "current night"},
+    "planner.night_auto_tip": {
+        "pl": "Noc wybiera program: dzisiejszy wieczór, a do końca ciemności - wczorajszy.\n"
+              "Pole obok pokazuje noc policzonego planu. Wybór daty w polu zdejmuje przełącznik.",
+        "en": "The program picks the night: this evening, or yesterday's until darkness ends.\n"
+              "The field next to it shows the night of the computed plan. Picking a date in the field"
+              " clears the switch.",
+    },
     "planner.layer_cirrus": {"pl": "Pokaż cirrus (LBN/LDN)", "en": "Show cirrus (LBN/LDN)"},
     "planner.status": {"pl": "Status", "en": "Status"},
     "planner.status_any": {"pl": "(dowolny)", "en": "(any)"},
@@ -1794,11 +1802,12 @@ CATALOG = {
               "chosen rig: single-frame targets first, then the ones filling it best.",
     },
     "planner.reset_thresholds": {"pl": "Przywróć domyślne", "en": "Restore defaults"},
+    # AR-371: wartości z `targets.DEFAULT_THRESHOLDS` (jedno źródło), człon PN - reset gasi też przełącznik PN.
     "planner.reset_thresholds_tip": {
-        "pl": "Progi wracają do 6′ rozmiaru, 15′ dla ciemnych, 13 mag dla galaktyk, 30° wysokości\n"
-              "i 1 h na kanał; próg kosztu Księżyca i filtr kadru wyłączone.",
-        "en": "Thresholds return to 6′ size, 15′ for dark nebulae, 13 mag for galaxies, 30° altitude\n"
-              "and 1 h per channel; the Moon cost threshold and the framing filter go off.",
+        "pl": "Progi wracają do {size}′ rozmiaru, {dark}′ dla ciemnych, {mag} mag dla galaktyk, {alt}° wysokości\n"
+              "i {hours} h na kanał; próg kosztu Księżyca, filtr kadru i przełącznik PN wyłączone.",
+        "en": "Thresholds return to {size}′ size, {dark}′ for dark nebulae, {mag} mag for galaxies, {alt}° altitude\n"
+              "and {hours} h per channel; the Moon cost threshold, the framing filter and the PN switch go off.",
     },
     "planner.chips_label": {"pl": "Patrzę oczami zestawu:", "en": "Seen through the rig:"},
     "planner.chip_tip": {
@@ -1850,10 +1859,19 @@ CATALOG = {
         "en": "No target passed the current thresholds and the framing filter - relax the fill or"
               " the panel count.",
     },
+    # AR-371: `{…_def}` = dopisek wartości domyślnej przy progu odchylonym (pusty przy domyślnym), dla godzin za „/kanał”.
     "planner.controls_state": {
-        "pl": "Progi — rozmiar ≥{size}′, ciemna ≥{dark}′, mag ≤{mag}, wys. ≥{alt}°, {hours} h/kanał",
-        "en": "Thresholds — size ≥{size}′, dark ≥{dark}′, mag ≤{mag}, alt ≥{alt}°, {hours} h/channel",
+        "pl": "Progi - rozmiar ≥{size}′{size_def}, ciemna ≥{dark}′{dark_def}, mag ≤{mag}{mag_def}, wys. ≥{alt}°{alt_def},"
+              " {hours} h/kanał{hours_def}",
+        "en": "Thresholds - size ≥{size}′{size_def}, dark ≥{dark}′{dark_def}, mag ≤{mag}{mag_def},"
+              " alt ≥{alt}°{alt_def}, {hours} h/channel{hours_def}",
     },
+    "planner.controls_default": {"pl": " (domyślnie {n})", "en": " (default {n})"},
+    "planner.controls_default_arcmin": {"pl": " (domyślnie {n}′)", "en": " (default {n}′)"},
+    "planner.controls_default_deg": {"pl": " (domyślnie {n}°)", "en": " (default {n}°)"},
+    # AR-371: próg kosztu i filtr statusu tną listę jak progi - włączone stoją w tytule paska.
+    "planner.controls_state_cost": {"pl": " · koszt ≤{cost}", "en": " · cost ≤{cost}"},
+    "planner.controls_state_status": {"pl": " · status: {status}", "en": " · status: {status}"},
     "planner.max_cost_on": {"pl": "licz próg", "en": "apply threshold"},
     "planner.counts_find": {
         "pl": {"one": "Tryb szukania: {n} trafienie dla „{needle}” (progi i horyzont pominięte)",

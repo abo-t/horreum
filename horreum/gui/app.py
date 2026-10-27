@@ -5643,6 +5643,16 @@ class MainWindow(QMainWindow):
             while True:
                 self._odswiez_jeszcze_raz = False
                 with busy.busy(self._say_phase, i18n.t("busy.refresh_views")):
+                    # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc plan nocy
+                    # policzony przed dostawą pokazywałby stare luki. JEDEN WŁAŚCICIEL KOŃCA BIEGU (AR-350): bramę
+                    # rachunku otwiera dopiero ta para, kolejnymi instrukcjami - pompa fazy (wejście w `busy.busy`)
+                    # idzie przed nią, więc zegar albo koniec wątku sprzed biegu doręczony w pompie trafia na bramę
+                    # zamkniętą, a `refresh` liczy raz. Nowy bieg doręczony w pompie zostawia bramę zamkniętą.
+                    # PIERWSZA pod fazą: wyjątek odświeżenia dalszego widoku nie zostawia Planera w biegu na zawsze.
+                    planner = self._gotowy("planner_view")      # strona leniwa (AR-325) - wyłącznie zbudowana
+                    if planner is not None:
+                        planner.set_busy(self._dostawa_w_biegu)
+                        planner.refresh()
                     self.axis_view.refresh()
                     self.observatory_view.refresh()
                     self.object_view._load_facets()
@@ -5650,7 +5660,7 @@ class MainWindow(QMainWindow):
                     # pokazaniu (AR-84), a człowiek stoi teraz w Dostawie.
                     self.object_view.odswiez_gdy_widoczny()
                     # Strony leniwe (AR-325) - wyłącznie zbudowane: niezbudowana przeczyta stan przy budowie.
-                    grid, planner = self._gotowy("grid_view"), self._gotowy("planner_view")
+                    grid = self._gotowy("grid_view")
                     if grid is not None:
                         grid._load_facets()
                         # Skład zbioru w wątku tła (AR-27: 1,4-1,5 s na żywej bazie stało tu w oknie);
@@ -5662,10 +5672,6 @@ class MainWindow(QMainWindow):
                     # Liczniki zadań + badge ze świeżego stanu (F5) - w wątku tła (AR-84: 1,2-1,9 s
                     # stało tu w oknie na kopii pf4).
                     self.tasks_view.refresh_counts(w_tle=self._pola_poza_watkiem)
-                    # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc
-                    # plan nocy policzony przed dostawą pokazywałby stare luki.
-                    if planner is not None:
-                        planner.refresh()
                     # Dom: sumy i dziennik od razu, teczki tylko zamawiamy (wątek tła).
                     self._odswiez_dom()
                 if not self._odswiez_jeszcze_raz:
@@ -6147,7 +6153,10 @@ class MainWindow(QMainWindow):
         user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu).
 
         Zatrzask biegu PRZED rozesłaniem (AR-325): Zbiory i Planer zbudowane w trakcie biegu dostają go od
-        budowniczego; tu tylko strony zbudowane (`_gotowy`). Dostawa biegnie, więc jej strona jest."""
+        budowniczego; tu tylko strony zbudowane (`_gotowy`). Dostawa biegnie, więc jej strona jest.
+
+        Planer zamyka bramę tutaj, a otwiera ją WYŁĄCZNIE faza odświeżenia razem z rachunkiem (AR-350,
+        `_odswiez_widoki_po_przebiegu`) - otwarcie tutaj zostawiało pompę fazy między bramą a `refresh`."""
         self._dostawa_w_biegu = bool(running)
         self.axis_view.set_busy(running)
         self.observatory_view.set_busy(running)
@@ -6156,8 +6165,8 @@ class MainWindow(QMainWindow):
         grid, planner = self._gotowy("grid_view"), self._gotowy("planner_view")
         if grid is not None:
             grid.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) - gatuj (wizytator C1)
-        if planner is not None:
-            planner.set_busy(running)  # planer czyta CAŁE archiwum - nie liczmy nocy na wpół zapisanej bazie
+        if planner is not None and running:
+            planner.set_busy(True)     # planer czyta CAŁE archiwum - nie liczmy nocy na wpół zapisanej bazie
         self.home_view.set_busy(running)     # „Wydaj do WBPP" Domu gaśnie jak „Wydaj obiekt…" gridu
         przyjmij = self._gotowy("przyjmij_view")
         if przyjmij is not None:

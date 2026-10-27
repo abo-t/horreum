@@ -49,6 +49,7 @@ import json
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from importlib import resources
+from types import MappingProxyType
 
 from . import sky
 from .gui.queries import (all_frame_ids, integrated_exposure, object_exposure,
@@ -130,6 +131,12 @@ _CUT_MARGIN = 0.5
 # (`sky.Framing.frame_fill`) stoi przed mozaiką i przed celem za małym. Ta sama liczba jest
 # domyślną wartością progu „Min. wypełnienie" w GUI - próg i ranking mówią jednym głosem.
 RANK_MIN_FILL = 0.3
+# Wartości domyślne pięciu progów planera (D-0731-10) - JEDNO źródło (AR-371): czytają je `feasible` i `plan`
+# (domyślne argumentów), GUI (`planner._THRESHOLDS`: pole, reset, dopisek „domyślnie” w tytule paska) i CLI (bez flagi
+# próg nie jest podawany - liczy domyślna rdzenia). Tylko do odczytu: domyślne argumentów wiążą się przy imporcie,
+# więc zmieniony w locie słownik rozjechałby się z nimi bez słowa.
+DEFAULT_THRESHOLDS = MappingProxyType({"min_size": 6.0, "min_dark": 15.0, "max_mag": 13.0, "min_alt": 30.0,
+                                       "min_hours": 1.0})
 
 # ─────────────────────────────────────────────────────── palety i kanały (T3 §6)
 # Kanał = to, czego brak użytkownik nazywa luką („Ha bez OIII / HOO bez SII"). Broadband jest
@@ -434,8 +441,8 @@ def _target(raw, layer):
                   status=status, **fields)
 
 
-def feasible(t, rigs=(), *, min_size=6.0, min_dark=15.0, max_mag=13.0, min_fill=None,
-             max_panels=None, overlap=0.10):
+def feasible(t, rigs=(), *, min_size=DEFAULT_THRESHOLDS["min_size"], min_dark=DEFAULT_THRESHOLDS["min_dark"],
+             max_mag=DEFAULT_THRESHOLDS["max_mag"], min_fill=None, max_panels=None, overlap=0.10):
     """Czy cel jest WYKONALNY wg progów typo-zależnych (D-0731-10) i, na żądanie, TWOIM SPRZĘTEM.
 
     Galaktyka bez magnitudo odpada (dla galaktyki jasność JEST kryterium), mgławica bez magnitudo
@@ -1085,9 +1092,10 @@ class BrakStanowiska(ValueError):
 
 
 def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
-         min_size=6.0, min_dark=15.0, max_mag=13.0, min_alt=30.0, min_hours=1.0,
-         max_cost=None, overlap=0.10, v_zen=sky.V_ZEN_DEFAULT, k_ext=sky.K_EXT_DEFAULT,
-         only_gaps=False, only_new=False, status=None, find=None, limit=None, step_min=5,
+         min_size=DEFAULT_THRESHOLDS["min_size"], min_dark=DEFAULT_THRESHOLDS["min_dark"],
+         max_mag=DEFAULT_THRESHOLDS["max_mag"], min_alt=DEFAULT_THRESHOLDS["min_alt"],
+         min_hours=DEFAULT_THRESHOLDS["min_hours"], max_cost=None, overlap=0.10,
+         v_zen=sky.V_ZEN_DEFAULT, k_ext=sky.K_EXT_DEFAULT, only_gaps=False, only_new=False, status=None, find=None, limit=None, step_min=5,
          min_fill=None, max_panels=None, hide_doubtful_pn=False):
     """Pełna odpowiedź planera dla jednej nocy (READ-ONLY).
 

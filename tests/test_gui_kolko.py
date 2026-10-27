@@ -15,10 +15,10 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QInputDialog
+from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QInputDialog, QWidget
 
 from horreum import naming
 from horreum.gui.planner import ParkDialog, PlannerView
@@ -45,11 +45,40 @@ def _kolko(pole, dy):
     return ev
 
 
+class _Trafienia(QObject):
+    """Filtr notujący `QEvent.Wheel` na polu i jego potomkach (pole linii spinboxu, widok listy) - nic nie przyjmuje."""
+
+    def __init__(self):
+        super().__init__()
+        self.bylo = False
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Wheel:
+            self.bylo = True
+        return False
+
+
 def _kolko_spontaniczne(pole, dy):
-    """Ząbek kółka nad środkiem pola przez okno (`QTest.wheelEvent`) - pełna droga zdarzenia systemu okien."""
+    """Ząbek kółka nad środkiem pola przez okno (`QTest.wheelEvent`) - pełna droga zdarzenia systemu okien.
+
+    Punkt W PIKSELACH NATYWNYCH (AR-369): droga kółka przez `QWindow` dzieli punkt przez skalę Qt (droga myszy przelicza
+    sama), więc przy DPR 1,5 ząbek celowany w pole lądował w `pos/1,5` - u sąsiada albo w odstępie układu, a test „bez
+    fokusu nie zmienia” przechodził pusto. Na Windows i offscreen cały DPR okna to skala Qt. Asercja trafienia pilnuje
+    uprzęży na każdej platformie: ząbek, który nie doszedł do pola, jest błędem testu, nie zielonym wynikiem."""
     okno = pole.window()
-    QTest.wheelEvent(okno.windowHandle(), QPointF(pole.mapTo(okno, pole.rect().center())), QPoint(0, dy))
-    _pompuj()
+    uchwyt = okno.windowHandle()
+    straz = _Trafienia()                   # referencja w Pythonie - filtr bez właściciela znika z GC
+    cele = [pole, *pole.findChildren(QWidget)]
+    for w in cele:
+        w.installEventFilter(straz)
+    try:
+        QTest.wheelEvent(uchwyt, QPointF(pole.mapTo(okno, pole.rect().center())) * uchwyt.devicePixelRatio(),
+                         QPoint(0, dy))
+        _pompuj()
+    finally:
+        for w in cele:
+            w.removeEventFilter(straz)
+    assert straz.bylo, f"ząbek minął pole {type(pole).__name__} (DPR {uchwyt.devicePixelRatio()})"
 
 
 @pytest.fixture
@@ -154,10 +183,7 @@ def test_kolko_w_otwartej_liscie_combo_przewija_liste(qapp):
         pasek = lista.verticalScrollBar()
         assert pasek.maximum() > 0 and pasek.value() == 0, "lista bez przewijania - test bez przedmiotu"
         przed = combo.currentIndex()
-        popup = lista.window()
-        QTest.wheelEvent(popup.windowHandle(), QPointF(lista.viewport().mapTo(popup, lista.viewport().rect().center())),
-                         QPoint(0, -120))
-        _pompuj()
+        _kolko_spontaniczne(lista.viewport(), -120)      # okno wyskakujące listy - ta sama uprząż (AR-369)
         assert pasek.value() > 0
         assert lista.isVisible() and combo.currentIndex() == przed
     finally:
@@ -264,3 +290,88 @@ def test_pole_odniesienia_czasu_w_oknie_qt_pod_regula_kolka(qapp, monkeypatch):
     przed = pole.value()
     ev = _kolko(pole, 120)
     assert pole.value() == przed and not ev.isAccepted()
+
+
+# ---------------------------------------------------------------- AR-369: uprząż ząbka przy DPR ≠ 1
+
+def test_kolko_spontaniczne_pole_bez_kolka_zmienia_wartosc(qapp):
+    """Kontrola przesłanki uprzęży: ten sam ząbek drogą systemu okien na GOŁYM polu (bez `kolko`, bez fokusu) zmienia
+    wartość - zdarzenie doszło i działa, więc „bez fokusu nie zmienia” na polu z `kolko` nie jest pustym wynikiem.
+    Falsyfikator: punkt ząbka poza polem (pole bez zmiany)."""
+    from PySide6.QtWidgets import QHBoxLayout
+    okno = QWidget()
+    QHBoxLayout(okno).addWidget(pole := QDoubleSpinBox())
+    okno.resize(300, 60)
+    okno.show()
+    okno.activateWindow()
+    _pompuj()
+    try:
+        _kolko_spontaniczne(pole, 120)
+        assert pole.value() == 1.0
+    finally:
+        okno.close()
+
+
+def test_kolko_spontaniczne_mowi_gdy_zabek_minal_pole(qapp):
+    """Asercja trafienia: pole przykryte rodzeństwem podniesionym nad nie - ząbek dostaje zasłona, nie pole, a pomocnik
+    mówi to błędem zamiast pustego PASS. Falsyfikator: pomocnik bez asercji trafienia."""
+    okno = QWidget()
+    okno.resize(300, 100)
+    pole = QDoubleSpinBox(okno)
+    pole.setGeometry(10, 10, 120, 30)
+    zaslona = QWidget(okno)
+    zaslona.setGeometry(0, 0, 300, 100)
+    zaslona.raise_()
+    okno.show()
+    okno.activateWindow()
+    _pompuj()
+    try:
+        with pytest.raises(AssertionError, match="ząbek minął pole"):
+            _kolko_spontaniczne(pole, 120)
+        assert pole.value() == 0.0
+    finally:
+        okno.close()
+
+
+def test_kolko_spontaniczne_trafia_przy_skali_150():
+    """AR-369: przy DPR 1,5 (offscreen z `QT_SCALE_FACTOR=1.5` w podprocesie - czynnik skali Qt czyta przy budowie
+    `QApplication`, a bateria ma jeden sesyjny) ząbek uprzęży trafia środek celowanego pola: w rzędzie sześciu gołych pól
+    po 100 px zmienia się wyłącznie czwarte. Falsyfikator: punkt bez przeliczenia na piksele natywne (trafia trzecie,
+    asercja trafienia pomocnika pada)."""
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+    testy = Path(__file__).resolve().parent
+    kod = textwrap.dedent(f"""
+        import faulthandler
+        import sys
+        faulthandler.dump_traceback_later(60, exit=True)
+        sys.path.insert(0, {str(testy)!r})
+        from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QHBoxLayout, QWidget
+        app = QApplication([])
+        from test_gui_kolko import _kolko_spontaniczne
+        okno = QWidget()
+        lay = QHBoxLayout(okno)
+        lay.setSpacing(0)
+        lay.setContentsMargins(0, 0, 0, 0)
+        pola = []
+        for _ in range(6):
+            p = QDoubleSpinBox()
+            p.setFixedSize(100, 30)
+            lay.addWidget(p)
+            pola.append(p)
+        okno.show()
+        okno.activateWindow()
+        for _ in range(10):
+            app.processEvents()
+        try:
+            _kolko_spontaniczne(pola[3], 120)
+            print(okno.windowHandle().devicePixelRatio(), [p.value() for p in pola])
+        finally:
+            okno.close()
+    """)
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_SCALE_FACTOR="1.5", PYTHONPATH=str(testy.parent))
+    wynik = subprocess.run([sys.executable, "-c", kod], capture_output=True, text=True, env=env, timeout=120)
+    assert wynik.returncode == 0, wynik.stdout + wynik.stderr
+    assert wynik.stdout.strip() == "1.5 [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]", wynik.stdout + wynik.stderr

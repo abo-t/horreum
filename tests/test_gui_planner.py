@@ -61,9 +61,10 @@ def _seed(path):
 
 @pytest.fixture
 def view(qapp, tmp_path, ustawienia):
-    """Ekran INLINE (bez `db_path`) — plan liczy się synchronicznie, więc test widzi wynik od razu."""
+    """Ekran INLINE (bez `db_path`) - plan liczy się synchronicznie, więc test widzi wynik od razu. Zegar widoku
+    z `NOW`: minimum pola nocy to „dziś minus rok” (AR-365), więc noc jawna z 2026 nie spadnie na klamrę w 2027."""
     con = _seed(str(tmp_path / "planer.db"))
-    v = PlannerView(con, db_path=None)
+    v = PlannerView(con, db_path=None, now_fn=lambda: NOW)
     v.night_edit.setDate(QDate(2026, 8, 15))       # noc jawna = wynik deterministyczny
     v.replan()
     yield v
@@ -192,7 +193,9 @@ def test_przywroc_domyslne_cofa_wszystkie_progi(view):
             view.min_alt.value(), view.min_hours.value()) == (6.0, 15.0, 13.0, 30.0, 1.0)
     assert view.max_cost_on.isChecked() is False and view.max_cost.isEnabled() is False
     assert view._gen == gen + 1                        # dokładnie jeden bieg, nie pięć
-    assert "6′" in view.controls_toggle.text()         # tytuł zwiniętego paska mówi prawdę
+    # Tytuł zwiniętego paska mówi prawdę: po resecie bez dopisku wartości domyślnej (AR-371) - sam „6′” byłby pusty,
+    # bo nieudany reset dałby „≥9′ (domyślnie 6′)”.
+    assert "≥6′" in view.controls_toggle.text() and "(domyślnie" not in view.controls_toggle.text()
 
 
 def test_filtr_kadru_domyslnie_wylaczony_a_kolumna_wypelnienia_jest(view):
@@ -1017,7 +1020,7 @@ def licznik_data(monkeypatch):
 def widoczny(qapp, tmp_path, ustawienia, licznik_data):
     """Ekran INLINE pokazany (offscreen) - rysuje komórki, jak ekran na wierzchu."""
     con = _seed(str(tmp_path / "planer.db"))
-    v = PlannerView(con, db_path=None)
+    v = PlannerView(con, db_path=None, now_fn=lambda: NOW)       # minimum nocy z zegara widoku (AR-365)
     v.night_edit.setDate(QDate(2026, 8, 15))
     v.replan()
     v.resize(1400, 800)
@@ -1119,3 +1122,302 @@ def test_szukanie_M_4_na_ekranie_planera(view, lang):
         assert view.panel.title() == i18n.t("planner.panel_of", canon="NGC1976")
     finally:
         i18n.set_lang("pl")
+
+
+# ───────────────────────── AR-371: tytuł paska progów z wartością domyślną, próg kosztu i status w tytule
+
+_ODCHYLENIA = (("min_size", 8.0, "≥8′ (domyślnie 6′)", "≥8′ (default 6′)"),
+               ("min_dark", 20.0, "≥20′ (domyślnie 15′)", "≥20′ (default 15′)"),
+               ("max_mag", 12.5, "≤12.5 (domyślnie 13.0)", "≤12.5 (default 13.0)"),
+               ("min_alt", 35.0, "≥35° (domyślnie 30°)", "≥35° (default 30°)"),
+               ("min_hours", 2.0, "2.0 h/kanał (domyślnie 1.0)", "2.0 h/channel (default 1.0)"))
+
+
+def _widok_inline(tmp_path, nazwa="tytul.db"):
+    con = _seed(str(tmp_path / nazwa))
+    return PlannerView(con, db_path=None, now_fn=lambda: NOW), con
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_tytul_progow_dopisuje_wartosc_domyslna_przy_odchyleniu(qapp, tmp_path, ustawienia, lang):
+    """AR-371 (`O1`): próg różny od domyślnego dopisuje domyślną za wartością (godziny - za „/kanał”); każdy próg
+    odchylony osobno daje dokładnie jeden dopisek, powrót do domyślnej go zdejmuje. Tytuł bez pauzy, pełny tekst
+    w podpowiedzi przycisku. Falsyfikatory: tytuł bez dopisków; dopisek przy każdym progu."""
+    from horreum.gui import i18n
+    i18n.set_lang(lang)
+    v, con = _widok_inline(tmp_path)
+    znacznik = "(domyślnie" if lang == "pl" else "(default"
+    try:
+        assert znacznik not in v.controls_toggle.text()
+        for prog, wartosc, pl, en in _ODCHYLENIA:
+            pole = v._spins[prog]
+            domyslna = pole.value()
+            pole.setValue(wartosc)
+            tytul = v.controls_toggle.text()
+            assert (pl if lang == "pl" else en) in tytul, tytul
+            assert tytul.count(znacznik) == 1, tytul
+            assert chr(0x2014) not in tytul and v.controls_toggle.toolTip() == tytul     # bez pauzy
+            pole.setValue(domyslna)
+            assert znacznik not in v.controls_toggle.text(), v.controls_toggle.text()
+    finally:
+        i18n.set_lang("pl")
+        v.close()
+        con.close()
+
+
+def test_tytul_progow_odchylenie_na_tekscie_sformatowanym(view):
+    """AR-371: próg 6,5 tytuł pokazuje „≥6′”, więc dopisek „(domyślnie 6′)” obok byłby sprzecznością; 6,6 to już
+    „≥7′ (domyślnie 6′)”. Falsyfikator: odchylenie liczone na surowej wartości progu."""
+    view.min_size.setValue(6.5)
+    assert "≥6′" in view.controls_toggle.text() and "(domyślnie" not in view.controls_toggle.text()
+    view.min_size.setValue(6.6)
+    assert "≥7′ (domyślnie 6′)" in view.controls_toggle.text()
+
+
+def test_tytul_progow_mowi_o_progu_kosztu_i_statusie(view):
+    """AR-371: próg kosztu i filtr statusu tną listę jak progi, więc włączone stoją w tytule zwiniętego paska;
+    wyłączone go nie zmieniają. Sygnały kontrolek, nie wołanie slotu. Falsyfikatory: przełącznik kosztu, pole kosztu
+    albo zmiana statusu bez odświeżenia tytułu."""
+    domyslny = view.controls_toggle.text()
+    view.max_cost_on.setChecked(True)
+    assert view.controls_toggle.text() == domyslny + " · koszt ≤3"
+    view.max_cost.setValue(4.5)
+    assert view.controls_toggle.text() == domyslny + " · koszt ≤4.5"
+    view.status_combo.setCurrentIndex(view.status_combo.findData("planned"))
+    assert view.controls_toggle.text() == domyslny + " · koszt ≤4.5 · status: zaplanowany"
+    view.status_combo.setCurrentIndex(0)                  # „(dowolny)” - `findData(None)` w Qt daje -1
+    view.max_cost_on.setChecked(False)
+    assert view.controls_toggle.text() == domyslny
+
+
+def test_przywroc_domyslne_podpowiedz_z_jednego_zrodla(view):
+    """AR-371: podpowiedź „Przywróć domyślne” formatowana z wartości rdzenia, z członem przełącznika PN, który
+    reset gasi; progi GUI biorą domyślne z `targets.DEFAULT_THRESHOLDS`. Liczby w asercji to pin decyzji, nie kopia
+    stałej. Falsyfikator: proza z liczbami przepisanymi ręcznie, bez PN."""
+    from horreum.gui import i18n
+    from horreum.gui import planner as P
+    assert view.reset_btn.toolTip() == i18n.t("planner.reset_thresholds_tip", size="6", dark="15", mag="13",
+                                              alt="30", hours="1")
+    assert "PN" in view.reset_btn.toolTip()
+    assert {n: spec[1] for n, spec in P._THRESHOLDS.items()} == dict(targets.DEFAULT_THRESHOLDS)
+
+
+# ───────────────────────── AR-365: pole „Noc” - przełącznik „bieżąca noc”
+
+@pytest.fixture
+def pokazany(qapp, tmp_path, ustawienia):
+    """Planer INLINE pokazany offscreen, noc programu (przełącznik zaznaczony), zegar widoku `NOW`."""
+    con = _seed(str(tmp_path / "pokazany.db"))
+    v = PlannerView(con, db_path=None, now_fn=lambda: NOW)
+    v.resize(1400, 800)
+    v.show()
+    v.activateWindow()
+    _pompuj()
+    yield v
+    v.zatrzymaj_pola()
+    v.close()
+    con.close()
+
+
+def _czekaj_na(warunek, opis, limit_s=10):
+    import time
+    koniec = time.monotonic() + limit_s
+    while not warunek():
+        assert time.monotonic() < koniec, opis
+        QApplication.processEvents()
+        time.sleep(0.01)
+
+
+def _klik_strzalki_daty(pole):
+    """Klik w strzałkę kalendarza pola daty - punkt trafienia stylem, jak `QDateTimeEdit::mousePressEvent` (kalendarza
+    nie otwiera ani F4, ani Alt+strzałka w dół - ta druga przestawia datę)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+    opt = QStyleOptionComboBox()
+    opt.initFrom(pole)
+    opt.editable = True
+    opt.frame = True
+    opt.subControls = QStyle.SC_All
+    xs = [x for x in range(pole.width() // 2, pole.width())
+          if pole.style().hitTestComplexControl(QStyle.CC_ComboBox, opt, QPoint(x, pole.height() // 2), pole)
+          == QStyle.SC_ComboBoxArrow]
+    assert xs, "pole daty bez strzałki kalendarza"
+    punkt = QPoint(xs[len(xs) // 2], pole.height() // 2)
+    QTest.mousePress(pole, Qt.LeftButton, Qt.NoModifier, punkt)
+    _pompuj()
+    QTest.mouseRelease(pole, Qt.LeftButton, Qt.NoModifier, punkt)
+    _pompuj()
+
+
+def test_noc_tab_wychodzi_z_pola(pokazany):
+    """AR-365: Tab z pola „Noc” przechodzi przez sekcje daty i wychodzi do „cirrus” (dawniej przy wartości specjalnej
+    „(bieżąca noc)” zostawał w polu 10/10). Tab nie wybiera daty - przełącznik stoi. Prawdziwe klawisze.
+    Falsyfikator: wartość specjalna na minimum pola."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v = pokazany
+    QTest.mouseClick(v.night_edit.lineEdit(), Qt.LeftButton)
+    _pompuj()
+    assert QApplication.focusWidget() in (v.night_edit, v.night_edit.lineEdit())
+    for _ in range(4):
+        if QApplication.focusWidget() is v.cirrus:
+            break
+        QTest.keyClick(QApplication.focusWidget(), Qt.Key_Tab)
+        _pompuj()
+    assert QApplication.focusWidget() is v.cirrus
+    assert v.night_auto.isChecked() and v._params()["night"] is None
+
+
+def test_noc_kalendarz_na_nocy_rdzenia_bez_zmiany_wartosci(pokazany):
+    """AR-365: przy przełączniku pole pokazuje noc policzonego planu, więc kalendarz otwiera się na niej (dawniej na
+    1970-01) i samo otwarcie niczego nie wybiera. Zegar widoku (`NOW`, lipiec 2026) jest w innym miesiącu niż noc
+    rdzenia z zegara rdzenia - strona z daty startowej pola nie przeszłaby. Falsyfikator: `_render_header` bez wpisania
+    nocy rdzenia w pole."""
+    v = pokazany
+    noc = v._result.night_date
+    assert (v.night_edit.date().year(), v.night_edit.date().month(), v.night_edit.date().day()) == \
+        (noc.year, noc.month, noc.day)
+    _klik_strzalki_daty(v.night_edit)
+    kalendarz = v.night_edit.calendarWidget()
+    try:
+        assert kalendarz.isVisible()
+        assert (kalendarz.yearShown(), kalendarz.monthShown()) == (noc.year, noc.month)
+        assert v.night_auto.isChecked() and v._params()["night"] is None
+    finally:
+        kalendarz.window().hide()
+        _pompuj()
+
+
+def test_noc_wybor_daty_zdejmuje_przelacznik_a_przelacznik_wraca_do_nocy_rdzenia(pokazany):
+    """AR-365: wybór daty w polu (strzałka klawiatury) zdejmuje przełącznik - noc jawna; klik w przełącznik wraca do nocy
+    programu: rachunek z `night=None`, pole z nocą rdzenia, a wynik nie zdejmuje przełącznika. Prawdziwe klawisze
+    i klik. Falsyfikatory: `dateChanged` bez zdjęcia przełącznika; wpis nocy rdzenia w pole bez `blockSignals`;
+    przełącznik bez re-planu."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDateTimeEdit
+    v = pokazany
+    QTest.mouseClick(v.night_edit.lineEdit(), Qt.LeftButton)
+    _pompuj()
+    v.night_edit.setCurrentSection(QDateTimeEdit.Section.YearSection)   # sekcja bez sufitu - strzałka zawsze zmienia
+    QTest.keyClick(v.night_edit, Qt.Key_Up)
+    _pompuj()
+    wybrana = v.night_edit.date()
+    assert not v.night_auto.isChecked()
+    jawna = date(wybrana.year(), wybrana.month(), wybrana.day())
+    assert v._params()["night"] == jawna
+    gen = v._gen
+    # Rachunek wyboru daty (debounce) dochodzi PRZED klikiem w przełącznik - inaczej jego zegar policzyłby noc programu
+    # za przełącznik bez re-planu.
+    _czekaj_na(lambda: v._gen > gen and not v._pending_gen(), "re-plan po wyborze daty")
+    assert v._result.night_date == jawna
+    gen = v._gen
+    QTest.mouseClick(v.night_auto, Qt.LeftButton)
+    _czekaj_na(lambda: v._gen > gen and not v._pending_gen(), "re-plan po zaznaczeniu przełącznika")
+    noc = v._result.night_date
+    assert v.night_auto.isChecked() and v._params()["night"] is None
+    assert (v.night_edit.date().year(), v.night_edit.date().month(), v.night_edit.date().day()) == \
+        (noc.year, noc.month, noc.day)
+
+
+def test_noc_minimum_rok_wstecz_od_zegara_widoku(pokazany):
+    """AR-365: minimum pola to „dziś minus rok” z zegara WIDOKU (`now_fn`) - wpis z 1970 nie liczy planu bez słowa,
+    a testy z nocą jawną nie spadają na klamrę wraz z upływem lat. Falsyfikator: minimum z zegara maszyny."""
+    from PySide6.QtCore import QDate
+    assert pokazany.night_edit.minimumDate() == QDate(2025, 7, 31)
+
+
+# ───────────────────────── AR-366: „Porządek” i chipy budowane raz
+
+def test_porzadek_przezywa_przeliczenie_z_fokusem_i_otwarta_lista(pokazany):
+    """AR-366: „Porządek” to TO SAMO combo po przeliczeniu - fokus zostaje na nim, a lista otwarta Alt+strzałką w dół
+    przeżywa rachunek (dawniej combo powstawało przy każdym wyniku: fokus `None`, lista zamknięta). Prawdziwe klik,
+    Escape i Alt+strzałka. Falsyfikator: combo budowane w `_rebuild_chips`."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    v = pokazany
+    c = v.order_combo
+    QTest.mouseClick(c, Qt.LeftButton)
+    _pompuj()
+    QTest.keyClick(QApplication.focusWidget(), Qt.Key_Escape)
+    _pompuj()
+    assert QApplication.focusWidget() is c
+    v.refresh()
+    _pompuj()
+    assert v.order_combo is c and QApplication.focusWidget() is c
+    QTest.keyClick(c, Qt.Key_Down, Qt.AltModifier)
+    _pompuj()
+    try:
+        assert c.view().isVisible()
+        v.refresh()
+        _pompuj()
+        assert v.order_combo is c and c.view().isVisible()
+    finally:
+        c.hidePopup()
+        _pompuj()
+
+
+def test_jedna_grupa_chipow_a_chipy_bez_przebudowy_przy_tych_samych_zestawach(view):
+    """AR-366: jedna `QButtonGroup` na widok (dawniej +1 przy każdym rachunku); przy tych samych zestawach chipy
+    to te same przyciski, a zmiana parku (inny zbiór zestawów) daje nowe chipy w tej samej grupie.
+    Falsyfikatory: nowa grupa przy wyniku; przebudowa chipów przy każdym wyniku."""
+    from PySide6.QtWidgets import QButtonGroup
+    from horreum.gui import i18n
+    from horreum.gui import planner_model as pm
+    chipy = view._chip_group.buttons()
+    assert len(view.findChildren(QButtonGroup)) == 1
+    for _ in range(3):
+        view.replan()
+    assert len(view.findChildren(QButtonGroup)) == 1
+    assert view._chip_group.buttons() == chipy
+    repo.set_telescope_park(view.con, telescope_id=1, in_park=1, now=NOW)
+    view.replan()
+    nowe = view._chip_group.buttons()
+    assert [b.text() for b in nowe] == [i18n.t("planner.chip_best"), *pm.rig_choices(view._result)]
+    assert len(nowe) < len(chipy) and not set(nowe) & set(chipy)
+    assert len(view.findChildren(QButtonGroup)) == 1
+
+
+def test_podpowiedz_chipow_idzie_za_filtrem_kadru_bez_przebudowy(view):
+    """AR-366: chipy nie powstają od nowa przy tych samych zestawach, ale podpowiedź idzie za filtrem kadru (przy
+    włączonym chip CHOWA wiersze). Falsyfikator: podpowiedź ustawiana tylko przy budowie chipów."""
+    from horreum.gui import i18n
+    repo.set_telescope_park(view.con, telescope_id=1, in_park=1, now=NOW)
+    repo.set_telescope_park(view.con, telescope_id=2, in_park=1, now=NOW)
+    view.replan()
+    chipy = view._chip_group.buttons()
+    assert all(b.toolTip() == i18n.t("planner.chip_tip") for b in chipy)
+    view.min_fill_on.setChecked(True)
+    view.replan()
+    assert view._result.rig_filter == "on" and view._chip_group.buttons() == chipy
+    assert all(b.toolTip() == i18n.t("planner.chip_tip_filter") for b in chipy)
+
+
+# ───────────────────────── AR-350: rachunek w wątku czyta jedną migawkę
+
+def test_rachunek_planera_w_watku_czyta_jedna_migawke(qapp, tmp_path, ustawienia, monkeypatch):
+    """Rachunek na własnym połączeniu workera czyta bazę JEDNĄ migawką: zapis innego połączenia między odczytem
+    pokrycia a odczytem kurateli nie trafia do wyniku (wynik opisuje stan sprzed zapisu, nie mieszankę), choć baza
+    zapis ma. Prawdziwy rdzeń, podsłuch na odczycie pokrycia. Falsyfikator: `_compute` bez `BEGIN`."""
+    from horreum.gui.planner import PlanWorker
+    sciezka = str(tmp_path / "migawka.db")
+    con = _seed(sciezka)
+    cel = targets.plan(con, night=date(2026, 8, 15)).rows[0].target.canon
+    prawdziwe = targets.archive_coverage
+
+    def _zapis_w_srodku(c):
+        wynik = prawdziwe(c)
+        inne = db.connect(sciezka)
+        inne.execute("INSERT INTO target_plan(canon, status, priority, note, created_at, updated_at) "
+                     "VALUES (?, 'planned', NULL, NULL, ?, ?)", (cel, NOW, NOW))
+        inne.commit()
+        inne.close()
+        return wynik
+    monkeypatch.setattr(targets, "archive_coverage", _zapis_w_srodku)
+    try:
+        wynik = PlanWorker(sciezka, {"night": date(2026, 8, 15)}, 1)._compute()
+        assert next(r for r in wynik.rows if r.target.canon == cel).plan_status is None
+        assert targets.plan_marks(con)[cel]["status"] == "planned"
+    finally:
+        con.close()

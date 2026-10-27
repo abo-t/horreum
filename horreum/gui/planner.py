@@ -87,18 +87,27 @@ _MIN_W = 1240
 
 _STATUSES = ("planned", "active", "done", "skip")
 
-# Progi wyszukiwania: (atrybut, klucz i18n, domyślna, min, max, krok) — JEDEN właściciel wartości
-# domyślnych (D-0731-10). Zapamiętywane w `QSettings` per maszyna — to zostaje, ale UWAGA na wzorzec:
-# porównanie „jak perspektywy gridu" jest NIEAKTUALNE od 2026-08-01 (D-P-I-3 odwróciło D-B, perspektywy
+# Progi wyszukiwania: (atrybut, klucz i18n, domyślna, min, max, krok) - wartość domyślna z JEDNEGO źródła w rdzeniu
+# (`targets.DEFAULT_THRESHOLDS`, AR-371: te same liczby biorą `targets.plan`, `targets.feasible` i CLI, więc „domyślnie”
+# w tytule paska nie ogłasza kopii GUI; D-0731-10). Zapamiętywane w `QSettings` per maszyna - to zostaje, ale UWAGA
+# na wzorzec: porównanie „jak perspektywy gridu" jest NIEAKTUALNE od 2026-08-01 (D-P-I-3 odwróciło D-B, perspektywy
 # idą do BAZY). Próg wyszukiwania jest własnością BIURKA, nie archiwum, więc dzieli los rejestru
 # świadomie, a nie przez analogię: „w bieżącym wyszukiwaniu" mówiło o tym, że progi nie idą do assetu — a nie o tym, że mają
 # ginąć przy każdym uruchomieniu. „Przywróć domyślne" jest obok, więc powrót do 6′/15′/13 mag
 # kosztuje jeden klik i stan zawsze widnieje w tytule zwiniętego paska.
-_THRESHOLDS = {"min_size": ("planner.min_size", 6.0, 0.0, 600.0, 1.0),
-               "min_dark": ("planner.min_dark", 15.0, 0.0, 600.0, 1.0),
-               "max_mag": ("planner.max_mag", 13.0, 0.0, 25.0, 0.5),
-               "min_alt": ("planner.min_alt", 30.0, 0.0, 89.0, 5.0),
-               "min_hours": ("planner.min_hours", 1.0, 0.0, 100.0, 0.5)}
+_THRESHOLDS = {"min_size": ("planner.min_size", targets.DEFAULT_THRESHOLDS["min_size"], 0.0, 600.0, 1.0),
+               "min_dark": ("planner.min_dark", targets.DEFAULT_THRESHOLDS["min_dark"], 0.0, 600.0, 1.0),
+               "max_mag": ("planner.max_mag", targets.DEFAULT_THRESHOLDS["max_mag"], 0.0, 25.0, 0.5),
+               "min_alt": ("planner.min_alt", targets.DEFAULT_THRESHOLDS["min_alt"], 0.0, 89.0, 5.0),
+               "min_hours": ("planner.min_hours", targets.DEFAULT_THRESHOLDS["min_hours"], 0.0, 100.0, 0.5)}
+# Tytuł paska progów (AR-371): (próg, pole szablonu `planner.controls_state`, format wartości, klucz dopisku wartości
+# domyślnej). Odchylenie liczone na TEKŚCIE sformatowanym - próg 6,5 tytuł pokazuje „≥6′”, więc dopisek
+# „(domyślnie 6′)” obok niego byłby sprzecznością na ekranie.
+_TYTUL_PROGOW = (("min_size", "size", ".0f", "planner.controls_default_arcmin"),
+                 ("min_dark", "dark", ".0f", "planner.controls_default_arcmin"),
+                 ("max_mag", "mag", ".1f", "planner.controls_default"),
+                 ("min_alt", "alt", ".0f", "planner.controls_default_deg"),
+                 ("min_hours", "hours", ".1f", "planner.controls_default"))
 _MAX_COST_DEFAULT = 3.0
 # Filtr kadru (dług T5, PL-1, PL-2) - jak próg kosztu: domyślnie WYŁĄCZONY, wartość pamiętana obok
 # przełącznika. Wypełnienie w PROCENTACH na ekranie (kolumna mówi „58%"), w rdzeniu ułamek 0..1.
@@ -171,6 +180,11 @@ class PlanWorker(QObject):
         own = bool(self._db_path)
         con = db.connect(self._db_path) if own else self._con
         try:
+            if own:
+                # JEDNA MIGAWKA WAL na cały rachunek (wzór `grid_workers`): `targets.plan` czyta osobnymi zapytaniami
+                # (pokrycie, kuratela, park, zestawy), a rachunek sprzed biegu Dostawy, który trwa w biegu, zmieszałby
+                # stan sprzed i po zapisie etapu. Tryb inline liczy na połączeniu wątku głównego - bez transakcji.
+                con.execute("BEGIN")
             return targets.plan(con, **self._params)
         finally:
             if own:
@@ -381,6 +395,7 @@ class PlannerView(QWidget):
         # w SESJI, nie w bazie: to droga powrotu z pomyłki sprzed sekundy, a nie druga historia
         # obok dziennika (`event(target_plan.cleared)` niesie cały wiersz sprzed kasacji).
         self._orphan_undo = None
+        self._park_dlg = None            # otwarte okno „Park…” - gaśnie w biegu Dostawy (`_sync_gestow_zapisu`)
         self._rig_chip = None            # None = soczewka „najlepsze dopasowanie" (D-0731-13)
         self._order = pm.ORDER_CORE      # porządek listy — prezentacja, klucz rdzenia nietknięty
         self._settings = QSettings("Horreum", "Horreum")
@@ -454,8 +469,32 @@ class PlannerView(QWidget):
         self.notes_label.setProperty("role", "secondary")
         outer.addWidget(self.notes_label)
         outer.addWidget(self._build_controls())
-        self.chips_row = QHBoxLayout()
-        outer.addLayout(self.chips_row)
+        # Rząd chipów i „Porządek” BUDOWANE RAZ (AR-366): combo powstające przy każdym wyniku gubiło fokus i otwartą
+        # listę przy każdym przeliczeniu, a grupa chipów przybywała z każdym rachunkiem. Kontener z marginesami 0 - jak
+        # dawny zagnieżdżony `QHBoxLayout`; schowany do pierwszego wyniku (wtedy rząd był pusty).
+        self._chips_box = QWidget()
+        self.chips_row = QHBoxLayout(self._chips_box)
+        self.chips_row.setContentsMargins(0, 0, 0, 0)
+        # Etykieta mówi WPROST, że to soczewka, a nie filtr (wiz T5 #2 P1): sam pasek nazw
+        # teleskopów czytał się jak zawężanie listy, choć zmienia dwie KOLUMNY, nie zbiór.
+        self.chips_row.addWidget(QLabel(i18n.t("planner.chips_label")))
+        self.chips_row.addStretch(1)
+        # Porządek listy PRZY chipach, bo to ta sama myśl: chip mówi CZYIMI oczami patrzysz,
+        # porządek - czy lista ma iść za tym spojrzeniem. Do T5 chip zmieniał radę, ale nie
+        # kolejność, więc „patrzę oczami RC8" zostawiało na górze cele wybrane dla A140R.
+        self.chips_row.addWidget(QLabel(i18n.t("planner.order_label")))
+        self.order_combo = kolko(QComboBox())
+        self.order_combo.addItem(i18n.t("planner.order_core"), pm.ORDER_CORE)
+        self.order_combo.addItem(i18n.t("planner.order_lens"), pm.ORDER_LENS)
+        self.order_combo.setCurrentIndex(0 if self._order == pm.ORDER_CORE else 1)
+        self.order_combo.setToolTip(i18n.t("planner.order_tip"))
+        self.order_combo.currentIndexChanged.connect(self._on_order)
+        self.chips_row.addWidget(self.order_combo)
+        self._chip_group = QButtonGroup(self)
+        self._chip_group.setExclusive(True)
+        self._chip_names = None              # zestawy obecnych chipów - przebudowa tylko przy zmianie
+        self._chips_box.setVisible(False)
+        outer.addWidget(self._chips_box)
         self.busy = QProgressBar()
         self.busy.setRange(0, 0)                 # nieokreślony — nie znamy postępu rachunku nocy
         # Miejsce REZERWOWANE także po ukryciu (wiz T5 #14): pasek wchodził w układ przy każdym
@@ -554,8 +593,23 @@ class PlannerView(QWidget):
 
     def _sync_save_enabled(self):
         """„Zapisz oznaczenie" żyje TYLKO przy wybranym statusie — przy „(bez oznaczenia)" nie ma
-        czego zapisać, a szczery disabled mówi to bez komunikatu (wiz T5 #1)."""
-        self.save_btn.setEnabled(self.panel_status.currentData() is not None)
+        czego zapisać, a szczery disabled mówi to bez komunikatu (wiz T5 #1). W biegu Dostawy gaśnie
+        jak każdy zapis do bazy (AR-366)."""
+        self.save_btn.setEnabled(self.panel_status.currentData() is not None and not self._w_biegu)
+
+    def _sync_gestow_zapisu(self):
+        """Gesty ZAPISU DO BAZY ekranu - kuratela celu, park, sieroty - gasną w biegu Dostawy (AR-366, spójnie
+        z osiami: `TelescopeAxisView.set_busy` gasi same zapisy). Pola panelu (status, priorytet, notatka) zostają
+        nietknięte: wpisana notatka przeżywa bieg. Otwarte okno parku gaśnie wprost - dawniej gasło z wygaszonym
+        rodzicem (`setEnabled(False)` widoku), a bieg ruszający przy otwartym oknie zostawiłby czynny zapis parku."""
+        wolno = not self._w_biegu
+        self.park_btn.setEnabled(wolno)
+        if self._park_dlg is not None:
+            self._park_dlg.setEnabled(wolno)
+        row = self.selected_row()
+        self.clear_btn.setEnabled(wolno and row is not None and row.source.plan_status is not None)
+        self._sync_save_enabled()
+        self._sync_orphan_buttons()
 
     # ---------------------------------------------------------------- sierota kurateli (R-S0-7)
 
@@ -656,21 +710,22 @@ class PlannerView(QWidget):
 
     def _sync_orphan_buttons(self):
         dane = self._selected_orphan()
-        self.orphan_clear_btn.setEnabled(dane is not None)
+        wolno = not self._w_biegu            # trzy gesty zapisu do bazy - w biegu Dostawy zgaszone (AR-366)
+        self.orphan_clear_btn.setEnabled(dane is not None and wolno)
         moved = dane is not None and dane[1] == targets.ORPHAN_MOVED
         # ZAPOWIEDŹ NIE MA PRAWA OBIECYWAĆ GESTU, KTÓRY GUARD ZARAZ ODMÓWI (G2-9d, treść rejestru):
         # gdy cel `gdzie` ma już własną kuratelę, guzik gaśnie z POWODEM w tooltipie zamiast stać
         # aktywny nad kliknięciem, które i tak skończy się odmową. Guard w `_on_orphan_move`
         # ZOSTAJE - to obrona w głąb, nie duplikat do usunięcia.
         blocked = moved and self._orphan_move_blocked(dane[2])
-        self.orphan_move_btn.setEnabled(moved and not blocked)
+        self.orphan_move_btn.setEnabled(moved and not blocked and wolno)
         if blocked:
             self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip_taken", where=dane[2]))
         elif dane and dane[2]:
             self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip", where=dane[2]))
         else:
             self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip_none"))
-        self.orphan_undo_btn.setEnabled(self._orphan_undo is not None)
+        self.orphan_undo_btn.setEnabled(self._orphan_undo is not None and wolno)
 
     def _on_orphan_clear(self):
         dane = self._selected_orphan()
@@ -743,16 +798,31 @@ class PlannerView(QWidget):
         lay = QHBoxLayout(body)
         lay.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
+        # PRZEŁĄCZNIK „bieżąca noc” (AR-365): dopóki stoi, noc wybiera rdzeń (`targets.default_night` liczy dobę
+        # z DŁUGOŚCI stanowiska, nie ze strefy maszyny), a pole pokazuje noc POLICZONEGO planu (`_render_header`) -
+        # migawka wyniku, nie zegar: przejście doby przy otwartym oknie przestawi pole dopiero kolejny rachunek. Dawna
+        # wartość specjalna na minimum 1970 trzymała Tab w polu, otwierała kalendarz na 1970-01 i nie miała drogi powrotu.
+        # Noc nie idzie do `QSettings` - każda sesja startuje na nocy programu. Przełącznik przed polem (wzór progu
+        # kosztu): Tab idzie przełącznik → pole → „cirrus”.
+        noc = QHBoxLayout()
+        self.night_auto = QCheckBox(i18n.t("planner.night_auto"))
+        self.night_auto.setChecked(True)
+        self.night_auto.setToolTip(i18n.t("planner.night_auto_tip"))
+        self.night_auto.toggled.connect(self._queue_replan)
         self.night_edit = kolko(QDateEdit())
         self.night_edit.setCalendarPopup(True)
-        self.night_edit.setSpecialValueText(i18n.t("planner.night_auto"))
-        # Minimum = wartość specjalna „noc bieżąca": DOPÓKI user nie tknie pola, noc wybiera rdzeń
-        # (`targets.default_night` liczy dobę z DŁUGOŚCI stanowiska, nie ze strefy maszyny) —
-        # podstawianie tu `QDate.currentDate()` byłoby DRUGIM właścicielem faktu „która to noc".
-        self.night_edit.setMinimumDate(QDate(1970, 1, 1))
-        self.night_edit.setDate(QDate(1970, 1, 1))
+        # Minimum „dziś minus rok” z zegara WIDOKU (`now_fn`, ten sam co zapis kurateli) - bez niego wpis z 1970 ręką
+        # dawał plan bez słowa. Data startowa z tego zegara stoi tylko do pierwszego wyniku; parametr przy
+        # zaznaczonym przełączniku i tak jest `None`, więc rdzeń zostaje jedynym właścicielem faktu „która to noc”.
+        dzis = datetime.fromisoformat(self._now()).date()
+        self.night_edit.setMinimumDate(QDate(dzis.year, dzis.month, dzis.day).addYears(-1))
+        self.night_edit.setDate(QDate(dzis.year, dzis.month, dzis.day))
+        # Wybór daty (wpis, strzałka, kółko z fokusem, kalendarz) zdejmuje przełącznik - noc jawna.
+        self.night_edit.dateChanged.connect(lambda _d: self.night_auto.setChecked(False))
         self.night_edit.dateChanged.connect(self._queue_replan)
-        form.addRow(i18n.t("planner.night"), self.night_edit)
+        noc.addWidget(self.night_auto)
+        noc.addWidget(self.night_edit)
+        form.addRow(i18n.t("planner.night"), noc)
 
         self.cirrus = QCheckBox(i18n.t("planner.layer_cirrus"))   # D-0731-9: domyślnie OFF
         self.cirrus.toggled.connect(self._queue_replan)
@@ -770,6 +840,7 @@ class PlannerView(QWidget):
         for s in _STATUSES:
             self.status_combo.addItem(i18n.t(f"planner.status_{s}"), s)
         self.status_combo.currentIndexChanged.connect(self._queue_replan)
+        self.status_combo.currentIndexChanged.connect(lambda _i: self._sync_controls_title())   # tnie listę (AR-371)
         form.addRow(i18n.t("planner.status"), self.status_combo)
         lay.addLayout(form)
 
@@ -798,6 +869,7 @@ class PlannerView(QWidget):
         self.max_cost.setEnabled(self.max_cost_on.isChecked())
         self.max_cost.setFixedWidth(_SPIN_W)
         self.max_cost.valueChanged.connect(self._queue_replan)
+        self.max_cost.valueChanged.connect(lambda _v: self._sync_controls_title())   # „· koszt ≤N” w tytule (AR-371)
         self.max_cost.valueChanged.connect(lambda _v: self._save_thresholds())
         cost_row.addWidget(self.max_cost_on)
         cost_row.addWidget(self.max_cost)
@@ -820,7 +892,10 @@ class PlannerView(QWidget):
         # Powrót do 6′/15′/13 mag jednym klikiem — bez niego zapamiętane progi byłyby drogą
         # w jedną stronę, a user nie ma skąd znać wartości domyślnych (są w kodzie, nie na ekranie).
         self.reset_btn = QPushButton(i18n.t("planner.reset_thresholds"))
-        self.reset_btn.setToolTip(i18n.t("planner.reset_thresholds_tip"))
+        # Wartości w podpowiedzi z jednego źródła (AR-371) - proza z liczbami przepisanymi ręcznie rozjechałaby się
+        # z rdzeniem przy pierwszej zmianie domyślnej.
+        self.reset_btn.setToolTip(i18n.t("planner.reset_thresholds_tip", **{
+            pole: f"{targets.DEFAULT_THRESHOLDS[name]:g}" for name, pole, _fmt, _klucz in _TYTUL_PROGOW}))
         self.reset_btn.clicked.connect(self._on_reset_thresholds)
         right.addRow("", self.reset_btn)
         lay.addLayout(right)
@@ -935,6 +1010,7 @@ class PlannerView(QWidget):
     def _on_max_cost_toggled(self, on):
         self.max_cost.setEnabled(on)
         self._save_thresholds()
+        self._sync_controls_title()          # próg kosztu tnie listę - włączony stoi w tytule (AR-371)
         self._queue_replan()
 
     def _on_controls_toggled(self, shown):
@@ -943,12 +1019,20 @@ class PlannerView(QWidget):
         self._sync_controls_title()
 
     def _sync_controls_title(self):
-        """Tytuł paska niesie STAN progów — zwinięty musi mówić, czym tniesz listę, inaczej user
-        widzi krótką listę i nie wie dlaczego (wiz T5 #3)."""
-        text = i18n.t(
-            "planner.controls_state", size=f"{self.min_size.value():.0f}",
-            dark=f"{self.min_dark.value():.0f}", mag=f"{self.max_mag.value():.1f}",
-            alt=f"{self.min_alt.value():.0f}", hours=f"{self.min_hours.value():.1f}")
+        """Tytuł paska niesie STAN progów - zwinięty musi mówić, czym tniesz listę, inaczej user
+        widzi krótką listę i nie wie dlaczego (wiz T5 #3). Próg odchylony od domyślnego dopisuje
+        domyślną („rozmiar ≥8′ (domyślnie 6′)”, AR-371) - jedynym śladem odchylenia była sama liczba.
+        Próg kosztu i filtr statusu tną listę jak progi, więc włączone też stoją w tytule. Pełny tekst
+        idzie też do podpowiedzi przycisku: przy minimalnym oknie najdłuższy tytuł się ucina."""
+        kw = {}
+        for name, pole, fmt, klucz in _TYTUL_PROGOW:
+            tekst = format(self._spins[name].value(), fmt)
+            domyslna = format(_THRESHOLDS[name][1], fmt)
+            kw[pole] = tekst
+            kw[pole + "_def"] = "" if tekst == domyslna else i18n.t(klucz, n=domyslna)
+        text = i18n.t("planner.controls_state", **kw)
+        if self.max_cost_on.isChecked():
+            text += i18n.t("planner.controls_state_cost", cost=f"{self.max_cost.value():g}")
         # Filtr kadru CHOWA cele, więc zwinięty pasek musi go nazwać - ale tylko włączony:
         # domyślny tytuł zostaje ten sam co przed filtrem.
         parts = []
@@ -970,7 +1054,11 @@ class PlannerView(QWidget):
             text += i18n.t("planner.controls_state_pn")
             if self._result is not None and self._result.pn_filter == "find":
                 text += i18n.t("planner.controls_state_rig_off")
+        status = self.status_combo.currentData()
+        if status is not None:
+            text += i18n.t("planner.controls_state_status", status=i18n.t(f"planner.status_{status}"))
         self.controls_toggle.setText(text)
+        self.controls_toggle.setToolTip(text)
 
     # ---------------------------------------------------------------- chipy zestawu (soczewka)
 
@@ -991,61 +1079,52 @@ class PlannerView(QWidget):
             "QToolButton:checked { background: %s; color: %s; font-weight: bold; "
             "border: 1px solid %s; border-radius: 3px; padding: 2px 8px; }"
             "QToolButton { padding: 2px 8px; }" % (p["highlight"], p["highlight_text"], a["gold"]))
-        group = getattr(self, "_chip_group", None)
-        for b in (group.buttons() if group is not None else ()):
+        for b in self._chip_group.buttons():
             b.setStyleSheet(self._chip_qss)
         self.model.use_theme(self._theme)
 
     def _rebuild_chips(self, result):
         """Chipy zestawów w porządku po lightach + „najlepsze dopasowanie" jako pozycja pierwsza.
-        Chip jest SOCZEWKĄ (nic nie znika — `planner_model`), więc przełączenie NIE re-planuje:
-        przelicza tylko komórki z tego samego `PlanResult`."""
-        while self.chips_row.count():
-            item = self.chips_row.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        self._chip_group = QButtonGroup(self)
-        self._chip_group.setExclusive(True)
-        # Etykieta mówi WPROST, że to soczewka, a nie filtr (wiz T5 #2 P1): sam pasek nazw
-        # teleskopów czytał się jak zawężanie listy, choć zmienia dwie KOLUMNY, nie zbiór.
-        self.chips_row.addWidget(QLabel(i18n.t("planner.chips_label")))
-        # Zaznaczony chip na kolorze zaznaczenia ŻYWEGO motywu (`use_theme`): zmierzone 64 vs 81
-        # na tle 43 (różnica 17/255, i to zaznaczony był CIEMNIEJSZY) nie odróżniało soczewki.
+        Chip jest SOCZEWKĄ (nic nie znika - `planner_model`), więc przełączenie NIE re-planuje:
+        przelicza tylko komórki z tego samego `PlanResult`.
+
+        PRZEBUDOWA TYLKO PRZY ZMIANIE ZESTAWÓW (AR-366): rząd, grupa i „Porządek” stoją od `_build`, a chipy
+        powstają od nowa wyłącznie, gdy wynik niesie inny zbiór zestawów (inny park, nowy zestaw po dostawie) -
+        przy tych samych zestawach fokus chipa przeżywa przeliczenie. Podpowiedź idzie za filtrem kadru przy
+        każdym wyniku."""
         # Chip wskazuje NAZWĘ zestawu (`RigSet.name`), nie teleskop: optyka z dwiema kamerami ma
         # dwa chipy z kamerą w etykiecie, a nie dwa „ED120R", z których oba patrzyłyby jednym okiem.
         names = (None,) + pm.rig_choices(result)
-        # Chip PRZEŻYWA RESTART (AR-36): wybór czytamy z `QSettings` przy każdej przebudowie, więc
-        # zestaw, który zniknął (inny park, inna baza), daje best-fit bez kasowania zapamiętanego -
-        # wróci, gdy zestaw znów będzie na liście. Wpis nieczytelny = best-fit, jak brak wpisu.
-        zapamietany = self._settings.value(_SETTINGS_PREFIX + "rig_chip", "")
-        self._rig_chip = zapamietany if isinstance(zapamietany, str) and zapamietany in names \
-            else None
-        for name in names:
-            b = QToolButton()
-            b.setCheckable(True)
-            b.setText(i18n.t("planner.chip_best") if name is None else name)
-            b.setChecked(name == self._rig_chip)
-            b.setStyleSheet(self._chip_qss)
-            # Przy włączonym filtrze kadru chip CHOWA wiersze - obietnica „żaden cel nie znika"
-            # byłaby wtedy nieprawdą.
-            b.setToolTip(i18n.t("planner.chip_tip_filter" if result.rig_filter == "on"
-                                else "planner.chip_tip"))
-            b.clicked.connect(lambda _c=False, n=name: self._on_chip(n))
-            self._chip_group.addButton(b)
-            self.chips_row.addWidget(b)
-        self.chips_row.addStretch(1)
-        # Porządek listy PRZY chipach, bo to ta sama myśl: chip mówi CZYIMI oczami patrzysz,
-        # porządek — czy lista ma iść za tym spojrzeniem. Do T5 chip zmieniał radę, ale nie
-        # kolejność, więc „patrzę oczami RC8" zostawiało na górze cele wybrane dla A140R.
-        self.chips_row.addWidget(QLabel(i18n.t("planner.order_label")))
-        self.order_combo = kolko(QComboBox())
-        self.order_combo.addItem(i18n.t("planner.order_core"), pm.ORDER_CORE)
-        self.order_combo.addItem(i18n.t("planner.order_lens"), pm.ORDER_LENS)
-        self.order_combo.setCurrentIndex(0 if self._order == pm.ORDER_CORE else 1)
-        self.order_combo.setToolTip(i18n.t("planner.order_tip"))
-        self.order_combo.currentIndexChanged.connect(self._on_order)
-        self.chips_row.addWidget(self.order_combo)
+        if names != self._chip_names:
+            for b in self._chip_group.buttons():
+                self._chip_group.removeButton(b)
+                self.chips_row.removeWidget(b)
+                b.hide()
+                b.deleteLater()
+            # Chip PRZEŻYWA RESTART (AR-36): wybór czytamy z `QSettings` przy każdej przebudowie, więc
+            # zestaw, który zniknął (inny park, inna baza), daje best-fit bez kasowania zapamiętanego -
+            # wróci, gdy zestaw znów będzie na liście. Wpis nieczytelny = best-fit, jak brak wpisu.
+            zapamietany = self._settings.value(_SETTINGS_PREFIX + "rig_chip", "")
+            self._rig_chip = zapamietany if isinstance(zapamietany, str) and zapamietany in names \
+                else None
+            for i, name in enumerate(names):
+                b = QToolButton()
+                b.setCheckable(True)
+                b.setText(i18n.t("planner.chip_best") if name is None else name)
+                b.setChecked(name == self._rig_chip)
+                # Zaznaczony chip na kolorze zaznaczenia ŻYWEGO motywu (`use_theme`): zmierzone 64 vs 81
+                # na tle 43 (różnica 17/255, i to zaznaczony był CIEMNIEJSZY) nie odróżniało soczewki.
+                b.setStyleSheet(self._chip_qss)
+                b.clicked.connect(lambda _c=False, n=name: self._on_chip(n))
+                self._chip_group.addButton(b)
+                self.chips_row.insertWidget(1 + i, b)        # za etykietą soczewki, przed rozciągaczem
+            self._chip_names = names
+        # Przy włączonym filtrze kadru chip CHOWA wiersze - obietnica „żaden cel nie znika"
+        # byłaby wtedy nieprawdą.
+        tip = i18n.t("planner.chip_tip_filter" if result.rig_filter == "on" else "planner.chip_tip")
+        for b in self._chip_group.buttons():
+            b.setToolTip(tip)
+        self._chips_box.setVisible(True)
 
     def _on_chip(self, name):
         self._rig_chip = name
@@ -1065,11 +1144,11 @@ class PlannerView(QWidget):
     # ---------------------------------------------------------------- rachunek
 
     def _params(self):
-        """Parametry rachunku z kontrolek. `night=None` dopóki user nie tknął daty — wtedy noc
-        wybiera rdzeń. Tekst w „Szukaj" włącza tryb `find`, który POMIJA progi (pytasz o konkretny
+        """Parametry rachunku z kontrolek. `night=None`, dopóki stoi przełącznik „bieżąca noc” - wtedy noc
+        wybiera rdzeń (AR-365). Tekst w „Szukaj" włącza tryb `find`, który POMIJA progi (pytasz o konkretny
         obiekt — masz dostać jego okno, nawet gdy nigdy nie wschodzi); mówi o tym nota nad listą."""
         qd = self.night_edit.date()
-        night = None if qd == self.night_edit.minimumDate() else date(qd.year(), qd.month(), qd.day())
+        night = None if self.night_auto.isChecked() else date(qd.year(), qd.month(), qd.day())
         find = self.find_edit.text().strip() or None
         return {"night": night, "limit": None, "find": find,
                 "layers": targets.ALL_LAYERS if self.cirrus.isChecked() else targets.DEFAULT_LAYERS,
@@ -1098,10 +1177,17 @@ class PlannerView(QWidget):
             self._keep_canon = self._selected_canon()
         self._gen += 1
         if self._w_biegu:
-            # Bieg Dostawy (AR-334): rachunek czeka w generacji na koniec przebiegu (`set_busy`). Planer bez niczego
-            # na ekranie mówi, kiedy policzy - zamiast pustej listy pod nagłówkiem bez nocy.
+            # Bieg Dostawy (AR-334): rachunek czeka w generacji na koniec przebiegu (refresh gospodarza). Planer bez
+            # niczego na ekranie mówi, kiedy policzy - pustym stanem w miejscu tabeli, nie pustą tabelą z dwunastoma
+            # nagłówkami (AR-366); zdanie stoi w jednym miejscu, więc nagłówek nocy jest pusty. Przy pokazanym planie
+            # kontrolki zmienione w biegu dostają to samo zdanie pierwszą notą nad listą (`_render_header`).
             if not self._shown_gen:
-                self.night_label.setText(i18n.t("planner.after_intake"))
+                self.night_label.setText("")
+                self.empty_note.setText(i18n.t("planner.after_intake"))
+                self.empty_note.setVisible(True)
+                self.table.setVisible(False)
+            elif self._result is not None:
+                self._render_header(self._result)
             return
         if self._worker is not None:
             return                       # wynik w biegu i tak przyjdzie ze STARĄ generacją → odrzucony
@@ -1259,6 +1345,15 @@ class PlannerView(QWidget):
         liczona w `planner_model.header_notes` i do tej pory widok ją WYRZUCAŁ."""
         find = self.find_edit.text().strip()
         self.night_label.setText(pm.night_text(result))
+        if self.night_auto.isChecked():
+            # Pole przy przełączniku mówi noc policzonego planu (AR-365) - kalendarz otwiera się na niej. Sygnały
+            # zablokowane (idiom `blockSignals` repo): wpis programu nie jest wyborem daty i nie zdejmuje przełącznika.
+            nd = result.night_date
+            self.night_edit.blockSignals(True)
+            try:
+                self.night_edit.setDate(QDate(nd.year, nd.month, nd.day))
+            finally:
+                self.night_edit.blockSignals(False)
         # W trybie `find` lejek („1560 → 1 po progach") kłamał: progi są pominięte (wiz T5 #7).
         self.counts_label.setText(
             i18n.t_plural("planner.counts_find", len(result.rows), needle=find) if find
@@ -1272,6 +1367,10 @@ class PlannerView(QWidget):
             pudlo = pm.find_miss_text(result, find)
             if pudlo:
                 infos.insert(0, pudlo)
+        if self._w_biegu and self._pending_gen():
+            # Kontrolki zmienione w biegu Dostawy (AR-366): lista jest starsza niż one i zostaje do końca biegu - nota
+            # pierwsza mówi, kiedy plan dogoni kontrolki, inaczej lista przeczyłaby tytułowi progów.
+            infos.insert(0, i18n.t("planner.after_intake"))
         self.warn_label.setText("\n".join(f"⚠ {t}" for t in warns))
         self.warn_label.setVisible(bool(warns))
         self.notes_label.setText("\n".join(infos))
@@ -1358,7 +1457,7 @@ class PlannerView(QWidget):
             self.panel_note.setText("")
             self.no_gaps_label.setText("")
             self.panel_status.setCurrentIndex(0)
-            self._sync_save_enabled()      # patrz niżej — `setCurrentIndex(0)` na zerze MILCZY
+            self._sync_gestow_zapisu()     # patrz niżej - `setCurrentIndex(0)` na zerze MILCZY
             return
         src = row.source
         # Kanon w TYTULE panelu (wiz T5 #8): etykieta w rzędzie kontrolek była ściskana przez
@@ -1372,11 +1471,11 @@ class PlannerView(QWidget):
         # na indeksie już zerowym NIE emituje `currentIndexChanged`, więc „Zapisz" zostawał
         # aktywny (bold + pierścień domyślnego) od startu aplikacji do pierwszej zmiany statusu —
         # najczęstszy pierwszy klik sesji trafiał w martwy przycisk i nie dostawał nawet komunikatu.
-        self._sync_save_enabled()
+        # „Zapisz” i „Zdejmij” jedną regułą z biegiem Dostawy (AR-366).
+        self._sync_gestow_zapisu()
         self.panel_priority.setValue(src.priority or 0)
         self.panel_note.setText(src.note or "")
         self.frames_btn.setEnabled(pm.can_show_frames(src))
-        self.clear_btn.setEnabled(src.plan_status is not None)
         # Podpowiedź, nie automat (D-T4-d): status jest zdaniem CZŁOWIEKA, a luka zależy od suwaka
         # `min_hours` — automatyczne `done` czyniłoby trwały status funkcją parametru runtime.
         self.no_gaps_label.setText("" if src.coverage.gaps else i18n.t("planner.no_gaps"))
@@ -1420,8 +1519,14 @@ class PlannerView(QWidget):
     def _on_park(self):
         """Dialog parku. Po zmianie oznaczeń plan liczy się od nowa — park ZMIENIA zestawy, więc
         stary wynik opisywałby inny sprzęt (a po scaleniu osi park bywa stęchły — `5dfe28b`)."""
+        if self._w_biegu:
+            return                       # obrona w głąb: w biegu Dostawy „Park…” jest zgaszony (AR-366)
         dlg = ParkDialog(self.con, self._now, parent=self)
-        dlg.exec()
+        self._park_dlg = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._park_dlg = None
         if dlg.changed:
             self.status_message.emit(i18n.t("planner.park_changed", n=dlg.changed))
             self.replan()
@@ -1449,22 +1554,21 @@ class PlannerView(QWidget):
         self.replan()
 
     def set_busy(self, running):
-        """W biegu Dostawy ekran nie liczy planu na wpół zapisanej bazie (AR-334): widok wygaszony (spójnie z osiami),
-        a każdy powód rachunku - wejście przy bazie bez stanowiska, ponowienie `no_site`, restart po wątku, debounce
-        sprzed biegu - tylko podbija generację (`replan`, `_cleanup_thread`). Rachunek wystartowany PRZED biegiem
-        dobiega końca i jego wynik staje na wygaszonym ekranie (bez bramki renderu - schowałaby prawdziwy wynik);
-        koniec biegu przelicza raz.
+        """W biegu Dostawy ekran nie liczy planu na wpół zapisanej bazie (AR-334) i nie pisze do bazy, ale zostaje
+        czytelny i sterowalny (AR-366, spójnie z osiami): gasną wyłącznie gesty zapisu do bazy
+        (`_sync_gestow_zapisu`), a lista, sort, chipy i progi działają na ostatnim planie. Każdy powód rachunku w biegu
+        - zmiana progu, wejście przy bazie bez stanowiska, ponowienie `no_site`, restart po wątku, debounce sprzed
+        biegu - tylko podbija generację (`replan`, `_cleanup_thread`). Rachunek wystartowany PRZED biegiem dobiega
+        końca i jego wynik staje na ekranie (bez bramki renderu - schowałaby prawdziwy wynik); własne połączenie
+        workera czyta go jedną migawką (`PlanWorker._compute`).
 
-        KONIEC BIEGU NIE LICZY TUTAJ. Liczy gospodarz - jednym `refresh` każdego zbudowanego planera po przebiegu
-        (`MainWindow._odswiez_widoki_po_przebiegu`, wołane po `set_busy(False)`). Rachunek tu dałby dwa: `refresh`
-        przy żywym wątku podbija generację, a `_cleanup_thread` liczy drugi raz; rachunek odłożony (`singleShot`)
-        doręczyłby się w fazie odświeżenia przed `refresh` - faza kręci pętlę zdarzeń (`busy.repaint`,
-        `ExcludeUserInputEvents`: zegary tak, kliki nie). Ta sama faza jest granicą tej reguły: wątek sprzed biegu,
-        który skończy się w niej, albo zegar (debounce, ponowienie `no_site`) doręczony w niej startuje rachunek, który
-        `refresh` unieważni, a `_cleanup_thread` powtórzy - jeden zbędny rachunek po końcu biegu, bez nieprawdy na
-        ekranie (dług w rejestrze)."""
+        KONIEC BIEGU NIE LICZY TUTAJ (AR-350). Bramę otwiera gospodarz i od razu liczy: `planner.set_busy(...)`
+        i `planner.refresh()` kolejnymi instrukcjami na początku fazy odświeżenia
+        (`MainWindow._odswiez_widoki_po_przebiegu`). Pompa fazy (`busy.repaint`, `ExcludeUserInputEvents`: zegary
+        tak, kliki nie) idzie PRZED bramą, więc zegar albo koniec wątku sprzed biegu doręczony w niej trafia na bramę
+        zamkniętą i tylko podbija generację - a `refresh` liczy raz."""
         self._w_biegu = bool(running)
-        self.setEnabled(not running)
+        self._sync_gestow_zapisu()
 
     def closeEvent(self, event):
         """Zamknięcie w biegu = unieważnienie generacją; wątek dokańcza i sprząta się sam."""

@@ -466,7 +466,7 @@ def test_klik_znajdz_przy_porazce_budowy_nie_buduje_drugi_raz(qapp, tmp_path, mo
 
 def test_zbiory_i_planer_budowane_w_biegu_dostawy_maja_blokade(qapp, tmp_path, monkeypatch):
     """Prawdziwy etap Dostawy w biegu (brama): pierwsze wejście w Zbiory i Planer buduje je z blokadą biegu
-    (grid - akcje zapisu wygaszone, planer - nieczynny); koniec przebiegu zwalnia obie.
+    (grid - akcje zapisu wygaszone, planer - gesty zapisu do bazy wygaszone); koniec przebiegu zwalnia obie.
     Falsyfikator: budowniczy bez zatrzasku `_dostawa_w_biegu`."""
     puszczona = _brama_dostawy(monkeypatch)
     win = _okno(_baza(tmp_path))
@@ -476,9 +476,9 @@ def test_zbiory_i_planer_budowane_w_biegu_dostawy_maja_blokade(qapp, tmp_path, m
         win._show_view(NAV_ZBIORY)
         win._show_view(NAV_PLANER)
         grid, planer = win._strony["grid_view"], win._strony["planner_view"]
-        assert grid._etap_w_biegu and not planer.isEnabled()
+        assert grid._etap_w_biegu and not planer.park_btn.isEnabled()
         _etap_koniec(win, puszczona)
-        assert not grid._etap_w_biegu and planer.isEnabled()
+        assert not grid._etap_w_biegu and planer.park_btn.isEnabled()
     finally:
         puszczona.set()
         win.close()

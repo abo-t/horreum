@@ -198,11 +198,13 @@ def _main(argv=None):
                                        "(bez flagi: `telescope.in_park`, a gdy pusty — wszystkie)")
     p_plan.add_argument("--layers", default="core",
                         help="warstwy katalogu: core|cirrus|core,cirrus (curated ZAWSZE)")
-    p_plan.add_argument("--min-size", type=float, default=6.0, help="próg rozmiaru [']")
-    p_plan.add_argument("--min-dark", type=float, default=15.0, help="próg rozmiaru ciemnej [']")
-    p_plan.add_argument("--max-mag", type=float, default=13.0, help="próg magnitudo GALAKTYK")
-    p_plan.add_argument("--min-alt", type=float, default=30.0, help="próg wysokości [deg]")
-    p_plan.add_argument("--min-hours", type=float, default=1.0, help="ile godzin kanału to pokrycie")
+    # Pięć progów BEZ wartości domyślnej w parserze (AR-371): bez flagi próg nie idzie do rdzenia, więc liczy
+    # `targets.DEFAULT_THRESHOLDS` - jedno źródło z GUI. Odczyt stałej tutaj ciągnąłby `targets` przy każdej komendzie.
+    p_plan.add_argument("--min-size", type=float, default=None, help="próg rozmiaru [']")
+    p_plan.add_argument("--min-dark", type=float, default=None, help="próg rozmiaru ciemnej [']")
+    p_plan.add_argument("--max-mag", type=float, default=None, help="próg magnitudo GALAKTYK")
+    p_plan.add_argument("--min-alt", type=float, default=None, help="próg wysokości [deg]")
+    p_plan.add_argument("--min-hours", type=float, default=None, help="ile godzin kanału to pokrycie")
     p_plan.add_argument("--max-cost", type=float, default=None,
                         help="odetnij cele droższe niż N× (domyślnie BEZ progu — D-0731-14)")
     # Filtr kadru (dług T5, PL-1, PL-2) - domyślnie WYŁĄCZONY jak `--max-cost`; działa na parku
@@ -569,14 +571,15 @@ def _main(argv=None):
             print(f"Horreum plan: baza {args.db} ma schemat v{version}, kod oczekuje "
                   f"v{db.SCHEMA_VERSION} — uruchom `horreum init {args.db}` (plan nie migruje).")
             return 2
+        # Próg podany flagą idzie do rdzenia; bez flagi liczy domyślna rdzenia (AR-371).
+        progi = {k: getattr(args, k) for k in targets.DEFAULT_THRESHOLDS if getattr(args, k) is not None}
         try:
             result = targets.plan(
                 con,
                 night=date.fromisoformat(args.night) if args.night else None,
                 park=[p.strip() for p in args.park.split(",")] if args.park else None,
                 layers=tuple(x.strip() for x in args.layers.split(",") if x.strip()),
-                min_size=args.min_size, min_dark=args.min_dark, max_mag=args.max_mag,
-                min_alt=args.min_alt, min_hours=args.min_hours, max_cost=args.max_cost,
+                **progi, max_cost=args.max_cost,
                 overlap=args.overlap, only_gaps=args.gaps, only_new=args.new,
                 status=args.status, find=args.find,
                 limit=None if args.all else args.limit,

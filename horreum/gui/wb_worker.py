@@ -1155,6 +1155,73 @@ def tekst_powodu(powod):
     return czytelny_powod(powod)
 
 
+# ---- krótka forma powodu: nazwy plików zamiast ścieżek (AR-387) ----
+# Parametry powodu niosące ścieżkę pliku (kontrakt `item_reasons.PARAM_KINDS`, rodzaj tekst) i lista ścieżek `paths`
+# (rodzaj lista). Zdanie w polu elidowanym w środku (szuflada Zbiorów) mówi nazwy plików - pełna ścieżka zjadała
+# wielokropkiem właśnie nazwę; pełny powód zostaje w bazie (`reason_args`) i idzie do szczegółu zdania.
+_PARAMY_SCIEZEK = frozenset({"path", "src", "dst", "db_path", "tmp", "copy"})
+
+
+def _czy_sciezka(wartosc):
+    return isinstance(wartosc, str) and not isinstance(wartosc, PowodPozycji)
+
+
+def _ze_skrotami(powod, skrot):
+    """Powód (to samo zdanie PL i kod) z parametrami ścieżek przepuszczonymi przez `skrot` - rekurencyjnie: powody
+    zagnieżdżone (`inner`), uwagi i lista `paths`. JEDYNY przegląd drzewa powodu - zbieranie ścieżek to `skrot`,
+    który je zapisuje i oddaje bez zmian. Bez żadnej zmiany parametru - TEN SAM obiekt (wołający poznaje skrót
+    tożsamością)."""
+    if not isinstance(powod, PowodPozycji):
+        return powod
+    params, zmiana = {}, False
+    for nazwa, wartosc in powod.params:
+        lista = isinstance(wartosc, (list, tuple))
+        if nazwa in _PARAMY_SCIEZEK and _czy_sciezka(wartosc):
+            stare, nowe = (wartosc,), (skrot(wartosc),)
+        elif lista:
+            stare = tuple(wartosc)
+            nowe = tuple(skrot(w) if nazwa == "paths" and _czy_sciezka(w) else _ze_skrotami(w, skrot)
+                         for w in stare)
+        else:
+            stare, nowe = (wartosc,), (_ze_skrotami(wartosc, skrot),)
+        # Powód zagnieżdżony zmieniony to nowy obiekt (zdanie PL zostaje - równość tekstu nic nie mówi); ścieżka -
+        # inny tekst.
+        zmiana = zmiana or any(n is not s if isinstance(s, PowodPozycji) else n != s for n, s in zip(nowe, stare))
+        params[nazwa] = nowe if lista else nowe[0]
+    return PowodPozycji(str(powod), powod.code, **params) if zmiana else powod
+
+
+def sciezki_skrocone(powod, *, obok=()):
+    """`powod` z NAZWAMI plików w parametrach ścieżek (AR-387) - to samo zdanie PL i kod, parametry ścieżek skrócone
+    do nazwy (`grid_model._ogon_sciezki`), rekurencyjnie w powodach zagnieżdżonych (`inner`), uwagach i liście `paths`.
+    Nazwa, którą w ZDANIU (ścieżki `powod` i powodów `obok` - inne człony tego samego zdania) noszą różne ścieżki,
+    zostaje pełną ścieżką: „a.fits / a.fits” z dwóch katalogów nie mówi, który plik gdzie stoi. Nazwy porównane bez
+    wielkości liter (jak Windows), ścieżki znak w znak - dwie ścieżki różne choćby wielkością liter katalogu to dwa
+    pliki dla zdania, a skrót powiedziałby jedną nazwę dwa razy. Powód bez kodu (proza) - bez zmian (ścieżka w prozie
+    zostaje); powód bez ścieżki do skrócenia - ten sam obiekt. Zdanie składa `tekst_powodu(sciezki_skrocone(...))` -
+    TA SAMA droga co pełna forma (wpis `objchg.item.<kod>`, parametry prozą przez `czytelny_powod`), więc tekst
+    systemu mówi tu dokładnie to, co w pełnym zdaniu; powód bez kompletnego wpisu katalogu - pełna proza. Zdanie
+    szuflady o własnym kluczu weźmie te same parametry skrócone."""
+    from horreum.gui.grid_model import _ogon_sciezki   # lazy: `grid_model` woła ten moduł leniwie
+    if not isinstance(powod, PowodPozycji):
+        return powod
+    sciezki = set()
+
+    def _zbierz(sciezka):
+        sciezki.add(sciezka)
+        return sciezka
+    for p in (powod, *obok):
+        _ze_skrotami(p, _zbierz)
+    nosiciele = {}                                     # nazwa → różne ścieżki, które ją niosą
+    for s in sciezki:
+        nosiciele.setdefault(_ogon_sciezki(s).casefold(), set()).add(s)
+
+    def _skrot(sciezka):
+        nazwa = _ogon_sciezki(sciezka)
+        return nazwa if nazwa and len(nosiciele.get(nazwa.casefold(), ())) == 1 else sciezka
+    return _ze_skrotami(powod, _skrot)
+
+
 def zdanie_bledu_wzoru(exc):
     """Zdanie paska dla odmowy wzoru nazwy (`naming.validate_template`/`compose_name`, AR-193, AR-368): powód z kodem
     `rename_tpl_*` w języku UI (`tekst_powodu`), a tekst `re.error` Pythona złego wyrażenia (parametr `detail` kodu

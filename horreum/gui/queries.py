@@ -5509,24 +5509,30 @@ def przebiegi_szuflady_izolowane(con):
             for r in _przebiegi_kart_szuflady(con) if r["fazy"]]
 
 
-def ostatni_przebieg_kart(con):
-    """Ostatni zapis kart do „Cofnij” po otwarciu bazy (AR-367): `{"run_id", "kiedy", "zakres"}` albo None.
-    „Cofnij” szuflady było stanem sesji - po zamknięciu okna zapisany przebieg zostawał z drogą wyłącznie
-    w CLI (`header-fix --undo N` per commit), a szuflada mówiła „pusta”.
+def ostatni_zapis_szuflady(con):
+    """Ostatni zapis szuflady Zbiorów do „Cofnij” po otwarciu bazy i po „Odrzuć” (AR-367, AR-381, AR-382):
+    `{"klinga": "karty", "run_id", "kiedy", "zakres"}`, `{"klinga": "nazwy", "run_id", "kiedy", "zapisane"}`
+    albo None. „Cofnij” szuflady było stanem sesji - po zamknięciu okna zapisany przebieg zostawał z drogą
+    wyłącznie w CLI (`header-fix --undo N` per commit, `rename --undo RUN`), a szuflada mówiła „pusta”.
 
-    Przebieg = ten z NAJNOWSZYM commitem spoza przebiegów zmiany obiektu (`object_change_run` - mają własne
+    Karty: przebieg z NAJNOWSZYM commitem spoza przebiegów zmiany obiektu (`object_change_run` - mają własne
     okno i wiersz Porządków); plik zapisany później przez zmianę obiektu chroni rdzeń przy kliku
-    (`undo_newer_write`). Bez cofania się do starszego przebiegu: ostatni cofnięty w całości to brak „Cofnij”,
-    nie „Cofnij” sprzed niego. `kiedy` - `commits.applied_at` tego commitu, `zakres` -
-    `writeback.przebieg_do_cofniecia` (tylko przy `zakres.cofnij`). None także wtedy, gdy w szufladzie
-    cokolwiek czeka - przebieg do podjęcia, zatrzymany izolacją albo nazwy z otwartym zamiarem
-    (`_przebiegi_kart_szuflady`, `_przebiegi_nazw_szuflady` - te same predykaty, które karmią podjęcie i zdania
-    pustej szuflady): wtedy szuflada mówi o nich, a żywe „Cofnij” wyłączyłoby to zdanie.
+    (`undo_newer_write`); `kiedy` - `commits.applied_at` tego commitu, `zakres` - `writeback.przebieg_do_cofniecia`
+    (tylko przy `zakres.cofnij`). Nazwy: przebieg z najnowszym zapisem nazw (`_ostatni_zapis_nazw`). Klinga
+    wygrywa NOWSZYM zapisem (porównanie chwil w SQL - `julianday` czyta zapis ze strefą i bez); remis - karty.
+    Bez cofania się do starszego zapisu: ostatni zapis cofnięty w całości (karty albo nazwy) to brak „Cofnij”,
+    nie „Cofnij” zapisu sprzed niego - także drugiej klingi. Historia nazw, w której zapisu nie da się przypisać
+    jednoznacznie, to JAWNA odmowa wyboru (None), gdy ten zapis mógłby być najnowszy - bez spadania do kart.
+
+    None także wtedy, gdy w szufladzie cokolwiek czeka - przebieg do podjęcia, zatrzymany izolacją albo nazwy
+    z otwartym zamiarem (`_przebiegi_kart_szuflady`, `_przebiegi_nazw_szuflady` - te same predykaty, które
+    karmią podjęcie i zdania pustej szuflady): wtedy szuflada mówi o nich, a żywe „Cofnij” wyłączyłoby to zdanie.
 
     JEDNA MIGAWKA WAL na wszystkie odczyty (własna transakcja odczytu zamykana wycofaniem; w transakcji
     wołającego - w niej, bez zamykania; wzór `writeback._klasy_przebiegu`, którego klasy wchodzą w tę samą
     transakcję): zapis innego połączenia między nimi nie złoży kandydata z jednej chwili i zakresu z innej.
-    Zmierzone na kopii pf4 (2026-10-27): 0,08 ms (mediana z 30)."""
+    Zmierzone na kopii pf4 (2026-10-27): odczyt kart 0,08 ms, nazw 2,1 ms (mediany z 30; 69 lokacji, przeszukiwanie
+    przypisań do 13 węzłów na lokację)."""
     from horreum import writeback          # lazy: rdzeń pisarza ciągnie astropy (wołający już go ma)
     wlasna = not con.in_transaction
     if wlasna:
@@ -5534,19 +5540,243 @@ def ostatni_przebieg_kart(con):
     try:
         if _przebiegi_kart_szuflady(con) or _przebiegi_nazw_szuflady(con):
             return None
-        r = con.execute(
+        karty = con.execute(
             "SELECT c.run_id, c.applied_at FROM commits c "
             "WHERE NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = c.run_id) "
             "ORDER BY c.id DESC LIMIT 1").fetchone()
-        if r is None:
+        nazwy = _ostatni_zapis_nazw(con)
+        if nazwy is not None and (karty is None or con.execute(
+                "SELECT julianday(?) > julianday(?)", (nazwy["kiedy"], karty["applied_at"])).fetchone()[0]):
+            # Nazwy NOWSZE niż ostatni zapis kart (albo kart nie ma). Zapis niejednoznaczny, cofnięty w całości
+            # albo z otwartym zamiarem (cofnięcie nazw w biegu albo przerwane - rozstrzyga rekoncyliacja) - bez
+            # „Cofnij”, także bez „Cofnij” starszych kart.
+            if nazwy["niejednoznaczny"] or nazwy["w_locie"] or not nazwy["zapisane"]:
+                return None
+            return {"klinga": "nazwy", "run_id": nazwy["run_id"], "kiedy": nazwy["kiedy"],
+                    "zapisane": nazwy["zapisane"]}
+        if karty is None:
             return None
-        zakres = writeback.przebieg_do_cofniecia(con, r["run_id"])
+        zakres = writeback.przebieg_do_cofniecia(con, karty["run_id"])
         if zakres is None or not zakres.cofnij:
             return None
-        return {"run_id": r["run_id"], "kiedy": r["applied_at"], "zakres": zakres}
+        return {"klinga": "karty", "run_id": karty["run_id"], "kiedy": karty["applied_at"], "zakres": zakres}
     finally:
         if wlasna:
             con.rollback()                 # odczyt - nic do zatwierdzenia
+
+
+def _ostatni_zapis_nazw(con):
+    """Najnowszy ZAPIS nazw szuflady (pod transakcją wołającego): `{"run_id", "kiedy", "zapisane", "w_locie",
+    "niejednoznaczny"}` albo None, gdy żaden wiersz spoza przebiegów zmiany obiektu nie został zapisany.
+
+    Przebieg nazw nie ma tabeli przebiegu ani czasu zapisu (`0005_rename.sql`: wiersz 'applied' SAM jest rekordem
+    undo; kolumny czasu wiersz nie ma), a zdarzenie `location.renamed` zapisu i cofnięcia nie niesie wiersza stagingu
+    (`repo.guard_file_rename` woła `_apply_relocation` bez `rename_id` - niesie go wyłącznie rekoncyliacja). Czas
+    zapisu wiersza = zdarzenie WPRZÓD na jego lokacji (`target` - indeks `idx_event_target`; pełny przegląd po
+    `verb` to 50 ms na kopii pf4): para `before = old_path`, `after = new_path` (cofnięcie ma parę odwrotną),
+    bez przeniesień zmiany obiektu (`$.reason` w ładunku). Wiersz bez takiego zdarzenia nie jest zapisem (kopia
+    zniknęła przy zapisie - 'skipped').
+    Przypisanie zdarzeń lokacji do jej wierszy - `_zapisy_lokacji` (fakt na wierszu, kierunek, okno, konflikt).
+
+    Wynik niesie przebieg wiersza z NAJNOWSZĄ granicą zapisu i flagę `niejednoznaczny`, gdy tego wiersza historia
+    lokacji nie przypisuje jednoznacznie: wołający odmawia wyboru, jeśli ta granica przekracza ostatni zapis kart
+    (inaczej nazwy i tak są starsze). Bez czasu na wierszu (migracja - rejestr) to jedyne rozstrzygnięcie, które nigdy
+    nie wskaże jako ostatniego zapisu, którego ostatnim nie był.
+
+    `zapisane` - wiersze 'applied' przebiegu (cel „Cofnij” nazw, `writeback.undo_renames`), `w_locie` - wiersz
+    przebiegu z otwartym zamiarem (`in_flight`). Wiersze przebiegów nazw spoza zmiany obiektu jednym literałem SQL,
+    zdarzenia per lokacja po `target`; zbiór to wiersze zapisanych zmian nazw (kopia pf4: 39 lokacji).
+
+    `cofniety` - wiersz 'skipped' BYŁ zapisem i został cofnięty: rdzeń stawia zmianie nazw 'skipped' wyłącznie przy
+    cofnięciu (`writeback._COFNIETO` - kod, a w wierszach sprzed kodów powodu sama proza) albo przy kopii, która
+    zniknęła przed zapisem (każdy inny powód - zapisu nie było)."""
+    from horreum import writeback          # lazy: rdzeń pisarza ciągnie astropy (wołający już go ma)
+    wiersze = con.execute(
+        "SELECT p.id, p.run_id, p.location_id, p.old_path, p.new_path, p.status, "
+        "  p.status = 'skipped' AND (p.reason_code = ? OR (p.reason_code IS NULL AND p.reason = ?)) AS cofniety "
+        "FROM pending_renames p "
+        "WHERE p.status IN ('applied', 'skipped') "
+        "  AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = p.run_id) "
+        "  AND p.id NOT IN (SELECT po.rename_id FROM pending_object_change po "
+        "                   WHERE po.rename_id IS NOT NULL) "
+        "ORDER BY p.id", (writeback._COFNIETO.code, str(writeback._COFNIETO))).fetchall()
+    po_lokacji = {}
+    for w in wiersze:
+        po_lokacji.setdefault(w["location_id"], []).append(w)
+    najnowszy = None                       # (granica zapisu - id zdarzenia, przebieg, jednoznaczny)
+    for lokacja, wiersze_lokacji in po_lokacji.items():
+        zdarzenia = con.execute(
+            "SELECT id, json_extract(payload, '$.before') AS przed, json_extract(payload, '$.after') AS po, "
+            "  json_extract(payload, '$.pending_rename') AS wiersz FROM event "
+            "WHERE target = ? AND verb = 'location.renamed' AND json_extract(payload, '$.reason') IS NULL "
+            "ORDER BY id", (f"location:{lokacja}",)).fetchall()
+        for w, granica, jednoznaczny in _zapisy_lokacji(wiersze_lokacji, zdarzenia):
+            if granica is not None and (najnowszy is None or granica > najnowszy[0]):
+                najnowszy = (granica, w["run_id"], jednoznaczny)
+    if najnowszy is None:
+        return None
+    zdarzenie, run_id, jednoznaczny = najnowszy
+    stan = con.execute(
+        "SELECT sum(status = 'applied') AS zapisane, sum(in_flight IS NOT NULL) AS w_locie "
+        "FROM pending_renames WHERE run_id = ?", (run_id,)).fetchone()
+    return {"run_id": run_id, "kiedy": con.execute("SELECT ts FROM event WHERE id = ?", (zdarzenie,)).fetchone()[0],
+            "zapisane": int(stan["zapisane"] or 0), "w_locie": bool(stan["w_locie"]),
+            "niejednoznaczny": not jednoznaczny}
+
+
+def _zapisy_lokacji(wiersze, zdarzenia):
+    """Zdarzenia `location.renamed` JEDNEJ lokacji (`id`, `przed`, `po`, `wiersz` = `$.pending_rename`; bez przeniesień
+    zmiany obiektu; rosnąco) przypisane do jej wierszy zmian nazw (`id`, `old_path`, `new_path`, `status` 'applied'
+    albo 'skipped', `cofniety`; rosnąco - kolejność stagingu) → `[(wiersz, granica, jednoznaczny)]`: `granica` - id zdarzenia
+    zapisu wiersza (przy niejednoznaczności - najnowszego zdarzenia, które mogło nim być), None - wiersz nie był
+    zapisem. Bez bazy - czysta reguła.
+
+      1. FAKT NA WIERSZU: zdarzenie z `pending_rename` tego wiersza (rekoncyliacja zamiaru) w kierunku zapisu
+         (`old → new`) albo cofnięcia (`new → old`) należy do niego - bez heurystyki: zapis znany z faktu jest
+         granicą wiersza bez sprawdzania okna (punkt 3 rozstrzyga wyłącznie, KTÓRE zdarzenie było zapisem).
+         Identyfikator wiersza spoza zbioru albo para spoza wiersza - zdarzenie cudze.
+      2. PRZYPISANIE: każde zdarzenie bez identyfikatora jest ZAPISEM wiersza, COFNIĘCIEM wiersza albo zdarzeniem
+         CUDZYM (przepięcie bez gestu nazw). Przypisanie spójne: zapisy idą w kolejności stagingu, także zapis z faktu
+         (nowy staging zaczyna od ścieżki, którą zostawił poprzedni zapis); wiersz 'applied' czeka na swój zapis -
+         dalszy wiersz nie zostaje zapisany przed nim. Wiersz 'skipped' mówi sam, czy był zapisem (`cofniety`, FAKT jak
+         w punkcie 1): cofnięty ma zapis i po nim cofnięcie (para odwrotna; cofnięcie przebiegu późniejszego przed
+         wcześniejszym - CLI `rename --undo` - wolno), pozostały (kopia zniknęła przed zapisem) zapisu nie ma i się go
+         przeskakuje - zdarzenie z jego parą nie udaje zapisu i cofnięcia. Liczą się WSZYSTKIE przypisania spójne
+         o najmniejszej liczbie zdarzeń cudzych, nie pierwsze
+         znalezione: A→B po zapisie B→A bywa zapisem następnego wiersza A→B albo cofnięciem wiersza B→A, a który zapis
+         był ostatni, mówi cała historia, nie kolejność próbowania. Para odwrotna sama w sobie niczego nie miesza:
+         A→B, potem B→A to zapis drugiego wiersza, gdy pierwszy dalej jest 'applied' (jego cofnięcia nie ma).
+      3. KONFLIKT (w każdym przypisaniu z punktu 2): zdarzenie cudze z parą wiersza w jego OKNIE (od najbliższego
+         zdarzenia innych wierszy przed jego zapisem do najbliższego po nim) albo wiersz cofnięty bez zdarzenia
+         cofnięcia - historia wiersza nie jest jednoznaczna; granica = najnowsze zdarzenie zapisu z jego parą w oknie.
+         Wiersz nie ma czasu stagingu, więc okno zaczyna się przed nim: przejście `new → old` PRZED zapisem wiersza nie
+         jest konfliktem - kończy się na jego starej ścieżce (lokacja przyszła tam przed stagingiem).
+      4. WYNIK: wiersz jednoznaczny wyłącznie wtedy, gdy wszystkie przypisania z punktu 2 dają mu tę samą granicę i
+         żadne nie widzi konfliktu; granica - najnowsza z nich. Przeszukiwanie ponad `_LIMIT_PRZYPISAN` węzłów albo
+         historia bez przypisania spójnego (fakty sprzeczne z kolejnością stagingu) - każdy wiersz niejednoznaczny,
+         granica = najnowsze zdarzenie z jego parą zapisu."""
+    po_id = {w["id"]: w for w in wiersze}
+    fakt_zapis, fakt_cofniecie, kroki, cudze = {}, {}, [], []
+    for z in zdarzenia:
+        w = po_id.get(z["wiersz"]) if z["wiersz"] is not None else None
+        para = (z["przed"], z["po"])
+        if w is not None and para == (w["old_path"], w["new_path"]) and w["id"] not in fakt_zapis:
+            fakt_zapis[w["id"]] = z["id"]
+            kroki.append((z, w))
+        elif w is not None and para == (w["new_path"], w["old_path"]) and w["id"] not in fakt_cofniecie:
+            fakt_cofniecie[w["id"]] = z["id"]
+        elif z["wiersz"] is None:
+            kroki.append((z, None))
+        else:
+            cudze.append(z)
+    przypisania = _przypisania_spojne(wiersze, kroki, fakt_zapis, fakt_cofniecie)
+    if not przypisania:
+        return [(w, max((z["id"] for z in zdarzenia if (z["przed"], z["po"]) == (w["old_path"], w["new_path"])),
+                        default=None), False) for w in wiersze]
+    warianty = [_granice_przypisania(wiersze, zapisy, cofniecia, cudze + obce, set(fakt_zapis))
+                for zapisy, cofniecia, obce in przypisania]
+    wynik = []
+    for n, w in enumerate(wiersze):
+        granice = {v[n][0] for v in warianty}
+        wynik.append((w, max((g for g in granice if g is not None), default=None),
+                      len(granice) == 1 and all(v[n][1] for v in warianty)))
+    return wynik
+
+
+# Przeszukiwanie przypisań jednej lokacji (`_zapisy_lokacji` punkt 2): ponad limit węzłów albo kroków historia lokacji
+# jest w całości niejednoznaczna (odmowa wyboru zamiast zgadywania).
+_LIMIT_PRZYPISAN = 20000
+_LIMIT_KROKOW = 200
+
+
+class _PonadLimit(Exception):
+    """Przeszukiwanie przypisań lokacji przekroczyło `_LIMIT_PRZYPISAN` węzłów."""
+
+
+def _przypisania_spojne(wiersze, kroki, fakt_zapis, fakt_cofniecie):
+    """Przypisania spójne o najmniejszej liczbie zdarzeń cudzych (`_zapisy_lokacji` punkt 2): lista `(zapisy,
+    cofniecia, cudze)` - id wiersza → id zdarzenia (z faktami) i zdarzenia bez identyfikatora uznane za cudze. Pusta,
+    gdy przeszukiwanie przekracza limit albo przypisania spójnego nie ma. `kroki` rosnąco: `(zdarzenie, wiersz)` -
+    zapis z faktu - albo `(zdarzenie, None)` - zdarzenie bez identyfikatora."""
+    if len(kroki) > _LIMIT_KROKOW:
+        return []
+    indeks = {w["id"]: n for n, w in enumerate(wiersze)}
+    bez_zapisu = {w["id"] for w in wiersze if w["status"] == "skipped" and not w["cofniety"]}
+    cofniete = {w["id"] for w in wiersze if w["status"] == "skipped" and w["cofniety"]}
+    najlepsze, stan = [], {"koszt": float("inf"), "wezly": 0}
+    zapisy, cofniecia, obce = {}, dict(fakt_cofniecie), []
+
+    def _krok(s, k):                         # k - pierwszy wiersz, którego zapis jeszcze nie przeszedł
+        stan["wezly"] += 1
+        if stan["wezly"] > _LIMIT_PRZYPISAN:
+            raise _PonadLimit
+        if len(obce) > stan["koszt"]:
+            return
+        if s == len(kroki):
+            if bez_zapisu & set(zapisy) or any(i not in zapisy or i not in cofniecia for i in cofniete):
+                return                       # wbrew faktowi wiersza 'skipped'
+            if len(obce) < stan["koszt"]:
+                stan["koszt"], najlepsze[:] = len(obce), []
+            najlepsze.append((dict(zapisy), dict(cofniecia), list(obce)))
+            return
+        z, fakt = kroki[s]
+        if fakt is not None:                 # zapis z faktu: wiersze przed nim zapisane albo bez zapisu
+            j = indeks[fakt["id"]]
+            if all(wiersze[n]["id"] in bez_zapisu for n in range(k, j)):
+                zapisy[fakt["id"]] = z["id"]
+                _krok(s + 1, j + 1)
+                del zapisy[fakt["id"]]
+            return
+        para = (z["przed"], z["po"])
+        for j in range(k, len(wiersze)):     # zapis wiersza j - wiersze bez zapisu przed nim przeskoczone
+            w = wiersze[j]
+            if w["id"] in fakt_zapis:
+                break                        # jego zapis z faktu jeszcze nie przyszedł
+            if (w["id"] not in bez_zapisu and para == (w["old_path"], w["new_path"])
+                    and fakt_cofniecie.get(w["id"], z["id"] + 1) > z["id"]):
+                zapisy[w["id"]] = z["id"]
+                _krok(s + 1, j + 1)
+                del zapisy[w["id"]]
+            if w["id"] not in bez_zapisu:
+                break                        # wiersz zapisany czeka na swój zapis
+        for w in wiersze:                    # cofnięcie zapisanego wiersza cofniętego
+            if (w["id"] in cofniete and w["id"] in zapisy and w["id"] not in cofniecia
+                    and para == (w["new_path"], w["old_path"])):
+                cofniecia[w["id"]] = z["id"]
+                _krok(s + 1, k)
+                del cofniecia[w["id"]]
+        obce.append(z)
+        _krok(s + 1, k)
+        obce.pop()
+    try:
+        _krok(0, 0)
+    except _PonadLimit:
+        return []
+    return najlepsze
+
+
+def _granice_przypisania(wiersze, wprzod, wstecz, cudze, fakty):
+    """`[(granica, jednoznaczny)]` wierszy w JEDNYM przypisaniu (`_zapisy_lokacji` punkt 3): `wprzod`/`wstecz` - id
+    wiersza → id zdarzenia zapisu/cofnięcia, `cudze` - zdarzenia spoza przypisania, `fakty` - wiersze z zapisem z
+    faktu (bez sprawdzania okna)."""
+    wlasne = {w["id"]: [x for x in (wprzod.get(w["id"]), wstecz.get(w["id"])) if x is not None] for w in wiersze}
+    wynik = []
+    for w in wiersze:
+        if w["id"] not in wprzod:
+            wynik.append((None, True))
+            continue
+        zapis = wprzod[w["id"]]
+        inne = [x for v in wiersze if v["id"] != w["id"] for x in wlasne[v["id"]]]
+        poczatek = max((x for x in inne if x < zapis), default=0)
+        koniec = min((x for x in inne if x > zapis), default=float("inf"))
+        para, przyjazd = {w["old_path"], w["new_path"]}, (w["new_path"], w["old_path"])
+        w_oknie = [] if w["id"] in fakty else [
+            z for z in cudze if poczatek < z["id"] < koniec and {z["przed"], z["po"]} == para
+            and not (z["id"] < zapis and (z["przed"], z["po"]) == przyjazd)]
+        jednoznaczny = not w_oknie and (w["status"] != "skipped" or w["id"] in wstecz)
+        granica = max([zapis] + [z["id"] for z in w_oknie if (z["przed"], z["po"]) == (w["old_path"], w["new_path"])])
+        wynik.append((granica, jednoznaczny))
+    return wynik
 
 
 def odrzucenia_szuflady(con, *, ts, actor):

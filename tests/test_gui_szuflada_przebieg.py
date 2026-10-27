@@ -1208,3 +1208,64 @@ def test_pole_wyniku_maluje_przez_elizje_zdania(qapp, tmp_path, monkeypatch):
         monkeypatch.undo()
         _zamknij_widok(v)
         con.close()
+
+
+# ============================================================ AR-387 - zdanie odmowy rekoncyliacji mówi nazwy plików
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_obu_nazw_mowi_nazwy_plikow_pelne_sciezki_w_szczegole(qapp, tmp_path, monkeypatch, lang):
+    """Odmowa rekoncyliacji „plik pod obiema nazwami” (prawdziwy rdzeń): zdanie szuflady mówi NAZWY obu plików, pełnej
+    ścieżki w nim nie ma - stoi w szczególe zdania (wskaźnik i podpowiedź pola) wierszem pełnego powodu. EN tak samo.
+    Falsyfikatory: zdanie z pełną formą powodu (wielokropek w środku zjadał właśnie nazwy); szczegół niepołożony."""
+    from horreum.gui.wb_worker import tekst_powodu
+    from horreum.item_reasons import z_bazy
+    from horreum.gui import queries
+    i18n.set_lang(lang)
+    _path, con, v, stara = _odmowa_obu_nazw(tmp_path, monkeypatch)
+    try:
+        v.set_writeback_busy(True)
+        v.set_writeback_busy(False)
+        tekst = v.drawer.result.text()
+        (w,), _czekajace = queries.powody_zamiarow_nazw(con, {r[0] for r in con.execute(
+            "SELECT run_id FROM pending_renames WHERE in_flight IS NOT NULL")})
+        nowa = con.execute("SELECT new_path FROM pending_renames WHERE in_flight IS NOT NULL").fetchone()[0]
+        assert os.path.basename(stara) in tekst and os.path.basename(nowa) in tekst, tekst
+        assert stara not in tekst and nowa not in tekst, tekst
+        assert v.drawer.result.szczegol() == tekst_powodu(z_bazy(w["reason"], w["reason_code"], w["reason_args"]))
+        assert stara in v.drawer.result.szczegol() and stara in v.drawer.result.toolTip()
+        if lang == "en":
+            assert not set(tekst) & _POLSKIE, tekst
+    finally:
+        i18n.set_lang("pl")
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_odmowa_rekoncyliacji_padla_mowi_tekst_systemu_przez_czytelny_powod(qapp, tmp_path, monkeypatch):
+    """Szew krótkiej formy z `czytelny_powod`: rekoncyliacja pada wyjątkiem systemu spoza klas (WinError 87 ze ścieżką
+    w zapisie `repr`; atrapa wyłącznie awarii - prawdziwy rdzeń zapisu i rekoncyliacji). Zdanie szuflady mówi tekst
+    systemu TĄ SAMĄ drogą co pełna forma: oczekiwanie liczy `czytelny_powod` w biegu testu, więc test mówi prawdę przed
+    i po zmianie tej funkcji. Falsyfikator: krótka forma z surową prozą parametru (podwojone ukośniki `repr`)."""
+    from horreum.gui.wb_worker import czytelny_powod
+    from horreum.item_reasons import z_bazy
+    from test_gui_grid_szuflada import _nazwy_rozdarte, _rekoncyliacja_obok
+    path, _pliki, run = _nazwy_rozdarte(tmp_path, monkeypatch)
+    con, v = _restart(path)
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(writeback, "_location_rename",
+                      lambda c, lid: (_ for _ in ()).throw(OSError(22, "Parametr jest niepoprawny", r"X:\L\a.fits", 87)))
+            assert [f.reason.code for f in _rekoncyliacja_obok(path)] == ["reconcile_failed"]
+        from horreum.gui import queries
+        (w,), _czekajace = queries.powody_zamiarow_nazw(con, {run})
+        detail = dict(z_bazy(w["reason"], w["reason_code"], w["reason_args"]).params)["detail"]
+        assert "\\\\" in detail, detail                  # tekst systemu ze ścieżką w zapisie `repr`
+        v.set_writeback_busy(True)
+        v.set_writeback_busy(False)
+        tekst = v.drawer.result.text()
+        assert czytelny_powod(detail) in tekst and "\\\\" not in tekst, tekst
+        assert v.drawer.result.szczegol() == "", v.drawer.result.szczegol()   # bez ścieżek w parametrach - bez szczegółu
+    finally:
+        _zamknij_widok(v)
+        con.close()

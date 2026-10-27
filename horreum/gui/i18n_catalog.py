@@ -3669,6 +3669,14 @@ CATALOG = {
                "many": "Ostatni zapis kart z {day}: {n} plików - „{undo}” cofa cały przebieg"},
         "en": {"one": "Last card write on {day}: {n} file - “{undo}” undoes the whole run",
                "other": "Last card write on {day}: {n} files - “{undo}” undoes the whole run"}},
+    # AR-382: to samo, gdy ostatnim zapisem szuflady jest zmiana NAZW (nowsza niż ostatni zapis kart); `n` - pliki
+    # pod nową nazwą, które „Cofnij” przemianuje z powrotem.
+    "grid.drawer.last_rename": {
+        "pl": {"one": "Ostatnia zmiana nazw z {day}: {n} plik - „{undo}” przywraca stare nazwy",
+               "few": "Ostatnia zmiana nazw z {day}: {n} pliki - „{undo}” przywraca stare nazwy",
+               "many": "Ostatnia zmiana nazw z {day}: {n} plików - „{undo}” przywraca stare nazwy"},
+        "en": {"one": "Last name change on {day}: {n} file - “{undo}” restores the old names",
+               "other": "Last name change on {day}: {n} files - “{undo}” restores the old names"}},
     "grid.drawer.retry_tip": {
         "pl": "Zmiany, których zapis się nie udał, a plików nie ruszył, wracają do szuflady - „{commit}” "
               "spróbuje jeszcze raz",

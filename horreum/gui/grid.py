@@ -5233,9 +5233,9 @@ class FramesView(QWidget):
             self._odswiez_pusta_szuflade()
 
     def set_writeback_busy(self, busy):
-        """DRUGA powierzchnia writebacku (dialog „Napraw nagłówek…") pisze do plików — wygaś
+        """DRUGA powierzchnia writebacku (dialog „Napraw nagłówek…") pisze do plików - wygaś
         Zatwierdź/Odrzuć/Cofnij (D-PD-3). To NIE to samo co `set_busy`: tam pisze pipeline do BAZY
-        i gasną wszystkie akcje zapisu; tu chodzi o jeden zasób — mutację plików pod jedną
+        i gasną wszystkie akcje zapisu; tu chodzi o jeden zasób - mutację plików pod jedną
         transakcją. Własny bieg gridu tej ścieżki nie używa (jego akcje są wtedy schowane paskiem
         postępu), więc flaga mówi wyłącznie o CUDZEJ operacji."""
         self._foreign_wb = busy
@@ -5247,6 +5247,9 @@ class FramesView(QWidget):
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(False)
             self.drawer.btn_retry.setEnabled(False)      # jak „Cofnij” (AR-347)
+            # Zapis tej sesji z innej powierzchni - jego wynik (choćby zapis samych blokad bez commitu) to stan
+            # szuflady po odroczeniu: odroczone „Cofnij” ostatniego zapisu gaśnie (AR-381).
+            self._cofnij_ostatniego_odlozone = False
         else:
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
@@ -5375,7 +5378,7 @@ class FramesView(QWidget):
         if run.touched:
             if self._run_id is None and not self._szuflada_do_stagingu():
                 return
-            self._dismiss_undo()                         # nowy staging unieważnia leftover „Cofnij" (wiz #3)
+            self._dismiss_undo()                         # nowy staging unieważnia leftover „Cofnij"
             if self._run_id is None:
                 self._run_id = uuid.uuid4().hex
         if self._run_id is not None:                     # idempotentny re-stage (R#5)
@@ -5657,12 +5660,18 @@ class FramesView(QWidget):
 
     def _szuflada_do_stagingu(self):
         """Bramka założenia przebiegu (staging makra, edycja komórki, „Popraw f/”, staging nazw): bez
-        blokady szuflady zdanie na pasku i w szufladzie, nic do stagingu nie wchodzi."""
+        blokady szuflady zdanie na pasku i w szufladzie, nic do stagingu nie wchodzi.
+
+        Przy odroczonym „Cofnij” ostatniego zapisu (`_cofnij_ostatniego_odlozone`, AR-381) zdanie odmowy mówi stan
+        szuflady, nie wynik gestu - jest zdaniem ODŚWIEŻENIA (`_zdanie_odswiezenia`): po zwolnieniu blokady
+        odświeżenie zdejmuje je i stawia „Cofnij”, pod trwającą blokadą zostaje (`_pusta`)."""
         zdanie = self._wez_szuflade()
         if zdanie is None:
             return True
         self.drawer.set_result(zdanie)
         self.status_message.emit(zdanie)
+        if self._cofnij_ostatniego_odlozone:
+            self._zdanie_odswiezenia = self.drawer.result.text()
         return False
 
     def _zwolnij_szuflade(self):
@@ -5767,7 +5776,7 @@ class FramesView(QWidget):
         from horreum.gui.wb_worker import tekst_powodu, wiersz_systemu
         from horreum.item_reasons import powod_okna
         try:
-            self._pusta()
+            self._pusta(odswiezenie=True)        # także odroczone „Cofnij” ostatniego zapisu (AR-381)
         except (OSError, sqlite3.Error) as exc:
             powod = powod_okna(exc)
             if getattr(powod, "code", None) == "prog_error":   # `ProgrammingError` - EXPECT, nie stan bazy
@@ -5820,36 +5829,69 @@ class FramesView(QWidget):
             return
         self._podejmij(przebiegi[0], len(przebiegi) - 1)
 
-    def _postaw_cofnij_ostatniego(self):
-        """Otwarcie bazy bez niczego w szufladzie: OSTATNI zapis kart z „Cofnij” całego przebiegu (AR-367,
-        `queries.ostatni_przebieg_kart`). „Cofnij” było stanem sesji, więc po zamknięciu okna zapisany przebieg
-        zostawał z drogą wyłącznie w CLI (`header-fix --undo N` per commit). Zdanie mówi datę zapisu - przebieg
-        mógł zapisać okno kart albo CLI, a pochodzenia przebiegu baza nie zna; etykieta, kropka, przycisk
-        i „Ponów nieudane (N)” są te same co po zapisie w sesji, a nowy staging zdejmuje je jak każde „Cofnij”
-        (`_dismiss_undo`).
+    # Odczyt ostatniego zapisu odmówiony cudzą blokadą szuflady (`_postaw_cofnij_ostatniego`, AR-381): ponawia go
+    # odświeżenie pustej szuflady (`_pusta(odswiezenie=True)` - aktywacja okna, wejście w Zbiory, koniec etapu), gdy
+    # blokada zejdzie. Gaśnie WYŁĄCZNIE w jawnych punktach przejęcia szuflady przez tę sesję - staging
+    # (`_dismiss_undo`), podjęcie zwolnionego przebiegu (`_pusta`), zapis tej sesji (`_start_writeback`) i zapis innej
+    # powierzchni tej sesji (`set_writeback_busy(True)`) - oraz na decyzji pod blokadą. Atrybut klasy - stan sesji
+    # widoku bez zmiany konstruktora (wzór `_odswiezenie_po_zbiorze`).
+    _cofnij_ostatniego_odlozone = False
+
+    def _postaw_cofnij_ostatniego(self, result=None):
+        """Szuflada bez niczego czekającego: OSTATNI zapis szuflady z „Cofnij” (AR-367, AR-382,
+        `queries.ostatni_zapis_szuflady`) - zapis kart: „Cofnij” całego przebiegu, zmiana nazw: „Cofnij” nazw
+        przebiegu. True, gdy „Cofnij” stanęło. „Cofnij” było stanem sesji, więc po zamknięciu okna zapisany przebieg
+        zostawał z drogą wyłącznie w CLI (`header-fix --undo N` per commit, `rename --undo RUN`). Zdanie mówi datę
+        zapisu - przebieg mógł zapisać okno kart albo CLI, a pochodzenia przebiegu baza nie zna; etykieta, kropka,
+        przycisk i „Ponów nieudane (N)” są te same co po zapisie w sesji, a nowy staging zdejmuje je jak każde
+        „Cofnij” (`_dismiss_undo`). `result` - zdanie gestu, który szufladę opróżnił („Odrzuć”, AR-381): idzie przed
+        zdaniem ostatniego zapisu. Zdanie odmowy, gdy szufladę trzyma cudza blokada (odroczenie) - wołający
+        sprawdza `is True`.
+
+        Wołają: otwarcie bazy (`_podejmij_przebieg_poprzedni`, nic nie czeka), „Odrzuć” obu kling i odświeżenie
+        pustej szuflady po odmowie cudzą blokadą (`_pusta`). NIE ogony zapisu i cofnięcia: zapis samych blokad nie
+        zakłada wiersza `commits` (`writeback` - commit powstaje przy pierwszym ruszonym pliku), więc odczyt dałby
+        „Cofnij” STARSZEGO przebiegu w miejscu zdania porażki.
 
         Decyzja pod blokadą szuflady, jak każde podjęcie stanu poprzedniej sesji (wzór AR-345: odczyt, blokada,
         ponowny odczyt pod nią): cudza blokada (inne okno albo CLI w biegu, choćby `header-fix --undo` tego
-        przebiegu) to brak „Cofnij”. Blokada schodzi zaraz po odczycie - przebiegu do prowadzenia nie ma,
-        a „Cofnij” w sesji też żyje bez niej (`_zwolnij_szuflade_gdy_pusta`). Baza bez zapisu kart nie zakłada
-        pliku blokady (pierwszy odczyt bez niej). Błąd bazy - bez „Cofnij” (odczyt pomocniczy nie wywraca
-        budowy widoku, wzór `_zakres_z_bazy`)."""
+        przebiegu) to brak „Cofnij” i odroczenie (`_cofnij_ostatniego_odlozone`); flagę gasi wyłącznie decyzja pod
+        blokadą - pierwszy odczyt bez niej jej nie rusza. Blokadę wziętą tu oddaje zaraz po
+        odczycie - przebiegu do prowadzenia nie ma, a „Cofnij” w sesji też żyje bez niej
+        (`_zwolnij_szuflade_gdy_pusta`); blokady trzymanej już przez okno („Odrzuć” własnego przebiegu) nie rusza -
+        oddaje ją `_sync_staging_mutex` wołającego. Baza bez zapisu nie zakłada pliku blokady (pierwszy odczyt bez
+        niej). Błąd bazy - bez „Cofnij” (odczyt pomocniczy nie wywraca budowy widoku, wzór `_zakres_z_bazy`)."""
         try:
-            if queries.ostatni_przebieg_kart(self.con) is None or self._wez_szuflade() is not None:
-                return
+            if queries.ostatni_zapis_szuflady(self.con) is None:
+                return False
+            wzieta = self._blokada_szuflady is None or not self._blokada_szuflady.isLocked()
+            odmowa = self._wez_szuflade()
+            if odmowa is not None:
+                self._cofnij_ostatniego_odlozone = True
+                return odmowa
             try:
-                ostatni = queries.ostatni_przebieg_kart(self.con)
+                ostatni = queries.ostatni_zapis_szuflady(self.con)
             finally:
-                self._zwolnij_szuflade()
+                if wzieta:
+                    self._zwolnij_szuflade()
         except sqlite3.Error:
-            return
+            return False
+        self._cofnij_ostatniego_odlozone = False
         if ostatni is None:
-            return
+            return False
+        dzien, cofnij = self._dzien_zapisu(ostatni["kiedy"]), i18n.t("grid.action.undo")
+        if ostatni["klinga"] == "nazwy":
+            n = ostatni["zapisane"]
+            zdanie = i18n.t_plural("grid.drawer.last_rename", n, day=dzien, undo=cofnij)
+            self._postaw_cofnij_nazw(ostatni["run_id"], " · ".join(z for z in (result, zdanie) if z), n)
+            self._pokaz_ponowienie("nazwy", ostatni["run_id"])
+            return True
         zakres = ostatni["zakres"]
         zdanie = i18n.t_plural("grid.drawer.last_write", zakres.zatwierdzone + zakres.do_sprawdzenia,
-                               day=self._dzien_zapisu(ostatni["kiedy"]), undo=i18n.t("grid.action.undo"))
-        self._postaw_cofnij_przebiegu(ostatni["run_id"], zdanie, zakres)
+                               day=dzien, undo=cofnij)
+        self._postaw_cofnij_przebiegu(ostatni["run_id"], " · ".join(z for z in (result, zdanie) if z), zakres)
         self._pokaz_ponowienie("karty", ostatni["run_id"])
+        return True
 
     @staticmethod
     def _dzien_zapisu(kiedy):
@@ -5956,7 +5998,8 @@ class FramesView(QWidget):
     }
 
     def _zdanie_wylaczonych(self):
-        """`(etykieta, droga)` pustej szuflady przy przebiegach wyłączonych z podjęcia albo `(None, None)`.
+        """`(etykieta, droga, szczegół)` pustej szuflady przy przebiegach wyłączonych z podjęcia albo
+        `(None, None, "")`.
         Karty zatrzymane izolacją: etykieta liczy WSZYSTKIE czekające wpisy tych przebiegów, droga mówi gest
         i wiersz Porządków właściwy fazie: zapis czekający na dokończenie (`written`) - „Dokończ zapis”, zapis
         przerwany (faza otwarta) - „Przywróć nagłówek”/„Zwolnij”. Same nazwy z otwartym zamiarem (AR-316):
@@ -5967,7 +6010,15 @@ class FramesView(QWidget):
 
         Trzy odczyty (izolowane, nazwy w locie, powody zamiarów) w JEDNEJ migawce WAL (własna transakcja odczytu
         zamykana wycofaniem; w transakcji wołającego - w niej; wzór `writeback._klasy_przebiegu`): rekoncyliacja
-        innego połączenia między nimi nie złoży etykiety zamiaru otwartego z drogą zamiaru już rozstrzygniętego."""
+        innego połączenia między nimi nie złoży etykiety zamiaru otwartego z drogą zamiaru już rozstrzygniętego.
+
+        Powód odmowy rekoncyliacji mówi NAZWY plików (AR-387, decyzja CEO): pełne ścieżki z parametrów powodu
+        (`plik pod obiema nazwami (X:\\…\\a.fits / …)`) zjadał wielokropek w środku zdania szuflady
+        (`grid_selection.elizja_zdania`) - właśnie nazwy, po które człowiek patrzy. Krótka forma
+        (`wb_worker.sciezki_skrocone` i zdanie tą samą drogą `tekst_powodu`; kolizje nazw liczone na wszystkich
+        odmowach zdania - te same nazwy z różnych katalogów zostają pełnymi ścieżkami), a pełny powód każdej skróconej
+        odmowy idzie wierszem do szczegółu zdania (wskaźnik i podpowiedź pola, `EtykietaBledu.ustaw`). Powód bez
+        ścieżek - bez szczegółu."""
         wlasna = not self.con.in_transaction
         if wlasna:
             self.con.execute("BEGIN")
@@ -5980,8 +6031,8 @@ class FramesView(QWidget):
             if wlasna:
                 self.con.rollback()                      # odczyt - nic do zatwierdzenia
         if not izolowane and not nazwy:
-            return None, None
-        drogi = []
+            return None, None, ""
+        drogi, szczegoly = [], []
         if izolowane:
             fazy = {f for p in izolowane for f in p["fazy"]}
             nav = i18n.t("nav.porzadki")
@@ -6003,22 +6054,26 @@ class FramesView(QWidget):
             # rozstrzygnie - powód i droga człowieka per kod (AR-347): szablon nie dokleja już „rozstrzyga
             # człowiek”, które cztery powody same niosą („rozstrzyga człowiek - rozstrzyga człowiek”), a przy
             # kodach przejściowych było fałszem.
-            from horreum.gui.wb_worker import tekst_powodu
+            from horreum.gui.wb_worker import sciezki_skrocone, tekst_powodu
             from horreum.item_reasons import KODY_PRZEJSCIOWE_REKONCYLIACJI, z_bazy
             powody = list(dict.fromkeys((w["reason"], w["reason_code"], w["reason_args"]) for w in odmowy))
+            odtworzone = [z_bazy(*t) for t in powody]
             receive, nav_d = i18n.t("pipeline.receive"), i18n.t("nav.dostawa")
             if not powody or czekajace or any(t[1] in KODY_PRZEJSCIOWE_REKONCYLIACJI for t in powody):
                 drogi.append(i18n.t("grid.drawer.names_held_way", receive=receive, nav=nav_d))
-            for trojka in powody:                        # jeden człon na odrębny powód
-                czlon = i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(z_bazy(*trojka)))
+            for trojka, powod in zip(powody, odtworzone):   # jeden człon na odrębny powód
+                skrot = sciezki_skrocone(powod, obok=odtworzone)
+                czlon = i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(skrot))
                 if trojka[1] not in KODY_PRZEJSCIOWE_REKONCYLIACJI:
                     czlon += i18n.t(self._DROGI_ODMOWY_NAZW[trojka[1]], receive=receive, nav=nav_d)
                 drogi.append(czlon)
+                if skrot is not powod:               # skrót zmienił ścieżkę - pełny powód do szczegółu
+                    szczegoly.append(tekst_powodu(powod))
         etykieta = (i18n.t_plural("grid.drawer.pending_isolated", sum(p["n"] for p in izolowane)) if izolowane
                     else i18n.t_plural("grid.drawer.pending_names_held", n_nazw))
-        return etykieta, " · ".join(drogi)
+        return etykieta, " · ".join(drogi), "\n".join(szczegoly)
 
-    def _pusta(self, result=None):
+    def _pusta(self, result=None, *, ostatni=False, odswiezenie=False):
         """Pusta szuflada (licznik 0) - etykieta pustostanu albo, przy przebiegach wyłączonych z podjęcia
         (izolacja kart, zamiar nazw), zdanie „N zmian czeka…” (`_zdanie_wylaczonych`). `result` jak
         w `set_count`; przy przebiegach wyłączonych bez `result` droga wchodzi w puste pole wyniku (zdanie
@@ -6032,9 +6087,20 @@ class FramesView(QWidget):
         przebiegów wciąż wyłączonych (`_zdanie_wylaczonych`), gdy takie są obok. Kropka zmian czekających poza
         szufladą (`StagingDrawer.set_count(zatrzymane=…)`, AR-316) stoi przy obu stanach „czeka, ale nie
         tutaj”: wyłączonych i zwolnionych niepodjętych - wtedy bez Zatwierdź/Odrzuć (AR-323). Podjęcie bez
-        `result` (odświeżenie, nie gest) mówi zdaniem podjęcia (`picked_up`)."""
+        `result` (odświeżenie, nie gest) mówi zdaniem podjęcia (`picked_up`).
+
+        PUSTOSTAN Z „COFNIJ” OSTATNIEGO ZAPISU (AR-381): gdy nic nie czeka ani nie jest wyłączone, szuflada stawia
+        „Cofnij” ostatniego zapisu (`_postaw_cofnij_ostatniego`) w dwóch chwilach - po „Odrzuć” obu kling
+        (`ostatni`: nowy staging zdjął żywe „Cofnij”, a odrzucenie go nie oddawało - trzeba było restartu) i przy
+        odświeżeniu pustej szuflady (`odswiezenie`, `_odswiez_pusta_szuflade`) po odmowie cudzą blokadą przy budowie
+        (`_cofnij_ostatniego_odlozone`), gdy pole nie niesie zdania gestu. NIE w każdym `_pusta`: ogony zapisu
+        i gestów (zapis samych blokad nie zakłada commitu) dostałyby „Cofnij” STARSZEGO zapisu w miejscu swojego
+        zdania. Odroczenie gaśnie w jawnych punktach przejęcia szuflady przez tę sesję (komentarz przy fladze) -
+        tu przy podjęciu zwolnionego przebiegu. Ponowienie odmówione znów cudzą blokadą zostawia zdanie odświeżenia
+        o niej (świeże) zamiast pustego pola."""
         stan, czlon, gotowe = self._podejmij_zwolnione()
         if stan == "podjety":
+            self._cofnij_ostatniego_odlozone = False     # szufladę przejął przebieg podjęty w tej sesji
             self._zdanie_odswiezenia = ""
             self._refresh_drawer()
             if not self._zbior_w_drodze():       # bez przeładowania podgląd czekających od razu
@@ -6076,19 +6142,28 @@ class FramesView(QWidget):
             # zwolnionych (krótka; zdanie jest elidowane, etykieta nie), a zwolnione nie przesłaniają
             # przebiegu zatrzymanego: przy cudzej blokadzie zwykły przebieg odmówiony przy otwarciu czeka
             # w `_wylaczone_znane` razem z zatrzymanym izolacją.
-            etykieta, droga = self._zdanie_wylaczonych()
+            etykieta, droga, szczegol = self._zdanie_wylaczonych()
             zdanie = " · ".join(z for z in (result, czlon, etykieta, droga) if z)
             self._zdanie_odswiezenia = zdanie if result is None else ""
             self.drawer.set_count(0, result=zdanie, label=i18n.t_plural("grid.drawer.pending_ready", gotowe),
                                   zatrzymane=zatrzymane)
+            self._podpowiedz_wyniku(szczegol)    # pełne ścieżki odmów rekoncyliacji (AR-387)
             if akcje:
                 self.drawer.set_commit_actions_visible(False)
             return
-        etykieta, droga = self._zdanie_wylaczonych()
+        etykieta, droga, szczegol = self._zdanie_wylaczonych()
         if etykieta is None:
+            odmowa = ""
+            if (ostatni or (odswiezenie and self._cofnij_ostatniego_odlozone
+                            and (wlasne or not self.drawer.result.text()))):
+                postawione = self._postaw_cofnij_ostatniego(result)
+                if postawione is True:
+                    self._zdanie_odswiezenia = ""
+                    return
+                odmowa = postawione or ""
             if wlasne:
-                result = ""
-            self._zdanie_odswiezenia = ""
+                result = odmowa                  # zdanie odświeżenia schodzi - zostaje świeża odmowa blokady
+            self._zdanie_odswiezenia = result if wlasne else ""
             self.drawer.set_count(0, result=result)
             if akcje:
                 self.drawer.set_commit_actions_visible(True)
@@ -6097,6 +6172,8 @@ class FramesView(QWidget):
             result = droga                       # pusta albo zdanie poprzedniego odświeżenia
         self._zdanie_odswiezenia = droga
         self.drawer.set_count(0, result=result, label=etykieta, zatrzymane=zatrzymane)
+        if result == droga:                      # droga w polu - pełne ścieżki odmów w szczególe (AR-387)
+            self._podpowiedz_wyniku(szczegol)
         if akcje:
             self.drawer.set_commit_actions_visible(False)
 
@@ -6199,6 +6276,7 @@ class FramesView(QWidget):
         TUTAJ zostają wyłącznie rzeczy widżetowe (pasek szuflady, wygaszenie „Do stagingu")."""
         if self._wb.is_busy or self._foreign_wb:         # jeden writeback naraz (akcje i tak schowane)
             return
+        self._cofnij_ostatniego_odlozone = False         # zapis tej sesji przejmuje szufladę (AR-381)
         self._wb_target_id = target_id
         self.drawer.begin_progress(0)
         self.macro_bar.btn_stage.setEnabled(False)       # bez nowego stagingu w biegu
@@ -6492,13 +6570,19 @@ class FramesView(QWidget):
             self.drawer.layout().addWidget(self._undo_btn)
 
     def _dismiss_undo(self):
-        """Nowa operacja stagingu UNIEWAŻNIA „Cofnij" poprzedniego commitu (transient undo wygasa — inny
+        """Nowa operacja stagingu UNIEWAŻNIA „Cofnij" poprzedniego commitu (transient undo wygasa - inny
         run w toku). Chowa przycisk + zeruje `_undo_mode`, żeby leftover „Cofnij" nie dispatchował undo
         starej klingi na wierzch świeżego stagingu = osierocenie pending + zakleszczenie mutexa bez
-        widocznego powodu (recenzent #1, wizytator #3). Wołane na starcie stagingu obu kling."""
+        widocznego powodu. Wołane na starcie stagingu obu kling.
+
+        Staging to przejęcie szuflady przez gest tej sesji - gasi też odroczone „Cofnij” ostatniego zapisu
+        (`_cofnij_ostatniego_odlozone`, AR-381): po zwolnieniu cudzej blokady własny przebieg zamknięty bez zapisu
+        (ponowny staging do zera, awaria) nie dostanie przy odświeżeniu „Cofnij” STARSZEGO zapisu w miejscu
+        swojego zdania."""
         if hasattr(self, "_undo_btn"):
             self._undo_btn.setVisible(False)
         self._undo_mode = None
+        self._cofnij_ostatniego_odlozone = False
 
     def _dispatch_undo(self):
         """Współdzielony „Cofnij" woła undo AKTYWNEJ klingi wg `_undo_mode` (R1 #3, init None). Cofnięcie
@@ -6734,7 +6818,9 @@ class FramesView(QWidget):
         # „Cofnij” (AR-345); dawniej zostawały zmienione z drogą wyłącznie przez CLI.
         zakres = self._zakres_z_bazy(run_id)
         if not self._postaw_cofnij_przebiegu(run_id, zdanie, zakres, wczesniej=True):
-            self._pusta(result=zdanie + self._czlon_otwartych(zakres))   # trwałe sprzężenie w szufladzie (#3)
+            # Trwałe sprzężenie w szufladzie (#3); przebieg bez zapisanych plików oddaje „Cofnij” OSTATNIEGO zapisu,
+            # które nowy staging zdjął (AR-381) - dawniej wracało dopiero po restarcie okna.
+            self._pusta(result=zdanie + self._czlon_otwartych(zakres), ostatni=True)
         self._sync_staging_mutex()
         self.status_message.emit(zdanie)
 
@@ -6855,7 +6941,7 @@ class FramesView(QWidget):
         if run.touched:
             if not otwarty and not self._szuflada_do_stagingu():   # szufladę prowadzi inne okno (AR-280)
                 return
-            self._dismiss_undo()                         # nowy staging unieważnia leftover „Cofnij" (wiz #3)
+            self._dismiss_undo()                         # nowy staging unieważnia leftover „Cofnij"
             if not otwarty:
                 self._rename_run_id = uuid.uuid4().hex
                 self._rename_run_committed = False
@@ -7036,6 +7122,6 @@ class FramesView(QWidget):
         else:
             self._rename_run_id = None
             self._rename_run_committed = False
-            self._pusta(result=zdanie)
+            self._pusta(result=zdanie, ostatni=True)    # „Cofnij” ostatniego zapisu wraca (AR-381, lustro kart)
         self._sync_staging_mutex()
         self.status_message.emit(zdanie)

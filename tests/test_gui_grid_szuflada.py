@@ -2881,7 +2881,7 @@ def test_odmowa_rekoncyliacji_nazw_mowi_powod_w_szufladzie(qapp, tmp_path, monke
     przed rekoncyliacją ogłoszony jako odmowa)."""
     import shutil
     from horreum.gui.wb_worker import tekst_powodu
-    from horreum.item_reasons import z_bazy
+    from horreum.item_reasons import PowodPozycji, z_bazy
     if przerwanie == "smierc":
         path, _pliki, run = _nazwy_przerwane_smiercia(tmp_path, monkeypatch)
         czeka = 3
@@ -2901,10 +2901,15 @@ def test_odmowa_rekoncyliacji_nazw_mowi_powod_w_szufladzie(qapp, tmp_path, monke
         assert w["reason_code"] == "intent_both_names" and czekajace == 0
         v.set_writeback_busy(True)
         v.set_writeback_busy(False)
-        powod = tekst_powodu(z_bazy(w["reason"], w["reason_code"], w["reason_args"]))
+        # Zdanie mówi NAZWY plików, pełny powód (ze ścieżkami) stoi w szczególe zdania (AR-387). Wyrocznia z
+        # `os.path.basename`, nie funkcją pod testem.
+        odmowa = z_bazy(w["reason"], w["reason_code"], w["reason_args"])
+        powod = tekst_powodu(PowodPozycji(str(odmowa), odmowa.code, **{
+            n: os.path.basename(x) if n in ("src", "dst") else x for n, x in odmowa.params}))
         assert v.drawer.result.text() == (i18n.t("grid.drawer.names_held_refused", reason=powod)
                                           + i18n.t("grid.drawer.names_way_both", receive=i18n.t("pipeline.receive"),
                                                    nav=i18n.t("nav.dostawa")))
+        assert stara not in v.drawer.result.text() and v.drawer.result.szczegol() == tekst_powodu(odmowa)
         assert v.drawer.result.text().count("rozstrzyga człowiek") == 1, v.drawer.result.text()
         assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_names_held", czeka)
         os.remove(stara)
@@ -2931,7 +2936,7 @@ def test_powod_zamiaru_spoza_przebiegow_zdania_nie_trafia_do_zdania(qapp, tmp_pa
     import sqlite3
     from horreum import repo
     from horreum.gui.wb_worker import tekst_powodu
-    from horreum.item_reasons import z_bazy
+    from horreum.item_reasons import PowodPozycji, z_bazy
     from test_rename import _bez_kompensacji, _pad_raz
     path, con, _p = _baza_szuflady(tmp_path, 6)
     lok = con.execute("SELECT id, path, mtime FROM location ORDER BY id").fetchall()
@@ -2965,9 +2970,10 @@ def test_powod_zamiaru_spoza_przebiegow_zdania_nie_trafia_do_zdania(qapp, tmp_pa
         (wc,), czekajace = queries.powody_zamiarow_nazw(con, {"A", "C"})
         assert wc["run_id"] == "C" and czekajace == 1
 
-        def _odmowa(w):
-            return (i18n.t("grid.drawer.names_held_refused",
-                           reason=tekst_powodu(z_bazy(w["reason"], w["reason_code"], w["reason_args"])))
+        def _odmowa(w):                                  # nazwy plików zamiast ścieżek (AR-387) - `os.path.basename`
+            p = z_bazy(w["reason"], w["reason_code"], w["reason_args"])
+            krotki = PowodPozycji(str(p), p.code, **{n: os.path.basename(x) if n == "path" else x for n, x in p.params})
+            return (i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(krotki))
                     + i18n.t("grid.drawer.names_way_check"))
         assert _odmowa(wb) != _odmowa(wc)
         assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_names_held", 3 + 1)

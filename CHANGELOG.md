@@ -6,6 +6,61 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.22.0] - 2026-10-27
+
+Wydanie o **Planerze, który mówi, od czego odchylono progi, Porządkach bez zamrożenia okna i cofnięciu zapisu kart,
+które przeżywa restart i mówi, co zostało**. Tytuł paska progów Planera podaje wartość domyślną przy każdym zmienionym
+progu, a noc planu wybiera przełącznik „bieżąca noc”. Wejście w Porządki nie zatrzymuje okna - liczby dochodzą w tle.
+Po ponownym otwarciu programu ostatni zapis kart cofa się jednym „Cofnij” w szufladzie. **Schemat bazy bez zmian
+(47)** - baza otwarta w 0.20.0 albo 0.21.0 otwiera się tak samo; baza ze starszej wersji przechodzi tę samą migrację
+co w 0.20.0, więc przed pierwszym uruchomieniem zrób kopię pliku bazy.
+
+### Dodane
+
+- **„Cofnij” ostatniego zapisu kart po ponownym otwarciu programu:** szuflada zmian pokazuje ostatni przebieg zapisu
+  kart zdaniem „Ostatni zapis kart z RRRR-MM-DD: N plików - „Cofnij” cofa cały przebieg” z przyciskiem „Cofnij”.
+  Dawniej po zamknięciu okna zostawała tylko droga przez wiersz poleceń. Nowa zmiana w szufladzie zdejmuje to zdanie,
+  a „Ponów nieudane (N)” tego samego przebiegu wraca obok.
+- **Przełącznik „bieżąca noc” w wierszu „Noc” Planera:** zaznaczony domyślnie - plan liczy się na bieżącą noc i noc
+  nie trafia do ustawień; wybór daty w polu zdejmuje przełącznik. Zastępuje pole startujące od daty 1970: Tab wychodzi
+  z pola, a kalendarz otwiera się na bieżącej nocy.
+- **Cofnięcie zapisu kart mówi o klatkach bez dowodu:** gdy po cofnięciu dopisania karty `OBJECT` klatka zostaje przy
+  obiekcie z nagłówka, a nie ma dowodu, że nadała go cofnięta karta, zdanie wyniku podaje ich liczbę zamiast milczeć.
+
+### Zmienione
+
+- **Tytuł paska progów Planera** dopisuje wartość domyślną przy zmienionym progu („rozmiar ≥8′ (domyślnie 6′)”) oraz
+  człony „koszt ≤N” i „status: …” przy włączonym progu kosztu i filtrze statusu; pełny tekst stoi w podpowiedzi.
+- **Planer w biegu Dostawy:** gasną wyłącznie gesty zapisu do bazy (zapis i zdjęcie celu, „Park…”, sieroty) - plan
+  zostaje czytelny i sortowalny, a progi czynne; po końcu biegu plan liczy się dokładnie raz. Lista „Porządek” i chipy
+  zestawów nie gubią fokusu ani otwartej listy przy przeliczeniu.
+- **Wejście w Porządki** nie zatrzymuje okna: liczniki liczą się w tle (klik „Porządki” blokował okno ~1,1 s, teraz
+  ~20 ms; pomiar natywny, mediana). Do wyniku lista wygląda jak przy pierwszym montażu, a klik w wiersz w tym czasie
+  wykona się po przyjściu liczb - wyjście z listy go odwołuje.
+- **Zdania szuflady:** zapis w przebiegu z wcześniejszymi plikami mówi „N zapisane teraz · … · razem M w przebiegu”;
+  długie zdanie skraca się wielokropkiem w środku, a początek i „(commit N)” zostają widoczne (całość w podpowiedzi);
+  odmowa uzgodnienia nazw podaje drogę dla każdego powodu.
+- **Okna kart** („Zatwierdź nazwy ze ścieżki”, „Napraw nagłówek”) pokazują „Cofnij” tylko wtedy, gdy zadziała: po
+  zapisie przerwanym w miejscu bez przycisku, po niepotwierdzonej podmianie pliku z „do sprawdzenia”, a gdy stanu
+  zapisu nie da się odczytać - ze zdaniem zamiast przycisku.
+- **`horreum header-fix --undo 1,2`** cofa cały przebieg tą samą drogą co „Cofnij” w szufladzie (najpierw sprawdza, że
+  podane commity należą do jednego przebiegu).
+- **Wiersz Porządków „Niedokończone cofnięcia zapisu kart”** liczy się szybciej (na bazie z 220 cofnięciami ~4,5 s →
+  ~20 ms) z tym samym wynikiem.
+- **Okno żniw:** pierwszy wybór folderu startuje w polu, w archiwum albo w folderze domowym, nie w katalogu uruchomienia
+  programu.
+
+### Naprawione
+
+- **Pole „Noc” Planera:** naciśnięcie ramki pola przestawiało noc o dobę albo rok i zdejmowało przełącznik „bieżąca
+  noc”, więc plan liczył się dla złej nocy (pole daty z kalendarzem w Qt 6.9.2). Klawisze, kółko z fokusem i kalendarz
+  działają jak dawniej, wygląd pola bez zmian.
+- **Cofnięcie przerwane w każdej drodze** (szuflada, okno kart, wiersz poleceń) zostawia ślad i pokazuje się
+  w Porządkach jako „Dokończ cofnięcie”; cofnięcie domknięte do końca z listy wypada.
+- **Błąd wzoru nazwy:** nieprawidłowe wyrażenie w szablonie daje zdanie z powodem zamiast „NoneType”, szczegół błędu
+  wyrażenia trafia do szuflady w każdej drodze, odmowa mówi etykietą tokenu z edytora, a pozycja spoza edytora pokazuje
+  się jako „folder: poziom …”.
+
 ## [0.21.0] - 2026-10-26
 
 Wydanie o **kółku myszy, które nie zmienia pól bez kliknięcia, i „Cofnij”, które cofa cały przebieg szuflady**.
@@ -1766,7 +1821,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.21.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/abo-t/horreum/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/abo-t/horreum/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/abo-t/horreum/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/abo-t/horreum/compare/v0.18.0...v0.19.0

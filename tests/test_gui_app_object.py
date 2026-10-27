@@ -900,7 +900,7 @@ def test_podpowiedz_kopii_nieczytelnych_liczy_blad_bazy_OSOBNO(view):
     „rodzaj nieznany" tylko przy liczbie > 0. Wpadnięcie do rodzajów plikowych kazałoby szukać winy
     w pliku, a do „nieznanego" - ukryłoby, że wiadomo, co zawiodło.
 
-    Falsyfikator: zdejmij człon `'db'` z `pipeline.unreadable_kinds_text` → podpowiedź nie ma „baza 1"
+    Falsyfikator: zdejmij człon `'db'` z `dostawa_bramka.unreadable_kinds_text` → podpowiedź nie ma „baza 1"
     i asercja czerwienieje."""
     v, con, ids = view
     loc = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",

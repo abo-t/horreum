@@ -2088,10 +2088,11 @@ def test_przelaczenie_bazy_w_trakcie_licznikow_nie_przyklada_starego_wyniku(qapp
 def test_klik_w_wiersz_Porzadkow_przed_pierwszym_rachunkiem_czeka(qapp, tmp_path, monkeypatch):
     """AR-175: do pierwszego rachunku wiersze akcyjne są wygaszone z podpowiedzią „liczę” - prawdziwy
     klik niczego nie otwiera (wiersz „?” bez rachunku poszedłby do perspektywy zamiast do Dostawy).
-    Wejście w Porządki w czasie rachunku montażu nie liczy drugi raz na wątku GUI - czeka na bieg
-    w drodze. Klik w czasie rachunku NIE przepada: po wyniku prowadzi sam, bez drugiego kliku.
+    Wejście w Porządki w czasie rachunku montażu nie liczy drugi raz - ani na wątku GUI, ani drugim
+    biegiem w tle (AR-337): czeka na bieg w drodze, do wyniku jest jeden rachunek. Klik w czasie
+    rachunku NIE przepada: po wyniku prowadzi sam, bez drugiego kliku.
     Mutanty: wiersze aktywne od budowy (klik otwiera perspektywę); wejście bez czekania na bieg
-    w drodze (rachunek na wątku GUI); klik czekający zgubiony."""
+    w drodze (drugi rachunek: na wątku GUI albo w tle); klik czekający zgubiony."""
     from PySide6.QtTest import QTest
     from horreum.gui import i18n
     _w_tle(monkeypatch)
@@ -2117,8 +2118,10 @@ def test_klik_w_wiersz_Porzadkow_przed_pierwszym_rachunkiem_czeka(qapp, tmp_path
         assert glowny not in watki, "wejście liczyło na wątku GUI zamiast czekać na bieg w drodze"
         brama.set()
         _po_rachunku(win)
+        _pompuj()
         assert it.toolTip() != i18n.t("busy.counting_tasks")
         assert otwarte == [PRESET_DUPS], "klik sprzed wyniku wykonany po pierwszym rachunku"
+        assert len(watki) == 1, "wejście w trakcie rachunku montażu policzyło drugi raz"
     finally:
         brama.set()
         win.close()
@@ -2666,4 +2669,555 @@ def test_dlugi_raport_po_krotkim_ma_szerokosc_etykiety_od_razu(qapp, tmp_path):
         assert not tekst.endswith("…") and szerokosc < win.statusBar().width() // 2, "test nie mierzy etykiety"
         assert rl.width() >= szerokosc, (rl.width(), szerokosc)
     finally:
+        win.close()
+
+
+# ═════════════ AR-337: wejście i powrót liczą w tle, lista nieaktualna do wyniku, klik odłożony w wizycie listy
+
+def _zapis_drugim_polaczeniem(path):
+    """Zapis zatwierdzony z DRUGIEGO połączenia (jak worker Dostawy albo CLI): pierwsza klatka bez obiektu dostaje
+    obiekt - odcisk bazy okna się zmienia, a liczba „Klatek bez obiektu” spada o 1."""
+    con = db.connect(path)
+    try:
+        fid = con.execute(
+            "SELECT id FROM frame WHERE object_id IS NULL AND kind = 'light' ORDER BY id LIMIT 1").fetchone()[0]
+        repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC", kind="deep_sky",
+                                frame_ids=[fid], now=NOW)
+    finally:
+        con.close()
+
+
+def _klik_nav(win, wiersz, *, pompuj=True):
+    """Prawdziwy klik w wiersz sidebara (`QTest.mouseClick`) - wejście gospodarza `_on_nav_changed`."""
+    from PySide6.QtTest import QTest
+    rect = win.nav.visualItemRect(win.nav.item(wiersz))
+    QTest.mouseClick(win.nav.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    if pompuj:
+        _pompuj()
+
+
+def _klik_wiersz(win, klucz):
+    """Prawdziwy klik w wiersz listy Porządków."""
+    from PySide6.QtTest import QTest
+    lista = win.tasks_view.tasks
+    rect = lista.visualItemRect(_task_item(win, klucz))
+    QTest.mouseClick(lista.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    _pompuj()
+
+
+def _wiersze_akcyjne(win):
+    from horreum.gui import tasks as tasks_mod
+    return [win.tasks_view.tasks.item(r) for r, (_k, _l, akcja) in enumerate(tasks_mod._TASKS) if akcja is not None]
+
+
+def _lista_nieaktualna(win):
+    """Wygląd montażu (AR-175) na każdym wierszu akcyjnym: wygaszony, z podpowiedzią „liczę”, bez liczby i bez pędzla
+    koloru (szarość „nic do zrobienia” przeszłaby przez wygaszenie)."""
+    from horreum.gui import i18n, rows
+    return all(not it.flags() & Qt.ItemIsEnabled and it.data(rows.SECONDARY) is None
+               and it.data(Qt.ForegroundRole) is None and it.toolTip() == i18n.t("busy.counting_tasks")
+               for it in _wiersze_akcyjne(win))
+
+
+def _lista_czynna(win):
+    return all(it.flags() & Qt.ItemIsEnabled for it in _wiersze_akcyjne(win))
+
+
+def _okno_po_montazu(win):
+    """Okno pokazane, rachunek montażu przyłożony, jedno wejście w Porządki (skrót - baza bez zmian) i powrót na Dom."""
+    win.resize(1200, 800)
+    win.show()
+    _po_rachunku(win)
+    tasks = win.tasks_view
+    _klik_nav(win, NAV_PORZADKI)
+    _czekaj_na(lambda: tasks._liczniki_thread is None and _lista_czynna(win), "lista po pierwszym wejściu")
+    _klik_nav(win, NAV_DOM)
+    return tasks
+
+
+def _po_wyniku(tasks):
+    return tasks._liczniki_thread is None and tasks._odcisk_licznikow == queries.odcisk_bazy(tasks.con)
+
+
+def test_wejscie_po_zapisie_liczy_w_tle_lista_nieaktualna_klik_po_wyniku(qapp, tmp_path, monkeypatch):
+    """AR-337 (rachunek wejścia w tle): wejście w Porządki po zapisie drugim połączeniem liczyło synchronicznie - okno
+    stało (natywnie 825-1091 ms na kopii pf4 v47). Teraz rachunek idzie w tle, a lista do wyniku wygląda jak przed
+    pierwszym rachunkiem (AR-175): wiersze akcyjne wygaszone z podpowiedzią „liczę”, kolumna liczb pusta, bez pędzla
+    koloru, faza przy tytule. Prawdziwy klik w wiersz w tym czasie czeka i wykonuje się po wyniku na świeżej liście.
+    Wynik zdejmuje stan nieaktualny: następny bieg gestu (AR-84) trzyma listę czynną, bez fazy przy tytule.
+    Mutanty: wejście bez gałęzi `w_tle` (rachunek na wątku GUI); gospodarz bez `w_tle=`; wygaszenie bez zdjęcia
+    liczby; bez zdjęcia `ForegroundRole`; wynik bez wykonania kliku odłożonego; `_przyloz_liczniki` bez
+    `_nieaktualny = False`."""
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    brama = None
+    try:
+        tasks = _okno_po_montazu(win)
+        przed = _task_row(win, "unresolved_lights")
+        brama, wszedl, watki, glowny = _brama_rachunku(monkeypatch)
+        _zapis_drugim_polaczeniem(path)
+        otwarte = []
+        tasks.open_collection.connect(otwarte.append)
+        _klik_nav(win, NAV_PORZADKI)
+        assert glowny not in watki, "wejście liczyło na wątku GUI"
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S), "rachunek wejścia nie ruszył w tle"
+        assert _lista_nieaktualna(win)
+        assert tasks.faza_licznikow.isVisible()
+        _klik_wiersz(win, "dup_frames")
+        assert otwarte == [] and tasks.pages.currentIndex() == 0
+        brama.set()
+        _czekaj_na(lambda: _po_wyniku(tasks) and _lista_czynna(win), "rachunek wejścia nie przyłożony")
+        _pompuj()
+        assert _task_row(win, "unresolved_lights") != przed, "lista mówi o stanie po zapisie"
+        assert tasks.faza_licznikow.isHidden()
+        assert otwarte == [PRESET_DUPS], "klik czekający wykonany na świeżej liście"
+        assert glowny not in watki
+        # Klik przełączył okno na Zbiory - stan fazy czytany z flagi widżetu (`isHidden`), nie z widoczności strony.
+        brama.clear()
+        wszedl.clear()
+        tasks.refresh_counts(w_tle=True)                 # gest Zbiorów (AR-84) przy liście po wyniku wejścia
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        assert _lista_czynna(win) and tasks.faza_licznikow.isHidden(), "wynik nie zdjął stanu nieaktualnego"
+        brama.set()
+        _czekaj_na(lambda: tasks._liczniki_thread is None, "bieg gestu nie skończył")
+    finally:
+        if brama is not None:
+            brama.set()
+        win.close()
+
+
+def test_powrot_z_podstrony_po_zapisie_liczy_w_tle(qapp, tmp_path, monkeypatch):
+    """AR-337 (rachunek wejścia w tle): „← Porządki” idzie drogą wejścia TYM SAMYM trybem co wejście gospodarza
+    (`_wejscie_w_tle`) - po zapisie w trakcie pracy w podstronie liczy w tle z listą nieaktualną (prawdziwy klik
+    przycisku powrotu).
+    Mutant: `_on_back` bez trybu wejścia (rachunek na wątku GUI)."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+    from horreum.gui import i18n, tasks as tasks_mod
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    brama = None
+    try:
+        tasks = _okno_po_montazu(win)
+        _klik_nav(win, NAV_PORZADKI)
+        _klik_wiersz(win, "telescopes_unlabeled")
+        assert tasks.pages.currentIndex() == tasks_mod._PAGE_TELESCOPE
+        brama, wszedl, watki, glowny = _brama_rachunku(monkeypatch)
+        _zapis_drugim_polaczeniem(path)
+        wstecz = next(b for b in tasks.pages.currentWidget().findChildren(QPushButton)
+                      if b.text() == i18n.t("tasks.back"))
+        QTest.mouseClick(wstecz, Qt.LeftButton)
+        _pompuj()
+        assert tasks.pages.currentIndex() == tasks_mod._PAGE_LIST
+        assert glowny not in watki, "powrót liczył na wątku GUI"
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        assert _lista_nieaktualna(win) and tasks.faza_licznikow.isVisible()
+        brama.set()
+        _czekaj_na(lambda: _po_wyniku(tasks) and _lista_czynna(win), "rachunek powrotu nie przyłożony")
+    finally:
+        if brama is not None:
+            brama.set()
+        win.close()
+
+
+def test_wejscie_w_trakcie_biegu_gestu_gasi_stare_liczby(qapp, tmp_path, monkeypatch):
+    """AR-337 (gałąź „bieg w drodze”): gest Zbiorów po zapisie liczy w tle, a lista trzyma stan poprzedni (AR-84).
+    Wejście w Porządki w trakcie tego biegu na tym samym stanie bazy czekało na jego wynik, pokazując stare liczby
+    jako czynne, bez znaku. Teraz czeka z listą nieaktualną; wynik zapala ją z liczbami po zapisie. Zapis PRZED
+    biegiem - inaczej wejście skróciłoby po niezmienionym odcisku i nie doszło do gałęzi. Do końca - jeden rachunek
+    (wejście nie zamawia drugiego biegu).
+    Mutanty: gałąź „bieg w drodze” bez `_wygas_wiersze`; bez całej gałęzi „bieg w drodze”; `_start_licznikow` bez
+    `_bieg_czeka_na_wynik = True` (wejście nie rozpoznaje biegu w drodze)."""
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    brama = None
+    try:
+        tasks = _okno_po_montazu(win)
+        przed = _task_row(win, "unresolved_lights")
+        brama, wszedl, watki, glowny = _brama_rachunku(monkeypatch)
+        _zapis_drugim_polaczeniem(path)
+        tasks.refresh_counts(w_tle=True)                 # gest Zbiorów (AR-84) - bieg w drodze na stanie po zapisie
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        assert _task_row(win, "unresolved_lights") == przed and _lista_czynna(win), "gest nie gasi listy (AR-84)"
+        _klik_nav(win, NAV_PORZADKI)
+        assert _lista_nieaktualna(win) and tasks.faza_licznikow.isVisible()
+        assert glowny not in watki and len(watki) == 1, "wejście czeka na bieg w drodze, nie liczy drugi raz"
+        brama.set()
+        _czekaj_na(lambda: _po_wyniku(tasks) and _lista_czynna(win), "wynik biegu gestu nie przyłożony")
+        _pompuj()
+        assert _task_row(win, "unresolved_lights") != przed
+        assert len(watki) == 1, "wejście w trakcie biegu policzyło drugi raz"
+    finally:
+        if brama is not None:
+            brama.set()
+        win.close()
+
+
+def test_wejscie_po_drugiej_porazce_przed_sprzataniem_watku_nie_zostawia_listy_wygaszonej(qapp, tmp_path,
+                                                                                          monkeypatch):
+    """AR-337: po obsłużonej drugiej porażce biegu w tle wątek żyje jeszcze do `_sprzataj_liczniki`. Wejście w tej
+    przerwie nie może czekać na „bieg w drodze” - ten już nic nie przyniesie, a lista zostałaby wygaszona na zawsze,
+    bez rachunku i bez zdania błędu. Kolejność wymuszona: sprzątanie wątku (zdarzenie kolejki zaraz po porażce) najpierw
+    wchodzi w Porządki prawdziwym klikiem, potem sprząta. Wynik: lista czynna ze stanem poprzednim i zdaniem błędu.
+    Mutant: gałąź „bieg w drodze” bez `_bieg_czeka_na_wynik`."""
+    import sqlite3
+    from horreum.gui import tasks as tasks_mod
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    brama = None
+    try:
+        tasks = _okno_po_montazu(win)
+        przed = _task_row(win, "unresolved_lights")
+        brama, _wszedl, _watki, _glowny = _brama_rachunku(
+            monkeypatch, pada=sqlite3.OperationalError("database is locked"))
+        brama.set()
+        prawdziwe = tasks_mod.TasksView._sprzataj_liczniki
+        wejscia = []
+
+        def _sprzataj(self):
+            if not wejscia and not self.blad_licznikow.isHidden():
+                wejscia.append(1)
+                _klik_nav(win, NAV_PORZADKI, pompuj=False)    # druga porażka obsłużona, wątek jeszcze żyje
+            prawdziwe(self)
+        monkeypatch.setattr(tasks_mod.TasksView, "_sprzataj_liczniki", _sprzataj)
+        _zapis_drugim_polaczeniem(path)
+        tasks.refresh_counts(w_tle=True)                 # gest po zapisie - bieg pada dwa razy (ponowienie, AR-302)
+        _czekaj_na(lambda: wejscia and tasks._liczniki_thread is None and not tasks._liczniki_ponow,
+                   "seria po wejściu nie skończyła")
+        _pompuj()
+        assert _lista_czynna(win), "lista wygaszona bez rachunku"
+        assert not tasks.blad_licznikow.isHidden(), "seria po wejściu skończyła się bez zdania"
+        assert _task_row(win, "unresolved_lights") == przed, "stan poprzedni wrócił"
+        assert not tasks.faza_licznikow.isVisible()
+    finally:
+        if brama is not None:
+            brama.set()
+        win.close()
+
+
+def test_wejscie_po_porazce_chowa_wiersz_bledu_i_pokazuje_faze(qapp, tmp_path, monkeypatch):
+    """AR-337: wejście po porażce rachunku (wiersz błędu nad listą ze stanem poprzednim) liczy od nowa w tle - lista
+    nieaktualna chowa wiersz błędu poprzedniej porażki i pokazuje fazę przy tytule; inaczej obok siebie stałyby
+    zdanie „nie policzyłem” i lista wygaszona, a faza czekałaby na schowanie wiersza błędu. Wynik zapala listę bez
+    błędu. Mutant: `_wygas_wiersze` bez schowania wiersza błędu."""
+    import sqlite3
+    from horreum.gui import tasks as tasks_mod
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    bramy = []
+    try:
+        tasks = _okno_po_montazu(win)
+        prawdziwy = tasks_mod._stan_licznikow
+        brama_pada, _w, _wt, _g = _brama_rachunku(monkeypatch, pada=sqlite3.OperationalError("database is locked"))
+        bramy.append(brama_pada)
+        brama_pada.set()
+        tasks.refresh_counts(w_tle=True)                 # gest Zbiorów - bieg pada dwa razy (ponowienie, AR-302)
+        _czekaj_na(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(),
+                   "bieg gestu nie padł")
+        monkeypatch.setattr(tasks_mod, "_stan_licznikow", prawdziwy)
+        brama, wszedl, _watki, _glowny = _brama_rachunku(monkeypatch)
+        bramy.append(brama)
+        _klik_nav(win, NAV_PORZADKI)
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        assert tasks.blad_licznikow.isHidden(), "wiersz błędu poprzedniej porażki obok listy nieaktualnej"
+        assert tasks.faza_licznikow.isVisible() and _lista_nieaktualna(win)
+        brama.set()
+        _czekaj_na(lambda: _po_wyniku(tasks) and _lista_czynna(win), "rachunek wejścia nie przyłożony")
+        assert tasks.blad_licznikow.isHidden() and not tasks.faza_licznikow.isVisible()
+    finally:
+        for b in bramy:
+            b.set()
+        win.close()
+
+
+def test_klik_odlozony_przepada_z_koncem_wizyty_listy(qapp, tmp_path, monkeypatch):
+    """AR-337: klik w wiersz wygaszony czeka na wynik - ale tylko w TEJ wizycie listy. Klik → Dom →
+    powrót do Porządków → wynik otwierał cel kliku w nowej wizycie, bez gestu. Prawdziwe kliknięcia.
+    Mutant: wejście bez skasowania kliku odłożonego."""
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    brama = None
+    try:
+        tasks = _okno_po_montazu(win)
+        brama, wszedl, _watki, _glowny = _brama_rachunku(monkeypatch)
+        _zapis_drugim_polaczeniem(path)
+        otwarte = []
+        tasks.open_collection.connect(otwarte.append)
+        _klik_nav(win, NAV_PORZADKI)
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S) and _lista_nieaktualna(win)
+        _klik_wiersz(win, "dup_frames")
+        _klik_nav(win, NAV_DOM)
+        _klik_nav(win, NAV_PORZADKI)
+        assert _lista_nieaktualna(win)
+        brama.set()
+        _czekaj_na(lambda: _po_wyniku(tasks) and _lista_czynna(win), "rachunek wejścia nie przyłożony")
+        _pompuj()
+        assert otwarte == [] and tasks.pages.currentIndex() == 0, "klik z poprzedniej wizyty wykonany"
+        assert win.stack.currentIndex() == STRONA_PORZADKI
+    finally:
+        if brama is not None:
+            brama.set()
+        win.close()
+
+
+def test_porazka_rachunku_wejscia_wraca_do_stanu_poprzedniego(qapp, tmp_path, monkeypatch):
+    """AR-337 (porażka rachunku wejścia): rachunek pada dwa razy (ponowienie w tle, AR-302) - lista NIEAKTUALNA wraca
+    do stanu POPRZEDNIEGO: liczby ostatniego przyłożonego rachunku, wiersze czynne, zdanie błędu nad listą, plakietka
+    bez zmian; klik odłożony przepada (nic się nie otwiera ani teraz, ani po następnym udanym rachunku).
+    Mutanty: `_pokaz_blad_licznikow` bez `_przyloz_liczniki(*self._ostatni_stan)` (liczby puste); kasowanie kliku
+    w `_pokaz_blad_licznikow` (jedyne miejsce, obie drogi porażki) zdjęte - przywrócenie wykonuje klik od razu."""
+    import sqlite3
+    from horreum.gui import tasks as tasks_mod
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    brama = None
+    try:
+        tasks = _okno_po_montazu(win)
+        przed = _task_row(win, "unresolved_lights")
+        plakietka = win.nav.item(NAV_PORZADKI).text()
+        prawdziwy = tasks_mod._stan_licznikow
+        brama, wszedl, _watki, _glowny = _brama_rachunku(
+            monkeypatch, pada=sqlite3.OperationalError("database is locked"))
+        _zapis_drugim_polaczeniem(path)
+        otwarte = []
+        tasks.open_collection.connect(otwarte.append)
+        _klik_nav(win, NAV_PORZADKI)
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S) and _lista_nieaktualna(win)
+        _klik_wiersz(win, "dup_frames")
+        brama.set()
+        _czekaj_na(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(),
+                   "seria rachunku wejścia nie padła")
+        _pompuj()
+        assert tasks.blad_licznikow.text()
+        assert _task_row(win, "unresolved_lights") == przed and _lista_czynna(win)
+        assert not tasks.faza_licznikow.isVisible()
+        assert win.nav.item(NAV_PORZADKI).text() == plakietka
+        assert otwarte == []
+        monkeypatch.setattr(tasks_mod, "_stan_licznikow", prawdziwy)
+        tasks.refresh_counts(w_tle=True)
+        _czekaj_na(lambda: _po_wyniku(tasks), "następny rachunek nie przyłożony")
+        _pompuj()
+        assert otwarte == [], "klik sprzed porażki odpalił się sam przy następnym rachunku"
+        assert _task_row(win, "unresolved_lights") != przed and tasks.blad_licznikow.isHidden()
+    finally:
+        if brama is not None:
+            brama.set()
+        win.close()
+
+
+def test_porazka_rachunku_awaryjnego_w_stanie_nieaktualnym_wraca_do_stanu_poprzedniego(qapp, tmp_path, monkeypatch):
+    """AR-337 (porażka rachunku wejścia, droga synchroniczna): lista nieaktualna z klikiem odłożonym, a następny bieg
+    nie rusza, bo połączenie okna nie czyta odcisku - rachunek awaryjny `refresh_counts` pada na wątku GUI
+    (`_start_licznikow`, PRAWDZIWY błąd SQLite: plik nie jest bazą). Ta sama semantyka co porażka w tle: stan
+    poprzedni, zdanie klasy błędu, klik przepada. Mutant: kasowanie kliku w `_pokaz_blad_licznikow` zdjęte
+    (przywrócenie stanu poprzedniego wykonuje klik)."""
+    import sqlite3
+    from horreum.gui import i18n
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    smieci = tmp_path / "smieci.db"
+    smieci.write_bytes(b"to nie jest baza" * 512)
+    zla = sqlite3.connect(str(smieci))
+    win = MainWindow(path)
+    brama = None
+    tasks = None
+    prawdziwe = None
+    try:
+        tasks = _okno_po_montazu(win)
+        prawdziwe = tasks.con
+        przed = _task_row(win, "unresolved_lights")
+        brama, wszedl, _watki, _glowny = _brama_rachunku(monkeypatch)
+        _zapis_drugim_polaczeniem(path)
+        otwarte = []
+        tasks.open_collection.connect(otwarte.append)
+        _klik_nav(win, NAV_PORZADKI)
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S) and _lista_nieaktualna(win)
+        _klik_wiersz(win, "dup_frames")
+        tasks.con = zla
+        tasks.refresh_counts(w_tle=True)                 # zlecenie w trakcie biegu - bieg po nim, generacja nowsza
+        brama.set()                                      # wynik biegu do kosza, następny bieg nie czyta odcisku
+        _czekaj_na(lambda: tasks._liczniki_thread is None and not tasks.blad_licznikow.isHidden(),
+                   "rachunek awaryjny nie padł")
+        _pompuj()
+        assert tasks.blad_licznikow.text() == i18n.t(
+            "tasks.counts_failed", msg=i18n.t("objchg.item.db_damaged", db_code="SQLITE_NOTADB"))
+        assert _task_row(win, "unresolved_lights") == przed and _lista_czynna(win)
+        assert otwarte == [], "przywrócenie stanu poprzedniego wykonało klik odłożony"
+    finally:
+        if tasks is not None and prawdziwe is not None:
+            tasks.con = prawdziwe
+        if brama is not None:
+            brama.set()
+        win.close()
+        zla.close()
+
+
+@pytest.mark.zmienia_motyw
+def test_zmiana_motywu_w_stanie_nieaktualnym_nie_maluje_szarosci_rodzaju(qapp, tmp_path, monkeypatch):
+    """AR-337: lista nieaktualna nie ma rodzaju koloru (`ROLA_RODZAJU_KOLORU` zdjęta razem z liczbą), więc zmiana
+    motywu w czasie rachunku (`odswiez_motyw`, AR-175) nie maluje szarości „nic do zrobienia” na wierszach wygaszonych.
+    Mutant: wygaszenie bez zdjęcia rodzaju koloru."""
+    from horreum.gui import theme
+    _w_tle(monkeypatch)
+    path = _seeded_db(tmp_path, object_axis=True)
+    win = MainWindow(path)
+    brama = None
+    try:
+        tasks = _okno_po_montazu(win)
+        brama, wszedl, _watki, _glowny = _brama_rachunku(monkeypatch)
+        _zapis_drugim_polaczeniem(path)
+        _klik_nav(win, NAV_PORZADKI)
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S) and _lista_nieaktualna(win)
+        for motyw in ("light", "dark"):
+            win._on_theme(motyw)
+            assert _lista_nieaktualna(win), motyw
+        brama.set()
+        _czekaj_na(lambda: _po_wyniku(tasks) and _lista_czynna(win), "rachunek wejścia nie przyłożony")
+    finally:
+        if brama is not None:
+            brama.set()
+        win._on_theme(theme.DEFAULT)
+        win.close()
+
+
+def test_rachunek_w_tle_czyta_jedna_migawke(qapp, tmp_path, monkeypatch):
+    """AR-337: `_LicznikiWorker` liczy w JEDNEJ migawce (`BEGIN`) - zapis zatwierdzony drugim połączeniem zaraz po
+    PIERWSZEJ instrukcji SELECT rachunku (wtrącenie śladem instrukcji połączenia workera, niezależnie od tego, która
+    funkcja czyta pierwsza) nie wchodzi do dalszych odczytów TEGO rachunku: ani liczba „Klatek bez obiektu”, ani
+    kandydaci faktów kopii czytani na samym końcu (`scan.copy_facts_candidates`). Prawdziwy rachunek, prawdziwe
+    połączenia. Bez transakcji każdy SELECT widział swoją chwilę - wiersz i jego podpowiedź z dwóch stanów bazy.
+    Mutant: `run` bez `BEGIN`."""
+    import sys
+    from horreum import scan
+    from horreum.gui.tasks import _LicznikiWorker
+    path = _seeded_db(tmp_path, object_axis=True)
+
+    def _odczyt():
+        con = db.connect(path)
+        try:
+            return (queries.tasks_state(con)["unresolved_lights"],
+                    len(scan.copy_facts_candidates(con, porownywalne=True)))
+        finally:
+            con.close()
+    przed = _odczyt()
+
+    def _zapis():
+        _zapis_drugim_polaczeniem(path)                  # „Klatki bez obiektu” - 1
+        con = db.connect(path)
+        try:
+            fid = con.execute("SELECT min(id) FROM frame").fetchone()[0]
+            for nazwa in ("kopia_a", "kopia_b"):         # kopie bez faktów klatki o >1 lokacji - kandydaci + 2
+                repo.add_location(con, frame_id=fid, volume="V", path=f"X:\\L\\{nazwa}.fits",
+                                  header_hash=f"h_{nazwa}", now=NOW)
+        finally:
+            con.close()
+
+    prawdziwe_connect = db.connect
+    selecty = []
+
+    def _slad(sql):
+        if sql.lstrip().upper().startswith(("SELECT", "WITH")):
+            selecty.append(sql)
+            if len(selecty) == 2:                        # pierwsza instrukcja odczytu już przeszła
+                _zapis()
+
+    def _connect(sciezka):
+        con = prawdziwe_connect(sciezka)
+        if sys._getframe(1).f_code.co_name == "run":     # wyłącznie połączenie workera liczników
+            con.set_trace_callback(_slad)
+        return con
+    monkeypatch.setattr(db, "connect", _connect)
+    w = _LicznikiWorker(1, path)
+    wyniki, bledy = [], []
+    w.done.connect(lambda _gen, wynik: wyniki.append(wynik))
+    w.failed.connect(lambda _gen, powod: bledy.append(powod))
+    w.run()
+    assert len(selecty) > 2 and bledy == [], bledy
+    ((stan, kandydaci),) = wyniki
+    monkeypatch.setattr(db, "connect", prawdziwe_connect)
+    po = _odczyt()
+    assert po == (przed[0] - 1, przed[1] + 2), (przed, po)
+    assert (stan["unresolved_lights"], len(kandydaci)) == przed, "rachunek po pierwszym odczycie widział cudzy zapis"
+
+
+@pytest.mark.parametrize("droga", ["wynik", "wyjatek", "przerwanie"])
+def test_migawka_rachunku_w_tle_zwolniona_kazda_droga(qapp, tmp_path, monkeypatch, droga):
+    """AR-337: migawka rachunku w tle wstrzymuje checkpoint WAL ponad siebie, więc musi zniknąć KAŻDĄ drogą końca
+    biegu: wynik, wyjątek w rachunku, przerwanie zapytania w locie (`request_cancel` z innego wątku). Dowód z zewnątrz:
+    zapis drugim połączeniem w trakcie rachunku, a po końcu biegu `wal_checkpoint(TRUNCATE)` połączenia bez
+    `busy_timeout` przechodzi bez `busy`. Mutant: połączenie workera niezamykane (`finally` bez `close`)."""
+    import sqlite3
+    import threading
+    from horreum import resolver
+    from horreum.gui.tasks import _LicznikiWorker
+    path = _seeded_db(tmp_path, object_axis=True)
+    prawdziwe = resolver.nonprintable_unread_locations
+    w = _LicznikiWorker(1, path)
+
+    def _wtracenie(c):
+        wynik = prawdziwe(c)
+        _zapis_drugim_polaczeniem(path)
+        if droga == "wyjatek":
+            raise RuntimeError("rachunek padł")
+        if droga == "przerwanie":
+            threading.Timer(0.2, w.request_cancel).start()
+            c.execute(_ZAPYTANIE_BEZ_KONCA).fetchone()
+        return wynik
+    monkeypatch.setattr(resolver, "nonprintable_unread_locations", _wtracenie)
+    wyniki, bledy = [], []
+    w.done.connect(lambda _gen, wynik: wyniki.append(wynik))
+    w.failed.connect(lambda _gen, powod: bledy.append(powod))
+    w.run()
+    assert (len(wyniki), len(bledy)) == ((1, 0) if droga == "wynik" else (0, 1)), (wyniki, bledy)
+    surowe = sqlite3.connect(path)
+    try:
+        busy, _log, _przeniesione = surowe.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    finally:
+        surowe.close()
+    assert busy == 0, "migawka rachunku wisi po końcu biegu"
+
+
+def test_montaz_policzony_synchronicznie_nie_oddaje_serii_montazu_gestowi(qapp, tmp_path, monkeypatch):
+    """AR-337 (szew `M` z serią montażu): gdy rachunek montażu w trybie wątków tła policzy się synchronicznie (odcisk
+    nieczytelny przy starcie biegu, `_start_licznikow`), pierwsza późniejsza seria w tle (gest Zbiorów, wejście
+    w Porządki) była przyjmowana za serię montażu: pasek mówił „Liczę Porządki…” przy geście, a koniec serii stawiał
+    drugi raz kotwicę dobudowy Zbiorów. Mutant: `_mount_views` bez `_seria_montazu = 0`."""
+    import sqlite3
+    import sys
+    _w_tle(monkeypatch)
+    prawdziwy = queries.odcisk_bazy
+    padl = []
+
+    def _odcisk(con):
+        if not padl and sys._getframe(1).f_code.co_name == "_start_licznikow":
+            padl.append(1)
+            raise sqlite3.OperationalError("database is locked")
+        return prawdziwy(con)
+    monkeypatch.setattr(queries, "odcisk_bazy", _odcisk)
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    brama = None
+    try:
+        tasks = win.tasks_view
+        assert padl and tasks.ma_rachunek() and not tasks.liczy_w_tle(), "montaż policzony synchronicznie"
+        kotwice = []
+        monkeypatch.setattr(win, "_po_licznikach_montazu", lambda: kotwice.append(1))
+        brama, wszedl, _watki, _glowny = _brama_rachunku(monkeypatch)
+        tasks.refresh_counts(w_tle=True)                 # gest Zbiorów - pierwsza seria w tle po montażu
+        assert wszedl.wait(_BEZPIECZNIK_LICZNIKOW_S)
+        _pompuj()
+        assert win.phase_label.text() == "", "gest dostał fazę montażu"
+        brama.set()
+        _czekaj_na(lambda: tasks._liczniki_thread is None, "seria gestu nie skończyła")
+        _pompuj()
+        assert kotwice == [], "koniec serii gestu postawił kotwicę montażu"
+    finally:
+        if brama is not None:
+            brama.set()
         win.close()

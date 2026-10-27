@@ -3621,3 +3621,45 @@ def test_zdanie_odmowy_sondy_zniw_mowi_czynnosc():
             assert i18n.t("harvest.dry_failed", msg=i18n.t("objchg.item.prog_error")) == oczekiwane
     finally:
         i18n.set_lang("pl")
+
+
+# ═════════════════════════ AR-370: pierwszy wybór folderu nie startuje w katalogu roboczym procesu
+
+def _dom(tmp_path, monkeypatch):
+    """Folder domowy procesu podmieniony na katalog testu (`os.path.expanduser` czyta `USERPROFILE`/`HOME`)."""
+    dom = tmp_path / "dom"
+    dom.mkdir()
+    monkeypatch.setenv("USERPROFILE", str(dom))
+    monkeypatch.setenv("HOME", str(dom))
+    assert os.path.expanduser("~") == str(dom)
+    return str(dom)
+
+
+def test_katalog_startowy_pierwszy_niepusty_kandydat_albo_folder_domowy(tmp_path, monkeypatch):
+    """AR-370: pierwszy niepusty kandydat w kolejności wołającego, bez sprawdzania dysku; bez kandydatów - folder
+    domowy, nigdy pusty napis. Falsyfikator: zwrot `""` bez kandydatów."""
+    dom = _dom(tmp_path, monkeypatch)
+    assert hd_mod.katalog_startowy("", r"X:\ARCH") == r"X:\ARCH"
+    assert hd_mod.katalog_startowy(r"X:\WY", r"X:\ARCH") == r"X:\WY"
+    assert hd_mod.katalog_startowy("", "") == hd_mod.katalog_startowy() == dom
+
+
+def test_pierwszy_wybor_bez_wyjscia_i_archiwum_startuje_w_folderze_domowym(qapp, tmp_path, ustawienia, monkeypatch,
+                                                                          wybor_katalogu):
+    """AR-370 (wizytacja natywna): baza bez masterflatów w archiwum, bez pierwszej dostawy i bez pamięci wyjścia -
+    okno żniw od razu otwiera wybór „Wskaż katalog wyjścia WBPP”, który startował w katalogu roboczym procesu
+    (w wydaniu onefile: katalog uruchomienia). Teraz w folderze domowym; „Zmień…” archiwum tak samo.
+    Falsyfikator: `_pick_start`/`_on_pick_archive` bez folderu domowego (start `""`)."""
+    dom = _dom(tmp_path, monkeypatch)
+    con, _profile, _flats = _baza(tmp_path)
+    _czytnik(monkeypatch, {})
+    dlg = _dlg(con, "")
+    try:
+        dlg.show()
+        assert _wait_until(lambda: wybor_katalogu.wywolania)
+        assert wybor_katalogu.wywolania == [("Wskaż katalog wyjścia WBPP", dom)]
+        dlg.btn_archive.click()
+        assert wybor_katalogu.wywolania[1:] == [(i18n.t("harvest.dlg.pick_archive"), dom)]
+    finally:
+        dlg.reject()
+        con.close()

@@ -1088,7 +1088,7 @@ def unreadable_kinds_shown(counts):
     """Które rodzaje rozbicia kopii nieczytelnych pokazać - `[(rodzaj, n)]` w kolejności
     `UNREADABLE_KINDS`, z `counts` w kształcie `unreadable_kind_counts`. JEDYNY właściciel reguły
     milczenia (`_UNREADABLE_KINDS_ALWAYS`): CLI (`cli._format_delta`) i GUI
-    (`gui.pipeline.unreadable_kinds_text`) tylko renderują listę swoimi etykietami."""
+    (`gui.dostawa_bramka.unreadable_kinds_text`) tylko renderują listę swoimi etykietami."""
     return [(k, counts[k]) for k in UNREADABLE_KINDS
             if k in _UNREADABLE_KINDS_ALWAYS or counts[k]]
 
@@ -1121,9 +1121,13 @@ def _unreadable_snapshot(con):
     return row["frames"], {k: row[k] for k in UNREADABLE_KINDS}
 
 
-def review_state(con):
-    """Policz kolejkę przeglądu ze STANU (read-only, zero zapisu). Po co i dlaczego DISTINCT — zob.
+def review_state(con, *, niezbadane=None):
+    """Policz kolejkę przeglądu ze STANU (read-only, zero zapisu). Po co i dlaczego DISTINCT - zob.
     `ReviewState`.
+
+    `niezbadane` - wiersze `nonprintable_unread_locations(con)` przeczytane już przez wołającego (rachunek
+    liczników Porządków czyta je RAZ dla licznika i napisu gestu Dostawy, AR-352); predykat ten sam, zmienia się
+    wyłącznie źródło wierszy. Bez nich - odczyt tutaj.
 
     `kind_unknown` idzie po `EXISTS(header)`, NIE po karcie IMAGETYP: kolejka przeglądu pyta o ZEZNANIE
     (jeden wiersz na klatkę), nie o jego lustro. Do P6a `cards` były w dodatku FITS-only, więc predykat
@@ -1189,7 +1193,8 @@ def review_state(con):
                        focal_mismatch=len(optics_mismatch_frame_ids(con, "focal")),
                        f_ratio_mismatch=len(optics_mismatch_frame_ids(con, "f_ratio")),
                        header_nonprintable=len(nonprintable_frame_ids(con)),
-                       header_nonprintable_unread=len(nonprintable_unread_locations(con)))
+                       header_nonprintable_unread=len(nonprintable_unread_locations(con) if niezbadane is None
+                                                      else niezbadane))
 
 
 def nonprintable_frame_ids(con):

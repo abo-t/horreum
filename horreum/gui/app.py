@@ -2856,12 +2856,14 @@ class ObjectAxisView(QWidget):
         # ROZBICIE PO RODZAJU (P4-2) idzie do podpowiedzi wiersza, liczone PO KOPIACH: kubełek
         # z samą liczbą nie mówił, czy szukać winy w dysku, czy w pliku. Pusty kubełek go nie
         # dostaje - zero nie ma czego rozbijać, a jego zdanie niesie `info`.
-        from horreum.gui.pipeline import unreadable_kinds_text   # lazy: jak montaż Dostawy
+        # Zdanie z modułu bez Qt (AR-356): import modułu Dostawy tutaj ładował go przechodnio każdemu
+        # wejściu w Porządki, omijając bramkę „Porządki bez modułu Dostawy” (`tests/test_dostawa_bramka.py`).
+        from horreum.gui import dostawa_bramka     # lazy jak reszta importów modułów stron
         self._add_review_item(i18n.t("object.unreadable_line"),
                               count=i18n.t_plural("object.review_count", q["unreadable_count"]),
                               tag="unreadable" if q["unreadable_count"] > 0 else None,
                               info=i18n.t("object.unreadable_info_empty"),
-                              tip=unreadable_kinds_text(resolver.unreadable_kind_counts(self.con))
+                              tip=dostawa_bramka.unreadable_kinds_text(resolver.unreadable_kind_counts(self.con))
                               if q["unreadable_count"] > 0 else None)
         # OŚ SPRZĘTU WYCHODZI Z WIERSZA INFORMACYJNEGO (R1) — do tej zmiany była połową licznika
         # z notą „rozwiązywanie w przygotowaniu". Nota mówiła prawdę i dlatego musiała zniknąć
@@ -5103,7 +5105,9 @@ class MainWindow(QMainWindow):
             else:
                 self._odswiez_dom()
         if strona == STRONA_PORZADKI:   # wejście w Porządki = świeży stan liczników zadań
-            self.tasks_view.odswiez_przy_wejsciu()   # bez rachunku, gdy baza bez zmian (AR-84)
+            # Bez rachunku, gdy baza bez zmian (AR-84); przy zmianie w trybie wątków tła - rachunek w tle
+            # z listą nieaktualną do wyniku (AR-337, rachunek wejścia w tle).
+            self.tasks_view.odswiez_przy_wejsciu(w_tle=self._pola_poza_watkiem)
         if strona == STRONA_DOSTAWA:
             # Raport „co przyszło” liczy się ze stanu, a nazwę mogła nadać ręka w Porządkach albo
             # w Zbiorach - wiersz „nie rozpoznałem” po powrocie kłamałby o niej (jedno zapytanie
@@ -5347,6 +5351,10 @@ class MainWindow(QMainWindow):
             home.ustaw_popraw(None)
         else:
             self._kotwica_licznikow = True   # rachunek montażu policzony synchronicznie - kotwica dobudowy stoi
+            # Seria montażu „była” (numer 0 - widok numeruje serie od 1): późniejsza seria w tle (gest Zbiorów,
+            # wejście w Porządki - AR-337) nie może udawać serii montażu - faza „Liczę…” na pasku i druga
+            # kotwica dobudowy (`_on_liczenie_w_toku`) należą wyłącznie do montażu.
+            self._seria_montazu = 0
         if not self._strony_leniwie:
             self.zbuduj_strony()
 
@@ -6347,8 +6355,11 @@ class MainWindow(QMainWindow):
 
     def _on_liczenie_w_toku(self, montaz, seria, w_toku):
         """Seria biegów liczników Porządków w tle (`TasksView.liczenie_w_toku`, AR-175). Faza tła
-        należy do PIERWSZEJ serii po montażu: późniejsze serie (gest Zbiorów, koniec Dostawy) mają
-        plakietkę ze stanem poprzednim i własny ogon gestu, a „Liczę…” po każdym geście byłoby szumem.
+        należy do PIERWSZEJ serii po montażu: późniejsze serie (gest Zbiorów, koniec Dostawy, wejście
+        i powrót do Porządków przy zmienionej bazie - AR-337, rachunek wejścia w tle) mają plakietkę ze
+        stanem poprzednim i własny znak (ogon gestu; faza przy tytule listy Porządków), a „Liczę…” na
+        pasku po każdym z nich byłoby szumem. Montaż policzony synchronicznie zostawia `_seria_montazu = 0`
+        (`_mount_views`) - żadna późniejsza seria nie zostaje wtedy przyjęta za serię montażu.
         Sygnał z cudzym tokenem montażu (widok w demontażu, AR-326 - dawniej `sender()`) i koniec cudzej
         serii są odrzucane - spóźnione `False` starej bazy nie gasi fazy nowej.
 

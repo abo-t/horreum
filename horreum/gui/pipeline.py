@@ -563,22 +563,6 @@ def zdanie_braku_przepisu(kubelek):
     return i18n.t("pipeline.fmt.calibrate_gap", cls=klasa, facts=reszta[len(_BRAK_FAKTOW):])
 
 
-def unreadable_kinds_text(counts):
-    """Zdanie rozbicia kopii nieczytelnych po RODZAJU (P4-2, P4-5) z
-    `resolver.unreadable_kind_counts`. Które rodzaje pokazać, rozstrzyga rdzeń
-    (`resolver.unreadable_kinds_shown`: oba rodzaje o PLIKU zawsze, „baza" i „bez kodu awarii"
-    tylko > 0 - ta sama reguła co raport CLI); tu tylko etykiety i18n.
-    Jedyny właściciel zdania: raport Dostawy i podpowiedź kubełka w Porządkach (`app`)."""
-    from horreum.resolver import unreadable_kinds_shown
-    # Klucze LITERAŁAMI, nie składane z rodzaju - bramka „klucze call-site ⊆ katalog" je widzi.
-    etykieta = {"io": lambda n: i18n.t("object.unreadable_kind_io", n=n),
-                "parse": lambda n: i18n.t("object.unreadable_kind_parse", n=n),
-                "db": lambda n: i18n.t("object.unreadable_kind_db", n=n),
-                "unknown": lambda n: i18n.t("object.unreadable_kind_unknown", n=n)}
-    parts = [etykieta[k](n) for k, n in unreadable_kinds_shown(counts)]
-    return i18n.t("object.unreadable_kinds", parts=" · ".join(parts))
-
-
 def _review_line(st):
     """`ReviewState` → jedna linia raportu. Wiodąca liczba to DISTINCT klatek, po niej POWODY, które
     się nakładają (klatka bez kamery jest też bez konfiguracji) — dlatego „powody", nie „w tym":
@@ -587,8 +571,9 @@ def _review_line(st):
         return i18n.t("pipeline.review.none")
     # RODZAJ PRZY „kopia nieczytelna" (P4-5): sama liczba oskarżała plik, choć winny bywa dysk albo
     # baza. W nawiasie, bo to rozbicie TEGO powodu - po kopiach, nie po klatkach (zdanie mówi „kopie").
+    # Zdanie rozbicia ma właściciela bez Qt (`dostawa_bramka`, AR-356) - czyta je też podstrona obiektów Porządków.
     powody = ", ".join(
-        f"{i18n.t(key)} {n}" + (f" ({unreadable_kinds_text(st.unreadable_kinds)})"
+        f"{i18n.t(key)} {n}" + (f" ({dostawa_bramka.unreadable_kinds_text(st.unreadable_kinds)})"
                                 if attr == "unreadable" else "")
         for attr, key in _REVIEW_REASONS if (n := getattr(st, attr)))
     return i18n.t("pipeline.review.line",

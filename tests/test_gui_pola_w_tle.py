@@ -1253,8 +1253,9 @@ def test_zaznaczenie_gridu_przezywa_przebieg_dostawy(qapp, tmp_path):
 
 
 def test_odczyt_synchroniczny_wyprzedza_wynik_licznikow_w_drodze(qapp, tmp_path, monkeypatch):
-    """Wejście w Porządki (odczyt synchroniczny) w trakcie biegu w tle: lista dostaje stan od razu,
-    a spóźniony wynik biegu sprzed wejścia NIE jest przykładany drugi raz (mógłby być starszy).
+    """Odczyt synchroniczny (tryb bez wątków tła, rachunek awaryjny przy nieczytelnym odcisku) w trakcie biegu
+    w tle: lista dostaje stan od razu, a spóźniony wynik biegu sprzed odczytu NIE jest przykładany drugi raz
+    (mógłby być starszy). Wejście w Porządki w trybie wątków tła liczy w tle (AR-337), nie tędy.
 
     Falsyfikator: zdejmij `self._liczniki_gen += 1` z `refresh_counts` → dwa przyłożenia."""
     from horreum.gui import tasks as tasks_mod
@@ -1270,7 +1271,7 @@ def test_odczyt_synchroniczny_wyprzedza_wynik_licznikow_w_drodze(qapp, tmp_path,
         brama, wszedl, _ = _brama_na_licznikach(monkeypatch)
         tasks.refresh_counts(w_tle=True)
         assert wszedl.wait(_BEZPIECZNIK_S)
-        tasks.refresh_counts()                        # wejście w Porządki
+        tasks.refresh_counts()                        # odczyt synchroniczny
         assert przylozenia == [1]
         brama.set()
         _czekaj(lambda: tasks._liczniki_thread is None, "wątek liczników nie skończył")
@@ -2133,3 +2134,31 @@ def _wiersz_tip(tasks, klucz):
     from horreum.gui import tasks as tasks_mod
     row = next(i for i, (k, _l, _a) in enumerate(tasks_mod._TASKS) if k == klucz)
     return tasks.tasks.item(row).toolTip()
+
+
+# ═════════════════════════ AR-352: jeden odczyt kopii niezbadanych w rachunku liczników Porządków
+
+def test_rachunek_licznikow_czyta_niezbadane_raz(qapp, tmp_path, monkeypatch):
+    """AR-352: `tasks._stan_licznikow` czytał kopie FITS niezbadane dwa razy - licznik wiersza bajtów przez
+    `resolver.review_state` i napis gestu Dostawy przez `scan.copy_facts_waiting` (2 odczyty po 70-95 ms na kopii
+    pf4 v47 przy 15 598 kopiach). Teraz raz, a oba człony mówią to samo, co ich właściciele czytający sami (fakty 2,
+    bajty 2). Mutanty: `_liczniki_osi` bez podania wierszy `review_state`; `_stan_licznikow` bez wierszy dla
+    `copy_facts_waiting`."""
+    from test_gui_pipeline import _kopie_bez_faktow
+    from horreum import resolver, scan
+    from horreum.gui import tasks as tasks_mod
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    con = db.connect(db_path)
+    try:
+        prawdziwe = resolver.nonprintable_unread_locations
+        wolania = []
+        monkeypatch.setattr(resolver, "nonprintable_unread_locations",
+                            lambda c: wolania.append(1) or prawdziwe(c))
+        stan, _kandydaci = tasks_mod._stan_licznikow(con)
+        assert len(wolania) == 1, wolania
+        monkeypatch.setattr(resolver, "nonprintable_unread_locations", prawdziwe)
+        assert stan["header_nonprintable_unread"] == resolver.review_state(con).header_nonprintable_unread == 2
+        assert stan["copy_facts_waiting"] == scan.copy_facts_waiting(con) == scan.CopyFactsWaiting(
+            facts=2, bytes=2, copies=2)
+    finally:
+        con.close()

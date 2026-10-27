@@ -2517,22 +2517,25 @@ def _pod_korzeniem(rows, korzen):
     return [r for r in rows if _under(r["path"], prefix)]
 
 
-def _niezbadane_do_odczytu(con):
+def _niezbadane_do_odczytu(con, wiersze=None):
     """Kopie FITS niezbadane (`resolver.nonprintable_unread_locations`), które sterownik może przeczytać:
-    czytelne i nie izolowane - te same bramki co kandydaci faktów (docstring `copy_facts_candidates`)."""
+    czytelne i nie izolowane - te same bramki co kandydaci faktów (docstring `copy_facts_candidates`).
+    `wiersze` - te same wiersze przeczytane już przez wołającego (AR-352); filtr zostaje tutaj."""
     from . import resolver                # leniwie - jak `queries` niżej
-    return [r for r in resolver.nonprintable_unread_locations(con)
-            if r["unreadable_since"] is None and not r["izolowana"]]
+    if wiersze is None:
+        wiersze = resolver.nonprintable_unread_locations(con)
+    return [r for r in wiersze if r["unreadable_since"] is None and not r["izolowana"]]
 
 
-def _dwie_roboty(con):
+def _dwie_roboty(con, niezbadane=None):
     """`(fakty, bajty)` trybu domyślnego `copy_facts_candidates` - JEDNO złożenie (AR-315): kandydaci
     faktów (`_kandydaci_faktow`) i WSZYSTKIE kopie FITS niezbadane (`_niezbadane_do_odczytu`). Kopia,
     która czeka na obie roboty, stoi w obu listach; lista etapu to ich unia (`_unia`). Z tej jednej
     pary biorą się lista przebiegu i jej klasyfikacja (`backfill_copy_facts`) oraz liczby przycisku
     (`copy_facts_waiting`) - osobny SELECT po wyborze listy rozjeżdżał mianowniki z listą, gdy robotę
-    domknął w międzyczasie ktoś inny."""
-    return _kandydaci_faktow(con, False), _niezbadane_do_odczytu(con)
+    domknął w międzyczasie ktoś inny. `niezbadane` - wiersze kopii niezbadanych podane przez wołającego
+    (`copy_facts_waiting`, AR-352)."""
+    return _kandydaci_faktow(con, False), _niezbadane_do_odczytu(con, niezbadane)
 
 
 def _unia(fakty, bajty):
@@ -2553,10 +2556,12 @@ class CopyFactsWaiting:
     copies: int = 0
 
 
-def copy_facts_waiting(con):
+def copy_facts_waiting(con, *, niezbadane=None):
     """`CopyFactsWaiting` całego archiwum (bez korzenia - slot okna nie dotyka dysku, AR-31 (3)) z tego
-    samego złożenia co `copy_facts_candidates` (`_dwie_roboty`)."""
-    fakty, bajty = _dwie_roboty(con)
+    samego złożenia co `copy_facts_candidates` (`_dwie_roboty`). `niezbadane` - wiersze
+    `resolver.nonprintable_unread_locations(con)` przeczytane już przez wołającego (rachunek liczników
+    Porządków czyta je RAZ dla licznika wiersza i dla tego napisu, AR-352); złożenie zostaje tutaj."""
+    fakty, bajty = _dwie_roboty(con, niezbadane)
     return CopyFactsWaiting(facts=len(fakty), bytes=len(bajty), copies=len(_unia(fakty, bajty)))
 
 

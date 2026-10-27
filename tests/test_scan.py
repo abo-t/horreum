@@ -2364,7 +2364,7 @@ def test_regula_milczenia_rodzajow_ma_jednego_wlasciciela(monkeypatch):
     > 0) rozstrzyga rdzeń (`resolver.unreadable_kinds_shown`); raport CLI i zdanie GUI tylko
     renderują listę. Dowód właściciela: zmiana reguły w rdzeniu przestawia obie powierzchnie.
 
-    Falsyfikator: wróć z regułą do `cli._format_delta` albo `pipeline.unreadable_kinds_text` - ta
+    Falsyfikator: wróć z regułą do `cli._format_delta` albo `dostawa_bramka.unreadable_kinds_text` - ta
     powierzchnia dalej mówi „naglowek 0" po zmianie reguły w rdzeniu."""
     from types import SimpleNamespace
 
@@ -2382,9 +2382,8 @@ def test_regula_milczenia_rodzajow_ma_jednego_wlasciciela(monkeypatch):
          "object_nameless_raw", "object_nameless_stacks", "filters_canon"), 0),
         object_delta=[], review=rv)
     assert cli._format_delta("x.db", rep).endswith("\n      kopie: dysk/dostep 2")
-    pytest.importorskip("PySide6")
-    from horreum.gui import i18n, pipeline
-    assert i18n.t("object.unreadable_kind_parse", n=0) not in pipeline.unreadable_kinds_text(zero)
+    from horreum.gui import dostawa_bramka, i18n      # zdanie GUI bez Qt (AR-356) - test biegnie i bez PySide6
+    assert i18n.t("object.unreadable_kind_parse", n=0) not in dostawa_bramka.unreadable_kinds_text(zero)
 
 
 def test_review_state_licznik_i_rozbicie_nieczytelnych_z_jednej_migawki(tmp_path):

@@ -1,9 +1,11 @@
 """Bramka i napis gestu Dostawy bez budowy strony (`horreum.gui.dostawa_bramka`, AR-335, AR-337) - BEZ PySide6.
 
 Moduł czytają gospodarz (powód odmowy biegu przy niezbudowanej Dostawie), widok Dostawy (ta sama reguła na własnym
-stanie) i Porządki (napis gestu w podpowiedzi wiersza bajtów). Ten plik nie robi `importorskip` - biega też w `.venv`
-bez Qt; Qt-wolność modułu przypina PRZECHODNIO (podproces), a bramka AST pilnuje, że lista Porządków (`tasks.py`)
-nie importuje modułu Dostawy. Każdy test nazywa mutanta, który go czerwieni."""
+stanie i zdanie rozbicia kopii nieczytelnych w raporcie) i Porządki (napis gestu w podpowiedzi wiersza bajtów, zdanie
+rozbicia na podstronie obiektów). Ten plik nie robi `importorskip` na poziomie modułu - biega też w `.venv` bez Qt
+(test podprocesu z `TasksView` pomija się bez PySide6); Qt-wolność modułu przypina PRZECHODNIO (podproces), bramka AST
+pilnuje, że lista Porządków (`tasks.py`) nie importuje modułu Dostawy, a podproces z `TasksView` - że nie ładuje go też
+przechodnio przez podstrony osi. Każdy test nazywa mutanta, który go czerwieni."""
 import ast
 import subprocess
 import sys
@@ -67,3 +69,44 @@ def test_porzadki_nie_importuja_modulu_dostawy():
     drzewo = ast.parse((PKG / "gui" / "tasks.py").read_text(encoding="utf-8"))
     assert "horreum.gui.pipeline" not in set(_importy_modulow(drzewo))
     assert "horreum.gui.dostawa_bramka" in set(_importy_modulow(drzewo))      # predykat nie oślepł
+
+
+# ═════════════════════════ AR-356: Porządki bez modułu Dostawy także przez podstrony osi
+
+_KOD_PORZADKOW = """\
+import os, sys
+sys.path.insert(0, sys.argv[1])
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+from PySide6.QtCore import QSettings
+_init = QSettings.__init__
+QSettings.__init__ = lambda self, *a, **k: _init(self, sys.argv[3], QSettings.Format.IniFormat)
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+from horreum import db
+from horreum.gui import tasks
+con = db.open_db(sys.argv[2])
+widok = tasks.TasksView(con)
+widok.refresh_counts()
+widok.object_view.refresh()
+widok.axis_view.refresh()
+widok.observatory_view.refresh()
+print(sorted(m for m in ("horreum.gui.pipeline", "horreum.gui.dostawa_bramka") if m in sys.modules))
+widok.zatrzymaj_pola()
+con.close()
+"""
+
+
+def test_porzadki_z_podstronami_osi_nie_laduja_modulu_dostawy(tmp_path):
+    """AR-356: bramka AST wyżej patrzy na sam `tasks.py`, a podstrona obiektów (`ObjectAxisView._load_review`)
+    importowała `horreum.gui.pipeline` dla zdania rozbicia kopii nieczytelnych - Porządki ładowały moduł Dostawy
+    przechodnio przy pierwszym `TasksView`. W świeżym procesie: `TasksView(con)` (osie od razu), rachunek liczników
+    i odświeżenie trzech podstron osi - moduł Dostawy niezaładowany, moduł bramki tak (predykat nie oślepł).
+    QSettings podprocesu idą do INI w `tmp_path` (podproces nie dziedziczy izolacji `conftest`).
+    Falsyfikator: import z `horreum.gui.pipeline` w `_load_review`."""
+    import pytest
+    pytest.importorskip("PySide6")
+    wynik = subprocess.run(
+        [sys.executable, "-I", "-c", _KOD_PORZADKOW, str(PKG.parent), str(tmp_path / "porzadki.db"),
+         str(tmp_path / "ustawienia.ini")], capture_output=True, text=True, timeout=120)
+    assert wynik.returncode == 0, wynik.stderr
+    assert wynik.stdout.strip().splitlines()[-1] == "['horreum.gui.dostawa_bramka']", wynik.stdout

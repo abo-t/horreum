@@ -1207,3 +1207,31 @@ def test_wiersz_cli_przebiegu_samych_faktow_bez_czlonu_bajtow(tmp_path):
     con.close()
     assert wiersze[0].startswith("  fakty kopii: zebrane 2 z 2 (niesprawdzone 0, "), wiersze
     assert "bajty naglowka" not in wiersze[0] and wiersze[0].isascii(), wiersze
+
+
+# ═════════════════════════ AR-352: wiersze kopii niezbadanych podane przez wołającego = odczyt właściciela
+
+def test_wiersze_niezbadanych_podane_rowne_odczytowi(tmp_path):
+    """AR-352: rachunek liczników Porządków czyta kopie FITS niezbadane RAZ i podaje wiersze parametrem licznikowi
+    wiersza (`resolver.review_state`) i napisowi gestu (`scan.copy_facts_waiting`) - wynik z parametrem = wynik bez,
+    także przy kopii niezbadanej nieczytelnej i izolowanej: licznik „niesprawdzone” liczy obie (to też „nie wiem”),
+    robota bajtów - żadnej (sterownik ich nie przeczyta). Predykat ten sam, zmienia się tylko źródło wierszy.
+    Mutant: filtr kopii czytelnych i nieizolowanych pominięty dla podanych wierszy (`bytes` 3 zamiast 1)."""
+    from horreum import resolver
+    con, _a, _b, f1, f2a, _f2b = _fakty_i_bajty(tmp_path)
+    try:
+        lf1 = _loc(con, f1)
+        sha1 = con.execute("SELECT sha1_data FROM frame WHERE id = ?", (lf1["frame_id"],)).fetchone()[0]
+        assert repo.refresh_location_unreadable(
+            con, location_id=lf1["id"], sha1_data=sha1, path=str(f1), mtime=lf1["mtime"],
+            reason="OSError: test", kind="io", now=NOW)
+        _operacja(con, _loc(con, f2a)["id"], repo.INPLACE_ISOLATING_PHASES[0])
+        wiersze = resolver.nonprintable_unread_locations(con)
+        assert len(wiersze) == 3 and {(r["unreadable_since"] is not None, bool(r["izolowana"]))
+                                      for r in wiersze} == {(True, False), (False, True), (False, False)}
+        assert resolver.review_state(con, niezbadane=wiersze) == resolver.review_state(con)
+        assert resolver.review_state(con).header_nonprintable_unread == 3
+        assert scan.copy_facts_waiting(con, niezbadane=wiersze) == scan.copy_facts_waiting(con)
+        assert scan.copy_facts_waiting(con).bytes == 1
+    finally:
+        con.close()

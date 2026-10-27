@@ -3520,6 +3520,9 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
     karty (AR-311) - czysty odczyt dziennika, bez zgadywania:
 
       * `None` - wariant tej klatki nie dotyczy (nic do zrobienia, nic do powiedzenia);
+      * `("bez_dowodu",)` - karta była, a dowodu pochodzenia z parą (commit, plik) nie ma (zapis sprzed pary), klatka
+        jest przy obiekcie ze źródłem `header`, którego już żadna kopia nie mówi: nic nie odtwarzamy (bez zgadywania),
+        klatka zostaje - zdanie to liczy (AR-364);
       * `("wrocil",)` - stan sprzed już odtworzony (znacznik `card_undone` z tą parą);
       * `("zostaje",)` - przypisanie z karty było, ale oś klatki zmieniła się po nim (ręka, kolejny
         przebieg z innym źródłem) albo obiekt sprzed jest zdjęty z osi - klatka zostaje;
@@ -3544,8 +3547,11 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
          Dokładna para, nigdy odcisk nagłówka ani czas: cofnięcie późniejszego C2 przywraca ten sam
          odcisk, dwa commity tej samej karty dzielą odcisk i sekundę, commit wieloplikowy ma jedno
          `applied_at` na wszystkie pliki, a niezwiązane `header.adopted` może nieść ten sam odcisk. Brak
-         zdarzenia z parą (commit zapisany przed dowodem, zeznanie z innej kopii) → `None`: klatka
-         zostaje, nic nie zgadujemy. Brak zdarzenia osi po kotwicy przy klatce z obiektem ze źródłem
+         zdarzenia z parą (commit zapisany przed dowodem, zeznanie z innej kopii): klatka zostaje, nic nie
+         zgadujemy - przy obiekcie ze źródłem `header` → `bez_dowodu` (kroki 4 i 4b przeszły: nazwy nie mówi już
+         żaden nagłówek, a klatka ją nosi; resolver jej nie odepnie, `resolver.run_resolver` „obiekt bez świadka
+         zostaje”), inaczej `None` (źródło regionu, ręki, ścieżki - karta obiektu nie nadała). Brak
+         zdarzenia osi po kotwicy przy klatce z obiektem ze źródłem
          `header` (przypisanie wyprzedziło późne rozliczenie zapisu) → `zostaje` - zdanie ją liczy.
          Pierwsze zdarzenie osi po kotwicy musi być przypisaniem RESOLVERA - samo
          `object.assigned` (stan sprzed: pustka) albo sąsiednia para
@@ -3593,6 +3599,12 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
         "AND json_extract(payload, '$.location_id') = ?",
         (target, ZNACZNIK_ZAPISU_KARTY, int(commit_id), int(location_id))).fetchone()[0]
     if kotwica is None:
+        # AR-364: bez dowodu nic nie odtwarzamy, ale klatka przy obiekcie z nagłówka, którego żadna kopia już nie mówi
+        # (kroki 4 i 4b wyżej), zostaje przy nim bez słowa, czy nadała go ta karta - zdanie wyniku to mówi.
+        fr = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
+                         (frame_id,)).fetchone()
+        if fr is not None and fr["object_id"] is not None and fr["object_source"] == "header":
+            return ("bez_dowodu",)
         return None
     osi = con.execute(
         "SELECT id, verb, actor, payload FROM event WHERE target = ? AND id > ? "
@@ -3635,9 +3647,10 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
 def object_undo_verdict(con, *, commit_id, location_id):
     """`(frame_id, werdykt)` stanu obiektu klatki pliku `location_id` po cofnięciu commitu - JEDNO
     miejsce decyzji dla zapisu (`_restore_object_state_tx`) i zdania wyniku (`UndoResult.
-    objects_restored`/`objects_kept`, AR-311): `"wrocil"` - stan obiektu sprzed zapisu odtworzony
-    (karta po „Rozwiąż” albo nagrobek ręki AR-38), `"zostaje"` - oś zmieniła się po zapisie i klatka
-    zostaje (także nagrobek, którego nie odtworzono, bo ręka orzekła nowszy werdykt), `None` - wariant
+    objects_restored`/`objects_kept`/`objects_unproven`, AR-311, AR-364): `"wrocil"` - stan obiektu sprzed
+    zapisu odtworzony (karta po „Rozwiąż” albo nagrobek ręki AR-38), `"zostaje"` - oś zmieniła się po zapisie
+    i klatka zostaje (także nagrobek, którego nie odtworzono, bo ręka orzekła nowszy werdykt), `"bez_dowodu"` -
+    klatka przy obiekcie z nagłówka bez dowodu pochodzenia karty (`_plan_obiektu_z_karty`), `None` - wariant
     tej klatki nie dotyczy. Czysty odczyt; `frame_id` `None`, gdy lokacji nie ma."""
     row = con.execute("SELECT frame_id FROM location WHERE id = ?",
                       (int(location_id),)).fetchone()
@@ -4872,16 +4885,31 @@ def discard_staging(con, *, run_id, klinga, now, actor="user:local"):
 
 
 def zamiar_cofniecia_przebiegu(con, *, run_id, commity, now, actor="writeback:undo"):
-    """ZAMIAR cofnięcia przebiegu kart (AR-345, AR-318): zdarzenie `run.undo_started` z zamrożonym zakresem
-    (`payload.commity`) własną transakcją, PRZED pierwszym plikiem `writeback.undo_run` - z tym samym `now`
-    co reszta cofnięcia. Wiersz Porządków „Dokończ cofnięcie” (`gui.queries.niedokonczone_cofniecia_kart`)
-    widzi z niego commit, którego cofnięcie przerwano na granicy commitów albo przed pierwszym plikiem -
-    pliku nie ruszono, więc ślad próby per commit nie powstał. Aktor księgowy spoza `user%` (jak `scan`,
-    `resolver`): to ślad dla Porządków, nie gest ręki - Dom (`queries.last_hand_gesture`) go nie liczy."""
+    """ZAMIAR cofnięcia commitów kart (AR-345, AR-318, AR-360): zdarzenie `run.undo_started` z zamrożonym zakresem
+    (`payload.commity`) własną transakcją, PRZED pierwszym plikiem KAŻDEGO cofnięcia commitów kart
+    (`writeback._cofnij_zakres` - `undo` jednego commitu z paska, okien kart i CLI, `undo_run` przebiegu z szuflady
+    i CLI) - z tym samym `now` co reszta cofnięcia. Wiersz Porządków „Dokończ cofnięcie”
+    (`gui.queries.niedokonczone_cofniecia_kart`) widzi z niego commit, którego cofnięcie przerwano na granicy commitów
+    albo przed pierwszym plikiem - pliku nie ruszono, więc ślad próby per commit nie powstał. Aktor księgowy spoza
+    `user%` (jak `scan`, `resolver`): to ślad dla Porządków, nie gest ręki - Dom (`queries.last_hand_gesture`) go
+    nie liczy."""
     with con:
         emit_event(con, actor=actor, verb="run.undo_started", target=f"run:{run_id}", now=now,
                    payload={"commity": [int(c) for c in commity]},
-                   reason="cofnięcie przebiegu z szuflady - zakres zamrożony przy „Cofnij”")
+                   reason="cofnięcie commitów kart - zakres zamrożony przed pierwszym plikiem")
+
+
+def domkniecie_cofniecia_przebiegu(con, *, run_id, commity, now, actor="writeback:undo"):
+    """ZNACZNIK DOMKNIĘCIA cofnięcia commitów kart (AR-360): zdarzenie `run.undo_finished` z TYM SAMYM zakresem co zamiar
+    (`payload.commity`), własną transakcją, wyłącznie po cofnięciu domkniętym (`writeback.UndoResult.complete` -
+    `writeback._cofnij_zakres`). Zamiar commitu sprzed znacznika z tym commitem na tym samym celu przestaje być
+    kandydatem wiersza „Dokończ cofnięcie” (`gui.queries.niedokonczone_cofniecia_kart`) - bez tego każde cofnięcie
+    dokładało na zawsze odczyt wszystkich backupów swoich commitów do każdego liczenia Porządków. Append-only, aktor
+    księgowy jak zamiar (Dom go nie liczy)."""
+    with con:
+        emit_event(con, actor=actor, verb="run.undo_finished", target=f"run:{run_id}", now=now,
+                   payload={"commity": [int(c) for c in commity]},
+                   reason="cofnięcie commitów kart domknięte - zamiar rozliczony")
 
 
 def nieudane_do_ponowienia(con, *, run_id, klinga):

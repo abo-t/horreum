@@ -200,6 +200,9 @@ ITEM_REASON_CODES = frozenset({
     # --- granice nagłówka FITS niezgodne z kanonicznym rekordem `END` (AR-174, `writeback._GRANICE_END`):
     # odmowa zapisu w miejscu, drogi atomowej i cofnięcia, plik nietknięty
     "header_end_bounds",
+    # --- wzór nazwy z zewnątrz: `re` tokenu `orig` niebędące napisem (AR-368, `naming.validate_template`) - zdanie bez
+    # nazwy typu Pythona (dawniej `rename_tpl_bad_regex` z „(NoneType)”)
+    "rename_tpl_regex_not_text",
 })
 
 # Kody błędu systemu (AR-168): okno dokłada do podpowiedzi surowy tekst systemu (`detail`) - zdanie

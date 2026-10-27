@@ -1193,6 +1193,9 @@ class ConfirmPathObjectsDialog(QDialog):
     # Nota cofnięcia DOMKNIĘTEGO poza oknem (pasek po zamknięciu, recepta „Cofnij zapis”, AR-296):
     # klatki zostają nazwane z folderu, a „Zatwierdź” już nie istnieje.
     UWAGA_COFNIECIA = "path.cards_restored_closed_note"
+    # Fakty operacji zapisu kart (`wb_worker.CzescZapisu`, AR-359) - przychodzą PRZED `_after_commit` (`_na_czesc`),
+    # zużywa je `_after_commit`; None = wynik bez faktów (wywołanie wprost) - reguła `CommitResult.commit_id`.
+    _czesc = None
 
     @property
     def commit_po_zamknieciu(self):
@@ -1421,9 +1424,16 @@ class ConfirmPathObjectsDialog(QDialog):
         self._begin_progress(staged)
         # Karta W MIEJSCU (AR-117): droga atomowa przepisuje cały plik po SMB i zrywa dowiązania
         # `_WBPP`; plik, w którym karta się nie mieści, rdzeń zapisuje atomowo i mówi dlaczego. Ta sama
-        # operacja co szuflada Zbiorów (`commit`, AR-258).
+        # operacja co szuflada Zbiorów (`commit`, AR-258). Fakty zapisu (`on_partial`, AR-359) - „Cofnij” z zakresu
+        # rdzenia, nie z samego `commit_id`.
+        self._czesc = None
         self._runner.start("commit", run_id, on_progress=self._on_progress,
-                           on_done=self._after_commit, on_failed=self._on_failed)
+                           on_done=self._after_commit, on_failed=self._on_failed, on_partial=self._na_czesc)
+
+    def _na_czesc(self, op, czesc):
+        """Fakty operacji zapisu kart od wykonawcy (`WritebackWorker.czesciowy`, AR-359) - przed `_after_commit`
+        tej samej operacji; metoda okna, więc z wątku tła przychodzi kolejką w wątku okna."""
+        self._czesc = czesc
 
     def _stage_karty(self, wybrane):
         """Staging kart dla zaznaczonych pozycji → `(run_id, liczba)`. Plan na ŚWIEŻO, wyłącznie
@@ -1479,23 +1489,34 @@ class ConfirmPathObjectsDialog(QDialog):
         teraz". `commit_id` widoczny - po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki
         (ta sama umowa co w „Napraw nagłówek…"). Commit, który NIE podmienił żadnego pliku (same
         `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty.
-        Zapis w miejscu mówi o drodze zapisu tylko przy spadku na atomową (`zdanie_commitu_kart`)."""
-        summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied")
+        Zapis w miejscu mówi o drodze zapisu tylko przy spadku na atomową (`zdanie_commitu_kart`).
+
+        „COFNIJ” Z FAKTÓW WYKONAWCY (AR-359): zakres z klas rdzenia (`CzescZapisu.zakres`, ta sama reguła co szuflada) -
+        sam przerwany zapis w miejscu „Cofnij” nie dostaje (rozstrzyga odzysk, zdanie mówi drogę), podmiana
+        niepotwierdzona dostaje z członem „do sprawdzenia”. „Zatwierdź” milczy, dopóki zapis ruszył plik (także otwarty
+        zapis - ponowny zapis trafiłby w izolację lokacji); oddaje go wyłącznie zapis, który nic nie ruszył."""
+        czesc, self._czesc = self._czesc, None
+        glowa = self.status.text()
+        summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied", czesc,
+                                              przycisk=i18n.t("path.undo_cards_btn"))
         if cofnij is not None:
             self._commit_id = cofnij
             self.undo_btn.setVisible(True)
             self.resolve_btn.setVisible(True)
-        self._domkniety = cofnij is not None
+        self._domkniety = (cofnij is not None or res.commit_id is not None
+                           or (czesc is not None and czesc.zakres is not None))
         if res.cancelled:
             self._porzuc_staging()               # reszta runu to sierota - nikt jej nie dokończy
         self._run_id = None                      # run domknięty commitem (R#5) - nie kasuj przy zamknięciu
         # Spadek na drogę atomową zdanie mówi językiem człowieka; szczegół rdzenia - pod kursorem,
         # razem z pozostałymi powodami (okno nie ma listy pozycji) - protokół pola (AR-204).
-        self.status.ustaw(self.status.text() + "\n" + summary, podpowiedz_kart(res))
+        self.status.ustaw(glowa + "\n" + summary, podpowiedz_kart(res))
         if cofnij is not None:                   # pasek po zamknięciu: polecenie cofnięcia (AR-283)
+            # Po zamknięciu przycisku okna nie ma - człony zdania nazywają polecenie CLI (wzór `_after_undo`).
+            cli = i18n.t("wb.undo_cli_short", id=cofnij)
+            pasek = zdanie_commitu_kart(res, "path.cards_applied", czesc, przycisk=cli)[0]
             self.po_zamknieciu = _wariant_paska_kart(
-                self.status.text(), self.status.text() + i18n.t(
-                    "wb.undo_short", cmd=i18n.t("wb.undo_cli_short", id=cofnij)),
+                self.status.text(), glowa + "\n" + pasek + i18n.t("wb.undo_short", cmd=cli),
                 self._db_path, cofnij)
         self._end_progress()
         dopasuj_wysokosc(self)                   # zdanie bazy + zdanie plików (`config_dialog`)
@@ -1504,7 +1525,9 @@ class ConfirmPathObjectsDialog(QDialog):
     def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera: staging tego runu jest sierotą (C1) - sprzątamy go od razu, nie przy
         zamknięciu okna. „Zatwierdź" wraca, bo nie wiemy, czy karty stoją w plikach. Szczegół
-        systemu (`podpowiedz`, AR-185) - pod kursorem pola błędu; następne zdanie go zdejmuje."""
+        systemu (`podpowiedz`, AR-185) - pod kursorem pola błędu; następne zdanie go zdejmuje. Fakty tej
+        operacji (`_na_czesc`, AR-359) schodzą - nie wiszą do następnego zapisu."""
+        self._czesc = None
         self._porzuc_staging()
         self._domkniety = self._commit_id is not None
         self._end_progress()
@@ -1783,6 +1806,8 @@ class RepairHeaderDialog(QDialog):
     busy_changed = Signal(bool)  # ta powierzchnia pisze do plików → mutex drugiej (D-PD-3)
     # Nota cofnięcia domkniętego poza oknem (AR-296) - naprawa mówi sam stan, jak `_after_undo`.
     UWAGA_COFNIECIA = ""
+    # Fakty operacji zapisu kart (`wb_worker.CzescZapisu`, AR-359) - jak w „Zatwierdź ze ścieżki…”.
+    _czesc = None
 
     @property
     def commit_po_zamknieciu(self):
@@ -2155,9 +2180,15 @@ class RepairHeaderDialog(QDialog):
 
         self._run_id = run_id
         self._begin_progress(staged)
-        # Karta W MIEJSCU (AR-117) - ten sam powód i ta sama operacja co w „Zatwierdź ze ścieżki…".
+        # Karta W MIEJSCU (AR-117) - ten sam powód i ta sama operacja co w „Zatwierdź ze ścieżki…"; fakty zapisu
+        # (`on_partial`, AR-359) - „Cofnij” z zakresu rdzenia.
+        self._czesc = None
         self._runner.start("commit", run_id, on_progress=self._on_progress,
-                           on_done=self._after_commit, on_failed=self._on_failed)
+                           on_done=self._after_commit, on_failed=self._on_failed, on_partial=self._na_czesc)
+
+    def _na_czesc(self, op, czesc):
+        """Fakty operacji zapisu kart od wykonawcy (AR-359) - przed `_after_commit`; metoda okna (kolejka z wątku tła)."""
+        self._czesc = czesc
 
     def _begin_progress(self, total):
         self.bar.setRange(0, total)
@@ -2180,14 +2211,18 @@ class RepairHeaderDialog(QDialog):
         """Post-processing commitu (wątek główny). Plik podmieniony → jednorazowe „Cofnij" + „Rozwiąż
         teraz"; `commit_id` WIDOCZNY, bo po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki.
         Zdanie i regułę „kiedy wolno cofnąć" daje `zdanie_commitu_kart` - wspólne z oknem
-        „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij")."""
+        „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij"), z faktów wykonawcy (AR-359):
+        przerwany zapis w miejscu bez „Cofnij” (droga odzysku w zdaniu), podmiana niepotwierdzona z „Cofnij” i członem
+        „do sprawdzenia”; „Zapisz karty” milczy, dopóki zapis ruszył plik."""
         self.bar.setVisible(False)
-        summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied")
+        czesc, self._czesc = self._czesc, None
+        summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied", czesc, przycisk=i18n.t("grid.action.undo"))
         if cofnij is not None:
             self._commit_id = cofnij
-            self._committed = True
             self.undo_btn.setVisible(True)
             self.resolve_btn.setVisible(True)
+        if cofnij is not None or res.commit_id is not None or (czesc is not None and czesc.zakres is not None):
+            self._committed = True               # zapis ruszył plik - ponowny trafiłby w izolację albo w kartę
         if res.cancelled or cofnij is None:
             self._porzuc_staging()               # reszta runu to sierota - nikt jej nie dokończy
         self._run_id = None                      # run domknięty commitem (R#5) - nie kasuj przy zamknięciu
@@ -2198,9 +2233,11 @@ class RepairHeaderDialog(QDialog):
         # razem z pozostałymi powodami (okno nie ma listy pozycji) - protokół pola (AR-204).
         self.status.ustaw(summary, podpowiedz_kart(res))
         if cofnij is not None:                   # pasek po zamknięciu: polecenie cofnięcia (AR-283)
+            # Po zamknięciu przycisku okna nie ma - człony zdania nazywają polecenie CLI (wzór `_after_undo`).
+            cli = i18n.t("wb.undo_cli_short", id=cofnij)
+            pasek = zdanie_commitu_kart(res, "grid.wb.applied", czesc, przycisk=cli)[0]
             self.po_zamknieciu = _wariant_paska_kart(
-                summary, summary + i18n.t("wb.undo_short", cmd=i18n.t("wb.undo_cli_short", id=cofnij)),
-                self._db_path, cofnij)
+                summary, pasek + i18n.t("wb.undo_short", cmd=cli), self._db_path, cofnij)
         # STATUS UCINAŁ SIĘ (AR-176, zmierzone natywnie): przy jednej grupie zdanie z trzema powodami
         # dostawało 44 px przy potrzebnych 64 - okno nie rosło. Wysokość PRZED emisją `changed`
         # (gospodarz odświeża po niej kolejkę).
@@ -2210,7 +2247,8 @@ class RepairHeaderDialog(QDialog):
     def _on_failed(self, op, msg, podpowiedz):
         """Wyjątek workera: staging runu jest sierotą (C1) - sprzątany od razu, nie przy zamknięciu.
         Szczegół systemu (`podpowiedz`, AR-185) - razem ze zdaniem błędu (`_fail`, protokół pola
-        AR-204); następne zdanie pola go zdejmuje."""
+        AR-204); następne zdanie pola go zdejmuje. Fakty tej operacji (`_na_czesc`, AR-359) schodzą."""
+        self._czesc = None
         self._porzuc_staging()
         self.bar.setVisible(False)
         self.undo_btn.setEnabled(True)

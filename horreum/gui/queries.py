@@ -5604,37 +5604,93 @@ def niedokonczone_cofniecia_kart(con):
       3. BEZ commitów przebiegów „Zmień obiekt…”/„Uzgodnij pliki…” (`object_change_run`): ich cofnięcie
          to przebieg karta → plik → baza, a drogą powrotu jest wiersz „Przerwane zmiany obiektu”.
 
-    ZAMIAR COFNIĘCIA PRZEBIEGU (AR-345): commit z zakresu zdarzenia `run.undo_started`
-    (`repo.zamiar_cofniecia_przebiegu`, przed pierwszym plikiem `writeback.undo_run`) jest kandydatem bez
+    ZAMIAR COFNIĘCIA (AR-345, AR-360): commit z zakresu zdarzenia `run.undo_started`
+    (`repo.zamiar_cofniecia_przebiegu`, przed pierwszym plikiem KAŻDEGO cofnięcia commitów kart -
+    `writeback.undo` z paska, okien kart i CLI, `writeback.undo_run` z szuflady i CLI) jest kandydatem bez
     śladu próby per commit - zamiar JEST śladem; filtr „czeka na dokończenie” zostaje. Bez tego cofnięcie
-    przebiegu przerwane na granicy commitów zostawiało starszy commit zmieniony bez wiersza, a ślad
+    przerwane na granicy commitów albo przed pierwszym plikiem zostawiało commit zmieniony bez wiersza, a ślad
     „inny commit przebiegu cofany” dawał fałszywy wiersz po legalnym `header-fix --undo` jednego commitu.
+    Zamiar commitu przestaje się liczyć po ZNACZNIKU DOMKNIĘCIA z tym commitem na tym samym celu
+    (`run.undo_finished`, `repo.domkniecie_cofniecia_przebiegu` - wyłącznie po cofnięciu domkniętym; zamiar
+    późniejszy niż znacznik liczy się znowu) i nigdy nie liczy commitu przebiegu zmiany obiektu (punkt 3).
     Zdarzenia czyta zakres po `target` (`run:…`, indeks `idx_event_target`) - filtr samym `verb` to pełny
     przegląd dziennika (kopia `pf4`, 179 tys. zdarzeń: 0,008 ms wobec 45,8 ms).
 
+    KOSZT BEZ ODCZYTU KAŻDEGO BACKUPU (AR-360) - dwie gwarancje rdzenia, obie z kodu `writeback`:
+      * WARUNEK KONIECZNY: backup czeka WYŁĄCZNIE wtedy, gdy baza opisuje plik jako wynik commitu - pierwszy warunek
+        `writeback._czeka_na_dokonczenie` (`location.header_hash` różny od `post_hash` albo lokacji brak → `False`;
+        Pythonowe `!=` = SQL `IS NOT`), a backupy to te z `writeback.backups_for_commit` (`unreplaced_at IS NULL`).
+        Backupy kandydatów, które go spełniają, daje JEDNO zapytanie zbiorcze; cofnięcie domknięte (ślad próby
+        zostaje w `inplace_op`/`atomic_undo`, więc commit dalej jest kandydatem) i lokacja nadpisana innym stanem
+        odpadają bez odczytu per backup. Plik, który później wrócił do stanu po zapisie (skan), przechodzi dalej;
+      * NA LOKACJI CZEKA NAJWYŻEJ JEDEN BACKUP - najnowszy żywy zapis: `writeback._nowszy_zywy_zapis` odbiera czekanie
+        każdemu starszemu backupowi lokacji, gdy nowszy (wyższe `id` i `commit_id` - backup powstaje przy zapisie
+        commitu) ma `unreplaced_at IS NULL`, odcisk bazy = swój `post_hash` i nie ma dowodu zakończenia
+        (`writeback._cofniecie_zakonczone`). Backupy lokacji spełniające warunek konieczny idą więc od najnowszego:
+        zakończone się pomija, a PIERWSZY niezakończony rozstrzyga lokację regułą rdzenia (`_czeka_na_dokonczenie`) -
+        starsze nie czekają (on sam albo nowszy od niego żywy zapis jest dla nich „nowszym żywym zapisem”). Bez tego
+        zapis tej samej karty powtarzany na tych samych plikach (A → B → A, każdy cofnięty) kosztował odczyt każdego
+        backupu z przeglądem wszystkich nowszych - zmierzone na bazie z 221 prawdziwymi cofnięciami po 25 plików:
+        37 tys. zapytań i 4,5 s na liczenie, po zmianie 221 zapytań i 20 ms (2026-10-27).
+    Zaczęcie commitu (punkt 1) sprawdza się tylko dla commitów z czekającym backupem. Wynik bez zmian - parytet
+    z pętlą po wszystkich backupach wszystkich kandydatów pinuje test.
+
+    JEDNA MIGAWKA: zamiar, kandydaci, warunek i pętla czytają jedną transakcję odczytu - własną (zamykaną
+    wycofaniem), gdy połączenie nie jest w transakcji (wątek okna, klik w wiersz Porządków), a w transakcji
+    wołającego (rachunek liczników w tle) - w niej, bez zamykania (wzór `writeback._klasy_przebiegu`).
+
     Granica: commit wyłącznie atomowy cofany przed 0044 i przerwany nie ma śladu „zaczęcia” - wiersza
-    nie dostanie (droga: recepta w sesji, CLI); tak samo pojedyncze cofnięcie commitu przerwane przed
-    pierwszym plikiem. Na kopii `pf4` (2026-10-22) wynik pusty, kandydaci 1,07 ms (sonda fazy planu)."""
+    nie dostanie (droga: recepta w sesji, CLI). Na kopii `pf4` (2026-10-22) wynik pusty, kandydaci 1,07 ms
+    (sonda fazy planu)."""
     from horreum import writeback          # lazy: rdzeń pisarza ciągnie astropy (wołający już go ma)
-    z_zamiaru = {int(r[0]) for r in con.execute(
-        "SELECT DISTINCT j.value FROM event e, json_each(json_extract(e.payload, '$.commity')) j "
-        "WHERE e.target >= 'run:' AND e.target < 'run;' AND e.verb = 'run.undo_started'")}
-    kandydaci = [r[0] for r in con.execute(
-        "SELECT c.id FROM commits c "
-        "WHERE c.id IN (SELECT commit_id FROM inplace_op WHERE commit_id IS NOT NULL "
-        "               GROUP BY commit_id, location_id HAVING count(*) > 1 "
-        "               UNION SELECT hb.commit_id FROM atomic_undo au "
-        "               JOIN header_backups hb ON hb.id = au.backup_id "
-        "               UNION SELECT commit_id FROM withheld_write WHERE kind = 'undo') "
-        "AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = c.run_id) "
-        "ORDER BY c.id")]
-    wynik = []
-    for commit_id in sorted(set(kandydaci) | z_zamiaru):
-        backupy = writeback.backups_for_commit(con, commit_id)
-        if commit_id not in z_zamiaru and not any(
-                writeback._slad_proby_cofniecia(con, commit_id, b) for b in backupy):
-            continue
-        n = sum(1 for b in backupy if writeback._czeka_na_dokonczenie(con, commit_id, b))
-        if n:
-            wynik.append((commit_id, n))
-    return wynik
+    wlasna = not con.in_transaction
+    if wlasna:
+        con.execute("BEGIN")                    # migawka WAL na cały rachunek (wzór `gui/grid_workers.py`)
+    try:
+        z_zamiaru = {int(r[0]) for r in con.execute(
+            "SELECT DISTINCT j.value FROM event e, json_each(json_extract(e.payload, '$.commity')) j "
+            "WHERE e.target >= 'run:' AND e.target < 'run;' AND e.verb = 'run.undo_started' "
+            "AND NOT EXISTS (SELECT 1 FROM event f, json_each(json_extract(f.payload, '$.commity')) k "
+            "                WHERE f.target = e.target AND f.verb = 'run.undo_finished' AND f.id > e.id "
+            "                AND k.value = j.value) "
+            "AND NOT EXISTS (SELECT 1 FROM commits c JOIN object_change_run o ON o.run_id = c.run_id "
+            "                WHERE c.id = j.value)")}
+        kandydaci = [r[0] for r in con.execute(
+            "SELECT c.id FROM commits c "
+            "WHERE c.id IN (SELECT commit_id FROM inplace_op WHERE commit_id IS NOT NULL "
+            "               GROUP BY commit_id, location_id HAVING count(*) > 1 "
+            "               UNION SELECT hb.commit_id FROM atomic_undo au "
+            "               JOIN header_backups hb ON hb.id = au.backup_id "
+            "               UNION SELECT commit_id FROM withheld_write WHERE kind = 'undo') "
+            "AND NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = c.run_id) "
+            "ORDER BY c.id")]
+        # Warunek konieczny: backupy kandydatów, które baza opisuje jako wynik commitu - per lokacja od najnowszego.
+        zywe = con.execute(
+            "SELECT hb.id, hb.commit_id, hb.location_id, hb.post_hash FROM header_backups hb "
+            "JOIN location l ON l.id = hb.location_id "
+            "WHERE hb.commit_id IN (SELECT value FROM json_each(?)) AND hb.unreplaced_at IS NULL "
+            "AND l.header_hash IS hb.post_hash ORDER BY hb.location_id, hb.commit_id DESC, hb.id DESC",
+            (json.dumps(sorted(set(kandydaci) | z_zamiaru)),)).fetchall()
+        czeka: dict[int, int] = {}              # commit → liczba czekających plików
+        zywy = None                             # najnowszy niezakończony backup bieżącej lokacji
+        for b in zywe:
+            # Starszy od żywego zapisu tej lokacji (oba warunki `_nowszy_zywy_zapis`: `commit_id` i `id`) nie czeka.
+            if (zywy is not None and b["location_id"] == zywy["location_id"]
+                    and b["commit_id"] < zywy["commit_id"] and b["id"] < zywy["id"]):
+                continue
+            if writeback._cofniecie_zakonczone(con, b["commit_id"], b):
+                continue
+            zywy = b
+            if writeback._czeka_na_dokonczenie(con, b["commit_id"], b):
+                czeka[b["commit_id"]] = czeka.get(b["commit_id"], 0) + 1
+        wynik = []
+        for commit_id in sorted(czeka):
+            if commit_id not in z_zamiaru and not any(
+                    writeback._slad_proby_cofniecia(con, commit_id, b)
+                    for b in writeback.backups_for_commit(con, commit_id)):
+                continue
+            wynik.append((commit_id, czeka[commit_id]))
+        return wynik
+    finally:
+        if wlasna:
+            con.rollback()                      # odczyt - nic do zatwierdzenia

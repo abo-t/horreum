@@ -7,10 +7,11 @@ widżetów; logika filtra, makra i nazw siedzi w Qt-wolnych `filter_engine`, `ma
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QToolButton, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStyle, QStyleOptionComboBox, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from horreum import naming
@@ -333,6 +334,24 @@ class MacroBar(QWidget):
             self.stage.emit(md)
 
 
+def _etykieta_obca(combo, klucz, arg):
+    """Etykieta pozycji obcej (AR-368) - szablon `klucz` z argumentem przyciętym wielokropkiem DO POLA TEKSTU zamkniętego
+    combo typu: kolumna ma stałe 170 px (pole tekstu 145 px przy Segoe UI 9 pt, pomiar natywny), a zamknięte combo
+    ucina bez wielokropka - limit znaków nie wystarczał (szerokie znaki, pomiar natywny 2026-10-27). Pełny argument stoi
+    w podpowiedzi pozycji. Szablon kończy się argumentem (`{arg}` na końcu w obu językach). Prostokąt combo ze stałej
+    szerokości kolumny i wysokości z podpowiedzi rozmiaru - wiersz powstaje, zanim układ nada mu geometrię."""
+    opt = QStyleOptionComboBox()
+    combo.initStyleOption(opt)
+    opt.rect = QRect(0, 0, combo.maximumWidth(), combo.sizeHint().height())
+    pole = combo.style().subControlRect(QStyle.CC_ComboBox, opt, QStyle.SC_ComboBoxEditField, combo).width()
+    metryka = combo.fontMetrics()
+    zapas = pole - metryka.horizontalAdvance(i18n.t(klucz, arg=""))
+    krotki = arg if metryka.horizontalAdvance(arg) <= zapas else metryka.elidedText(arg, Qt.ElideRight, zapas)
+    if len(krotki) < min(len(arg), 4):          # początek argumentu widać zawsze, choćby font był duży
+        krotki = arg if len(arg) <= 3 else arg[:3] + "…"
+    return i18n.t(klucz, arg=krotki)
+
+
 class _TokenRow(QWidget):
     """Jeden rząd edytora wzoru: typ tokenu + argument (folder→poziom, orig→regex, kind→wielkość liter) + ↑↓⊖. `spec()`
     zwraca goły string (token bez argumentu) LUB dict `{"t":…}` (parametryczny) — forma DANE `naming`."""
@@ -393,6 +412,8 @@ class _TokenRow(QWidget):
         for i in range(self.combo.count() - 1, len(self._TOKENS) - 1, -1):
             if i != self.combo.currentIndex():
                 self.combo.removeItem(i)
+        if self.combo.currentIndex() < len(self._TOKENS):
+            self.combo.setToolTip("")                   # pełny opis pozycji obcej (AR-368) schodzi razem z nią
         znane = len(self._CASES)
         if self.case.count() > znane and (typ_zmieniony or self.case.currentIndex() < znane):
             if self.case.currentIndex() >= znane:
@@ -425,14 +446,27 @@ class _TokenRow(QWidget):
                 poziom = None
             if poziom is not None and not self.level.minimum() <= poziom <= self.level.maximum():
                 poziom = None                           # `setValue` przycięłoby go do zakresu pola
+        # AR-368: argument spoza edytora - krótka etykieta z SAMYM argumentem (stała kolumna typu, pole tekstu 145 px),
+        # pełny opis z etykietą typu w podpowiedzi pozycji i combo; słownik Pythona nie wchodzi do tekstu.
+        opis_obcy = ""
         if not (isinstance(tok, str) and tok in etykiety):
             obcy = i18n.t("grid.token.unknown", tok=repr(tok))
-        elif (tok == "folder" and poziom is None) or (tok == "orig" and not isinstance(args.get("re", ""), str)):
-            obcy = i18n.t("grid.token.arg_unknown", token=i18n.t(etykiety[tok]), arg=repr(spec))
+        elif tok == "folder" and poziom is None:
+            arg = repr(args.get("n", 1))
+            obcy = _etykieta_obca(self.combo, "grid.token.level_foreign", arg)
+            opis_obcy = i18n.t("grid.token.level_foreign_tip", token=i18n.t(etykiety[tok]), arg=arg,
+                               lo=self.level.minimum(), hi=self.level.maximum())
+        elif tok == "orig" and not isinstance(args.get("re", ""), str):
+            arg = repr(args.get("re"))
+            obcy = _etykieta_obca(self.combo, "grid.token.regex_foreign", arg)
+            opis_obcy = i18n.t("grid.token.regex_foreign_tip", token=i18n.t(etykiety[tok]), arg=arg)
         else:
             obcy = None
+        self.combo.setToolTip(opis_obcy)
         if obcy is not None:
             self.combo.addItem(obcy, spec)              # dane = oryginał - `spec()` odda go bez zmian
+            if opis_obcy:
+                self.combo.setItemData(self.combo.count() - 1, opis_obcy, Qt.ToolTipRole)
             self.combo.setCurrentIndex(self.combo.count() - 1)
         else:
             self.combo.setCurrentIndex(self.combo.findData(tok))

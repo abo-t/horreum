@@ -3145,6 +3145,9 @@ class UndoResult:
     # których oś zmieniła się po przypisaniu z karty, więc zostają. `frame_id` bez powtórzeń.
     objects_restored: tuple = ()
     objects_kept: tuple = ()
+    # AR-364: klatki przy obiekcie ze źródłem `header`, którego cofnięta karta NIE ma dowodu pochodzenia (zapis sprzed
+    # pary commit/plik) - nic nie odtworzono, klatka zostaje, a zdanie to mówi (dawniej milczało jak „nie dotyczy”).
+    objects_unproven: tuple = ()
 
     @property
     def complete(self) -> bool:
@@ -4880,7 +4883,8 @@ def undo(con, commit_id, *, now,
     COFNIĘCIE ODTWARZA STAN OBIEKTU (AR-311, decyzja Zdzinia): klatka, której obiekt przypisał
     „Rozwiąż” z karty `OBJECT` tego commitu na tym pliku i której oś od tamtej pory się nie zmieniła,
     wraca do stanu obiektu sprzed zapisu (`repo.restore_object_state`, ta sama transakcja co
-    nagrobek AR-38). Werdykt per klatka - `UndoResult.objects_restored`/`objects_kept`.
+    nagrobek AR-38). Werdykt per klatka - `UndoResult.objects_restored`/`objects_kept`; klatka przy obiekcie z nagłówka
+    bez dowodu pochodzenia karty (AR-364) - `objects_unproven`.
 
     „JUŻ COFNIĘTE” ROZLICZA BAZĘ (AR-169): przed uznaniem pliku za cofnięty skutki cofnięcia w bazie
     (nagrobek ręki AR-38, otwarte wstrzymanie commitu) rozlicza ta sama klinga co re-sync -
@@ -4903,9 +4907,17 @@ def undo(con, commit_id, *, now,
     location_id)`), więc wynik per lokacja jest tu wynikiem per backup. ŁAŃCUCH PRZEBIEGU
     (`_cofniete_lancuchem`, AR-345): backup tego commitu, którego własne cofnięcie atomowe raz się
     domknęło, a starszy commit tego samego przebiegu na tej lokacji jest już cofnięty, to „już cofnięte”
-    bez dotyku pliku - dawniej ponowienie mówiło `undo_header_changed` o pliku w stanie sprzed przebiegu."""
-    return _cofnij_backupy(con, commit_id, [(commit_id, b) for b in backups_for_commit(con, commit_id)],
-                           now=now, progress=progress, should_cancel=should_cancel)
+    bez dotyku pliku - dawniej ponowienie mówiło `undo_header_changed` o pliku w stanie sprzed przebiegu.
+
+    ZAMIAR I ZNACZNIK Z KAŻDEJ DROGI (AR-360): jeden commit to zakres jednego commitu wspólnego ciała `_cofnij_zakres`
+    (to samo co `undo_run`) - zamiar przed pierwszym plikiem i znacznik domknięcia po cofnięciu domkniętym, więc pasek,
+    okna kart i CLI zostawiają Porządkom ten sam ślad co szuflada. `UndoResult.commit_id` = `commit_id`. Commit, którego
+    w bazie nie ma, daje pusty wynik domknięty bez zdarzeń - kontrakt tej funkcji sprzed zamiaru (zakres przebiegu
+    `undo_run` takiego commitu odmawia)."""
+    if con.execute("SELECT 1 FROM commits WHERE id = ?", (int(commit_id),)).fetchone() is None:
+        return UndoResult(commit_id, [], [], [])
+    return dataclasses.replace(_cofnij_zakres(con, (commit_id,), now=now, progress=progress,
+                                              should_cancel=should_cancel), commit_id=commit_id)
 
 
 # ------------------------------------------------ COFNIĘCIE PRZEBIEGU KART (AR-345)
@@ -5075,7 +5087,20 @@ def undo_run(con, commity, *, now,
     (`repo.zamiar_cofniecia_przebiegu`, ten sam `now`) - wiersz Porządków „Dokończ cofnięcie” widzi
     commit, którego cofnięcie przerwano na granicy commitów albo przed pierwszym plikiem (bez tego starszy
     commit nie miał śladu próby). Zakres pusty albo z dwóch przebiegów to błąd wołającego (EXPECT) - przed
-    jakimkolwiek zapisem. `UndoResult.commit_id` = `run_id` (jak `undo_renames`)."""
+    jakimkolwiek zapisem. `UndoResult.commit_id` = `run_id` (jak `undo_renames`). Ciało wspólne z `undo`
+    (`_cofnij_zakres`, AR-360) - także znacznik domknięcia po cofnięciu domkniętym."""
+    return _cofnij_zakres(con, commity, now=now, progress=progress, should_cancel=should_cancel)
+
+
+def _cofnij_zakres(con, commity, *, now, progress, should_cancel) -> UndoResult:
+    """JEDNO CIAŁO cofnięcia commitów kart (AR-345, AR-360) - `undo` (jeden commit: pasek, okna kart, CLI) i `undo_run`
+    (zakres przebiegu: szuflada, CLI `header-fix --undo 1,2`): walidacja zakresu (jeden przebieg, commity znane) przed
+    jakimkolwiek zapisem, ZAMIAR przed pierwszym plikiem (`repo.zamiar_cofniecia_przebiegu`), pętla `_cofnij_backupy` od
+    najnowszego commitu, a po cofnięciu DOMKNIĘTYM (`UndoResult.complete`) ZNACZNIK `repo.domkniecie_cofniecia_przebiegu`
+    z tym samym zakresem - od niego wiersz Porządków „Dokończ cofnięcie” nie liczy zamiaru tego zakresu
+    (`gui.queries.niedokonczone_cofniecia_kart`), więc zbiór zamiarów nie rośnie z każdym cofnięciem na zawsze.
+    Cofnięcie niedomknięte (przerwanie, porażka pliku, blokada spoza „już cofnięte”) i wyjątek w pętli znacznika nie
+    stawiają - zamiar zostaje śladem. `UndoResult.commit_id` = `run_id`."""
     commity = tuple(sorted({int(c) for c in commity}))
     przebiegi = [r[0] for r in con.execute(
         "SELECT DISTINCT run_id FROM commits WHERE id IN (SELECT value FROM json_each(?))",
@@ -5088,7 +5113,10 @@ def undo_run(con, commity, *, now,
     run_id = przebiegi[0]
     pozycje = [(cid, b) for cid in reversed(commity) for b in backups_for_commit(con, cid)]
     repo.zamiar_cofniecia_przebiegu(con, run_id=run_id, commity=commity, now=now)
-    return _cofnij_backupy(con, run_id, pozycje, now=now, progress=progress, should_cancel=should_cancel)
+    wynik = _cofnij_backupy(con, run_id, pozycje, now=now, progress=progress, should_cancel=should_cancel)
+    if wynik.complete:
+        repo.domkniecie_cofniecia_przebiegu(con, run_id=run_id, commity=commity, now=now)
+    return wynik
 
 
 def _waga_wyniku(c) -> int:
@@ -5164,7 +5192,8 @@ def _cofnij_backupy(con, wynik_id, pozycje, *, now, progress, should_cancel) -> 
                       already=[c.wynik for c in wyniki if c.juz], remaining=remaining,
                       untouched=untouched,
                       objects_restored=tuple(f for f, (_c, w) in obiekty.items() if w == "wrocil"),
-                      objects_kept=tuple(f for f, (_c, w) in obiekty.items() if w == "zostaje"))
+                      objects_kept=tuple(f for f, (_c, w) in obiekty.items() if w == "zostaje"),
+                      objects_unproven=tuple(f for f, (_c, w) in obiekty.items() if w == "bez_dowodu"))
 
 
 def _cofniecie_zakonczone(con, commit_id, b) -> bool:
@@ -6270,7 +6299,7 @@ def _commity_przebiegu(con, run_id) -> tuple[int, ...]:
         "WHERE c.run_id = ? AND b.unreplaced_at IS NULL ORDER BY c.id", (run_id,)))
 
 
-commity_przebiegu = _commity_przebiegu    # nazwa publiczna dla wołających spoza pisarza (CLI)
+commity_przebiegu = _commity_przebiegu    # nazwa publiczna dla wołających spoza pisarza (wykonawca `gui.wb_worker`)
 
 
 def _backupy_lokacji(con, run_id, location_id):

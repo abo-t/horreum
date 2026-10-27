@@ -112,25 +112,25 @@ _DROGI = [
     ("validate_template zły regex",
      lambda mp: _odmowa_wzoru(lambda: naming.validate_template([{"t": "orig", "re": "("}])),
      "rename_tpl_bad_regex",
-     "zły regex w tokenie 'orig': '(' (missing ), unterminated subpattern at position 0)",
-     "bad regex in token 'orig': '(' (missing ), unterminated subpattern at position 0)"),
+     "błędne wyrażenie w tokenie „fragment starej nazwy”: '('",
+     "bad expression in the “old-name fragment” token: '('"),
     ("validate_template trail nie na końcu",
      lambda mp: _odmowa_wzoru(lambda: naming.validate_template(["trail", "kind"])),
-     "rename_tpl_trail_not_last", "token 'trail' musi być ostatni we wzorze",
-     "the 'trail' token must be last in the pattern"),
+     "rename_tpl_trail_not_last", "token „końcowe _ (ostatni)” musi stać na końcu wzoru",
+     "the “trailing _ (last)” token must be at the end of the pattern"),
     ("compose_name trail nie na końcu",
      lambda mp: _odmowa_wzoru(lambda: naming.compose_name(_fakty(), DT, template=["trail", "kind"])),
-     "rename_tpl_trail_not_last", "token 'trail' musi być ostatni we wzorze",
-     "the 'trail' token must be last in the pattern"),
+     "rename_tpl_trail_not_last", "token „końcowe _ (ostatni)” musi stać na końcu wzoru",
+     "the “trailing _ (last)” token must be at the end of the pattern"),
     ("validate_template wielkość liter",
      lambda mp: _odmowa_wzoru(lambda: naming.validate_template([{"t": "kind", "case": "title"}])),
-     "rename_tpl_bad_case", "nieznana wielkość liter tokenu 'kind': 'title'",
-     "unknown letter case for token 'kind': 'title'"),
+     "rename_tpl_bad_case", "nieznana wielkość liter tokenu „rodzaj”: 'title'",
+     "unknown letter case of the “kind” token: 'title'"),
     ("compose_name wielkość liter",
      lambda mp: _odmowa_wzoru(lambda: naming.compose_name(_fakty(), DT,
                                                           template=[{"t": "kind", "case": "title"}])),
-     "rename_tpl_bad_case", "nieznana wielkość liter tokenu 'kind': 'title'",
-     "unknown letter case for token 'kind': 'title'"),
+     "rename_tpl_bad_case", "nieznana wielkość liter tokenu „rodzaj”: 'title'",
+     "unknown letter case of the “kind” token: 'title'"),
     ("compose_name nieznany token",
      lambda mp: _odmowa_wzoru(lambda: naming.compose_name(_fakty(), DT, template=["planeta"])),
      "rename_tpl_unknown_token", "nieznany token szablonu: 'planeta'", "unknown pattern token: 'planeta'"),
@@ -173,7 +173,7 @@ def test_powody_renamu_mowia_w_UI_PL_znak_w_znak_a_EN_dokladnie(monkeypatch, dro
 def test_odmowa_wzoru_zostaje_ValueError_z_dawnym_zdaniem():
     """Błąd wzoru to `OdmowaZPowodem` - dalej `ValueError` z tym samym `str` (CLI `rename` łapie go
     jak dotąd i drukuje `błąd wzoru nazwy: …`)."""
-    with pytest.raises(ValueError, match=r"^token 'trail' musi być ostatni we wzorze$") as info:
+    with pytest.raises(ValueError, match=r"^token „końcowe _ \(ostatni\)” musi stać na końcu wzoru$") as info:
         naming.validate_template({"light": ["kind", "trail", "exp"]})
     assert info.value.powod.code == "rename_tpl_trail_not_last"
 
@@ -228,8 +228,8 @@ def test_cli_rename_DRY_mowi_proza_PL_znak_w_znak():
 
 
 def test_cli_rename_zly_regex_pelne_zdanie_kod_2_zero_mutacji(tmp_path, capsys):
-    """CLI `rename` ze złym regexem `orig`: PEŁNE zdanie PL znak w znak, kod wyjścia 2, pliki
-    nietknięte - odmowa wzoru z kodem nie zmienia wydruku CLI."""
+    """CLI `rename` ze złym regexem `orig`: PEŁNE zdanie PL znak w znak, a tekst `re.error` (język Pythona - w oknie
+    szczegół pod kursorem) za nim po „ - ” (AR-368), kod wyjścia 2, pliki nietknięte."""
     from horreum import cli
     from test_cli_rename import _seed
     dbp, pliki = _seed(tmp_path)
@@ -237,6 +237,6 @@ def test_cli_rename_zly_regex_pelne_zdanie_kod_2_zero_mutacji(tmp_path, capsys):
     rc = cli.main(["rename", str(dbp), "--template-json", '[{"t": "orig", "re": "("}]'])
     assert rc == 2
     assert capsys.readouterr().out.splitlines() == [
-        "Horreum rename: błąd wzoru nazwy: zły regex w tokenie 'orig': '(' (missing ), unterminated "
-        "subpattern at position 0)"]
+        "Horreum rename: błąd wzoru nazwy: błędne wyrażenie w tokenie „fragment starej nazwy”: '(' - missing ), "
+        "unterminated subpattern at position 0"]
     assert all(p.exists() and p.read_bytes() == b for p, b in przed.items())

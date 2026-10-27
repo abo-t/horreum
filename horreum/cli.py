@@ -358,7 +358,7 @@ def _main(argv=None):
     # ujednolicenie karty OBJECT (staging + `writeback.commit(inplace=True)`), cofnięcie po commicie.
     p_hfx = sub.add_parser("header-fix",
                            help="naprawa naglowkow w miejscu: IMAGETYP mastera z historii i FILTER "
-                                "z folderu filtra (DRY domyslnie; --apply; --undo COMMIT)")
+                                "z folderu filtra (DRY domyslnie; --apply; --undo COMMIT[,COMMIT...])")
     p_hfx.add_argument("db", help="ścieżka pliku bazy")
     p_hfx.add_argument("--keyword", action="append", choices=("IMAGETYP", "FILTER"), default=None,
                        help="tylko ta karta (powtarzalne; domyślnie obie)")
@@ -373,8 +373,9 @@ def _main(argv=None):
     p_hfx.add_argument("--plan", default=None, help="plan.json z wydruku DRY (dla --apply)")
     p_hfx.add_argument("--plan-dir", default=None,
                        help="gdzie DRY zapisuje katalog planu (domyślnie katalog bazy)")
-    p_hfx.add_argument("--undo", type=int, default=None, metavar="COMMIT",
-                       help="cofnij zapis o numerze commitu z raportu --apply")
+    p_hfx.add_argument("--undo", type=_commity_cofniecia, default=None, metavar="COMMIT[,COMMIT...]",
+                       help="cofnij zapis o numerze commitu z raportu --apply albo caly przebieg kart - "
+                            "commity po przecinku, jak w kotwicy szuflady (np. 1,2)")
     p_hfx.add_argument("--limit", type=int, default=20,
                        help="ile pozycji każdej listy wypisać (domyślnie 20)")
 
@@ -658,7 +659,7 @@ def _main(argv=None):
         try:
             naming.validate_template(template)
         except ValueError as e:                                # zły regex orig / token w szablonie (INFORMUJ)
-            print(f"Horreum rename: błąd wzoru nazwy: {e}")
+            print(f"Horreum rename: błąd wzoru nazwy: {_zdanie_wzoru(e)}")
             return 2
         blokada = None
         if args.apply:
@@ -686,7 +687,7 @@ def _main(argv=None):
                         source=source, offset_hours=args.offset_hours, template=template,
                         fallback=not args.no_fallback, run_id=run_id)
                 except ValueError as e:                        # straż: wzór sprawdzony wyżej tą samą funkcją
-                    print(f"Horreum rename: błąd wzoru nazwy: {e}")
+                    print(f"Horreum rename: błąd wzoru nazwy: {_zdanie_wzoru(e)}")
                     return 2
                 if not args.apply:
                     print(_format_rename_dry(args.db, run, limit=args.limit, open_intents=otwarte))  # DRY: zero mutacji
@@ -2472,10 +2473,36 @@ def _cmd_object_change(args, parser):
     return 1 if (res.blocked or res.failed or zaleglosc) else 0
 
 
+def _zdanie_wzoru(odmowa):
+    """Odmowa wzoru nazwy w CLI `rename` (AR-368): zdanie powodu rdzenia (`item_reasons.powod_wyjatku` - powód odmowy
+    z kodem), a tekst `re.error` złego wyrażenia (parametr `detail` kodu `rename_tpl_bad_regex` - język Pythona, okno
+    stawia go w szczególe pod kursorem) za nim po „ - ”, żeby diagnoza nie zniknęła z terminala."""
+    from .item_reasons import powod_wyjatku
+    powod = powod_wyjatku(odmowa)
+    detail = dict(powod.params).get("detail") if getattr(powod, "code", None) == "rename_tpl_bad_regex" else None
+    return f"{powod} - {detail}" if isinstance(detail, str) and detail else str(powod)
+
+
+def _commity_cofniecia(tekst):
+    """Wartość `header-fix --undo` (AR-360): numer commitu albo lista numerów po przecinku - to, co szuflada Zbiorów
+    pokazuje w kotwicy „(commity 1, 2)” (`grid.wb.commit_ids`), także ze spacjami. Krotka rosnąca bez powtórzeń (rdzeń
+    i tak cofa od najnowszego); zły zapis → błąd parsera (kod 2), zanim cokolwiek otworzy bazę."""
+    try:
+        commity = tuple(sorted({int(c) for c in tekst.split(",")}))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"oczekiwany numer commitu albo lista numerow po przecinku (np. 1,2), jest {tekst!r}") from None
+    return commity
+
+
 def _cmd_header_fix(args):
     """`horreum header-fix DB [--keyword K] [--frames ...] [--filter-form KANON=FORMA] [--plan-dir K]`
-    (DRY) | `--apply --plan PLIK` | `--undo COMMIT` - plan kart `IMAGETYP` (master z historii)
+    (DRY) | `--apply --plan PLIK` | `--undo COMMIT[,COMMIT...]` - plan kart `IMAGETYP` (master z historii)
     i `FILTER` (filtr z folderu) per kopia (`macro.plan_header_fix`).
+
+    `--undo` (AR-360) cofa commit albo CAŁY przebieg kart jedną drogą rdzenia (`writeback.undo_run`): zakres z jednego
+    przebiegu i ze znanych commitów - inaczej odmowa z kodem 2 przed jakimkolwiek zapisem; zamiar cofnięcia przed
+    pierwszym plikiem (wiersz Porządków „Dokończ cofnięcie” po przerwaniu), commity od najnowszego.
 
     DRY wypisuje zmiany (karty i RÓŻNE kopie osobno), pominięcia i sprzeczności do ręki oraz zapisuje
     trwały plan: dokładne `location_id`, karta, operacja, wartość i `expected_header_hash` każdej
@@ -2516,9 +2543,17 @@ def _cmd_header_fix(args):
         raise
     try:
         if args.undo is not None:
-            res = writeback.undo(con, args.undo, now=now)
+            # Jedna droga dla jednego commitu i listy (AR-360): rdzeń sprawdza, że zakres to jeden przebieg
+            # i same znane commity, ZANIM cokolwiek zapisze, stawia zamiar i cofa od najnowszego commitu.
+            zakres = ", ".join(str(c) for c in args.undo)
+            naglowek = f"UNDO commit {zakres}" if len(args.undo) == 1 else f"UNDO commity {zakres}"
+            try:
+                res = writeback.undo_run(con, args.undo, now=now)
+            except ValueError as exc:
+                print(f"Horreum header-fix {args.db} ({naglowek}): odmowa - {exc}")
+                return 2
             zablokowane = [fr for fr in res.blocked if fr not in res.already]
-            lines = [f"Horreum header-fix {args.db} (UNDO commit {args.undo}): przywrocone "
+            lines = [f"Horreum header-fix {args.db} ({naglowek}): przywrocone "
                      f"{len(res.restored)} (bez powrotu zeznania {len(res.withheld)}), "
                      f"zablokowane {len(zablokowane)}, nieudane {len(res.failed)}"]
             # Zdanie neutralne (AR-182): „już cofnięte” bywa wynikiem własnego cofnięcia, w którym
@@ -2532,12 +2567,12 @@ def _cmd_header_fix(args):
             if tekstowe:
                 lines.append(f"  juz cofniete {len(tekstowe)} - naglowek i baza opisuja stan sprzed "
                              f"commitu; reszty pliku backup tekstowy nie pozwala sprawdzic")
-            # AR-311: stan obiektu klatek z cofnietej karty `OBJECT` po „Rozwiąż” - wiersz tylko przy
+            # AR-311, AR-364: stan obiektu klatek z cofnietej karty `OBJECT` po „Rozwiąż” - wiersz tylko przy
             # niezerowych liczbach (te same pola `UndoResult`, co zdanie okien i paska).
-            if res.objects_restored or res.objects_kept:
+            if res.objects_restored or res.objects_kept or res.objects_unproven:
                 lines.append(f"  obiekt z cofnietej karty: klatki ze stanem sprzed zapisu "
                              f"{len(res.objects_restored)}, zostaja (zmienione po Rozwiaz) "
-                             f"{len(res.objects_kept)}")
+                             f"{len(res.objects_kept)}, bez dowodu pochodzenia {len(res.objects_unproven)}")
             lines += [f"    {fr.status}: {fr.path} - {fr.reason}"
                       for fr in (res.withheld + zablokowane + res.failed)[:args.limit]]
             if res.restored:

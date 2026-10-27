@@ -406,7 +406,7 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
             case = args.get("case")
             if case not in (None, *_KIND_CASES):
                 raise OdmowaZPowodem(PowodPozycji(
-                    f"nieznana wielkość liter tokenu 'kind': {repr(case)}", "rename_tpl_bad_case",
+                    f"nieznana wielkość liter tokenu „rodzaj”: {repr(case)}", "rename_tpl_bad_case",
                     value=repr(case)))
             tokens.append(seg.upper() if case == "upper" else seg.lower() if case == "lower" else seg)
         elif tok == "flatgrp":
@@ -417,7 +417,7 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
                 tokens.append(seg)
         elif tok == "trail":
             if i != len(specs) - 1:
-                raise OdmowaZPowodem(PowodPozycji("token 'trail' musi być ostatni we wzorze",
+                raise OdmowaZPowodem(PowodPozycji("token „końcowe _ (ostatni)” musi stać na końcu wzoru",
                                                   "rename_tpl_trail_not_last"))
             trail = True
         elif tok == "filter":
@@ -473,7 +473,12 @@ def validate_template(template):
     WZÓR Z ZEWNĄTRZ (AR-341: edytor zachowuje specyfikację, której nie umie pokazać): `re` tokenu `orig`
     niebędące napisem i `n` tokenu `folder`, którego `_folder_segment` nie weźmie przez `int()`, też
     odmawiają tutaj kodem - inaczej `re.compile` rzuciłby `TypeError`, a `compose_name` surowy `ValueError`
-    bez kodu, oba poza `except` wołających. Wartości, które rdzeń przyjmuje (`n` = 0 czy 12), przechodzą."""
+    bez kodu, oba poza `except` wołających. Wartości, które rdzeń przyjmuje (`n` = 0 czy 12), przechodzą.
+
+    ZDANIA ODMOWY (AR-368) nazywają token ETYKIETĄ edytora wzoru („fragment starej nazwy”, „folder nadrzędny”,
+    „rodzaj”, „końcowe _ (ostatni)” - `grid.token.*`), nie identyfikatorem danych (`'orig'`); `re` nie-napis to
+    osobny kod bez nazwy typu Pythona, a tekst `re.error` (język Pythona) jedzie WYŁĄCZNIE parametrem `detail` - okno
+    stawia go w szczególe (`gui.wb_worker.zdanie_bledu_wzoru`), CLI za zdaniem."""
     lists = template.values() if isinstance(template, dict) else [template]
     for specs in lists:
         specs = list(specs)
@@ -481,31 +486,29 @@ def validate_template(template):
             tok, args = _spec_parts(spec)
             if tok == "orig":
                 if not isinstance(args.get("re", ""), str):
-                    # Nazwa typu (język Pythona) jedzie parametrem - jawna granica, jak tekst `re.error` niżej.
                     raise OdmowaZPowodem(PowodPozycji(
-                        f"zły regex w tokenie 'orig': {repr(args.get('re'))} ({type(args.get('re')).__name__})",
-                        "rename_tpl_bad_regex", value=repr(args.get("re")),
-                        detail=type(args.get("re")).__name__))
+                        f"wartość {repr(args.get('re'))} w tokenie „fragment starej nazwy” nie jest wyrażeniem",
+                        "rename_tpl_regex_not_text", value=repr(args.get("re"))))
                 try:
                     re.compile(args.get("re", ""))
                 except re.error as e:
                     # Tekst `re.error` (język Pythona) jedzie parametrem - jawna granica, jak tekst systemu.
                     raise OdmowaZPowodem(PowodPozycji(
-                        f"zły regex w tokenie 'orig': {repr(args.get('re'))} ({str(e)})",
+                        f"błędne wyrażenie w tokenie „fragment starej nazwy”: {repr(args.get('re'))}",
                         "rename_tpl_bad_regex", value=repr(args.get("re")), detail=str(e)))
             elif tok == "folder":
                 try:
                     int(args.get("n", 1))               # ta sama konwersja co `_folder_segment`
                 except (TypeError, ValueError, OverflowError):
                     raise OdmowaZPowodem(PowodPozycji(
-                        f"zły poziom tokenu 'folder': {repr(args.get('n', 1))}",
+                        f"zły poziom tokenu „folder nadrzędny”: {repr(args.get('n', 1))}",
                         "rename_tpl_bad_level", value=repr(args.get("n", 1)))) from None
             elif tok == "trail" and i != len(specs) - 1:
-                raise OdmowaZPowodem(PowodPozycji("token 'trail' musi być ostatni we wzorze",
+                raise OdmowaZPowodem(PowodPozycji("token „końcowe _ (ostatni)” musi stać na końcu wzoru",
                                                   "rename_tpl_trail_not_last"))
             elif tok == "kind" and args.get("case") not in (None, *_KIND_CASES):
                 raise OdmowaZPowodem(PowodPozycji(
-                    f"nieznana wielkość liter tokenu 'kind': {repr(args.get('case'))}",
+                    f"nieznana wielkość liter tokenu „rodzaj”: {repr(args.get('case'))}",
                     "rename_tpl_bad_case", value=repr(args.get("case"))))
             elif not isinstance(tok, str) or tok not in TOKENS:
                 # `isinstance` przed `in`: `{"t": [...]}` daje token niehaszowalny, a `TypeError` uciekłby

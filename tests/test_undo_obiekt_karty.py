@@ -252,7 +252,7 @@ def test_commit_bez_karty_OBJECT_nie_odtwarza_obiektu(tmp_path):
     oid, _ = repo.upsert_object(con, canon="NGC7635", catalog="NGC", kind="deep_sky", now=NOW)
     repo.assign_object(con, frame_id=loc["frame_id"], object_id=oid, object_source="region", now=NOW)
     u = writeback.undo(con, c.commit_id, now=NOW)
-    assert u.complete and u.objects_restored == () and u.objects_kept == (), u
+    assert u.complete and u.objects_restored == () and u.objects_kept == () and u.objects_unproven == (), u
     assert _stan(con, loc["frame_id"]) == ("NGC7635", "region", None)
     con.close()
 
@@ -280,7 +280,8 @@ def test_nagrobek_zostaje_domena_AR38_i_liczy_sie_jako_powrot(tmp_path):
 def test_juz_cofniete_odtwarza_obiekt_raz(tmp_path, inplace):
     """Plik wrócił spoza Horreum (bajty sprzed zapisu) i skan to wciągnął - cofnięcie mówi „już
     cofnięte” i rozlicza bazę: obiekt z karty wraca do stanu sprzed zapisu; drugie cofnięcie nie dokłada
-    zdarzeń, a liczy klatkę tak samo. Falsyfikator: rozliczenie „już cofnięte” bez odtworzenia obiektu."""
+    zdarzeń osi ani rozliczenia (wyłącznie parę księgową zamiaru i znacznika domknięcia, AR-360), a liczy klatkę
+    tak samo. Falsyfikator: rozliczenie „już cofnięte” bez odtworzenia obiektu."""
     con = db.open_db(str(tmp_path / "h.db"))
     p = _plik(tmp_path)
     loc = _skan(con, p)
@@ -293,10 +294,11 @@ def test_juz_cofniete_odtwarza_obiekt_raz(tmp_path, inplace):
     u = writeback.undo(con, c.commit_id, now=NOW)
     assert u.complete and u.already and u.objects_restored == (loc["frame_id"],), u
     assert _stan(con, loc["frame_id"]) == (None, None, None)
-    zdarzenia = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    poza_ksiegowa = "SELECT count(*) FROM event WHERE verb NOT LIKE 'run.undo_%'"
+    zdarzenia = con.execute(poza_ksiegowa).fetchone()[0]
     u2 = writeback.undo(con, c.commit_id, now=NOW)
     assert u2.objects_restored == (loc["frame_id"],), u2
-    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == zdarzenia
+    assert con.execute(poza_ksiegowa).fetchone()[0] == zdarzenia
     con.close()
 
 
@@ -460,14 +462,15 @@ def test_commit_wieloplikowy_kotwica_per_plik(tmp_path, inplace):
 def test_zapis_bez_dowodu_pochodzenia_nie_odtwarza(tmp_path):
     """Commit bez dowodu pochodzenia (para commit/plik ani w znaczniku zapisu karty, ani w zdarzeniu
     zeznania) - tak wyglądają zapisy sprzed tego dowodu (emulacja: znacznik usunięty z dziennika bazy testu):
-    cofnięcie nie zgaduje kotwicy po odcisku ani czasie, klatka zostaje przy obiekcie z karty i nie jest
-    liczona."""
+    cofnięcie nie zgaduje kotwicy po odcisku ani czasie, klatka zostaje przy obiekcie z nagłówka i jest liczona
+    jako bez dowodu pochodzenia (AR-364 - dawniej zdanie milczało). Falsyfikator: brak dowodu zlany z „nie dotyczy”."""
     s = _scena(tmp_path, inplace=False)
     s.con.execute("DELETE FROM event WHERE verb = ?", (repo.ZNACZNIK_ZAPISU_KARTY,))
     s.con.commit()
     resolver.run_resolver(s.con, NOW)
     u = writeback.undo(s.con, s.commit, now=NOW)
     assert u.complete and u.objects_restored == () and u.objects_kept == (), u
+    assert u.objects_unproven == (s.fid,), u
     assert _stan(s.con, s.fid) == ("NGC7635", "header", None) and _odtworzenia(s.con, s.fid) == 0
     s.con.close()
 

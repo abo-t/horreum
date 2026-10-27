@@ -260,16 +260,25 @@ class WritebackWorker(QObject):
                 zapisane=sum(1 for r in wiersze if r["status"] == "applied" and r["id"] not in znane),
                 czeka=sum(1 for r in wiersze if r["status"] == "pending"),
                 nazwy=sum(1 for r in wiersze if r["status"] == "applied"))
-        nowe = _albo_none(lambda: set(writeback.commity_przebiegu(con, self._target_id)) - znane)
-        # Jedna klasyfikacja backupów przebiegu: zakres „Cofnij” całości i pliki commitów TEJ operacji.
-        zakresy = _albo_none(lambda: writeback.zakresy_cofniecia(con, self._target_id, nowe or ()))
+        # JEDNA MIGAWKA (AR-359): trzy odczyty kart w jednej transakcji odczytu - zapis innego połączenia między nimi
+        # (drugie okno, CLI) nie złoży pary „commity sprzed - klasy po”, która nigdy nie istniała. Własna transakcja
+        # zamykana wycofaniem; połączenie w transakcji (wyjątek operacji w połowie) - odczyty w niej, jak
+        # `writeback._klasy_przebiegu`. `BEGIN`, który sam padnie, zostawia odczyty bez migawki (każdy w osłonie).
+        wlasna = not con.in_transaction and _albo_none(lambda: con.execute("BEGIN")) is not None
+        try:
+            nowe = _albo_none(lambda: set(writeback.commity_przebiegu(con, self._target_id)) - znane)
+            # Jedna klasyfikacja backupów przebiegu: zakres „Cofnij” całości i pliki commitów TEJ operacji.
+            zakresy = _albo_none(lambda: writeback.zakresy_cofniecia(con, self._target_id, nowe or ()))
+            czeka = _albo_none(lambda: sum(1 for r in writeback.pending_for_run(con, self._target_id)
+                                           if r["status"] == "pending"))
+        finally:
+            if wlasna:
+                _albo_none(con.rollback)                # odczyt - nic do zatwierdzenia
         pola = {"zapisane": None}
         if nowe is not None and zakresy is not None:
             z = zakresy[1]
             pola = {"zapisane": z.zatwierdzone if z else 0, "do_sprawdzenia": z.do_sprawdzenia if z else 0,
                     "otwarte": z.otwarte if z else 0}
-        czeka = _albo_none(lambda: sum(1 for r in writeback.pending_for_run(con, self._target_id)
-                                       if r["status"] == "pending"))
         return CzescZapisu(podmienione, wszystkie, zakres=zakresy[0] if zakresy else None,
                            zakres_znany=zakresy is not None, czeka=czeka, **pola)
 
@@ -827,17 +836,30 @@ def _klucz_powodu(powod):
     return ("kod", kod) if kod else ("tekst", str(powod))
 
 
-def commit_do_cofniecia(res):
-    """`commit_id`, który wolno cofnąć, albo None - JEDNA reguła dla wszystkich powierzchni (C4/Z11).
+def commit_do_cofniecia(res, czesc=None):
+    """`commit_id`, który wolno cofnąć po operacji zapisu kart, albo None (C4/Z11, AR-359).
 
-    Rdzeń nadaje `commit_id`, gdy choć jeden plik został PODMIENIONY - także przy `failed`
-    z `backup_text` (weryfikacja po podmianie padła, plik jest zmieniony, kopia nagłówka leży
-    w `header_backups`). Dawny warunek „`applied` niepuste" zostawiał taki plik zmieniony bez
-    przycisku cofnięcia. Przebieg, w którym backup powstał, a podmianę odbiła straż (wiersz
-    commitu jest w bazie), `commit_id` NIE dostaje - „Cofnij" commitu, który niczego nie zmienił,
-    byłoby kłamstwem (`writeback.commit`). Rename (`commit_renames`) `commit_id` nie nadaje - jego
+    Z FAKTAMI WYKONAWCY (`czesc` = `CzescZapisu` operacji - okna kart): decyduje zakres „Cofnij” z klas rdzenia
+    (`CzescZapisu.zakres`, `writeback.zakresy_cofniecia` - te same fakty co szuflada Zbiorów): commit zakresu, gdy
+    `zakres.cofnij` (podmiana potwierdzona albo niepotwierdzona - cofnięcie ją rozstrzyga), inaczej None - sam
+    otwarty zapis w miejscu rozstrzyga odzysk („Przywróć nagłówek sprzed zapisu”), nie „Cofnij” (rdzeń odmówiłby
+    `undo_open_op` w pętli bez wyjścia). Podmiana niepotwierdzona (`replace_unconfirmed`) „Cofnij” dostaje, choć
+    `CommitResult.commit_id` jest None. Zakres NIEZNANY (odczyt faktów padł) - None: okno nie obiecuje cofnięcia, którego
+    stanu nie zna (zdanie mówi to członem `wb.write_facts_unknown`). Okno kart pisze jednym kliknięciem jeden świeży
+    przebieg, a jeden `writeback.commit` - najwyżej jeden commit, więc zakres ma jeden commit (EXPECT).
+
+    BEZ FAKTÓW (`czesc` None - szuflada Zbiorów, która zakres liczy sama, wywołanie wprost): reguła rdzenia
+    `CommitResult.commit_id` - nadany, gdy choć jeden plik został PODMIENIONY, także przy `failed` z `backup_text`
+    (weryfikacja po podmianie padła, kopia nagłówka leży w `header_backups`); przebieg, w którym podmianę odbiła
+    straż, `commit_id` nie dostaje (`writeback.commit`). Rename (`commit_renames`) `commit_id` nie nadaje - jego
     cofnięcie idzie po `run_id` i ma własną regułę w gridzie."""
-    return res.commit_id
+    if czesc is None:
+        return res.commit_id
+    zakres = czesc.zakres
+    if not czesc.zakres_znany or zakres is None or not zakres.cofnij:
+        return None
+    assert len(zakres.commity) == 1, zakres        # okno kart: jeden przebieg = jedna operacja = jeden commit
+    return zakres.commity[0]
 
 
 def spadek_na_droge_atomowa(fr):
@@ -1054,6 +1076,21 @@ def tekst_powodu(powod):
     return czytelny_powod(powod)
 
 
+def zdanie_bledu_wzoru(exc):
+    """Zdanie paska dla odmowy wzoru nazwy (`naming.validate_template`/`compose_name`, AR-193, AR-368): powód z kodem
+    `rename_tpl_*` w języku UI (`tekst_powodu`), a tekst `re.error` Pythona złego wyrażenia (parametr `detail` kodu
+    `rename_tpl_bad_regex`, język Pythona) - do szczegółu pod kursorem paska (`ZdanieZeSzczegolem`), nie do zdania PL.
+    Jedno zdanie dla podglądu i stagingu nazw (`FramesView._zdanie_bledu_wzoru`)."""
+    from horreum.item_reasons import powod_wyjatku
+    powod = powod_wyjatku(exc)
+    zdanie = i18n.t("grid.rename.error", e=tekst_powodu(powod))
+    detail = (dict(powod.params).get("detail")
+              if isinstance(powod, PowodPozycji) and powod.code == "rename_tpl_bad_regex" else None)
+    if isinstance(detail, str) and detail:
+        return ZdanieZeSzczegolem(zdanie, i18n.t("grid.token.regex_detail_tip", detail=detail))
+    return zdanie
+
+
 def _uwagi_poprawne(uwagi):
     return isinstance(uwagi, tuple) and all(isinstance(n, str) for n in uwagi)
 
@@ -1089,13 +1126,19 @@ def _zdanie_z_kodu(powod):
     return "; ".join([tekst, *(tekst_powodu(u) for u in uwagi)])
 
 
-def zdanie_commitu_kart(res, applied_key):
+def zdanie_commitu_kart(res, applied_key, czesc=None, *, przycisk=None):
     """Zdanie commitu okna piszącego karty → `(tekst, commit_id do cofnięcia | None)`: zdanie
     wyniku + człon o spadku na drogę atomową (`zdanie_drogi_zapisu` - pusty, gdy wszystko poszło
     w miejscu) + nota przerwania + `commit_id` (po zamknięciu okna to jedyny uchwyt do cofnięcia).
     Okna kart piszą jedną operacją z szufladą (`commit`, zapis w miejscu ze spadkiem - AR-258), więc
     flaga drogi zniknęła: spadek rozpoznaje rdzeń po kodzie, a wynik zwykłego commitu atomowego
     spadku nie niesie.
+
+    Z FAKTAMI WYKONAWCY (`czesc`, AR-359): „Cofnij” z zakresu (`commit_do_cofniecia(res, czesc)`), a zdanie mówi
+    człony plików bez dowodu podmiany tą samą funkcją co szuflada (`czlony_niepewnych`: „do sprawdzenia -
+    „{przycisk}” je sprawdzi”, „przerwany zapis w miejscu - najpierw „Przywróć nagłówek…””); `przycisk` = etykieta,
+    którą zdanie nazywa uchwyt cofnięcia (przycisk okna, po zamknięciu - polecenie CLI). Zakres nieznany - człon
+    `wb.write_facts_unknown`, a numer commitu rdzenia zostaje kotwicą (droga CLI), bez „Cofnij”.
 
     Okna kart nie mają listy pozycji: przy różnych powodach pozostałe stoją w podpowiedzi zdania
     (`podpowiedz_powodow`), a zdanie mówi, gdzie ich szukać (`wb.reasons_tip`)."""
@@ -1105,9 +1148,16 @@ def zdanie_commitu_kart(res, applied_key):
     summary += zdanie_drogi_zapisu(res)
     if res.cancelled:
         summary += i18n.t("wb.cancelled_note")
-    cofnij = commit_do_cofniecia(res)
-    if cofnij is not None:
-        summary += i18n.t("grid.wb.commit_id", id=cofnij)
+    cofnij = commit_do_cofniecia(res, czesc)
+    kotwica = cofnij
+    if czesc is not None and not czesc.zakres_znany:
+        summary += i18n.t("wb.write_facts_unknown")
+        kotwica = res.commit_id
+    elif czesc is not None and czesc.zakres is not None:
+        assert przycisk, "człony plików bez dowodu podmiany nazywają uchwyt cofnięcia"
+        summary += czlony_niepewnych(czesc.zakres.do_sprawdzenia, czesc.zakres.otwarte, przycisk=przycisk)
+    if kotwica is not None:
+        summary += i18n.t("grid.wb.commit_id", id=kotwica)
     return summary, cofnij
 
 
@@ -1135,6 +1185,10 @@ def zdanie_undo_kart(res):
     zostaja = getattr(res, "objects_kept", ())
     if zostaja:
         msg += " · " + _liczba("wb.undo_objects_kept", len(zostaja))
+    # AR-364: klatki przy obiekcie z nagłówka, którego cofnięta karta nie ma dowodu pochodzenia - zostają, zdanie mówi.
+    bez_dowodu = getattr(res, "objects_unproven", ())
+    if bez_dowodu:
+        msg += " · " + _liczba("wb.undo_objects_unproven", len(bez_dowodu))
     return msg
 
 

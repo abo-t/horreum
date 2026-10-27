@@ -67,8 +67,10 @@ def test_folder_z_argumentem_spoza_pola(qapp, n):
     spec = {"t": "folder", "n": n}
     wiersz = _wiersz(spec)
     assert wiersz.spec() == spec
-    assert wiersz.combo.currentText() == i18n.t("grid.token.arg_unknown", token=i18n.t("grid.token.folder"),
-                                                arg=repr(spec))
+    # AR-368: krótka etykieta z samym argumentem (przycięcie do pola mierzy sonda natywna), pełny opis w podpowiedzi.
+    assert wiersz.combo.currentText().startswith(i18n.t("grid.token.level_foreign", arg=repr(n)[:3]))
+    assert wiersz.combo.toolTip() == i18n.t("grid.token.level_foreign_tip", token=i18n.t("grid.token.folder"),
+                                            arg=repr(n), lo=1, hi=8)
     assert _wiersz({"t": "folder", "n": 3}).spec() == {"t": "folder", "n": 3}
 
 
@@ -100,8 +102,9 @@ def test_podglad_odmawia_tokenu_spoza_slownika(rn_view, jezyk, lang):
 # ---------------------------------------------------------------- rdzeń: wzór z zewnątrz odmawia kodem
 
 @pytest.mark.parametrize("spec, kod, params", [
-    ({"t": "orig", "re": None}, "rename_tpl_bad_regex", {"value": "None", "detail": "NoneType"}),
-    ({"t": "orig", "re": 5}, "rename_tpl_bad_regex", {"value": "5", "detail": "int"}),
+    # AR-368: `re` nie-napis - własny kod bez nazwy typu Pythona (dawniej `rename_tpl_bad_regex` z „NoneType”).
+    ({"t": "orig", "re": None}, "rename_tpl_regex_not_text", {"value": "None"}),
+    ({"t": "orig", "re": 5}, "rename_tpl_regex_not_text", {"value": "5"}),
     ({"t": "folder", "n": "abc"}, "rename_tpl_bad_level", {"value": "'abc'"}),
     ({"t": "folder", "n": None}, "rename_tpl_bad_level", {"value": "None"}),
     ({"t": "folder", "n": float("inf")}, "rename_tpl_bad_level", {"value": "inf"}),
@@ -138,8 +141,7 @@ def test_podglad_i_staging_odmawiaja_re_nienapisu_i_zlego_poziomu(rn_view, jezyk
     view, _con, _pliki = rn_view
     bar = _panel_nazw(view)
     komunikaty = _komunikaty(view)
-    for spec, kod, params in (({"t": "orig", "re": None}, "rename_tpl_bad_regex",
-                               {"value": "None", "detail": "NoneType"}),
+    for spec, kod, params in (({"t": "orig", "re": None}, "rename_tpl_regex_not_text", {"value": "None"}),
                               ({"t": "folder", "n": "abc"}, "rename_tpl_bad_level", {"value": "'abc'"})):
         bar.template_editor.set_template(["datetime", spec])
         assert bar.policy()["template"] == ["datetime", spec]
@@ -215,3 +217,109 @@ def test_obca_pozycja_typu_znika_po_opuszczeniu(qapp, spec):
         assert wiersz.combo.count() == len(_TokenRow._TOKENS)
     finally:
         wiersz.close()
+
+
+# ---------------------------------------------------------------- AR-368: pozycja obca bez słownika, zdania etykietą UI
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("spec, klucz, arg", [
+    ({"t": "folder", "n": "abc"}, "level", "'abc'"),
+    ({"t": "folder", "n": 12}, "level", "12"),
+    ({"t": "orig", "re": None}, "regex", "None"),
+    ({"t": "orig", "re": ["a", "b"]}, "regex", "['a', 'b']"),
+    ({"t": "folder", "n": "W" * 40}, "level", repr("W" * 40)),
+])
+def test_pozycja_obca_krotka_etykieta_bez_slownika(qapp, jezyk, lang, spec, klucz, arg):
+    """Argument spoza edytora: etykieta zamkniętego combo niesie SAM argument (przycięty wielokropkiem do pola tekstu
+    combo, początek zawsze widoczny), bez słownika Pythona; pełny opis z etykietą typu i całym argumentem - w podpowiedzi
+    pozycji i combo; streszczenie zwiniętego wzoru (`opis`) też bez słownika. Dawniej „folder nadrzędny: argument spoza
+    edytora {'t': 'folder', 'n': 'abc'}” ucięte w 170 px bez wielokropka. Mieszczenie w pikselach mierzy sonda natywna
+    (offscreen ma inną metrykę fontu). Falsyfikatory: `repr(spec)` w etykiecie; podpowiedź nieustawiona; argument
+    zgubiony z etykiety."""
+    from PySide6.QtCore import Qt
+    jezyk(lang)
+    wiersz = _wiersz(spec)
+    tekst = wiersz.combo.currentText()
+    glowa = i18n.t(f"grid.token.{klucz}_foreign", arg="")
+    reszta = tekst[len(glowa):]
+    assert tekst.startswith(glowa) and (reszta == arg or (
+        reszta.endswith("…") and len(reszta) >= 4 and arg.startswith(reszta[:-1]))), tekst
+    if len(arg) > 30:                               # 40 znaków nie mieści się w kolumnie 170 px przy żadnym foncie
+        assert reszta != arg and reszta.endswith("…"), tekst
+    assert "{" not in tekst and "{" not in wiersz.opis()
+    token = i18n.t("grid.token.folder" if spec["t"] == "folder" else "grid.token.orig")
+    pelny = (i18n.t("grid.token.level_foreign_tip", token=token, arg=arg, lo=1, hi=8) if klucz == "level"
+             else i18n.t("grid.token.regex_foreign_tip", token=token, arg=arg))
+    assert wiersz.combo.itemData(wiersz.combo.currentIndex(), Qt.ToolTipRole) == pelny
+    assert wiersz.combo.toolTip() == pelny and token in pelny and arg in pelny
+    assert wiersz.spec() == spec
+
+
+def test_podpowiedz_znika_z_pozycja_obca(qapp):
+    """Strzałka z pozycji obcej na typ ze słownika: pozycja i jej podpowiedź schodzą razem (combo bez opisu
+    nieistniejącej pozycji). Falsyfikator: podpowiedź combo zostaje po zdjęciu pozycji."""
+    from PySide6.QtCore import Qt
+    wiersz = _wiersz({"t": "folder", "n": "abc"})
+    wiersz.show()
+    try:
+        assert wiersz.combo.toolTip()
+        _klawisz(wiersz.combo, Qt.Key_Up)
+        assert wiersz.combo.currentData() == "trail" and wiersz.combo.toolTip() == ""
+    finally:
+        wiersz.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_nienapisu_bez_nazwy_typu(rn_view, jezyk, lang):
+    """„Podgląd” (klik) na wzorze z `re=None`: zdanie odmowy własnym kodem `rename_tpl_regex_not_text` - bez nazwy
+    typu Pythona („NoneType”), token etykietą edytora. Falsyfikator: stary kod `rename_tpl_bad_regex` z typem."""
+    jezyk(lang)
+    view, _con, _pliki = rn_view
+    bar = _panel_nazw(view)
+    komunikaty = _komunikaty(view)
+    bar.template_editor.set_template(["datetime", {"t": "orig", "re": None}])
+    _klik_w(bar.btn_prev)
+    QApplication.processEvents()
+    assert komunikaty[-1] == i18n.t("grid.rename.error",
+                                    e=i18n.t("objchg.item.rename_tpl_regex_not_text", value="None")), komunikaty
+    assert "NoneType" not in komunikaty[-1] and i18n.t("grid.token.orig") in komunikaty[-1], komunikaty
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_zdania_wzoru_nazywaja_token_etykieta_UI(jezyk, lang):
+    """Straż rozjazdu: zdania odmowy wzoru o tokenie z argumentem nazywają go ETYKIETĄ edytora (`grid.token.*`) w obu
+    językach, bez identyfikatora danych (`'orig'`, `'folder'`, `'kind'`, `'trail'`). Falsyfikator: etykieta edytora
+    zmieniona bez zdań (albo zdanie z identyfikatorem)."""
+    jezyk(lang)
+    for kod, token in (("rename_tpl_bad_regex", "orig"), ("rename_tpl_regex_not_text", "orig"),
+                       ("rename_tpl_bad_level", "folder"), ("rename_tpl_bad_case", "kind"),
+                       ("rename_tpl_trail_not_last", "trail")):
+        zdanie = i18n.t(f"objchg.item.{kod}", value="'x'")
+        assert i18n.t(f"grid.token.{token}") in zdanie and f"'{token}'" not in zdanie, (kod, zdanie)
+
+
+@pytest.mark.parametrize("droga", ["zywe_cofnij", "czekajace_nazwy", "pusta"])
+def test_szuflada_niesie_szczegol_re_error_w_kazdej_drodze(rn_view, droga):
+    """„Do stagingu” (klik) ze złym wyrażeniem w każdej z trzech gałęzi szuflady - żywe „Cofnij” po zapisie nazw,
+    czekające nazwy przebiegu, szuflada pusta: zdanie pola wyniku bez tekstu `re.error` (język Pythona), a szczegół pod
+    kursorem pola go niesie - jak pasek gospodarza. Falsyfikator: gałąź bez szczegółu (komunikat Pythona znika
+    z szuflady, choć dawniej stał w zdaniu)."""
+    from horreum import naming
+    view, _con, _pliki = rn_view
+    bar = _panel_nazw(view)
+    if droga != "pusta":
+        bar.template_editor.set_template(list(naming.DEFAULT_TEMPLATE))
+        _klik_w(bar.btn_stage)
+        QApplication.processEvents()
+        assert view._rename_pending_count() > 0
+        if droga == "zywe_cofnij":
+            _klik_w(view.drawer.btn_commit)
+            QApplication.processEvents()
+            assert view._undo_mode is not None and view._rename_pending_count() == 0
+    bar.template_editor.set_template([{"t": "orig", "re": "("}])
+    _klik_w(bar.btn_stage)
+    QApplication.processEvents()
+    tekst_re = "missing ), unterminated subpattern at position 0"
+    assert view.drawer.result.szczegol() == i18n.t("grid.token.regex_detail_tip", detail=tekst_re), droga
+    assert tekst_re not in view.drawer.result.text(), view.drawer.result.text()
+    assert i18n.t("grid.token.orig") in view.drawer.result.text(), view.drawer.result.text()

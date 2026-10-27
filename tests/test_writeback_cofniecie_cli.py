@@ -50,12 +50,13 @@ def test_undo_z_plikiem_zmienionym_od_commitu_zostaje_niedomkniete(tmp_path, cap
 
 
 def _undo_z_wynikiem(tmp_path, capsys, monkeypatch, wynik, *argv):
-    """`header-fix --undo 7` z wynikiem rdzenia podstawionym pod `writeback.undo` - liczniki, wiersze
-    i kod wyjścia CLI dla każdej kombinacji `UndoResult` bez budowania jej na plikach."""
+    """`header-fix --undo 7` z wynikiem rdzenia podstawionym pod `writeback.undo_run` (jedna droga CLI dla commitu
+    i listy, AR-360) - liczniki, wiersze i kod wyjścia CLI dla każdej kombinacji `UndoResult` bez budowania jej
+    na plikach."""
     from horreum import db, writeback
     dbp = str(tmp_path / "u.db")
     db.open_db(dbp).close()
-    monkeypatch.setattr(writeback, "undo", lambda con, commit_id, now: wynik)
+    monkeypatch.setattr(writeback, "undo_run", lambda con, commity, now: wynik)
     return _cli(capsys, "header-fix", dbp, "--undo", "7", *argv)
 
 

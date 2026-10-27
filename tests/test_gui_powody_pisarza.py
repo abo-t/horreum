@@ -782,21 +782,22 @@ def test_podglad_nazw_dotkniety_wiersz_mowi_w_jezyku_UI(rn_view, jezyk, lang):
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
 def test_zly_wzor_nazwy_mowi_w_jezyku_UI_w_podgladzie_i_stagingu(rn_view, jezyk, lang):
-    """AR-193: zły regex tokenu `orig` - „Podgląd” i „Do stagingu” (kliki) mówią odmowę wzoru
-    w języku UI (EN dokładnie, tekst `re.error` znak w znak), zero stagingu. Falsyfikator:
-    `grid.rename.error` z `e=e` → „zły regex…” w EN."""
+    """AR-193, AR-368: zły regex tokenu `orig` - „Podgląd” i „Do stagingu” (kliki) mówią odmowę wzoru
+    w języku UI (EN dokładnie, token etykietą edytora), a tekst `re.error` Pythona znak w znak stoi w szczególe
+    paska, nie w zdaniu; zero stagingu. Falsyfikator: `grid.rename.error` z `e=e` → zdanie PL w EN."""
+    from horreum.gui.wb_worker import szczegol_zdania
     jezyk(lang)
     view, _con, _pliki = rn_view
     bar = _panel_nazw(view)
     komunikaty = _komunikaty(view)
     bar.template_editor.set_template([{"t": "orig", "re": "("}])
-    zdanie = {"pl": "zły regex w tokenie 'orig': '(' (missing ), unterminated subpattern at "
-                    "position 0)",
-              "en": "bad regex in token 'orig': '(' (missing ), unterminated subpattern at "
-                    "position 0)"}[lang]
+    zdanie = {"pl": "błędne wyrażenie w tokenie „fragment starej nazwy”: '('",
+              "en": "bad expression in the “old-name fragment” token: '('"}[lang]
     for przycisk in (bar.btn_prev, bar.btn_stage):
         _klik_w(przycisk)
         assert komunikaty[-1] == i18n.t("grid.rename.error", e=zdanie), komunikaty
+        assert szczegol_zdania(komunikaty[-1]) == i18n.t(
+            "grid.token.regex_detail_tip", detail="missing ), unterminated subpattern at position 0"), komunikaty
     assert view._rename_pending_count() == 0
 
 

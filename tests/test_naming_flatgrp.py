@@ -137,10 +137,13 @@ def test_trail_dokleja_separator_przed_rozszerzeniem():
 
 
 def test_trail_nie_na_koncu_valueerror():
-    with pytest.raises(ValueError, match="trail"):
+    # Odmowa niesie kod (zdanie mówi etykietą tokenu z UI, nie jego nazwą wewnętrzną - AR-368).
+    with pytest.raises(ValueError) as exc:
         naming.compose_name(_facts(), DT, template=["trail", "kind"])
-    with pytest.raises(ValueError, match="trail"):
+    assert exc.value.powod.code == "rename_tpl_trail_not_last"
+    with pytest.raises(ValueError) as exc:
         naming.validate_template({"light": ["kind", "trail", "exp"]})
+    assert exc.value.powod.code == "rename_tpl_trail_not_last"
 
 
 def test_validate_template_case():

@@ -6777,10 +6777,10 @@ class FramesView(QWidget):
     @staticmethod
     def _zdanie_bledu_wzoru(exc):
         """Zdanie paska dla błędu wzoru nazwy (`naming.validate_template`/`compose_name`): powód
-        z kodem `rename_tpl_*` (AR-193) w języku UI - jedno dla podglądu i stagingu nazw."""
-        from horreum.gui.wb_worker import tekst_powodu
-        from horreum.item_reasons import powod_wyjatku
-        return i18n.t("grid.rename.error", e=tekst_powodu(powod_wyjatku(exc)))
+        z kodem `rename_tpl_*` (AR-193) w języku UI, tekst `re.error` w szczególe (AR-368) - jedno dla podglądu
+        i stagingu nazw (`wb_worker.zdanie_bledu_wzoru`)."""
+        from horreum.gui.wb_worker import zdanie_bledu_wzoru
+        return zdanie_bledu_wzoru(exc)
 
     def _show_rename_preview(self, run):
         """Podgląd renamu do modelu (nazwa stara→nowa / pominięto). `RenamePreview` niesie `frame_id`
@@ -6832,14 +6832,20 @@ class FramesView(QWidget):
         except ValueError as e:
             # Wynik gestu w szufladzie i na pasku - trzy gałęzie jak błąd definicji makra (`_run`): przy
             # żywym „Cofnij” etykieta „Zatwierdzono…” zostaje, a zdanie niesie identyfikator (AR-276).
+            # Tekst `re.error` (język Pythona) jedzie szczegółem zdania (AR-368) - pod kursorem pola wyniku
+            # w każdej z trzech gałęzi, jak na pasku gospodarza (protokół pola, AR-204).
+            from horreum.gui.wb_worker import szczegol_zdania
             zdanie = self._zdanie_bledu_wzoru(e)
+            szczegol = szczegol_zdania(zdanie)
             if self._undo_mode is not None:
-                self._ustaw_wynik(zdanie)
+                self._ustaw_wynik(zdanie, szczegol)
             elif self._rename_pending_count():
                 self._refresh_drawer()                   # etykieta przebiegu (także podjętego) bez zmian
                 self.drawer.set_result(zdanie)
+                self._podpowiedz_wyniku(szczegol)
             else:
                 self._pusta(result=zdanie)
+                self._podpowiedz_wyniku(szczegol)
             self.status_message.emit(zdanie)
             return
         # Pętla życia run_id (R1 #1 + R2 #1): run niecommitowany → clear (bezpieczne, same 'pending');

@@ -650,6 +650,19 @@ CATALOG = {
                "many": "{n} klatek zostaje przy obiekcie zmienionym po zapisie"},
         "en": {"one": "{n} frame keeps the object changed after the write",
                "other": "{n} frames keep the object changed after the write"}},
+    # AR-364: cofnięta karta `OBJECT` bez dowodu pochodzenia (zapis sprzed pary commit/plik) - klatka przy obiekcie
+    # ze źródłem nagłówka zostaje (`UndoResult.objects_unproven`); zdanie nie twierdzi, że obiekt nadała ta karta.
+    "wb.undo_objects_unproven": {
+        "pl": {"one": "{n} klatka zostaje przy obiekcie z nagłówka - brak dowodu, że nadała go cofnięta karta",
+               "few": "{n} klatki zostają przy obiekcie z nagłówka - brak dowodu, że nadała go cofnięta karta",
+               "many": "{n} klatek zostaje przy obiekcie z nagłówka - brak dowodu, że nadała go cofnięta karta"},
+        "en": {"one": "{n} frame keeps the object from the header - no proof the undone card gave it",
+               "other": "{n} frames keep the object from the header - no proof the undone card gave it"}},
+    # AR-359: fakty zapisu (zakres „Cofnij” z klas rdzenia) nie dały się odczytać po operacji okna kart - okno nie
+    # obiecuje cofnięcia, którego stanu nie zna; kotwica commitu (droga CLI) zostaje za członem.
+    "wb.write_facts_unknown": {
+        "pl": " · stanu zapisu nie udało się odczytać z bazy - „Cofnij” w tym oknie niedostępne",
+        "en": " · the state of the write could not be read from the database - “Undo” is unavailable in this window"},
     # Droga powrotu ze STANU (AR-318): wiersz Porządków „Niedokończone cofnięcia zapisu kart” stawia
     # receptę dokończenia (`ObjectAxisView.podaj_dokonczenie_cofniecia`); zdanie liczy pliki czekające.
     "wb.undo_finish_recipe": {"pl": "Dokończ cofnięcie (commit {id})",
@@ -2634,8 +2647,23 @@ CATALOG = {
     # `{tok}`, `{case}`, `{arg}` - `repr` wartości ze wzoru; `{token}` - etykieta typu tokenu (wyżej).
     "grid.token.unknown": {"pl": "nieznany token: {tok}", "en": "unknown token: {tok}"},
     "grid.token.case_unknown": {"pl": "nieznana wielkość liter: {case}", "en": "unknown letter case: {case}"},
-    "grid.token.arg_unknown": {"pl": "{token}: argument spoza edytora {arg}",
-                               "en": "{token}: an argument the editor cannot show {arg}"},
+    # AR-368: argument spoza edytora - SAM argument w krótkiej etykiecie (kolumna typu ma stałe 170 px; zmierzone
+    # natywnie: pole tekstu 145 px), `{arg}` skrócony; pełny opis z etykietą typu i drogą - w podpowiedzi pozycji i combo.
+    "grid.token.level_foreign": {"pl": "folder: poziom {arg}", "en": "folder: level {arg}"},
+    "grid.token.regex_foreign": {"pl": "fragment: wyrażenie {arg}", "en": "fragment: expression {arg}"},
+    "grid.token.level_foreign_tip": {
+        "pl": "{token}: poziom {arg} spoza edytora (pole poziomu przyjmuje {lo}-{hi}) - wzór zostaje bez zmian, "
+              "dopóki nie wybierzesz innego typu",
+        "en": "{token}: level {arg} outside the editor (the level field takes {lo}-{hi}) - the pattern stays "
+              "unchanged until you choose another type"},
+    "grid.token.regex_foreign_tip": {
+        "pl": "{token}: wyrażenie {arg} spoza edytora (pole wyrażenia przyjmuje tekst) - wzór zostaje bez zmian, "
+              "dopóki nie wybierzesz innego typu",
+        "en": "{token}: expression {arg} outside the editor (the expression field takes text) - the pattern stays "
+              "unchanged until you choose another type"},
+    # AR-368: tekst `re.error` złego wyrażenia (język Pythona) - szczegół pod kursorem paska, nie zdanie odmowy wzoru.
+    "grid.token.regex_detail_tip": {"pl": "Komunikat wyrażenia (Python): {detail}",
+                                    "en": "Expression message (Python): {detail}"},
 
     # --- TemplateEditor ---
     "grid.tmpl.title": {"pl": "Wzór nazwy:", "en": "Name pattern:"},
@@ -8263,17 +8291,22 @@ CATALOG = {
     "objchg.item.rename_collision": {
         "pl": "kolizja nazwy w wsadzie: {name} - dodaj token disc lub zmień wzór",
         "en": "name collision in the batch: {name} - add the disc token or change the pattern"},
-    "objchg.item.rename_tpl_bad_regex": {"pl": "zły regex w tokenie 'orig': {value} ({detail})",
-                                         "en": "bad regex in token 'orig': {value} ({detail})"},
-    "objchg.item.rename_tpl_trail_not_last": {"pl": "token 'trail' musi być ostatni we wzorze",
-                                              "en": "the 'trail' token must be last in the pattern"},
-    "objchg.item.rename_tpl_bad_case": {"pl": "nieznana wielkość liter tokenu 'kind': {value}",
-                                        "en": "unknown letter case for token 'kind': {value}"},
+    # AR-368: zdania wzoru nazywają token ETYKIETĄ edytora (`grid.token.*`), tekst `re.error` (Python) zostaje
+    # w parametrze `detail` - okno stawia go w szczególe (`wb_worker.zdanie_bledu_wzoru`), nie w zdaniu.
+    "objchg.item.rename_tpl_bad_regex": {"pl": "błędne wyrażenie w tokenie „fragment starej nazwy”: {value}",
+                                         "en": "bad expression in the “old-name fragment” token: {value}"},
+    "objchg.item.rename_tpl_regex_not_text": {
+        "pl": "wartość {value} w tokenie „fragment starej nazwy” nie jest wyrażeniem",
+        "en": "the value {value} in the “old-name fragment” token is not an expression"},
+    "objchg.item.rename_tpl_trail_not_last": {"pl": "token „końcowe _ (ostatni)” musi stać na końcu wzoru",
+                                              "en": "the “trailing _ (last)” token must be at the end of the pattern"},
+    "objchg.item.rename_tpl_bad_case": {"pl": "nieznana wielkość liter tokenu „rodzaj”: {value}",
+                                        "en": "unknown letter case of the “kind” token: {value}"},
     "objchg.item.rename_tpl_unknown_token": {"pl": "nieznany token szablonu: {value}",
                                              "en": "unknown pattern token: {value}"},
     # AR-341: `n` tokenu folder, którego rdzeń nie weźmie jako liczby (wzór z zewnątrz - `validate_template`).
-    "objchg.item.rename_tpl_bad_level": {"pl": "zły poziom tokenu 'folder': {value}",
-                                         "en": "bad level of token 'folder': {value}"},
+    "objchg.item.rename_tpl_bad_level": {"pl": "zły poziom tokenu „folder nadrzędny”: {value}",
+                                         "en": "bad level of the “parent folder” token: {value}"},
     # Błędy definicji makra i wyrażenia (AR-194, `expr.compile_expr`, `expr._eval`,
     # `macro.MacroDef.from_dict`). PL = zdanie rdzenia znak w znak (polskie znaki od AR-228, jak
     # `macro_*`).

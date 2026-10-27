@@ -5051,15 +5051,16 @@ class FramesView(QWidget):
         pustego przebiegu."""
         self.drawer.end_progress()
         # Gest rozstrzygnął ostatni czekający wpis przebiegu z zapisanymi plikami - „Cofnij” całego przebiegu
-        # (AR-345); zdanie gestu stawia potem `_po_gescie_zapisu` (z identyfikatorem przy żywym „Cofnij”).
-        self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
+        # (AR-345); zdanie gestu stawia potem `_po_gescie_zapisu` (z identyfikatorem przy żywym „Cofnij”), a człon
+        # „skąd Cofnij” dochodzi do niego niżej - bez niego zdanie gestu stało obok przycisku bez słowa (AR-361).
+        czlon_cofnij = self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
         if self._undo_mode is not None:
             self.drawer.set_commit_actions_visible(False)
         msg, szczegol = _zdanie_gestu_zapisu(op, res), _podpowiedz_gestu_zapisu(op, res)
         czlon = self._podejmij_po_izolacji(op)
         self._po_gescie_zapisu(msg, self._cel_gestu_zapisu, szczegol)
-        if czlon:
-            self._ustaw_wynik(" · ".join(z for z in (msg, czlon) if z), szczegol)
+        if czlon or czlon_cofnij:
+            self._ustaw_wynik(" · ".join(z for z in (msg + czlon_cofnij, czlon) if z), szczegol)
             self._oznacz_wynik_gestu_zapisu()
 
     def _on_release_file(self):
@@ -5386,8 +5387,8 @@ class FramesView(QWidget):
                 new_type=p.new_type, new_comment=p.comment,
                 expected_header_hash=p.expected_header_hash)
         # Re-stage bez zmian = przebieg odrzucony (AR-316); zapisany wcześniej plik - „Cofnij” (AR-345), a zdanie
-        # gestu idzie niżej obok niego (gałąź „żywe Cofnij, zero zmian”).
-        self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
+        # gestu idzie niżej obok niego (gałąź „żywe Cofnij, zero zmian”) z członem „skąd Cofnij” (AR-361).
+        czlon_cofnij = self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
         self._show_preview(run)
         zdanie = (i18n.t_plural("grid.macro.staged", len(run.touched), s=len(run.skipped))
                   + zdanie_pominiec_makra(run.skipped))
@@ -5397,7 +5398,7 @@ class FramesView(QWidget):
             if run.skipped or not run.touched:           # wynik gestu zamiast wyniku poprzedniej operacji
                 self.drawer.set_result(zdanie)
         else:                                            # żywe „Cofnij”, zero zmian: wynik obok niego
-            self._ustaw_wynik(zdanie)
+            self._ustaw_wynik(zdanie + czlon_cofnij)
             self._sync_staging_mutex()
         self.status_message.emit(zdanie)
 
@@ -5793,9 +5794,13 @@ class FramesView(QWidget):
         `_podejmij_zwolnione`, gałąź cudzej blokady), a odświeżenie po zwolnieniu blokady podejmuje go
         w tej sesji. Dawniej zostawała etykieta pustostanu, a zdanie o drugim oknie trwało także po jego
         zamknięciu, choć nikt już szuflady nie prowadził. Wyłącznie NAJNOWSZY przebieg - starsze wracają
-        przy kolejnych otwarciach bazy (reguła AR-280)."""
+        przy kolejnych otwarciach bazy (reguła AR-280).
+
+        NIC NIE CZEKA - szuflada pokazuje OSTATNI zapis kart z „Cofnij” całego przebiegu (AR-367,
+        `_postaw_cofnij_ostatniego`)."""
         przebiegi = queries.oczekujace_przebiegi_szuflady(self.con)
         if not przebiegi:
+            self._postaw_cofnij_ostatniego()
             return
         if self._wez_szuflade() is not None:
             self._wylaczone_znane.add(przebiegi[0]["run_id"])
@@ -5814,6 +5819,46 @@ class FramesView(QWidget):
             self._zwolnij_szuflade()
             return
         self._podejmij(przebiegi[0], len(przebiegi) - 1)
+
+    def _postaw_cofnij_ostatniego(self):
+        """Otwarcie bazy bez niczego w szufladzie: OSTATNI zapis kart z „Cofnij” całego przebiegu (AR-367,
+        `queries.ostatni_przebieg_kart`). „Cofnij” było stanem sesji, więc po zamknięciu okna zapisany przebieg
+        zostawał z drogą wyłącznie w CLI (`header-fix --undo N` per commit). Zdanie mówi datę zapisu - przebieg
+        mógł zapisać okno kart albo CLI, a pochodzenia przebiegu baza nie zna; etykieta, kropka, przycisk
+        i „Ponów nieudane (N)” są te same co po zapisie w sesji, a nowy staging zdejmuje je jak każde „Cofnij”
+        (`_dismiss_undo`).
+
+        Decyzja pod blokadą szuflady, jak każde podjęcie stanu poprzedniej sesji (wzór AR-345: odczyt, blokada,
+        ponowny odczyt pod nią): cudza blokada (inne okno albo CLI w biegu, choćby `header-fix --undo` tego
+        przebiegu) to brak „Cofnij”. Blokada schodzi zaraz po odczycie - przebiegu do prowadzenia nie ma,
+        a „Cofnij” w sesji też żyje bez niej (`_zwolnij_szuflade_gdy_pusta`). Baza bez zapisu kart nie zakłada
+        pliku blokady (pierwszy odczyt bez niej). Błąd bazy - bez „Cofnij” (odczyt pomocniczy nie wywraca
+        budowy widoku, wzór `_zakres_z_bazy`)."""
+        try:
+            if queries.ostatni_przebieg_kart(self.con) is None or self._wez_szuflade() is not None:
+                return
+            try:
+                ostatni = queries.ostatni_przebieg_kart(self.con)
+            finally:
+                self._zwolnij_szuflade()
+        except sqlite3.Error:
+            return
+        if ostatni is None:
+            return
+        zakres = ostatni["zakres"]
+        zdanie = i18n.t_plural("grid.drawer.last_write", zakres.zatwierdzone + zakres.do_sprawdzenia,
+                               day=self._dzien_zapisu(ostatni["kiedy"]), undo=i18n.t("grid.action.undo"))
+        self._postaw_cofnij_przebiegu(ostatni["run_id"], zdanie, zakres)
+        self._pokaz_ponowienie("karty", ostatni["run_id"])
+
+    @staticmethod
+    def _dzien_zapisu(kiedy):
+        """Dzień zapisu `RRRR-MM-DD` w czasie LOKALNYM (`commits.applied_at` pisze UTC, człowiek pamięta swój
+        wieczór); nieczytelny znacznik - surowy (wzór `harvest_dialog.release_date_text`)."""
+        try:
+            return datetime.fromisoformat(str(kiedy)).astimezone().strftime("%Y-%m-%d")
+        except ValueError:
+            return str(kiedy or "")
 
     def _podejmij(self, p, starsze):
         """Rdzeń podjęcia przebiegu `p` (słownik `queries.oczekujace_przebiegi_szuflady`) przez szufladę,
@@ -5899,6 +5944,17 @@ class FramesView(QWidget):
         self._wylaczone_znane.update(p["run_id"] for p in izolowane + nazwy)
         return izolowane, nazwy
 
+    # Droga człowieka per kod odmowy rekoncyliacji, której następna rekoncyliacja nie rozstrzygnie (AR-347):
+    # każdy kod `item_reasons.KODY_ODMOWY_REKONCYLIACJI` jest albo tu, albo w `KODY_PRZEJSCIOWE_REKONCYLIACJI`
+    # (pilnuje test podziału). Cel zajęty przez inną lokację nie ma jeszcze nazwanego gestu - zostaje zdaniem.
+    _DROGI_ODMOWY_NAZW = {
+        "intent_both_names": "grid.drawer.names_way_both",
+        "intent_no_name": "grid.drawer.names_way_none",
+        "intent_mtime_differs": "grid.drawer.names_way_check",
+        "intent_sha1_differs": "grid.drawer.names_way_check",
+        "intent_target_taken": "grid.drawer.names_way_taken",
+    }
+
     def _zdanie_wylaczonych(self):
         """`(etykieta, droga)` pustej szuflady przy przebiegach wyłączonych z podjęcia albo `(None, None)`.
         Karty zatrzymane izolacją: etykieta liczy WSZYSTKIE czekające wpisy tych przebiegów, droga mówi gest
@@ -5907,8 +5963,22 @@ class FramesView(QWidget):
         etykieta liczy ich czekające wiersze, droga mówi, co rozstrzyga zamiar. Oba rodzaje naraz: etykieta
         kart, a droga po drogach kart dokłada człon nazw i ich drogę. Zapamiętuje przebiegi w
         `_wylaczone_znane` - tylko je podejmuje potem gest albo odświeżenie (starsze zwykłe przebiegi dalej
-        wracają przy kolejnych otwarciach bazy, AR-280)."""
-        izolowane, nazwy = self._wylaczone()
+        wracają przy kolejnych otwarciach bazy, AR-280).
+
+        Trzy odczyty (izolowane, nazwy w locie, powody zamiarów) w JEDNEJ migawce WAL (własna transakcja odczytu
+        zamykana wycofaniem; w transakcji wołającego - w niej; wzór `writeback._klasy_przebiegu`): rekoncyliacja
+        innego połączenia między nimi nie złoży etykiety zamiaru otwartego z drogą zamiaru już rozstrzygniętego."""
+        wlasna = not self.con.in_transaction
+        if wlasna:
+            self.con.execute("BEGIN")
+        try:
+            izolowane, nazwy = self._wylaczone()
+            # Odczyt powodów wyłącznie przebiegów tego zdania (`nazwy`) - powód spoza nich nie dołącza do zdania.
+            odmowy, czekajace = (queries.powody_zamiarow_nazw(self.con, {p["run_id"] for p in nazwy})
+                                 if nazwy else ([], 0))
+        finally:
+            if wlasna:
+                self.con.rollback()                      # odczyt - nic do zatwierdzenia
         if not izolowane and not nazwy:
             return None, None
         drogi = []
@@ -5926,19 +5996,24 @@ class FramesView(QWidget):
         if nazwy:
             if izolowane:
                 drogi.append(i18n.t_plural("grid.drawer.names_held_more", n_nazw))
-            # Zamiar, którego rekoncyliacja ODMÓWIŁA, niesie powód z kodem odmowy na wierszu (AR-323) -
-            # „Przyjmij nowe” go nie rozstrzygnie, więc droga mówi powód zamiast obietnicy; obietnica zostaje
-            # dla zamiarów, które na rekoncyliację dopiero czekają (bez kodu albo z kodem samej próby
-            # renamu). Odczyt wyłącznie przebiegów tego zdania (`nazwy`).
+            # Zamiar, którego rekoncyliacja ODMÓWIŁA, niesie powód z kodem odmowy na wierszu (AR-323). Odmowę
+            # PRZEJŚCIOWĄ (dysk milczy, zamiar zmienił się w biegu, rekoncyliacja padła) rozstrzygnie następna
+            # rekoncyliacja - powód stoi obok obietnicy, jak zamiar, który na rekoncyliację dopiero czeka (bez
+            # kodu albo z kodem samej próby renamu). Odmowę, którą rozstrzyga człowiek, „Przyjmij nowe” samo nie
+            # rozstrzygnie - powód i droga człowieka per kod (AR-347): szablon nie dokleja już „rozstrzyga
+            # człowiek”, które cztery powody same niosą („rozstrzyga człowiek - rozstrzyga człowiek”), a przy
+            # kodach przejściowych było fałszem.
             from horreum.gui.wb_worker import tekst_powodu
-            from horreum.item_reasons import z_bazy
-            odmowy, czekajace = queries.powody_zamiarow_nazw(self.con, {p["run_id"] for p in nazwy})
+            from horreum.item_reasons import KODY_PRZEJSCIOWE_REKONCYLIACJI, z_bazy
             powody = list(dict.fromkeys((w["reason"], w["reason_code"], w["reason_args"]) for w in odmowy))
-            if not powody or czekajace:
-                drogi.append(i18n.t("grid.drawer.names_held_way", receive=i18n.t("pipeline.receive"),
-                                    nav=i18n.t("nav.dostawa")))
-            drogi.extend(i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(z_bazy(*trojka)))
-                         for trojka in powody)           # jeden człon na odrębny powód
+            receive, nav_d = i18n.t("pipeline.receive"), i18n.t("nav.dostawa")
+            if not powody or czekajace or any(t[1] in KODY_PRZEJSCIOWE_REKONCYLIACJI for t in powody):
+                drogi.append(i18n.t("grid.drawer.names_held_way", receive=receive, nav=nav_d))
+            for trojka in powody:                        # jeden człon na odrębny powód
+                czlon = i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(z_bazy(*trojka)))
+                if trojka[1] not in KODY_PRZEJSCIOWE_REKONCYLIACJI:
+                    czlon += i18n.t(self._DROGI_ODMOWY_NAZW[trojka[1]], receive=receive, nav=nav_d)
+                drogi.append(czlon)
         etykieta = (i18n.t_plural("grid.drawer.pending_isolated", sum(p["n"] for p in izolowane)) if izolowane
                     else i18n.t_plural("grid.drawer.pending_names_held", n_nazw))
         return etykieta, " · ".join(drogi)
@@ -6206,6 +6281,12 @@ class FramesView(QWidget):
         cofnij = i18n.t("grid.action.undo")
         blad = (zdanie_czesci_zapisu(op, czesc, msg, czeka=czesc.czeka, cofnij=cofnij if postawione else None,
                                      przycisk=cofnij) if op in ("commit", "commit_rename") and czesc else None)
+        if blad and postawione:
+            # Etykieta „Zatwierdzono/Przemianowano: M” liczy cały przebieg, a „N z K zapisane” - tę operację (AR-367,
+            # lustro ogona sukcesu): przebieg z plikami sprzed niej mówi obie liczby.
+            # „Cofnij” kart stoi wyłącznie przy znanym zakresie (`_cofnij_po_awarii`), nazw - przy `czesc.nazwy`.
+            razem = czesc.zakres.zatwierdzone if postawione == "commit" else czesc.nazwy
+            blad += self._czlon_razem_w_przebiegu(czesc.zapisane, razem)
         blad = blad or i18n.t(f"grid.wb.op.{op}", msg=msg)
         czlon = self._podejmij_po_izolacji(op)   # pętla gestu mogła zamknąć operacje przed wyjątkiem (AR-308)
         # Zdanie po przyłożeniu zbioru składanego w tle - raport wczytania by je przykrył (AR-84).
@@ -6306,18 +6387,24 @@ class FramesView(QWidget):
         # `set_count` bez wyniku czyści go jak przy nowym stagingu - wołana po zdaniu zjadała
         # „przerwano, N do dokończenia” w tej samej chwili, w której padło.
         self._refresh_drawer()
-        summary = self._commit_summary(res, "grid.wb.applied")
+        remaining = self._pending_count()
+        zakres, wczesniej, razem = None, False, ""
+        if remaining == 0:
+            zakres = self._zakres_po_zapisie(res, fakty)
+            # Ta operacja nic nie podmieniła, a przebieg ma zapis sprzed przerwania - zdanie mówi, skąd „Cofnij”.
+            wczesniej = commit_do_cofniecia(res) is None
+            # …a gdy podmieniła, przebieg zaś ma pliki spoza niej (AR-367): „N zapisane teraz · razem M w przebiegu”
+            # - M to liczba etykiety „Zatwierdzono: M” (fakty wykonawcy; nieznane - zdanie jak dotąd).
+            if not wczesniej and zakres is not None and fakty is not None and fakty.zakres_znany:
+                razem = self._czlon_razem_w_przebiegu(fakty.zapisane, zakres.zatwierdzone)
+        summary = self._commit_summary(res, "grid.wb.applied_now" if razem else "grid.wb.applied")
         wskazanie, podpowiedz = self._wskazanie_powodow(res)
         droga = zdanie_drogi_zapisu(res)                 # pusty bez spadku - jak w oknach kart
-        remaining = self._pending_count()
         if remaining > 0:                                # przerwane anulowaniem
             ogon = ogon_czesci_zapisu(remaining)
             self.drawer.set_count(remaining, result=summary + wskazanie + droga + ogon)
         else:
-            zakres = self._zakres_po_zapisie(res, fakty)
-            # Ta operacja nic nie podmieniła, a przebieg ma zapis sprzed przerwania - zdanie mówi, skąd „Cofnij”.
-            wczesniej = commit_do_cofniecia(res) is None
-            if self._postaw_cofnij_przebiegu(res.run_id, summary + wskazanie + droga, zakres,
+            if self._postaw_cofnij_przebiegu(res.run_id, summary + wskazanie + droga + razem, zakres,
                                              wczesniej=wczesniej):
                 ogon = self._kotwica_commitow(self._undo_commity)   # pasek; szuflada - `_install_undo`
             else:                                        # nic do cofnięcia (blocked/failed/skipped)
@@ -6343,7 +6430,7 @@ class FramesView(QWidget):
         self._odloz_podglad_do_przylozenia(pozostale)
         self._oznacz_przeladowanie_z_zaznaczeniem()
         # Szczegół zdania (spadek, różne powody, tekst systemu) - w podpowiedzi paska (AR-218).
-        self._przeladuj_po_gescie(i18n.t("grid.wb.status", summary=summary + droga + ogon),
+        self._przeladuj_po_gescie(i18n.t("grid.wb.status", summary=summary + droga + razem + ogon),
                                   poza=False, szczegol=podpowiedz)
         # Karta w pliku to zeznanie klatki (`header`, `cards`), a z niego liczą się wiersze Porządków
         # („Nagłówek inny niż folder", kopie niezgodne…) - więc commit, który COKOLWIEK podmienił,
@@ -6516,14 +6603,30 @@ class FramesView(QWidget):
         """„Cofnij” całego przebiegu kart `run_id` z zakresem `zakres` (zamrożonym teraz) - True, gdy stanęło.
         Zdanie dostaje człony plików bez dowodu podmiany (`czlony_niepewnych`) i - `wczesniej`: operacja, która
         przebieg zamyka, sama niczego nie zapisała - skąd przycisk („N plik zapisany wcześniej”)."""
-        from horreum.gui.wb_worker import czlony_niepewnych
         if zakres is None or not zakres.cofnij:
             return False
-        if wczesniej and zakres.zatwierdzone:
-            zdanie += i18n.t_plural("grid.wb.written_before", zakres.zatwierdzone)
-        zdanie += czlony_niepewnych(zakres.do_sprawdzenia, zakres.otwarte, przycisk=i18n.t("grid.action.undo"))
-        self._install_undo(run_id, zakres, zdanie)
+        self._install_undo(run_id, zakres, zdanie + self._czlon_cofnij_przebiegu(zakres, wczesniej=wczesniej))
         return True
+
+    @staticmethod
+    def _czlon_cofnij_przebiegu(zakres, *, wczesniej):
+        """Człony zdania „skąd Cofnij” przebiegu kart (AR-345, AR-361): pliki zapisane wcześniej (`wczesniej` -
+        operacja, która przebieg zamyka, sama niczego nie zapisała) i pliki bez dowodu podmiany
+        (`czlony_niepewnych`). Jedno źródło dla `_postaw_cofnij_przebiegu` i zwrotu `_cofnij_po_zamknieciu`."""
+        from horreum.gui.wb_worker import czlony_niepewnych
+        czlon = (i18n.t_plural("grid.wb.written_before", zakres.zatwierdzone)
+                 if wczesniej and zakres.zatwierdzone else "")
+        return czlon + czlony_niepewnych(zakres.do_sprawdzenia, zakres.otwarte, przycisk=i18n.t("grid.action.undo"))
+
+    @staticmethod
+    def _czlon_razem_w_przebiegu(zapisane, razem):
+        """Człon „ · razem N w przebiegu” (AR-367): etykieta „Zatwierdzono/Przemianowano: N” liczy CAŁY
+        przebieg, a zdanie wyniku - operację; gdy przebieg ma pliki spoza tej operacji (dokończenie po „Anuluj”,
+        po restarcie, po „Ponów nieudane”), zdanie mówi obie liczby, zamiast stać obok etykiety bez słowa, skąd
+        różnica. Z FAKTÓW wykonawcy: `zapisane` - pliki tej operacji, `razem` - przebiegu; nieznane - `""`."""
+        if zapisane is None or razem is None or razem <= zapisane:
+            return ""
+        return i18n.t_plural("grid.wb.run_total", razem)
 
     def _nazwy_zapisane(self, run_id):
         """Wiersze `applied` przebiegu nazw (cel „Cofnij” nazw - `writeback.undo_renames`); błąd bazy - 0."""
@@ -6540,17 +6643,26 @@ class FramesView(QWidget):
         self._rename_run_committed = True
         self._install_rename_undo(run_id, zdanie, applied=zapisane)
 
-    def _cofnij_po_zamknieciu(self, zamkniete, zdanie=""):
+    def _cofnij_po_zamknieciu(self, zamkniete):
         """„Cofnij” przebiegów zamkniętych przez `_zamknij_puste_przebiegi` (krotka `(karty, nazwy)`) - gdy mają
-        zapisane pliki. Bez nich szuflada zostaje, jak ją zostawił wołający."""
+        zapisane pliki. Bez nich szuflada zostaje, jak ją zostawił wołający.
+
+        Zwraca człon zdania „skąd Cofnij” (pliki zapisane wcześniej, pliki bez dowodu podmiany) albo `""`, gdy
+        „Cofnij” nie stanęło (AR-361): wołający dokleja go do zdania SWOJEGO gestu w jednym `_ustaw_wynik` -
+        dawniej zdanie gestu nadpisywało człon w tej samej turze i obok „Zatwierdzono: 1” stało zdanie makra albo
+        nazw bez słowa, skąd przycisk. Obie klingi naraz - człon klingi, której „Cofnij” stoi (ostatniej)."""
         karty, nazwy = zamkniete
+        czlon = ""
         if karty is not None:
-            self._postaw_cofnij_przebiegu(karty, zdanie, self._zakres_z_bazy(karty), wczesniej=True)
+            zakres = self._zakres_z_bazy(karty)
+            if self._postaw_cofnij_przebiegu(karty, "", zakres, wczesniej=True):
+                czlon = self._czlon_cofnij_przebiegu(zakres, wczesniej=True)
         if nazwy is not None:
             zapisane = self._nazwy_zapisane(nazwy)
             if zapisane:
-                self._postaw_cofnij_nazw(nazwy, zdanie + i18n.t_plural("grid.wb.written_before", zapisane),
-                                         zapisane)
+                czlon = i18n.t_plural("grid.wb.written_before", zapisane)
+                self._postaw_cofnij_nazw(nazwy, czlon, zapisane)
+        return czlon
 
     def _pokaz_ponowienie(self, klinga, run_id):
         """„Ponów nieudane (N)” po zamkniętym przebiegu `run_id` (AR-347): N = wpisy nieudane, których pliku
@@ -6755,14 +6867,15 @@ class FramesView(QWidget):
         for p in run.touched:
             repo.stage_rename(self.con, run_id=self._rename_run_id, location_id=p.location_id,
                               old_path=p.old_path, new_path=p.new_path, expected_mtime=p.mtime)
-        # Re-staging bez zmian = przebieg odrzucony (AR-316); nazwy zmienione wcześniej - „Cofnij” nazw (AR-345).
-        self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
+        # Re-staging bez zmian = przebieg odrzucony (AR-316); nazwy zmienione wcześniej - „Cofnij” nazw (AR-345)
+        # z członem „skąd Cofnij” w zdaniu gestu (AR-361).
+        czlon_cofnij = self._cofnij_po_zamknieciu(self._zamknij_puste_przebiegi())
         self._show_rename_preview(run)
         self._refresh_drawer()
         zdanie = i18n.t_plural("grid.rename.staged", len(run.touched), s=len(run.skipped), target=target)
         if not run.touched:                              # wynik gestu w szufladzie - jak makro (AR-309)
             if self._undo_mode is not None:
-                self._ustaw_wynik(zdanie)                # obok „Cofnij”, z identyfikatorem przebiegu
+                self._ustaw_wynik(zdanie + czlon_cofnij)  # obok „Cofnij”, z identyfikatorem przebiegu
             else:
                 self.drawer.set_result(zdanie)
         self.status_message.emit(zdanie)
@@ -6802,10 +6915,14 @@ class FramesView(QWidget):
         self.drawer.end_progress()
         self._refresh_drawer()                           # PRZED zdaniem wyniku - jak w `_after_commit`
         run_id = self._wb_target_id
-        summary = self._commit_summary(res, "grid.wb.renamed")
-        wskazanie, podpowiedz = self._wskazanie_powodow(res)   # pozostałe powody (AR-176)
         remaining = self._rename_pending_count()
         zapisane = fakty.nazwy if fakty is not None and fakty.nazwy is not None else len(res.applied)
+        # Przebieg z nazwami zmienionymi przed tą operacją (AR-367, lustro `_after_commit`): etykieta
+        # „Przemianowano: M” liczy przebieg, więc zdanie mówi „N przemianowane teraz · razem M w przebiegu”.
+        razem = (self._czlon_razem_w_przebiegu(fakty.zapisane, fakty.nazwy)
+                 if remaining == 0 and res.applied and fakty is not None else "")
+        summary = self._commit_summary(res, "grid.wb.renamed_now" if razem else "grid.wb.renamed")
+        wskazanie, podpowiedz = self._wskazanie_powodow(res)   # pozostałe powody (AR-176)
         if remaining > 0:                                # przerwane anulowaniem
             ogon = ogon_czesci_zapisu(remaining)
             self.drawer.set_count(remaining, label=i18n.t_plural("grid.drawer.pending_rename", remaining),
@@ -6813,7 +6930,7 @@ class FramesView(QWidget):
         elif zapisane:                                   # Cofnij TYLKO gdy coś zrobione (R2 #6)
             # run_id w wyniku: undo po restarcie przez CLI (R2 #7) - pasek tu, szuflada w `_install_rename_undo`
             ogon = i18n.t("grid.wb.run_id", id=run_id)
-            czlon = "" if res.applied else i18n.t_plural("grid.wb.written_before", zapisane)
+            czlon = razem if res.applied else i18n.t_plural("grid.wb.written_before", zapisane)
             # PRZECHWYĆ cel Cofnij przed re-stage (R2 #1)
             self._postaw_cofnij_nazw(run_id, summary + wskazanie + czlon, zapisane)
         else:                                            # wszystko blocked/failed → run zwolniony
@@ -6833,7 +6950,7 @@ class FramesView(QWidget):
         self._schowaj_podglad_po_zapisie()
         self._odloz_podglad_do_przylozenia(pozostale, i18n.t("grid.preview.name"))
         self._oznacz_przeladowanie_z_zaznaczeniem()
-        self._przeladuj_po_gescie(i18n.t("grid.rename.status_summary", summary=summary + ogon),
+        self._przeladuj_po_gescie(i18n.t("grid.rename.status_summary", summary=summary + razem + ogon),
                                   poza=False, szczegol=podpowiedz)   # szczegół na pasku (AR-218)
         if res.applied:                                  # ogon zapisu → plakietka (definicja sygnału)
             self.stan_porzadkow_changed.emit()

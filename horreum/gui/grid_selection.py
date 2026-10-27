@@ -539,10 +539,17 @@ class _PanelStack(QStackedWidget):
 
 
 
+def elizja_zdania(fm, tekst, szerokosc):
+    """Zdanie szuflady zmieszczone w `szerokosc` px z wielokropkiem W ŚRODKU (AR-347): Qt dzieli szerokość
+    po równo między początek i koniec (sonda fazy planu: 720/720 px przy 90 %, 192/192 przy 25 % zdania), więc
+    kotwica commitu na końcu zostaje, dopóki pole jest szersze niż ~2× ogon. Tekst, który się mieści - bez zmian."""
+    return fm.elidedText(tekst, Qt.ElideMiddle, szerokosc)
+
+
 class _ZdanieWyniku(EtykietaBledu):
     """Zdanie wyniku szuflady: pole zdania okien zapisu (`EtykietaBledu` - `text()` i podpowiedź
     niosą PEŁNĄ treść, szczegół wyniku przez `ustaw`, minimum szerokości 0), a render jest elidowany
-    w prawo do bieżącej szerokości.
+    wielokropkiem w środku do bieżącej szerokości.
 
     Minimum szerokości NIE zależy od długości zdania: zwykły `QLabel` bez zawijania zgłasza minimum
     = szerokość całego tekstu i to minimum idzie w górę aż do okna - zdanie porażki gestu (368
@@ -550,12 +557,17 @@ class _ZdanieWyniku(EtykietaBledu):
     Zawijanie odpadło, bo szuflada jest jednym wierszem, a jej wysokość ruszałaby tabelą przy każdym
     wyniku. Elizja w malowaniu, nie w `setText`: wołający czytają `text()` jako treść wyniku, więc
     przycięta wersja w tym polu mówiłaby mniej, niż gest powiedział. Wskaźnik szczegółu stoi przed
-    zdaniem, więc elizja go nie zjada."""
+    zdaniem, więc elizja go nie zjada.
+
+    WIELOKROPEK W ŚRODKU (AR-347, decyzja CEO): koniec zdania niesie kotwicę „(commit N)” (`_zdanie_przy_cofnij`
+    dokleja ją na końcu) i nazwę pliku na końcu ścieżki, a początek - liczby wyniku; elizja w prawo chowała
+    kotwicę za długą ścieżką pliku zajętego przy oknie 1600 px. Jedna reguła dla każdego zdania szuflady
+    (`elizja_zdania`); pełne zdanie stoi w podpowiedzi jak dotąd."""
 
     def paintEvent(self, event):
         painter = QPainter(self)
         rect = self._prostokat_tekstu()
-        tekst = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, rect.width())
+        tekst = elizja_zdania(self.fontMetrics(), self.text(), rect.width())
         self.style().drawItemText(painter, rect, int(self.alignment()), self.palette(),
                                   self.isEnabled(), tekst, self.foregroundRole())
         self._maluj_wskaznik(painter)
@@ -596,14 +608,28 @@ class StagingDrawer(QFrame):
         lay.addWidget(self.result); lay.addStretch(1)
         lay.addWidget(self.bar); lay.addWidget(self.btn_cancel)
         lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject); lay.addWidget(self.btn_retry)
+        self._etykieta = ""          # etykieta z ostatniego `set_count` - bez członu ponowienia
+        self._do_ponowienia = 0      # N przycisku „Ponów nieudane (N)” (`set_retry`)
         self.set_count(0)
 
     def set_retry(self, n):
         """„Ponów nieudane (N)”: `n > 0` pokazuje przycisk z liczbą wpisów, `0` go chowa. Chowa go też sam
         nowy staging (`set_count(n > 0)`); bieg operacji (także gestu spoza stagingu) tylko go wygasza
-        (`begin_progress`/`end_progress`) - gest izolacji nie zabiera drogi ponowienia."""
+        (`begin_progress`/`end_progress`) - gest izolacji nie zabiera drogi ponowienia. Etykieta mówi to samo
+        członem „ · N do ponowienia” (`_sync_etykiety`)."""
+        self._do_ponowienia = n
         self.btn_retry.setText(i18n.t("grid.drawer.retry", n=n))
         self.btn_retry.setVisible(n > 0)
+        self._sync_etykiety()
+
+    def _sync_etykiety(self):
+        """Etykieta = tekst ostatniego `set_count` + człon „ · N do ponowienia”, dopóki stoi „Ponów nieudane (N)”
+        (AR-367): kropka „○” przy „Zatwierdzono: 3” mówiła „nic nie czeka”, a zmiana do ponowienia stała
+        wyłącznie w przycisku. JEDNA reguła dla kart, nazw i pustostanu - człon schodzi każdą drogą, która chowa
+        przycisk (nowy staging, „Cofnij”, ponowienie bez wpisów), bo każda idzie przez `set_retry`."""
+        czlon = (i18n.t_plural("grid.drawer.retry_label", self._do_ponowienia) if self._do_ponowienia > 0
+                 else "")
+        self.label.setText(self._etykieta + czlon)
 
     def begin_progress(self, total):
         """Wejście w tryb postępu (start commitu/undo): pasek + „Anuluj" widoczne, Zatwierdź/Odrzuć
@@ -644,7 +670,7 @@ class StagingDrawer(QFrame):
             self.dot.setToolTip("")
             # `label` rozróżnia klingę też przy n>0: „N zmian nazw oczekuje" vs domyślne „N zmian
             # oczekuje" (mikro-zmiana §0; call-sites makra bez label → domyślny tekst, R1 #8).
-            self.label.setText(label or i18n.t_plural("grid.drawer.pending", n))
+            self._etykieta = label or i18n.t_plural("grid.drawer.pending", n)
             if result is None:
                 self.result.setText("")      # nowy staging: skasuj STALE wynik commitu/odrzucenia (wiz #7)
         elif zatrzymane:
@@ -652,13 +678,14 @@ class StagingDrawer(QFrame):
             # „czeka, ale nie w całości tutaj”. Warianty półpełne („◐”, „◉”) Segoe UI nie ma.
             self.dot.setText("◌"); _set_role(self.dot, "warn")
             self.dot.setToolTip(zatrzymane)
-            self.label.setText(label or i18n.t("grid.drawer.empty"))
+            self._etykieta = label or i18n.t("grid.drawer.empty")
         else:
             self.dot.setText("○"); _set_role(self.dot, "secondary")
             self.dot.setToolTip("")
             # `label` nadpisuje domyślny tekst pustego stanu: po commicie „Zatwierdzono…" zamiast
-            # pustostanu poczekalni (sprzeczność z wynikiem obok — wizytator D2).
-            self.label.setText(label or i18n.t("grid.drawer.empty"))
+            # pustostanu poczekalni (sprzeczność z wynikiem obok - wizytator D2).
+            self._etykieta = label or i18n.t("grid.drawer.empty")
+        self._sync_etykiety()
         self.btn_commit.setEnabled(n > 0)
         self.btn_reject.setEnabled(n > 0)
         # Nowy staging (n>0) → Zatwierdź/Odrzuć znowu widoczne. NIE chowa tu „Cofnij" (osobny przycisk

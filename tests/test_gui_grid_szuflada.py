@@ -2902,7 +2902,10 @@ def test_odmowa_rekoncyliacji_nazw_mowi_powod_w_szufladzie(qapp, tmp_path, monke
         v.set_writeback_busy(True)
         v.set_writeback_busy(False)
         powod = tekst_powodu(z_bazy(w["reason"], w["reason_code"], w["reason_args"]))
-        assert v.drawer.result.text() == i18n.t("grid.drawer.names_held_refused", reason=powod)
+        assert v.drawer.result.text() == (i18n.t("grid.drawer.names_held_refused", reason=powod)
+                                          + i18n.t("grid.drawer.names_way_both", receive=i18n.t("pipeline.receive"),
+                                                   nav=i18n.t("nav.dostawa")))
+        assert v.drawer.result.text().count("rozstrzyga człowiek") == 1, v.drawer.result.text()
         assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_names_held", czeka)
         os.remove(stara)
         assert [f.status for f in _rekoncyliacja_obok(path)] == ["reconciled"]
@@ -2963,8 +2966,9 @@ def test_powod_zamiaru_spoza_przebiegow_zdania_nie_trafia_do_zdania(qapp, tmp_pa
         assert wc["run_id"] == "C" and czekajace == 1
 
         def _odmowa(w):
-            return i18n.t("grid.drawer.names_held_refused",
-                          reason=tekst_powodu(z_bazy(w["reason"], w["reason_code"], w["reason_args"])))
+            return (i18n.t("grid.drawer.names_held_refused",
+                           reason=tekst_powodu(z_bazy(w["reason"], w["reason_code"], w["reason_args"])))
+                    + i18n.t("grid.drawer.names_way_check"))
         assert _odmowa(wb) != _odmowa(wc)
         assert v.drawer.label.text() == i18n.t_plural("grid.drawer.pending_names_held", 3 + 1)
         assert v.drawer.result.text() == " · ".join((_droga_nazw(), _odmowa(wc)))

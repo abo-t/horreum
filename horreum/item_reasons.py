@@ -706,3 +706,10 @@ KODY_ODMOWY_REKONCYLIACJI = frozenset({
     "disk_silent", "intent_both_names", "intent_no_name", "intent_mtime_differs",
     "intent_sha1_differs", "intent_changed", "intent_target_taken", "reconcile_failed",
 })
+
+
+# Kody odmowy rekoncyliacji PRZEJŚCIOWEJ (AR-347): dysk nie odpowiedział, zamiar zmienił się pod rekoncyliacją,
+# rekoncyliacja padła - zamiar rozstrzygnie NASTĘPNA rekoncyliacja (każdy zapis nazw, skan, CLI), nie człowiek.
+# Podzbiór `KODY_ODMOWY_REKONCYLIACJI`; reszta tamtego zbioru to odmowy, które rozstrzyga człowiek - szuflada mówi
+# przy nich drogę per kod (`gui.grid.FramesView._DROGI_ODMOWY_NAZW`), a przy tych obietnicę rekoncyliacji.
+KODY_PRZEJSCIOWE_REKONCYLIACJI = frozenset({"disk_silent", "intent_changed", "reconcile_failed"})

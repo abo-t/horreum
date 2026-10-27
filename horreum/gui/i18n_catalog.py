@@ -3588,6 +3588,18 @@ CATALOG = {
     # „Ponów nieudane (N)” (AR-347): wpisy, których zapis się nie udał, a plików nie ruszył, wracają do TEGO
     # SAMEGO przebiegu (`repo.ponow_nieudane`) - „Zatwierdź” spróbuje jeszcze raz.
     "grid.drawer.retry": {"pl": "Ponów nieudane ({n})", "en": "Retry failed ({n})"},
+    # AR-367: człon etykiety szuflady, dopóki stoi „Ponów nieudane (N)” - „Zatwierdzono: 3 · 1 do ponowienia”.
+    "grid.drawer.retry_label": {
+        "pl": {"one": " · {n} do ponowienia", "few": " · {n} do ponowienia", "many": " · {n} do ponowienia"},
+        "en": {"one": " · {n} to retry", "other": " · {n} to retry"}},
+    # AR-367: szuflada po otwarciu bazy, gdy nic nie czeka - ostatni zapis kart z „Cofnij” całego przebiegu
+    # (`FramesView._postaw_cofnij_ostatniego`); `day` - data lokalna RRRR-MM-DD, `n` - pliki, które „Cofnij” cofa.
+    "grid.drawer.last_write": {
+        "pl": {"one": "Ostatni zapis kart z {day}: {n} plik - „{undo}” cofa cały przebieg",
+               "few": "Ostatni zapis kart z {day}: {n} pliki - „{undo}” cofa cały przebieg",
+               "many": "Ostatni zapis kart z {day}: {n} plików - „{undo}” cofa cały przebieg"},
+        "en": {"one": "Last card write on {day}: {n} file - “{undo}” undoes the whole run",
+               "other": "Last card write on {day}: {n} files - “{undo}” undoes the whole run"}},
     "grid.drawer.retry_tip": {
         "pl": "Zmiany, których zapis się nie udał, a plików nie ruszył, wracają do szuflady - „{commit}” "
               "spróbuje jeszcze raz",
@@ -3667,10 +3679,22 @@ CATALOG = {
               "“{receive}” on the archive ({nav}) or the next name write - then the drawer picks them up "
               "by itself"},
     # AR-323: zamiar nazw, którego rekoncyliacja odmówiła - powód z wiersza zamiaru
-    # (`queries.powody_zamiarow_nazw`), zamiast obietnicy „Przyjmij nowe”, która go nie rozstrzygnie.
+    # (`queries.powody_zamiarow_nazw`), zamiast obietnicy „Przyjmij nowe”, która go nie rozstrzygnie. Bez ogona
+    # (AR-347): kto rozstrzyga, mówi powód albo droga kodu niżej (`FramesView._DROGI_ODMOWY_NAZW`).
     "grid.drawer.names_held_refused": {
-        "pl": "przerwanego zapisu nazw rekoncyliacja nie rozstrzygnęła: {reason} - rozstrzyga człowiek",
-        "en": "reconciliation did not settle the interrupted name write: {reason} - a person decides"},
+        "pl": "przerwanego zapisu nazw rekoncyliacja nie rozstrzygnęła: {reason}",
+        "en": "reconciliation did not settle the interrupted name write: {reason}"},
+    # AR-347: droga człowieka przy odmowie, której następna rekoncyliacja nie rozstrzygnie - człon za powodem.
+    "grid.drawer.names_way_both": {
+        "pl": " - usuń jedną kopię, potem „{receive}” ({nav})",
+        "en": " - delete one copy, then “{receive}” ({nav})"},
+    "grid.drawer.names_way_none": {
+        "pl": " - przywróć plik pod jedną z nazw, potem „{receive}” ({nav})",
+        "en": " - restore the file under one of the names, then “{receive}” ({nav})"},
+    "grid.drawer.names_way_check": {
+        "pl": " - sprawdź, który plik jest kopią z bazy",
+        "en": " - check which file is the copy from the database"},
+    "grid.drawer.names_way_taken": {"pl": " - rozstrzyga człowiek", "en": " - a person decides"},
     "grid.drawer.names_held_more": {
         "pl": {"one": "czeka też {n} zmiana nazwy zatrzymana zapisem nazw",
                "few": "czekają też {n} zmiany nazw zatrzymane zapisem nazw",
@@ -3790,6 +3814,14 @@ CATALOG = {
     "grid.wb.renamed": {
         "pl": {"one": "{n} przemianowany", "few": "{n} przemianowane", "many": "{n} przemianowanych"},
         "en": {"one": "{n} renamed", "other": "{n} renamed"}},
+    # AR-367: fraza główna operacji, gdy przebieg ma pliki spoza niej - za nią „ · razem M w przebiegu”.
+    "grid.wb.applied_now": {
+        "pl": {"one": "{n} zapisany teraz", "few": "{n} zapisane teraz", "many": "{n} zapisanych teraz"},
+        "en": {"one": "{n} applied now", "other": "{n} applied now"}},
+    "grid.wb.renamed_now": {
+        "pl": {"one": "{n} przemianowany teraz", "few": "{n} przemianowane teraz",
+               "many": "{n} przemianowanych teraz"},
+        "en": {"one": "{n} renamed now", "other": "{n} renamed now"}},
     "grid.wb.restored": {
         "pl": {"one": "{n} przywrócony", "few": "{n} przywrócone", "many": "{n} przywróconych"},
         "en": {"one": "{n} restored", "other": "{n} restored"}},
@@ -3880,6 +3912,11 @@ CATALOG = {
         "pl": {"one": " · {n} plik zapisany wcześniej", "few": " · {n} pliki zapisane wcześniej",
                "many": " · {n} plików zapisanych wcześniej"},
         "en": {"one": " · {n} file written earlier", "other": " · {n} files written earlier"}},
+    # AR-367: przebieg z plikami spoza tej operacji - liczba etykiety „Zatwierdzono/Przemianowano: N”.
+    "grid.wb.run_total": {
+        "pl": {"one": " · razem {n} w przebiegu", "few": " · razem {n} w przebiegu",
+               "many": " · razem {n} w przebiegu"},
+        "en": {"one": " · {n} in the run in total", "other": " · {n} in the run in total"}},
     "grid.rename.renamed_label": {"pl": "Przemianowano: {n}", "en": "Renamed: {n}"},
     "grid.wb.error": {"pl": "BŁĄD: {msg}", "en": "ERROR: {msg}"},
     # Awaria całej operacji uchwytu zapisu Zbiorów na pasku (AR-204): zdanie per operacja startowana

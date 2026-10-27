@@ -5509,6 +5509,46 @@ def przebiegi_szuflady_izolowane(con):
             for r in _przebiegi_kart_szuflady(con) if r["fazy"]]
 
 
+def ostatni_przebieg_kart(con):
+    """Ostatni zapis kart do „Cofnij” po otwarciu bazy (AR-367): `{"run_id", "kiedy", "zakres"}` albo None.
+    „Cofnij” szuflady było stanem sesji - po zamknięciu okna zapisany przebieg zostawał z drogą wyłącznie
+    w CLI (`header-fix --undo N` per commit), a szuflada mówiła „pusta”.
+
+    Przebieg = ten z NAJNOWSZYM commitem spoza przebiegów zmiany obiektu (`object_change_run` - mają własne
+    okno i wiersz Porządków); plik zapisany później przez zmianę obiektu chroni rdzeń przy kliku
+    (`undo_newer_write`). Bez cofania się do starszego przebiegu: ostatni cofnięty w całości to brak „Cofnij”,
+    nie „Cofnij” sprzed niego. `kiedy` - `commits.applied_at` tego commitu, `zakres` -
+    `writeback.przebieg_do_cofniecia` (tylko przy `zakres.cofnij`). None także wtedy, gdy w szufladzie
+    cokolwiek czeka - przebieg do podjęcia, zatrzymany izolacją albo nazwy z otwartym zamiarem
+    (`_przebiegi_kart_szuflady`, `_przebiegi_nazw_szuflady` - te same predykaty, które karmią podjęcie i zdania
+    pustej szuflady): wtedy szuflada mówi o nich, a żywe „Cofnij” wyłączyłoby to zdanie.
+
+    JEDNA MIGAWKA WAL na wszystkie odczyty (własna transakcja odczytu zamykana wycofaniem; w transakcji
+    wołającego - w niej, bez zamykania; wzór `writeback._klasy_przebiegu`, którego klasy wchodzą w tę samą
+    transakcję): zapis innego połączenia między nimi nie złoży kandydata z jednej chwili i zakresu z innej.
+    Zmierzone na kopii pf4 (2026-10-27): 0,08 ms (mediana z 30)."""
+    from horreum import writeback          # lazy: rdzeń pisarza ciągnie astropy (wołający już go ma)
+    wlasna = not con.in_transaction
+    if wlasna:
+        con.execute("BEGIN")
+    try:
+        if _przebiegi_kart_szuflady(con) or _przebiegi_nazw_szuflady(con):
+            return None
+        r = con.execute(
+            "SELECT c.run_id, c.applied_at FROM commits c "
+            "WHERE NOT EXISTS (SELECT 1 FROM object_change_run o WHERE o.run_id = c.run_id) "
+            "ORDER BY c.id DESC LIMIT 1").fetchone()
+        if r is None:
+            return None
+        zakres = writeback.przebieg_do_cofniecia(con, r["run_id"])
+        if zakres is None or not zakres.cofnij:
+            return None
+        return {"run_id": r["run_id"], "kiedy": r["applied_at"], "zakres": zakres}
+    finally:
+        if wlasna:
+            con.rollback()                 # odczyt - nic do zatwierdzenia
+
+
 def odrzucenia_szuflady(con, *, ts, actor):
     """Ile czekających zmian odrzucił gest „Odrzuć” przebiegu z poprzedniej sesji (AR-304) - suma `n`
     z ładunku zdarzeń `staging.discarded` gestu (`ts` + `actor`, jak `last_hand_gesture`) per klinga:

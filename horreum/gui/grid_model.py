@@ -17,14 +17,16 @@ from PySide6.QtCore import (
     QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel, QItemSelectionRange, QModelIndex,
     QPersistentModelIndex, QRect, Qt, qVersion, Signal,
 )
-from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QContextMenuEvent, QFont, QRegion
+from PySide6.QtGui import (
+    QAccessible, QAccessibleEvent, QColor, QContextMenuEvent, QFont, QRegion, QTextLayout, QTextOption,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QLineEdit, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTableView, QWidget,
 )
 
 from horreum import naming, pivot as pivot_mod
-from horreum.gui import facet_model, i18n, queries, rows, theme
+from horreum.gui import facet_model, i18n, queries, rows, szerokosci, theme
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
 
 
@@ -1769,19 +1771,115 @@ def kolumna_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
     prefiks, a elizja z prawej zjadała właśnie nazwę pliku.
 
     Idempotentna jak `elizja_w_srodku`. Zdjęcie elizji poza perspektywą robi wołający
-    (`setItemDelegateForColumn(col, None)`) - ta funkcja mówi tylko, jak kolumnę ustawić."""
+    (`setItemDelegateForColumn(col, None)`) - ta funkcja mówi tylko, jak kolumnę ustawić. Zwraca szerokość, którą
+    ustawiła: zapis perspektywy porównuje z nią, nie z rachunkiem w kadrze z chwili zapisu (AR-36)."""
     elizja_w_srodku(table, col)
-    table.setColumnWidth(col, szerokosc_z_tresci(table, col, sufit=sufit))
+    szer = szerokosc_z_tresci(table, col, sufit=sufit)
+    table.setColumnWidth(col, szer)
+    return szer
 
 
 def szerokosc_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
     """Szerokość, jaką `kolumna_z_tresci` nadaje kolumnie `col` - bez jej ustawiania. Ta sama
     reguła co `QTableView.resizeColumnToContents` (większa z podpowiedzi treści i nagłówka),
-    przycięta sufitem. Jedno miejsce, bo pyta o nią też zapis perspektywy: szerokość równa tej
-    nie jest wyborem ręki (AR-36)."""
+    przycięta sufitem (`sufit=None` - bez sufitu, kolumna „Wersja”). Jedno miejsce, bo pyta o nią też
+    zapis perspektywy: szerokość równa tej nie jest wyborem ręki (AR-36).
+
+    JEDNA REGUŁA DLA KAŻDEJ KOLUMNY MODELU GRIDU (AR-358): `szerokosci_z_tresci` liczy tę samą liczbę co Qt z tych
+    samych wierszy, bez przejścia Qt po `data()` - 8000 wywołań na kolumnę (1000 wierszy × 8 ról), natywnie na kopii
+    pf4 ścieżka 50,9 → 28,3 ms i podgląd nazw 41,1 → 15,4 ms (mediany 10 biegów), co do piksela jak Qt. Obcy model
+    (okno kopii osi obiektu, `QTableWidget`) zostaje na drodze Qt. Układ odłożony najpierw - kadr, z którego Qt bierze
+    wiersze, czyta się z nagłówka pionowego po nim."""
     table.executeDelayedItemsLayout()
-    szer = max(table.sizeHintForColumn(col), table.horizontalHeader().sectionSizeHint(col))
-    return min(szer, sufit)
+    if isinstance(table.model(), GridTableModel):
+        szer = szerokosci_z_tresci(table, [col])[0]
+    else:
+        szer = max(table.sizeHintForColumn(col), table.horizontalHeader().sectionSizeHint(col))
+    return szer if sufit is None else min(szer, sufit)
+
+
+# MIARA TEKSTU KOMÓRKI REGUŁĄ QT (AR-358): `QCommonStylePrivate::viewItemSize` (qcommonstyle.cpp:950-996, Qt 6.9.2)
+# składa tekst `QTextLayout`-em z zawijaniem słów na linii QFIXED_MAX - przy pustym prostokącie opcji
+# (`sizeHintForColumn`) nic się nie łamie, a szerokością jest `naturalTextWidth`. `horizontalAdvance` daje dla długich
+# nazw plików o 1 px mniej (natywnie: 531 wobec 532 px ścieżki na kopii pf4). Jedna opcja na moduł.
+_OPCJA_LINII = QTextOption()
+_OPCJA_LINII.setWrapMode(QTextOption.WrapMode.WordWrap)
+_LINIA_BEZ_KONCA = 8388607          # QFIXED_MAX (qfixed_p.h) w px
+
+
+def _szerokosc_tekstu(tekst, czcionka):
+    """Szerokość tekstu komórki w px (sufit) - reguła Qt z komentarza wyżej. Znak nowej linii staje się separatorem
+    linii (U+2028), jak w `QStyledItemDelegate::displayText`, więc tekst wielowierszowy liczy się najszerszą linią
+    (zmierzone natywnie na 261 tekstach, z tego 21 wielowierszowych - 261/261 zgodnych z `sizeHintForIndex`; bez
+    zamiany `QTextLayout` składa wszystko w jedną linię, np. 205 wobec 172 px)."""
+    uklad = QTextLayout(tekst.replace("\n", "\N{LINE SEPARATOR}"), czcionka)
+    uklad.setTextOption(_OPCJA_LINII)
+    uklad.beginLayout()
+    szer = 0.0
+    while True:
+        linia = uklad.createLine()
+        if not linia.isValid():
+            break
+        linia.setLineWidth(_LINIA_BEZ_KONCA)
+        szer = max(szer, linia.naturalTextWidth())
+    uklad.endLayout()
+    return math.ceil(szer)
+
+
+def szerokosci_z_tresci(table, kolumny):
+    """Szerokości (bez sufitu) kolumn `kolumny` tabeli `table` z `GridTableModel` - ta sama liczba, którą daje
+    `resizeColumnToContents` (`max(sizeHintForColumn, sectionSizeHint)`), bez przejścia Qt po `data()` (AR-346, AR-358).
+
+    Te same wiersze co Qt (`szerokosci.wiersze_podpowiedzi` ze stanu widoku, który Qt czyta); tekst i czcionka komórki
+    z `GridTableModel.komorka` - tego samego rozdziału, przez który idzie `data()`; czcionka roli rozwiązana na czcionce
+    tabeli jak w `QStyledItemDelegate::initStyleOption`; miara `_szerokosc_tekstu`. BELKA GRUPY regułą spanu Qt
+    (`QTableViewPrivate::widthHintForIndex`, Qt 6.9.2): podpis z czcionką belki minus BIEŻĄCE szerokości kolumn spanu;
+    wiersz belki liczy się do limitu wierszy. Qt liczy kolumny po kolei, więc odejmuje szerokości sprzed rachunku.
+    Margines komórki: `PM_FocusFrameHMargin` + 1 z każdej strony i linia siatki. Zmierzone natywnie (PL i EN, belki,
+    kadr góra i środek, podgląd kart/nazw/makra, „Wersje stosów”, Duplikaty, Znajdź): 0 różnic piksela widocznego
+    w 1760 operacjach układu wobec drogi Qt."""
+    m = table.model()
+    h, vh = table.horizontalHeader(), table.verticalHeader()
+    # EXPECT: wiersz widoku = wiersz modelu - na tym stoi reguła wierszy Qt (`wiersze_podpowiedzi`).
+    assert isinstance(m, GridTableModel), f"reguła modelu gridu dla obcego modelu: {type(m).__name__}"
+    assert vh.hiddenSectionCount() == 0, "grid schował wiersz - reguła wierszy Qt liczy widok jak model"
+    assert not vh.sectionsMoved(), "grid przestawił wiersz - reguła wierszy Qt liczy widok jak model"
+    wiersze = szerokosci.wiersze_podpowiedzi(
+        max(0, vh.visualIndexAt(0)), vh.visualIndexAt(table.viewport().height()) if table.isVisible() else -1,
+        m.rowCount(), h.resizeContentsPrecision())
+    czcionka = table.font()
+    klucz_tabeli = czcionka.key()
+    # PAMIĘĆ SZEROKOŚCI W OBRĘBIE TEGO WYWOŁANIA: kolumny Znajdź mają mało różnych wartości (noce, filtry, czasy,
+    # zestawy), a `QTextLayout` na każdą komórkę kosztował klik w kafel Znajdź +24,5 ms wobec samych stałych ról
+    # (natywnie na kopii pf4, 6 biegów). Klucz to tekst I czcionka (`QFont.key()` - rodzina, rozmiar, waga, kursywa):
+    # ten sam tekst pogrubiony jest szerszy. Bez stanu między wywołaniami - zmiana czcionki, motywu albo języka nie
+    # trafia w starą pamięć.
+    zmierzone = {}
+
+    def szerokosc_tresci(r, c):
+        tekst = m.komorka(r, c, _ROLA_TEKSTU)
+        if tekst is None:
+            return None
+        rola_czcionki = m.komorka(r, c, _ROLA_CZCIONKI)
+        if rola_czcionki is None:
+            f, klucz = czcionka, (str(tekst), klucz_tabeli)
+        else:
+            f = QFont(rola_czcionki).resolve(czcionka)
+            klucz = (str(tekst), f.key())
+        w = zmierzone.get(klucz)
+        if w is None:
+            w = zmierzone[klucz] = _szerokosc_tekstu(klucz[0], f)
+        if c == 0 and "_group" in m._rows[r]:
+            spanu = table.columnSpan(r, 0)        # span belki od kolumny 0 (`FramesView._uloz_belki_i_wersje`)
+            if spanu > 1:
+                lewa = h.logicalIndex(0)
+                w -= sum(table.columnWidth(h.visualIndex(lewa + i)) for i in range(1, spanu + 1))
+        return w
+
+    margines = (2 * (table.style().pixelMetric(_MARGINES_RAMKI, None, table) + 1)
+                + (1 if table.showGrid() else 0))
+    return szerokosci.szerokosci_kolumn(szerokosc_tresci, wiersze, kolumny, margines,
+                                        [h.sectionSizeHint(c) for c in kolumny])
 
 
 # KOLUMNA EXPTIME - JEDNA PRECYZJA NA KOLUMNĘ (AR-115). Karta niesie liczbę w zapisie programu, który
@@ -2106,8 +2204,14 @@ class GridTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        row = self._rows[index.row()]
-        col = index.column()
+        return self.komorka(index.row(), index.column(), role)
+
+    def komorka(self, wiersz, kolumna, role):
+        """Treść roli `role` komórki (`wiersz`, `kolumna`) bez `QModelIndex` (AR-358) - JEDEN rozdział komórki (belka
+        grupy, podgląd, „Wersja”, kolumny bazowe, keywordy), przez który idą `data()` i rachunek szerokości z treści
+        (`szerokosci_z_tresci`): szerokość liczy się z tej samej treści i czcionki, które Qt dostaje z `data()`."""
+        row = self._rows[wiersz]
+        col = kolumna
 
         if "_group" in row:  # marker grupy
             # NAGŁÓWEK ZNA STAN, KTÓRY ZNA KOMÓRKA (FC-3). Bez tego „Grupuj wg: Obiekt" malowało

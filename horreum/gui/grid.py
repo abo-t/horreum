@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 import os
 import sqlite3
 import statistics
@@ -42,16 +41,16 @@ from PySide6.QtCore import (
     QEvent, QItemSelection, QItemSelectionModel, QLockFile, QModelIndex, QPersistentModelIndex, Qt, QSettings,
     QThread, QTimer, Signal, Slot,
 )
-from PySide6.QtGui import QFont, QFontMetricsF, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton, QDialog, QMenu,
-    QFrame, QMessageBox, QScrollArea, QSizePolicy, QSplitter, QStyle, QVBoxLayout, QWidget,
+    QFrame, QMessageBox, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
 from horreum import (
     filter_engine, lead_copy, lineage, macro as macro_mod, naming, repo, scan, stacks, supersede, writeback,
 )
-from horreum.gui import busy, facet_model, i18n, queries, rows, szerokosci
+from horreum.gui import busy, facet_model, i18n, queries, rows
 from horreum.gui.facets import FacetRail
 from horreum.gui.kolko import kolko                # kółko myszy przestawia pole wyłącznie z fokusem (AR-349)
 from horreum.gui import assign_dialog
@@ -88,7 +87,8 @@ from horreum.gui.grid_model import (
     PREZENTACJA_KLASYCZNA,
     PREZENTACJA_ZNAJDZ, Recepta,
     _RECEPTA_ZAJETA, _RECEPTY_ZAPISU, _ROLA_ETYKIETY, _set_role, _SPEC_OBRAZY, _SPEC_SZEROKOSC_SCIEZKI,
-    _SPEC_WIDOK, STRUCT_NOISE, _SUFIT_KOLUMNY_Z_TRESCI, _SZEROKOSC_UWAG, szerokosc_z_tresci, _TabelaKlatek,
+    _SPEC_WIDOK, STRUCT_NOISE, _SUFIT_KOLUMNY_Z_TRESCI, _SZEROKOSC_UWAG, szerokosc_z_tresci, szerokosci_z_tresci,
+    _TabelaKlatek,
     _TRIMY,
     use_theme, _UWAGI_ZAJETE, _zawezenie_facetowe, _zdanie_gestu_zapisu, _zdanie_kopii_wielokrotnych,
     _zdanie_kopii_wiodacej, zdanie_pominiec, zdanie_pominiec_makra, _zlacz_recepty, _ZNANE_KLUCZE_SPECU,
@@ -1339,7 +1339,9 @@ class FramesView(QWidget):
         if znajdz:
             self._szerokosci_znajdz()
         if self.model._version_col() is not None:
-            self.table.resizeColumnToContents(self.model._version_col())
+            # Reguła z treści bez sufitu - ta sama liczba co `resizeColumnToContents`, bez przejścia Qt po `data()`.
+            wersja = self.model._version_col()
+            self.table.setColumnWidth(wersja, szerokosc_z_tresci(self.table, wersja, sufit=None))
         # Wejście przy zbiorze W DRODZE policzyło szerokości z modelu, którego wiersze dopiero jadą (przy
         # otwarciu bazy z pustego - zostawały podpowiedzi nagłówka, AR-346): zamówienie na najbliższe
         # przyłożenie zbioru, także nowszego zlecenia, które zastąpi to w drodze. Wyjście ze Znajdź je zdejmuje.
@@ -1359,6 +1361,9 @@ class FramesView(QWidget):
     _szerokosci_zamowione = None
     _szerokosci_programowe = 0    # zmiana szerokości w toku od programu (reset modelu, własny rachunek)
     _straz_szerokosci = False     # strażnik ręki podpięty (raz na widok, przy pierwszym zamówieniu)
+    # Szerokość ścieżki ZASTOSOWANA programowo regułą z treści (`_uloz_kolumny`) albo None - poza perspektywami
+    # z treścią i przy zapisanej szerokości. Zapis perspektywy porównuje z nią (`_wyglad_do_zapisu`, AR-36, AR-358).
+    _sciezka_z_tresci = None
 
     def _zamow_szerokosci(self):
         """Zamów szerokości Znajdź na przyłożenie zbioru, który jest w drodze. Strażnik ręki - sygnał
@@ -1396,56 +1401,14 @@ class FramesView(QWidget):
 
         TA SAMA LICZBA CO `resizeColumnToContents`, BEZ PRZEJŚCIA QT PO `data()` (AR-346). Qt pyta model
         o osiem ról na komórkę (`szerokosci`) - na kopii pf4 40 000 wywołań, klik w kafel Znajdź 455-795 ms
-        natywnie. Tu te same wiersze (`szerokosci.wiersze_podpowiedzi` ze stanu widoku, który czyta Qt), tekst
-        i czcionka komórki z `_base_cell` (ta sama droga, którą `data()` idzie do kolumn bazowych) i metryka
-        fontu z czcionką rozwiązaną jak w `QStyledItemDelegate::initStyleOption`; tekst z `\\n` liczy się
-        najszerszą linią (Qt łamie go na separatorze linii). Zmierzone natywnie na kopii pf4: te same szerokości
-        co Qt w PL i EN, przy belkach grup i przy aktywnym spanie (reguła na prototypie: 5000/5000 komórek,
-        2364/2364 komórek kursywą); klik w kafel Znajdź 156-335 ms wobec 457-814 ms (dwie serie przeplatane).
-
-        BELKA GRUPY regułą spanu Qt (`QTableViewPrivate::widthHintForIndex`, Qt 6.9.2): podpis z czcionką
-        belki minus BIEŻĄCE szerokości kolumn spanu; wiersz belki liczy się do limitu wierszy. Qt liczy
-        kolumny po kolei od obiektu - jedynej z podpisem belki - więc odejmuje szerokości sprzed rachunku."""
+        natywnie. Rachunek to reguła szerokości z treści każdej kolumny modelu gridu (`szerokosci_z_tresci`,
+        AR-358): te same wiersze co Qt, tekst i czcionka z rozdziału komórki modelu, miara tekstu regułą Qt
+        (`QTextLayout`, nie `horizontalAdvance` - ten dawał o 1 px mniej na długich nazwach), belka grupy regułą
+        spanu Qt. Zmierzone natywnie na kopii pf4: pięć kolumn Znajdź równe pięciu `resizeColumnToContents`
+        w PL i EN, bez grupy i przy belkach obiektu i aparatu, kadr u góry i w środku."""
         t, m = self.table, self.model
-        h, vh = t.horizontalHeader(), t.verticalHeader()
-        # EXPECT: wiersz widoku = wiersz modelu - na tym stoi reguła wierszy Qt (`wiersze_podpowiedzi`).
-        assert vh.hiddenSectionCount() == 0, "grid schował wiersz - reguła wierszy Qt liczy widok jak model"
-        assert not vh.sectionsMoved(), "grid przestawił wiersz - reguła wierszy Qt liczy widok jak model"
         kolumny = [m.base_col(k) for k in (self._KOLUMNY_Z_TRESCI if klucze is None else klucze)]
-        wiersze = szerokosci.wiersze_podpowiedzi(
-            max(0, vh.visualIndexAt(0)), vh.visualIndexAt(t.viewport().height()) if t.isVisible() else -1,
-            m.rowCount(), h.resizeContentsPrecision())
-        czcionka = t.font()
-        miary = {None: QFontMetricsF(czcionka)}
-        tekstu, czcionki = Qt.DisplayRole, Qt.FontRole     # raz: dostęp do skrótu roli kosztuje ~2 µs
-
-        def szerokosc_tekstu(tekst, rola_czcionki):
-            if rola_czcionki is None:
-                fm = miary[None]
-            else:
-                f = QFont(rola_czcionki).resolve(czcionka)
-                fm = miary.get(f.key()) or miary.setdefault(f.key(), QFontMetricsF(f))
-            return max(math.ceil(fm.horizontalAdvance(linia)) for linia in tekst.split("\n"))
-
-        def szerokosc_tresci(r, c):
-            row = m._rows[r]
-            if "_group" not in row:
-                klucz = m._col_key(c)
-                return szerokosc_tekstu(m._base_cell(row, klucz, tekstu), m._base_cell(row, klucz, czcionki))
-            if c != 0:
-                return None                   # podpis belki stoi wyłącznie w kolumnie 0 (`GridTableModel.data`)
-            idx = m.index(r, 0)
-            w = szerokosc_tekstu(idx.data(tekstu), idx.data(czcionki))
-            spanu = t.columnSpan(r, 0)        # span belki od kolumny 0 (`_uloz_belki_i_wersje`)
-            if spanu > 1:
-                lewa = h.logicalIndex(0)
-                w -= sum(t.columnWidth(h.visualIndex(lewa + i)) for i in range(1, spanu + 1))
-            return w
-
-        margines = (2 * (t.style().pixelMetric(QStyle.PM_FocusFrameHMargin, None, t) + 1)
-                    + (1 if t.showGrid() else 0))
-        szer = szerokosci.szerokosci_kolumn(szerokosc_tresci, wiersze, kolumny, margines,
-                                            [h.sectionSizeHint(c) for c in kolumny])
+        szer = szerokosci_z_tresci(t, kolumny)
         # Własny rachunek to nie gest ręki. Strażnik jest dziś bez skutku - przy wejściu zamówienie staje PO tym
         # rachunku, przy przyłożeniu schodzi PRZED nim - i zadziała, gdy rachunek pobiegnie przy żywym zamówieniu.
         self._szerokosci_programowe += 1
@@ -1759,17 +1722,39 @@ class FramesView(QWidget):
         gest ręki - perspektywa ma się otworzyć tak, jak ją zapisano), i szerokość ścieżki tylko
         wtedy, gdy różni się od tej, którą widok ustawiłby sam: z treści w perspektywach
         `_FLAGI_SCIEZKI_Z_TRESCI`, domyślnej sekcji gdzie indziej. Szerokość „taka jak zwykle"
-        zapisana w spec-u zamroziłaby treść z chwili zapisu."""
+        zapisana w spec-u zamroziłaby treść z chwili zapisu.
+
+        SZEROKOŚĆ Z TREŚCI TO TA, KTÓRĄ PROGRAM ZASTOSOWAŁ (`_sciezka_z_tresci` z `_uloz_kolumny`), nie rachunek
+        w kadrze z chwili zapisu (AR-358): reguła Qt bierze do 1000 wierszy od kadru, więc po samym przewinięciu dawała
+        inną liczbę i zapis brał szerokość programu za wybór ręki (zmierzone natywnie: zbiór 2388 klatek, 331 px
+        u góry, 293 px w środku - `path_width` 331 zapisane bez gestu). Perspektywa z zapisaną szerokością
+        (pamięci brak) porównuje z treścią, jak dotąd. Ścieżka będąca OSTATNIĄ widoczną sekcją (Znajdź - „Plik” stoi
+        ostatni) ROZCIĄGNIĘTĄ do kadru nie jest wyborem ręki - bez zapisu. Przy poziomym przepełnieniu nagłówka
+        `stretchLastSection` nie ma czego dociągać i ostatnia sekcja niesie własną szerokość - wtedy zapis jak
+        każdej."""
         widok = {_SPEC_OBRAZY: self._obrazy_widoczne()}
         kol = self.model.base_col("path")
+        h = self.table.horizontalHeader()
+        if (kol == self._ostatnia_widoczna_sekcja() and h.stretchLastSection()
+                and h.length() <= h.viewport().width()):
+            return widok
         biezaca = self.table.columnWidth(kol)
         if any(getattr(self, atrybut) for atrybut in _FLAGI_SCIEZKI_Z_TRESCI):
-            sama = szerokosc_z_tresci(self.table, kol)
+            sama = self._sciezka_z_tresci
+            if sama is None:
+                sama = szerokosc_z_tresci(self.table, kol)
         else:
             sama = self.table.horizontalHeader().defaultSectionSize()
         if biezaca != sama:
             widok[_SPEC_SZEROKOSC_SCIEZKI] = biezaca
         return widok
+
+    def _ostatnia_widoczna_sekcja(self):
+        """Logiczny numer ostatniej widocznej sekcji nagłówka albo None - `setStretchLastSection` rozciąga ją do kadru,
+        więc jej szerokość nie jest wyborem ręki (migawka `_zapamietaj_szerokosci`, zapis `_wyglad_do_zapisu`)."""
+        h = self.table.horizontalHeader()
+        return next((h.logicalIndex(v) for v in range(h.count() - 1, -1, -1)
+                     if not h.isSectionHidden(h.logicalIndex(v))), None)
 
     def _zapytaj_nazwe_perspektywy(self):
         """Okno nazwy zapisywanej perspektywy → nazwa bez białych znaków na brzegach albo None
@@ -3642,9 +3627,10 @@ class FramesView(QWidget):
         naglowek.setSortIndicator(m.sort_column(), m.sort_order())
         naglowek.blockSignals(False)
         sciezka = m.base_col("path")
+        self._sciezka_z_tresci = None
         if any(getattr(self, atrybut) for atrybut in _FLAGI_SCIEZKI_Z_TRESCI):
             if self._szerokosc_sciezki is None:
-                kolumna_z_tresci(self.table, sciezka)
+                self._sciezka_z_tresci = kolumna_z_tresci(self.table, sciezka)
             else:
                 elizja_w_srodku(self.table, sciezka)
         elif self._widok_gotowych_obrazow():
@@ -3997,8 +3983,10 @@ class FramesView(QWidget):
         if self.model._version_col() is not None:
             # Domyślne 100 px elidowało „inna integracja · 2026-02-21 12:43 · 33 wejścia", czyli
             # właśnie te fakty, po które perspektywa istnieje. Koszt znikomy: perspektywa ma na
-            # kopii żywego archiwum 40 stosów (2026-09-26).
-            self.table.resizeColumnToContents(self.model._version_col())
+            # kopii żywego archiwum 40 stosów (2026-09-26). Reguła z treści bez sufitu (AR-358) -
+            # ta sama liczba co `resizeColumnToContents`.
+            wersja = self.model._version_col()
+            self.table.setColumnWidth(wersja, szerokosc_z_tresci(self.table, wersja, sufit=None))
         # CEL OSTATNIEGO GESTU WRACA RAZEM ZE ZBIOREM (FC-2, firsthand). Recepta powrotu odsłania
         # zbiór, ale sama nie ODNAJDUJE w nim celu: zmierzone na żywym archiwum - po wykonaniu
         # recepty widok miał 16 901 wierszy, zaznaczenie 0 i wygaszoną kontrolkę, więc 43 klatki
@@ -4486,6 +4474,14 @@ class FramesView(QWidget):
                 if (znaczenie is not None and znaczenie != ("version",)
                         and not h.isSectionHidden(c)):
                     t.setColumnWidth(c, szerokosci.get(znaczenie, h.defaultSectionSize()))
+        # Ścieżka szeroka z treści (perspektywa z treścią bez zapisanej szerokości), której migawka NIE niesie (była
+        # ostatnią, rozciąganą sekcją), wraca do szerokości, którą program ZASTOSOWAŁ (`_sciezka_z_tresci`, AR-358), bez
+        # nowego rachunku - domyślna z oddania zapisałaby się potem jako wybór ręki. Migawka niosąca ścieżkę wygrywa:
+        # to szerokość sprzed resetu, także po geście ręki, a pamięć programu nadpisałaby gest przy każdym sorcie.
+        if (self._sciezka_z_tresci is not None and self._szerokosc_sciezki is None
+                and any(getattr(self, atrybut) for atrybut in _FLAGI_SCIEZKI_Z_TRESCI)
+                and self._znaczenia_kolumn[m.base_col("path")] not in szerokosci):
+            t.setColumnWidth(m.base_col("path"), self._sciezka_z_tresci)
         # Elizja w środku należy do ścieżki (ustawia ją `_uloz_kolumny`) i do podglądu; każdy inny
         # numer, który ją niesie, dostał ją pod innym znaczeniem - numer podglądu niesie teraz
         # keyword, a po zmianie prezentacji numer ścieżki niesie „Obiekt".
@@ -4508,8 +4504,7 @@ class FramesView(QWidget):
         być ostatni - seria zmian „Pól" zostawiała kilka kolumn szerokich na pół ekranu."""
         t = self.table
         h = t.horizontalHeader()
-        rozciagnieta = next((h.logicalIndex(v) for v in range(h.count() - 1, -1, -1)
-                             if not h.isSectionHidden(h.logicalIndex(v))), None)
+        rozciagnieta = self._ostatnia_widoczna_sekcja()
         self._szerokosci_przed_resetem = {
             znaczenie: t.columnWidth(c) for c, znaczenie in enumerate(self._znaczenia_kolumn)
             if znaczenie is not None and c < h.count() and c != rozciagnieta

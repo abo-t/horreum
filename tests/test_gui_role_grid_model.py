@@ -28,7 +28,7 @@ from horreum.gui import grid_model
 
 _KORZENIE = {"Qt", "QStyle", "QStyleOptionViewItem", "QTextOption"}
 _KLASY = ("GridTableModel", "_ElizjaWSrodku", "_DelegatBelki")
-_FUNKCJE = ("szerokosc_z_tresci", "kolumna_z_tresci")
+_FUNKCJE = ("szerokosc_z_tresci", "kolumna_z_tresci", "szerokosci_z_tresci", "_szerokosc_tekstu")
 # Metody zimne: raz na gest sortu, poza drogą komórki i malowania.
 _ZIMNE = {"GridTableModel.sort", "GridTableModel.sort_order"}
 

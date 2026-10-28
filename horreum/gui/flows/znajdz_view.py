@@ -30,11 +30,14 @@ class ZnajdzView(QWidget):
     (czasownik „Zbiory klasyczne"), o której gospodarz nawigacji inaczej by nie wiedział."""
 
     prezentacja_zmieniona = Signal(str)
+    # Prezentacja, w której kontener startuje - czyta ją też gospodarz nawigacji: budowa strony bez wiersza sidebara
+    # (komenda przez atrybut widoku) mówi w zdaniu fazy napis wiersza tej prezentacji (AR-351).
+    PREZENTACJA_STARTU = PREZENTACJA_KLASYCZNA
 
     def __init__(self, frames_view, parent=None):
         super().__init__(parent)
         self.frames_view = frames_view
-        self.prezentacja = PREZENTACJA_KLASYCZNA
+        self.prezentacja = self.PREZENTACJA_STARTU
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
 

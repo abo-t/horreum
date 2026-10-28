@@ -18,6 +18,7 @@ między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY
 import itertools
 import os
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -5149,8 +5150,8 @@ class MainWindow(QMainWindow):
         budowy wychodzi z komendy wyjątkiem (jedno okno błędu programu) i zatrzymuje ją, zanim cokolwiek zmieni
         sidebar albo stos - dawniej porażka w `_on_nav_changed` nie przerywała komendy, a jej następny krok budował
         stronę drugi raz (drugie okno albo sidebar „Znajdź” nad Domem). Po udanej budowie przełączenie już nic nie
-        buduje."""
-        self._zbuduj_strone(_TRASY[idx][0])
+        buduje. Wiersz idzie do budowy - zdanie fazy mówi napis wiersza, którym człowiek wchodzi (AR-351)."""
+        self._zbuduj_strone(_TRASY[idx][0], wiersz=idx)
         self._show_view(idx)
 
     def show_find(self, query=None):
@@ -5183,7 +5184,7 @@ class MainWindow(QMainWindow):
         # (błąd programu - mówi straż oknem) cofa wiersz sidebara do ostatniego udanego wejścia: strona się nie
         # zmieniła, a następne wejście buduje od nowa.
         try:
-            self._zbuduj_strone(strona)
+            self._zbuduj_strone(strona, wiersz=row)
         except BaseException:
             self.nav.blockSignals(True)
             try:
@@ -5542,10 +5543,12 @@ class MainWindow(QMainWindow):
             self._po_malowaniu.zamow()
 
     def _dobudowa_mozliwa(self):
-        """Warunek stanu dobudowy: przełącznik, otwarta baza, pokazane okno, strona Zbiorów jeszcze niezbudowana i nie
-        w budowie (zegar uzbrojony w fazie składu budowy na żądanie wszedłby w nią drugi raz)."""
+        """Warunek stanu dobudowy: przełącznik, otwarta baza, pokazane okno, strona Zbiorów jeszcze niezbudowana
+        i ŻADNA strona w budowie - zegar uzbrojony w pompie fazy budowy na żądanie (`busy.repaint`) wszedłby w nią
+        budową Zbiorów: tej samej strony drugi raz albo 80-320 ms w środku kliku w inną stronę (AR-351). Budowa
+        oddaje zegar po sobie."""
         return (self._zbiory_w_bezczynnosci and self.con is not None and self.isVisible()
-                and STRONA_ZBIORY in self._zaslepki and STRONA_ZBIORY not in self._w_budowie)
+                and STRONA_ZBIORY in self._zaslepki and not self._w_budowie)
 
     def _na_malowanie_domu(self):
         """Kotwica malowania (`_PoMalowaniu`): Dom bazy, która właśnie się otworzyła, jest już namalowany."""
@@ -5573,10 +5576,10 @@ class MainWindow(QMainWindow):
         """Zegar dobudowy (`_zamow_dobudowe`). Strony zbudowanej w międzyczasie (klik w Zbiory, komenda) zegar nie
         dotyka - budowa na żądanie go zatrzymuje, a `_zbuduj_strone` strony zbudowanej nie buduje drugi raz. Porażka
         budowy to błąd programu (mówi straż oknem): zaślepka zostaje, następne wejście buduje od nowa, zegar nie
-        ponawia."""
-        self._zbuduj_strone(STRONA_ZBIORY)
+        ponawia. Bez fazy i kursora (AR-351): człowiek na tę budowę nie czeka - biegnie w bezczynności."""
+        self._zbuduj_strone(STRONA_ZBIORY, faza=False)
 
-    def _zbuduj_strone(self, strona):
+    def _zbuduj_strone(self, strona, *, faza=True, wiersz=None):
         """Zbuduj stronę leniwą `strona` (`STRONA_*`) i podmień nią zaślepkę na stosie. Strona zbudowana,
         strona nieleniwa i okno bez bazy - nic.
 
@@ -5584,32 +5587,59 @@ class MainWindow(QMainWindow):
         (`_w_budowie`) zaraz po utworzeniu. Wyjątek w budowie zbiera wątki tła każdego już utworzonego widoku
         (`zatrzymaj_pola` - `QThread` skasowany w biegu to twardy abort, `FramesView.zatrzymaj_pola`), kasuje je,
         zostawia zaślepkę i słownik stron bez wpisu i leci dalej (błąd programu - mówi straż oknem); następne
-        wejście buduje od nowa. EXPECT: budowa tej samej strony w trakcie jej budowy to błąd programu."""
+        wejście buduje od nowa. EXPECT: budowa tej samej strony w trakcie jej budowy to błąd programu.
+
+        BUDOWA NA ŻĄDANIE MÓWI, ŻE TRWA (AR-351): faza „Przygotowuję stronę „…”…” z kursorem oczekiwania
+        (`busy.busy`) - klik przed dobudową Zbiorów wpadał w ~320 ms budowy (zmierzone natywnie na kopii pf4, 10/10
+        biegów z przestojem pętli > 300 ms), a pasek mówił wtedy fazę tła o Porządkach albo nic. Nazwa w zdaniu to
+        napis wiersza sidebara, którym człowiek wchodzi (`wiersz` z `_wejdz` i `_on_nav_changed`; stronę Zbiorów
+        prowadzą dwa wiersze), a bez wiersza - komenda przez atrybut widoku, `zbuduj_strony` - napis wiersza
+        prezentacji, w której strona startuje (`ZnajdzView.PREZENTACJA_STARTU`). Dobudowa zegarem w bezczynności
+        (`faza=False`) - bez fazy i kursora. Faza obejmuje budowę i sprzątanie po jej porażce (`zatrzymaj_pola` zbiera
+        wątki blokująco - kursor i zdanie stoją do końca), a zdanie schodzi razem z kursorem; budowa w fazie otwarcia
+        bazy (`zbuduj_strony` w montażu) oddaje wtedy jej zdanie - `_end_phase` zgasiłby fazę, która jeszcze trwa.
+        Pompa fazy (`busy.repaint`) doręcza zdarzenia, więc każda budowa zdejmuje zegar dobudowy, ZANIM ruszy, a kotwice
+        dobudowy doręczone w pompie widzą budowę w toku (`_dobudowa_mozliwa`); budowa strony innej niż Zbiory oddaje
+        zegar po sobie (`_sprawdz_dobudowe`) - dobudowa rusza po kliku, nie w jego środku."""
         zaslepka = self._zaslepki.get(strona)
         if zaslepka is None:
             return
-        if strona == STRONA_ZBIORY:
-            # Budowa na żądanie przed zegarem dobudowy zdejmuje zegar, ZANIM ruszy: skład zbioru bez wątków tła idzie
-            # pod fazą (`busy.repaint` kręci pętlę), a zegar wszedłby w nią budową tej samej strony (asercja niżej).
-            self._dobudowa_zbiorow.stop()
+        self._dobudowa_zbiorow.stop()
         assert strona not in self._w_budowie, f"strona {strona} budowana ponownie w trakcie budowy"
-        utworzone = self._w_budowie[strona] = []
+        if wiersz is None:
+            wiersz = next(w for w, (s, prez) in _TRASY.items()
+                          if s == strona and prez in (None, ZnajdzView.PREZENTACJA_STARTU))
+        assert _TRASY[wiersz][0] == strona, f"wiersz {wiersz} nie prowadzi do strony {strona}"
         budowniczy = {STRONA_ZBIORY: self._zbuduj_zbiory, STRONA_DOSTAWA: self._zbuduj_dostawe,
                       STRONA_PLANER: self._zbuduj_planer}[strona]
+        zewnetrzna = self._faza_pierwsza            # faza pierwszego planu, w którą budowa weszła (otwarcie bazy)
+        # Wpis budowy schodzi w ZEWNĘTRZNYM `finally`: wyjątek z wejścia w fazę (`busy.busy` → `_say_phase`, `repaint`)
+        # omija ciało `with`, a wpis zostawiony na zawsze blokowałby dobudowę i kończył następną budowę asercją.
+        utworzone = self._w_budowie[strona] = []
         try:
-            widoki, kontener = budowniczy(utworzone)
-        except BaseException:
-            for w in reversed(utworzone):
-                zatrzymaj = getattr(w, "zatrzymaj_pola", None)
-                if zatrzymaj is not None and isValid(w):
-                    zatrzymaj()
-            for w in reversed(utworzone):
-                if isValid(w):
-                    w.setParent(None)
-                    w.deleteLater()
-            raise
+            with (busy.busy(self._say_phase, i18n.t("busy.page_building", page=self.nav.item(wiersz).text()))
+                  if faza else nullcontext()):
+                try:
+                    widoki, kontener = budowniczy(utworzone)
+                except BaseException:
+                    for w in reversed(utworzone):
+                        zatrzymaj = getattr(w, "zatrzymaj_pola", None)
+                        if zatrzymaj is not None and isValid(w):
+                            zatrzymaj()
+                    for w in reversed(utworzone):
+                        if isValid(w):
+                            w.setParent(None)
+                            w.deleteLater()
+                    raise
         finally:
             del self._w_budowie[strona]
+            if faza:
+                if zewnetrzna:
+                    self._say_phase(zewnetrzna)     # zagnieżdżenie w fazie otwarcia - wraca jej zdanie
+                else:
+                    self._end_phase()               # pasek wraca do fazy tła albo gaśnie
+            if strona != STRONA_ZBIORY:
+                self._sprawdz_dobudowe()            # zegar zdjęty na czas budowy wraca po niej
         # Krok świadomie BEZ obwódki: operacje na stosie i słowniku nie czytają danych i nie startują wątków,
         # więc nie mają porażki, którą trzeba by zwijać (wyjątek tu byłby błędem Qt, nie stanem bazy).
         self._strony.update(widoki)
@@ -6563,31 +6593,34 @@ class MainWindow(QMainWindow):
         # zbudowałby w nich stronę bazy, która właśnie znika. Odmowa bazy - zegar wraca dla bazy, która zostaje.
         self._wstrzymaj_dobudowe()
         name = Path(path).name
-        with busy.busy(self._say_phase, i18n.t("busy.open_db", name=name)) as faza:
-            try:
-                new_con = db.open_db(path)
-            except db.SchemaTooNew as exc:           # nic nie przejęte - okno zostaje, jak było
-                odmowa = i18n.t("main.db_too_new", name=name, found=exc.found,
-                                supported=db.SCHEMA_VERSION)
-            except Exception as exc:
-                odmowa = i18n.t("main.db_open_failed", name=name,
-                                reason=str(exc) or type(exc).__name__)
-            else:
-                odmowa = None
-                old = self.con
-                self.con = new_con
-                self.db_path = path
-                faza.say(i18n.t("busy.mount_views"))
-                self._mount_views()
-                self._sync_db_state()
-                if old is not None:
-                    old.close()
-        if odmowa is not None:
+        try:
+            with busy.busy(self._say_phase, i18n.t("busy.open_db", name=name)) as faza:
+                try:
+                    new_con = db.open_db(path)
+                except db.SchemaTooNew as exc:           # nic nie przejęte - okno zostaje, jak było
+                    odmowa = i18n.t("main.db_too_new", name=name, found=exc.found,
+                                    supported=db.SCHEMA_VERSION)
+                except Exception as exc:
+                    odmowa = i18n.t("main.db_open_failed", name=name,
+                                    reason=str(exc) or type(exc).__name__)
+                else:
+                    odmowa = None
+                    old = self.con
+                    self.con = new_con
+                    self.db_path = path
+                    faza.say(i18n.t("busy.mount_views"))
+                    self._mount_views()
+                    self._sync_db_state()
+                    if old is not None:
+                        old.close()
+        finally:
+            # Faza okna gaśnie na KAŻDYM wyjściu (AR-351) - także po wyjątku montażu (błąd programu, mówi straż
+            # oknem): `busy` zdejmuje kursor, ale zdania nie sprząta, więc „Buduję widoki…” zostawało na pasku.
             self._end_phase()
+        if odmowa is not None:
             self._zamow_dobudowe()
             QMessageBox.warning(self, i18n.t("dialog.open_db_title"), odmowa)
             return
-        self._end_phase()
         if self._on_db_changed is not None:        # zapamiętaj ostatnią bazę (trwałe ustawienia)
             self._on_db_changed(path)
         self._flash(i18n.t("main.db_loaded", path=path), gest=False)   # stan okna, nie gest (AR-97)

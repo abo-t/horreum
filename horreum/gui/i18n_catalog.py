@@ -2243,6 +2243,9 @@ CATALOG = {
     # KAŻDĄ fazę, żeby jej zniknięcie było jedynym sygnałem końca.
     "busy.open_db": {"pl": "Otwieram bazę: {name}…", "en": "Opening database: {name}…"},
     "busy.mount_views": {"pl": "Buduję widoki…", "en": "Building views…"},
+    # Budowa strony leniwej na żądanie (AR-351) - `{page}` to napis wiersza sidebara, którym człowiek wchodzi
+    # (`nav.*`), w mianowniku i w cudzysłowie: nazwa strony bez odmiany.
+    "busy.page_building": {"pl": "Przygotowuję stronę „{page}”…", "en": "Preparing the “{page}” page…"},
     "busy.refresh_views": {"pl": "Odświeżam widoki po etapie…", "en": "Refreshing views after stage…"},
     # Faza TŁA (AR-175): liczniki Porządków montażu w wątku tła - okno żyje, plakietka czeka na liczbę.
     "busy.counting_tasks": {"pl": "Liczę Porządki…", "en": "Counting Housekeeping…"},

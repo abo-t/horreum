@@ -304,8 +304,8 @@ def test_dwuklik_w_porzadki_nie_przenosi_fokusu_na_liste(qapp, tmp_path, monkeyp
 
 def test_enter_na_porzadkach_przy_podstronie_kladzie_fokus_na_powrot(qapp, tmp_path, monkeypatch):
     """Porządki zostały na podstronie osi (lista schowana): strzałka do „Porządki” w pasku i Enter kładą fokus na
-    „← Porządki” podstrony, nie na schowanej liście - drugi Enter nie otwiera wiersza, którego człowiek nie widzi.
-    Mutant: fokus na liście bez względu na stronę."""
+    „← Porządki” podstrony, nie na schowanej liście - drugi Enter wraca na listę i nie otwiera wiersza, którego
+    człowiek nie widział (AR-415). Mutant: fokus na liście bez względu na stronę."""
     from horreum.gui import tasks as tm
     _w_tle(monkeypatch)
     bledy = _bledy_haka(monkeypatch)
@@ -335,7 +335,62 @@ def test_enter_na_porzadkach_przy_podstronie_kladzie_fokus_na_powrot(qapp, tmp_p
         fokus = QApplication.focusWidget()
         assert fokus is _wstecz(tasks) and fokus.isVisible(), fokus
         _enter_z_petli(fokus)
-        assert otwarte == [] and tasks.pages.currentIndex() == tm._PAGE_TELESCOPE and bledy == [], (otwarte, bledy)
+        assert otwarte == [] and tasks.pages.currentIndex() == tm._PAGE_LIST and bledy == [], (otwarte, bledy)
+        assert tasks.tasks.hasFocus() and tasks.tasks.currentItem() is _task_item(win, "dup_frames")
+    finally:
+        win.close()
+
+
+def test_enter_na_powrocie_wraca_na_ten_sam_wiersz(qapp, tmp_path, monkeypatch):
+    """Enter (`Key_Return` i `Key_Enter` z klawiatury numerycznej, z `QTest.keyClick` i z pętli zdarzeń C++) na
+    „← Porządki” z fokusem wraca na listę z fokusem na wierszu, z którego człowiek wszedł - jak Spacja i klik. Dawniej
+    nic: przycisk poza oknem dialogowym reaguje wyłącznie na Spację (AR-415). Przycisk z fokusem nie staje się domyślny
+    - `autoDefault` zmieniłby jego rysunek w Fusion. Przytrzymany Enter wraca raz: auto-powtórzenia trafiają już w listę
+    i niczego nie otwierają. Mutanty: zwykły `QPushButton` w `_wrap`; `setAutoDefault(True)` zamiast obsługi klawisza."""
+    from horreum.gui import tasks as tm
+    _w_tle(monkeypatch)
+    bledy = _bledy_haka(monkeypatch)
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        tasks = _okno_po_montazu(win)
+        _klik_nav(win, NAV_PORZADKI)
+        _czekaj_na(lambda: tasks._liczniki_thread is None and _lista_czynna(win), "lista czynna")
+        wiersz = _task_item(win, "telescopes_unlabeled")
+        otwarte = []
+        tasks.open_collection.connect(otwarte.append)
+        tasks.open_intake.connect(lambda: otwarte.append("dostawa"))
+        tasks.open_object_change_run.connect(otwarte.append)
+        for klawisz, z_petli in ((Qt.Key_Return, False), (Qt.Key_Enter, False), (Qt.Key_Return, True)):
+            _czekaj_na(lambda: tasks._liczniki_thread is None and _lista_czynna(win), "lista czynna")
+            tasks.tasks.setFocus(Qt.TabFocusReason)
+            tasks.tasks.setCurrentItem(wiersz)
+            QTest.keyClick(tasks.tasks, Qt.Key_Return)
+            _pompuj()
+            assert tasks.pages.currentIndex() == tm._PAGE_TELESCOPE
+            wstecz = _wstecz(tasks)
+            wstecz.setFocus(Qt.TabFocusReason)
+            _pompuj()
+            assert wstecz.hasFocus() and not wstecz.autoDefault() and not wstecz.isDefault()
+            if z_petli:
+                _enter_z_petli(wstecz, klawisz)
+            else:
+                QTest.keyClick(wstecz, klawisz)
+                _pompuj()
+            assert tasks.pages.currentIndex() == tm._PAGE_LIST, (klawisz, z_petli)
+            assert tasks.tasks.hasFocus() and tasks.tasks.currentItem() is wiersz, QApplication.focusWidget()
+        tasks.tasks.setCurrentItem(wiersz)
+        QTest.keyClick(tasks.tasks, Qt.Key_Return)
+        _pompuj()
+        wstecz = _wstecz(tasks)
+        wstecz.setFocus(Qt.TabFocusReason)
+        QApplication.sendEvent(wstecz, QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier, "\r"))
+        for _ in range(3):                                   # auto-powtórzenia trafiają w widżet z fokusem
+            QApplication.sendEvent(QApplication.focusWidget(),
+                                   QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier, "\r", True))
+        QApplication.sendEvent(QApplication.focusWidget(), QKeyEvent(QEvent.KeyRelease, Qt.Key_Return, Qt.NoModifier))
+        _pompuj()
+        assert tasks.pages.currentIndex() == tm._PAGE_LIST and tasks.tasks.currentItem() is wiersz
+        assert otwarte == [] and bledy == [], (otwarte, bledy)
     finally:
         win.close()
 

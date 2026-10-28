@@ -615,6 +615,22 @@ _PODPOWIEDZI_GESTU = {"torn_write_frames": "tasks.torn_write_tip",
                       "pending_finish_frames": "tasks.pending_finish_tip"}
 
 
+class _PrzyciskPowrotu(QPushButton):
+    """„← Porządki” podstrony: Enter (`Key_Return`, `Key_Enter`) na przycisku z fokusem = klik (AR-415). Fokus stawia tu
+    klawiatura (Enter na „Porządki” przy podstronie), a zwykły `QPushButton` poza oknem dialogowym reaguje wyłącznie na
+    Spację. NIE `setAutoDefault(True)`: przy fokusie robi z przycisku domyślny i Fusion maluje go inaczej (zmierzone -
+    2-3 tys. pikseli różnych w obu motywach). Auto-powtórzenie zjedzone bez akcji, jak w filtrze Entera listy
+    (`TasksView.eventFilter`); klawisz trzymany po powrocie trafia już w listę i tam też nic nie otwiera."""
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if not event.isAutoRepeat():
+                self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class TasksView(QWidget):
     """Miejsce PORZĄDKI: strona 0 = lista zadań ze stanu, strony 1–3 = podstrony osi (te same widoki
     co dawne zakładki, opakowane w pasek „← Porządki"). Klik w zadanie prowadzi do powierzchni:
@@ -856,7 +872,7 @@ class TasksView(QWidget):
         pv = QVBoxLayout(page)
         pv.setContentsMargins(0, 0, 0, 0)
         bar = QHBoxLayout()
-        back = QPushButton(i18n.t("tasks.back"))
+        back = _PrzyciskPowrotu(i18n.t("tasks.back"))   # Enter z fokusem = klik (AR-415)
         back.clicked.connect(self._on_back)
         bar.addWidget(back)
         lbl = QLabel(title)

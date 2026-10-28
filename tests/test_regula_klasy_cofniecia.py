@@ -182,20 +182,37 @@ _GRANICA = ("AR-421: łańcuch między przebiegami wymaga trwałego dowodu nast�
             "(rodowód stanu lokacji - migracja, wpis rejestru); dziś klasa widzi łańcuch wyłącznie w przebiegu")
 
 
+def _dwa_przebiegi_cofniete(tmp_path, drogi, druga):
+    """R1: RC8 → EQ6 (`drogi[0]`: `m` w miejscu, `a` atomowo), R2: EQ6 → `druga` atomowo, cofnięcie C2, potem C1 -
+    plik wraca do RC8. Warunki wstępne sceny pinuje `test_warunki_wstepne_granicy_ar421` (bez xfail), test celu
+    ich nie powtarza - regresja sceny nie chowa się w XFAIL (fala 31, krok 0)."""
+    con, (p,) = _baza(tmp_path, 1)
+    _makro(con, "R1", "EQ6")
+    c1 = writeback.commit(con, "R1", now=NOW, inplace=drogi[0] == "m").commit_id
+    _makro(con, "R2", druga)
+    c2 = writeback.commit(con, "R2", now=NOW, inplace=False).commit_id
+    cofniete = writeback.undo(con, c2, now=NOW).complete and writeback.undo(con, c1, now=NOW).complete
+    return con, p, c2, cofniete
+
+
+@pytest.mark.parametrize("drogi, druga", [("aa", "RC8"), ("ma", "RC8"), ("aa", "EQ8")])
+def test_warunki_wstepne_granicy_ar421(tmp_path, drogi, druga):
+    """Scena obu testów granicy AR-421 przechodzi na prawdziwym pisarzu: oba cofnięcia domknięte, plik w RC8."""
+    con, p, _c2, cofniete = _dwa_przebiegi_cofniete(tmp_path, drogi, druga)
+    try:
+        assert cofniete and _tel(p) == "RC8"
+    finally:
+        con.close()
+
+
 @pytest.mark.xfail(strict=True, reason=_GRANICA)
 @pytest.mark.parametrize("drogi", ["aa", "ma"])
 def test_aba_miedzy_przebiegami_ponowne_cofniecie_nie_przywraca_cofnietego_zapisu(tmp_path, drogi):
     """A → B → A między przebiegami (R1: RC8 → EQ6, R2: EQ6 → RC8 atomowo), cofnięcie C2, potem C1 - plik wraca do
     RC8. Ponowne cofnięcie C2 (szuflada po restarcie, CLI `header-fix --undo 2`) nie może przywrócić EQ6 - wyniku C1,
     który człowiek cofnął. Dziś przywraca (klasa C2 `zatwierdzony`, odcisk lokacji = `post_hash` C2)."""
-    con, (p,) = _baza(tmp_path, 1)
+    con, p, c2, _cofniete = _dwa_przebiegi_cofniete(tmp_path, drogi, "RC8")
     try:
-        _makro(con, "R1", "EQ6")
-        c1 = writeback.commit(con, "R1", now=NOW, inplace=drogi[0] == "m").commit_id
-        _makro(con, "R2", "RC8")
-        c2 = writeback.commit(con, "R2", now=NOW, inplace=False).commit_id
-        assert writeback.undo(con, c2, now=NOW).complete and writeback.undo(con, c1, now=NOW).complete
-        assert _tel(p) == "RC8"
         writeback.undo_run(con, (c2,), now=NOW)
         assert _tel(p) == "RC8"
     finally:
@@ -207,14 +224,8 @@ def test_dwa_przebiegi_cofniete_po_kolei_nie_zostawiaja_cofnij(tmp_path):
     """Dwa przebiegi atomowo na jednym pliku (R1: RC8 → EQ6, R2: EQ6 → EQ8), cofnięcie C2, potem C1 - plik sprzed
     obu. Zakres „Cofnij” R2 ma być pusty (szuflada po restarcie nie stawia „Cofnij” zapisu już cofniętego). Dziś
     R2 zostaje `zatwierdzony`, a klik odmawia `undo_header_changed`."""
-    con, (p,) = _baza(tmp_path, 1)
+    con, _p, _c2, _cofniete = _dwa_przebiegi_cofniete(tmp_path, "aa", "EQ8")
     try:
-        _makro(con, "R1", "EQ6")
-        c1 = writeback.commit(con, "R1", now=NOW, inplace=False).commit_id
-        _makro(con, "R2", "EQ8")
-        c2 = writeback.commit(con, "R2", now=NOW, inplace=False).commit_id
-        assert writeback.undo(con, c2, now=NOW).complete and writeback.undo(con, c1, now=NOW).complete
-        assert _tel(p) == "RC8"
         assert writeback.przebieg_do_cofniecia(con, "R2") is None
     finally:
         con.close()

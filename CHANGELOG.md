@@ -6,6 +6,76 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.23.0] - 2026-10-28
+
+Wydanie o **Planerze, który nie gubi wpisu, Porządkach z klawiatury i szufladzie, która daje „Cofnij” także po
+„Odrzuć”, dla zmiany nazw po restarcie i po przerwanym zapisie w oknach kart**. Niezapisany status, priorytet
+i notatka celu przeżywają klik chipa i przeliczenie planu. Enter na wierszu Porządków działa jak klik. Okna wyboru
+folderu i pliku nie startują już w katalogu programu. Zbiory malują się szybciej, a pierwsze wejście na stronę mówi,
+że strona się przygotowuje. **Schemat bazy bez zmian (47)** - baza otwarta w 0.20.0, 0.21.0 albo 0.22.0 otwiera się
+tak samo; baza ze starszej wersji przechodzi tę samą migrację co w 0.20.0, więc przed pierwszym uruchomieniem zrób
+kopię pliku bazy.
+
+### Dodane
+
+- **Porządki z klawiatury:** Enter na wierszu listy działa jak klik (przytrzymany klawisz nie powtarza gestu).
+  Wejście w Porządki klawiaturą z paska nawigacji kładzie fokus na liście albo na „← Porządki” otwartej podstrony,
+  a „← Porządki” (klik, Return albo Enter z klawiatury numerycznej) wraca na ten sam wiersz.
+- **„Cofnij” ostatniego zapisu po „Odrzuć”:** odrzucenie zmian w szufladzie stawia z powrotem „Cofnij” ostatniego
+  zapisu - kart albo nazw, zależnie od tego, który był nowszy. Po ponownym otwarciu programu szuflada proponuje
+  także ostatnią zmianę nazw („Ostatnia zmiana nazw z RRRR-MM-DD: N plików”); gdy historii zmian nazw nie da się
+  jednoznacznie przypisać, szuflada mówi to wprost zamiast proponować „Cofnij”.
+- **„Cofnij” po przerwanym zapisie w oknach kart:** gdy błąd przerwie zapis w oknie „Zatwierdź obiekty ze ścieżek”
+  albo „Napraw nagłówek…” po podmianie części plików, okno mówi „N z M zapisane, potem błąd … - „Cofnij” cofa
+  zapisane” i daje „Cofnij” zapisanych plików; po zamknięciu okna ten sam zapis cofa recepta na pasku.
+- **„Przygotowuję stronę „…”…”:** pierwsze wejście w Zbiory, Dostawę albo Planer, które buduje stronę, pokazuje to
+  zdanie na pasku z kursorem oczekiwania (nazwa strony jak w pasku bocznym). Dawniej klik w Zbiory wpadał w ~320 ms
+  budowy bez słowa.
+- **Pusty plan Planera mówi, co wyzerowało listę** - filtr statusu, próg kosztu, wysokość albo rozmiar i magnitudo;
+  „Przywróć domyślne” zdejmuje też filtr statusu.
+
+### Zmienione
+
+- **Okna wyboru folderu i pliku** (dziesięć okien, m.in. żniwa, Dostawa, „Otwórz bazę…” i „Nowa baza…”) startują
+  w ostatnio użytym miejscu, które istnieje, a na końcu w folderze domowym - nigdy w katalogu uruchomienia programu.
+  Sprawdzenie dysku sieciowego ma limit czasu i nie zatrzymuje okna. „Otwórz bazę…” i „Nowa baza…” startują przy
+  bieżącej albo ostatniej bazie.
+- **Liczba progu Planera jednym zapisem:** tytuł paska, dopisek wartości domyślnej, podpowiedź resetu, próg kosztu
+  i pusty stan pokazują próg z precyzją wpisu („≥6.5′ (domyślnie 6′)”, „13 mag”).
+- **Gesty zapisu Planera w biegu Dostawy** mówią w podpowiedzi, dlaczego są wygaszone; po biegu wracają ich
+  własne podpowiedzi. Koniec biegu Dostawy ze żniwami odświeża widoki jeden raz.
+- **Zdanie odmowy uzgodnienia z dyskiem w szufladzie** - gdy plik zmienił się na dysku i rozstrzyga człowiek - jest
+  krótkie: powód, co zrobić i nazwa pliku na końcu, czasy w strefie lokalnej. Pełny powód (czas UTC, pełne ścieżki)
+  zostaje w szczególe pola wyniku. Pozostałe odmowy podają nazwy plików zamiast pełnych ścieżek.
+- **Cofnięcie mówi „N nie niesie wersji z tego zapisu - nie ma czego cofać”** o plikach, w których nie ma wersji
+  z tego zapisu (np. podmiana pliku nie została potwierdzona), zamiast liczyć je jako już cofnięte - w oknach kart,
+  szufladzie, na pasku i w `horreum header-fix --undo`.
+- **Zdanie błędu systemu** nie zaczyna się od nazwy klasy Pythona („OSError: [WinError …]”) - klasa trafia do
+  szczegółu błędu.
+- **Szuflada przy nieznanych faktach zapisu** nie pokazuje „Cofnij”, a zdanie kończy się informacją z numerem
+  commitu - tak jak okna kart.
+- **Jedna reguła cofnięcia zapisu kart** dla szuflady, Porządków, osi obiektu i wiersza poleceń; wiersz Porządków
+  „Niedokończone cofnięcia zapisu kart” liczy się mniejszą liczbą zapytań z tym samym wynikiem.
+- **Menu „Więcej…” na Domu:** pozycja „Wciągnij z WBPP…” mówi w podpowiedzi, dlaczego żniwa są teraz niedostępne.
+- **Szybsze Zbiory** (pomiar natywny na bazie ~17 000 klatek): kadr widoku klasycznego 47,7 → 28,5 ms,
+  Znajdź 25,0 → 16,8 ms, klik w kafel Znajdź ~158 → ~97 ms; szerokość kolumny ścieżki z treści 107,8 → 29,0 ms.
+
+### Naprawione
+
+- **Planer gubił niezapisany wpis:** status, priorytet i notatka celu ginęły przy kliku chipa soczewki,
+  „Porządek” albo przeliczeniu planu w tle, a notatka jednego celu mogła trafić do innego.
+- **Zapis w Zbiorach i na osi obiektu naraz:** koniec jednego zapisu odblokowywał gesty Dostawy, Przyjmij, Domu
+  i żniw, choć drugi jeszcze trwał. Teraz gesty czekają na koniec ostatniego zapisu.
+- **Odłożone recepty osi obiektu** (cofnięcie kart, cofnięcie dopisania teleskopu) niosą tożsamość z chwili
+  złożenia i odmawiają, gdy stan się zmienił, zamiast trafiać w inny.
+- **Odmowa żniw w trakcie sprawdzania folderu źródła** odsyłała do postępu na stronie Dostawy, którego wtedy nie ma -
+  teraz mówi „Dostawa sprawdza folder źródła - przyjmij po zakończeniu sprawdzania”.
+- **Porażka budowy Dostawy po oknie żniw** mówi utratę rodowodu na początku zdania.
+- **Zdanie o klatkach bez dowodu po cofnięciu zapisu kart** liczy klatki przy obiekcie z każdego źródła nazwy
+  w nagłówku, nie tylko z jednego.
+- **Zapis perspektywy po samym przewinięciu** utrwalał szerokość kolumny ścieżki policzoną przez program jako wybór
+  ręki; gest ręki wygrywa też z resetem bez zbioru.
+
 ## [0.22.0] - 2026-10-27
 
 Wydanie o **Planerze, który mówi, od czego odchylono progi, Porządkach bez zamrożenia okna i cofnięciu zapisu kart,
@@ -1821,7 +1891,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.22.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/abo-t/horreum/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/abo-t/horreum/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/abo-t/horreum/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/abo-t/horreum/compare/v0.19.0...v0.20.0

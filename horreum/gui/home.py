@@ -335,8 +335,6 @@ class HomeView(QWidget):
         self.btn_wiecej = QPushButton(i18n.t("home.more"))
         menu = QMenu(self.btn_wiecej)
         self.akcje_wiecej = {}
-        self._zniwa_bieg = False    # dwa powody wygaszenia „Wciągnij z WBPP…” (`_sync_zniwa`)
-        self._zniwa_zapis = False
         # Napis żniw z klucza przycisku Dostawy: nazwa gestu ma w katalogu jednego właściciela.
         # Tak samo „Oś teleskopu" - napis z tytułu podstrony Porządków, do której prowadzi.
         for klucz, tekst in ((WIECEJ_ZNIWA, i18n.t("pipeline.btn.harvest")),
@@ -351,8 +349,8 @@ class HomeView(QWidget):
             akcja = menu.addAction(tekst)
             akcja.triggered.connect(lambda _c=False, k=klucz: self.wiecej.emit(k))
             self.akcje_wiecej[klucz] = akcja
-        # Podpowiedź wygaszonej pozycji mówi DLACZEGO (`set_busy`); pozycje bez jawnej podpowiedzi
-        # milczą (QMenu pokazuje wyłącznie ustawioną podpowiedź akcji).
+        # Podpowiedź wygaszonej pozycji mówi DLACZEGO (`ustaw_zniwa` - gospodarz przy otwarciu menu); pozycje bez
+        # jawnej podpowiedzi milczą (QMenu pokazuje wyłącznie ustawioną podpowiedź akcji).
         menu.setToolTipsVisible(True)
         self.btn_wiecej.setMenu(menu)
         naglowek.addWidget(self.btn_wiecej)
@@ -694,31 +692,22 @@ class HomeView(QWidget):
         """Przebieg Dostawy: „Wydaj do WBPP" gaśnie jak „Wydaj obiekt…" paska Zbiorów - etap
         przepisuje `calibration` i rodowód, więc plan policzony w środku wydałby mastery sprzed i po
         przeliczeniu naraz. Reszta kafli to nawigacja i zostaje czynna; Przyjmij prowadzi wtedy na
-        Dostawę z widocznym postępem, a nie do drugiego biegu.
-
-        „Wciągnij z WBPP…” z menu „Więcej…” gaśnie tak samo: „Zamknij i przyjmij” okna żniw
-        uruchamia łańcuch Dostawy, który w biegu odmówi, a wtedy rodowód dokładny wciągniętych
-        stosów zostaje tylko w folderze wydania. Podpowiedź to zdanie odmowy złotej akcji;
-        bramkę przed oknem trzyma i tak gospodarz (`MainWindow._on_open_harvest` - reguła
-        `dostawa_bramka.powod_odmowy_biegu`, bez budowy strony Dostawy, AR-335)."""
+        Dostawę z widocznym postępem, a nie do drugiego biegu. „Wciągnij z WBPP…” z menu „Więcej…”
+        nie zależy od tego wejścia - mówi o nim gospodarz przy otwarciu menu (`ustaw_zniwa`)."""
         self.tile_wydaj.setEnabled(not busy)
         self.tile_wydaj.setToolTip(i18n.t("home.tile.release_busy") if busy
                                    else i18n.t("home.tile.release_tip"))
-        self._zniwa_bieg = bool(busy)
-        self._sync_zniwa()
 
-    def set_writeback_busy(self, busy):
-        """Zapis nagłówków do plików: „Wciągnij z WBPP…” gaśnie z tego samego powodu co w biegu
-        Dostawy - łańcuch po „Zamknij i przyjmij” odmówiłby (`dostawa_bramka.powod_odmowy_biegu`).
-        Osobny stan, nie `set_busy`: koniec zapisu nie może zapalić pozycji w trwającym biegu."""
-        self._zniwa_zapis = bool(busy)
-        self._sync_zniwa()
-
-    def _sync_zniwa(self):
+    def ustaw_zniwa(self, powod):
+        """Pozycja „Wciągnij z WBPP…” menu „Więcej…”: `powod` - zdanie odmowy z JEDNEJ reguły gospodarza
+        (`MainWindow._powod_odmowy_zniw`, AR-354), podanej przy KAŻDYM otwarciu menu (`aboutToShow`), albo `None`,
+        gdy wolno. Dom reguły nie liczy: „Zamknij i przyjmij” okna żniw uruchamia łańcuch Dostawy, który w biegu
+        (także w samej sondzie źródła po „Wskaż katalog…”) albo przy zapisie nagłówków do plików odmówi, a wtedy
+        rodowód dokładny wciągniętych stosów zostaje tylko w folderze wydania - i to gospodarz wie, co trwa.
+        Wygaszona pozycja mówi powód podpowiedzią."""
         zniwa = self.akcje_wiecej[WIECEJ_ZNIWA]
-        zniwa.setEnabled(not (self._zniwa_bieg or self._zniwa_zapis))
-        zniwa.setToolTip(i18n.t("pipeline.refuse.delivery_running") if self._zniwa_bieg
-                         else i18n.t("pipeline.refuse.writeback") if self._zniwa_zapis else "")
+        zniwa.setEnabled(powod is None)
+        zniwa.setToolTip(powod or "")
 
     def ustaw_popraw(self, n, powod=""):
         """Licznik kafla Popraw - ta sama liczba, co plakietka Porządków (gospodarz podaje ją z tego

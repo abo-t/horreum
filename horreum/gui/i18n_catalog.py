@@ -716,6 +716,13 @@ CATALOG = {
     "wb.undo_recipe_ready": {
         "pl": "Cofnięcie zapisu (commit {id}) znów możliwe - recepta stoi w Porządkach.",
         "en": "Undoing the write (commit {id}) is possible again - the recipe is in Housekeeping."},
+    # Recepta z tożsamością zamiaru inną niż commit o tym numerze w bazie pod oknem albo bez takiego commitu
+    # (AR-355, `ObjectAxisView._cofnij_zapis_kart`) - odmowa bez zapisu, recepta schodzi z paska.
+    "wb.undo_recipe_stale": {
+        "pl": "Nie cofnięto zapisu (commit {id}): commit {id} w tej bazie to inny zapis niż ten z recepty "
+              "albo już go nie ma - nic nie zmieniono.",
+        "en": "The write (commit {id}) was not undone: commit {id} in this database is a different write than "
+              "the one in the recipe, or it no longer exists - nothing was changed."},
     "wb.undo_recipe_started": {"pl": "Cofam zapis (commit {id})…", "en": "Undoing the write (commit {id})…"},
     "wb.undo_recipe_progress": {"pl": "Cofam zapis (commit {id}): {done}/{total}",
                                 "en": "Undoing the write (commit {id}): {done}/{total}"},
@@ -9180,6 +9187,12 @@ CATALOG = {
         "pl": "klatki wróciłyby do zestawu teleskopu, którego dopisanie cofnięto wcześniej",
         "en": "the frames would return to a setup of a telescope whose addition was undone "
               "earlier"},
+    # Powód POWIERZCHNI, nie token klingi (AR-355, `ObjectAxisView._on_cofnij_dopisanie`): recepta z paska niesie ślad
+    # gestu, a otwarty ślad tego teleskopu w bazie pod oknem jest inny - „Dopisz nowy…” tej samej nazwy wskrzesił
+    # teleskop z nagrobka z nowym śladem (drugie okno) albo plik to inna biblioteka. Odmowa bez zapisu.
+    "object.config_undo_add.refused.re_added": {
+        "pl": "teleskop dopisano od nowa po tej recepcie - nowe dopisanie cofniesz w Osi teleskopu",
+        "en": "the telescope was added again after this recipe - undo the new addition on the Telescope axis"},
     # Zero klatek wróciło (wszystkie zmienione po geście) - zdanie nie mówi „cofnięto”, którego
     # nie było; człony `kept` i `stays`/`retired` doklejają się jak przy cofnięciu.
     "object.config_undo_add.nothing": {

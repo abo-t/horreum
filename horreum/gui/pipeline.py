@@ -2345,7 +2345,11 @@ class PipelineView(QWidget):
         """MUTEX W DRUGĄ STRONĘ: zapis nagłówków do plików (grid albo okno naprawy) gasi etapy
         Dostawy. Przebieg Dostawy gasił już zapis w gridzie (`running_changed`), ale nie odwrotnie -
         „Przyjmij nowe” w trakcie commitu w miejscu czytało plik zapisywany obok i mogło wciągnąć
-        jego fakty (astra, 2026-09-27). Anulowanie biegnącego etapu zostaje dostępne."""
+        jego fakty (astra, 2026-09-27). Anulowanie biegnącego etapu zostaje dostępne.
+
+        `busy` to ZATRZASK GOSPODARZA (AR-353, `MainWindow._rozeslij_zatrzask_zapisu`): zapis trwa, dopóki pisze
+        którakolwiek powierzchnia - nie stan powierzchni, która właśnie się zgłosiła. Re-sync faktów kopii pada więc
+        po końcu OSTATNIEGO zapisu."""
         self._writeback_busy = bool(busy)
         if not busy and self._thread is None:
             self._sync_copy_facts()        # re-sync pisarza dociąga fakty kopii - licznik spada

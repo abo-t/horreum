@@ -2395,7 +2395,8 @@ class _Odlozona:
     (`("karty", commit)` / `("dopisanie", teleskop)`), `zapis_plikow` (czeka też na koniec zapisu do plików),
     `argumenty` (reszta zamiaru), `czeka` - bieg blokady, którego koniec wpis podaje: `(rodzaj, numer)`, rodzaj
     `"etap"` (bieg Dostawy) albo `"zapis"` (zapis do plików Zbiorów), numer z `_NUMERY_BLOKAD`, i `podany` - koniec
-    blokady albo otwarcie bazy już go podały; potem podaje go wyłącznie wejście w Porządki i ogon gestu z recepty
+    blokady, otwarcie bazy albo zdjęcie podanej głowy przed nim (aktywacja okna, Oś teleskopu - AR-355,
+    `ObjectAxisView.podaj_odlozone`) już go podały; potem podaje go wyłącznie wejście w Porządki i ogon gestu z recepty
     (`ObjectAxisView._podaj_odlozone`). `recepta` - obiekt recepty z ostatniego podania, a `przed` - zdanie, do którego
     dokleiło ono gotowość (wynik gestu, raport Porządków, `None`): wpis, któremu baza nic nie zostawiła, rozpoznaje po
     nich swoją receptę na pasku gospodarza (`ObjectAxisView.oczysc_martwe`, po tożsamości obiektu).
@@ -3576,12 +3577,14 @@ class ObjectAxisView(QWidget):
 
     def _recepta_cofniecia_kart(self, commit_id, uwaga, *, dokoncz=False):
         """Recepta „Cofnij zapis (commit N)” (albo „Dokończ cofnięcie (commit N)” - `dokoncz`) - człon
-        z wykonawcą (wzór `_recepta_cofniecia_dopisania`)."""
+        z wykonawcą (wzór `_recepta_cofniecia_dopisania`). Recepta NIESIE TOŻSAMOŚĆ ZAMIARU (AR-355): `commits.run_id`
+        z chwili złożenia (`queries.przebieg_commitu`, jak wpis kolejki - AR-336), a wykonawca sprawdza ją przed
+        startem (`_cofnij_zapis_kart`)."""
         from functools import partial
         from horreum.gui.grid_model import CzlonRecepty, Recepta
         return Recepta([CzlonRecepty(self._etykieta_cofniecia_kart(commit_id, dokoncz),
                                      partial(self._cofnij_zapis_kart, commit_id, uwaga,
-                                             dokoncz=dokoncz))])
+                                             queries.przebieg_commitu(self.con, commit_id), dokoncz=dokoncz))])
 
     def podaj_dokonczenie_cofniecia(self, commit_id, n):
         """Wejście z wiersza Porządków „Niedokończone cofnięcia zapisu kart” (AR-318): zdanie z liczbą
@@ -3616,9 +3619,16 @@ class ObjectAxisView(QWidget):
         pid = info[0] if info else None
         return pid if pid and pid != os.getpid() else None
 
-    def _cofnij_zapis_kart(self, commit_id, uwaga, *, dokoncz=False):
+    def _cofnij_zapis_kart(self, commit_id, uwaga, tozsamosc, *, dokoncz=False):
         """Klik „Cofnij zapis (commit N)” po zamknięciu okna kart (AR-296) - ten sam rdzeń, co „Cofnij”
         okna i `header-fix --undo` (`writeback.undo`), na wątku uchwytu zapisu tego widoku.
+
+        NAJPIERW TOŻSAMOŚĆ ZAMIARU (AR-355): `tozsamosc` - `commits.run_id` z chwili złożenia recepty
+        (`_recepta_cofniecia_kart`). Commit o tym numerze z INNYM przebiegiem zapisu w bazie pod połączeniem (albo
+        brak commitu o tym numerze - `queries.przebieg_commitu` daje wtedy None) to nie zamiar recepty - zdanie
+        odmowy i nic więcej: bez odłożenia, bez biegu, recepta schodzi z paska (kanał bez recepty). Wyłącznie
+        tożsamość, nie żywotność zamiaru (`_zywy`): commit cofnięty inną drogą przy recepcie na
+        pasku to droga osiągalna ręką, a zdanie mówi wtedy rdzeń (`ogon_cofniecia`).
 
         Odmowa przy biegu Dostawy i przy zapisie szuflady Zbiorów mówi zdaniem z numerem commitu (polecenie
         CLI w szczególe i w polu polecenia), a oś PAMIĘTA receptę i podaje ją ponownie, gdy blokada się
@@ -3643,11 +3653,14 @@ class ObjectAxisView(QWidget):
         (`_obcy_wlasciciel_bazy`) - inny proces Horreum (okno albo wiersz poleceń) trzyma szufladę → zdanie
         z jego PID-em, recepta
         zostaje; etykieta recepty i zdania wyniku to „Dokończ cofnięcie (commit N)”."""
+        if queries.przebieg_commitu(self.con, commit_id) != tozsamosc:
+            self.wynik_cofniecia.emit(i18n.t("wb.undo_recipe_stale", id=commit_id), None)
+            return
         if self._busy or self._foreign_wb:
-            # Tożsamość zamiaru (AR-336) z TEJ bazy, w chwili odłożenia - po podmianie pliku pod tą samą ścieżką
-            # commit o tym numerze jest cudzy (`_zywy`).
+            # Tożsamość zamiaru (AR-336) z TEJ bazy - sprawdzona wyżej, więc wpis niesie tę z recepty; po podmianie
+            # pliku pod tą samą ścieżką commit o tym numerze jest cudzy (`_zywy`).
             self._odloz(("karty", commit_id), True, (uwaga, dokoncz), self._blokady["etap" if self._busy else "zapis"],
-                        queries.przebieg_commitu(self.con, commit_id))
+                        tozsamosc)
             self.wynik_cofniecia.emit(self._zdanie_polecenia_kart(i18n.t(
                 "wb.undo_recipe_busy" if self._busy else "wb.undo_recipe_foreign", id=commit_id),
                 commit_id), None)
@@ -3710,12 +3723,20 @@ class ObjectAxisView(QWidget):
         głowa - a recepta, którą taki wpis już podał, idzie do gospodarza (`recepta_martwa`): zdejmuje ją z paska
         i ze swojego stanu, zanim cokolwiek ją przywróci albo poda następny wpis. Woła to każda chwila podania
         (`_podaj_odlozone`, przed strażą stojącej recepty), wejście w Porządki przed przywróceniem recepty
-        i zamknięcie gestu drogą trwałą tego okna (`MainWindow._na_cofniete_dopisanie`)."""
+        i zamknięcie gestu drogą trwałą tego okna (`MainWindow._na_cofniete_dopisanie`).
+
+        `True`, gdy zszedł wpis już PODANY (AR-355) - zamknięcie gestu w Osi teleskopu podaje wtedy następny niepodany
+        wpis (`podaj_odlozone(tylko_niepodane=True)`); zdjęcie wyłącznie wpisów niepodanych - `False`: nic z kolejki nie
+        stało na pasku, więc nic nie ustępuje. Aktywacja okna pyta węziej - czy zdjęta gotowość wciąż STAŁA na pasku
+        (gospodarz, `MainWindow._zdjeta_gotowosc`): podany kiedyś wpis bywa już przykryty innym raportem."""
+        zdjety_podany = False
         for w in list(self._odlozone):
             if not self._zywy(w):
                 self.zdejmij_odlozona(w.klucz)
+                zdjety_podany = zdjety_podany or w.podany
                 if w.recepta is not None:
                     self.recepta_martwa.emit(w.recepta, w.przed)
+        return zdjety_podany
 
     def _odloz(self, klucz, zapis_plikow, argumenty, czeka, tozsamosc):
         """Recepta osi odmówiona w biegu blokady `czeka` (`(rodzaj, numer)` z `_blokady`) wchodzi na KONIEC kolejki
@@ -3752,7 +3773,11 @@ class ObjectAxisView(QWidget):
             wpis kolejki, także już podany, wraca z gotowością DOKLEJONĄ do tego raportu - recepta jest dostępna
             do startu swojego gestu, a raport, który na człowieka czekał, nie znika pod nią;
           * koniec otwarcia bazy (`tylko_niepodane`): wyłącznie wpis, którego żadna chwila jeszcze nie podała
-            (powrót do bazy z odłożeniem sprzed przełączenia) - podany nie zastępuje drugi raz „Baza: … wczytana”."""
+            (powrót do bazy z odłożeniem sprzed przełączenia) - podany nie zastępuje drugi raz „Baza: … wczytana”;
+          * zdjęcie podanej głowy (`doklej` + `tylko_niepodane`, AR-355): aktywacja okna, która zdjęła z paska STOJĄCĄ
+            gotowość martwego wpisu (`doklej` = zdanie, które wtedy wróciło), i zamknięcie gestu w Osi teleskopu
+            (`doklej` = wynik tego gestu) - następny wpis, którego nic jeszcze nie podało, dochodzi do tego zdania;
+            podany nie wraca tu drugi raz (jego chwilą jest wejście w Porządki)."""
         return self._podaj_odlozone(doklej=doklej, wybor=(lambda w: not w.podany) if tylko_niepodane else None)
 
     def _koniec_blokady(self, blokada):
@@ -3956,17 +3981,26 @@ class ObjectAxisView(QWidget):
                                                                        telescope_label))
 
     def _recepta_cofniecia_dopisania(self, telescope_id, telescope_label):
-        """Recepta „Cofnij dopisanie „X”” - człon z wykonawcą (`grid_model.CzlonRecepty`)."""
+        """Recepta „Cofnij dopisanie „X”” - człon z wykonawcą (`grid_model.CzlonRecepty`). Recepta NIESIE TOŻSAMOŚĆ
+        ZAMIARU (AR-355): ślad gestu z chwili złożenia (`queries.slad_dopisania`, jak wpis kolejki - AR-336)."""
         from horreum.gui.grid_model import CzlonRecepty, Recepta
+        tozsamosc = queries.slad_dopisania(self.con, telescope_id)
         return Recepta([CzlonRecepty(
             i18n.t("object.config_undo_add", telescope=telescope_label),
-            lambda: self._on_cofnij_dopisanie(telescope_id, telescope_label))])
+            lambda: self._on_cofnij_dopisanie(telescope_id, telescope_label, tozsamosc))])
 
-    def _on_cofnij_dopisanie(self, telescope_id, telescope_label):
+    def _on_cofnij_dopisanie(self, telescope_id, telescope_label, tozsamosc):
         """Klik „Cofnij dopisanie” (AR-133): `repo.undo_new_telescope` - klatki gestu wracają do
         zestawu sprzed gestu (CAS: klatka zmieniona po geście zostaje i jest policzona), teleskop
         bez klatek i bez ręki po geście schodzi nagrobkiem z osi. Odmowa bez zapisu (teleskop żyje
         już poza gestem: profil, scalenie, ręka po geście) mówi powodem z tokenu klingi.
+
+        NAJPIERW TOŻSAMOŚĆ ZAMIARU (AR-355): `tozsamosc` - ślad gestu z chwili złożenia recepty. OTWARTY ślad tego
+        teleskopu z inną tożsamością to gest dopisany od nowa (drugie okno, nagrobek: „Dopisz nowy…” tej samej nazwy
+        wskrzesza TEN SAM teleskop z nowym śladem - `repo.user_assign_config_new_telescope`) albo inna biblioteka -
+        zdanie odmowy z rodziny klingi (`refused.re_added`: nowe dopisanie cofa się na Osi teleskopu), bez odłożenia
+        i bez zapisu. Brak otwartego śladu to gest zamknięty inną drogą (droga osiągalna ręką): klinga odmawia sama
+        i mówi to swoim zdaniem.
 
         W TRAKCIE ETAPU DOSTAWY GEST JEST ODKŁADANY (AR-310): wpis `("dopisanie", teleskop)` wchodzi do
         tej samej kolejki odłożeń co cofnięcie zapisu kart (SPOT, `_odloz`), zdanie odmowy mówi, kiedy
@@ -3974,9 +4008,14 @@ class ObjectAxisView(QWidget):
         `_koniec_blokady`) - raporty odświeżenia po przebiegu już jej nie gaszą. Dopisanie czeka
         wyłącznie na etap: to zapis do BAZY, poza mutexem zapisu plików (jak „Przypisz zestaw…”).
         Wynik gestu przy niepustej kolejce idzie razem z gotowością następnego wpisu."""
+        slad = queries.slad_dopisania(self.con, telescope_id)
+        if slad is not None and slad != tozsamosc:
+            self.wynik_cofniecia.emit(i18n.t("object.config_undo_add.refused", telescope=telescope_label,
+                                             reason=i18n.t("object.config_undo_add.refused.re_added")), None)
+            return
         if self._busy:
             self._odloz(("dopisanie", telescope_id), False, (telescope_label,), self._blokady["etap"],
-                        queries.slad_dopisania(self.con, telescope_id))      # tożsamość zamiaru (AR-336)
+                        tozsamosc)      # tożsamość zamiaru (AR-336), sprawdzona wyżej
             self.wynik_cofniecia.emit(i18n.t("object.config_undo_add.deferred",
                                              telescope=telescope_label), None)
             return
@@ -4793,6 +4832,11 @@ class MainWindow(QMainWindow):
     # `run_finished` (dziś rodowód stosów ze żniw), albo None. Wtedy odświeżenie widoków robi ostatni pisarz, raz -
     # `running_changed(False)` go nie powtarza (`_on_pipeline_running`). Stan instancji; tu wartość startowa.
     _ogon_biegu = None
+    # ZDJĘTA STOJĄCA GOTOWOŚĆ (AR-355): `(zdanie przywrócone albo None,)`, gdy `_zdejmij_martwa_recepte` zdjął z paska
+    # gotowość martwego wpisu kolejki osi, która wciąż stała - aktywacja okna (`changeEvent`) podaje wtedy następny
+    # niepodany wpis, doklejony do tego zdania; None - nic takiego nie zaszło. Jedna chwila: aktywacja zeruje ją przed
+    # zdjęciem i po odczycie. Stan instancji; tu wartość startowa.
+    _zdjeta_gotowosc = None
 
     grid_view = _widok_strony("grid_view")
     znajdz_view = _widok_strony("znajdz_view")
@@ -5404,8 +5448,10 @@ class MainWindow(QMainWindow):
         home.znajdz.connect(lambda: self.show_find())
         home.wydaj.connect(self._on_wydaj_domu)             # KOMENDA (AR-325): buduje Zbiory przed oknem wydania
         home.popraw.connect(lambda: self._show_view(NAV_PORZADKI))
-        # Cofnięcie zapisu kart z paska Porządków (AR-296) pisze do plików bez modalnego okna - „Wciągnij z WBPP…”
-        # Domu gaśnie jak przy zapisie Zbiorów: JEDNA droga, `_na_zapis_osi` (podpięty wyżej), stawia mutex Domu.
+        # „Wciągnij z WBPP…” w „Więcej…” Domu nie liczy reguły sam (AR-354): przy KAŻDYM otwarciu menu pyta gospodarza
+        # (`_powod_odmowy_zniw` - ta sama reguła, co klik). Bieg Dostawy, sonda źródła i zapis do plików (także
+        # cofnięcie zapisu kart z paska Porządków, AR-296) gaszą pozycję z jednego źródła.
+        home.btn_wiecej.menu().aboutToShow.connect(lambda: home.ustaw_zniwa(self._powod_odmowy_zniw()))
         tasks.object_view.wynik_cofniecia.connect(self._wynik_cofniecia_osi)   # bez odkładania (AR-296)
         tasks.object_view.recepta_martwa.connect(self._zdejmij_martwa_recepte)  # recepta martwego wpisu (AR-321)
         # „Cofnij dopisanie” z Osi teleskopu - droga trwała zamyka gest; wpis kolejki odłożeń schodzi (AR-321).
@@ -5596,7 +5642,7 @@ class MainWindow(QMainWindow):
         # Gest „Przypisz obiekt…” z raportu dostawy - POWIADOMIENIE przez gospodarza (`_po_osi_z_raportu`):
         # Zbiory mogą jeszcze nie istnieć.
         przyjmij.object_axis_changed.connect(self._po_osi_z_raportu)
-        if any(self._zapis_w_biegu.values()):
+        if self._zatrzask_zapisu():
             pipeline.set_writeback_busy(True)
             przyjmij.set_writeback_busy(True)
         if self._dostawa_w_biegu:
@@ -5697,14 +5743,23 @@ class MainWindow(QMainWindow):
         """„Cofnij dopisanie” Osi teleskopu zamknął gest „Dopisz nowy…” teleskopu `telescope_id` (AR-133) - wpis tego
         zamiaru schodzi z kolejki odłożonych recept osi obiektu tej bazy razem z receptą, którą już podał (AR-321,
         `ObjectAxisView.oczysc_martwe` - baza mówi, że gest zamknięty): podany drugi raz ogłaszałby „znów możliwe”
-        gestu, którego już nie ma, i zasłaniał wpis za nim."""
-        self.object_view.oczysc_martwe()
+        gestu, którego już nie ma, i zasłaniał wpis za nim.
+
+        Zdjęta głowa PODANA ustępuje następnemu niepodanemu wpisowi (AR-355): jego gotowość dochodzi do zdania
+        wyniku gestu Osi teleskopu, które stoi na pasku (`doklej`) - dawniej wpis za zdjętą głową czekał na wejście
+        w Porządki."""
+        if self.object_view.oczysc_martwe():
+            self.object_view.podaj_odlozone(doklej=self._pelny_komunikat or None, tylko_niepodane=True)
 
     def _zdejmij_martwa_recepte(self, recepta, przed):
         """Wpis kolejki odłożeń, któremu baza nic nie zostawiła, podał wcześniej `recepta` (AR-321,
         `ObjectAxisView.recepta_martwa`). Rozpoznanie po TOŻSAMOŚCI obiektu recepty, nie po tekście: stan recepty
         Porządków schodzi (wejście w Porządki jej nie przywróci), przycisk paska też, a raport z jej zdaniem
-        gotowości, gdy wciąż stoi na pasku, ustępuje zdaniu, do którego go doklejono (`przed`), albo gaśnie."""
+        gotowości, gdy wciąż stoi na pasku, ustępuje zdaniu, do którego go doklejono (`przed`), albo gaśnie.
+
+        Zdjęcie STOJĄCEJ gotowości gospodarz pamięta razem z tym, co wróciło na pasek (`_zdjeta_gotowosc`, AR-355):
+        tylko wtedy aktywacja okna ma czym podać następny wpis - gotowość przykryta innym raportem (raport Zbiorów ze
+        szczegółem, zdanie postępu cofnięcia) już nie stoi, więc nic nie ustępuje i raport zostaje."""
         stan = self._recepta_porzadkow_stan
         if stan is None or stan[0] is not recepta:
             return
@@ -5712,6 +5767,7 @@ class MainWindow(QMainWindow):
         if self._czlony_recepty is recepta.czlony:
             self._ustaw_recepte("")
         if stan[1] is self._pelny_komunikat:
+            self._zdjeta_gotowosc = (przed or None,)
             if przed:
                 self._flash(przed, miejsce=None)
             else:
@@ -5719,14 +5775,32 @@ class MainWindow(QMainWindow):
 
     def _na_zapis_osi(self, busy):
         """Zapis do plików z paska osi obiektu (cofnięcie commitu kart, AR-296): zatrzask stanu PRZED
-        rozesłaniem (AR-325), potem mutex zbudowanych stron - szuflada Zbiorów, Dostawa i jej raport, Dom."""
+        rozesłaniem (AR-325), potem mutex zbudowanych stron - szuflada Zbiorów dostaje stan TEGO źródła (druga strona
+        mutexu, `FramesView.set_writeback_busy`: flaga o cudzej operacji), Dostawa i jej raport - zatrzask gospodarza
+        (`_rozeslij_zatrzask_zapisu`). Dom pyta gospodarza przy otwarciu menu (`_powod_odmowy_zniw`)."""
         self._zapis_w_biegu["os"] = bool(busy)
-        for nazwa in ("grid_view", "pipeline_view", "przyjmij_view"):
+        grid = self._gotowy("grid_view")
+        if grid is not None:
+            grid.set_writeback_busy(busy)
+        self._rozeslij_zatrzask_zapisu()
+
+    def _rozeslij_zatrzask_zapisu(self):
+        """JEDNA PRAWDA ZAPISU DLA ODBIORCÓW SPOZA MUTEXU (AR-353): Dostawa i jej raport dostają zatrzask gospodarza
+        - zapis do plików trwa, dopóki pisze KTÓRAKOLWIEK powierzchnia (`any` źródeł `_zapis_w_biegu`) - a nie wartość
+        nadawcy, który właśnie się zgłosił: koniec zapisu z paska osi przy trwającym zapisie Zbiorów zapalałby etapy
+        Dostawy obok pisarza. Ten sam zatrzask przykłada budowniczy (`_zbuduj_dostawe`); tu tylko strony zbudowane."""
+        zapis = self._zatrzask_zapisu()
+        for nazwa in ("pipeline_view", "przyjmij_view"):
             widok = self._gotowy(nazwa)
             if widok is not None:
-                widok.set_writeback_busy(busy)
-        if self.home_view is not None:
-            self.home_view.set_writeback_busy(busy)
+                widok.set_writeback_busy(zapis)
+
+    def _zatrzask_zapisu(self):
+        """Zatrzask zapisu do plików gospodarza (AR-353) - `True`, dopóki pisze KTÓRAKOLWIEK powierzchnia
+        (`_zapis_w_biegu`: pasek osi obiektu, szuflada Zbiorów). Jedno źródło dla rozsyłki do zbudowanych stron
+        (`_rozeslij_zatrzask_zapisu`), budowniczego Dostawy (`_zbuduj_dostawe`) i reguły odmowy żniw przy
+        niezbudowanej Dostawie (`_powod_odmowy_zniw`)."""
+        return any(self._zapis_w_biegu.values())
 
     def _odswiez_widoki_po_przebiegu(self):
         """Przebieg Dostawy się skończył (worker, własne połączenie) - read-modele w głównym wątku
@@ -5896,6 +5970,24 @@ class MainWindow(QMainWindow):
         else:
             self.object_view.refresh()
 
+    def _powod_odmowy_zniw(self):
+        """JEDNA reguła odmowy „Wciągnij z WBPP…” gospodarza (AR-354) - powód (zdanie odmowy złotej akcji) albo `None`,
+        gdy wolno. Pytają o nią klik (`_on_open_harvest`, bramka przed oknem) i pozycja menu „Więcej…” Domu przy KAŻDYM
+        otwarciu menu (`aboutToShow`, `_mount_views`): Dom przykłada wynik i reguły nie liczy. Dawniej Dom trzymał
+        własną kopię z zatrzasków biegu i zapisu, a sonda źródła („Wskaż katalog…”, etap bez bazy) nie zgłasza biegu
+        gospodarzowi - pozycja stała czynna, a klik odmawiał.
+
+        BEZ BUDOWY DOSTAWY DLA SAMEGO POWODU (AR-335): odczyt property `pipeline_view` budował całą stronę.
+        Zbudowana Dostawa mówi własnym stanem (także etap bez bazy - `_thread` jest, a zatrzask biegu gospodarza
+        nie); niezbudowana nie ma biegu z definicji, więc ta sama reguła (`dostawa_bramka.powod_odmowy_biegu`)
+        dostaje zatrzaski gospodarza - te, które budowniczy przyłożyłby nowej Dostawie (`_zbuduj_dostawe`)."""
+        pipeline = self._gotowy("pipeline_view")
+        if pipeline is not None:
+            return pipeline.powod_odmowy_biegu()
+        from horreum.gui import dostawa_bramka     # lazy jak reszta importów drogi żniw
+        return dostawa_bramka.powod_odmowy_biegu(baza=self.db_path is not None, bieg=self._dostawa_w_biegu,
+                                                 zapis=self._zatrzask_zapisu())
+
     def _on_open_harvest(self):
         """„Wciągnij z WBPP…” → okno żniw nad połączeniem okna. Dwa wejścia, jedna droga: przycisk
         sekcji Stosy Dostawy (`PipelineView.open_harvest`) i pozycja „Więcej…” Domu (AR-109,
@@ -5914,23 +6006,18 @@ class MainWindow(QMainWindow):
         wydań. Gdy wciągnęło stosy, a łańcuch ruszył, rodowód zapisujemy dopiero PO nim
         (`_zapisz_rodowod_po_przebiegu`): wiersz integracji stawia sam łańcuch.
 
-        BRAMKA PRZED OKNEM (`PipelineView.powod_odmowy_biegu`, ta sama co `run_all_on`): w biegu
-        Dostawy albo przy zapisie nagłówków okno otwarte z Domu kończyło się odmową łańcucha PO
+        BRAMKA PRZED OKNEM (`_powod_odmowy_zniw` - ta sama reguła, którą pozycja „Więcej…” Domu czyta przy otwarciu
+        menu): w biegu Dostawy albo przy zapisie nagłówków okno otwarte z Domu kończyło się odmową łańcucha PO
         „Zamknij i przyjmij”, a rodowód dokładny wciągniętych stosów zostawał tylko w folderze
-        wydania. Odmowa pada na pasek, okno się nie otwiera.
+        wydania. Odmowa pada na pasek, okno się nie otwiera. Strona Dostawy powstaje dopiero przy „Zamknij
+        i przyjmij”.
 
-        BEZ BUDOWY DOSTAWY DLA SAMEGO POWODU (AR-335): odczyt property `pipeline_view` budował całą stronę.
-        Zbudowana Dostawa mówi własnym stanem (także etap bez bazy - `_thread` jest, a zatrzask biegu gospodarza
-        nie); niezbudowana nie ma biegu z definicji, więc ta sama reguła (`dostawa_bramka.powod_odmowy_biegu`)
-        dostaje zatrzaski gospodarza - te, które budowniczy przyłożyłby nowej Dostawie (`_zbuduj_dostawe`). Strona
-        powstaje dopiero przy „Zamknij i przyjmij”."""
-        pipeline = self._gotowy("pipeline_view")
-        if pipeline is not None:
-            powod = pipeline.powod_odmowy_biegu()
-        else:
-            from horreum.gui import dostawa_bramka     # lazy jak reszta importów tej drogi
-            powod = dostawa_bramka.powod_odmowy_biegu(baza=self.db_path is not None, bieg=self._dostawa_w_biegu,
-                                                      zapis=any(self._zapis_w_biegu.values()))
+        BUDOWA DOSTAWY PO OKNIE TO KOMENDA (`_wejdz`, AR-354): mastery już leżą w bibliotece, więc porażka budowy
+        mówi na pasku utratę rodowodu dokładnego (instrukcja ratunku, NA POCZĄTKU - jak porażka biegu
+        w `_zapisz_rodowod_po_przebiegu`) i wynik okna, a wyjątek idzie do straży - jedna budowa, jedno okno błędu.
+        Dawniej przełączenie wiersza połykało porażkę w slocie, a odczyt widoku budował stronę drugi raz i wychodził
+        przed zdaniem wyniku."""
+        powod = self._powod_odmowy_zniw()
         if powod is not None:
             self._flash(powod)
             return
@@ -5945,7 +6032,14 @@ class MainWindow(QMainWindow):
         dlg.exec()
         zdania = [dlg.summary] if dlg.summary else []
         if dlg.harvested_root:
-            self._show_view(NAV_DOSTAWA)                 # z Dostawy - bez zmiany (ten sam wiersz)
+            try:
+                self._wejdz(NAV_DOSTAWA)                 # z Dostawy - bez budowy i bez zmiany (ten sam wiersz)
+            except BaseException:
+                if dlg.harvested_stacks:                 # zbiór dokładny leży dalej tylko w folderze wydania
+                    zdania.insert(0, i18n.t("status.harvest_lineage_lost", n=len(dlg.harvested_stacks)))
+                if zdania:
+                    self._flash(zlacz_zdania(" - ", zdania))
+                raise
             reason = self.pipeline_view.run_all_on(dlg.harvested_root)
             if reason is not None:
                 zdania.append(reason)
@@ -6040,7 +6134,13 @@ class MainWindow(QMainWindow):
     def _domknij_ogon(self, since, pisarz, *, odswiez=True):
         """Pisarz ogona skończył - KAŻDĄ drogą (AR-373). Ostatni zdejmuje ogon i robi JEDNO odświeżenie końca
         przebiegu (`_odswiez_i_zwolnij_po_biegu`); `odswiez=False` - widoki zmontowane od nowa (inna baza), nie ma
-        czego odświeżać ani zwalniać."""
+        czego odświeżać ani zwalniać.
+
+        PRZED odświeżeniem raport Przyjmij bierze odcisk stanu od nowa (`PrzyjmijView.odcisk_po_ogonie`, AR-354): jego
+        odcisk z `run_finished` powstał przed zapisem pisarzy ogona, więc następne przeliczenie raportu podpisywało log
+        „stan sprzed Twoich zmian” po zapisie gospodarza. Odcisk = stan po OSTATNIM zapisie końca biegu. Odcisk czyta
+        bazę, więc stoi w `try`: jego błąd idzie dalej do straży (EXPECT), a odświeżenie i zwolnienie osi pada
+        w `finally` - ogon jest już zdjęty, więc nikt inny osi po tym przebiegu nie zwolni."""
         if not self._ogon_trwa(since):
             return
         self._ogon_biegu[1].discard(pisarz)
@@ -6048,7 +6148,12 @@ class MainWindow(QMainWindow):
             return
         self._ogon_biegu = None
         if odswiez:
-            self._odswiez_i_zwolnij_po_biegu()
+            przyjmij = self._gotowy("przyjmij_view")
+            try:
+                if przyjmij is not None:
+                    przyjmij.odcisk_po_ogonie()
+            finally:
+                self._odswiez_i_zwolnij_po_biegu()
 
     def _odswiez_i_zwolnij_po_biegu(self):
         """KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki, potem panel rodowodu, a oś obiektu
@@ -6310,15 +6415,12 @@ class MainWindow(QMainWindow):
         z gestem raportu „co przyszło” (zapis osi obiektu w trakcie zapisu kart do plików).
 
         Zatrzask stanu PRZED rozesłaniem (AR-325): Dostawa zbudowana w trakcie zapisu Zbiorów dostaje go od
-        budowniczego; tu tylko strony zbudowane (`_gotowy`)."""
+        budowniczego; tu tylko strony zbudowane (`_gotowy`). Oś obiektu dostaje stan TEGO źródła (druga strona
+        mutexu), Dostawa i jej raport - zatrzask gospodarza (`_rozeslij_zatrzask_zapisu`, AR-353); „Wciągnij z WBPP…”
+        Domu czyta regułę gospodarza przy otwarciu menu (`_powod_odmowy_zniw`, AR-354)."""
         self._zapis_w_biegu["grid"] = bool(busy)
         self.object_view.set_writeback_busy(busy)
-        for nazwa in ("pipeline_view", "przyjmij_view"):
-            widok = self._gotowy(nazwa)
-            if widok is not None:
-                widok.set_writeback_busy(busy)
-        if self.home_view is not None:
-            self.home_view.set_writeback_busy(busy)    # „Wciągnij z WBPP…” gaśnie jak w biegu
+        self._rozeslij_zatrzask_zapisu()
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
@@ -7004,14 +7106,21 @@ class MainWindow(QMainWindow):
         self._zamow_dobudowe()
 
     def changeEvent(self, event):
-        """AKTYWACJA OKNA ZDEJMUJE MARTWE WPISY, NIE PODAJE (AR-348): gest recepty osi zamknięty POZA tym oknem
+        """AKTYWACJA OKNA ZDEJMUJE MARTWE WPISY (AR-348): gest recepty osi zamknięty POZA tym oknem
         (CLI `header-fix --undo`, drugie okno, okno modalne tego okna) nie daje tu żadnego zdarzenia, więc martwa
         recepta stała na pasku do najbliższej chwili podania - a zdanie gotowości cofnięcia kart (`ZdanieZeSzczegolem`,
         `miejsce=None`, bez zegara - `_wynik_cofniecia_osi`, `_flash`) stoi na pasku KAŻDEJ strony. Powrót do okna
         (zmiana aktywacji na aktywne) czyści kolejkę odłożeń z wpisów, którym baza nic nie zostawiła
         (`ObjectAxisView.oczysc_martwe`, idempotentne - każda chwila podania i tak woła je najpierw); recepta i zdanie
-        takiego wpisu schodzą z paska (`_zdejmij_martwa_recepte`). Żywego wpisu za zdjętym aktywacja nie podaje - czeka
-        on na najbliższą chwilę podania.
+        takiego wpisu schodzą z paska (`_zdejmij_martwa_recepte`).
+
+        ...I PODAJE WPIS ZA ZDJĘTĄ GOTOWOŚCIĄ (AR-355): gdy zdjęcie zdjęło z paska gotowość, która wciąż na nim STAŁA
+        (`_zdjeta_gotowosc` z `_zdejmij_martwa_recepte`), następny niepodany wpis kolejki wraca teraz ze swoją
+        gotowością - doklejoną do zdania, które to zdjęcie przywróciło (`doklej`; nic nie wróciło - sama gotowość) -
+        zamiast czekać na wejście w Porządki. Gotowość przykryta wcześniej innym raportem (raport Zbiorów ze szczegółem,
+        zdanie postępu cofnięcia) nie stoi, więc nic nie ustępuje: gotowość doklejona do cudzego raportu stałaby potem
+        na każdej stronie bez wiązania z miejscem. Zdjęcie wpisu nigdy niepodanego niczego nie podaje: taki wpis czeka
+        na swoją chwilę (koniec blokady, wejście w Porządki), a aktywacja nie jest nią.
 
         TU, nie w `TasksView.event(WindowActivate)`: Qt podaje `WindowActivate` tylko widocznym dzieciom, a Porządki poza
         swoją stroną są ukryte - martwe zdanie na Domu zostałoby. Powrót z innej aplikacji to ta sama zmiana aktywacji
@@ -7020,7 +7129,11 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if (event.type() == QEvent.ActivationChange and self.isActiveWindow() and self.con is not None
                 and self.object_view is not None and isValid(self.object_view)):
+            self._zdjeta_gotowosc = None
             self.object_view.oczysc_martwe()
+            zdjeta, self._zdjeta_gotowosc = self._zdjeta_gotowosc, None
+            if zdjeta is not None:
+                self.object_view.podaj_odlozone(doklej=zdjeta[0], tylko_niepodane=True)
 
     def closeEvent(self, event):
         # ZAPIS DO PLIKÓW W TOKU (szuflada Zbiorów) - okno ZOSTAJE, zamknięcie = żądanie anulowania po

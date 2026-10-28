@@ -1119,24 +1119,31 @@ def test_wiecej_wciagnij_z_wbpp_ta_sama_droga_co_przycisk_Dostawy(qapp, tmp_path
         win.close()
 
 
-def test_wciagnij_z_wbpp_gasnie_w_biegu_i_przy_zapisie_niezaleznie(qapp, tmp_path):
-    """„Wciągnij z WBPP…” w „Więcej…” gaśnie z dwóch powodów - bieg Dostawy (`set_busy`) i zapis
-    nagłówków (`set_writeback_busy` przez `_on_writeback_busy`) - a podpowiedź mówi, który trwa.
-    Falsyfikator: jedno pole stanu → koniec zapisu w trwającym biegu zapala pozycję."""
+def test_wciagnij_z_wbpp_gasnie_w_biegu_i_przy_zapisie_niezaleznie(qapp, tmp_path, monkeypatch):
+    """„Wciągnij z WBPP…” w „Więcej…” gaśnie z dwóch powodów - bieg Dostawy (prawdziwy etap) i zapis
+    nagłówków (`_on_writeback_busy`) - a podpowiedź mówi, który trwa. Stan pozycji to stan z chwili
+    otwarcia menu: Dom pyta gospodarza (`_powod_odmowy_zniw`, AR-354). To test REGUŁY, nie drogi
+    człowieka: zapis Zbiorów zgłoszony w trwającym etapie Dostawy to para stanów niemożliwa gestem
+    (mutex D-PD-3) - pin mówi, że reguła liczy oba powody niezależnie. Falsyfikator: koniec jednego
+    powodu zapala pozycję, gdy drugi trwa."""
+    from test_gui_gospodarz import _odmowy_zniw, _stan_pozycji_zniw
+    from test_gui_grid_recepty import _brama_dostawy, _etap_koniec, _etap_start
+    puszczona = _brama_dostawy(monkeypatch)
     win = MainWindow(_s8(tmp_path))
     try:
-        akcja = win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA]
-        odmowy = {i18n.t("pipeline.refuse.writeback"), i18n.t("pipeline.refuse.delivery_running")}
-        assert akcja.isEnabled() and akcja.toolTip() not in odmowy     # bez podpowiedzi = tekst akcji
+        czynna, podpowiedz = _stan_pozycji_zniw(win)
+        assert czynna and podpowiedz not in _odmowy_zniw()             # bez podpowiedzi = tekst akcji
+        _etap_start(win)
+        assert _stan_pozycji_zniw(win) == (False, i18n.t("pipeline.refuse.delivery_running"))
         win._on_writeback_busy(True)
-        assert not akcja.isEnabled() and akcja.toolTip() == i18n.t("pipeline.refuse.writeback")
-        win.home_view.set_busy(True)
+        assert _stan_pozycji_zniw(win) == (False, i18n.t("pipeline.refuse.delivery_running"))
+        _etap_koniec(win, puszczona)
+        assert _stan_pozycji_zniw(win) == (False, i18n.t("pipeline.refuse.writeback"))
         win._on_writeback_busy(False)
-        assert not akcja.isEnabled()
-        assert akcja.toolTip() == i18n.t("pipeline.refuse.delivery_running")
-        win.home_view.set_busy(False)
-        assert akcja.isEnabled() and akcja.toolTip() not in odmowy
+        czynna, podpowiedz = _stan_pozycji_zniw(win)
+        assert czynna and podpowiedz not in _odmowy_zniw()
     finally:
+        puszczona.set()
         win.close()
 
 

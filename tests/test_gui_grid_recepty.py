@@ -989,7 +989,8 @@ def test_cofniecie_z_paska_gasi_powierzchnie_zapisu(qapp, tmp_path, bez_watkow, 
         _czekaj(brama.doszlo.is_set, "pierwszy plik cofnięcia")
         QApplication.processEvents()
         assert not ov.repair_btn.isEnabled()
-        assert win.grid_view._foreign_wb is True and win.home_view._zniwa_zapis is True
+        assert win.grid_view._foreign_wb is True
+        assert win._powod_odmowy_zniw() == i18n.t("pipeline.refuse.writeback")   # reguła „Wciągnij…” Domu (AR-354)
         brama.puszczona.set()
         _czekaj_na_cofniecie(win)
         _select_review_tag(ov, "nameless")

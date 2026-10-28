@@ -456,22 +456,22 @@ def test_wciagnij_z_domu_w_biegu_albo_przy_zapisie_nie_otwiera_okna(qapp, tmp_pa
     monkeypatch.setattr(PipelineWorker, "_zrodlo", sonda_za_brama)
     tree = _drzewo(tmp_path, "d1", [(1, PLAMA)])
     win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    from test_gui_gospodarz import _stan_pozycji_zniw   # stan pozycji z chwili otwarcia menu (AR-354)
     try:
         pv = win.pipeline_view
         win._zegar_priorytetu.setInterval(60000)
-        zniwa = win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA]
         w_biegu = i18n.t("pipeline.refuse.delivery_running")
-        assert zniwa.isEnabled()
+        assert _stan_pozycji_zniw(win)[0]
 
         def start():
             assert pv.run_all_on(tree) is None
-            assert not zniwa.isEnabled() and zniwa.toolTip() == w_biegu
+            assert _stan_pozycji_zniw(win) == (False, w_biegu)
             win._on_wiecej_domu(home_mod.WIECEJ_ZNIWA)            # wejście wprost, mimo wygaszenia
             assert okna == [] and win.report_label.text() == w_biegu
             brama.set()
 
         _przebieg(pv, start)
-        assert zniwa.isEnabled()
+        assert _stan_pozycji_zniw(win)[0]
         win._on_writeback_busy(True)
         win._on_wiecej_domu(home_mod.WIECEJ_ZNIWA)
         assert okna == [] and win.report_label.text() == i18n.t("pipeline.refuse.writeback")

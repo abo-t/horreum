@@ -251,7 +251,11 @@ class PrzyjmijView(QWidget):
 
         Przebieg, który NIE RUSZYŁ (`refused`: źródło niedostępne, guard serialu), odcisku nie
         dostaje: jego log mówi „nie wykonano” i nie opisuje żadnego stanu, więc podpis „stan sprzed
-        Twoich zmian” nad nim byłby nieprawdą - gest po nim podpisu nie stawia."""
+        Twoich zmian” nad nim byłby nieprawdą - gest po nim podpisu nie stawia.
+
+        Koniec przebiegu z OGONEM PISARZY gospodarza (AR-373 - rodowód żniw zapisany po `run_finished`): odświeżenie
+        widoków idzie dopiero po ostatnim pisarzu, a zapis pisarza to nie gest człowieka - odcisk bierze się wtedy
+        jeszcze raz, po ostatnim z nich (`odcisk_po_ogonie`, AR-354)."""
         self.lbl_odmowa.setVisible(False)
         if zapis["refused"]:
             self._odcisk_przebiegu = self._godzina_przebiegu = None
@@ -263,6 +267,14 @@ class PrzyjmijView(QWidget):
             self._zapis = zapis
             self._until = self._now()
         self.odswiez_raport()
+
+    def odcisk_po_ogonie(self):
+        """Wejście gospodarza (AR-354): ostatni pisarz ogona końca przebiegu skończył (`MainWindow._domknij_ogon`), więc
+        odcisk stanu bierze się od nowa - log przebiegu opisuje stan PO zapisach końca biegu, a podpis „stan sprzed
+        Twoich zmian” stawia dopiero gest człowieka. Przebieg bez odcisku (odmówiony) zostaje bez niego. Raportu nie
+        przelicza: zapis ogona (rodowód stosów) nie zmienia tego, co raport czyta (`queries.delivery_report`)."""
+        if self._odcisk_przebiegu is not None:
+            self._odcisk_przebiegu = self._odcisk_stanu()
 
     def _render(self):
         zapis = self._zapis

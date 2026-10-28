@@ -1111,8 +1111,10 @@ def test_ta_sama_nazwa_w_dwoch_odmowach_zdania_mowi_pelne_sciezki(qapp, tmp_path
     """Dwa przebiegi nazw rozdarte (prawdziwy pisarz, atrapy wyłącznie porażki przepięcia i kompensacji - wzór
     `test_gui_grid_szuflada`), a plik każdego pod nową nazwą ma inny `mtime`: rekoncyliacja odmawia obu
     (`intent_mtime_differs`). Oba pliki noszą tę samą nazwę w dwóch katalogach - zdanie szuflady mówi o nich PEŁNYMI
-    ścieżkami (sama nazwa dwa razy nie mówi, który plik gdzie stoi). Falsyfikator: kolizje nazw liczone osobno dla
-    każdej odmowy zdania."""
+    ścieżkami (sama nazwa dwa razy nie mówi, który plik gdzie stoi), zwięźle (bez przedrostka formy pełnej), a oba
+    pełne powody (czas UTC) stoją w szczególe, choć ścieżek nie skróciło (AR-387) - w kolejności członów zdania, każdy
+    raz. Falsyfikatory: kolizje nazw liczone osobno dla każdej odmowy zdania; szczegół tylko przy skróconej ścieżce;
+    szczegół w innej kolejności niż człony albo z powtórzeniem."""
     import sqlite3
     from test_gui_grid_szuflada import NOW
     from test_rename import _bez_kompensacji, _pad_raz
@@ -1134,14 +1136,21 @@ def test_ta_sama_nazwa_w_dwoch_odmowach_zdania_mowi_pelne_sciezki(qapp, tmp_path
             writeback.commit_renames(con, run, now=NOW, should_cancel=lambda p=pytania: p.append(1) or len(p) > 1)
         # `mtime` pod nową nazwą zmieniony zaraz po rozdarciu - rekoncyliacja na wejściu następnego zapisu odmawia.
         st = os.stat(rozdarte[-1])
-        os.utime(rozdarte[-1], (st.st_atime, st.st_mtime + 3600))
+        os.utime(rozdarte[-1], (st.st_atime, st.st_mtime + 5000))
     assert [f.reason.code for f in writeback.reconcile_renames(con, now=NOW)] == ["intent_mtime_differs"] * 2
     con.close()
     con, v = _restart(path)
     try:
+        from horreum.gui.wb_worker import tekst_powodu
+        from horreum.item_reasons import z_bazy
         tekst = v.drawer.result.text()
         assert all(nowa in tekst for nowa in rozdarte), tekst
-        assert v.drawer.result.szczegol() == "", v.drawer.result.szczegol()   # nic nie skrócone - bez szczegółu
+        assert i18n.t("grid.drawer.names_held_refused", reason="")[:20] not in tekst, tekst
+        odmowy, _czekajace = queries.powody_zamiarow_nazw(con, {"A", "B"})
+        pelne = [z_bazy(w["reason"], w["reason_code"], w["reason_args"]) for w in odmowy]
+        pelne.sort(key=lambda p: tekst.index(dict(p.params)["path"]))      # kolejność członów w zdaniu
+        linie = v.drawer.result.szczegol().split("\n")
+        assert linie == [tekst_powodu(p) for p in pelne] and len(set(linie)) == len(linie) == 2, linie
     finally:
         _zamknij_widok(v)
         con.close()
@@ -1156,3 +1165,350 @@ def test_parametry_sciezek_w_kontrakcie_powodu():
     assert _PARAMY_SCIEZEK and all(PARAM_KINDS.get(n) == "text" for n in _PARAMY_SCIEZEK), _PARAMY_SCIEZEK
     assert PARAM_KINDS.get("paths") == "list"
     assert json.dumps(sorted(_PARAMY_SCIEZEK)) == json.dumps(["copy", "db_path", "dst", "path", "src", "tmp"])
+
+
+# ============================================================ AR-387 - zwięzłe zdania odmowy rekoncyliacji (wariant B)
+
+
+def _lokalne(*isos, wzor="%Y-%m-%d %H:%M:%S"):
+    """Wyrocznia czasów zdania: znaczniki ISO w czasie lokalnym maszyny testu (liczona w biegu, nie literałem); para
+    po dwóch stronach przestawienia zegara maszyny - z przesunięciem strefy (scena w noc przestawienia zostaje
+    prawdziwa). Regułę przesunięcia pinuje literałami `test_czasy_lokalne_do_sekundy_remis_i_przestawienie_zegara`."""
+    from datetime import datetime
+    chwile = [datetime.fromisoformat(i).astimezone() for i in isos]
+    strefy = len({c.utcoffset() for c in chwile}) > 1
+    return [c.strftime(wzor) + (c.isoformat()[-6:] if strefy else "") for c in chwile]   # `±HH:MM` z ISO
+
+
+def _warszawa(c):
+    """Strefa z przestawieniem zegara bez bazy stref (`tzdata` spoza zależności): czas środkowoeuropejski 2026 -
+    letni (+02:00) od 2026-03-29 01:00 UTC do 2026-10-25 01:00 UTC, poza nim zimowy (+01:00)."""
+    from datetime import datetime, timedelta, timezone
+    lato = datetime(2026, 3, 29, 1, tzinfo=timezone.utc) <= c < datetime(2026, 10, 25, 1, tzinfo=timezone.utc)
+    return c.astimezone(timezone(timedelta(hours=2 if lato else 1)))
+
+
+def test_czasy_lokalne_do_sekundy_remis_i_przestawienie_zegara():
+    """`wb_worker.czasy_lokalne` ze strefą podaną konwerterem (wynik nie zależy od strefy maszyny testu): znaczniki ISO
+    UTC (`scan._mtime_iso`) w czasie lokalnym do sekundy; różne znaczniki równe do sekundy - pełna precyzja
+    (mikrosekundy); para po dwóch stronach przestawienia zegara (godzina podwójna, przeskok) - z przesunięciem strefy;
+    ta sama chwila inaczej zapisana (rdzeń porównuje napisy) i znacznik bez strefy obok znacznika ze strefą - napisy
+    znak w znak; znaczniki bez strefy - jakie są; ten sam znacznik dwa razy - jeden czas; nieczytelny albo poza
+    zakresem konwertera (`OSError`, `OverflowError`) - None. Domyślny konwerter - strefa systemu. Falsyfikatory: czas
+    UTC zamiast lokalnego; para z godziny podwójnej jednym czasem ściennym, „pół sekundy” przy godzinie różnicy albo
+    z odwróconym porządkiem; remis do sekundy albo ta sama chwila dwoma identycznymi czasami; para bez wspólnej skali
+    przeliczona; błąd konwertera poza gałęzią None."""
+    from horreum.gui.wb_worker import czasy_lokalne
+
+    def _cl(znaczniki):
+        return czasy_lokalne(znaczniki, lokalny=_warszawa)
+    a, b = "2026-10-04T17:54:43.120000+00:00", "2026-10-04T17:54:40.990000+00:00"
+    assert _cl([a, b]) == ["2026-10-04 19:54:43", "2026-10-04 19:54:40"]
+    assert _cl([a, "2026-10-04T17:54:43.870000+00:00"]) == ["2026-10-04 19:54:43.120000",
+                                                            "2026-10-04 19:54:43.870000"]
+    # Godzina podwójna 2026-10-25 (02:00-03:00 dwa razy): ten sam czas ścienny przy godzinie i pół sekundy różnicy,
+    # a para 00:50 / 01:10 UTC odwraca porządek czasu ściennego.
+    assert _cl(["2026-10-25T00:30:00+00:00", "2026-10-25T01:30:00.500000+00:00"]) == [
+        "2026-10-25 02:30:00+02:00", "2026-10-25 02:30:00+01:00"]
+    assert _cl(["2026-10-25T01:10:00+00:00", "2026-10-25T00:50:00+00:00"]) == [
+        "2026-10-25 02:10:00+01:00", "2026-10-25 02:50:00+02:00"]
+    # Przeskok 2026-03-29 (02:00-03:00 nie istnieje): sekunda różnicy, godzina czasu ściennego.
+    assert _cl(["2026-03-29T00:59:59+00:00", "2026-03-29T01:00:00+00:00"]) == [
+        "2026-03-29 01:59:59+01:00", "2026-03-29 03:00:00+02:00"]
+    # Przesunięcie ujemne i z minutami (strefa -02:30 / -03:30): znak, godziny i minuty przesunięcia.
+    def _minus(c):
+        from datetime import datetime, timedelta, timezone
+        letni = c < datetime(2026, 11, 1, 4, 30, tzinfo=timezone.utc)
+        return c.astimezone(timezone(timedelta(hours=-2, minutes=-30) if letni else timedelta(hours=-3, minutes=-30)))
+    assert czasy_lokalne(["2026-11-01T04:00:00+00:00", "2026-11-01T05:00:00+00:00"], lokalny=_minus) == [
+        "2026-11-01 01:30:00-02:30", "2026-11-01 01:30:00-03:30"]
+    ta_sama = ["2026-10-04T17:54:43.120000+00:00", "2026-10-04T19:54:43.120000+02:00"]
+    assert _cl(ta_sama) == ta_sama
+    mieszane = ["2026-10-04T17:54:43.120000", "2026-10-04T17:54:43.120000+00:00"]
+    assert _cl(mieszane) == mieszane
+    assert _cl(["2026-10-04T17:54:43.120000", "2026-10-04T17:54:40.990000"]) == ["2026-10-04 17:54:43",
+                                                                                "2026-10-04 17:54:40"]
+    assert _cl([a, a]) == ["2026-10-04 19:54:43"] * 2
+    for zly in ([a, None], [a, "wczoraj"], [a, 5]):
+        assert _cl(zly) is None, zly
+    for blad in (OSError(22, "Invalid argument"), OverflowError("date value out of range")):
+        def _rzuca(_c, blad=blad):
+            raise blad
+        assert czasy_lokalne([a, b], lokalny=_rzuca) is None, blad
+    assert czasy_lokalne([a, b]) == _lokalne(a, b)
+
+
+def test_zdanie_zwiezle_totalne(monkeypatch):
+    """`wb_worker.zdanie_zwiezle` - TOTALNE jak `_zdanie_z_kodu`: wpis wypełniony parametrami powodu (tekst przez
+    `tekst_powodu`, liczba bez zmian, czasy lokalne) i polami wołającego (pierwszeństwo przed parametrem powodu o tej
+    samej nazwie); czas powodu bez wartości - wariant `<klucz>.no_<pole>` bez tego pola; każdy brak - None, nigdy
+    wyjątek: brak klucza albo wariantu, wpis mnogi, proza bez kodu, uwagi, pole bez parametru, None, lista, liczba
+    tekstem, czas nieczytelny, wariant z polem czasu bez wartości. Falsyfikatory: zdanie bez sprawdzenia pól; None,
+    lista albo uwagi przepuszczone; parametr powodu przed polem wołającego; czas nieczytelny bez odmowy; czas bez
+    wartości bez wariantu albo podany do przeliczenia."""
+    from horreum.gui.i18n_catalog import CATALOG
+    from horreum.gui.wb_worker import tekst_powodu, zdanie_zwiezle
+    szablon = "{way} {path} {location} {mtime}|{db_mtime}"
+    monkeypatch.setitem(CATALOG, "_test.zwiezle", {"pl": szablon, "en": szablon})
+    monkeypatch.setitem(CATALOG, "_test.wewn", {"pl": "{inner}", "en": "{inner}"})
+    monkeypatch.setitem(CATALOG, "_test.lista", {"pl": "{paths}", "en": "{paths}"})
+    monkeypatch.setitem(CATALOG, "_test.mnogi", {"pl": {"one": "{n}", "few": "{n}", "many": "{n}"},
+                                                  "en": {"one": "{n}", "other": "{n}"}})
+    monkeypatch.setitem(CATALOG, "_test.zly.no_db_mtime", {"pl": "{way} {db_mtime}", "en": "{way} {db_mtime}"})
+    mt, db_mt = "2026-10-04T17:54:43.120000+00:00", "2026-10-04T17:54:40.990000+00:00"
+
+    def _mtime(**zmiany):
+        return _powod("intent_mtime_differs", **{"path": "a.fits", "mtime": mt, "db_mtime": db_mt, "location": 3,
+                                                 **zmiany})
+    lok, lok_db = _lokalne(mt, db_mt)
+    assert zdanie_zwiezle("_test.zwiezle", _mtime(), way="D") == f"D a.fits 3 {lok}|{lok_db}"
+    assert zdanie_zwiezle("_test.zwiezle", _mtime(way="z powodu"), way="D").startswith("D a.fits ")
+    wewn = _powod("target_taken_db", location=7, volume="V", path="nowa.fits")
+    assert zdanie_zwiezle("_test.wewn", _powod("intent_target_taken", inner=wewn, location=3, path="s.fits")) \
+        == tekst_powodu(wewn)
+    bez_db = _powod("intent_mtime_differs", path="a.fits", mtime=mt, location=3)
+    niepelne = [bez_db, _mtime(path=None), _mtime(location="3"), _mtime(db_mtime="wczoraj"), _mtime(db_mtime=None),
+                _mtime(notes=(_powod("disk_silent", detail="cisza"),)), "proza a.fits"]
+    for p in niepelne:
+        assert zdanie_zwiezle("_test.zwiezle", p, way="D") is None, p
+    assert zdanie_zwiezle("_test.zwiezle", _mtime()) is None                     # pole wołającego nie podane
+    assert zdanie_zwiezle("_test.lista", _powod("undo_files_kept", paths=("a.fits", "b.fits"))) is None
+    assert zdanie_zwiezle("_test.mnogi", _powod("undo_files_kept", n=2)) is None
+    assert zdanie_zwiezle("_test.brak", _mtime(), way="D") is None
+    assert zdanie_zwiezle("_test.zly", _mtime(db_mtime=None), way="D") is None
+    wariant = "{way} {path} {mtime}"
+    monkeypatch.setitem(CATALOG, "_test.zwiezle.no_db_mtime", {"pl": wariant, "en": wariant})
+    assert zdanie_zwiezle("_test.zwiezle", _mtime(db_mtime=None), way="D") == f"D a.fits {_lokalne(mt)[0]}"
+
+
+def test_zwiezle_klucze_odmow_czlowieka_w_parytecie():
+    """Zwięzłe zdania szuflady - klucz składany w locie `grid.drawer.refused.<kod>` (kolektor literałów `test_i18n` go
+    nie widzi): klucz na KAŻDY kod drogi człowieka (`FramesView._DROGI_ODMOWY_NAZW`) i żaden poza nimi (kod bez zdania
+    mówiłby formą pełną po cichu, zdanie bez kodu jest martwe), PL i EN napisem, EN bez polskich znaków; pole `way`
+    (droga w zdaniu), pozostałe pola - parametry pełnego wpisu kodu `objchg.item.<kod>` (literówka pola = forma pełna
+    na zawsze), szablon kończy się nazwą pliku. Wariant `<kod>.no_<pole>` (czas powodu bez wartości) - tylko dla kodu
+    drogi i pola czasu, bez tego pola. Falsyfikatory: kod drogi bez klucza; pole spoza parametrów powodu; nazwa przed
+    drogą; wariant z polem, którego powód nie ma."""
+    import string
+    from horreum.gui import grid as grid_mod
+    from horreum.gui.i18n_catalog import CATALOG
+    from horreum.gui.wb_worker import _PARAMY_CZASU
+
+    def _pola(s):
+        return {f for _, f, _, _ in string.Formatter().parse(s) if f}
+    drogi = grid_mod.FramesView._DROGI_ODMOWY_NAZW
+    klucze = {k.removeprefix("grid.drawer.refused.") for k in CATALOG if k.startswith("grid.drawer.refused.")}
+    assert set(drogi) <= klucze and {k.partition(".")[0] for k in klucze} == set(drogi), klucze
+    for klucz in klucze:
+        kod, _, wariant = klucz.partition(".")
+        bez = wariant.removeprefix("no_")
+        assert not wariant or (wariant.startswith("no_") and bez in _PARAMY_CZASU), klucz
+        for lang in ("pl", "en"):
+            szablon = CATALOG[f"grid.drawer.refused.{klucz}"][lang]
+            assert isinstance(szablon, str) and "way" in _pola(szablon), (klucz, lang)
+            assert _pola(szablon) - {"way"} <= _pola(CATALOG[f"objchg.item.{kod}"][lang]) - {bez}, (klucz, lang)
+            assert szablon.endswith(("{path}", "{dst}")), (klucz, lang)
+        assert not set(CATALOG[f"grid.drawer.refused.{klucz}"]["en"]) & _POLSKIE, klucz
+
+
+def _odmowa_mtime(tmp_path, monkeypatch, przesun=None):
+    """Zapis nazw rozdarty (`test_gui_grid_szuflada._nazwy_rozdarte` - prawdziwy pisarz, atrapy wyłącznie porażki
+    przepięcia i kompensacji), potem plik pod nową nazwą z `mtime` przestawionym `przesun(ns) → ns` albo - `przesun`
+    None - kopia w bazie bez `mtime` (znacznik „przeczytaj od nowa” drogą rdzenia `repo.mark_location_rescan`):
+    rekoncyliacja drugim połączeniem odmawia `intent_mtime_differs`. Restart programu. Zwraca (połączenie, widok,
+    pełny powód odmowy z bazy)."""
+    from horreum.item_reasons import z_bazy
+    from test_gui_grid_szuflada import NOW, _nazwy_rozdarte, _rekoncyliacja_obok
+    path, _pliki, run = _nazwy_rozdarte(tmp_path, monkeypatch)
+    con = db.connect(path)
+    nowa, lid = con.execute("SELECT new_path, location_id FROM pending_renames WHERE in_flight IS NOT NULL").fetchone()
+    if przesun is None:
+        repo.mark_location_rescan(con, location_id=lid, now=NOW, reason="przeczytaj od nowa")
+    con.close()
+    if przesun is not None:
+        st = os.stat(nowa)
+        os.utime(nowa, ns=(st.st_atime_ns, przesun(st.st_mtime_ns)))
+    assert [f.reason.code for f in _rekoncyliacja_obok(path)] == ["intent_mtime_differs"]
+    con, v = _restart(path)
+    (w,), _czekajace = queries.powody_zamiarow_nazw(con, {run})
+    return con, v, z_bazy(w["reason"], w["reason_code"], w["reason_args"])
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_mtime_mowi_czasy_lokalne_i_nazwe_na_koncu(qapp, tmp_path, monkeypatch, lang):
+    """Odmowa rekoncyliacji „inny mtime” (prawdziwy rdzeń): zwięzłe zdanie szuflady - bez przedrostka formy pełnej, oba
+    czasy w czasie lokalnym do sekundy, droga człowieka, NAZWA pliku na końcu; surowego czasu UTC i pełnej ścieżki
+    w zdaniu nie ma - stoją w szczególe zdania z pełnym powodem. EN tak samo, bez polskich znaków. Falsyfikatory: człon
+    formą pełną; `db_mtime` poza czasami lokalnymi."""
+    from horreum.gui.wb_worker import tekst_powodu
+    i18n.set_lang(lang)
+    con, v, odmowa = _odmowa_mtime(tmp_path, monkeypatch, lambda ns: ns + 5000 * 10**9)
+    try:
+        p = dict(odmowa.params)
+        nazwa, tekst = os.path.basename(p["path"]), v.drawer.result.text()
+        mt, db_mt = _lokalne(p["mtime"], p["db_mtime"])
+        assert tekst == i18n.t("grid.drawer.refused.intent_mtime_differs", path=nazwa, mtime=mt, db_mtime=db_mt,
+                               way=i18n.t("grid.drawer.names_way_check")), tekst
+        assert tekst.endswith(": " + nazwa), tekst
+        assert p["mtime"] not in tekst and p["db_mtime"] not in tekst and p["path"] not in tekst, tekst
+        assert i18n.t("grid.drawer.names_held_refused", reason="")[:20] not in tekst, tekst
+        assert v.drawer.result.szczegol() == tekst_powodu(odmowa) and p["mtime"] in v.drawer.result.szczegol()
+        if lang == "en":
+            assert not set(tekst) & _POLSKIE, tekst
+    finally:
+        i18n.set_lang("pl")
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_odmowa_mtime_rowny_do_sekundy_mowi_pelna_precyzje(qapp, tmp_path, monkeypatch):
+    """`mtime` pliku w TEJ SAMEJ sekundzie co kopia w bazie, inna część ułamkowa (rdzeń porównuje napisy - odmawia):
+    zwięzłe zdanie mówi oba czasy z mikrosekundami - „inny mtime” z dwoma identycznymi czasami do sekundy kłamałby.
+    Falsyfikator: czasy wyłącznie do sekundy."""
+    def _ta_sama_sekunda(ns):
+        sekunda, ulamek = divmod(ns, 10**9)
+        return sekunda * 10**9 + (250_000_000 if ulamek >= 500_000_000 else 750_000_000)
+    con, v, odmowa = _odmowa_mtime(tmp_path, monkeypatch, _ta_sama_sekunda)
+    try:
+        p = dict(odmowa.params)
+        assert len(set(_lokalne(p["mtime"], p["db_mtime"]))) == 1, p   # remis do sekundy - scena jest prawdziwa
+        pelne = _lokalne(p["mtime"], p["db_mtime"], wzor="%Y-%m-%d %H:%M:%S.%f")
+        assert pelne[0] != pelne[1] and all(c in v.drawer.result.text() for c in pelne), v.drawer.result.text()
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_obu_nazw_mowi_zwiezle_z_nazwami_na_koncu(qapp, tmp_path, monkeypatch, lang):
+    """Odmowa „plik pod obiema nazwami” (prawdziwy rdzeń): zwięzłe zdanie - krótki powód, droga człowieka („usuń jedną
+    kopię, potem „Przyjmij nowe” (Dostawa)”), obie NAZWY plików na końcu; pełny powód w szczególe. EN bez polskich
+    znaków. Falsyfikator: człon formą pełną (przedrostek, nazwy w środku zdania)."""
+    from horreum.gui.wb_worker import tekst_powodu
+    from horreum.item_reasons import z_bazy
+    from test_gui_szuflada_przebieg import _odmowa_obu_nazw
+    i18n.set_lang(lang)
+    _path, con, v, stara = _odmowa_obu_nazw(tmp_path, monkeypatch)
+    try:
+        v.set_writeback_busy(True)
+        v.set_writeback_busy(False)
+        run, nowa = con.execute("SELECT run_id, new_path FROM pending_renames WHERE in_flight IS NOT NULL").fetchone()
+        droga = i18n.t("grid.drawer.names_way_both", receive=i18n.t("pipeline.receive"), nav=i18n.t("nav.dostawa"))
+        tekst = v.drawer.result.text()
+        assert tekst == i18n.t("grid.drawer.refused.intent_both_names", src=os.path.basename(stara),
+                               dst=os.path.basename(nowa), way=droga), tekst
+        assert tekst.endswith(os.path.basename(stara) + " / " + os.path.basename(nowa)), tekst
+        (w,), _czekajace = queries.powody_zamiarow_nazw(con, {run})
+        assert v.drawer.result.szczegol() == tekst_powodu(z_bazy(w["reason"], w["reason_code"], w["reason_args"]))
+        if lang == "en":
+            assert not set(tekst) & _POLSKIE, tekst
+    finally:
+        i18n.set_lang("pl")
+        _zamknij_widok(v)
+        con.close()
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_odmowa_mtime_bez_czasu_w_bazie_mowi_brak_w_bazie(qapp, tmp_path, monkeypatch, lang):
+    """Kopia w bazie bez `mtime` (znacznik „przeczytaj od nowa” `repo.mark_location_rescan` - prawdziwy rdzeń):
+    rekoncyliacja odmawia „inny mtime” z `db_mtime` None. Zwięzłe zdanie mówi czas pliku i „brak w bazie” (nie
+    „None”), drogę człowieka i nazwę na końcu; pełny powód w szczególe. Bez wariantu zdania w katalogu człon mówi
+    formą pełną (przedrostek, krótka forma powodu, droga człowieka), nigdy wyjątkiem w oknie. Wyrocznie z
+    `os.path.basename` i literału. Falsyfikatory: wariant pominięty (forma pełna z „None”); czas bez wartości podany do
+    przeliczenia; forma pełna bez drogi."""
+    from horreum.gui.i18n_catalog import CATALOG
+    from horreum.gui.wb_worker import tekst_powodu
+    from horreum.item_reasons import PowodPozycji
+    i18n.set_lang(lang)
+    con, v, odmowa = _odmowa_mtime(tmp_path, monkeypatch)
+    try:
+        p = dict(odmowa.params)
+        assert p["db_mtime"] is None, odmowa.params
+        nazwa, tekst, droga = os.path.basename(p["path"]), v.drawer.result.text(), i18n.t("grid.drawer.names_way_check")
+        assert tekst == i18n.t("grid.drawer.refused.intent_mtime_differs.no_db_mtime", path=nazwa,
+                               mtime=_lokalne(p["mtime"])[0], way=droga), tekst
+        assert {"pl": " / brak w bazie)", "en": " / none in the database)"}[lang] in tekst, tekst
+        assert "None" not in tekst and tekst.endswith(": " + nazwa), tekst
+        assert v.drawer.result.szczegol() == tekst_powodu(odmowa)
+        monkeypatch.delitem(CATALOG, "grid.drawer.refused.intent_mtime_differs.no_db_mtime")
+        krotki = PowodPozycji(str(odmowa), odmowa.code,
+                              **{n: os.path.basename(x) if n == "path" else x for n, x in odmowa.params})
+        assert v._zdanie_wylaczonych()[1:] == (
+            i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(krotki)) + droga, tekst_powodu(odmowa))
+    finally:
+        i18n.set_lang("pl")
+        _zamknij_widok(v)
+        con.close()
+
+
+# Droga człowieka per kod odmowy - wyrocznia LITERAŁEM, niezależna od mapy produktu (`FramesView._DROGI_ODMOWY_NAZW`).
+_DROGA_KODU = {
+    "intent_both_names": "grid.drawer.names_way_both",
+    "intent_no_name": "grid.drawer.names_way_none",
+    "intent_mtime_differs": "grid.drawer.names_way_check",
+    "intent_sha1_differs": "grid.drawer.names_way_check",
+    "intent_target_taken": "grid.drawer.names_way_taken",
+}
+_NA_KONCU_CELU = {"pl": ": historię renamu niesie lokacja 3 pod stara.fits",
+                  "en": ": the move history is carried by location 3 at stara.fits"}
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("kod, parametry, krotkie, koniec", [
+    ("intent_both_names", {"src": r"X:\L\noc\a.fits", "dst": r"X:\L\noc\b.fits"}, {"src": "a.fits", "dst": "b.fits"},
+     {"pl": ": a.fits / b.fits", "en": ": a.fits / b.fits"}),
+    ("intent_no_name", {"src": r"X:\L\noc\a.fits", "dst": r"X:\L\noc\b.fits"}, {"src": "a.fits", "dst": "b.fits"},
+     {"pl": ": a.fits / b.fits", "en": ": a.fits / b.fits"}),
+    ("intent_mtime_differs", {"path": r"X:\L\noc\a.fits", "mtime": "2026-07-15T10:00:05.250000+00:00",
+                              "db_mtime": "2026-07-15T10:00:00.750000+00:00"}, {"path": "a.fits"},
+     {"pl": ": a.fits", "en": ": a.fits"}),
+    ("intent_sha1_differs", {"path": r"X:\L\noc\a.fits"}, {"path": "a.fits"}, {"pl": ": a.fits", "en": ": a.fits"}),
+    ("intent_target_taken", {"inner": _powod("target_taken_db", location=7, volume="V", path=r"X:\L\noc\nowa.fits"),
+                             "location": 3, "path": r"X:\L\noc\stara.fits"},
+     {"inner": _powod("target_taken_db", location=7, volume="V", path="nowa.fits"), "location": 3,
+      "path": "stara.fits"}, _NA_KONCU_CELU),
+    ("intent_target_taken", {"inner": "location:3 nie istnieje", "location": 3, "path": r"X:\L\noc\stara.fits"},
+     {"inner": "location:3 nie istnieje", "location": 3, "path": "stara.fits"}, _NA_KONCU_CELU),
+])
+def test_czlon_odmowy_kazdego_kodu_drogi_czlowieka(qapp, kod, parametry, krotkie, koniec, lang):
+    """`FramesView._czlon_odmowy` bez okna, KAŻDY kod drogi człowieka, PL i EN: całe zwięzłe zdanie - krótki powód
+    z nazwami plików, droga człowieka WŁAŚCIWA kodowi (wyrocznia literałem), nazwa na końcu (literał; cel zajęty: nazwa
+    lokacji z historią renamu w relacji „pod”), czasy lokalne do sekundy, powód zagnieżdżony (`target_taken_db` albo
+    proza rdzenia) w języku UI przez `tekst_powodu`; pełny powód do szczegółu. EN bez polskich znaków. Falsyfikatory:
+    zła droga kodu w mapie; nazwa w środku zdania; powód zagnieżdżony surowo (polskie zdanie w EN)."""
+    from horreum.gui import grid as grid_mod
+    from horreum.gui.wb_worker import sciezki_skrocone, tekst_powodu
+    i18n.set_lang(lang)
+    try:
+        receive, nav = i18n.t("pipeline.receive"), i18n.t("nav.dostawa")
+        powod = _powod(kod, **parametry)
+        tekst, pelny = grid_mod.FramesView._czlon_odmowy(kod, powod, sciezki_skrocone(powod), receive, nav)
+        oczek = {n: tekst_powodu(x) if n == "inner" else x for n, x in krotkie.items()}
+        if "mtime" in parametry:
+            oczek["mtime"], oczek["db_mtime"] = _lokalne(parametry["mtime"], parametry["db_mtime"])
+        assert tekst == i18n.t(f"grid.drawer.refused.{kod}", **oczek,
+                               way=i18n.t(_DROGA_KODU[kod], receive=receive, nav=nav)), tekst
+        assert tekst.endswith(koniec[lang]) and pelny is True, tekst
+        if lang == "en":
+            assert not set(tekst) & _POLSKIE, tekst
+    finally:
+        i18n.set_lang("pl")
+
+
+def test_czlon_odmowy_kod_bez_klucza_i_przejsciowy(qapp, monkeypatch):
+    """`FramesView._czlon_odmowy` bez okna: kod drogi człowieka bez zwięzłego klucza - forma pełna z drogą i pełnym
+    powodem w szczególe (ścieżka skrócona); kod przejściowy - forma pełna bez drogi i bez szczegółu, gdy nic nie
+    skrócono. Falsyfikatory: kod przejściowy przez mapę dróg; forma pełna bez drogi."""
+    from horreum.gui import grid as grid_mod
+    from horreum.gui.i18n_catalog import CATALOG
+    from horreum.gui.wb_worker import sciezki_skrocone, tekst_powodu
+    czlon = grid_mod.FramesView._czlon_odmowy
+    receive, nav = i18n.t("pipeline.receive"), i18n.t("nav.dostawa")
+    monkeypatch.delitem(CATALOG, "grid.drawer.refused.intent_sha1_differs")
+    sha = _powod("intent_sha1_differs", path=r"X:\L\a.fits")
+    assert czlon("intent_sha1_differs", sha, sciezki_skrocone(sha), receive, nav) == (
+        i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(_powod("intent_sha1_differs", path="a.fits")))
+        + i18n.t("grid.drawer.names_way_check"), True)
+    cisza = _powod("disk_silent", detail="cisza")
+    assert czlon("disk_silent", cisza, sciezki_skrocone(cisza), receive, nav) == (
+        i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(cisza)), False)

@@ -3757,11 +3757,14 @@ CATALOG = {
               "by itself"},
     # AR-323: zamiar nazw, którego rekoncyliacja odmówiła - powód z wiersza zamiaru
     # (`queries.powody_zamiarow_nazw`), zamiast obietnicy „Przyjmij nowe”, która go nie rozstrzygnie. Bez ogona
-    # (AR-347): kto rozstrzyga, mówi powód albo droga kodu niżej (`FramesView._DROGI_ODMOWY_NAZW`).
+    # (AR-347): kto rozstrzyga, mówi powód albo droga kodu niżej (`FramesView._DROGI_ODMOWY_NAZW`). Od AR-387 forma
+    # pełna: odmowa przejściowa i odmowa człowieka, której zwięzłego zdania (`grid.drawer.refused.*`) parametry
+    # powodu nie wypełniają.
     "grid.drawer.names_held_refused": {
         "pl": "przerwanego zapisu nazw rekoncyliacja nie rozstrzygnęła: {reason}",
         "en": "reconciliation did not settle the interrupted name write: {reason}"},
-    # AR-347: droga człowieka przy odmowie, której następna rekoncyliacja nie rozstrzygnie - człon za powodem.
+    # AR-347: droga człowieka przy odmowie, której następna rekoncyliacja nie rozstrzygnie - człon za powodem formy
+    # pełnej i pole `{way}` zwięzłego zdania (AR-387).
     "grid.drawer.names_way_both": {
         "pl": " - usuń jedną kopię, potem „{receive}” ({nav})",
         "en": " - delete one copy, then “{receive}” ({nav})"},
@@ -3772,6 +3775,32 @@ CATALOG = {
         "pl": " - sprawdź, który plik jest kopią z bazy",
         "en": " - check which file is the copy from the database"},
     "grid.drawer.names_way_taken": {"pl": " - rozstrzyga człowiek", "en": " - a person decides"},
+    # AR-387 (decyzja CEO): ZWIĘZŁE zdanie odmowy rekoncyliacji, którą rozstrzyga człowiek (`FramesView._czlon_odmowy`),
+    # bez przedrostka `names_held_refused` (etykieta szuflady mówi już, że zapis nazw czeka), z drogą człowieka
+    # (`{way}` = człon `names_way_*` kodu) i nazwą pliku NA KOŃCU, gdzie wielokropek w środku pola jej nie zje. Pola =
+    # parametry powodu `objchg.item.<kod>` (nazwy plików - `wb_worker.sciezki_skrocone`, czasy lokalne do sekundy -
+    # `wb_worker.czasy_lokalne`); pełny powód idzie do szczegółu zdania. Klucz na każdy kod `_DROGI_ODMOWY_NAZW`;
+    # wariant `<kod>.no_<pole>` - czas powodu bez wartości (`wb_worker.zdanie_zwiezle`).
+    "grid.drawer.refused.intent_both_names": {
+        "pl": "plik pod obiema nazwami{way}: {src} / {dst}",
+        "en": "the file is under both names{way}: {src} / {dst}"},
+    "grid.drawer.refused.intent_no_name": {
+        "pl": "plik pod żadną z nazw{way}: {src} / {dst}",
+        "en": "the file is under neither name{way}: {src} / {dst}"},
+    "grid.drawer.refused.intent_mtime_differs": {
+        "pl": "inny mtime niż kopia w bazie ({mtime} / w bazie {db_mtime}){way}: {path}",
+        "en": "mtime differs from the database copy ({mtime} / in the database {db_mtime}){way}: {path}"},
+    # Kopia w bazie bez `mtime` (znacznik „przeczytaj od nowa”, powrót zapisu w miejscu) - `db_mtime` None.
+    "grid.drawer.refused.intent_mtime_differs.no_db_mtime": {
+        "pl": "inny mtime niż kopia w bazie ({mtime} / brak w bazie){way}: {path}",
+        "en": "mtime differs from the database copy ({mtime} / none in the database){way}: {path}"},
+    "grid.drawer.refused.intent_sha1_differs": {
+        "pl": "inna treść niż kopia w bazie (sha1){way}: {path}",
+        "en": "content differs from the database copy (sha1){way}: {path}"},
+    "grid.drawer.refused.intent_target_taken": {
+        "pl": "{inner}; skan wciągnął plik jako nową kopię{way}: historię renamu niesie lokacja {location} pod {path}",
+        "en": "{inner}; the scan pulled the file in as a new copy{way}: the move history is carried by location "
+              "{location} at {path}"},
     "grid.drawer.names_held_more": {
         "pl": {"one": "czeka też {n} zmiana nazwy zatrzymana zapisem nazw",
                "few": "czekają też {n} zmiany nazw zatrzymane zapisem nazw",

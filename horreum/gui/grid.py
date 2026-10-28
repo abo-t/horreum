@@ -5989,6 +5989,8 @@ class FramesView(QWidget):
     # Droga człowieka per kod odmowy rekoncyliacji, której następna rekoncyliacja nie rozstrzygnie (AR-347):
     # każdy kod `item_reasons.KODY_ODMOWY_REKONCYLIACJI` jest albo tu, albo w `KODY_PRZEJSCIOWE_REKONCYLIACJI`
     # (pilnuje test podziału). Cel zajęty przez inną lokację nie ma jeszcze nazwanego gestu - zostaje zdaniem.
+    # Jedno brzmienie drogi dla obu form (AR-387): pole `{way}` zwięzłego zdania `grid.drawer.refused.<kod>` i ogon
+    # formy pełnej, gdy parametry powodu zwięzłego zdania nie wypełniają (`_czlon_odmowy`).
     _DROGI_ODMOWY_NAZW = {
         "intent_both_names": "grid.drawer.names_way_both",
         "intent_no_name": "grid.drawer.names_way_none",
@@ -5996,6 +5998,27 @@ class FramesView(QWidget):
         "intent_sha1_differs": "grid.drawer.names_way_check",
         "intent_target_taken": "grid.drawer.names_way_taken",
     }
+
+    @classmethod
+    def _czlon_odmowy(cls, kod, powod, skrot, receive, nav):
+        """Człon zdania pustej szuflady dla odmowy rekoncyliacji `powod` (kod `kod`; `skrot` - ten sam powód z nazwami
+        plików, `wb_worker.sciezki_skrocone`) → `(człon, czy pełny powód do szczegółu)`.
+        Odmowa, którą rozstrzyga człowiek, mówi ZWIĘŹLE (AR-387, decyzja CEO): `grid.drawer.refused.<kod>` - bez
+        przedrostka `names_held_refused` (etykieta szuflady mówi już, że zapis nazw czeka), z drogą człowieka w zdaniu
+        i nazwą pliku NA KOŃCU, gdzie wielokropek w środku pola (`grid_selection.elizja_zdania`) jej nie zje; czas
+        lokalny do sekundy (`wb_worker.czasy_lokalne`). Zwięzłe zdanie nie mówi pełnego powodu (czas UTC, „zamiar
+        zostaje”, pełne ścieżki) - pełny idzie ZAWSZE do szczegółu. Kod bez zwięzłego klucza albo powód, który go nie
+        wypełnia (zapis spoza kodeka - `wb_worker.zdanie_zwiezle` → None), i kod przejściowy (bez drogi, AR-347) mówią
+        formą pełną `names_held_refused`; szczegół wtedy, gdy krótka forma skróciła ścieżkę."""
+        from horreum.gui.wb_worker import tekst_powodu, zdanie_zwiezle
+        from horreum.item_reasons import KODY_PRZEJSCIOWE_REKONCYLIACJI
+        droga = ""
+        if kod not in KODY_PRZEJSCIOWE_REKONCYLIACJI:
+            droga = i18n.t(cls._DROGI_ODMOWY_NAZW[kod], receive=receive, nav=nav)
+            zwiezly = zdanie_zwiezle(f"grid.drawer.refused.{kod}", skrot, way=droga)
+            if zwiezly is not None:
+                return zwiezly, True
+        return i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(skrot)) + droga, skrot is not powod
 
     def _zdanie_wylaczonych(self):
         """`(etykieta, droga, szczegół)` pustej szuflady przy przebiegach wyłączonych z podjęcia albo
@@ -6015,10 +6038,11 @@ class FramesView(QWidget):
         Powód odmowy rekoncyliacji mówi NAZWY plików (AR-387, decyzja CEO): pełne ścieżki z parametrów powodu
         (`plik pod obiema nazwami (X:\\…\\a.fits / …)`) zjadał wielokropek w środku zdania szuflady
         (`grid_selection.elizja_zdania`) - właśnie nazwy, po które człowiek patrzy. Krótka forma
-        (`wb_worker.sciezki_skrocone` i zdanie tą samą drogą `tekst_powodu`; kolizje nazw liczone na wszystkich
-        odmowach zdania - te same nazwy z różnych katalogów zostają pełnymi ścieżkami), a pełny powód każdej skróconej
-        odmowy idzie wierszem do szczegółu zdania (wskaźnik i podpowiedź pola, `EtykietaBledu.ustaw`). Powód bez
-        ścieżek - bez szczegółu."""
+        (`wb_worker.sciezki_skrocone`; kolizje nazw liczone na wszystkich odmowach zdania - te same nazwy z różnych
+        katalogów zostają pełnymi ścieżkami), a odmowa, którą rozstrzyga człowiek, mówi zwięźle - droga w zdaniu,
+        czas lokalny do sekundy, nazwa na końcu (`_czlon_odmowy`). Pełny powód każdej odmowy, której człon go nie mówi
+        (zwięzłe zdanie albo skrócona ścieżka), idzie wierszem do szczegółu zdania (wskaźnik i podpowiedź pola,
+        `EtykietaBledu.ustaw`) - tam czas UTC i pełne ścieżki. Człon równy pełnemu powodowi - bez szczegółu."""
         wlasna = not self.con.in_transaction
         if wlasna:
             self.con.execute("BEGIN")
@@ -6062,12 +6086,10 @@ class FramesView(QWidget):
             if not powody or czekajace or any(t[1] in KODY_PRZEJSCIOWE_REKONCYLIACJI for t in powody):
                 drogi.append(i18n.t("grid.drawer.names_held_way", receive=receive, nav=nav_d))
             for trojka, powod in zip(powody, odtworzone):   # jeden człon na odrębny powód
-                skrot = sciezki_skrocone(powod, obok=odtworzone)
-                czlon = i18n.t("grid.drawer.names_held_refused", reason=tekst_powodu(skrot))
-                if trojka[1] not in KODY_PRZEJSCIOWE_REKONCYLIACJI:
-                    czlon += i18n.t(self._DROGI_ODMOWY_NAZW[trojka[1]], receive=receive, nav=nav_d)
+                czlon, pelny = self._czlon_odmowy(trojka[1], powod, sciezki_skrocone(powod, obok=odtworzone),
+                                                  receive, nav_d)
                 drogi.append(czlon)
-                if skrot is not powod:               # skrót zmienił ścieżkę - pełny powód do szczegółu
+                if pelny:                            # człon nie mówi pełnego powodu - pełny do szczegółu
                     szczegoly.append(tekst_powodu(powod))
         etykieta = (i18n.t_plural("grid.drawer.pending_isolated", sum(p["n"] for p in izolowane)) if izolowane
                     else i18n.t_plural("grid.drawer.pending_names_held", n_nazw))

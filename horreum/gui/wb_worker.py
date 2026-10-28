@@ -1222,6 +1222,84 @@ def sciezki_skrocone(powod, *, obok=()):
     return _ze_skrotami(powod, _skrot)
 
 
+# Parametry czasu powodu: `mtime` pliku i `db_mtime` kopii w bazie (`scan._mtime_iso` - ISO UTC z mikrosekundami).
+_PARAMY_CZASU = ("mtime", "db_mtime")
+
+
+def czasy_lokalne(znaczniki, *, lokalny=None):
+    """Znaczniki czasu ISO (`scan._mtime_iso`) do zdania (AR-387) - lista w kolejności `znaczniki`: czas LOKALNY do
+    sekundy `RRRR-MM-DD GG:MM:SS` (człowiek porównuje go z zegarem Eksploratora). Czasy po dwóch stronach przestawienia
+    zegara (różne przesunięcia strefy: godzina podwójna jesienią, przeskok wiosną) idą Z PRZESUNIĘCIEM (`+02:00`) -
+    sam czas ścienny powtarza się albo odwraca porządek pary. Różne znaczniki, które do sekundy są równe, idą z pełną
+    precyzją (mikrosekundy) - zdanie „inny mtime” z dwoma identycznymi czasami kłamałoby; równe i w mikrosekundach
+    (ta sama chwila inaczej zapisana - rdzeń porównuje NAPISY) - napisy znak w znak. Znacznik bez strefy zostaje, jaki
+    jest (wzór `harvest_dialog.release_date_text`); obok znacznika ze strefą - napisy znak w znak (bez wspólnej skali).
+    Znacznik nieczytelny (nie tekst, nie ISO, poza zakresem czasu systemu) → None: wołający mówi pełną formą.
+    `lokalny` - chwila ze strefą → czas lokalny (domyślnie strefa systemu, `datetime.astimezone`)."""
+    from datetime import datetime
+    try:
+        chwile = [datetime.fromisoformat(z) for z in znaczniki]
+    except (TypeError, ValueError):
+        return None
+    if len({c.tzinfo is None for c in chwile}) > 1:
+        return list(znaczniki)
+    try:
+        chwile = [(lokalny or datetime.astimezone)(c) if c.tzinfo is not None else c for c in chwile]
+    except (OSError, OverflowError):
+        return None
+
+    def _strefa(c):          # `+HH:MM` składane ręcznie - `strftime` mówi je dopiero od Pythona 3.12 (repo: `>=3.9`)
+        sekundy = int(c.utcoffset().total_seconds())
+        minuty = abs(sekundy) // 60
+        return f"{'-' if sekundy < 0 else '+'}{minuty // 60:02d}:{minuty % 60:02d}"
+    strefy = len({c.utcoffset() for c in chwile}) > 1
+    rozne = len(set(znaczniki))
+    for wzor in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        teksty = [c.strftime(wzor) + (_strefa(c) if strefy else "") for c in chwile]
+        if len(set(teksty)) == rozne:
+            return teksty
+    return list(znaczniki)
+
+
+def zdanie_zwiezle(klucz, powod, **pola):
+    """Zwięzłe zdanie powodu z kodem (AR-387): wpis `klucz` katalogu (szuflada: `grid.drawer.refused.<kod>`) wypełniony
+    parametrami `powod` (zwykle już `sciezki_skrocone` - nazwy plików) i polami wołającego `pola` (droga człowieka;
+    pierwszeństwo przed parametrem powodu o tej samej nazwie) albo None - wtedy wołający mówi pełną formą. Parametr
+    tekstowy w języku UI drogą pełnej formy (`tekst_powodu`: powód zagnieżdżony z kodem, proza przez `czytelny_powod`),
+    liczba bez zmian, czasy (`_PARAMY_CZASU`) w czasie lokalnym - wszystkie czasy powodu razem (`czasy_lokalne`: remis
+    do sekundy patrzy na parę). Czas powodu bez wartości (kopia w bazie bez `mtime` - znacznik „przeczytaj od nowa”
+    `repo.mark_location_rescan`, powrót zapisu w miejscu) mówi wariant zdania `<klucz>.no_<pole>` - bez tego pola.
+    Pełny powód zostaje w bazie i w szczególe zdania.
+
+    TOTALNE jak `_zdanie_z_kodu` (kompletność sprawdzana z góry, nie łapaniem błędu): powód bez kodu, z uwagami (zwięzłe
+    zdanie by je zgubiło), wpis (albo wariant) brak albo nieprosty w języku UI, pole szablonu bez parametru, z None,
+    z listą albo z wartością spoza kontraktu (`param_ok`), czas nieczytelny - None, nigdy wyjątek w oknie."""
+    if not isinstance(powod, PowodPozycji):
+        return None
+    p = dict(powod.params)
+    klucz += "".join(f".no_{k}" for k in _PARAMY_CZASU if k in p and p[k] is None)
+    wpis = CATALOG.get(klucz)
+    if not isinstance(wpis, dict):
+        return None
+    szablon = wpis.get(i18n.current_lang()) or wpis.get(i18n.DEFAULT)
+    if not isinstance(szablon, str) or "notes" in p:
+        return None
+    z_powodu = {pole for _, pole, _, _ in string.Formatter().parse(szablon) if pole} - set(pola)
+    wartosci = dict(pola)
+    for pole in z_powodu:
+        v = p.get(pole)
+        if v is None or isinstance(v, (list, tuple)) or not param_ok(pole, v):
+            return None
+        wartosci[pole] = tekst_powodu(v) if isinstance(v, str) else v
+    czasowe = [k for k in _PARAMY_CZASU if p.get(k) is not None]
+    if z_powodu & set(czasowe):
+        czasy = czasy_lokalne([p[k] for k in czasowe])
+        if czasy is None:
+            return None
+        wartosci.update((k, c) for k, c in zip(czasowe, czasy) if k in z_powodu)
+    return i18n.t(klucz, **wartosci)
+
+
 def zdanie_bledu_wzoru(exc):
     """Zdanie paska dla odmowy wzoru nazwy (`naming.validate_template`/`compose_name`, AR-193, AR-368): powód z kodem
     `rename_tpl_*` w języku UI (`tekst_powodu`), a tekst `re.error` Pythona złego wyrażenia (parametr `detail` kodu

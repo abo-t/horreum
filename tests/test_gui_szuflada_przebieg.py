@@ -1083,18 +1083,19 @@ def _odmowa_obu_nazw(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
 def test_odmowa_rekoncyliacji_mowi_raz_kto_rozstrzyga(qapp, tmp_path, monkeypatch, lang):
-    """Odmowa rekoncyliacji, którą rozstrzyga człowiek (plik pod obiema nazwami): zdanie szuflady mówi „rozstrzyga
-    człowiek” RAZ (powód sam to mówi) i drogę człowieka („usuń jedną kopię, potem „Przyjmij nowe””). EN tak samo,
-    bez polskich znaków. Falsyfikator: szablon z ogonem („rozstrzyga człowiek - rozstrzyga człowiek”)."""
+    """Odmowa rekoncyliacji, którą rozstrzyga człowiek (plik pod obiema nazwami): zwięzłe zdanie szuflady (AR-387)
+    mówi drogę człowieka („usuń jedną kopię, potem „Przyjmij nowe””) RAZ, a „rozstrzyga człowiek” wcale - droga to
+    mówi. EN tak samo, bez polskich znaków. Falsyfikator: szablon z ogonem (droga albo „rozstrzyga człowiek” za
+    drogą)."""
     i18n.set_lang(lang)
     _path, con, v, _stara = _odmowa_obu_nazw(tmp_path, monkeypatch)
     try:
         v.set_writeback_busy(True)
         v.set_writeback_busy(False)
         tekst = v.drawer.result.text()
-        assert tekst.count(i18n.t("grid.drawer.names_way_taken").removeprefix(" - ")) == 1, tekst
-        assert i18n.t("grid.drawer.names_way_both", receive=i18n.t("pipeline.receive"),
-                      nav=i18n.t("nav.dostawa")) in tekst, tekst
+        assert i18n.t("grid.drawer.names_way_taken").removeprefix(" - ") not in tekst, tekst
+        assert tekst.count(i18n.t("grid.drawer.names_way_both", receive=i18n.t("pipeline.receive"),
+                                  nav=i18n.t("nav.dostawa"))) == 1, tekst
         if lang == "en":
             assert not set(tekst) & _POLSKIE, tekst
     finally:

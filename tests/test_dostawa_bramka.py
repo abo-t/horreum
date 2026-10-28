@@ -28,6 +28,20 @@ def test_powod_odmowy_biegu_kolejnosc_i_brak():
     assert t(baza=True, bieg=False, zapis=False) is None
 
 
+def test_powod_odmowy_przy_samej_sondzie_zrodla_nie_odsyla_do_postepu():
+    """AR-432: „bieg” będący samą sondą źródła mówi, że Dostawa sprawdza folder - strona Dostawy nie ma wtedy paska
+    ani zdania etapu, więc zdanie biegu („postęp na stronie Dostawy”) byłoby nieprawdą. Kolejność ważności bez zmian:
+    brak bazy przed sondą, sonda przed zapisem; `sonda` bez biegu niczego nie zmienia. Mutant: gałąź biegu bez `sonda`."""
+    t = dostawa_bramka.powod_odmowy_biegu
+    sonda = i18n.t("pipeline.refuse.source_probe")
+    assert sonda != i18n.t("pipeline.refuse.delivery_running")
+    assert t(baza=True, bieg=True, zapis=False, sonda=True) == sonda
+    assert t(baza=True, bieg=True, zapis=True, sonda=True) == sonda
+    assert t(baza=False, bieg=True, zapis=False, sonda=True) == i18n.t("pipeline.refuse.no_db")
+    assert t(baza=True, bieg=False, zapis=False, sonda=True) is None
+    assert t(baza=True, bieg=True, zapis=False, sonda=False) == i18n.t("pipeline.refuse.delivery_running")
+
+
 def test_etykieta_gestu_kopii_trzy_napisy():
     """Fakty i bajty naraz - napis obu robót; same bajty - „Sprawdź bajty…”; same fakty - „Zbierz fakty…”.
     Falsyfikator: gałąź samych bajtów przed gałęzią obu robót (fakty giną z napisu)."""

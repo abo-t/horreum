@@ -906,9 +906,9 @@ def test_wciagnij_przy_zapisie_zbiorow_odmawia_bez_budowy_dostawy(qapp, tmp_path
 
 def test_wciagnij_przy_sondzie_zrodla_zbudowanej_dostawy_odmawia_stanem_widoku(qapp, tmp_path, monkeypatch, ustawienia):
     """AR-335: Dostawa zbudowana, w biegu sama sonda źródła („Wskaż katalog…”, etap `probe` bez bazy) - wątek
-    widoku jest, a `running_changed` nie pada, więc zatrzask biegu gospodarza stoi na fałszu. Odmowa biegu przychodzi
-    ze stanu widoku (`PipelineView.powod_odmowy_biegu`), okno żniw się nie otwiera. Falsyfikator: gospodarz pyta
-    własnych zatrzasków także przy zbudowanej Dostawie."""
+    widoku jest, a `running_changed` nie pada, więc zatrzask biegu gospodarza stoi na fałszu. Odmowa sondy przychodzi
+    ze stanu widoku (`PipelineView.powod_odmowy_biegu`; zdanie sondy, nie biegu - AR-432), okno żniw się nie otwiera.
+    Falsyfikator: gospodarz pyta własnych zatrzasków także przy zbudowanej Dostawie."""
     import threading
     from PySide6.QtWidgets import QFileDialog
     from horreum.gui import home as home_mod, i18n
@@ -931,7 +931,7 @@ def test_wciagnij_przy_sondzie_zrodla_zbudowanej_dostawy_odmawia_stanem_widoku(q
         assert pipeline._thread is not None and not win._dostawa_w_biegu
         win.home_view.akcje_wiecej[home_mod.WIECEJ_ZNIWA].trigger()
         assert okna == []
-        assert str(win._pelny_komunikat) == i18n.t("pipeline.refuse.delivery_running")
+        assert str(win._pelny_komunikat) == i18n.t("pipeline.refuse.source_probe")
     finally:
         puszczona.set()
         _czekaj(lambda: win._gotowy("pipeline_view")._thread is None, "koniec sondy źródła")

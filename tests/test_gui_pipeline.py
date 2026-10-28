@@ -1825,7 +1825,7 @@ def test_odmowy_wejsc_stoja_samodzielnie_od_wielkiej_litery(jezyk):
     i18n.set_lang(jezyk)
     try:
         for klucz in ("pipeline.refuse.no_db", "pipeline.refuse.running", "pipeline.refuse.delivery_running",
-                      "pipeline.refuse.writeback", "pipeline.refuse.mark_stale"):
+                      "pipeline.refuse.source_probe", "pipeline.refuse.writeback", "pipeline.refuse.mark_stale"):
             zdanie = i18n.t(klucz)
             assert zdanie[:1].isupper(), (klucz, zdanie)
             assert "\u2014" not in zdanie and (jezyk == "pl" or "\u201e" not in zdanie), (klucz, zdanie)

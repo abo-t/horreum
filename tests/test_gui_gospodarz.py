@@ -67,7 +67,7 @@ def _bez_watkow(monkeypatch):
 def _odmowy_zniw():
     """Zdania odmowy złotej akcji w bieżącym języku - pozycja bez podpowiedzi pokazuje tekst akcji (Qt), nie pusty."""
     return {i18n.t("pipeline.refuse.delivery_running"), i18n.t("pipeline.refuse.writeback"),
-            i18n.t("pipeline.refuse.no_db")}
+            i18n.t("pipeline.refuse.no_db"), i18n.t("pipeline.refuse.source_probe")}
 
 
 def _menu_wiecej(win):
@@ -196,7 +196,7 @@ def test_menu_wiecej_przy_sondzie_zrodla_gasi_wciagnij_z_powodem_biegu(qapp, tmp
         QTest.mouseClick(pv.btn_pick, Qt.LeftButton)
         assert pv._thread is not None and not win._dostawa_w_biegu, "sonda źródła nie ruszyła - test nie mierzy reguły"
         _klik_nav(win, NAV_DOM)
-        assert _stan_pozycji_zniw(win) == (False, i18n.t("pipeline.refuse.delivery_running"))
+        assert _stan_pozycji_zniw(win) == (False, i18n.t("pipeline.refuse.source_probe"))   # nie „postęp na stronie”
         _wybierz_zniwa(win)
         assert okna == []
         puszczona.set()

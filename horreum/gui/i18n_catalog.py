@@ -4632,6 +4632,12 @@ CATALOG = {
         "pl": "Etap Dostawy w biegu - postęp na stronie Dostawy; przyjmij po jego zakończeniu",
         "en": "An Intake stage is running - progress is on the Intake page; receive after it finishes",
     },
+    # Sonda źródła („Wskaż katalog…”) nie ma na stronie Dostawy ani paska, ani zdania etapu - odmowa nie odsyła tam po
+    # postęp (AR-432).
+    "pipeline.refuse.source_probe": {
+        "pl": "Dostawa sprawdza folder źródła - przyjmij po zakończeniu sprawdzania",
+        "en": "Intake is checking the source folder - receive after the check finishes",
+    },
     "pipeline.refuse.writeback": {
         "pl": "Trwa zapis nagłówków do plików - etapy Dostawy ruszą po jego zakończeniu",
         "en": "Header write to files in progress - Intake stages start after it finishes",

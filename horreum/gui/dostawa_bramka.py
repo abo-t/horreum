@@ -18,13 +18,17 @@ from __future__ import annotations
 from horreum.gui import i18n
 
 
-def powod_odmowy_biegu(*, baza, bieg, zapis):
+def powod_odmowy_biegu(*, baza, bieg, zapis, sonda=False):
     """Powód odmowy sekwencji „all” (klucz katalogu w bieżącym języku) albo `None`, gdy wolno. Kolejność = ważność:
-    brak bazy (`baza` fałszywe), bieg Dostawy w toku (`bieg`), zapis nagłówków do plików w toku (`zapis`)."""
+    brak bazy (`baza` fałszywe), bieg Dostawy w toku (`bieg`), zapis nagłówków do plików w toku (`zapis`).
+
+    `sonda` - bieżący „bieg” to sama sonda źródła („Wskaż katalog…”, etap bez bazy): strona Dostawy nie pokazuje wtedy
+    ani paska, ani zdania etapu, więc odmowa nie odsyła do postępu na niej (AR-432), tylko mówi, że Dostawa sprawdza
+    folder. Podaje ją wyłącznie zbudowany widok - gospodarz bez strony Dostawy sondy nie ma."""
     if not baza:
         return i18n.t("pipeline.refuse.no_db")
     if bieg:
-        return i18n.t("pipeline.refuse.delivery_running")
+        return i18n.t("pipeline.refuse.source_probe" if sonda else "pipeline.refuse.delivery_running")
     if zapis:
         return i18n.t("pipeline.refuse.writeback")
     return None

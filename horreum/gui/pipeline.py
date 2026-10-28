@@ -1427,7 +1427,8 @@ class PipelineView(QWidget):
         etapu bez bazy (`ETAPY_BEZ_BAZY`: `_thread` jest, a `running_changed` nie pada); gospodarz bez zbudowanej Dostawy
         podaje swoje zatrzaski, zamiast budować stronę dla samego powodu."""
         return dostawa_bramka.powod_odmowy_biegu(baza=self._db_path is not None, bieg=self._thread is not None,
-                                                 zapis=self._writeback_busy)
+                                                 zapis=self._writeback_busy,
+                                                 sonda=self._thread is not None and not self._bieg_pisze)
 
     def _pick_and_scan(self, stage):
         """Pytanie o katalog (pierwsza dostawa albo źródło niedostępne), zapamiętanie go jak

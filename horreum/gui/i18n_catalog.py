@@ -3687,6 +3687,15 @@ CATALOG = {
                "many": "Ostatnia zmiana nazw z {day}: {n} plików - „{undo}” przywraca stare nazwy"},
         "en": {"one": "Last name change on {day}: {n} file - “{undo}” restores the old names",
                "other": "Last name change on {day}: {n} files - “{undo}” restores the old names"}},
+    # AR-389 (decyzja CEO): po „Cofnij” przebiegu kart cofniętego w całości ten sam przycisk cofa starszy zapis TYCH
+    # SAMYCH plików (`FramesView._postaw_cofnij_poprzedni`); `day` - data lokalna RRRR-MM-DD, kotwicę „(commit N)”
+    # zdania dokleja `_zdanie_przy_cofnij`.
+    "grid.drawer.undo_older": {"pl": "Cofnij poprzedni zapis (commit {id})",
+                               "en": "Undo the previous write (commit {id})"},
+    "grid.drawer.undo_older_n": {"pl": "Cofnij poprzedni zapis (commity {ids})",
+                                 "en": "Undo the previous write (commits {ids})"},
+    "grid.drawer.older_write": {"pl": "Starszy zapis kart tych plików z {day}",
+                                "en": "Older card write of these files on {day}"},
     "grid.drawer.retry_tip": {
         "pl": "Zmiany, których zapis się nie udał, a plików nie ruszył, wracają do szuflady - „{commit}” "
               "spróbuje jeszcze raz",

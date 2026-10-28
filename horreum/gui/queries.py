@@ -5794,6 +5794,83 @@ def odrzucenia_szuflady(con, *, ts, actor):
             wynik[r["klinga"]] = int(r["n"])
     return wynik
 
+
+# ---- „Cofnij poprzedni zapis” szuflady (AR-389) ----
+
+def poprzedni_zapis_kart(con, run_id):
+    """Starszy zapis kart TYCH SAMYCH plików do „Cofnij poprzedni zapis” po „Cofnij” przebiegu kart `run_id`, który cofnął
+    się w całości (AR-389, decyzja CEO: tylko starszy zapis tych plików, nigdy dowolny starszy przebieg):
+    `{"run_id", "kiedy", "zakres"}` - przebieg poprzednika, `commits.applied_at` jego najnowszego commitu i zakres
+    `writeback.przebieg_do_cofniecia` - albo None. Dawniej po takim „Cofnij” starszy zapis cofał wyłącznie CLI
+    (`header-fix --undo N`).
+
+    Reguła (każde niespełnienie - None, BEZ szukania dalej):
+      * w szufladzie nic nie czeka (`_przebiegi_kart_szuflady`, `_przebiegi_nazw_szuflady` - te same predykaty co
+        `ostatni_zapis_szuflady`): żywe „Cofnij” wyłączyłoby zdanie o czekających;
+      * przebieg `run_id` nie ma już czego cofać (`przebieg_do_cofniecia` None);
+      * poprzednik = przebieg commitu o NAJNOWSZYM `id` mniejszym od najstarszego commitu `run_id`, z backupem na L - BEZ
+        filtra odcisku (filtr wybrałby zapis starszy niż bezpośrednio poprzedni, gdy jego wynik ktoś nadpisał). L =
+        lokacje backupów `run_id` bez `unreplaced_at` - pliki, które zapis naprawdę zmienił;
+      * poprzednik spoza przebiegów zmiany obiektu (`object_change_run` - mają własne okno);
+      * (a) lokacje CAŁEGO przebiegu poprzednika (wszystkich jego commitów, backupy bez `unreplaced_at`) to DOKŁADNIE L -
+        najwęższe odczytanie „tych samych plików” (poprzednik na części plików cofniętego zapisu też odpada: zdanie
+        „Starszy zapis kart tych plików” mówiłoby o plikach, których klik nie cofa),
+        (b) na każdej z nich najnowszy backup poprzednika opisuje lokację (`post_hash IS location.header_hash`);
+      * (c) zakres poprzednika obejmuje KAŻDĄ jego lokację (`zatwierdzone + do_sprawdzenia` = liczba lokacji, `otwarte`
+        0): poprzednik cofnięty kiedyś w części (plik z dowodem zakończenia, którego wynik wrócił potem z zewnątrz)
+        cofnąłby się tylko na pozostałych plikach - para stanów, której nigdy nie było.
+    JEDEN KROK: szuflada woła tę funkcję wyłącznie po „Cofnij” przebiegu (tryb `"macro"`), nigdy po cofnięciu samego
+    poprzednika - starszy łańcuch zostaje CLI.
+
+    JEDNA MIGAWKA WAL na wszystkie odczyty, także obu zakresów (własna transakcja odczytu zamykana wycofaniem; w
+    transakcji wołającego - w niej; wzór `ostatni_zapis_szuflady`, `writeback._fakty_przebiegu` wchodzi w tę samą
+    transakcję). Zmierzone na kopii pf4 (2026-10-28, mediany z 31): przebieg 1 lokacji 2,6 ms, 250 lokacji z poprzednikiem
+    56 lokacji 18,3 ms."""
+    from horreum import writeback          # lazy: rdzeń pisarza ciągnie astropy (wołający już go ma)
+    wlasna = not con.in_transaction
+    if wlasna:
+        con.execute("BEGIN")
+    try:
+        if _przebiegi_kart_szuflady(con) or _przebiegi_nazw_szuflady(con):
+            return None
+        if writeback.przebieg_do_cofniecia(con, run_id) is not None:
+            return None
+        wybor = con.execute(
+            "SELECT p.commit_id, c.run_id FROM header_backups p JOIN commits c ON c.id = p.commit_id "
+            "WHERE p.unreplaced_at IS NULL AND p.commit_id < (SELECT min(id) FROM commits WHERE run_id = ?) "
+            "  AND p.location_id IN (SELECT hb.location_id FROM header_backups hb "
+            "                        JOIN commits k ON k.id = hb.commit_id "
+            "                        WHERE k.run_id = ? AND hb.unreplaced_at IS NULL) "
+            "ORDER BY p.commit_id DESC LIMIT 1", (run_id, run_id)).fetchone()
+        if wybor is None:
+            return None
+        poprzedni = wybor[1]
+        if con.execute("SELECT 1 FROM object_change_run WHERE run_id = ?", (poprzedni,)).fetchone() is not None:
+            return None
+        lokacje = {r[0] for r in con.execute(
+            "SELECT DISTINCT hb.location_id FROM header_backups hb JOIN commits c ON c.id = hb.commit_id "
+            "WHERE c.run_id = ? AND hb.unreplaced_at IS NULL", (run_id,))}
+        opisuje = {}                       # lokacja poprzednika → czy jego NAJNOWSZY backup na niej opisuje lokację
+        for lid, zgodny in con.execute(
+                "SELECT hb.location_id, hb.post_hash IS l.header_hash FROM header_backups hb "
+                "JOIN commits c ON c.id = hb.commit_id JOIN location l ON l.id = hb.location_id "
+                "WHERE c.run_id = ? AND hb.unreplaced_at IS NULL "
+                "ORDER BY hb.location_id, hb.commit_id DESC, hb.id DESC", (poprzedni,)):
+            opisuje.setdefault(lid, bool(zgodny))
+        if set(opisuje) != lokacje or not all(opisuje.values()):
+            return None
+        zakres = writeback.przebieg_do_cofniecia(con, poprzedni)
+        if (zakres is None or zakres.otwarte
+                or zakres.zatwierdzone + zakres.do_sprawdzenia != len(opisuje)):
+            return None
+        kiedy = con.execute("SELECT applied_at FROM commits WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+                            (poprzedni,)).fetchone()[0]
+        return {"run_id": poprzedni, "kiedy": kiedy, "zakres": zakres}
+    finally:
+        if wlasna:
+            con.rollback()                 # odczyt - nic do zatwierdzenia
+
+
 # ---- recepty paska: wpisy czekające w szufladach (AR-297) ----
 
 def klatki_w_szufladzie(con, frame_ids, keyword):

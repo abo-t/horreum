@@ -109,6 +109,110 @@ def _fmt_f(v):
     return "-" if v is None else f"{v:g}"
 
 
+# ---- wspólny przycisk „Cofnij” szuflady (AR-389) ----
+
+def _okno_przezbrojenia_ms():
+    """Czas, przez który przycisk przezbrojony na „Cofnij poprzedni zapis” nie przyjmuje kliku (AR-389): dwa interwały
+    dwukliku, co najmniej sekunda - zmierzone natywnie: cel zmieniał się 0,1 s po kliku pod kursorem, a drugi klik „na
+    upewnienie” po 0,7 s cofał starszy zapis."""
+    return max(1000, 2 * QGuiApplication.styleHints().mouseDoubleClickInterval())
+
+
+class _PrzyciskCofnij(QPushButton):
+    """Wspólny przycisk „Cofnij” szuflady: ten sam widżet zmienia cel (`FramesView._ensure_undo_button` - przebieg kart,
+    nazw, poprzedni zapis tych samych plików), więc gest zaczęty przed zmianą celu nie klika nowego celu. Straże
+    (Qt 6.9.2):
+
+      * drugie naciśnięcie DWUKLIKU lewym nie jest kliknięciem: Qt doręcza je wyłącznie jako `MouseButtonDblClick`, a
+        domyślne `QWidget.mouseDoubleClickEvent` woła `mousePressEvent` - bez straży dwuklik dawał dwa `clicked`;
+      * naciśnięcie sprzed przezbrojenia (`uzbroj`) jest unieważnione do zwolnienia: `uzbroj` gasi `down` (zwolnienie
+        myszy i spacji klika wyłącznie przy `down`), ale Qt trzyma stan „wciśnięty”, a ruch myszy nad przyciskiem
+        przywraca `down` - ruch takiego naciśnięcia jest połykany;
+      * OKNO PRZEZBROJENIA (`uzbroj(..., okno_ms=…)`, tryb „poprzedni”): przycisk jest przez nie szczerze wygaszony -
+        klik albo spacja „na upewnienie” chwilę po pierwszym nie cofa starszego zapisu. Prośbę widoku o stan
+        (`setEnabled` - etap Dostawy, cudzy zapis) przycisk pamięta i stosuje dopiero po oknie, więc koniec etapu w oknie
+        go nie włącza, a okno skończone w biegu zapisu nie włącza go wbrew niemu. Fokus schodzi z przycisku na czas okna
+        (wygaszenie przeniosłoby go na następny widżet i druga spacja trafiłaby tam) i wraca po nim, gdy nikt go nie
+        przejął. Naciśnięcie i klawisz w oknie połyka też straż zdarzeń - bezpiecznik, gdyby ktoś włączył przycisk
+        z pominięciem `setEnabled` tej klasy."""
+
+    def __init__(self, tekst, parent=None):
+        super().__init__(tekst, parent)
+        self._uzbrojenie = 0               # numer uzbrojenia (rośnie przy każdej zmianie celu)
+        self._nacisniety_przy = None       # numer uzbrojenia z chwili naciśnięcia lewym; None - brak naciśnięcia
+        self._wlaczony = True              # stan, o który prosi widok (`setEnabled`)
+        self._fokus_po_oknie = False
+        self._okno = QTimer(self)
+        self._okno.setSingleShot(True)
+        self._okno.timeout.connect(self._koniec_okna)
+
+    def uzbroj(self, tekst, *, okno_ms=0):
+        """Nowy cel przycisku: etykieta, gest w toku unieważniony (zwolnienie go nie kliknie); `okno_ms` - okno
+        przezbrojenia (wygaszony, bez fokusu), 0 - bez okna (bieżące okno schodzi, stan wraca do prośby widoku)."""
+        self._uzbrojenie += 1
+        self.setText(tekst)
+        self.setDown(False)
+        if okno_ms:
+            self._fokus_po_oknie = self._fokus_po_oknie or self.hasFocus()
+            if self.hasFocus():
+                self.clearFocus()
+            QPushButton.setEnabled(self, False)
+            self._okno.start(okno_ms)
+        elif self._okno.isActive():
+            self._okno.stop()
+            self._fokus_po_oknie = False
+            QPushButton.setEnabled(self, self._wlaczony)
+
+    def setEnabled(self, wlaczony):
+        """Prośba widoku o stan przycisku - w oknie przezbrojenia czeka na jego koniec (`_koniec_okna`)."""
+        self._wlaczony = bool(wlaczony)
+        if not self._okno.isActive():
+            QPushButton.setEnabled(self, self._wlaczony)
+
+    def _koniec_okna(self):
+        QPushButton.setEnabled(self, self._wlaczony)
+        if (self._fokus_po_oknie and self._wlaczony and self.isVisible()
+                and self.window().focusWidget() is None):
+            self.setFocus(Qt.OtherFocusReason)
+        self._fokus_po_oknie = False
+
+    def _sprzed_uzbrojenia(self):
+        return self._nacisniety_przy is not None and self._nacisniety_przy != self._uzbrojenie
+
+    def mousePressEvent(self, e):
+        if self._okno.isActive():
+            e.accept()                     # bezpiecznik okna przezbrojenia
+            return
+        if e.button() == Qt.LeftButton:
+            self._nacisniety_przy = self._uzbrojenie
+        super().mousePressEvent(e)
+
+    def keyPressEvent(self, e):
+        if self._okno.isActive() and e.key() in (Qt.Key_Space, Qt.Key_Select):
+            e.accept()                     # bezpiecznik okna przezbrojenia
+            return
+        super().keyPressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            super().mouseDoubleClickEvent(e)
+            return
+        e.accept()                         # drugie naciśnięcie dwukliku lewym to nie kliknięcie
+
+    def mouseMoveEvent(self, e):
+        if self._sprzed_uzbrojenia():
+            # Ruch naciśnięcia sprzed przezbrojenia połknięty: `super()` przywróciłby `down` nad przyciskiem. Stan
+            # podświetlenia pod kursorem odświeża następny ruch po zwolnieniu - zamierzone.
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._nacisniety_przy = None   # gest skończony; Qt zeruje stan „wciśnięty”, bez `down` nie klika
+        super().mouseReleaseEvent(e)
+
+
 class FramesView(QWidget):
     """Widok „Klatki": panel Pól | (perspektywa + filtr + PASEK ZBIORU + panele kling + grid)
     + poczekalnia zmian (szuflada stagingu). Kontrakt montażu `MainWindow`: `__init__(con, now_fn,
@@ -256,7 +360,7 @@ class FramesView(QWidget):
         # Stan renamu — CZTERY zmienne (R1 #1 + R2 #1): run aktywnego stagingu, flaga „skommitowany"
         # (re-stage po commicie MINTUJE nowy run, nie kasuje wierszy 'applied'=undo), OSOBNY cel „Cofnij"
         # (przechwycony przy commicie — bez niego mint przekierowałby żywy Cofnij na pusty run = złudzenie),
-        # tryb dispatchu współdzielonego „Cofnij" ({None,macro,rename}).
+        # tryb dispatchu współdzielonego „Cofnij" ({None,macro,rename,poprzedni} - `poprzedni`: AR-389).
         self._rename_run_id = None
         self._rename_run_committed = False
         self._undo_rename_run_id = None
@@ -6439,8 +6543,9 @@ class FramesView(QWidget):
         bez żywego „Cofnij” samo zdanie. Etykieta „Zatwierdzono/Przemianowano: N” identyfikatora nie niesie
         (AR-255), więc każde zdanie, które przy żywym przycisku zastępuje wynik zapisu - ogon gestów
         izolacji i kopii wiodącej, błąd operacji, cofnięcie niedomknięte, błąd definicji makra - gubiło
-        kotwicę `header-fix --undo N` / cofnięcia nazw po restarcie, choć przycisk dalej ją cofał."""
-        if self._undo_mode == "macro":
+        kotwicę `header-fix --undo N` / cofnięcia nazw po restarcie, choć przycisk dalej ją cofał. Tryb `poprzedni`
+        (AR-389) - commit starszego zapisu, jak makro."""
+        if self._undo_mode in ("macro", "poprzedni"):
             return zdanie + self._kotwica_commitow(self._undo_commity)
         if self._undo_mode == "rename":
             return zdanie + i18n.t("grid.wb.run_id", id=self._undo_rename_run_id)
@@ -6576,16 +6681,17 @@ class FramesView(QWidget):
         self._podglad_po_zapisie = self.model._preview
         self.table.setColumnHidden(kolumna, True)
 
-    def _install_undo(self, run_id, zakres, summary):
+    def _install_undo(self, run_id, zakres, summary, *, tryb="macro"):
         """Po zapisie makra szuflada oferuje jednorazowe „Cofnij" CAŁEGO przebiegu `run_id` (AR-345): cel to
         commity `zakres` (`writeback.ZakresCofniecia`) ZAMROŻONE teraz - wykonawca cofa dokładnie je
         (`undo_run`), nie commity odczytane przy kliku. Etykieta „Zatwierdzono: N” (pliki z potwierdzoną
         podmianą) albo, bez takich, „Do sprawdzenia: K” zamiast pustostanu, by nie przeczyła wynikowi obok
         (wizytator D2) - bez identyfikatora commitu: niesie go zdanie wyniku w tym samym wierszu (AR-255),
-        doklejony w jednym miejscu (`_zdanie_przy_cofnij`, AR-276) - `summary` przychodzi bez niego."""
+        doklejony w jednym miejscu (`_zdanie_przy_cofnij`, AR-276) - `summary` przychodzi bez niego.
+        `tryb` - `"poprzedni"` dla starszego zapisu tych samych plików (AR-389, `_postaw_cofnij_poprzedni`)."""
         self._undo_run_id = run_id
         self._undo_commity = tuple(zakres.commity)
-        self._undo_mode = "macro"                        # dispatch współdzielonego „Cofnij" (R1 #3)
+        self._undo_mode = tryb                           # dispatch współdzielonego „Cofnij" (R1 #3)
         etykieta = (i18n.t("grid.wb.committed_label", n=zakres.zatwierdzone) if zakres.zatwierdzone
                     else i18n.t("grid.wb.to_check_label", n=zakres.do_sprawdzenia + zakres.otwarte))
         self.drawer.set_count(0, result=self._zdanie_przy_cofnij(summary), label=etykieta)
@@ -6595,11 +6701,32 @@ class FramesView(QWidget):
 
     def _ensure_undo_button(self):
         """Współdzielony przycisk „Cofnij" (tworzony RAZ, stabilny handler → dispatch po `_undo_mode`;
-        bez churnu connect/disconnect, który sypał RuntimeWarning — wzorzec makra)."""
+        bez churnu connect/disconnect, który sypał RuntimeWarning - wzorzec makra). Każde wołanie to
+        UZBROJENIE (AR-389): etykieta trybu (`_etykieta_cofnij` - „Cofnij poprzedni zapis (commit N)” albo
+        „Cofnij”, także po trybie `poprzedni`), a gest zaczęty przed nim nie klika nowego celu (`_PrzyciskCofnij`).
+        Tryb `poprzedni` dostaje okno przezbrojenia (`_okno_przezbrojenia_ms`): klik „na upewnienie” po „Cofnij” trafiał
+        w nowy cel."""
         if not hasattr(self, "_undo_btn"):
-            self._undo_btn = QPushButton(i18n.t("grid.action.undo"))
+            self._undo_btn = _PrzyciskCofnij(i18n.t("grid.action.undo"))
             self._undo_btn.clicked.connect(self._dispatch_undo)
             self.drawer.layout().addWidget(self._undo_btn)
+        self._undo_btn.uzbroj(self._etykieta_cofnij(),
+                              okno_ms=_okno_przezbrojenia_ms() if self._undo_mode == "poprzedni" else 0)
+
+    def _etykieta_cofnij(self):
+        """Etykieta wspólnego przycisku dla bieżącego trybu: `poprzedni` (AR-389) - „Cofnij poprzedni zapis (commit
+        N)” z zakresu zamrożonego przy uzbrojeniu; każdy inny tryb - „Cofnij”."""
+        if self._undo_mode != "poprzedni":
+            return i18n.t("grid.action.undo")
+        return self._etykieta_poprzedniego(self._undo_commity)
+
+    @staticmethod
+    def _etykieta_poprzedniego(commity):
+        """„Cofnij poprzedni zapis (commit N)” / „(commity N, M)” - przebieg poprzednika z kilku commitów (zapis
+        przerwany i dokończony) niesie wszystkie, jak kotwica zdania (`_kotwica_commitow`)."""
+        if len(commity) == 1:
+            return i18n.t("grid.drawer.undo_older", id=commity[0])
+        return i18n.t("grid.drawer.undo_older_n", ids=", ".join(str(c) for c in commity))
 
     def _dismiss_undo(self):
         """Nowa operacja stagingu UNIEWAŻNIA „Cofnij" poprzedniego commitu (transient undo wygasa - inny
@@ -6618,7 +6745,8 @@ class FramesView(QWidget):
 
     def _dispatch_undo(self):
         """Współdzielony „Cofnij" woła undo AKTYWNEJ klingi wg `_undo_mode` (R1 #3, init None). Cofnięcie
-        gasi drogę ponowienia nieudanych (AR-347) - ponowiony zapis po cofnięciu przeczyłby intencji."""
+        gasi drogę ponowienia nieudanych (AR-347) - ponowiony zapis po cofnięciu przeczyłby intencji. Tryby
+        `macro` i `poprzedni` (AR-389) cofają zakres przebiegu kart zamrożony przy uzbrojeniu (`_undo_commity`)."""
         self._do_ponowienia = None
         self.drawer.set_retry(0)
         if self._undo_mode == "rename":
@@ -6640,10 +6768,15 @@ class FramesView(QWidget):
         Ponowienie jest bezpieczne: pliki już cofnięte rdzeń odda jako zablokowane „już cofnięte".
         Zdanie i regułę „Cofnij zostaje” daje `wb_worker.ogon_cofniecia` - jedna dla trzech
         powierzchni (AR-160); zostaje też przy cofnięciu PRZERWANYM (`cancelled`): pętla rdzenia
-        staje przed resztą backupów, więc commit nie jest w pełni cofnięty."""
+        staje przed resztą backupów, więc commit nie jest w pełni cofnięty. Recepta ponowienia nazywa przycisk,
+        który stoi (`_etykieta_cofnij` - także „Cofnij poprzedni zapis (commit N)”).
+
+        „COFNIJ POPRZEDNI ZAPIS” (AR-389): po cofnięciu DOMKNIĘTYM z trybu `macro` ten sam przycisk cofa starszy
+        zapis TYCH SAMYCH plików, gdy taki jest (`_postaw_cofnij_poprzedni`) - przycisk zostaje, zmienia cel. Jeden
+        krok: po cofnięciu z trybu `poprzedni` szuflada o kolejny zapis nie pyta (starszy łańcuch - CLI)."""
         from horreum.gui.wb_worker import (ogon_cofniecia,   # wspólny ogon cofnięcia (AR-160)
                                            podpowiedz_cofniecia)
-        msg, ponow = ogon_cofniecia(res, i18n.t("grid.action.undo"))
+        msg, ponow = ogon_cofniecia(res, self._etykieta_cofnij())
         # Szczegół systemu cofnięcia (AR-168) i numery operacji zapisu w miejscu z nazwą pliku (AR-281):
         # zdanie mówi gest, nie numer - jedyne miejsce numeru jest pod kursorem.
         szczegol = podpowiedz_cofniecia(res)
@@ -6654,10 +6787,20 @@ class FramesView(QWidget):
             # zdanie, które tu zastępuje zdanie wyniku commitu (kotwica `header-fix --undo`), raz.
             self.drawer.set_result(self._zdanie_przy_cofnij(msg))
         else:
-            self._undo_btn.setVisible(False)
+            tryb = self._undo_mode
             self._undo_mode = None
-            self.drawer.set_commit_actions_visible(True)  # przywróć akcje po cofnięciu (#5)
-            self._pusta(result=msg)
+            # Przycisk NIE chowa się, gdy staje „Cofnij poprzedni zapis”: ten sam widżet zostaje, a przezbrojenie
+            # (`_ensure_undo_button`) unieważnia gest w toku samo. Wyjątek odczytu spoza błędu bazy (EXPECT rdzenia)
+            # nie zostawia widocznego przycisku przy trybie None z zakresem cofniętego przebiegu.
+            try:
+                postawiony = tryb == "macro" and self._postaw_cofnij_poprzedni(self._undo_run_id, msg)
+            except BaseException:
+                self._undo_btn.setVisible(False)
+                raise
+            if not postawiony:
+                self._undo_btn.setVisible(False)
+                self.drawer.set_commit_actions_visible(True)  # przywróć akcje po cofnięciu (#5)
+                self._pusta(result=msg)
         self._oznacz_przeladowanie_z_zaznaczeniem()      # zbiór ten sam - zaznaczenie wraca (AR-187)
         self._przeladuj_po_gescie(i18n.t("grid.wb.undo_status", msg=msg), poza=False,   # AR-84
                                   szczegol=szczegol)     # ...i w podpowiedzi paska (AR-218)
@@ -6668,6 +6811,44 @@ class FramesView(QWidget):
         # „Plik po przerwanym zapisie". Licz ze stanu, jak `_on_wb_failed`, zamiast zgadywać.
         if res.restored or res.failed:
             self.stan_porzadkow_changed.emit()
+
+    def _postaw_cofnij_poprzedni(self, run_id, wynik):
+        """Gest trybu `poprzedni` (AR-389): po cofnięciu DOMKNIĘTYM przebiegu kart `run_id` ten sam przycisk dostaje
+        cel „Cofnij poprzedni zapis (commit N)” - starszy zapis TYCH SAMYCH plików (`queries.poprzedni_zapis_kart`) -
+        a zdanie `wynik` (cofnięcia) zyskuje człon „Starszy zapis kart tych plików z RRRR-MM-DD” z kotwicą commitu
+        (`_install_undo` → `_zdanie_przy_cofnij`). True, gdy przycisk przezbrojono. Dawniej starszy zapis cofał
+        wyłącznie CLI (`header-fix --undo N`).
+
+        Decyzja pod blokadą szuflady, jak `_postaw_cofnij_ostatniego` (wzór AR-345: odczyt, blokada, ponowny odczyt
+        pod nią): cudza blokada (inne okno, CLI w biegu) - bez „poprzedni” i BEZ odroczenia, zdanie cofnięcia zostaje.
+        Blokadę wziętą tu oddaje zaraz po odczycie - żywe „Cofnij” żyje bez niej. Bez „Ponów nieudane” starszego
+        przebiegu (`_dispatch_undo` zdjął je przed cofnięciem). Błąd bazy - False (odczyt pomocniczy nie wywraca ogona
+        cofnięcia, wzór `_zakres_z_bazy`). NIE odczyt „ostatniego zapisu”: pytamy o poprzednika przebiegu, którego
+        cofnięcie rdzeń właśnie domknął."""
+        from horreum.gui.wb_worker import czlony_niepewnych
+        try:
+            if queries.poprzedni_zapis_kart(self.con, run_id) is None:
+                return False
+            wzieta = self._blokada_szuflady is None or not self._blokada_szuflady.isLocked()
+            if self._wez_szuflade() is not None:
+                return False
+            try:
+                poprzedni = queries.poprzedni_zapis_kart(self.con, run_id)
+            finally:
+                if wzieta:
+                    self._zwolnij_szuflade()
+        except sqlite3.Error:
+            return False
+        if poprzedni is None:
+            return False
+        zakres = poprzedni["zakres"]
+        zdanie = " · ".join(z for z in (wynik, i18n.t("grid.drawer.older_write",
+                                                       day=self._dzien_zapisu(poprzedni["kiedy"]))) if z)
+        przycisk = self._etykieta_poprzedniego(zakres.commity)
+        self._install_undo(poprzedni["run_id"], zakres,
+                           zdanie + czlony_niepewnych(zakres.do_sprawdzenia, zakres.otwarte, przycisk=przycisk),
+                           tryb="poprzedni")
+        return True
 
     # ---- „Cofnij” CAŁEGO przebiegu kart i „Ponów nieudane” (AR-345, AR-347) ----
     # Każde zamknięcie przebiegu kart (zapis, awaria, „Odrzuć”, przebieg wyczyszczony do zera) pyta o zakres

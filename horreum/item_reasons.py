@@ -143,6 +143,8 @@ ITEM_REASON_CODES = frozenset({
     "undo_region_unproven",
     "undo_newer_write",   # lokacja ma nowszy, niecofnięty zapis - cofnięcie odmawia (AR-318)
     "undo_already_chain",  # zapis wrócił razem ze starszym zapisem tego przebiegu (łańcuch, AR-345)
+    "undo_already_lineage",  # według historii pliku (rodowód stanu lokacji) zapisu nie ma już w pliku (AR-421)
+    "undo_result_unproven",  # plik po odzysku nie jest dowiedzionym bajtowym wynikiem zapisu - nietknięty (AR-423)
     # --- bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
     # `evaluate_manual_change`, `run_macro`/`plan_manual_change`) i powody wyrażenia (`expr.eval_for`)
     "macro_raw", "macro_no_present_copy", "macro_many_copies", "macro_compressed",

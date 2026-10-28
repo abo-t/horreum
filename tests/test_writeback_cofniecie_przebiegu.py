@@ -231,7 +231,7 @@ def test_wynik_lokacji_z_kilku_commitow_wedlug_hierarchii(monkeypatch, sekwencja
                                                semantycznie=_S in cechy, wstrzymane=_W in cechy)
                    for s, znak, cechy in sekwencja])
     monkeypatch.setattr(writeback, "_cofnij_lokacje", lambda con, cid, b, *, now: next(wyniki))
-    monkeypatch.setattr(writeback, "_cofniete_lancuchem", lambda con, cid, b: False)
+    monkeypatch.setattr(writeback, "_skrot_juz_cofnietego", lambda con, b: None)
     monkeypatch.setattr(repo, "object_undo_verdict", lambda con, *, commit_id, location_id: (None, None))
     pozycje = [(len(sekwencja) - i, {"id": i + 1, "location_id": 1}) for i in range(len(sekwencja))]
     wynik = writeback._cofnij_backupy(None, "R", pozycje, now=NOW, progress=None, should_cancel=None)
@@ -424,8 +424,9 @@ def _scena_klas(tmp_path, monkeypatch, przypadek):
 
 @pytest.mark.parametrize("przypadek", PRZYPADKI_KLAS)
 def test_klasy_wsadowe_rowne_predykatom_cofniecia(tmp_path, monkeypatch, przypadek):
-    """Zasilacz wsadowy reguły klasy (`_fakty_przebiegu`/`_klasy_przebiegu` - trzy zapytania na przebieg) daje te
-    same FAKTY i te same klasy, co zasilacz pojedynczy per backup (`_fakty_wprost`, `_klasy_wprost`), w każdej klasie:
+    """Zasilacz wsadowy reguły klasy (`_fakty_przebiegu`/`_klasy_przebiegu` - cztery zapytania na przebieg, z wierszami
+    rodowodu stanu lokacji) daje te same FAKTY (z `stan_rodowodu`) i te same klasy, co zasilacz pojedynczy per backup
+    (`_fakty_wprost`, `_klasy_wprost`), w każdej klasie:
     zapis zakończony w sześciu stanach, cofnięcie w miejscu nieweryfikowane i powtórzone po odzysku (dwie operacje
     cofnięcia jednego backupu), kilka śladów cofnięcia atomowego jednego backupu (z parą lokacji i bez, wciągnięte
     i nie), nakładka każdej pary dróg przed cofnięciem, po cofnięciu nowszego (także z plikiem zmienionym potem

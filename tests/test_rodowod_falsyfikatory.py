@@ -1,17 +1,17 @@
-"""AR-421 (fala 31, krok 0): sceny-falsyfikatory reguły klasy cofnięcia z rodowodem stanu lokacji - łańcuch cofnięć
-MIĘDZY przebiegami i powrót wyniku z zewnątrz. Sceny z sondy fali 30 (`fala30\\D2\\sonda_z1.py`: H1, H2, S2, S5, P2,
-R11) i z recenzji planu fali 31 (`sol` Z1, `astra` A1) oraz scena kroku 0 (K2 - objazd z zewnątrz PRZED powrotem
-wyniku) - nazwy i przewidywania: `brief/FALA31_plan.md` §2.3.
+"""AR-421: sceny-falsyfikatory reguły klasy cofnięcia z rodowodem stanu lokacji (`writeback.stan_rodowodu`) - łańcuch
+cofnięć MIĘDZY przebiegami i powrót wyniku z zewnątrz, na prawdziwym pisarzu. Sceny: H1, H2, S2, S5, P2, R11 (łańcuchy
+i powroty dwóch-trzech zapisów), Z1 (objazd z zewnątrz B → C → B po cofnięciu C2), A1 (ponowne cofnięcie po powrocie
+wyniku), K2 (objazd z zewnątrz PRZED powrotem wyniku) - przewidywania: tabela reguły w planie fali.
 
 Trzy rodzaje testów:
-  * warunki wstępne sceny - BEZ xfail: regresja samej sceny (gest nie przeszedł, plik w innym stanie) nie może zostać
-    połknięta jako XFAIL testu celu;
-  * cel sceny, którego dziś nie ma - `xfail(strict=True)` z ID `AR-421` (tor B fali 31 zdejmuje): macierz konsumentów
-    reguły dla H1 i S2 (zakres szuflady, szuflada po restarcie, CLI `header-fix --undo` = `undo_run`, wiersz Porządków,
-    straż nowszego zapisu, klasa nieprzetworzonego, recepta osi), cele P2, R11, H2mr, Z1, K2;
-  * zachowanie HEAD, które fala ma utrzymać - zielone piny: H2m, H2a, S5 (wynik wrócił z zewnątrz - „Cofnij” działa),
+  * warunki wstępne sceny: regresja samej sceny (gest nie przeszedł, plik w innym stanie) nie miesza się z celem;
+  * cel sceny: macierz konsumentów reguły dla H1 i S2 (zakres szuflady, szuflada po restarcie, CLI `header-fix --undo`
+    = `undo_run`, wiersz Porządków, straż nowszego zapisu, klasa nieprzetworzonego, recepta osi), cele P2, R11, H2mr
+    (wynik przywrócony z zewnątrz w JEDNYM przebiegu daje znów „Cofnij”), Z1, K2 oraz obiekt z karty `OBJECT` przy
+    cofnięciu starszego zapisu A → B → A (`repo._plan_obiektu_z_karty`, straż nowszego żywego zapisu);
+  * zachowanie sprzed rodowodu, które zostaje - piny: H2m, H2a, S5 (wynik wrócił z zewnątrz - „Cofnij” działa),
     S2 `am`/`mm` (dowód wprost cofnięcia w miejscu), A1 bajtowo (łańcuch przebiegu po ponownym cofnięciu), oraz dwa
-    konsumenty S2, które dziś mówią prawdę (Porządki, straż nowszego zapisu).
+    konsumenty S2, które mówiły prawdę bez rodowodu (Porządki, straż nowszego zapisu).
 
 TELESCOP: RC8 = A (stan wyjściowy), EQ6 = B, EQ8 = C, ED120 = D. Prawdziwy pisarz na syntetycznych FITS w `tmp_path`,
 bez atrap."""
@@ -19,18 +19,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from astropy.io import fits
 
-from horreum import db, repo, scan, writeback
+from horreum import db, repo, resolver, scan, writeback
 from horreum.gui import queries
 
 from test_writeback_cofniecie_przebiegu import NOW, _baza, _makro, _tel
-
-_REGULA = ("AR-421: klasa cofnięcia widzi łańcuch wyłącznie w przebiegu - łańcuch MIĘDZY przebiegami i powrót wyniku "
-           "z zewnątrz rozstrzyga dopiero reguła z rodowodem stanu lokacji (`location_state`, fala 31 tor B)")
-_N1 = ("AR-421 (zmiana świadoma N1, `brief/FALA31_plan.md` §2.3): wynik zapisu przywrócony z zewnątrz w JEDNYM przebiegu "
-       "daje znów „Cofnij”, jak między przebiegami - dziś łańcuch przebiegu mówi „już cofnięte”")
 
 
 def _skan(con, p):
@@ -150,8 +146,8 @@ _PO_SCENIE = {"H1m": ["RC8"], "H1a": ["RC8"], "S2aa": ["RC8"], "S2ma": ["RC8"], 
 
 @pytest.mark.parametrize("kod", list(_PO_SCENIE))
 def test_warunki_wstepne_sceny(tmp_path, kod):
-    """Każdy gest sceny przechodzi na prawdziwym pisarzu i zostawia pliki w stanie, który zakłada test celu - bez
-    xfail (regresja sceny nie chowa się w XFAIL celu)."""
+    """Każdy gest sceny przechodzi na prawdziwym pisarzu i zostawia pliki w stanie, który zakłada test celu
+    (regresja sceny osobno od celu)."""
     sc = _scena(tmp_path, kod)
     try:
         assert [_tel(p) for p in sc.pliki] == _PO_SCENIE[kod]
@@ -208,19 +204,19 @@ KONSUMENCI = {
     "nieprzetworzony": _klasa_nieprzetworzonego,
     "recepta_osi": _recepta_osi_martwa,
 }
-# Konsumenci, którzy na scenie S2 (dwa przebiegi bez ABA) mówią prawdę już dziś: lokacja nie opisuje wyniku C2, więc
-# Porządki i straż nowszego zapisu go nie widzą (sonda fali 30) - piny, nie falsyfikatory.
+# Konsumenci, którzy na scenie S2 (dwa przebiegi bez ABA) mówili prawdę bez rodowodu: lokacja nie opisuje wyniku C2,
+# więc Porządki i straż nowszego zapisu go nie widzą - piny, nie falsyfikatory rodowodu.
 _S2_DZIS = ("porzadki", "straz_nowszego")
-_MACIERZ_XFAIL = ([(k, n) for k in ("H1m", "H1a") for n in KONSUMENCI]
-                  + [(k, n) for k in ("S2aa", "S2ma") for n in KONSUMENCI if n not in _S2_DZIS])
+_MACIERZ = ([(k, n) for k in ("H1m", "H1a") for n in KONSUMENCI]
+            + [(k, n) for k in ("S2aa", "S2ma") for n in KONSUMENCI if n not in _S2_DZIS])
 
 
-@pytest.mark.xfail(strict=True, reason=_REGULA)
-@pytest.mark.parametrize("kod, konsument", _MACIERZ_XFAIL)
+@pytest.mark.parametrize("kod, konsument", _MACIERZ)
 def test_konsument_widzi_cofniecie_miedzy_przebiegami(tmp_path, kod, konsument):
     """H1 (A → B → A) i S2 (A → B → C) między przebiegami, cofnięcie C2, potem C1 - zapis C2 jest „już cofnięty” dla
-    KAŻDEGO konsumenta reguły klasy. Dziś klasa C2 `zatwierdzony`: zakres i szuflada po restarcie stawiają „Cofnij”,
-    CLI przy H1 przywraca EQ6 (wynik C1, który człowiek cofnął), przy S2 odmawia `undo_header_changed`."""
+    KAŻDEGO konsumenta reguły klasy (rodowód: `cofniety`). Falsyfikator: reguła bez rodowodu - klasa C2
+    `zatwierdzony`: zakres i szuflada po restarcie stawiały „Cofnij”, CLI przy H1 przywracał EQ6 (wynik C1, który
+    człowiek cofnął), przy S2 odmawiał `undo_header_changed`."""
     sc = _scena(tmp_path, kod)
     try:
         assert KONSUMENCI[konsument](sc)
@@ -231,7 +227,7 @@ def test_konsument_widzi_cofniecie_miedzy_przebiegami(tmp_path, kod, konsument):
 @pytest.mark.parametrize("kod", ["S2aa", "S2ma"])
 @pytest.mark.parametrize("konsument", _S2_DZIS)
 def test_konsument_s2_mowi_prawde_dzis(tmp_path, kod, konsument):
-    """Pin HEAD: S2 bez ABA - Porządki i straż nowszego zapisu nie widzą C2 (odcisk lokacji ≠ wynik C2)."""
+    """Pin: S2 bez ABA - Porządki i straż nowszego zapisu nie widzą C2 (odcisk lokacji ≠ wynik C2)."""
     sc = _scena(tmp_path, kod)
     try:
         assert KONSUMENCI[konsument](sc)
@@ -241,8 +237,8 @@ def test_konsument_s2_mowi_prawde_dzis(tmp_path, kod, konsument):
 
 @pytest.mark.parametrize("kod", ["S2am", "S2mm"])
 def test_cofniecie_w_miejscu_jest_dowodem_wprost(tmp_path, kod):
-    """Pin HEAD: C2 cofnięty w miejscu (`undo` w `synced` - dowód zakończenia) - każdy konsument już dziś mówi „już
-    cofnięte” (asymetria dróg zostaje: faza operacji w miejscu = dowód wprost)."""
+    """Pin: C2 cofnięty w miejscu (`undo` w `synced` - dowód zakończenia) - każdy konsument mówi „już cofnięte” także
+    bez rodowodu (asymetria dróg zostaje: faza operacji w miejscu = dowód wprost)."""
     for konsument in KONSUMENCI:
         (tmp_path / konsument).mkdir()
         sc = _scena(tmp_path / konsument, kod)
@@ -255,11 +251,11 @@ def test_cofniecie_w_miejscu_jest_dowodem_wprost(tmp_path, kod):
 # ============================================================ cele pozostałych scen
 
 
-@pytest.mark.xfail(strict=True, reason=_REGULA)
 def test_p2_cofniecie_czesciowe_rozstrzyga_per_lokacja(tmp_path):
     """P2: cofnięcie R2 przerwane po pierwszym pliku, potem R1 (pierwszy plik wraca do RC8, drugi odmawia). Ponowne
     cofnięcie C2: pierwszy plik „już cofnięty” (łańcuch C2 → C1 na tej lokacji), drugi wraca do EQ6; Porządki czekają
-    na JEDEN plik. Dziś klik przywraca oba pliki (pierwszy do EQ6 - wynik cofniętego C1)."""
+    na JEDEN plik. Falsyfikator: reguła bez rodowodu (klik przywracał oba pliki, pierwszy do EQ6 - wynik cofniętego
+    C1)."""
     sc = _scena(tmp_path, "P2")
     try:
         assert queries.niedokonczone_cofniecia_kart(sc.con) == [(sc.c2, 1)]
@@ -270,12 +266,12 @@ def test_p2_cofniecie_czesciowe_rozstrzyga_per_lokacja(tmp_path):
 
 
 @pytest.mark.parametrize("kod", ["R11", "Z1", "K2"])
-@pytest.mark.xfail(strict=True, reason=_REGULA)
 def test_cofniety_zapis_nie_wraca_po_dalszych_zmianach(tmp_path, kod):
-    """C2 cofnięty, a potem plik zmieniali: R11 - cofnięcie C1 i zapis C3 cofnięty; Z1 (`sol`) - zmiana z zewnątrz
+    """C2 cofnięty, a potem plik zmieniali: R11 - cofnięcie C1 i zapis C3 cofnięty; Z1 - zmiana z zewnątrz
     B → C → B i cofnięcie C1; K2 - cofnięcie C3 i C1, z zewnątrz D, potem bajty wyniku C3 i ponowne cofnięcie C3.
     Plik ma odcisk wyniku C2, ale postawiło go cofnięcie innego zapisu: zakres R2 pusty, szuflada po restarcie bez
-    „Cofnij”, CLI „już cofnięte” bez zmiany bajtu. Dziś klasa C2 `zatwierdzony` i klik przywraca EQ6 (wynik C1)."""
+    „Cofnij”, CLI „już cofnięte” bez zmiany bajtu. Falsyfikatory: reguła bez rodowodu (klik przywracał EQ6 - wynik
+    C1); przeskok cofnięcia pod NAJNOWSZY wiersz z wynikiem X (Z1); bez zejścia przez objazdy pod powrotem (K2)."""
     sc = _scena(tmp_path, kod)
     try:
         assert writeback.przebieg_do_cofniecia(sc.con, "R2") is None
@@ -285,11 +281,10 @@ def test_cofniety_zapis_nie_wraca_po_dalszych_zmianach(tmp_path, kod):
         sc.con.close()
 
 
-@pytest.mark.xfail(strict=True, reason=_N1)
 def test_h2mr_wynik_przywrocony_w_przebiegu_daje_cofnij(tmp_path):
     """H2mr: C1 cofnięty, bajty B wróciły z zewnątrz, C2 (TEN SAM przebieg) cofnięty, bajty A z wyniku C2 wróciły
-    z zewnątrz - wynik C2 przyniosła treść spoza Horreum, więc „Cofnij” C2 przywraca EQ6, jak w H2m między
-    przebiegami (zmiana N1). Dziś łańcuch przebiegu mówi „już cofnięte”."""
+    z zewnątrz - wynik C2 przyniosła treść spoza Horreum (rodowód `powrot` wetuje łańcuch przebiegu), więc „Cofnij” C2
+    przywraca EQ6, jak w H2m między przebiegami. Falsyfikator: łańcuch przebiegu bez veta rodowodu („już cofnięte”)."""
     sc = _scena(tmp_path, "H2mr")
     try:
         u = writeback.undo_run(sc.con, (sc.c2,), now=NOW)
@@ -298,12 +293,12 @@ def test_h2mr_wynik_przywrocony_w_przebiegu_daje_cofnij(tmp_path):
         sc.con.close()
 
 
-# ============================================================ piny HEAD, które fala utrzymuje
+# ============================================================ piny zachowania sprzed rodowodu
 
 
 @pytest.mark.parametrize("kod, oczek", [("H2m", "EQ6"), ("H2a", "EQ6"), ("S5", "RC8")])
 def test_wynik_wrocil_z_zewnatrz_cofnij_dziala(tmp_path, kod, oczek):
-    """Pin HEAD: wynik C2 wrócił z zewnątrz po jego cofnięciu (H2 między przebiegami, S5) - zakres R2 ma co cofnąć,
+    """Pin: wynik C2 wrócił z zewnątrz po jego cofnięciu (H2 między przebiegami, S5) - zakres R2 ma co cofnąć,
     a klik przywraca stan sprzed C2. Falsyfikator reguły: wiersz zewnętrzny przezroczysty (powrót = „już cofnięte”)."""
     sc = _scena(tmp_path, kod)
     try:
@@ -316,7 +311,7 @@ def test_wynik_wrocil_z_zewnatrz_cofnij_dziala(tmp_path, kod, oczek):
 
 
 def test_a1_ponowne_cofniecie_po_powrocie_wyniku_nie_wskrzesza_zapisu(tmp_path):
-    """Pin HEAD (`astra` A1, bajtowo): jeden przebieg C1 A → B, C2 B → A, C3 A → C, cofnięcie przebiegu, bajty wyniku
+    """Pin (A1, bajtowo): jeden przebieg C1 A → B, C2 B → A, C3 A → C, cofnięcie przebiegu, bajty wyniku
     C3 z zewnątrz i ponowne cofnięcie C3 - C2 zostaje „już cofnięty” (łańcuch przebiegu), CLI nie przywraca EQ6.
     Falsyfikator reguły z rodowodem: przeskok cofnięcia C3 pod PIERWSZY wiersz zapisu C3 (C2 `zywy` wetuje łańcuch)."""
     sc = _scena(tmp_path, "A1")
@@ -325,3 +320,59 @@ def test_a1_ponowne_cofniecie_po_powrocie_wyniku_nie_wskrzesza_zapisu(tmp_path):
         assert _cofniecie_cli_nie_zmienia_pliku(sc)
     finally:
         sc.con.close()
+
+
+# ============================================================ obiekt z karty `OBJECT` przy łańcuchu A → B → A
+
+
+def _plik_z_pusta_karta(tmp_path):
+    """FITS z kartą `OBJECT` PUSTĄ (nagłówek nie nazywa obiektu - krok 4 planu obiektu z karty przepuszcza)."""
+    d = tmp_path / "LIGHTS" / "NGC7635" / "RC8"
+    d.mkdir(parents=True)
+    p = d / "a.fits"
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + 1)
+    for k, v in (("IMAGETYP", "Light"), ("OBJECT", ""), ("TELESCOP", "RC8"), ("DATE-OBS", "2024-03-15T21:30:45")):
+        hdu.header[k] = v
+    hdu.writeto(str(p))
+    return p
+
+
+def _karta_object(con, run_id, location_id, wartosc):
+    naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?", (location_id,)).fetchone()[0]
+    repo.stage_pending(con, run_id=run_id, location_id=location_id, keyword="OBJECT", idx=0, op="set",
+                       old_value=None, new_value=wartosc, new_type="str", new_comment=None,
+                       expected_header_hash=naglowek)
+
+
+def _obiekt(con, frame_id):
+    return tuple(con.execute("SELECT o.canon, f.object_source FROM frame f LEFT JOIN object o ON o.id = f.object_id "
+                             "WHERE f.id = ?", (frame_id,)).fetchone())
+
+
+@pytest.mark.parametrize("inplace", [False, True], ids=["atomowo", "w_miejscu"])
+def test_aba_karty_object_cofniecie_starszego_odtwarza_obiekt(tmp_path, inplace):
+    """Karta `OBJECT` A → B → A między przebiegami: C1 (R1) pisze `NGC 7635` w pustą kartę, „Rozwiąż” przypisuje
+    obiekt z nagłówka, C2 (R2) czyści kartę z powrotem; cofnięcie C2, potem C1. Cofnięcie C1 odtwarza obiekt sprzed
+    zapisu (klatka bez obiektu, `objects_restored` = ta klatka): straż nowszego żywego zapisu w planie obiektu z karty
+    (`repo._plan_obiektu_z_karty`, krok 0) widzi C2 jako cofnięty (rodowód), choć odcisk lokacji = wynik C2.
+    Falsyfikator: reguła bez rodowodu - C2 „żywy”, plan obiektu zwraca None, klatka zostaje przy obiekcie z karty
+    cofniętego C1."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    try:
+        p = _plik_z_pusta_karta(tmp_path)
+        _skan(con, p)
+        lid, fid = con.execute("SELECT id, frame_id FROM location").fetchone()
+        _karta_object(con, "R1", lid, "NGC 7635")
+        c1 = writeback.commit(con, "R1", now=NOW, inplace=inplace)
+        assert c1.applied, c1
+        resolver.run_resolver(con, NOW)
+        assert _obiekt(con, fid) == ("NGC7635", "header")
+        _karta_object(con, "R2", lid, "")
+        c2 = writeback.commit(con, "R2", now=NOW, inplace=False)
+        assert c2.applied, c2
+        assert writeback.undo(con, c2.commit_id, now=NOW).complete
+        u1 = writeback.undo(con, c1.commit_id, now=NOW)
+        assert u1.complete and u1.objects_restored == (fid,), u1
+        assert _obiekt(con, fid) == (None, None) and fits.getheader(str(p))["OBJECT"] == ""
+    finally:
+        con.close()

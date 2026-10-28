@@ -728,32 +728,46 @@ def _zloz_plik_tymczasowy(path: str, fh, czesci, *, oryginal_region: bytes | Non
     h_org = hashlib.sha1() if oryginal_region is not None else None
     try:
         with open(tmp, "wb") as dst:
-            for czesc in czesci:
-                if isinstance(czesc, bytes):
-                    dst.write(czesc)
-                    h_tmp.update(czesc)
-                    if h_org is not None:
-                        h_org.update(oryginal_region)
-                    continue
-                od, do = czesc
-                fh.seek(od)
-                zostalo = None if do is None else do - od
-                while zostalo is None or zostalo > 0:
-                    b = fh.read(_SHA1_BUF if zostalo is None else min(_SHA1_BUF, zostalo))
-                    if not b:
-                        break
-                    dst.write(b)
-                    h_tmp.update(b)
-                    if h_org is not None:
-                        h_org.update(b)
-                    if zostalo is not None:
-                        zostalo -= len(b)
-                if zostalo:
-                    raise ValueError(f"zakres {od}:{do} pliku niekompletny (brak {zostalo} B)")
+            for kawalek, bajtowa in _czesci_pliku(fh, czesci):
+                dst.write(kawalek)
+                h_tmp.update(kawalek)
+                if h_org is not None:
+                    h_org.update(oryginal_region if bajtowa else kawalek)
     except BaseException:
         os.remove(tmp)
         raise
     return tmp, h_tmp.hexdigest(), None if h_org is None else h_org.hexdigest()
+
+
+def _czesci_pliku(fh, czesci):
+    """Bajty pliku złożonego z `czesci` (`bytes` albo zakres `(od, do)` uchwytu `fh`, `do=None` = do końca pliku),
+    kawałkami po kolei: `(kawałek, czy część bajtowa)`. Zakres, którego plik nie ma w całości → `ValueError`. JEDNO
+    składanie dla pliku tymczasowego (`_zloz_plik_tymczasowy`) i sha1 bez zapisu (`_sha1_czesci` - kotwica wyniku
+    cofnięcia, AR-423): oba liczą te same bajty."""
+    for czesc in czesci:
+        if isinstance(czesc, bytes):
+            yield czesc, True
+            continue
+        od, do = czesc
+        fh.seek(od)
+        zostalo = None if do is None else do - od
+        while zostalo is None or zostalo > 0:
+            b = fh.read(_SHA1_BUF if zostalo is None else min(_SHA1_BUF, zostalo))
+            if not b:
+                break
+            yield b, False
+            if zostalo is not None:
+                zostalo -= len(b)
+        if zostalo:
+            raise ValueError(f"zakres {od}:{do} pliku niekompletny (brak {zostalo} B)")
+
+
+def _sha1_czesci(fh, czesci) -> str:
+    """sha1 pliku złożonego z `czesci` (`_czesci_pliku`) - bez pliku tymczasowego, tym samym uchwytem."""
+    h = hashlib.sha1()
+    for kawalek, _bajtowa in _czesci_pliku(fh, czesci):
+        h.update(kawalek)
+    return h.hexdigest()
 
 
 def _coerce(value, value_type: str):
@@ -1120,7 +1134,8 @@ def _sprzatnij_tmp(tmp: str | None, zachowaj: bool) -> None:
 def write_full_header(path, header_text: str, expected_hash: str | None, *,
                       replace_guard=None,
                       persist_result: Callable[[_PrzygotowaneCofniecie], None] | None = None,
-                      expect_file_sha1: str | None = None) -> WriteResult:
+                      expect_file_sha1: str | None = None,
+                      kotwica_wyniku: str | None = None) -> WriteResult:
     """Atomowo przywróć nagłówek z backupu (ścieżka undo): plik tymczasowy + `os.replace`. Kontrola
     `header_hash` jak w `write_changes` (dysk ≠ `expected_hash` → 'blocked'). `header_text` = backup
     dowolnej generacji: koperta `RegionBackup` (od 2026-09-26) albo tekst sprzed niej
@@ -1159,7 +1174,15 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
     ZMIANA OD COMMITU: `expect_file_sha1` = sha1 wersji zapisanej przez commit
     (`replace_intent.prepared_sha1`). Plik zastany z innym sha1 zmienił się poza nagłówkiem od
     commitu - cofnięcie idzie (nagłówek wraca, zmiana zostaje w pliku, nikt jej nie traci), a powód
-    mówi to wprost (`undo_outside_changed`) zamiast „cofnięte semantycznie” artefaktu serializacji."""
+    mówi to wprost (`undo_outside_changed`) zamiast „cofnięte semantycznie” artefaktu serializacji.
+
+    KOTWICA WYNIKU (AR-423): `kotwica_wyniku` = sha1 pliku SPRZED zapisu, który cofnięcie ma odtworzyć bajt w bajt
+    (zapis w miejscu odzyskany, a nagłówek wyniku wrócił z zewnątrz - `_cofnij_lokacje`). Sprawdzana POD tą samą
+    blokadą i tym samym uchwytem, z którego powstanie plik tymczasowy, PRZED jego złożeniem: plik z regionem koperty
+    w miejscu bieżącego nagłówka ma mieć sha1 kotwicy - wtedy bieżący plik jest wynikiem tego zapisu poza nagłówkiem.
+    Rozjazd albo backup tekstowy (bez regionu do podstawienia) → 'blocked' `undo_result_unproven`, układ niezgodny
+    z kopertą (droga bajtowa niemożliwa) → 'blocked' `undo_region_changed`; w każdym plik nietknięty. Kontrola PRZED wywołaniem pisarza nie wystarcza: plik otwierany od
+    nowa mógłby być już inny (okno między blokadami). Zgodność dowodzi też bajtowości wyniku (`byte_exact`)."""
     if _is_raw(path):
         return WriteResult("blocked", _RAW_READ_ONLY, None)
     path = os.fspath(path)
@@ -1173,8 +1196,14 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
             plan = _plan_przywrocenia(path, fh, env, expected_hash) if env is not None else None
             if isinstance(plan, WriteResult):
                 return plan
+            if kotwica_wyniku is not None and plan is None:
+                # Układ niezgodny z kopertą (zdanie o regionie prawdziwe); backup tekstowy nie ma regionu do
+                # podstawienia - dowodu nie będzie.
+                return WriteResult("blocked", _REGION_ZMIENIONY if env is not None else _WYNIK_NIEDOWIEDZIONY, None)
             if plan is not None:
                 czesci, odcisk = plan
+                if kotwica_wyniku is not None and _sha1_czesci(fh, czesci) != kotwica_wyniku:
+                    return WriteResult("blocked", _WYNIK_NIEDOWIEDZIONY, None)
                 # sha1 pliku zastanego liczy ten sam przebieg po ogonie (jedyna część bajtowa to
                 # region koperty w miejscu bieżącego nagłówka) - bez drugiego odczytu.
                 tmp, sha1_tmp, sha1_zrodla = _zloz_plik_tymczasowy(path, fh, czesci,
@@ -1186,7 +1215,8 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
                 if written_hash != env.pre_hash:
                     raise ValueError("region backupu w bieżącym pliku czyta się innym nagłówkiem "
                                      "niż zapisany w backupie - plik nietknięty")
-                bajtowo = None if env.file_sha1 is None else sha1_tmp == env.file_sha1
+                wzor = kotwica_wyniku or env.file_sha1         # dowód szedł wobec kotwicy, gdy podana
+                bajtowo = None if wzor is None else sha1_tmp == wzor
                 nota = {True: None, None: _NOTA_BAJTOWO_BEZ_PLIKU,
                         False: _NOTA_SEMANTYCZNIE_POZA_NAGLOWKIEM}[bajtowo]
             else:
@@ -2891,6 +2921,12 @@ _JUZ_REGION = PowodPozycji("już cofnięte - region nagłówka jest stanem sprze
                            "undo_already_region")
 _REGION_ZMIENIONY = PowodPozycji("plik zmienił się od commitu - region nagłówka nie jest tym, "
                                  "który commit zapisał", "undo_region_changed")
+# AR-423: cofnięcie zapisu w miejscu ODZYSKANEGO, którego nagłówek wyniku wrócił z zewnątrz, pisze plik wyłącznie
+# z dowodem kotwicy (`write_full_header(kotwica_wyniku=)`) - obcy plik o tym samym nagłówku albo brak kotwicy → odmowa
+# bez zapisu. Zdanie nie mówi o synchronizacji bazy (baza może już opisywać obcy plik po skanie).
+_WYNIK_NIEDOWIEDZIONY = PowodPozycji(
+    "nie udało się dowieść, że plik jest bajtowym wynikiem cofanego zapisu - cofnięcie go nie zapisało, plik "
+    "nietknięty", "undo_result_unproven")
 # „Już cofnięte” drogi atomowej (AR-182) - każde z dowodem tego, co mówi: cały plik sprzed commitu
 # (kotwica koperty), wynik własnego cofnięcia (para odcisków ze śladu `atomic_undo`) albo - backup
 # tekstowy bez śladu, a ze śladem po skanie, który przyjął cały plik (AR-229) - sam nagłówek i baza,
@@ -4930,10 +4966,11 @@ def undo(con, commit_id, *, now,
 
     PĘTLA WSPÓLNA z cofnięciem przebiegu (`undo_run`): przerwanie, liczenie reszty, postęp i wynik idą
     przez `_cofnij_backupy`. Jeden commit ma najwyżej jeden backup lokacji (`UNIQUE(commit_id,
-    location_id)`), więc wynik per lokacja jest tu wynikiem per backup. ŁAŃCUCH PRZEBIEGU
-    (`_cofniete_lancuchem`, AR-345): backup tego commitu, którego własne cofnięcie atomowe raz się
-    domknęło, a starszy commit tego samego przebiegu na tej lokacji jest już cofnięty, to „już cofnięte”
-    bez dotyku pliku - dawniej ponowienie mówiło `undo_header_changed` o pliku w stanie sprzed przebiegu.
+    location_id)`), więc wynik per lokacja jest tu wynikiem per backup. ŁAŃCUCH PRZEBIEGU I RODOWÓD
+    (`_powod_juz_cofnietego`, AR-345, AR-421): backup tego commitu, którego własne cofnięcie atomowe raz się
+    domknęło, a starszy commit tego samego przebiegu na tej lokacji jest już cofnięty - albo którego zapis według
+    historii odcisku lokacji nie stoi już w pliku - to „już cofnięte” bez dotyku pliku (dawniej ponowienie mówiło
+    `undo_header_changed` o pliku w stanie sprzed przebiegu, a łańcuch między przebiegami przywracał cofnięty wynik).
 
     ZAMIAR I ZNACZNIK Z KAŻDEJ DROGI (AR-360): jeden commit to zakres jednego commitu wspólnego ciała `_cofnij_zakres`
     (to samo co `undo_run`) - zamiar przed pierwszym plikiem i znacznik domknięcia po cofnięciu domkniętym, więc pasek,
@@ -4956,19 +4993,34 @@ def undo(con, commit_id, *, now,
 
 _JUZ_LANCUCHEM = PowodPozycji("już cofnięte - zapis wrócił razem ze starszym zapisem tego przebiegu",
                               "undo_already_chain")
+# AR-421: łańcuch MIĘDZY przebiegami z rodowodu stanu lokacji (`stan_rodowodu` = `cofniety`, bez dowodu wprost) - zapis
+# cofnięty, a po nim plik zmieniali wyłącznie pisarze Horreum (brzmienie - decyzja CEO).
+_JUZ_RODOWODEM = PowodPozycji("już cofnięte - według historii pliku tego zapisu nie ma już w pliku",
+                              "undo_already_lineage")
 
 
 # ------------------------------------------------ REGUŁA KLASY COFNIĘCIA (AR-362)
 # JEDNA czysta reguła nad faktami bazy (`klasa_backupu` nad `FaktyBackupu`) - dawniej trzy lustra jednego drzewa:
-# wsad `_klasy_przebiegu`, predykaty per backup (`_cofniecie_zakonczone` + `_cofniete_lancuchem` + fazy) i pętla
+# wsad `_klasy_przebiegu`, predykaty per backup (dowód zakończenia + łańcuch przebiegu + fazy) i pętla
 # wiersza Porządków. Fakty dają DWA zasilacze z literałami SQL (SQL poza `repo.py` wyłącznie literałem): wsadowy
-# (`_fakty_przebiegu` - trzy odczyty na przebieg w jednej migawce) i pojedynczy (`_fakty_backupu` - jeden odczyt na
-# backup, starsze backupy przebiegu leniwie, `_starsze_w_przebiegu`). Rozjazd zasilaczy pinuje test równoważności
-# (te same fakty i klasy na każdym przypadku klas).
+# (`_fakty_przebiegu` - cztery odczyty na przebieg w jednej migawce) i pojedynczy (`_fakty_backupu` - fakty i wiersze
+# rodowodu lokacji, starsze backupy przebiegu leniwie, `_starsze_w_przebiegu`). Rozjazd zasilaczy pinuje test
+# równoważności (te same fakty i klasy na każdym przypadku klas).
 #
-# ŁAŃCUCH WYŁĄCZNIE W PRZEBIEGU: łańcuch między przebiegami (cofnięcie C2, potem C1 innego przebiegu na tej samej
-# lokacji) wymaga trwałego dowodu następstwa DOMKNIĘĆ cofnięć obu dróg, którego baza nie ma (`atomic_undo.id`
-# porządkuje próby, nie domknięcia; cofnięcie w miejscu nie ma śladu w tej sekwencji) - AR-362, wpis rejestru.
+# ŁAŃCUCH MIĘDZY PRZEBIEGAMI - RODOWÓD STANU LOKACJI (AR-421, 0048): `stan_rodowodu` idzie po wierszach
+# `location_state` lokacji (kolejność ZATWIERDZONYCH obserwacji odcisku, pochodzenie pisarza z dowodem zgodności)
+# efektywnym łańcuchem stanów - cofnięcie zapisu X znaczy „stan sprzed X”, więc przeskakuje pod wiersz, który postawił
+# wynik X. `atomic_undo.id` porządkuje próby, nie domknięcia, a cofnięcie w miejscu nie ma śladu w tej sekwencji - stąd
+# osobna tabela. Lokacja bez wierszy (historia sprzed 0048) = stan `None` = reguła sprzed rodowodu: łańcuch wyłącznie
+# w przebiegu (`lancuch_przebiegu`).
+#
+# JEDNA MIGAWKA NA OCENĘ - WYŁĄCZNIE predykaty, które BRAMKUJĄ zapis (wykonawca cofnięcia `_powod_juz_cofnietego`
+# i jego skrót `_skrot_juz_cofnietego` - z wierszem lokacji do kontroli `mtime`, straż nowszego zapisu
+# `_nowszy_zywy_zapis`) i wsad (`_fakty_przebiegu`): fakty backupu, wiersze rodowodu i fakty starszych backupów
+# przebiegu czyta jedna transakcja odczytu (`_migawka_odczytu`) - zapis innego połączenia między nimi nie złoży stanu,
+# który nigdy nie istniał. Konsumenci wyświetlania czytają bez własnej migawki: `_klasa_z_bazy`
+# (`_cofniecie_zakonczone`, `_stan_nieprzetworzonego` - liczby reszty w zdaniu przerwania), `_czeka_na_dokonczenie`
+# i `czekajacy_na_lokacji` (wiersz Porządków - w migawce `gui.queries.niedokonczone_cofniecia_kart`).
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4983,7 +5035,9 @@ class FaktyBackupu:
         (commit, lokacja) albo None (`_ostatnia_operacja`);
       * `slad_wciagniety` - WŁASNE cofnięcie atomowe raz się domknęło: ślad `atomic_undo` z `synced_at` (stawia go
         wyłącznie transakcja re-syncu albo rozliczenia „już cofnięte” tego cofnięcia, razem ze skutkami w bazie);
-      * `wynik_wlasny` - wciągnięty ślad, którego para odcisków jest parą lokacji (`_wynik_wlasny_w_bazie`)."""
+      * `wynik_wlasny` - wciągnięty ślad, którego para odcisków jest parą lokacji (`_wynik_wlasny_w_bazie`);
+      * `stan_rodowodu` - wynik przejścia rodowodu stanu lokacji (`stan_rodowodu`): `cofniety`, `zywy`, `powrot` albo
+        None (historia nieznana - reguła sprzed rodowodu)."""
     id: int
     commit_id: int
     location_id: int
@@ -4994,6 +5048,73 @@ class FaktyBackupu:
     faza_cofniecia: str | None
     slad_wciagniety: bool
     wynik_wlasny: bool
+    stan_rodowodu: str | None
+
+
+def stan_rodowodu(backup_id, post_hash, wiersze) -> str | None:
+    """RODOWÓD STANU LOKACJI (AR-421) - czysta reguła, bez bazy: czy zapis backupu `backup_id` (wynik zapisu - nagłówek
+    `post_hash`) stoi w pliku według historii odcisku lokacji. `wiersze` - wiersze `location_state` lokacji rosnąco po
+    `id`: krotki `(id, origin, backup_id, header_hash, post_hash backupu wiersza)`.
+
+    Przejście idzie EFEKTYWNYM łańcuchem stanów od najnowszego wiersza, wyłącznie wstecz:
+      * `commit` - własny → `zywy`; cudzy → wiersz wcześniej;
+      * `undo` własny → `cofniety`; cofnięcie CUDZEGO zapisu X znaczy „stan sprzed X” - przeskok pod NAJSTARSZY wiersz
+        z wynikiem X (`commit` X albo `external` z nagłówkiem = wynik X) NOWSZY od poprzedniego cofnięcia X (bez
+        poprzedniego - od początku): cofnięcie zdejmuje bieżącą INSTANCJĘ wyniku X; brak takiego wiersza → None (zapis
+        sprzed rodowodu albo wynik, którego baza nie poznała). Pod POWROTEM wyniku X z zewnątrz przejście schodzi
+        jeszcze przez obce objazdy o nagłówku innym niż zapisany tym cofnięciem;
+      * `rollback` (własny powrót pisarza) - przezroczysty;
+      * `external` kończy: `powrot`, gdy WŁASNY odcisk tego wiersza to wynik zapisu, inaczej None.
+    Łańcuch, który zszedł pod własny wiersz `commit`, kończy się `cofniety`; przejście bez wiersza `commit` zapisu
+    i bez rozstrzygnięcia → None. Powtórzone cofnięcie X bez nowej instancji wyniku X → None (wariant „ten sam przeskok”
+    odrzucony: przypisanie po powrocie wyniku z zewnątrz dawało fałszywe `cofniety`).
+
+    EXPECT (`AssertionError`): dwa wiersze `commit` jednego backupu (niezmiennik zapisu - indeks unikalny 0048),
+    powrót do odwiedzonego wiersza. Przeskok idzie wyłącznie wstecz z konstrukcji (szukany wiersz jest starszy od
+    cofnięcia)."""
+    poz = {w[0]: i for i, w in enumerate(wiersze)}
+
+    def poprzedni(w):
+        i = poz[w[0]]
+        return wiersze[i - 1] if i > 0 else None
+    zapisy = [w[0] for w in wiersze if w[1] == "commit" and w[2] == backup_id]
+    if len(zapisy) > 1:
+        raise AssertionError(f"rodowód: dwa wiersze commit backupu {backup_id} ({zapisy}) - błąd zapisu rodowodu")
+    cf = zapisy[0] if zapisy else None
+    s = wiersze[-1] if wiersze else None
+    odwiedzone = set()
+    while s is not None:
+        if s[0] in odwiedzone:
+            raise AssertionError(f"rodowód: przejście wraca do wiersza {s[0]} (cykl)")
+        odwiedzone.add(s[0])
+        if cf is not None and s[0] < cf:
+            return "cofniety"
+        origin = s[1]
+        if origin == "commit":
+            if s[2] == backup_id:
+                return "zywy"
+            s = poprzedni(s)
+        elif origin == "undo":
+            if s[2] == backup_id:
+                return "cofniety"
+            x, wynik_x = s[2], s[4]
+            od = max((w[0] for w in wiersze if w[0] < s[0] and w[1] == "undo" and w[2] == x), default=0)
+            t = next((w for w in wiersze if od < w[0] < s[0] and (
+                (w[1] == "commit" and w[2] == x) or (w[1] == "external" and w[3] == wynik_x))), None)
+            if t is None:
+                return None
+            nastepny = poprzedni(t)
+            if t[1] == "external":
+                while nastepny is not None and nastepny[1] == "external" and nastepny[3] != s[3]:
+                    nastepny = poprzedni(nastepny)
+            s = nastepny
+        elif origin == "rollback":
+            s = poprzedni(s)
+        elif origin == "external":
+            return "powrot" if s[3] == post_hash else None
+        else:
+            raise AssertionError(f"rodowód: pochodzenie spoza zbioru {origin!r}")
+    return "cofniety" if cf is not None else None
 
 
 def dowod_zakonczenia(f: FaktyBackupu) -> bool:
@@ -5007,7 +5128,7 @@ def lancuch_przebiegu(f: FaktyBackupu, starsze) -> bool:
     """ŁAŃCUCH PRZEBIEGU (AR-345): własne cofnięcie atomowe backupu raz się domknęło ORAZ starszy commit TEGO
     przebiegu ma backup tej lokacji z dowodem zakończenia (`dowod_zakonczenia` - wprost, bez rekurencji łańcucha).
     `starsze` - fakty backupów starszych commitów przebiegu na lokacji (bez `unreplaced_at`); iterowane wyłącznie
-    przy własnym śladzie wciągniętym (zasilacz pojedynczy czyta je leniwie). Opis granic - `_cofniete_lancuchem`."""
+    przy własnym śladzie wciągniętym (zasilacz pojedynczy czyta je leniwie). Opis granic - `_powod_juz_cofnietego`."""
     return f.slad_wciagniety and any(dowod_zakonczenia(s) for s in starsze)
 
 
@@ -5015,33 +5136,65 @@ def klasa_backupu(f: FaktyBackupu, starsze=()) -> str:
     """Klasa backupu dla zakresu „Cofnij” - czysta reguła (bez bazy), jedna dla wsadu (`_klasy_przebiegu`), pętli
     cofnięcia, predykatów rdzenia, wiersza Porządków i recepty osi (opis klas - `_klasy_przebiegu`):
 
-      * `"zakonczony"` - dowód zakończenia albo łańcuch przebiegu (`lancuch_przebiegu`);
+      * `"zakonczony"` - dowód zakończenia, rodowód `cofniety` albo łańcuch przebiegu (`lancuch_przebiegu`), którego
+        rodowód nie wetuje (`powrot` - wynik przyniosła treść spoza Horreum; `zywy` - przejście doszło do własnego
+        zapisu, którego nic nie cofnęło - czy wynik stoi w pliku, rozstrzyga ciało cofnięcia);
       * `"otwarty"` - operacja zapisu albo cofnięcia w miejscu w fazie otwartej (`repo.INPLACE_OPEN_PHASES`);
-      * `"poza"` - operacja commitu po odzysku (`recovered`);
-      * `"niepewny"` - operacja zwolniona ręką (`released`) albo backup drogi atomowej niepotwierdzony;
+      * `"poza"` - operacja commitu po odzysku (`recovered`), baza nie opisuje wyniku zapisu;
+      * `"niepewny"` - operacja zwolniona ręką (`released`), backup drogi atomowej niepotwierdzony albo operacja po
+        odzysku, a baza opisuje wynik zapisu (wrócił z zewnątrz - cofnięcie rozstrzyga kotwicą, AR-423);
       * `"zatwierdzony"` - reszta: podmiana potwierdzona."""
-    if dowod_zakonczenia(f) or lancuch_przebiegu(f, starsze):
+    if (dowod_zakonczenia(f) or f.stan_rodowodu == "cofniety"
+            or (f.stan_rodowodu not in ("powrot", "zywy") and lancuch_przebiegu(f, starsze))):
         return "zakonczony"
     if f.faza_zapisu in repo.INPLACE_OPEN_PHASES or f.faza_cofniecia in repo.INPLACE_OPEN_PHASES:
         return "otwarty"
+    if f.faza_zapisu == "recovered":
+        return "niepewny" if f.opisuje_wynik else "poza"
     if f.faza_zapisu is not None:
-        return ("poza" if f.faza_zapisu == "recovered" else "niepewny" if f.faza_zapisu == "released"
-                else "zatwierdzony")
+        return "niepewny" if f.faza_zapisu == "released" else "zatwierdzony"
     return "niepewny" if f.niepotwierdzony else "zatwierdzony"
 
 
-def _fakty_z_wiersza(r) -> FaktyBackupu:
-    """`FaktyBackupu` z wiersza zasilacza pojedynczego (kolumny w kolejności pól)."""
+@contextlib.contextmanager
+def _migawka_odczytu(con):
+    """JEDNA migawka WAL na kilka odczytów reguły klasy: własna transakcja odczytu zamykana wycofaniem (nic do
+    zatwierdzenia), a w transakcji wołającego - w niej, bez zamykania (wzór `gui/grid_workers.py`). Wszystko, co
+    ocena konsumuje (także generator `_starsze_w_przebiegu`), musi się wykonać WEWNĄTRZ."""
+    wlasna = not con.in_transaction
+    if wlasna:
+        con.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if wlasna:
+            con.rollback()
+
+
+def _wiersze_rodowodu(con, location_id) -> list[tuple]:
+    """Wiersze rodowodu stanu lokacji rosnąco po `id` (indeks `idx_location_state_location`) w kształcie
+    `stan_rodowodu`: `(id, origin, backup_id, header_hash, post_hash backupu wiersza)`."""
+    return [(r[0], r[1], r[2], r[3], r[4]) for r in con.execute(
+        "SELECT ls.id, ls.origin, ls.backup_id, ls.header_hash, hb.post_hash FROM location_state ls "
+        "LEFT JOIN header_backups hb ON hb.id = ls.backup_id WHERE ls.location_id = ? ORDER BY ls.id",
+        (location_id,))]
+
+
+def _fakty_z_wiersza(r, wiersze) -> FaktyBackupu:
+    """`FaktyBackupu` z wiersza zasilacza pojedynczego (kolumny w kolejności pól, `post_hash` backupu na końcu)
+    i wierszy rodowodu jego lokacji (`_wiersze_rodowodu`)."""
     return FaktyBackupu(int(r[0]), int(r[1]), int(r[2]), bool(r[3]), bool(r[4]), bool(r[5]), r[6], r[7],
-                        bool(r[8]), bool(r[9]))
+                        bool(r[8]), bool(r[9]), stan_rodowodu(int(r[0]), r[10], wiersze))
 
 
 def _fakty_backupu(con, b) -> FaktyBackupu:
     """ZASILACZ POJEDYNCZY reguły klasy: fakty backupu `b` (wiersz z `id`) JEDNYM odczytem - fazy ostatnich operacji
-    rodzaju i ślady atomowe podzapytaniami (indeksy `idx_inplace_op_commit`, `idx_atomic_undo_backup`). Para (commit,
-    lokacja) - z wiersza `header_backups`, nie od wołającego. `hb.post_hash IS l.header_hash` (nie odwrotnie):
-    literał warunku koniecznego Porządków rozpoznaje po swoim zapisie podgląd zapytań testu parytetu."""
-    return _fakty_z_wiersza(con.execute(
+    rodzaju i ślady atomowe podzapytaniami (indeksy `idx_inplace_op_commit`, `idx_atomic_undo_backup`) - i wiersze
+    rodowodu jego lokacji drugim (`_wiersze_rodowodu`). Para (commit, lokacja) - z wiersza `header_backups`, nie od
+    wołającego. `hb.post_hash IS l.header_hash` (nie odwrotnie): literał warunku koniecznego Porządków rozpoznaje po
+    swoim zapisie podgląd zapytań testu parytetu. Dwa odczyty bez wspólnej migawki - predykat, który rozstrzyga zapis,
+    woła go w `_migawka_odczytu`."""
+    r = con.execute(
         "SELECT hb.id, hb.commit_id, hb.location_id, hb.unreplaced_at IS NOT NULL, hb.pending_since IS NOT NULL, "
         "l.id IS NOT NULL AND hb.post_hash IS l.header_hash, "
         "(SELECT io.phase FROM inplace_op io WHERE io.commit_id = hb.commit_id "
@@ -5050,16 +5203,18 @@ def _fakty_backupu(con, b) -> FaktyBackupu:
         " AND io.location_id = hb.location_id AND io.kind = 'undo' ORDER BY io.id DESC LIMIT 1), "
         "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL), "
         "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL "
-        " AND au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash) "
+        " AND au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash), hb.post_hash "
         "FROM header_backups hb LEFT JOIN location l ON l.id = hb.location_id WHERE hb.id = ?",
-        (int(b["id"]),)).fetchone())
+        (int(b["id"]),)).fetchone()
+    return _fakty_z_wiersza(r, _wiersze_rodowodu(con, r[2]))
 
 
 def _starsze_w_przebiegu(con, f: FaktyBackupu):
     """Fakty backupów STARSZYCH commitów przebiegu backupu `f` na jego lokacji (bez `unreplaced_at`), od
-    najnowszego - GENERATOR: odczyt dopiero przy pierwszym kroku, więc reguła, która łańcucha nie sprawdza
-    (dowód wprost, brak własnego śladu), go nie wykonuje."""
-    yield from (_fakty_z_wiersza(r) for r in con.execute(
+    najnowszego - GENERATOR: odczyt (wiersze rodowodu lokacji i backupy) dopiero przy pierwszym kroku, więc reguła,
+    która łańcucha nie sprawdza (dowód wprost, brak własnego śladu, rodowód rozstrzyga), go nie wykonuje."""
+    wiersze = _wiersze_rodowodu(con, f.location_id)
+    yield from (_fakty_z_wiersza(r, wiersze) for r in con.execute(
         "SELECT hb.id, hb.commit_id, hb.location_id, hb.unreplaced_at IS NOT NULL, hb.pending_since IS NOT NULL, "
         "l.id IS NOT NULL AND hb.post_hash IS l.header_hash, "
         "(SELECT io.phase FROM inplace_op io WHERE io.commit_id = hb.commit_id "
@@ -5068,7 +5223,7 @@ def _starsze_w_przebiegu(con, f: FaktyBackupu):
         " AND io.location_id = hb.location_id AND io.kind = 'undo' ORDER BY io.id DESC LIMIT 1), "
         "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL), "
         "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL "
-        " AND au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash) "
+        " AND au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash), hb.post_hash "
         "FROM header_backups hb JOIN commits c ON c.id = hb.commit_id LEFT JOIN location l ON l.id = hb.location_id "
         "WHERE c.run_id = (SELECT run_id FROM commits WHERE id = ?) AND hb.location_id = ? "
         "AND hb.commit_id < ? AND hb.unreplaced_at IS NULL ORDER BY hb.commit_id DESC",
@@ -5088,19 +5243,50 @@ def _nowszy_od(a, b) -> bool:
     return a["commit_id"] > b["commit_id"] and a["id"] > b["id"]
 
 
-def _cofniete_lancuchem(con, commit_id, b) -> bool:
-    """Czy backup `b` commitu jest „już cofnięty” ŁAŃCUCHEM przebiegu (`lancuch_przebiegu`): (a) jego WŁASNE cofnięcie
-    atomowe raz się domknęło (wiersz `atomic_undo` z `synced_at` - stawia go wyłącznie transakcja re-syncu tego
-    cofnięcia, razem ze skutkami w bazie) ORAZ (b) starszy commit TEGO przebiegu ma backup tej lokacji
-    z dowodem zakończenia (`dowod_zakonczenia`). Straż nowszego zapisu (`_nowszy_zywy_zapis`) nie pozwala
-    domknąć starszego przed nowszym, więc baza opisuje wtedy stan sprzed starszego, a własna para śladu
-    nowszego już się z lokacją nie zgadza - ponowienie szłoby w `undo_header_changed`. Warunek (a): starszy
-    cofnięty, ZANIM nowszy zapisał tę lokację (np. `header-fix --undo` przed podjęciem przebiegu), nie domyka
-    nowszego - ten wciąż trzeba cofnąć. Cofnięcie nowszego w miejscu łańcucha nie potrzebuje: domyka je faza
-    `synced` jego operacji (`dowod_zakonczenia`). Granica: starszy z INNEGO przebiegu łańcucha nie domyka (blok
-    reguły wyżej)."""
-    f = _fakty_backupu(con, b)
-    return lancuch_przebiegu(f, _starsze_w_przebiegu(con, f))
+def _powod_juz_cofnietego(con, b) -> PowodPozycji | None:
+    """Powód „już cofnięte” backupu `b` BEZ dotyku pliku z reguły klasy - albo None (rozstrzyga ciało cofnięcia):
+
+      * ŁAŃCUCH PRZEBIEGU (`lancuch_przebiegu`, AR-345), gdy rodowód go nie wetuje (stan ∉ {`powrot`, `zywy`}) →
+        `_JUZ_LANCUCHEM`: (a) WŁASNE cofnięcie atomowe raz się domknęło (wiersz `atomic_undo` z `synced_at` - stawia go
+        wyłącznie transakcja re-syncu tego cofnięcia, razem ze skutkami w bazie) ORAZ (b) starszy commit TEGO
+        przebiegu ma backup tej lokacji z dowodem zakończenia (`dowod_zakonczenia`). Straż nowszego zapisu
+        (`_nowszy_zywy_zapis`) nie pozwala domknąć starszego przed nowszym, więc baza opisuje wtedy stan sprzed
+        starszego, a własna para śladu nowszego już się z lokacją nie zgadza - ponowienie szłoby w
+        `undo_header_changed`. Warunek (a): starszy cofnięty, ZANIM nowszy zapisał tę lokację, nie domyka nowszego.
+        Cofnięcie nowszego w miejscu łańcucha nie potrzebuje: domyka je faza `synced` jego operacji;
+      * RODOWÓD (AR-421): stan `cofniety` bez dowodu wprost → `_JUZ_RODOWODEM` - łańcuch między przebiegami i własne
+        cofnięcie przykryte nowszym zapisem tych samych bajtów. Dowód wprost zostaje ciału (`_cofnij_lokacje`) z jego
+        powodami (operacja zamknięta, wynik własny, commit bez podmiany).
+    Bez rozliczenia bazy - skutki rozliczyła transakcja cofnięcia, które przejście rodowodu albo łańcuch znalazły.
+    Fakty, wiersze rodowodu i starsze backupy przebiegu - w JEDNEJ migawce (`_migawka_odczytu`): odpowiedź opisuje
+    stan, który istniał."""
+    with _migawka_odczytu(con):
+        f = _fakty_backupu(con, b)
+        if (f.stan_rodowodu not in ("powrot", "zywy")
+                and lancuch_przebiegu(f, _starsze_w_przebiegu(con, f))):
+            return _JUZ_LANCUCHEM
+        if f.stan_rodowodu == "cofniety" and not dowod_zakonczenia(f):
+            return _JUZ_RODOWODEM
+        return None
+
+
+def _skrot_juz_cofnietego(con, b):
+    """SKRÓT WYKONAWCY „już cofnięte” bez dotyku pliku (`_cofnij_backupy`, `_cofnij_pozycje`): powód reguły klasy
+    (`_powod_juz_cofnietego` - łańcuch przebiegu albo rodowód) WYŁĄCZNIE, gdy plik na dysku ma `mtime` z bazy - ta sama
+    granica zaufania co szybka ścieżka wyniku własnego i faza `synced` (`_baza_opisuje`). Reguła czyta wyłącznie bazę:
+    zmiana spoza Horreum bez skanu (bajty wyniku zapisu wróciły z nowym `mtime`) idzie zwykłą drogą `_cofnij_lokacje`,
+    która czyta plik - stat, który pada, też. Powód, wiersz lokacji i porównanie z `mtime` pliku - w JEDNEJ migawce
+    (`_migawka_odczytu`; predykat zagnieżdża się w niej): skan innego połączenia między powodem a odczytem lokacji nie
+    złoży powodu sprzed skanu z lokacją po nim - lokacja z migawki ma `mtime` sprzed skanu, więc plik po skanie idzie
+    zwykłą drogą. Zwraca `(lokacja, powód)` albo None."""
+    with _migawka_odczytu(con):
+        powod = _powod_juz_cofnietego(con, b)
+        if powod is None:
+            return None
+        loc = _location(con, int(b["location_id"]))
+        if loc is None or not _baza_opisuje(loc, loc["path"], loc["header_hash"]):
+            return None
+        return loc, powod
 
 
 @dataclasses.dataclass(frozen=True)
@@ -5126,16 +5312,17 @@ def _klasy_przebiegu(con, run_id) -> list[tuple[int, int, str]]:
     commitów jednej operacji (`zakresy_cofniecia`) - klasa backupu nie zależy od zawężenia. Klasy - z predykatów,
     które rozstrzygają cofnięcie (`_cofnij_lokacje`), bez odczytu pliku:
 
-      * `"zakonczony"` - dowód zakończenia (`_cofniecie_zakonczone`) albo łańcuch przebiegu
-        (`_cofniete_lancuchem`): nie ma czego cofać;
+      * `"zakonczony"` - dowód zakończenia (`_cofniecie_zakonczone`), rodowód stanu lokacji `cofniety` (AR-421) albo
+        łańcuch przebiegu, którego rodowód nie wetuje (`_powod_juz_cofnietego`): nie ma czego cofać;
       * `"otwarty"` - operacja zapisu albo cofnięcia w miejscu w fazie otwartej
         (`repo.INPLACE_OPEN_PHASES`): cofnięcie odmawia `undo_open_op` - najpierw odzysk („Przywróć nagłówek
         sprzed zapisu”), więc „Cofnij” tego pliku nie rozstrzyga;
-      * `"poza"` - operacja commitu po odzysku (`recovered`): region wrócił sprzed commitu, cofnięcie mówi
-        `undo_already_region`;
-      * `"niepewny"` - podmiana bez dowodu: operacja zwolniona ręką (`released` - zwolnienie zmienia samą fazę)
-        albo backup drogi atomowej niepotwierdzony (`pending_since`, AR-40); cofnięcie rozstrzyga go samo
-        (rekoncyliacja backupu, porównanie regionu);
+      * `"poza"` - operacja commitu po odzysku (`recovered`), baza nie opisuje wyniku zapisu: region wrócił sprzed
+        commitu (cofnięcie mówi `undo_already_region`) albo plik jest inny - bez „Cofnij”;
+      * `"niepewny"` - podmiana bez dowodu: operacja zwolniona ręką (`released` - zwolnienie zmienia samą fazę),
+        backup drogi atomowej niepotwierdzony (`pending_since`, AR-40) albo operacja po odzysku, a baza opisuje wynik
+        zapisu (wrócił z zewnątrz, AR-423); cofnięcie rozstrzyga go samo (rekoncyliacja backupu, porównanie regionu,
+        kotwica wyniku pod blokadą pisarza);
       * `"zatwierdzony"` - podmiana potwierdzona: operacja w fazie `written`/`synced` albo backup drogi
         atomowej potwierdzony w transakcji straży podmiany.
 
@@ -5151,19 +5338,17 @@ def _klasy_przebiegu(con, run_id) -> list[tuple[int, int, str]]:
 
 def _fakty_przebiegu(con, run_id) -> list[FaktyBackupu]:
     """ZASILACZ WSADOWY reguły klasy: `FaktyBackupu` każdego backupu przebiegu kart `run_id` (bez `unreplaced_at`)
-    po commitach rosnąco - trzy zapytania na przebieg zamiast odczytu per backup (pomiar przed: 2000 plików jednego
+    po commitach rosnąco - cztery zapytania na przebieg zamiast odczytu per backup (pomiar przed: 2000 plików jednego
     commitu - 12-14 tys. zapytań, mediana 122-167 ms w wątku okna, który pyta o zakres przy „Odrzuć” i zamknięciu
     przebiegu). Fakty - te same co zasilacz pojedynczy (`_fakty_backupu`): ostatnia operacja rodzaju, ślad atomowy
-    wciągnięty i z parą lokacji; równość faktów obu zasilaczy na wszystkich klasach i nakładkach pinuje test.
-    Trzy odczyty idą w JEDNEJ migawce WAL (własna transakcja odczytu, zamykana wycofaniem; w transakcji wołającego -
-    w niej, bez zamykania): zapis innego połączenia między nimi nie złoży pary stanów, która nigdy nie istniała."""
-    wlasna = not con.in_transaction
-    if wlasna:
-        con.execute("BEGIN")                    # migawka WAL na trzy odczyty (wzór `gui/grid_workers.py`)
-    try:
+    wciągnięty i z parą lokacji, stan rodowodu z wierszy lokacji (czwarte zapytanie - wiersze WSZYSTKICH lokacji
+    przebiegu; kopia `pf4` po 0048, 787 plików: +2,9 ms); równość faktów obu zasilaczy na wszystkich klasach
+    i nakładkach pinuje test. Cztery odczyty idą w JEDNEJ migawce WAL (`_migawka_odczytu`): zapis innego połączenia
+    między nimi nie złoży pary stanów, która nigdy nie istniała."""
+    with _migawka_odczytu(con):
         backupy = con.execute(
             "SELECT hb.id, hb.commit_id, hb.location_id, hb.pending_since IS NOT NULL, "
-            "l.id IS NOT NULL AND hb.post_hash IS l.header_hash FROM header_backups hb "
+            "l.id IS NOT NULL AND hb.post_hash IS l.header_hash, hb.post_hash FROM header_backups hb "
             "JOIN commits c ON c.id = hb.commit_id LEFT JOIN location l ON l.id = hb.location_id "
             "WHERE c.run_id = ? AND hb.unreplaced_at IS NULL ORDER BY hb.commit_id, hb.id", (run_id,)).fetchall()
         faza: dict[tuple, str] = {}             # (commit, lokacja, rodzaj) → faza OSTATNIEJ operacji
@@ -5180,12 +5365,18 @@ def _fakty_przebiegu(con, run_id) -> list[FaktyBackupu]:
             domkniete.add(r[0])
             if r[1]:
                 wlasne.add(r[0])
-    finally:
-        if wlasna:
-            con.rollback()                      # odczyt - nic do zatwierdzenia
+        wiersze: dict[int, list] = {}           # lokacja → wiersze rodowodu po `id` (kształt `_wiersze_rodowodu`)
+        for r in con.execute(
+                "SELECT ls.location_id, ls.id, ls.origin, ls.backup_id, ls.header_hash, hb.post_hash "
+                "FROM location_state ls LEFT JOIN header_backups hb ON hb.id = ls.backup_id "
+                "WHERE ls.location_id IN (SELECT hb2.location_id FROM header_backups hb2 "
+                "JOIN commits c ON c.id = hb2.commit_id WHERE c.run_id = ? AND hb2.unreplaced_at IS NULL) "
+                "ORDER BY ls.location_id, ls.id", (run_id,)):
+            wiersze.setdefault(r[0], []).append((r[1], r[2], r[3], r[4], r[5]))
     return [FaktyBackupu(int(r[0]), int(r[1]), int(r[2]), False, bool(r[3]), bool(r[4]),
                          faza.get((r[1], r[2], "commit")), faza.get((r[1], r[2], "undo")),
-                         r[0] in domkniete, r[0] in wlasne) for r in backupy]
+                         r[0] in domkniete, r[0] in wlasne, stan_rodowodu(int(r[0]), r[5], wiersze.get(r[2], [])))
+            for r in backupy]
 
 
 def _zakres_z_klas(klasy, commity=None) -> ZakresCofniecia | None:
@@ -5276,8 +5467,10 @@ def _cofnij_backupy(con, wynik_id, pozycje, *, now, progress, should_cancel) -> 
     """PĘTLA COFNIĘCIA wspólna dla `undo` (jeden commit) i `undo_run` (zakres przebiegu): `pozycje` =
     `(commit_id, backup)` w kolejności przetwarzania. Przerwanie sprawdzane przed KAŻDYM backupem; reszta
     (`UndoResult.remaining`/`untouched`, AR-176, AR-318) liczona po wszystkich nieprzetworzonych pozycjach.
-    Postęp per backup. Backup cofnięty łańcuchem przebiegu (`_cofniete_lancuchem`) - „już cofnięte” bez
-    dotyku pliku i bez ponownego rozliczenia bazy (jego skutki rozliczyła transakcja własnego cofnięcia).
+    Postęp per backup. Backup „już cofnięty” regułą klasy (`_skrot_juz_cofnietego`: łańcuch przebiegu albo rodowód
+    stanu lokacji, AR-421, przy pliku z `mtime` z bazy) - bez dotyku pliku i bez ponownego rozliczenia bazy (skutki
+    rozliczyła transakcja cofnięcia, które reguła znalazła), z powodem reguły; plik zmieniony od odczytu bazy rozstrzyga
+    ciało cofnięcia.
 
     WYNIK PER LOKACJA: lokacja z kilku commitów ma JEDEN wynik - porażka przed blokadą spoza „już cofnięte”
     przed przywróceniem przed „już cofnięte”; wśród porażek równej wagi pierwsza (najnowszy commit -
@@ -5308,10 +5501,10 @@ def _cofnij_backupy(con, wynik_id, pozycje, *, now, progress, should_cancel) -> 
             untouched = stany.count("nietkniety")
             break
         lid = int(b["location_id"])
-        if _cofniete_lancuchem(con, cid, b):
-            loc = _location(con, lid)
-            cofniecie = _CofniecieLokacji(FileResult(lid, loc["path"] if loc is not None else "", "blocked",
-                                                     _JUZ_LANCUCHEM), juz=True)
+        skrot = _skrot_juz_cofnietego(con, b)
+        if skrot is not None:
+            loc, powod_juz = skrot
+            cofniecie = _CofniecieLokacji(FileResult(lid, loc["path"], "blocked", powod_juz), juz=True)
         else:
             cofniecie = _cofnij_lokacje(con, cid, b, now=now)
         stary = lokacje.get(lid)
@@ -5395,17 +5588,20 @@ def _nowszy_zywy_zapis(con, b):
     zapisem swojego przebiegu nie jest żywy). Warunek odcisku gasi wieczną blokadę po nowszym commicie cofniętym
     atomowo bez śladu (sprzed 0044: baza opisuje wtedy plik sprzed niego).
     Odczyt kandydatów indeksem pokrywającym `UNIQUE(commit_id, location_id)` (zakres `commit_id`) -
-    na kopii `pf4` 0,31 ms na backup najstarszego commitu; droga po kluczu głównym (`id > ?`) to 33 ms."""
-    f = _fakty_backupu(con, b)
-    for n in con.execute(
-            "SELECT id, commit_id FROM header_backups WHERE commit_id > ? AND location_id = ? "
-            "AND id > ? ORDER BY id DESC", (f.commit_id, f.location_id, f.id)).fetchall():
-        assert _nowszy_od(n, {"commit_id": f.commit_id, "id": f.id}), (n, f)   # literał = `_nowszy_od`
-        nf = _fakty_backupu(con, n)
-        if (not nf.niepodmieniony and nf.opisuje_wynik
-                and klasa_backupu(nf, _starsze_w_przebiegu(con, nf)) != "zakonczony"):
-            return nf.commit_id
-    return None
+    na kopii `pf4` 0,31 ms na backup najstarszego commitu; droga po kluczu głównym (`id > ?`) to 33 ms.
+    Straż ROZSTRZYGA zapis (odmowa albo cofnięcie pliku), więc fakty, wiersze rodowodu i starsze przebiegu wszystkich
+    kandydatów czyta jedna migawka (`_migawka_odczytu`, AR-421)."""
+    with _migawka_odczytu(con):
+        f = _fakty_backupu(con, b)
+        for n in con.execute(
+                "SELECT id, commit_id FROM header_backups WHERE commit_id > ? AND location_id = ? "
+                "AND id > ? ORDER BY id DESC", (f.commit_id, f.location_id, f.id)).fetchall():
+            assert _nowszy_od(n, {"commit_id": f.commit_id, "id": f.id}), (n, f)   # literał = `_nowszy_od`
+            nf = _fakty_backupu(con, n)
+            if (not nf.niepodmieniony and nf.opisuje_wynik
+                    and klasa_backupu(nf, _starsze_w_przebiegu(con, nf)) != "zakonczony"):
+                return nf.commit_id
+        return None
 
 
 def _stan_nieprzetworzonego(con, commit_id, b, granica) -> str:
@@ -6041,6 +6237,14 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         # wyłącznie z dowodem CAŁEGO pliku; inaczej podmieniona kopia z innym drugim HDU byłaby
         # „już cofnięta”. Backup tekstowy ze śladem bez dowodu domyka skan (AR-229, `tekst`).
         return _region_sprzed(loc, path, env, op_c, wlasne, naglowek, tekst=tekst)
+    # ZAPIS W MIEJSCU ODZYSKANY (AR-423, `recovered`), a plik niesie znów nagłówek wyniku (wrócił z zewnątrz - klasa
+    # `niepewny`): pisarz dostaje kotwicę sprzed zapisu (reguła `_kontrola`) i sprawdza ją pod własną blokadą - obcy
+    # plik o tym samym nagłówku zostaje nietknięty. Bez kotwicy dowodu nie będzie - odmowa bez wołania pisarza.
+    kotwica_wyniku = None
+    if op_c is not None and op_c["phase"] == "recovered":
+        kotwica_wyniku = op_c["anchor_sha1"] or (env.file_sha1 if env is not None else None)
+        if kotwica_wyniku is None:
+            return _blok(loc, path, _WYNIK_NIEDOWIEDZIONY)
     zamiar = repo.replace_intent(con, b["id"])
     utrwalony: list[tuple[int, str, str]] = []
     nazwy_proby: list[tuple[str, str, str]] = []      # K, Z, T tej próby (AR-127)
@@ -6057,7 +6261,8 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
         replace_guard=lambda: repo.guard_file_replace(con, location_id=loc["id"], generation=gen),
         persist_result=_utrwal,
         expect_file_sha1=(zamiar["prepared_sha1"] if zamiar is not None
-                          and zamiar["outcome"] == "replaced" else None))
+                          and zamiar["outcome"] == "replaced" else None),
+        kotwica_wyniku=kotwica_wyniku)
 
     def _po_zapisie():
         if res.status == "applied":
@@ -6965,6 +7170,11 @@ def _cofnij_pozycje(con, p, *, now, liczniki) -> FileResult:
         return _stop("blocked", p["old_path"], _ZAMIAR_OTWARTY)
     if faza is None:
         for b in _backupy_lokacji(con, p["run_id"], lid):
+            if _skrot_juz_cofnietego(con, b) is not None:
+                # AR-422: zapis „już cofnięty” regułą klasy (łańcuch przebiegu, rodowód; plik z `mtime` z bazy) - plik
+                # bez dotyku, pozycja idzie dalej jak przy „już cofnięte” ciała (ABA: dawniej przywracała cofnięty wynik
+                # starszego zapisu).
+                continue
             cofniecie = _cofnij_lokacje(con, b["commit_id"], b, now=now)
             if cofniecie.wynik.status != "restored" and not cofniecie.juz:
                 return _stop(cofniecie.wynik.status, cofniecie.wynik.path, PowodPozycji(

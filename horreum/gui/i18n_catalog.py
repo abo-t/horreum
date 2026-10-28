@@ -8272,6 +8272,16 @@ CATALOG = {
     "objchg.item.undo_already_chain": {
         "pl": "już cofnięte - zapis wrócił razem ze starszym zapisem tego przebiegu",
         "en": "already undone - the write came back together with an older write of this run"},
+    # Rodowód stanu lokacji (AR-421, `writeback._powod_juz_cofnietego`) i kotwica wyniku po odzysku (AR-423,
+    # `writeback.write_full_header(kotwica_wyniku=)`).
+    "objchg.item.undo_already_lineage": {
+        "pl": "już cofnięte - według historii pliku tego zapisu nie ma już w pliku",
+        "en": "already undone - per the file history this write is no longer in the file"},
+    "objchg.item.undo_result_unproven": {
+        "pl": "nie udało się dowieść, że plik jest bajtowym wynikiem cofanego zapisu - cofnięcie go nie zapisało, plik "
+              "nietknięty",
+        "en": "could not prove that the file is a byte-exact result of the write being undone - the undo did not "
+              "write it, the file is untouched"},
     # Bramki celu i zmiany makra (AR-181, `macro.resolve_target`, `_evaluate_change`,
     # `evaluate_manual_change`) i powody wyrażenia (`expr.eval_for`, parametr `inner` powodów
     # `macro_compute`/`macro_assign`). PL = zdanie rdzenia znak w znak (polskie znaki od AR-228,

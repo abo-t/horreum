@@ -2,15 +2,17 @@
 faktach ręcznych, implikacje klasy dla realnego cofnięcia backupu (`zakonczony` → „już cofnięte” bez zapisu pliku,
 `otwarty` → `undo_open_op` bez zapisu), konsumenci reguły w jednym przebiegu (straż nowszego zapisu, wiersz Porządków)
 i jedna migawka wsadu z prawdziwym kandydatem łańcucha przebiegu. AR-383: werdykt obiektu z karty „bez dowodu” i
-„zostaje” dla każdego źródła z NAZWY w nagłówku. Granica AR-421 (wpis rejestru): łańcuch MIĘDZY przebiegami wymaga
-trwałego dowodu następstwa domknięć cofnięć, którego baza nie ma - testy `xfail(strict=True)` na prawdziwym rdzeniu.
+„zostaje” dla każdego źródła z NAZWY w nagłówku. AR-421: łańcuch MIĘDZY przebiegami rozstrzyga rodowód stanu lokacji
+(`location_state`, `writeback.stan_rodowodu`) - tabela klas z każdym stanem rodowodu i sceny A → B → A na prawdziwym
+rdzeniu (testy rodowodu - `tests/test_regula_rodowodu.py`, `tests/test_rodowod_falsyfikatory.py`).
 
 Prawdziwy pisarz na syntetycznych FITS w `tmp_path`; atrapy wyłącznie awarii."""
 from __future__ import annotations
 
 import pytest
+from astropy.io import fits
 
-from horreum import db, repo, resolver, writeback
+from horreum import db, repo, resolver, scan, writeback
 from horreum.gui import queries
 from horreum.resolve.objects import HEADER_NAME_SOURCES
 
@@ -22,10 +24,11 @@ from test_writeback_cofniecie_przebiegu import (NOW, PRZYPADKI_KLAS, _BarieraOdc
 
 
 def _f(**pola):
-    """Fakty ręczne backupu (domyślnie: podmiana atomowa potwierdzona, baza opisuje wynik, bez śladów)."""
+    """Fakty ręczne backupu (domyślnie: podmiana atomowa potwierdzona, baza opisuje wynik, bez śladów, historia
+    rodowodu nieznana)."""
     domyslne = dict(id=2, commit_id=2, location_id=1, niepodmieniony=False, niepotwierdzony=False,
                     opisuje_wynik=True, faza_zapisu=None, faza_cofniecia=None, slad_wciagniety=False,
-                    wynik_wlasny=False)
+                    wynik_wlasny=False, stan_rodowodu=None)
     domyslne.update(pola)
     return writeback.FaktyBackupu(**domyslne)
 
@@ -46,7 +49,8 @@ _TABELA = {
     "przed_bajtem": (_f(faza_zapisu="writing"), (), "otwarty"),
     "cofniecie_otwarte": (_f(faza_zapisu="synced", faza_cofniecia="unverified"), (), "otwarty"),
     "dowod_przed_otwartym": (_f(faza_zapisu="unverified", faza_cofniecia="synced"), (), "zakonczony"),
-    "odzyskany": (_f(faza_zapisu="recovered"), (), "poza"),
+    "odzyskany_bez_wyniku": (_f(faza_zapisu="recovered", opisuje_wynik=False), (), "poza"),
+    "odzyskany_wynik_wrocil": (_f(faza_zapisu="recovered"), (), "niepewny"),
     "zwolniony": (_f(faza_zapisu="released"), (), "niepewny"),
     "lancuch_przez_cofniety_w_miejscu": (_f(slad_wciagniety=True), (_STARSZY_COFNIETY,), "zakonczony"),
     "lancuch_przez_wynik_wlasny": (_f(slad_wciagniety=True), (_STARSZY_WYNIK_WLASNY,), "zakonczony"),
@@ -54,25 +58,51 @@ _TABELA = {
     "lancuch_starszy_bez_dowodu": (_f(slad_wciagniety=True), (_STARSZY_SAM_SLAD,), "zatwierdzony"),
     "lancuch_przed_otwartym": (_f(faza_zapisu="unverified", slad_wciagniety=True), (_STARSZY_COFNIETY,),
                                "zakonczony"),
+    # Rodowód stanu lokacji (AR-421): stan × opisuje wynik × dowód wprost × łańcuch przebiegu.
+    "rodowod_cofniety": (_f(stan_rodowodu="cofniety"), (), "zakonczony"),
+    "rodowod_cofniety_bez_opisu_wyniku": (_f(stan_rodowodu="cofniety", opisuje_wynik=False), (), "zakonczony"),
+    "rodowod_cofniety_przed_otwartym": (_f(stan_rodowodu="cofniety", faza_zapisu="unverified"), (), "zakonczony"),
+    "rodowod_cofniety_niepotwierdzony": (_f(stan_rodowodu="cofniety", niepotwierdzony=True), (), "zakonczony"),
+    "rodowod_zywy": (_f(stan_rodowodu="zywy"), (), "zatwierdzony"),
+    "rodowod_powrot": (_f(stan_rodowodu="powrot"), (), "zatwierdzony"),
+    "rodowod_powrot_niepotwierdzony": (_f(stan_rodowodu="powrot", niepotwierdzony=True), (), "niepewny"),
+    "rodowod_zywy_wetuje_lancuch": (_f(stan_rodowodu="zywy", slad_wciagniety=True), (_STARSZY_COFNIETY,),
+                                    "zatwierdzony"),
+    "rodowod_powrot_wetuje_lancuch": (_f(stan_rodowodu="powrot", slad_wciagniety=True), (_STARSZY_WYNIK_WLASNY,),
+                                      "zatwierdzony"),
+    "rodowod_powrot_dowod_wprost": (_f(stan_rodowodu="powrot", faza_zapisu="synced", faza_cofniecia="synced"), (),
+                                    "zakonczony"),
+    "rodowod_zywy_dowod_wprost": (_f(stan_rodowodu="zywy", slad_wciagniety=True, wynik_wlasny=True), (),
+                                  "zakonczony"),
+    "rodowod_zywy_niepodmieniony": (_f(stan_rodowodu="zywy", niepodmieniony=True), (), "zakonczony"),
+    "rodowod_nieznany_lancuch": (_f(stan_rodowodu=None, slad_wciagniety=True, opisuje_wynik=False),
+                                 (_STARSZY_COFNIETY,), "zakonczony"),
+    "rodowod_powrot_odzyskany": (_f(stan_rodowodu="powrot", faza_zapisu="recovered"), (), "niepewny"),
 }
 
 
 @pytest.mark.parametrize("fakty, starsze, oczek", list(_TABELA.values()), ids=list(_TABELA))
 def test_klasa_backupu_tabela(fakty, starsze, oczek):
-    """Czysta reguła na faktach ręcznych - każda klasa i łańcuch przebiegu: własne cofnięcie atomowe domknięte ORAZ
-    starszy z dowodem WPROST (bez rekurencji - starszy z samym śladem nie domyka). Falsyfikatory: łańcuch bez
-    własnego śladu; łańcuch po samym śladzie starszego; faza otwarta przed dowodem; `released` jak potwierdzony."""
+    """Czysta reguła na faktach ręcznych - każda klasa, łańcuch przebiegu (własne cofnięcie atomowe domknięte ORAZ
+    starszy z dowodem WPROST, bez rekurencji) i rodowód stanu lokacji: `cofniety` zawsze `zakonczony`, `powrot`/`zywy`
+    wetują łańcuch przebiegu, ale nie dowód wprost, None = reguła sprzed rodowodu; odzysk z wynikiem opisanym przez
+    bazę - `niepewny` (AR-423). Falsyfikatory: łańcuch bez własnego śladu; łańcuch po samym śladzie starszego; faza
+    otwarta przed dowodem; `released` jak potwierdzony; `powrot`/`zywy` bez veta; rodowód przed dowodem wprost;
+    `recovered` zawsze `poza`."""
     assert writeback.klasa_backupu(fakty, starsze) == oczek
 
 
 def test_starsze_czytane_wylacznie_przy_kandydacie_lancucha():
     """Zasilacz pojedynczy czyta starsze backupy przebiegu leniwie: reguła sięga po nie tylko przy własnym śladzie
-    wciągniętym bez dowodu wprost. Falsyfikator: `starsze` konsumowane zawsze (odczyt na każdy backup)."""
+    wciągniętym bez dowodu wprost i bez rozstrzygnięcia rodowodu (`cofniety` rozstrzyga, `powrot`/`zywy` wetują).
+    Falsyfikator: `starsze` konsumowane zawsze (odczyt na każdy backup) albo przed rodowodem."""
     def _nie_czytaj():
         raise AssertionError("starsze czytane bez kandydata łańcucha")
         yield  # pragma: no cover
 
-    for fakty in (_f(), _f(niepodmieniony=True), _f(slad_wciagniety=True, wynik_wlasny=True), _f(faza_zapisu="writing")):
+    for fakty in (_f(), _f(niepodmieniony=True), _f(slad_wciagniety=True, wynik_wlasny=True), _f(faza_zapisu="writing"),
+                  _f(slad_wciagniety=True, stan_rodowodu="cofniety"), _f(slad_wciagniety=True, stan_rodowodu="zywy"),
+                  _f(slad_wciagniety=True, stan_rodowodu="powrot")):
         writeback.klasa_backupu(fakty, _nie_czytaj())
 
 
@@ -150,42 +180,49 @@ def test_przerwane_ponowienie_po_lancuchu_nie_liczy_reszty(tmp_path):
         con.close()
 
 
-def test_klasy_wsadowe_z_lancuchem_czytaja_jedna_migawke(tmp_path):
+@pytest.mark.parametrize("zapis", ["zewnatrz", "inny_przebieg"])
+def test_klasy_wsadowe_z_lancuchem_czytaja_jedna_migawke(tmp_path, zapis):
     """Kandydat łańcucha przebiegu w migawce: nakładka `aa` cofnięta w całości (nowszy backup L0 - „już cofnięty”
-    łańcuchem przez wynik własny starszego). Drugie połączenie zapisuje L0 innym przebiegiem MIĘDZY odczytem operacji
-    a odczytem śladów (bariera przed trzecim SELECT-em): klasy z migawki sprzed - trzy `zakonczony` - a po zapisie
-    para śladu starszego pęka i łańcuch nowszego razem z nią. Falsyfikator: odczyt śladów poza transakcją odczytu
-    (łańcuch rozstrzygnięty stanem po zapisie innego połączenia)."""
+    łańcuchem przez wynik własny starszego). Drugie połączenie zmienia L0 MIĘDZY odczytem operacji a odczytem śladów
+    (bariera przed trzecim SELECT-em): klasy z migawki sprzed - trzy `zakonczony`. Po zapisie:
+      * `zewnatrz` (zmiana spoza Horreum + skan) - para śladu starszego pęka i łańcuch nowszego razem z nią, a rodowód
+        kończy się na odczycie zewnętrznym bez wyniku zapisu (None): `[zatwierdzony, zakonczony, zatwierdzony]`;
+      * `inny_przebieg` (zapis L0 przebiegiem S) - oba backupy L0 dalej `zakonczony`: według rodowodu ich zapisy
+        cofnięto, a L0 niesie zapis S (AR-421, wiersz tabeli „własne cofnięcie przykryte nowszym zapisem”).
+    Falsyfikator: odczyt śladów poza transakcją odczytu (wariant `zewnatrz`; pod regułą z rodowodem odczyt śladów poza
+    migawką łapie scena wyniku własnego po objeździe - `tests/test_regula_rodowodu.py`)."""
     con, pliki = _nakladka(tmp_path, "aa")
     f0 = _klatki(con)[0]
     assert writeback.undo_run(con, (1, 2), now=NOW).complete
     assert [k for *_x, k in writeback._klasy_przebiegu(con, "R")] == ["zakonczony"] * 3
     con2 = db.connect(str(tmp_path / "n.db"))
 
-    def _zapis_innego_przebiegu():
-        _makro(con2, "S", "EQ8", [f0])
-        assert writeback.commit(con2, "S", now=NOW, inplace=False).applied
+    def _zapis():
+        if zapis == "inny_przebieg":
+            _makro(con2, "S", "EQ8", [f0])
+            assert writeback.commit(con2, "S", now=NOW, inplace=False).applied
+        else:
+            fits.setval(str(pliki[0]), "TELESCOP", value="EQ8")
+            scan.ingest_record(con2, scan.scan_file(str(pliki[0])), volume="V", now=NOW,
+                               summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     try:
-        bariera = _BarieraOdczytu(con, 3, _zapis_innego_przebiegu)
+        bariera = _BarieraOdczytu(con, 3, _zapis)
         assert [k for *_x, k in writeback._klasy_przebiegu(bariera, "R")] == ["zakonczony"] * 3
         assert not con.in_transaction and _tel(pliki[0]) == "EQ8"
-        assert [k for *_x, k in writeback._klasy_przebiegu(con, "R")] == ["zatwierdzony", "zakonczony",
-                                                                           "zatwierdzony"]
+        po = ["zatwierdzony", "zakonczony", "zatwierdzony"] if zapis == "zewnatrz" else ["zakonczony"] * 3
+        assert [k for *_x, k in writeback._klasy_przebiegu(con, "R")] == po
     finally:
         con2.close()
         con.close()
 
 
-# ============================================================ granica: łańcuch między przebiegami (AR-421)
-
-_GRANICA = ("AR-421: łańcuch między przebiegami wymaga trwałego dowodu następstwa domknięć cofnięć obu dróg "
-            "(rodowód stanu lokacji - migracja, wpis rejestru); dziś klasa widzi łańcuch wyłącznie w przebiegu")
+# ============================================================ łańcuch między przebiegami - rodowód stanu lokacji (AR-421)
 
 
 def _dwa_przebiegi_cofniete(tmp_path, drogi, druga):
     """R1: RC8 → EQ6 (`drogi[0]`: `m` w miejscu, `a` atomowo), R2: EQ6 → `druga` atomowo, cofnięcie C2, potem C1 -
-    plik wraca do RC8. Warunki wstępne sceny pinuje `test_warunki_wstepne_granicy_ar421` (bez xfail), test celu
-    ich nie powtarza - regresja sceny nie chowa się w XFAIL (fala 31, krok 0)."""
+    plik wraca do RC8. Warunki wstępne sceny pinuje `test_warunki_wstepne_granicy_ar421`, test celu ich nie
+    powtarza - regresja sceny nie miesza się z celem."""
     con, (p,) = _baza(tmp_path, 1)
     _makro(con, "R1", "EQ6")
     c1 = writeback.commit(con, "R1", now=NOW, inplace=drogi[0] == "m").commit_id
@@ -205,12 +242,12 @@ def test_warunki_wstepne_granicy_ar421(tmp_path, drogi, druga):
         con.close()
 
 
-@pytest.mark.xfail(strict=True, reason=_GRANICA)
 @pytest.mark.parametrize("drogi", ["aa", "ma"])
 def test_aba_miedzy_przebiegami_ponowne_cofniecie_nie_przywraca_cofnietego_zapisu(tmp_path, drogi):
     """A → B → A między przebiegami (R1: RC8 → EQ6, R2: EQ6 → RC8 atomowo), cofnięcie C2, potem C1 - plik wraca do
-    RC8. Ponowne cofnięcie C2 (szuflada po restarcie, CLI `header-fix --undo 2`) nie może przywrócić EQ6 - wyniku C1,
-    który człowiek cofnął. Dziś przywraca (klasa C2 `zatwierdzony`, odcisk lokacji = `post_hash` C2)."""
+    RC8. Ponowne cofnięcie C2 (szuflada po restarcie, CLI `header-fix --undo 2`) nie przywraca EQ6 - wyniku C1, który
+    człowiek cofnął: rodowód mówi `cofniety`. Falsyfikator: reguła bez rodowodu (klasa C2 `zatwierdzony`, odcisk
+    lokacji = `post_hash` C2 - klik przywracał EQ6)."""
     con, p, c2, _cofniete = _dwa_przebiegi_cofniete(tmp_path, drogi, "RC8")
     try:
         writeback.undo_run(con, (c2,), now=NOW)
@@ -219,11 +256,10 @@ def test_aba_miedzy_przebiegami_ponowne_cofniecie_nie_przywraca_cofnietego_zapis
         con.close()
 
 
-@pytest.mark.xfail(strict=True, reason=_GRANICA)
 def test_dwa_przebiegi_cofniete_po_kolei_nie_zostawiaja_cofnij(tmp_path):
     """Dwa przebiegi atomowo na jednym pliku (R1: RC8 → EQ6, R2: EQ6 → EQ8), cofnięcie C2, potem C1 - plik sprzed
-    obu. Zakres „Cofnij” R2 ma być pusty (szuflada po restarcie nie stawia „Cofnij” zapisu już cofniętego). Dziś
-    R2 zostaje `zatwierdzony`, a klik odmawia `undo_header_changed`."""
+    obu. Zakres „Cofnij” R2 jest pusty (szuflada po restarcie nie stawia „Cofnij” zapisu już cofniętego).
+    Falsyfikator: reguła bez rodowodu (R2 `zatwierdzony`, klik odmawiał `undo_header_changed`)."""
     con, _p, _c2, _cofniete = _dwa_przebiegi_cofniete(tmp_path, "aa", "EQ8")
     try:
         assert writeback.przebieg_do_cofniecia(con, "R2") is None

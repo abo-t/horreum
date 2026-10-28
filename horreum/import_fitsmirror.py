@@ -686,7 +686,8 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, relocatio
         liczniki = ScanSummary()
         try:
             ingest_record(con, rec, volume=pf.volume, drive_letter=pf.drive_letter, tier=None,
-                          now=now, summary=liczniki, actor=ACTOR, inplace_gen=gen)
+                          now=now, summary=liczniki, actor=ACTOR, inplace_gen=gen,
+                          pochodzenie=repo.ZEWNETRZNE)
         except repo.StaleScanRecord as exc:
             raise ImportAbort(
                 f"zapis w miejscu na {path} w trakcie importu ({exc}) - import zasila WYLACZNIE "

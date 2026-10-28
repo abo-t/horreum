@@ -96,7 +96,7 @@ def test_granica_sladu_to_chwila_migracji_tej_bazy(tmp_path, z_wersji):
     (commit z 2026-10-20 byłby „nietknięty”)."""
     con = _baza_z_wersji(tmp_path / "h.db", z_wersji)
     dziennik = dict(con.execute("SELECT version, applied_at FROM migration_log").fetchall())
-    oczekiwane = set(range(44, 48)) if z_wersji == 43 else {47}
+    oczekiwane = set(range(44, 49)) if z_wersji == 43 else {47, 48}
     assert set(dziennik) == oczekiwane, dziennik
     assert len(set(dziennik.values())) == 1, dziennik       # jeden przebieg - jedna chwila
     assert writeback._granica_sladu(con) == dziennik[min(oczekiwane)]
@@ -371,6 +371,7 @@ def test_nowszy_zapis_cofniety_bez_sladu_nie_blokuje(tmp_path):
     _karta(con, "R2", lokacje[0], "NGC 1")
     c2 = writeback.commit(con, "R2", now=NOW, inplace=False)
     assert writeback.undo(con, c2.commit_id, now=NOW).complete
+    con.execute("DELETE FROM location_state")       # cofnięcie sprzed śladu (0044) jest też sprzed rodowodu (0048)
     con.execute("DELETE FROM atomic_undo")
     con.commit()
     u = writeback.undo(con, cid, now=NOW)
@@ -483,5 +484,5 @@ def test_wiersz_dziennika_w_transakcji_migracji(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "_migration_sql", prawdziwy)
     con = db.open_db(path)
     assert db._user_version(con) == db.SCHEMA_VERSION
-    assert [r[0] for r in con.execute("SELECT version FROM migration_log")] == [47]
+    assert [r[0] for r in con.execute("SELECT version FROM migration_log")] == [47, 48]
     con.close()

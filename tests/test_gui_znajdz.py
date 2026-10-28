@@ -757,7 +757,8 @@ def strona_z_plikami(qapp, tmp_path):
         hdu.header["TELESCOP"] = "RC8"
         hdu.header["IMAGETYP"] = "Light"
         hdu.writeto(str(p), overwrite=True)
-        scan.ingest_record(c, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(c, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     v = grid_mod.FramesView(c, now_fn=lambda: NOW)
     v._writeback_async = False
     s = ZnajdzView(v)

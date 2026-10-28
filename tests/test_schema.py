@@ -107,8 +107,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v47_po_migracji(tmp_path):
-    """0047 podnosi user_version do 47 (świeża baza leci 0002→…→0047 sekwencyjnie; 0025 = wersja
+def test_user_version_v48_po_migracji(tmp_path):
+    """0048 podnosi user_version do 48 (świeża baza leci 0002→…→0048 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -130,13 +130,14 @@ def test_user_version_v47_po_migracji(tmp_path):
     0044 = ślad własnego cofnięcia drogi atomowej `atomic_undo`, AR-182; 0045 = werdykt plików obok
     ścieżki na śladzie cofnięcia `atomic_undo.outcome`/`kept_paths`/`settled_at`, AR-127; 0046 =
     zbadanie bajtu spoza ASCII w surowym nagłówku kopii FITS `location.nonprintable_hash`/`_keyword`/
-    `_char`, AR-299; 0047 = dziennik migracji tej bazy `migration_log`, AR-318).
+    `_char`, AR-299; 0047 = dziennik migracji tej bazy `migration_log`, AR-318; 0048 = rodowód stanu lokacji
+    `location_state`, AR-421).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 47
-    assert db.SCHEMA_VERSION == 47
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 48
+    assert db.SCHEMA_VERSION == 48
     con.close()
 
 
@@ -180,7 +181,7 @@ def test_0044_slad_cofniecia_przyrost_na_bazie_v43_i_CHECK(tmp_path):
     con.commit()
     przed = {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
              for t in ("frame", "location", "commits", "header_backups")}
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v48_po_migracji
     assert con.execute("SELECT count(*) FROM atomic_undo").fetchone()[0] == 0
     assert {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in przed} == przed
     assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
@@ -234,7 +235,7 @@ def test_0045_werdykt_sladu_przyrost_na_bazie_v44_i_CHECK(tmp_path):
                     "VALUES (?, 1, ?, 1, ?, ?, 1, 'k', 't', 't')", (i, s, s, s))
     con.commit()
     przed = [tuple(r) for r in con.execute("SELECT * FROM atomic_undo ORDER BY id")]
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v48_po_migracji
     po = [tuple(r) for r in con.execute(
         "SELECT * FROM atomic_undo ORDER BY id")]
     assert [r[:len(przed[0])] for r in po] == przed
@@ -276,7 +277,7 @@ def test_0043_indeks_frame_object_na_bazie_v42(tmp_path):
     przed = [tuple(r) for r in con.execute("SELECT * FROM frame ORDER BY id")]
     assert db._user_version(con) == 42
     assert "idx_frame_object" not in {r[1] for r in con.execute("PRAGMA index_list(frame)")}
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v48_po_migracji
     assert [r[2] for r in con.execute("PRAGMA index_info(idx_frame_object)")] == ["object_id"]
     assert [tuple(r) for r in con.execute("SELECT * FROM frame ORDER BY id")] == przed
     assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
@@ -304,7 +305,7 @@ def test_0041_kod_powodu_pozycji_przyrost_na_bazie_v40_i_CHECK(tmp_path):
                 "'blocked', ?)", (proza,))
     con.commit()
     assert db._user_version(con) == 40
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v48_po_migracji
     assert tuple(con.execute("SELECT reason, reason_code, reason_args FROM pending_object_change"
                              ).fetchone()) == (proza, None, None)
     assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
@@ -351,7 +352,7 @@ def test_0042_kody_powodow_pisarza_przyrost_na_bazie_v41_i_CHECK(tmp_path):
     con.execute("UPDATE pending_renames SET status = 'skipped', reason = 'cofnięto (undo)' WHERE id = 1")
     con.commit()
     assert db._user_version(con) == 41
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v45_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v48_po_migracji
     tabele = ("pending_changes", "pending_renames", "withheld_write")
     assert [tuple(con.execute(f"SELECT reason, reason_code, reason_args FROM {t}").fetchone())
             for t in tabele] == [(proza, None, None), ("cofnięto (undo)", None, None),
@@ -406,7 +407,7 @@ def test_0036_zmiana_obiektu_przyrost_na_bazie_v35(tmp_path):
     con = _baza_v35_z_kopia(str(tmp_path / "h.db"))
     przed = {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
              for t in ("frame", "location", "object", "pending_renames", "event")}
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v37_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v48_po_migracji
     for t in ("object_change_run", "pending_object_change", "run_dir"):
         assert con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0
     assert {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in przed} == przed
@@ -595,7 +596,7 @@ def test_0039_optyka_reki_backfill_z_payloadu_na_bazie_v38(tmp_path):
     kolumny = ("id, telescop_canon, label, f_ratio_nominal, focal_nominal, status, merged_into, "
                "created_at, in_park")
     przed = [tuple(r) for r in con.execute(f"SELECT {kolumny} FROM telescope ORDER BY id")]
-    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v40_po_migracji
+    assert db.migrate(con) == db.SCHEMA_VERSION      # pin wersji: test_user_version_v48_po_migracji
     assert [tuple(r) for r in con.execute(f"SELECT {kolumny} FROM telescope ORDER BY id")] == przed
     reka = {r[0]: (r[1], r[2]) for r in con.execute(
         "SELECT id, focal_user, f_ratio_user FROM telescope")}

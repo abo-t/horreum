@@ -360,9 +360,11 @@ def test_zly_wzor_nie_rekoncyliuje_i_nie_bierze_blokady(tmp_path, capsys, monkey
 
 
 def _do_v46(baza):
-    """Baza starszego wydania (schemat v46): v47 bez tabeli z 0047 (`migration_log`) - jedynego przyrostu 0047."""
+    """Baza starszego wydania (schemat v46): bieżąca baza bez tabel z 0047 (`migration_log`) i 0048 (`location_state`
+    z indeksami) - jedynych przyrostów tych migracji."""
     con = db.connect(str(baza))
     try:
+        con.execute("DROP TABLE location_state")
         con.execute("DROP TABLE migration_log")
         con.execute("PRAGMA user_version = 46")
         con.commit()

@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from horreum import db
+from horreum import db, repo
 from horreum.gui import grid as grid_mod
 from horreum.gui import home as home_mod
 from horreum.gui import i18n, queries
@@ -1162,7 +1162,8 @@ def okno_ze_stagingiem(qapp, tmp_path):
     hdu.writeto(str(p), overwrite=True)
     path = str(tmp_path / "wb.db")
     con = db.open_db(path)
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     con.close()
     win = _pokazane(MainWindow(path))
     win.show_classic()

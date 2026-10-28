@@ -982,7 +982,7 @@ def repair(qapp, tmp_path):
     con = db.open_db(str(tmp_path / "pd.db"))
     for p in files:
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     v = ObjectAxisView(con, now_fn=lambda: NOW_PD)
 
     def _open(run_stage_fn=None):
@@ -1372,7 +1372,7 @@ def test_rozjazd_swiadkow_zostawia_pole_puste(repair, tmp_path):
     v, con, files, _open = repair
     p = _nameless_tree(tmp_path, names=("NGC1491_20220130_x.fits",), seed=7)[0]
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     dlg = _open()
     assert len(dlg._groups) == 1 and len(dlg._groups[0]["rows"]) == 3   # ten sam folder
     g = dlg._groups[0]
@@ -2918,7 +2918,7 @@ def sciezka_karty(qapp, tmp_path):
     con = db.open_db(str(tmp_path / "o3.db"))
     for p in pliki.values():
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_O3,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     fid = {k: con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
            for k, p in pliki.items()}
     kopia = tmp_path / "STACKS" / "NGC7635" / "kopia" / "NGC7635_Ha_c.fits"
@@ -3181,7 +3181,7 @@ def test_karty_dla_pozycji_nazwanej_mimo_bledu_INNEJ_pozycji(qapp, tmp_path, mon
     _biblioteka_kalibracji(con, tmp_path, NOW_O3)
     for p in (a, b):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_O3,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     prawdziwa = repo.user_assign_object
 
     def klinga(con_, **kw):
@@ -3261,7 +3261,7 @@ def _okno_karty_z_mieszanka(tmp_path, ktore):
     con = db.open_db(str(tmp_path / "mieszanka.db"))
     for p in pliki:
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=teraz,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     if ktore == "sciezka":
         # RAW pod `LIGHTS` jak w `sciezka_karty`: korzeń archiwum (kotwica `STACKS`) z bazy.
         raw, _ = repo.upsert_frame(con, sha1_data="sha-mieszanka-raw", kind="light",
@@ -3377,7 +3377,7 @@ def test_XISF_dopisuje_karte_W_MIEJSCU_i_Cofnij_wraca_bajt_w_bajt(qapp, tmp_path
     plik = _xisf_bez_object(tmp_path / "LIGHTS" / "NGC7635" / "RC8" / "L" / "NGC7635_a.xisf")
     con = db.open_db(str(tmp_path / "x.db"))
     scan.ingest_record(con, scan.scan_file(str(plik)), volume="V", now=NOW_PD,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     przed = hashlib.sha1(plik.read_bytes()).hexdigest()
     dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
                              db_path=queries.db_path_of(con), now_fn=lambda: NOW_PD)
@@ -3586,7 +3586,7 @@ def test_plan_kart_sciezki_pomija_FITS_z_suma_kontrolna_z_powodem(sciezka_karty,
     hdu.header["IMAGETYP"] = "Master Light"
     hdu.writeto(str(p), checksum=True)
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_O3,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     suma = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
     _value, touched, skipped = plan_kart_sciezki(con, "NGC7635", [fid["zapis"], suma])
     assert [t.path for t in touched] == [str(pliki["zapis"])]

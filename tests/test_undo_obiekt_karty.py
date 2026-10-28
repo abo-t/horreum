@@ -41,7 +41,8 @@ def _plik(katalog, nazwa="NGC7635_a.fits", *, seed=1, ra=None, dec=None):
 
 
 def _skan(con, p):
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     return con.execute("SELECT id, frame_id FROM location WHERE path = ?", (str(p),)).fetchone()
 
 

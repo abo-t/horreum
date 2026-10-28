@@ -679,7 +679,7 @@ def test_zatwierdzenie_ze_sciezki_POMIJA_klatke_ktorej_naglowek_zaczal_zeznawac(
                           header_hash="h-nowy", hdu_index=None, compressed=None, size_bytes=None,
                           unreadable_since=None, unreadable_kind=None, unreadable_reason=None,
                           present=1, now=NOW, raw_json="{}", hot_fields={"object_raw": "NGC 7000"},
-                          kind="master_light")
+                          kind="master_light", pochodzenie=repo.ZEWNETRZNE)
     assert con.execute("SELECT object_raw FROM header WHERE frame_id = ?",
                        (fid,)).fetchone()[0] == "NGC 7000"
     g = _zatwierdz(con, p)

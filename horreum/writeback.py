@@ -3182,8 +3182,8 @@ def _group_by_location(rows) -> list[tuple[int, list]]:
     return [(lid, groups[lid]) for lid in order]
 
 
-def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None, kontrola=None,
-            w_transakcji=None, przed_wciagnieciem=None) -> "_Resync":
+def _resync(con, path, volume, *, now, pochodzenie, actor="user:local", expect_sha1_data=None,
+            kontrola=None, w_transakcji=None, przed_wciagnieciem=None) -> "_Resync":
     """RE-SYNC bazy po mutacji pliku - REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
     (read-only, świeże hasze/nagłówek/karty) → `ingest_record`: `refresh_location` odświeża fakty
     kopii + zeznanie + `cards` + `frame.camera_id/kind` z eventami (actor="user:local"). Wymaga
@@ -3227,6 +3227,10 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     przejścia wpisu `OBJECT` w 'applied' w transakcji `w_transakcji` (`repo._zapis_karty_obiektu_tx`,
     AR-319) - ta sama reguła dla re-syncu, skanu, rekoncyliacji i dokończenia wstrzymania.
 
+    `pochodzenie` (WYMAGANE, 0048, AR-421): operacja, której wynik baza poznaje tym re-synciem, z oczekiwanym
+    wynikiem (`repo.Pochodzenie`) - jedzie do `refresh_location`, który dopisuje wiersz rodowodu stanu lokacji
+    w transakcji wjazdu. Etykieta pisarza wyłącznie przy zgodności odczytanego rekordu z wynikiem.
+
     Zwraca `_Resync`: `niezgodne` (kontrola danych - nic nie wciągnięto, `zeznanie` `None`) albo
     `zeznanie`."""
     rec = _skan_kontrolny(path, kontrola)
@@ -3237,7 +3241,7 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
         if przed_wciagnieciem is not None:
             przed_wciagnieciem()
         scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(),
-                           actor=actor)
+                           actor=actor, pochodzenie=pochodzenie)
         zeznanie = _dowod_zeznania(con, rec, volume, now=now, actor=actor)
         if w_transakcji is not None:
             w_transakcji(zeznanie)
@@ -3357,9 +3361,7 @@ def _kotwica_operacji(con, op, loc) -> str | None:
     if op["anchor_sha1"] is not None:
         return op["anchor_sha1"]
     if op["kind"] == "commit" and op["commit_id"] is not None:
-        row = con.execute(
-            "SELECT header_text FROM header_backups WHERE commit_id = ? AND location_id = ? "
-            "ORDER BY id DESC LIMIT 1", (op["commit_id"], op["location_id"])).fetchone()
+        row = repo.backup_operacji(con, commit_id=op["commit_id"], location_id=op["location_id"])
         try:
             env = RegionBackup.decode(row["header_text"]) if row is not None else None
         except ValueError:
@@ -3451,8 +3453,15 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
             except Exception as exc:
                 padlo_zamkniecie.append(exc)
                 raise
+        # Rodowód stanu lokacji (AR-421): wynik operacji = nagłówek, który zapisała; dowód całego pliku daje
+        # kontrola danych re-syncu (sha1 wyniku zapisu w miejscu nie jest nigdzie utrwalony).
+        backup = repo.backup_operacji(con, commit_id=op["commit_id"], location_id=loc["id"])
+        if backup is None:
+            raise ValueError(f"operacja {op_id} bez backupu commitu {op['commit_id']} na lokacji {loc['id']}")
+        pochodzenie = (repo.Pochodzenie.zapis if op["kind"] == "commit" else repo.Pochodzenie.cofniecie)(
+            backup["id"], (repo.WynikPisarza(spec.post_hash),), inplace_op_id=op_id)
         try:
-            wynik = _resync(con, loc["path"], loc["volume"], now=now,
+            wynik = _resync(con, loc["path"], loc["volume"], now=now, pochodzenie=pochodzenie,
                             expect_sha1_data=loc["sha1_data"], kontrola=kontrola,
                             przed_wciagnieciem=_przed, w_transakcji=_zamknij)
         except Exception as exc:  # noqa: BLE001 - wsad idzie dalej, operacja zostaje `written`
@@ -3589,6 +3598,7 @@ def _potwierdz_z_dysku(con, b, loc, *, now, intent_outcome=None) -> str | None:
             withheld_reason=None if zeznanie else repo.withheld_reason(
                 con, location_id=loc["id"], commit_id=b["commit_id"]))
     wynik = _resync(con, loc["path"], loc["volume"], now=now, expect_sha1_data=loc["sha1_data"],
+                    pochodzenie=repo.Pochodzenie.zapis(b["id"], (repo.wynik_zapisu(con, b["id"]),)),
                     przed_wciagnieciem=_potwierdz, w_transakcji=_rozlicz)
     if wynik.niezgodne is not None:
         return PowodPozycji(f"backup commitu {b['commit_id']} czeka na potwierdzenie podmiany; na "
@@ -3775,11 +3785,12 @@ def _potwierdz_pod_blokada(con, b, loc, n, *, now, kopia_a=None) -> str | None:
 
 def _odswiez_po_powrocie(con, loc, *, now) -> str | None:
     """C7: po powrocie cudzej wersji baza czyta plik od nowa (wjazd rekordu semantyką skanu - bez
-    kotwic zapisu, bo pod ścieżką stoi wersja innego pisarza). Porażka zostawia trwały znacznik
-    odczytu (`repo.mark_location_rescan`, postawiony przed werdyktem) - skan dokończy."""
+    kotwic zapisu, bo pod ścieżką stoi wersja innego pisarza; w rodowodzie stanu lokacji - odczyt
+    zewnętrzny, nie powrót pisarza). Porażka zostawia trwały znacznik odczytu
+    (`repo.mark_location_rescan`, postawiony przed werdyktem) - skan dokończy."""
     try:
         scan.ingest_record(con, scan.scan_file(loc["path"]), volume=loc["volume"], now=now,
-                           summary=scan.ScanSummary(), actor="user:local")
+                           summary=scan.ScanSummary(), actor="user:local", pochodzenie=repo.ZEWNETRZNE)
     except Exception as exc:  # noqa: BLE001 - znacznik odczytu zostaje
         blad = _blad_systemu(exc)
         return PowodPozycji(f"baza nie odczytała jeszcze wróconej wersji ({blad}) - najbliższy skan "
@@ -4219,8 +4230,15 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         if uwaga is not None:
             nagrobek.append(uwaga)
 
+    if not backup_pliku:
+        raise AssertionError("podmiana drogi atomowej bez backupu pliku - błąd pisarza")
+    # Rodowód stanu lokacji (AR-421): wynik zapisu = nagłówek `post_hash` i pełny sha1 przygotowanej wersji
+    # z zamiaru podmiany - re-sync biegnie poza blokadą pliku, więc obca wersja z tym samym obrazem
+    # (`sha1_data`) w tym oknie dostaje w rodowodzie odczyt zewnętrzny, nie zapis. Odczyt wyniku PRZED `try`:
+    # brak świeżo utrwalonego backupu to błąd pisarza (EXPECT), nie czkawka re-syncu.
+    pochodzenie = repo.Pochodzenie.zapis(backup_pliku[0], (repo.wynik_zapisu(con, backup_pliku[0]),))
     try:                              # droga atomowa: PLIK→DB (T8); pełny odczyt pliku
-        niezgodne = _resync(con, path, loc["volume"], now=now,
+        niezgodne = _resync(con, path, loc["volume"], now=now, pochodzenie=pochodzenie,
                             expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij).niezgodne
     except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
         # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
@@ -5473,16 +5491,6 @@ def _wynik_wlasny_w_bazie(con, b):
         "ORDER BY au.id DESC LIMIT 1", (int(b["location_id"]), b["id"])).fetchone()
 
 
-def _slad_pary(con, backup_id, sha1, naglowek):
-    """Najnowszy ślad cofnięcia backupu z parą odcisków `(sha1, naglowek)` - bez względu na
-    `synced_at` (AR-182): oznaczenie wciągnięcia dotyczy wyłącznie jego, a starsza próba z tym samym
-    wynikiem (śmierć między śladem a podmianą, potem ponowienie) zostaje, jaka była. `None` = plik
-    nie jest wynikiem żadnego cofnięcia tego backupu."""
-    return con.execute(
-        "SELECT max(id) FROM atomic_undo WHERE backup_id = ? AND result_sha1 = ? "
-        "AND result_hash = ?", (backup_id, sha1, naglowek)).fetchone()[0]
-
-
 # ------------------------------------------------ PLIKI OBOK ŚCIEŻKI PO COFNIĘCIU (AR-127, 0045)
 # Cofnięcie drogą atomową może zostawić obok ścieżki trzy pliki: kopię wypartą K, kopię zwrotną Z
 # (`_nazwa_zwrotna(K)`) i plik tymczasowy T - po śmierci procesu w oknie podmiany albo po awarii, którą
@@ -5679,13 +5687,15 @@ def _rozlicz_cofniecie_w_bazie(con, commit_id, loc, *, now, slad=None) -> None:
     raz - znacznik `card_undone`, nowszy werdykt ręki wygrywa). Woła je każde „już cofnięte”
     (AR-169): skan po zewnętrznym powrocie pliku wyrównuje nagłówek, ale stanu obiektu nie odtwarza.
     `slad` = ślad cofnięcia (`atomic_undo.id`), którego wynik leży na dysku i w bazie - oznaczany
-    w tej samej transakcji (AR-182)."""
+    w tej samej transakcji (AR-182) i przypisany w rodowodzie stanu lokacji (AR-421: baza poznała wynik
+    cudzym odczytem, więc wiersz `undo` tego śladu - wyłącznie, gdy lokacja opisuje jego parę odcisków)."""
     with repo.atomic(con):
         repo.close_withheld_undone(con, commit_id=commit_id, location_id=loc["id"], now=now)
         repo.restore_object_state(con, frame_id=loc["frame_id"], commit_id=commit_id,
                                   location_id=loc["id"], now=now)
         if slad is not None:
             repo.mark_atomic_undo_synced(con, undo_id=slad, now=now)
+            repo.attribute_undo_state(con, location_id=loc["id"], atomic_undo_id=slad, now=now)
 
 
 def _baza_opisuje(loc, path, naglowek) -> bool:
@@ -5730,7 +5740,13 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
 
         ŚLAD (AR-182): w transakcji re-syncu wciągnięty wynik własny dostaje `synced_at` - ślad
         `slad` (przebieg, który go utrwalił), gdy to on leży w bazie, a bez `slad` najnowszy ślad
-        z parą odcisków wciągniętej lokacji (ponowienie).
+        z parą odcisków wciągniętej lokacji (ponowienie). Ten sam wybór (`repo.pulled_atomic_undo`,
+        w tej samej transakcji) wskazuje ślad wiersza rodowodu stanu lokacji (AR-421).
+
+        RODOWÓD (AR-421): z kontrolą całego pliku - cofnięcie tego backupu (wynik: pary śladów
+        własnych albo nagłówek kontroli; resztę pliku dowodzi kontrola); bez kontroli (backup
+        tekstowy sprzed śladów, rozpoznany samym nagłówkiem poza blokadą) - odczyt zewnętrzny: obca
+        wersja z tym samym nagłówkiem i obrazem nie dostanie etykiety cofnięcia.
 
         ZEZNANIE (AR-82): OTWARTE wstrzymanie cofanego commitu zamyka się jako `undone` przed
         wjazdem rekordu, a cofnięcie, którego nagłówka zeznanie nie przyjęło, zakłada wstrzymanie
@@ -5749,9 +5765,10 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
                                       location_id=loc["id"], now=now)
             sha1, naglowek = con.execute("SELECT file_sha1, header_hash FROM location WHERE id = ?",
                                          (loc["id"],)).fetchone()
-            pasujacy = _slad_pary(con, b["id"], sha1, naglowek)
-            if pasujacy is not None and slad in (None, pasujacy):
-                repo.mark_atomic_undo_synced(con, undo_id=pasujacy, now=now)
+            wciagniety = repo.pulled_atomic_undo(con, backup_id=b["id"], file_sha1=sha1,
+                                                 header_hash=naglowek, slad=slad)
+            if wciagniety is not None:
+                repo.mark_atomic_undo_synced(con, undo_id=wciagniety, now=now)
             if zeznanie or zamkniete[0]:
                 return
             powod_w = repo.withheld_reason(con, location_id=loc["id"], commit_id=commit_id,
@@ -5759,9 +5776,13 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
             repo.withhold_write(con, kind="undo", location_id=loc["id"], commit_id=commit_id,
                                 header_hash=naglowek, reason=powod_w, now=now)
             wstrzymanie.append(powod_w)
+        pochodzenie = repo.ZEWNETRZNE if kontrola is None else repo.Pochodzenie.cofniecie(
+            b["id"], (*(repo.WynikPisarza(h, s) for s, h in sorted(kontrola.wlasne)),
+                      repo.WynikPisarza(kontrola.header_hash)), slad=slad, rozpoznaj_slad=True)
         try:
-            wynik = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect,
-                            kontrola=kontrola, przed_wciagnieciem=_przed, w_transakcji=_nagrobek)
+            wynik = _resync(con, path, loc["volume"], now=now, pochodzenie=pochodzenie,
+                            expect_sha1_data=expect, kontrola=kontrola, przed_wciagnieciem=_przed,
+                            w_transakcji=_nagrobek)
             if kontrola is not None and wynik.niezgodne is not None and odmowa is not None:
                 return _blok(loc, path, odmowa(wynik.niezgodne))
             niezgodne = wynik.niezgodne
@@ -5869,7 +5890,8 @@ def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
                     return _blok(loc, path, odmowa(niezgodne))
                 if (rec.file_sha1, rec.header_hash) in wlasne:
                     return _blok(loc, path, _JUZ_WLASNE, juz=True,
-                                 slad=_slad_pary(con, b["id"], rec.file_sha1, rec.header_hash))
+                                 slad=repo.atomic_undo_of_pair(con, b["id"], rec.file_sha1,
+                                                               rec.header_hash))
                 return _blok(loc, path, _JUZ_REGION if op_c is not None else _JUZ_ATOMOWO,
                              juz=True)
             return _sync(loc, path, loc["sha1_data"], _UNDO_DOKONCZONA_SYNCHRONIZACJA,
@@ -6141,7 +6163,10 @@ def recover_torn(con, op_id, *, now) -> FileResult:
         ponow = PowodPozycji(f"operacja zostaje otwarta, ponów {_droga_przywroc(op_id)}",
                              "way_retry_open", way=_droga_przywroc(op_id))
         try:
+            # Rodowód (AR-421): powrót pisarza do stanu sprzed operacji - plik ze starym regionem jest kotwicą.
             niezgodne = _resync(con, path, loc["volume"], now=now,
+                                pochodzenie=repo.Pochodzenie.powrot(
+                                    op_id, (repo.WynikPisarza(spec.pre_hash, kontrola.anchor_sha1),)),
                                 expect_sha1_data=loc["sha1_data"], kontrola=kontrola).niezgodne
         except Exception as exc:  # noqa: BLE001 - czkawka odczytu nie jest werdyktem
             blad = _blad_systemu(exc)

@@ -50,7 +50,8 @@ def _baza_z_bajtem(tmp_path):
     path = str(tmp_path / "b.db")
     con = db.open_db(path)
     p = _fits_z_bajtem(tmp_path / "ARCH" / "a.fits", 0xE9)
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     fid = con.execute("SELECT frame_id FROM location").fetchone()[0]
     con.close()
     return path, fid

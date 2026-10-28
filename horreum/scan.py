@@ -1951,7 +1951,7 @@ def _record_stack_history(con, rec, *, location_id, kind, now, actor):
                               history=rec.history, now=now, actor=actor)
 
 
-def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
+def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary, pochodzenie,
                   actor="scan", inplace_gen=None):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
     (`scan_tree`) i importu z dawcy (rekord pochodzi z nagłówka pliku ALBO z cache'owanego
@@ -2012,6 +2012,10 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     po odmowie strażnika generacji. Liczniki rekordu trafiają do `summary` dopiero po zatwierdzeniu -
     wycofany zapis nie zostawia w raporcie klatek, których w bazie nie ma.
 
+    POCHODZENIE (0048, AR-421): parametr WYMAGANY, podawany do obu gałęzi `repo.refresh_location` - skan,
+    stosy, uzupełnienie i import podają `repo.ZEWNETRZNE`, re-sync pisarza (`writeback._resync`) operację
+    z oczekiwanym wynikiem. Wiersz rodowodu stanu lokacji wchodzi w tę samą transakcję co fakty kopii.
+
     ŚCIEŻKA NIEZNANA, NIECZYTELNA (W1) dostaje lokację Z MARKEREM, rodzajem i powodem (P4-7,
     AR-21 (a)): pierwsza porażka odczytu jest przesłanką markera tak samo jak każda następna. Bez
     niego brama przyrostowa pomijała kopię przy tym samym `mtime`, a kubełek nie mówił, czy winny
@@ -2022,11 +2026,12 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     rekord = ScanSummary()
     with repo.atomic(con):
         _ingest_in_tx(con, rec, volume=volume, drive_letter=drive_letter, tier=tier, now=now,
-                      summary=rekord, actor=actor, inplace_gen=inplace_gen)
+                      summary=rekord, actor=actor, inplace_gen=inplace_gen, pochodzenie=pochodzenie)
     _dolicz_probe(summary, rekord)
 
 
-def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, inplace_gen):
+def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, inplace_gen,
+                  pochodzenie):
     """Ciało `ingest_record` - wołane WYŁĄCZNIE w jego zakresie `repo.atomic` (kontrakt tam)."""
     readable = rec.header is not None
     copy_facts = copy_header_facts(rec.header, rec.header_hash, rec.image_roles)
@@ -2133,7 +2138,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
             compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
             unreadable_kind=kind_after, unreadable_reason=reason_after,
             present=1, now=now, actor=actor, copy_facts=copy_facts, inplace_gen=inplace_gen,
-            nonprintable=rec.nonprintable)
+            nonprintable=rec.nonprintable, pochodzenie=pochodzenie)
         summary.locations_refreshed += refreshed["facts"]
         _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
         return
@@ -2149,7 +2154,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
         unreadable_kind=kind_after, unreadable_reason=reason_after,
         present=1, now=now, actor=actor, raw_json=raw_json, cards=cards, hot_fields=hot,
         camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen,
-        nonprintable=rec.nonprintable)
+        nonprintable=rec.nonprintable, pochodzenie=pochodzenie)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
     _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
@@ -2378,7 +2383,7 @@ def backfill_xisf_headers(con, *, now, progress=None):
             liczniki = ScanSummary()           # próba liczy na swoim - patrz `_dolicz_probe`
             try:
                 ingest_record(con, rec, volume=row["volume"], now=now, summary=liczniki,
-                              actor="backfill:xisf", inplace_gen=gen)
+                              actor="backfill:xisf", inplace_gen=gen, pochodzenie=repo.ZEWNETRZNE)
             except repo.StaleScanRecord as exc:        # zapis w miejscu po generacji
                 if proba < _PROBY_GENERACJI:
                     continue
@@ -3191,7 +3196,7 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
                     else:
                         ingest_record(con, rec, volume=volume, drive_letter=drive_letter,
                                       tier=tier, now=now, summary=liczniki, actor="stacks",
-                                      inplace_gen=gen)
+                                      inplace_gen=gen, pochodzenie=repo.ZEWNETRZNE)
                         s.ingested += 1
             except repo.StaleScanRecord:                   # zapis w miejscu po generacji
                 stary = True
@@ -3316,7 +3321,8 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
             if rec is not None:
                 try:
                     ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
-                                  now=now, summary=liczniki, inplace_gen=gen)
+                                  now=now, summary=liczniki, inplace_gen=gen,
+                                  pochodzenie=repo.ZEWNETRZNE)
                     if _under(spath, stacks_prefix):       # wariant kadru z zeznaniem obok (AR-54)
                         from . import stack_variants       # leniwie: plan wersji importuje skan
                         stack_variants.note_testimony(con, spath, now=now)

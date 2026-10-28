@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from horreum import db, naming, pivot as pivot_mod, writeback
+from horreum import db, naming, pivot as pivot_mod, repo, writeback
 from horreum.gui import grid as grid_mod, queries, rows as rows_mod, tasks as tasks_mod
 
 # Źródło CAŁEGO widoku: fasada `grid.py` + moduły `grid_*.py` (WO-6) - bramki tekstowe nie mogą
@@ -1114,7 +1114,8 @@ def wb_view(qapp, tmp_path, monkeypatch):
     hdu.header["TELESCOP"] = "RC8"; hdu.header["IMAGETYP"] = "Light"
     hdu.writeto(str(p), overwrite=True)
     con = db.open_db(str(tmp_path / "wb.db"))
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     v = FramesView(con, now_fn=lambda: NOW)
     v._writeback_async = False   # test: worker.run() inline (sygnały direct = synchronicznie), bez QThread
     yield v, con, p
@@ -1172,7 +1173,7 @@ def test_makro_z_komentarzem_zapisuje_karte_ktorej_komentarz_sie_nie_miesci(wb_v
     with fits.open(str(p), mode="update") as hdul:
         hdul[0].header["TELESCOP"] = ("RC8", "k" * 47)    # karta pełna: 80 znaków
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     bar = view.macro_bar
     bar.asg_kw.setCurrentText("TELESCOP")
     bar.asg_op.setCurrentIndex(0)
@@ -1472,7 +1473,8 @@ def rn_view(qapp, tmp_path, monkeypatch):
         hdu.header["IMAGETYP"] = "Light"; hdu.header["OBJECT"] = obj; hdu.header["TELESCOP"] = "RC8"
         hdu.header["FILTER"] = "Ha"; hdu.header["DATE-OBS"] = dobs; hdu.header["EXPTIME"] = 300.0
         hdu.writeto(str(p), overwrite=True)
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
         files.append(p)
     v = FramesView(con, now_fn=lambda: NOW)
     v._writeback_async = False   # test: worker.run() inline (sygnały direct = synchronicznie), bez QThread
@@ -6694,7 +6696,8 @@ def test_szuflada_spadek_na_droge_atomowa_mowi_zdaniem_okien(qapp, tmp_path, lan
         i += 1
     hdu.writeto(str(p))
     con = db.open_db(str(tmp_path / "f.db"))
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     view = FramesView(con, now_fn=lambda: NOW)
     view._writeback_async = False
     i18n.set_lang(lang)
@@ -6811,7 +6814,8 @@ def _spadek_po_podmianie(tmp_path, monkeypatch, stan):
     from horreum import repo, scan
     con = db.open_db(str(tmp_path / "s.db"))
     L = _plik_z_ogniskowa(tmp_path / "A" / "a.fits")
-    scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     lok = con.execute("SELECT id, header_hash FROM location").fetchone()
     repo.stage_pending(con, run_id="R", location_id=lok["id"], keyword="FOCALLEN", idx=0, op="set",
                        old_value="800", new_value="1000", new_type="str", new_comment=None,
@@ -6821,7 +6825,7 @@ def _spadek_po_podmianie(tmp_path, monkeypatch, stan):
         M.parent.mkdir(parents=True)
         shutil.copyfile(L, M)                     # druga kopia klatki wjeżdża PO stagingu
         scan.ingest_record(con, scan.scan_file(str(M)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         res = writeback.commit(con, "R", now=NOW, inplace=True)
     else:
         pada = lambda *a, **kw: (_ for _ in ()).throw(OSError(None, "x", None, 64))   # noqa: E731
@@ -6888,7 +6892,8 @@ def test_spadek_odmowiony_nie_jest_przepisanym_plikiem(tmp_path):
     hdu.header["IMAGETYP"] = "Light"
     hdu.header["OBJECT"] = ("M31", "k" * 47)
     hdu.writeto(str(L))
-    scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(L)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     lok = con.execute("SELECT id, header_hash FROM location").fetchone()
     repo.stage_pending(con, run_id="R", location_id=lok["id"], keyword="OBJECT", idx=0, op="set",
                        old_value="M31", new_value="V" * 20, new_type="str", new_comment=None,
@@ -6917,7 +6922,8 @@ def _widok_jednego_pliku(tmp_path):
     hdu.header["IMAGETYP"] = "Light"
     hdu.writeto(str(p), overwrite=True)
     con = db.open_db(str(tmp_path / "wb.db"))
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     v = grid_mod.FramesView(con, now_fn=lambda: NOW)
     v._writeback_async = False
     return v, con

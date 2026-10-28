@@ -14,7 +14,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from horreum import db, writeback
+from horreum import db, repo, writeback
 from horreum.gui import grid as grid_mod, i18n, queries
 
 NOW = "2026-07-03T14:00:00"
@@ -41,7 +41,8 @@ def _baza_szuflady(tmp_path, n, nazwa="sz"):
                      ("DATE-OBS", f"2024-03-{15 + i:02d}T21:30:45"), ("EXPTIME", 300.0)):
             hdu.header[k] = v
         hdu.writeto(str(p), overwrite=True)
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
         pliki.append(p)
     return str(path), con, pliki
 
@@ -880,7 +881,8 @@ def test_wpis_failed_po_odrzuceniu_potwierdza_skan(qapp, tmp_path, monkeypatch, 
     else:
         repo.clear_waiting_staging(con, run_id="R", klinga="karty")
     assert [s for s, _r in _wpisy(con, "R")] == ["failed"]
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     (status, powod), = _wpisy(con, "R")
     assert status == "applied" and f"commicie {res.commit_id}" in powod
     assert _stan(con, fid) == (None, None, None)
@@ -1780,7 +1782,8 @@ def test_zwolnione_nazwy_przy_zajetej_szufladzie_mowia_ze_czekaja(qapp, tmp_path
     nazwy = []
     for i in (3, 4, 5):
         p = _fits(tmp_path / "arch" / f"n{i}.fits", seed=i)
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
         lid, mtime = con.execute("SELECT id, mtime FROM location WHERE path = ?", (str(p),)).fetchone()
         repo.stage_rename(con, run_id="NF", location_id=lid, old_path=str(p),
                           new_path=str(tmp_path / "arch" / f"m{i}.fits"), expected_mtime=mtime)

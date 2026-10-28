@@ -94,7 +94,7 @@ def test_odmowa_przepiecia_cofa_nowa_klatke(tmp_path, monkeypatch):
     _zapis_po_wstepnym_sprawdzeniu(monkeypatch, con, p)
     with pytest.raises(repo.StaleScanRecord):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary(), inplace_gen=gen)
+                           summary=scan.ScanSummary(), inplace_gen=gen, pochodzenie=repo.ZEWNETRZNE)
     monkeypatch.undo()
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
     assert _loc(con, p)["frame_id"] == stara
@@ -115,7 +115,7 @@ def test_odmowa_generacji_przed_derywacja_osi_nie_zostawia_kamery(tmp_path):
     _operacja(con, _lid(con, p), "synced")                  # zapis w miejscu po generacji
     with pytest.raises(repo.StaleScanRecord):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary(), inplace_gen=gen)
+                           summary=scan.ScanSummary(), inplace_gen=gen, pochodzenie=repo.ZEWNETRZNE)
     assert con.execute("SELECT count(*) FROM camera").fetchone()[0] == 0
     con.close()
 

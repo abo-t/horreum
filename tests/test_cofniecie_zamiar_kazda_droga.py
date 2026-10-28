@@ -205,7 +205,8 @@ def _plik_wrocil(tmp_path, monkeypatch):
     po_zapisie = pliki[0].read_bytes()
     assert writeback.undo(con, 1, now=NOW).complete
     pliki[0].write_bytes(po_zapisie)
-    scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     return con, [(1, 1)]
 
 
@@ -215,7 +216,8 @@ def _plik_wrocil_w_miejscu(tmp_path, monkeypatch):
     po_zapisie = pliki[0].read_bytes()
     assert writeback.undo(con, 1, now=NOW).complete
     pliki[0].write_bytes(po_zapisie)
-    scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     return con, []
 
 
@@ -271,7 +273,8 @@ def _nowszy_zakonczony_starszy_zywy(tmp_path, monkeypatch):
     c2 = writeback.commit(con, "R2", now=NOW, inplace=True)
     assert writeback.undo(con, c2.commit_id, now=NOW).complete
     pliki[0].write_bytes(po_zapisie)
-    scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     hasze = [r[0] for r in con.execute("SELECT post_hash FROM header_backups ORDER BY id")]
     assert len(set(hasze)) == 1, hasze
     return con, [(c1.commit_id, 1)]

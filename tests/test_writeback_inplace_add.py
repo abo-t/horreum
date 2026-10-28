@@ -453,7 +453,7 @@ def test_header_fix_mieszanka_w_miejscu_spadek_i_set_potem_undo_bajt_w_bajt(tmp_
                        zapas=0, seed=5)
     con = db.open_db(dbp)
     scan.ingest_record(con, scan.scan_file(str(ciasny)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     cli._pochodne(con, NOW, [])
     con.close()
     pliki = [master, light, str(ciasny)]

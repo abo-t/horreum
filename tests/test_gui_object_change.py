@@ -540,7 +540,7 @@ class _Archiwum:
             i += 1
         hdu.writeto(str(p))
         scan.ingest_record(self.con, scan.scan_file(str(p)), volume="VOL", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         fid = self.con.execute("SELECT frame_id FROM location WHERE path = ?",
                                (str(p),)).fetchone()[0]
         oid, _ = repo.upsert_object(self.con, canon=canon, catalog=catalog_label(canon),
@@ -2690,7 +2690,7 @@ def test_ZLOTE_powody_dynamiczne_PL_okna_to_proza_rdzenia_a_EN_bez_polskiego(tmp
     shutil.copyfile(s.stare[1], kopia)
     from horreum import scan
     scan.ingest_record(s.con, scan.scan_file(str(kopia)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     powody.append(repo.withheld_reason(s.con, location_id=lok, commit_id=5, undo=True))
     assert [p.code for p in powody[2:]] == ["busy", "db_refused", "file_not_back",
                                             "testimony_withheld", "testimony_withheld_undo"]
@@ -3004,7 +3004,7 @@ def _bezimienne(root, con, foldery, *, bez_zapasu=()):
                 i += 1
             hdu.writeto(str(p))
             scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                               summary=scan.ScanSummary())
+                               summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
 
 
 def test_Napraw_naglowek_Enter_w_polu_grupy_NIE_pisze_kart_prawdziwym_klawiszem(qapp, tmp_path):
@@ -3159,7 +3159,7 @@ def _lighty(root, con, folder, n, *, baza, suma=False):
         hdu.header["DATE-OBS"] = f"2023-01-04T21:{baza:02d}:{k:02d}"
         hdu.writeto(str(p), checksum=suma)
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         pliki.append(p)
     return pliki
 
@@ -3607,7 +3607,7 @@ def _niebo(con, root, rel, *, obj=None, ra=312.75, dec=30.67, seed=0):
         hdu.header["RA"], hdu.header["DEC"] = ra, dec
     hdu.writeto(str(p))
     scan.ingest_record(con, scan.scan_file(str(p)), volume="VOL", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     return con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
 
 

@@ -25,7 +25,8 @@ def _baza(tmp_path, n, nazwa="p"):
                      ("DATE-OBS", f"2024-03-{15 + i:02d}T21:30:45"), ("EXPTIME", 300.0)):
             hdu.header[k] = v
         hdu.writeto(str(p), overwrite=True)
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
         pliki.append(p)
     return con, pliki
 
@@ -411,7 +412,8 @@ def _scena_klas(tmp_path, monkeypatch, przypadek):
         writeback.undo(con, 2, now=NOW)
     if etap == "zmiana_po_cofnieciu_nowszego":          # plik L0 zmieniony z zewnątrz i przeskanowany
         fits.setval(str(pliki[0]), "OBSERVER", value="obcy")
-        scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     elif etap == "po_cofnieciu_przebiegu":
         writeback.undo_run(con, (1, 2), now=NOW)
     elif etap == "przerwane":

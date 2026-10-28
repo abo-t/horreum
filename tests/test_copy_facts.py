@@ -203,7 +203,7 @@ def test_klinga_odbija_zly_ksztalt_i_zwietrzale_fakty(tmp_path):
         repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="m", file_sha1=None,
                               header_hash="h2", hdu_index=None, compressed=None, size_bytes=None,
                               unreadable_since=None, unreadable_kind=None, unreadable_reason=None,
-                              present=1, now=NOW)
+                              present=1, now=NOW, pochodzenie=repo.ZEWNETRZNE)
     with pytest.raises(ValueError):
         repo.record_copy_facts(con, location_id=lid, copy_facts=dict.fromkeys(repo.COPY_FACTS),
                                now=NOW)
@@ -392,7 +392,7 @@ def test_uzupelnienie_fakty_zebrane_rownolegle_nie_sa_stale(tmp_path, monkeypatc
             _operacja(con, _loc(con, a)["id"], "synced")
             vol = _loc(con, a)["volume"]
             scan.ingest_record(con, scan.scan_file(str(a)), volume=vol, now=NOW,
-                               summary=scan.ScanSummary())
+                               summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         return prawdziwa(sciezka, *aa, **kw)
     monkeypatch.setattr(scan, "_read_meta", _przeplot)
     s = scan.backfill_copy_facts(con, now=NOW)
@@ -554,7 +554,7 @@ def test_kopia_nieczytelna_nie_jest_kandydatem_a_fakty_przynosi_jej_skan(tmp_pat
     assert (s.rows, s.written, s.failed, s.remaining) == (1, 1, 0, 0)
     assert not scan._already_scanned(con, "V", str(b), lb["mtime"])
     scan.ingest_record(con, scan.scan_file(str(b)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     lb = _loc(con, b)
     assert lb["unreadable_since"] is None and lb["hdr_hash"] == lb["header_hash"]
     assert lb["hdr_filter"] == "L-Pro"

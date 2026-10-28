@@ -120,7 +120,7 @@ class _NieWolno:
 
 def _scan_in(con, path, volume="V"):
     rec = scan.scan_file(str(path))
-    scan.ingest_record(con, rec, volume=volume, now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, rec, volume=volume, now=NOW, summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
 
 
 def _loc(con, path):
@@ -596,9 +596,11 @@ def _stary_commit(con, path, value, run_id="STARY"):
     post = scan.read_fits_meta(str(path)).header_hash
     cid = repo.insert_commit(con, run_id=run_id, now=NOW, summary=f"run {run_id}")
     lid = _loc(con, path)["id"]
-    repo.insert_header_backup(con, commit_id=cid, location_id=lid, hdu_index=0,
-                              header_text=backup_text, post_hash=post)
-    writeback._resync(con, str(path), "V", now=NOW)
+    bid = repo.insert_header_backup(con, commit_id=cid, location_id=lid, hdu_index=0,
+                                    header_text=backup_text, post_hash=post)
+    # Re-sync pisarza po zapisie (commit z backupem) - w rodowodzie stanu lokacji wiersz zapisu tego backupu.
+    writeback._resync(con, str(path), "V", now=NOW,
+                      pochodzenie=repo.Pochodzenie.zapis(bid, (repo.wynik_zapisu(con, bid),)))
     return cid
 
 
@@ -1112,7 +1114,7 @@ def test_generacja_odrzuca_w_transakcji_klingi(tmp_path):
             kind="io", now=NOW, inplace_gen=gen)
     with pytest.raises(repo.StaleScanRecord):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary(), inplace_gen=gen)
+                           summary=scan.ScanSummary(), inplace_gen=gen, pochodzenie=repo.ZEWNETRZNE)
     assert _loc(con, p)["header_hash"] == przed
     assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] is None
     con.close()
@@ -1378,7 +1380,8 @@ def test_dokonczenie_nie_ufa_kotwicy_przestawionej_w_bazie(tmp_path, monkeypatch
     op_id = _operacje(con)[0]["id"]
     import hashlib
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())                 # kolumna mutowalna przestawiona
+                       summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)                 # kolumna mutowalna przestawiona
     assert con.execute("SELECT file_sha1 FROM location").fetchone()[0] == hashlib.sha1(
         p.read_bytes()).hexdigest()
     f = writeback.finish_inplace(con, op_id, now=NOW)

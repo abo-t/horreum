@@ -949,7 +949,7 @@ def _okno_sciezki_kart(tmp_path, monkeypatch, _ustawienia, rzut):
     for i, (nazwa, karta) in enumerate((("a", None), ("b", ""), ("c", None)), start=1):
         plik = _stos_fits(tmp_path, "NGC7635", f"NGC7635_Ha_{nazwa}.fits", seed=i, object_card=karta)
         scan.ingest_record(con, scan.scan_file(str(plik)), volume="V", now=NOW_O3,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     raw, _ = repo.upsert_frame(con, sha1_data="sha-o3-raw", kind="light", filetype="raw",
                                camera_id=None, now=NOW_O3)
     repo.record_header(con, frame_id=raw, raw_json="{}", object_raw=None, now=NOW_O3)

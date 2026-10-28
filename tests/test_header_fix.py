@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from horreum import cli, db, macro, scan
+from horreum import cli, db, macro, repo, scan
 from horreum.resolve.filters import classify_filter_token
 from test_rederive_kind import WEJSCIA, _historia, _xisf
 
@@ -267,7 +267,8 @@ def _archiwum(tmp_path):
     dbp = str(tmp_path / "h.db")
     con = db.open_db(dbp)
     for p in (master, light, osc):
-        scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     cli._pochodne(con, NOW, [])                                 # stan „po Dostawie" przed naprawą
     con.close()
     return dbp, master, light, osc
@@ -339,13 +340,14 @@ def test_cli_header_fix_rozjazd_z_planem_odmowa_w_calosci(tmp_path, capsys, zmia
             b.write(a.read())
         con = db.open_db(dbp)
         scan.ingest_record(con, scan.scan_file(str(kopia)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         con.close()
     else:
         with fits.open(light, mode="update") as h:
             h[0].header["FILTER"] = "LPRO"
         con = db.open_db(dbp)
-        scan.ingest_record(con, scan.scan_file(light), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(light), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
         con.close()
     bajty = {p: open(p, "rb").read() for p in (master, light)}
     kod, out = _cli(capsys, "header-fix", dbp, "--apply", "--plan", plik)
@@ -360,7 +362,8 @@ def test_cli_header_fix_bez_planu_odmawia_a_frames_i_keyword_zawezaja(tmp_path, 
     dbp = str(tmp_path / "h.db")
     con = db.open_db(dbp)
     for p in (a, b):
-        scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     fid = con.execute("SELECT frame_id FROM location WHERE path = ?", (a,)).fetchone()[0]
     con.close()
     kod, out = _cli(capsys, "header-fix", dbp, "--apply")

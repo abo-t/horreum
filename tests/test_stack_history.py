@@ -355,16 +355,16 @@ def _xisf_stosu(path, wejscia, *, obj="CTB 1", payload=b"\x01\x02" * 16, imagety
 def test_skan_pisze_historie_stosu_z_tego_samego_odczytu(con, tmp_path):
     p = _xisf_stosu(tmp_path / "stos.xisf", [(f"D:/w/a_{i}_c_r.xisf", True) for i in range(3)])
     s = scan.ScanSummary()
-    scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=s)
+    scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=s, pochodzenie=repo.ZEWNETRZNE)
     loc = con.execute("SELECT id, header_hash FROM location").fetchone()
     zapis = stacks._stored_histories(con)[loc["id"]]
     assert zapis[0] == loc["header_hash"] and zapis[1][0] == 3 and len(zapis[1][1]) == 3
     assert scan.stack_history_candidates(con) == []
-    scan.ingest_record(con, scan.scan_file(p), volume="V", now=LATER, summary=s)
+    scan.ingest_record(con, scan.scan_file(p), volume="V", now=LATER, summary=s, pochodzenie=repo.ZEWNETRZNE)
     assert con.execute("SELECT count(*) FROM event WHERE verb = 'stack_history.recorded'").fetchone()[0] == 1
     # Nagłówek zmieniony w miejscu → nowy odczyt skanu przepisuje historię pod nowym odciskiem.
     _xisf_stosu(p, [(f"D:/w/a_{i}_c_r.xisf", True) for i in range(2)], obj="CTB 2")
-    scan.ingest_record(con, scan.scan_file(p), volume="V", now=LATER, summary=s)
+    scan.ingest_record(con, scan.scan_file(p), volume="V", now=LATER, summary=s, pochodzenie=repo.ZEWNETRZNE)
     loc = con.execute("SELECT id, header_hash FROM location").fetchone()
     zapis = stacks._stored_histories(con)[loc["id"]]
     assert zapis[0] == loc["header_hash"] and zapis[1][0] == 2
@@ -375,7 +375,7 @@ def test_uzupelnienie_dociaga_stosy_bez_historii_i_milknie(con, tmp_path):
     jeden odczyt nagłówka, drugi przebieg bez kandydatów. Plik zmieniony od skanu → `stale`."""
     p = _xisf_stosu(tmp_path / "stos.xisf", [(f"D:/w/a_{i}_c_r.xisf", True) for i in range(3)])
     rec = dataclasses.replace(scan.scan_file(p), history=None)
-    scan.ingest_record(con, rec, volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, rec, volume="V", now=NOW, summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     assert len(scan.stack_history_candidates(con)) == 1
     h = scan.backfill_stack_history(con, now=NOW)
     assert (h.rows, h.headers_read, h.written, h.stale, h.remaining) == (1, 1, 1, 0, 0)
@@ -520,11 +520,11 @@ def test_nazwa_akwizycyjna_z_tokenem_wbpp_na_koncu_nie_psuje_trafienia(con):
 def test_przepiecie_kopii_stosu_na_inny_rodzaj_zdejmuje_historie(con, tmp_path):
     p = _xisf_stosu(tmp_path / "stos.xisf", [(f"D:/w/a_{i}_c_r.xisf", True) for i in range(3)])
     s = scan.ScanSummary()
-    scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=s)
+    scan.ingest_record(con, scan.scan_file(p), volume="V", now=NOW, summary=s, pochodzenie=repo.ZEWNETRZNE)
     assert con.execute("SELECT count(*) FROM stack_history").fetchone()[0] == 1
     _xisf_stosu(p, [(f"D:/w/a_{i}_c_r.xisf", True) for i in range(3)], imagetyp="Light",
                 payload=b"\x09" * 32)
-    scan.ingest_record(con, scan.scan_file(p), volume="V", now=LATER, summary=s)
+    scan.ingest_record(con, scan.scan_file(p), volume="V", now=LATER, summary=s, pochodzenie=repo.ZEWNETRZNE)
     assert s.locations_rebound == 1
     assert con.execute("SELECT count(*) FROM stack_history").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM stack_history_input").fetchone()[0] == 0

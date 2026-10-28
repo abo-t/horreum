@@ -89,7 +89,8 @@ def w_tle(qapp, tmp_path, monkeypatch):
         hdu.header["TELESCOP"] = "RC8"
         hdu.header["IMAGETYP"] = "Light"
         hdu.writeto(str(p))
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     brama, uzbrojona = threading.Event(), threading.Event()
     prawdziwy = grid_workers._sklad_zbioru
 
@@ -315,7 +316,8 @@ def test_etykieta_celu_i_blokada_stagingu_w_jezyku_UI(qapp, tmp_path, jezyk, lan
         hdu.header["TELESCOP"] = "RC8"
         hdu.header["IMAGETYP"] = "Light"
         hdu.writeto(str(p))
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     view = grid_mod.FramesView(con, now_fn=lambda: NOW)
     view._writeback_async = False
     view.resize(1400, 800)

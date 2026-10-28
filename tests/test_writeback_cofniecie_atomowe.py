@@ -190,7 +190,7 @@ def test_smierc_miedzy_sladem_a_podmiana_ponowienie_cofa_i_oznacza_jeden_slad(tm
     assert (s1["result_sha1"], s1["result_hash"]) == (s2["result_sha1"], s2["result_hash"])
     assert (s1["synced_at"], s2["synced_at"]) == (None, NOW)
     b = s2["backup_id"]
-    najnowszy = writeback._slad_pary(con, b, s2["result_sha1"], s2["result_hash"])
+    najnowszy = repo.atomic_undo_of_pair(con, b, s2["result_sha1"], s2["result_hash"])
     assert najnowszy == s2["id"]
     assert repo.mark_atomic_undo_synced(con, undo_id=najnowszy, now="2026-10-17") is False
     assert [s["synced_at"] for s in _slady(con)] == [None, NOW]

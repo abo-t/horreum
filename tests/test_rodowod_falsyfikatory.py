@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 from astropy.io import fits
 
-from horreum import db, scan, writeback
+from horreum import db, repo, scan, writeback
 from horreum.gui import queries
 
 from test_writeback_cofniecie_przebiegu import NOW, _baza, _makro, _tel
@@ -34,7 +34,8 @@ _N1 = ("AR-421 (zmiana świadoma N1, `brief/FALA31_plan.md` §2.3): wynik zapisu
 
 
 def _skan(con, p):
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
 
 
 def _zapis(con, run_id, wartosc, *, inplace=False):

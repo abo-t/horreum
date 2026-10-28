@@ -54,7 +54,7 @@ def _baza(tmp_path, n=1, *, do_zapisu=None):
     for i in range(n):
         p = _fits(kat / f"a{i}.fits", seed=i)
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         loc = con.execute("SELECT id, header_hash, frame_id FROM location WHERE path = ?",
                           (str(p),)).fetchone()
         if do_zapisu is None or i in do_zapisu:

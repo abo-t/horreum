@@ -12,7 +12,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from horreum import db, scan, writeback
+from horreum import db, repo, scan, writeback
 from horreum.gui import i18n
 from horreum.item_reasons import PowodPozycji
 
@@ -84,7 +84,8 @@ def widok(qapp, tmp_path):
     hdu.header["IMAGETYP"] = "Light"
     hdu.writeto(str(p), overwrite=True)
     con = db.open_db(str(tmp_path / "wb.db"))
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     v = FramesView(con, now_fn=lambda: NOW)
     yield v, con, p
     con.close()
@@ -185,7 +186,8 @@ def _widok_nad(qapp, tmp_path, *, suma=False):
     hdu.header["IMAGETYP"] = "Light"
     hdu.writeto(str(p), overwrite=True, checksum=suma)
     con = db.open_db(str(tmp_path / "wb.db"))
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     v = FramesView(con, now_fn=lambda: NOW)
     v._writeback_async = False
     return v, con, p
@@ -638,7 +640,7 @@ def test_pusta_komorka_karty_mowi_w_jezyku_UI(qapp, tmp_path, jezyk, lang):
             hdu.header["OBSERVER"] = obserwator
         hdu.writeto(str(tmp_path / nazwa))
         scan.ingest_record(con, scan.scan_file(str(tmp_path / nazwa)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     view = FramesView(con, now_fn=lambda: NOW)
     m, kol = view.model, _kolumna(view, "OBSERVER")
     tipy = {m.data(m.index(r, kol), Qt.ToolTipRole) for r in range(m.rowCount())}

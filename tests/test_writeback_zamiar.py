@@ -444,7 +444,8 @@ def test_skan_nie_potwierdza_proby_z_nierozstrzygnieta_podmiana(tmp_path, monkey
     res = writeback.commit(con, "R", now=NOW)
     monkeypatch.undo()
     assert len(res.failed) == 1, res
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     assert con.execute("SELECT status FROM pending_changes").fetchone()[0] == "failed"
     assert _zamiary(con)[0]["phase"] == "prepared"
     writeback.commit(con, "R", now=NOW)                       # nic do zapisu - ale rekoncyliacja
@@ -622,7 +623,8 @@ def test_po_powrocie_baza_opisuje_wrocona_wersje(tmp_path, monkeypatch):
     którego na dysku już nie ma."""
     from horreum import scan
     con, p, cudzy = _po_smierci_z_obcym(tmp_path, monkeypatch)
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     writeback.commit(con, "R", now=NOW)
     assert p.read_bytes() == cudzy["bajty"]
     lok = con.execute("SELECT header_hash, mtime FROM location WHERE path = ?", (str(p),)).fetchone()

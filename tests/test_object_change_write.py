@@ -75,7 +75,7 @@ def _sha1(path):
 
 def _wczytaj(con, path):
     rec = scan.scan_file(str(path))
-    scan.ingest_record(con, rec, volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, rec, volume="V", now=NOW, summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
 
 
 def _wiersz(con, path):

@@ -340,7 +340,7 @@ def test_kopia_oryginalu_z_zeznania_musi_byc_obecna(archiwum):
                 (str(a["arch"] / "STACKS" / "INNY" / "x" / "Ha" / "o.xisf"), a["fid"]))
     con.commit()
     scan.ingest_record(con, scan.scan_file(p.items[0].autocrop.dst), volume="?", now=NOW,
-                       summary=scan.ScanSummary())               # wjazd samego wariantu
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)   # wjazd samego wariantu
     s = stack_variants.link_from_testimonies(con, NOW)
     assert (s.refused, s.linked) == (1, 0) and _relacja(con) == []
 

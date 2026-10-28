@@ -5,7 +5,7 @@ import struct
 
 import pytest
 
-from horreum import exif, scan, writeback
+from horreum import exif, repo, scan, writeback
 from horreum.resolve.cameras import camera_identity, normalize_camera
 from horreum.resolve.frames import kind_from_path
 from horreum.resolve.observatory import site_coords
@@ -233,7 +233,8 @@ def test_scan_file_raw_bez_degeneracji(tmp_path):
     from horreum.db import open_db
     con = open_db(":memory:")
     rec = scan.scan_file(write_raw(tmp_path))
-    scan.ingest_record(con, rec, volume="V", now="2026-07-23T00:00:00", summary=scan.ScanSummary())
+    scan.ingest_record(con, rec, volume="V", now="2026-07-23T00:00:00", summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     row = con.execute("SELECT filetype, kind, kind_source, sha1_data_uncomputable FROM frame").fetchone()
     assert (row["filetype"], row["sha1_data_uncomputable"]) == ("raw", 0)
     assert (row["kind"], row["kind_source"]) == ("unknown", "path")   # tmp bez segmentu LIGHTS

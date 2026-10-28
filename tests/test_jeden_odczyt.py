@@ -81,7 +81,7 @@ def _plik(tmp_path, fmt, nazwa="a"):
 def _baza_z_plikiem(tmp_path, plik, run="R"):
     con = db.open_db(str(tmp_path / "h.db"))
     scan.ingest_record(con, scan.scan_file(str(plik)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     loc = con.execute("SELECT id, header_hash, frame_id FROM location WHERE path = ?",
                       (str(plik),)).fetchone()
     repo.stage_pending(con, run_id=run, location_id=loc["id"], keyword="OBJECT", idx=0, op="set",

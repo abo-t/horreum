@@ -1116,15 +1116,242 @@ def restore_frames(con, *, frame_ids, now, uid="local"):
     return replace(g, frame_ids=tuple(zapisane))   # jedna krotka po pętli, jak przy wycofaniu
 
 
+# ============================================================ RODOWÓD STANU LOKACJI (0048, AR-421)
+# Kto i w jakiej kolejności postawił odcisk lokacji (`file_sha1`, `header_hash`). Wiersz `location_state` pisze
+# WYŁĄCZNIE `_dopisz_stan`, w transakcji, w której baza poznaje odcisk: `refresh_location` (każdy odczyt pliku -
+# skan i re-sync pisarza) oraz `attribute_undo_state` (rozliczenie „już cofnięte”). Pochodzenie płynie w dół
+# parametrem WYMAGANYM (`writeback._resync` → `scan.ingest_record` → `scan._ingest_in_tx` → `refresh_location`) -
+# bez wartości domyślnej, jak `unreadable_since`/`present`: zapomniane pochodzenie byłoby cichym `external`.
+
+POCHODZENIA_STANU = ("commit", "undo", "rollback", "external")
+# Aktor zdarzenia przypisania (wiersz bez zmiany faktów kopii) - spoza `user%`: to księgowość pisarza, nie gest
+# ręki, więc zdanie Domu „ostatni gest” (`gui.queries.last_hand_gesture`) go nie liczy (jak `writeback:undo`).
+AKTOR_RODOWODU = "writeback:lineage"
+
+
+class WynikPisarza(NamedTuple):
+    """Odcisk, który operacja pisarza zostawia w pliku: nagłówek zawsze, sha1 pliku - gdy pisarz go zna (zamiar
+    podmiany `replace_intent.prepared_sha1`, ślad cofnięcia `atomic_undo.result_sha1`). Bez sha1 wynik dowodzi
+    wołający inną drogą (kontrola całego pliku pod blokadą, `writeback._KontrolaDanych`)."""
+    header_hash: str
+    file_sha1: str | None = None
+
+
+@dataclass(frozen=True)
+class Pochodzenie:
+    """Pochodzenie odczytu, który `refresh_location` zapisuje jako fakty kopii: `external` (treść spoza pisarza -
+    skan, stosy, uzupełnienie, import, wersja innego pisarza wrócona spod kopii wypartej) albo operacja pisarza
+    z jej identyfikatorami i OCZEKIWANYM wynikiem (`wyniki`). Etykieta pisarza wymaga zgodności odczytanego
+    odcisku z wynikiem (`dla`) - obca wersja w oknie między dowodem pisarza a odczytem re-syncu dostaje `external`.
+
+    `slad` / `rozpoznaj_slad` (wyłącznie `undo`): ślad cofnięcia atomowego wiersza. `rozpoznaj_slad` - re-sync
+    cofnięcia atomowego: ślad wybiera w transakcji `pulled_atomic_undo` (ta sama reguła, którą
+    `writeback._cofnij_lokacje` oznacza `synced_at`), `slad` = ślad tej próby albo `None` przy ponowieniu. Bez
+    `rozpoznaj_slad` - `slad` podany wprost (przypisanie „już cofnięte” rozlicza dokładnie ten ślad).
+
+    Niespójne pola = błąd wołającego (EXPECT, `ValueError`) - lustro CHECK-ów `0048_location_state.sql`."""
+    origin: str
+    backup_id: int | None = None
+    inplace_op_id: int | None = None
+    wyniki: tuple = ()
+    slad: int | None = None
+    rozpoznaj_slad: bool = False
+
+    def __post_init__(self):
+        if self.origin not in POCHODZENIA_STANU:
+            raise ValueError(f"pochodzenie stanu lokacji spoza {POCHODZENIA_STANU}: {self.origin!r}")
+        if any(not isinstance(w, WynikPisarza) for w in self.wyniki):
+            raise ValueError(f"wynik pisarza nie jest WynikPisarza: {self.wyniki!r}")
+        if self.origin == "external":
+            if (self.backup_id, self.inplace_op_id, self.wyniki, self.slad, self.rozpoznaj_slad) != (
+                    None, None, (), None, False):
+                raise ValueError(f"pochodzenie `external` z identyfikatorami albo wynikiem: {self!r}")
+            return
+        if not self.wyniki:
+            raise ValueError(f"pochodzenie pisarza bez oczekiwanego wyniku: {self!r}")
+        if (self.origin in ("commit", "undo")) != (self.backup_id is not None):
+            raise ValueError(f"`commit`/`undo` wymaga backupu, inne pochodzenie go nie ma: {self!r}")
+        if self.origin == "rollback" and self.inplace_op_id is None:
+            raise ValueError(f"`rollback` bez operacji zapisu w miejscu: {self!r}")
+        if self.origin != "undo" and (self.slad is not None or self.rozpoznaj_slad):
+            raise ValueError(f"ślad cofnięcia atomowego przy pochodzeniu innym niż `undo`: {self!r}")
+
+    @classmethod
+    def zapis(cls, backup_id, wyniki, *, inplace_op_id=None):
+        """Zapis kart albo zmiany obiektu (obie drogi) - wynik backupu `backup_id`."""
+        return cls("commit", backup_id, inplace_op_id, tuple(wyniki))
+
+    @classmethod
+    def cofniecie(cls, backup_id, wyniki, *, inplace_op_id=None, slad=None, rozpoznaj_slad=False):
+        """Cofnięcie zapisu backupu `backup_id` (obie drogi) - stan sprzed tego zapisu."""
+        return cls("undo", backup_id, inplace_op_id, tuple(wyniki), slad, rozpoznaj_slad)
+
+    @classmethod
+    def powrot(cls, inplace_op_id, wyniki):
+        """Własny powrót pisarza do stanu sprzed operacji w miejscu, która nie doszła (odzysk rozdarcia)."""
+        return cls("rollback", None, inplace_op_id, tuple(wyniki))
+
+    def dla(self, file_sha1, header_hash):
+        """`(origin, backup_id, inplace_op_id)` wiersza dla ODCZYTANEGO odcisku. Etykieta pisarza wyłącznie przy
+        zgodności z którymś wynikiem: ten sam nagłówek i - gdy wynik zna sha1 pliku - ten sam sha1 (nagłówek NULL
+        nie pasuje do niczego); rozjazd → `external` bez identyfikatorów."""
+        if self.origin != "external" and header_hash is not None and any(
+                w.header_hash == header_hash and w.file_sha1 in (None, file_sha1) for w in self.wyniki):
+            return self.origin, self.backup_id, self.inplace_op_id
+        return "external", None, None
+
+
+ZEWNETRZNE = Pochodzenie("external")
+
+
+def atomic_undo_of_pair(con, backup_id, file_sha1, header_hash):
+    """Najnowszy ślad cofnięcia backupu z parą odcisków `(file_sha1, header_hash)` - bez względu na `synced_at`
+    (AR-182): oznaczenie wciągnięcia dotyczy wyłącznie jego, a starsza próba z tym samym wynikiem (śmierć między
+    śladem a podmianą, potem ponowienie) zostaje, jaka była. `None` = plik nie jest wynikiem żadnego cofnięcia
+    tego backupu."""
+    return con.execute(
+        "SELECT max(id) FROM atomic_undo WHERE backup_id = ? AND result_sha1 = ? "
+        "AND result_hash = ?", (backup_id, file_sha1, header_hash)).fetchone()[0]
+
+
+def pulled_atomic_undo(con, *, backup_id, file_sha1, header_hash, slad):
+    """Ślad cofnięcia atomowego, którego wynik re-sync cofnięcia WCIĄGNĄŁ: najnowszy ślad pary odcisków lokacji
+    (`atomic_undo_of_pair`), o ile `slad` (ślad tej próby) jest nim albo `None` (ponowienie rozpoznaje). Jedna
+    reguła dla wiersza rodowodu (`_dopisz_stan`) i oznaczenia `synced_at` (`writeback._cofnij_lokacje`) - oba
+    czytają w tej samej transakcji, więc wskazują ten sam ślad albo żaden."""
+    pasujacy = atomic_undo_of_pair(con, backup_id, file_sha1, header_hash)
+    return pasujacy if pasujacy is not None and slad in (None, pasujacy) else None
+
+
+def wynik_zapisu(con, backup_id):
+    """Oczekiwany wynik zapisu backupu: nagłówek `post_hash` i - przy drodze atomowej z zamiarem podmiany (0038) -
+    pełny sha1 przygotowanej wersji. Jedno źródło dla obu dróg, które poznają wynik zapisu atomowego
+    (`writeback._zapisz_lokacje`, `writeback._potwierdz_z_dysku`). Brak backupu → `ValueError` (EXPECT)."""
+    row = con.execute(
+        "SELECT hb.post_hash, ri.prepared_sha1 FROM header_backups hb "
+        "LEFT JOIN replace_intent ri ON ri.backup_id = hb.id WHERE hb.id = ?", (backup_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"backup {backup_id} nie istnieje")
+    return WynikPisarza(row["post_hash"], row["prepared_sha1"])
+
+
+def backup_operacji(con, *, commit_id, location_id):
+    """Backup operacji zapisu w miejscu (wiersz `id`, `header_text`) albo `None`: najnowszy backup pary
+    `(commit_id, location_id)` - operacja `commit` zakłada go razem z sobą (`begin_inplace_commit`), operacja
+    `undo` cofa zapis tego backupu. Jedna reguła dla zamknięcia operacji (`finish_inplace_op`), kotwicy kontroli
+    danych (`writeback._kotwica_operacji`) i rodowodu (`writeback._dokoncz`)."""
+    return con.execute(
+        "SELECT id, header_text FROM header_backups WHERE commit_id = ? AND location_id = ? "
+        "ORDER BY id DESC LIMIT 1", (commit_id, location_id)).fetchone()
+
+
+def _straz_pochodzenia(con, location_id, pochodzenie):
+    """EXPECT: identyfikatory pochodzenia pisarza należą do lokacji wiersza - backup tej lokacji, operacja zapisu
+    w miejscu tej lokacji i tego samego commitu co backup, ślad cofnięcia tego backupu. Wołający buduje pochodzenie
+    z backupu lokacji, którą re-syncuje; rozjazd to błąd wołającego (`ValueError` w transakcji klingi - zero zapisu),
+    nie odczyt zewnętrzny: obcy backup na tej lokacji zająłby jedyny wiersz `commit` tamtego zapisu (indeks
+    unikalny), a jego prawdziwy re-sync na właściwej lokacji spadłby do odczytu zewnętrznego. Jedyny pisarz tabeli
+    to `_dopisz_stan`, więc straż stoi tu, nie w DDL."""
+    backup = None
+    if pochodzenie.backup_id is not None:
+        backup = con.execute("SELECT location_id, commit_id FROM header_backups WHERE id = ?",
+                             (pochodzenie.backup_id,)).fetchone()
+        if backup is None or backup["location_id"] != location_id:
+            raise ValueError(f"backup {pochodzenie.backup_id} nie należy do location:{location_id}")
+    if pochodzenie.inplace_op_id is not None:
+        op = con.execute("SELECT location_id, commit_id FROM inplace_op WHERE id = ?",
+                         (pochodzenie.inplace_op_id,)).fetchone()
+        if op is None or op["location_id"] != location_id or (
+                backup is not None and op["commit_id"] != backup["commit_id"]):
+            raise ValueError(f"operacja {pochodzenie.inplace_op_id} nie należy do location:{location_id} "
+                             f"albo do commitu backupu {pochodzenie.backup_id}")
+    if pochodzenie.slad is not None:
+        slad = con.execute("SELECT backup_id FROM atomic_undo WHERE id = ?", (pochodzenie.slad,)).fetchone()
+        if slad is None or slad["backup_id"] != pochodzenie.backup_id:
+            raise ValueError(f"ślad cofnięcia {pochodzenie.slad} nie należy do backupu {pochodzenie.backup_id}")
+
+
+def _dopisz_stan(con, *, location_id, pochodzenie, file_sha1, header_hash, odcisk_zmieniony, now):
+    """Wiersz `location_state` dla obserwacji odcisku lokacji - w transakcji wołającego (`_immediate` klingi),
+    PO jej strażnikach i zapisie faktów. Zwraca słownik wiersza do ładunku zdarzenia albo `None` (bez wiersza).
+
+      0. Pochodzenie pisarza: identyfikatory należą do tej lokacji (`_straz_pochodzenia`, EXPECT).
+      1. Etykieta: `Pochodzenie.dla` - pisarz tylko przy zgodności odcisku z wynikiem operacji.
+      2. `commit` backupu, który ma już wiersz `commit` ALBO `undo`, rozstrzyga się jak odczyt zewnętrzny:
+         ponowna obserwacja wyniku tego samego zapisu (utrata potwierdzenia podmiany, potem rekoncyliacja) nie
+         jest nowym zapisem, a spóźniony re-sync zapisu już cofniętego (cofnięcie i nowszy zapis tych samych
+         bajtów w innym procesie) stanąłby NAD cofnięciem. Bezpiecznik: indeks unikalny `commit` na backup.
+      3. `external`/`rollback` - wyłącznie przy zmianie odcisku (skan pliku bez zmiany - zero SQL).
+      4. Ślad cofnięcia atomowego (`pulled_atomic_undo` albo podany wprost).
+      5. Obserwacja bez zmiany odcisku identyczna z najnowszym wierszem lokacji (pochodzenie, backup, odcisk) -
+         bez wiersza: powtórzone cofnięcie tego samego zapisu nie jest nowym przejściem stanu."""
+    if pochodzenie.origin != "external":
+        _straz_pochodzenia(con, location_id, pochodzenie)
+    origin, backup_id, op_id = pochodzenie.dla(file_sha1, header_hash)
+    if origin == "commit" and con.execute(
+            "SELECT 1 FROM location_state WHERE backup_id = ? AND origin IN ('commit', 'undo') LIMIT 1",
+            (backup_id,)).fetchone() is not None:
+        origin, backup_id, op_id = "external", None, None
+    if origin in ("rollback", "external") and not odcisk_zmieniony:
+        return None
+    undo_id = None
+    if origin == "undo":
+        undo_id = (pulled_atomic_undo(con, backup_id=backup_id, file_sha1=file_sha1,
+                                      header_hash=header_hash, slad=pochodzenie.slad)
+                   if pochodzenie.rozpoznaj_slad else pochodzenie.slad)
+    if not odcisk_zmieniony:
+        ostatni = con.execute(
+            "SELECT origin, backup_id, file_sha1, header_hash FROM location_state WHERE location_id = ? "
+            "ORDER BY id DESC LIMIT 1", (location_id,)).fetchone()
+        if ostatni is not None and tuple(ostatni) == (origin, backup_id, file_sha1, header_hash):
+            return None
+    cur = con.execute(
+        "INSERT INTO location_state(location_id, origin, backup_id, inplace_op_id, atomic_undo_id, "
+        "file_sha1, header_hash, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (location_id, origin, backup_id, op_id, undo_id, file_sha1, header_hash, now))
+    return {"id": cur.lastrowid, "origin": origin, "backup_id": backup_id, "inplace_op_id": op_id,
+            "atomic_undo_id": undo_id}
+
+
+def attribute_undo_state(con, *, location_id, atomic_undo_id, now):
+    """PRZYPISANIE BEZ ZMIANY ODCISKU (AR-421): rozliczenie „już cofnięte” wyniku cofnięcia atomowego, który
+    baza poznała wcześniej cudzym odczytem (skan po śmierci procesu między podmianą a re-synciem albo po porażce
+    re-syncu) - wiersz `undo` śladu `atomic_undo_id`, gdy lokacja opisuje DOKŁADNIE parę odcisków jego wyniku
+    (inaczej bez wiersza: etykieta pisarza wymaga dowodu). W transakcji wołającego (`writeback.
+    _rozlicz_cofniecie_w_bazie`, zakres `atomic`) - wycofuje się razem z resztą rozliczenia. Wiersz →
+    `location.state_attributed` (aktor `AKTOR_RODOWODU`). Ślad nie istnieje albo należy do innej lokacji →
+    `ValueError` (EXPECT), zero zapisu. Zwraca słownik wiersza albo `None`."""
+    with _immediate(con):
+        slad = con.execute(
+            "SELECT au.backup_id, au.result_sha1, au.result_hash, hb.location_id FROM atomic_undo au "
+            "JOIN header_backups hb ON hb.id = au.backup_id WHERE au.id = ?", (atomic_undo_id,)).fetchone()
+        if slad is None or slad["location_id"] != location_id:
+            raise ValueError(f"ślad cofnięcia {atomic_undo_id} nie należy do location:{location_id}")
+        loc = con.execute("SELECT file_sha1, header_hash FROM location WHERE id = ?",
+                          (location_id,)).fetchone()
+        stan = _dopisz_stan(
+            con, location_id=location_id,
+            pochodzenie=Pochodzenie.cofniecie(
+                slad["backup_id"], (WynikPisarza(slad["result_hash"], slad["result_sha1"]),),
+                slad=atomic_undo_id),
+            file_sha1=loc["file_sha1"], header_hash=loc["header_hash"], odcisk_zmieniony=False, now=now)
+        if stan is not None:
+            emit_event(con, actor=AKTOR_RODOWODU, verb="location.state_attributed",
+                       target=f"location:{location_id}", now=now, payload={"location_state": stan})
+    return stan
+
+
 def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,
                      hdu_index, compressed, size_bytes, unreadable_since, unreadable_kind,
-                     unreadable_reason, present, now,
+                     unreadable_reason, present, now, pochodzenie,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
                      kind=None, copy_facts=None, inplace_gen=None, nonprintable=NIE_BADANO):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
 
-    - fakty kopii bez zmian → False-owy wynik, ZERO eventów (idempotentny re-skan);
+    - fakty kopii bez zmian → False-owy wynik, ZERO eventów (idempotentny re-skan); wyjątek od 0048:
+      obserwacja pisarza bez zmiany faktów, która przypisuje stan w rodowodzie (`pochodzenie` niżej), dopisuje
+      wiersz `location_state` ze zdarzeniem `location.state_attributed`;
     - zmiana faktów → UPDATE + JEDEN `event(location.refreshed)` z `{before, after}` pól zmienionych;
     - **zmiana `header_hash` ⇒ ODŚWIEŻENIE ZEZNANIA** (writeback fitsmirror — R2#2): pełny
       re-record `header` (raw_json + WSZYSTKIE pola gorące) + WYMIANA `cards` (R3-b4) + JEDEN
@@ -1170,6 +1397,12 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     - **`nonprintable`** (0046, AR-299): zeznanie bajtu spoza ASCII z odczytu (`_marker_bajtu`).
       Domyślne `NIE_BADANO` NIE jest cichym wektorem gaszenia - zostawia stan zbadania wiersza, a ten
       i tak przestaje się liczyć, gdy odcisk nagłówka się zmieni (kotwica `nonprintable_hash`).
+    - **`pochodzenie`** (0048, AR-421): kto postawił odczytany odcisk - `ZEWNETRZNE` (skan, import, wersja
+      innego pisarza) albo operacja pisarza z oczekiwanym wynikiem (`Pochodzenie`). Parametr WYMAGANY, jak
+      `unreadable_since`: zapomniane pochodzenie byłoby cichym `external`. W tej samej transakcji, PO strażniku
+      generacji i zapisie faktów, `_dopisz_stan` dopisuje wiersz `location_state` (reguły tam); wiersz przy
+      zmianie faktów jedzie kluczem `location_state` w ładunku `location.refreshed`, wiersz bez zmiany faktów
+      (przypisanie pisarza) - zdarzeniem `location.state_attributed`. Bez wiersza ładunek jak dotąd.
     Dowodu pochodzenia zapisu karty (para commit/plik) ta klinga nie niesie - niesie go znacznik
     przejścia wpisu `OBJECT` w 'applied' (`_zapis_karty_obiektu_tx`, AR-319), wspólny dla każdej drogi.
 
@@ -1183,6 +1416,8 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
              "hdu_index": hdu_index, "compressed": compressed, "size_bytes": size_bytes,
              "unreadable_since": unreadable_since, "unreadable_kind": unreadable_kind,
              "unreadable_reason": unreadable_reason, "present": present}
+    if not isinstance(pochodzenie, Pochodzenie):
+        raise TypeError(f"pochodzenie stanu lokacji musi być repo.Pochodzenie, nie {pochodzenie!r}")
     cf = None if copy_facts is None else _copy_facts_checked(copy_facts)
     result = {"facts": False, "header": False, "rederived": False}
     with _immediate(con):
@@ -1211,6 +1446,12 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
         changed = {k: {"before": row[k], "after": after[k]}
                    for k in _LOCATION_FACTS if row[k] != after[k]}
         if not changed:
+            stan = _dopisz_stan(con, location_id=location_id, pochodzenie=pochodzenie,
+                                file_sha1=file_sha1, header_hash=header_hash, odcisk_zmieniony=False,
+                                now=now)
+            if stan is not None:
+                emit_event(con, actor=AKTOR_RODOWODU, verb="location.state_attributed",
+                           target=f"location:{location_id}", now=now, payload={"location_state": stan})
             return result
         # KOPIA WIODĄCA LICZONA PRZED zapisem faktów tej lokacji (AR-4): o tym, czy L była źródłem
         # zeznania, mówią jej fakty SPRZED zmiany nagłówka. Po UPDATE porównanie z `header`
@@ -1229,8 +1470,11 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
              unreadable_kind, unreadable_reason, present, now,
              *(after[k] for k in COPY_FACTS), after["nonprintable_hash"],
              after["nonprintable_keyword"], after["nonprintable_char"], location_id))
-        emit_event(con, actor=actor, verb="location.refreshed",
-                   target=f"location:{location_id}", now=now, payload=changed)
+        stan = _dopisz_stan(con, location_id=location_id, pochodzenie=pochodzenie, file_sha1=file_sha1,
+                            header_hash=header_hash,
+                            odcisk_zmieniony="file_sha1" in changed or "header_hash" in changed, now=now)
+        emit_event(con, actor=actor, verb="location.refreshed", target=f"location:{location_id}",
+                   now=now, payload=changed if stan is None else {**changed, "location_state": stan})
         result["facts"] = True
 
         if not przepisz:
@@ -5977,9 +6221,7 @@ def finish_inplace_op(con, *, op_id, now, testimony_ok, withheld_reason=None,
         rows = con.execute("SELECT id, keyword FROM pending_changes WHERE inplace_op_id = ?",
                            (op_id,)).fetchall()
         if not testimony_ok and op["kind"] == "commit":
-            backup = con.execute(
-                "SELECT id FROM header_backups WHERE commit_id = ? AND location_id = ? "
-                "ORDER BY id DESC LIMIT 1", (op["commit_id"], op["location_id"])).fetchone()
+            backup = backup_operacji(con, commit_id=op["commit_id"], location_id=op["location_id"])
             return _withhold_write_tx(con, kind="commit", location_id=op["location_id"],
                                       commit_id=op["commit_id"], header_hash=op["post_hash"],
                                       reason=withheld_reason, now=now,

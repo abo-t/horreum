@@ -63,7 +63,8 @@ def _master_jako_flat(tmp_path, name="MASTERFLAT_A.xisf", sub="CLS", history=Non
 
 
 def _wjazd(con, path):
-    scan.ingest_record(con, scan.scan_file(path), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(path), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     return con.execute("SELECT frame_id FROM location WHERE path = ?", (path,)).fetchone()[0]
 
 

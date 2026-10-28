@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from horreum import db
+from horreum import db, repo
 from horreum import scan as scan_module
 from horreum.scan import (
     ScanRecord, ScanSummary, _already_scanned, backfill_xisf_headers, header_dict_from_cards,
@@ -827,7 +827,8 @@ def test_backfill_xisf_doczytuje_karty_i_hash_bez_nowych_lokacji(tmp_path):
                            keywords=[("INSTRUME", "'ZWO ASI2600MM Pro'"), ("SITELAT", "53.3885")])
     b = _write_xisf_attach(tmp_path, "b.xisf", b"\x22" * 16, keywords=[("TELESCOP", "'ED'")])
     for p in (a, b):
-        ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary())
+        ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary(),
+                      pochodzenie=repo.ZEWNETRZNE)
     _do_stanu_sprzed_p6a(con, a, b)
     assert con.execute("SELECT count(*) FROM cards").fetchone()[0] == 0
 
@@ -859,7 +860,8 @@ def test_backfill_xisf_nieczytelna_kopia_zostaje_kandydatem_bez_zapisu(tmp_path)
     ok = _write_xisf_attach(tmp_path, "ok.xisf", b"\x33" * 16, keywords=[("TELESCOP", "'RC8'")])
     gone = _write_xisf_attach(tmp_path, "gone.xisf", b"\x44" * 16, keywords=[("TELESCOP", "'RC6'")])
     for p in (ok, gone):
-        ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary())
+        ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary(),
+                      pochodzenie=repo.ZEWNETRZNE)
     _do_stanu_sprzed_p6a(con, ok, gone)
     Path(gone).unlink()
 
@@ -1244,7 +1246,7 @@ def test_ingest_record_replay_z_cache_bez_pliku(tmp_path):
                 "OBJECT": "M106", "FOCALLEN": "784", "FOCRATIO": "5.6"},
         sha1_data="a" * 40, file_sha1="b" * 40, header_hash="c" * 40, hdu_index=0, compressed=0)
     s = ScanSummary()
-    ingest_record(con, rec, volume="VOL", now=NOW, summary=s)
+    ingest_record(con, rec, volume="VOL", now=NOW, summary=s, pochodzenie=repo.ZEWNETRZNE)
     assert (s.frames_new, s.locations_new, s.headers) == (1, 1, 1)
     fid = con.execute("SELECT id FROM frame WHERE sha1_data=?", ("a" * 40,)).fetchone()[0]
     obj, focallen = con.execute(
@@ -1418,7 +1420,7 @@ def test_ingest_znana_sciezka_nieczytelna_bajty_bez_zmian(tmp_path):
     bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime="2027-01-01T00:00:00+00:00",
                      header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
     s = ScanSummary()
-    ingest_record(con, bad, volume="VOL1", now=NOW, summary=s)
+    ingest_record(con, bad, volume="VOL1", now=NOW, summary=s, pochodzenie=repo.ZEWNETRZNE)
     assert (s.frames_new, s.frames_existing, s.frame_review) == (0, 1, 1)
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
     loc = con.execute("SELECT mtime, unreadable_since FROM location").fetchone()
@@ -1443,7 +1445,7 @@ def test_brama_nie_pomija_kopii_oznaczonej_nieczytelnej(tmp_path):
     good = scan_file(str(f))
     bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=row["mtime"],
                      header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
-    ingest_record(con, bad, volume="VOL1", now=NOW, summary=ScanSummary())
+    ingest_record(con, bad, volume="VOL1", now=NOW, summary=ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] == NOW
     assert _already_scanned(con, "VOL1", row["path"], row["mtime"]) is False   # marker → re-odczyt wymuszony
     con.close()
@@ -1463,13 +1465,14 @@ def test_ingest_nieczytelna_potem_wyzdrowienie_gasi_marker(tmp_path):
     bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=good.mtime,
                      header=None, error="OSError: NAS timeout", error_kind="io",
                      file_sha1=good.file_sha1)
-    ingest_record(con, bad, volume="VOL1", now="2027-01-01T00:00:00+00:00", summary=ScanSummary())
+    ingest_record(con, bad, volume="VOL1", now="2027-01-01T00:00:00+00:00", summary=ScanSummary(),
+                  pochodzenie=repo.ZEWNETRZNE)
     row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location"
                       ).fetchone()
     assert tuple(row) == ("2027-01-01T00:00:00+00:00", "io", "OSError: NAS timeout")
     # 2) wyzdrowienie: czytelna znów, TEN SAM mtime i te same bajty → marker gaśnie
     s = ScanSummary()
-    ingest_record(con, good, volume="VOL1", now="2028-01-01T00:00:00+00:00", summary=s)
+    ingest_record(con, good, volume="VOL1", now="2028-01-01T00:00:00+00:00", summary=s, pochodzenie=repo.ZEWNETRZNE)
     row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location"
                       ).fetchone()
     assert tuple(row) == (None, None, None)
@@ -1493,10 +1496,11 @@ def test_ingest_nieczytelna_powtorka_zero_nowego_review(tmp_path):
     good = scan_file(str(f))
     bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=good.mtime,
                      header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
-    ingest_record(con, bad, volume="VOL1", now="2027-01-01T00:00:00+00:00", summary=ScanSummary())
+    ingest_record(con, bad, volume="VOL1", now="2027-01-01T00:00:00+00:00", summary=ScanSummary(),
+                  pochodzenie=repo.ZEWNETRZNE)
     ev1 = con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0]
     s = ScanSummary()                                           # druga awaria, TEN SAM mtime → cichy no-op
-    ingest_record(con, bad, volume="VOL1", now="2028-01-01T00:00:00+00:00", summary=s)
+    ingest_record(con, bad, volume="VOL1", now="2028-01-01T00:00:00+00:00", summary=s, pochodzenie=repo.ZEWNETRZNE)
     assert s.frame_review == 0
     assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == ev1
     con.close()
@@ -2281,7 +2285,7 @@ def test_odmowa_straznika_generacji_cofa_kamere_z_odczytu(tmp_path, monkeypatch)
     monkeypatch.setattr(repo, "rebind_location_to_identity", odmowa)
     with pytest.raises(repo.StaleScanRecord):
         ingest_record(con, scan_file(str(f)), volume="VOL1", now=LATER, summary=ScanSummary(),
-                      inplace_gen=0)
+                      inplace_gen=0, pochodzenie=repo.ZEWNETRZNE)
     assert con.execute("SELECT count(*) FROM camera").fetchone()[0] == 1   # tylko kamera skanu 1
     con.close()
 
@@ -2351,7 +2355,8 @@ def test_cli_delta_mowi_rodzaj_kopii_nieczytelnej(tmp_path, capsys):
     ingest_record(con, ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=good.mtime,
                                   header=None, error="OSError: [Errno 13] Permission denied",
                                   error_kind="io", file_sha1=good.file_sha1),
-                  volume="VOL1", now=LATER, summary=ScanSummary())     # dysk/dostęp (io)
+                  volume="VOL1", now=LATER, summary=ScanSummary(),
+                  pochodzenie=repo.ZEWNETRZNE)                         # dysk/dostęp (io)
     con.close()
     assert cli.main(["delta", dbp]) == 0
     out = capsys.readouterr().out
@@ -2738,19 +2743,19 @@ def test_import_nie_badal_bajtow_marker_zostaje_w1_bez_kubelka(tmp_path):
     p = _fits_z_bajtem(tmp_path / "a.fits", 0xE9)
     con = _db(tmp_path)
     rec = scan_file(str(p))
-    ingest_record(con, rec, volume="V", now=NOW, summary=ScanSummary())
+    ingest_record(con, rec, volume="V", now=NOW, summary=ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     bez = ScanRecord(path=rec.path, size_bytes=rec.size_bytes, mtime="2027-01-01T00:00:00+00:00",
                      header=rec.header, sha1_data=rec.sha1_data, file_sha1=rec.file_sha1,
                      header_hash=rec.header_hash, hdu_index=rec.hdu_index, compressed=rec.compressed,
                      cards=rec.cards)
     assert bez.nonprintable is repo.NIE_BADANO
-    ingest_record(con, bez, volume="V", now=NOW, summary=ScanSummary())
+    ingest_record(con, bez, volume="V", now=NOW, summary=ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     assert _lokacja_bajtu(con, p)["nonprintable_keyword"] == "OBSERVER"
     assert resolver.review_state(con).header_nonprintable == 1
     w1 = ScanRecord(path=rec.path, size_bytes=rec.size_bytes, mtime="2027-02-01T00:00:00+00:00",
                     header=None, error="OSError: zepsuty", error_kind="parse", sha1_data=None,
                     file_sha1="inny")
-    ingest_record(con, w1, volume="V", now=NOW, summary=ScanSummary())
+    ingest_record(con, w1, volume="V", now=NOW, summary=ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     stan = resolver.review_state(con)
     assert (stan.header_nonprintable, stan.header_nonprintable_unread) == (0, 0)
     con.close()
@@ -2765,7 +2770,7 @@ def test_kubelek_tylko_obecne_aktywne_przy_biezacym_odcisku(tmp_path):
     from horreum.gui import queries
     p = _fits_z_bajtem(tmp_path / "a.fits", 0xE9)
     con = _db(tmp_path)
-    ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary())
+    ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     lid, fid = con.execute("SELECT id, frame_id FROM location").fetchone()
     assert resolver.nonprintable_frame_ids(con) == queries.header_nonprintable_frame_ids(con) == {fid}
     with con:                                          # stan „odcisk zmieniony bez zbadania”

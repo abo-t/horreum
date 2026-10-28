@@ -17,7 +17,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from horreum import db, pivot as pivot_mod
+from horreum import db, pivot as pivot_mod, repo
 from horreum.gui import grid as grid_mod, i18n
 from test_gui_pola_w_tle import (NOW, _baza_ze_stosem, _biezaca, _klik_komorki, _klik_listy_panelu,
                                  _klik_przycisku, _odczekaj_debounce, _wybierz_w_combo, _zaznaczone)
@@ -372,7 +372,7 @@ def pliki(qapp, tmp_path):
         hdu.header["IMAGETYP"] = "Light"
         hdu.writeto(str(p), overwrite=True)
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     view = grid_mod.FramesView(con, now_fn=lambda: NOW)
     view._writeback_async = False
     view.resize(1400, 800)
@@ -454,7 +454,7 @@ def nazwy(qapp, tmp_path):
         hdu.header["EXPTIME"] = 300.0
         hdu.writeto(str(p), overwrite=True)
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     view = grid_mod.FramesView(con, now_fn=lambda: NOW)
     view._writeback_async = False
     view.resize(1400, 800)
@@ -573,7 +573,7 @@ def test_wybor_czlowieka_w_trakcie_zapisu_w_tle_wygrywa(qapp, tmp_path, monkeypa
         hdu.header["IMAGETYP"] = "Light"
         hdu.writeto(str(p), overwrite=True)
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     brama, wszedl = threading.Event(), threading.Event()
     prawdziwy = wb_worker.WritebackWorker._OPS["commit"]
 
@@ -1302,7 +1302,8 @@ def _pliki_ze_stosem(tmp_path):
         hdu.header["EXPTIME"] = 300.0
         hdu.header["DATE-OBS"] = f"2024-03-{14 + i:02d}T21:30:45"
         hdu.writeto(str(p), overwrite=True)
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     ids = [r[0] for r in con.execute("SELECT id FROM frame ORDER BY id")]
     con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
                 "VALUES (10, 'm10', 'master_light', 'xisf', ?)", (NOW,))

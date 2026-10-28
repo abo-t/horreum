@@ -239,7 +239,7 @@ def test_karta_OBJECT_w_uzgodnij_pomija_nieczytelna_kopie_bez_faktow_ktorej_dost
     assert wiersz["card_skip"] == "kopia oznaczona jako nieczytelna"
     assert wiersz["card_skip"].code == "unreadable"
     scan.ingest_record(con, scan.scan_file(str(b)), volume="?", now=LATER,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     lb = _loc(con, b)
     assert lb["unreadable_since"] is None and lb["hdr_hash"] == lb["header_hash"]
     assert queries.object_change_rows(con, [fid], target=None)[0]["card_skip"] is None
@@ -405,7 +405,9 @@ def test_zeznanie_z_recznej_poprawki_idzie_do_czlowieka_nie_do_etapu(tmp_path):
     scan.scan_tree(con, root, volume="?", now=NOW)
     fid = _loc(con, a)["frame_id"]
     _xisf(a, _MASTER + (("FILTER", "'Ha'"), ("OBJECT", "'FlatWizard'"), ("EXPTIME", "0.2")))
-    writeback._resync(con, str(a), "?", now=LATER)              # droga zapisu „Napraw nagłówek…"
+    # Re-sync drogi zapisu „Napraw nagłówek…" - kontrakt tej symulacji: zeznanie i aktor `user:local`. Bez backupu
+    # zapisu, więc w rodowodzie stanu lokacji to odczyt zewnętrzny, nie wiersz pisarza.
+    writeback._resync(con, str(a), "?", now=LATER, pochodzenie=repo.ZEWNETRZNE)
     assert _header(con, fid)["filter_raw"] == "Ha"
     b = _cls(root)
     scan.scan_tree(con, root, volume="?", now=LATER)
@@ -518,7 +520,7 @@ def test_ponowienie_porownuje_odcisk_z_biezacym_wierszem_nie_z_migawka(po_skasow
                                 ("EXPTIME", "0.21")), payload=b"\x05" * 32)   # zapis pisarza
             _operacja(con, _loc(con, b)["id"], "synced")
             scan.ingest_record(con, prawdziwy(str(b)), volume=_loc(con, b)["volume"], now=NOW,
-                               summary=scan.ScanSummary())
+                               summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         return prawdziwy(sciezka, *aa, **kw)
     monkeypatch.setattr(scan, "scan_file", _przeplot)
     s = scan.adopt_orphan_testimony(con, now=LATER)

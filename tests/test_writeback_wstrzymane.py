@@ -44,7 +44,7 @@ def _fits(path, *, obj="NGC6992", seed=0):
 def _wczytaj(con, path):
     """Pełny odczyt pliku i wjazd rekordu (bez bramy `mtime` - odczyt wymuszony)."""
     scan.ingest_record(con, scan.scan_file(str(path)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
 
 
 def _lok(con, path):

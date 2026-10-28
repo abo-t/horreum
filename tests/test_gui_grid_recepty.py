@@ -87,7 +87,8 @@ def _baza_zgodnosci(tmp_path, monkeypatch):
     path = str(tmp_path / "zgodnosc.db")
     c = db.open_db(path)
     for p in _nameless_tree(tmp_path):
-        scan.ingest_record(c, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary())
+        scan.ingest_record(c, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     c.close()
     monkeypatch.setattr(queries, "file_object_mismatch_frame_ids", _wszystkie_klatki)
     return path
@@ -334,7 +335,8 @@ def _okno_naprawy(tmp_path, n=2):
     nazwy = tuple(f"NGC7635_20230103_{chr(97 + i)}.fits" for i in range(n))
     pliki = _nameless_tree(tmp_path, names=nazwy)
     for p in pliki:
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     con.close()
     win = MainWindow(str(path))
     win.resize(1400, 900)
@@ -978,7 +980,7 @@ def test_cofniecie_z_paska_gasi_powierzchnie_zapisu(qapp, tmp_path, bez_watkow, 
         try:
             for p in _nameless_tree(tmp_path / "inne", names=("NGC7635_20230104_z.fits",), seed=7):
                 scan.ingest_record(con2, scan.scan_file(str(p)), volume="V", now=NOW_PD,
-                                   summary=scan.ScanSummary())
+                                   summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         finally:
             con2.close()
         ov._load_review()                            # kolejka bez raportu - recepta stoi
@@ -1417,7 +1419,8 @@ def _okno_naprawy_z_kamera(tmp_path, n=2):
     pliki = _nameless_tree(tmp_path, names=tuple(f"NGC7635_20230103_{chr(97 + i)}.fits" for i in range(n)))
     for p in pliki:
         fits.setval(str(p), "INSTRUME", value="ZWO ASI2600MC Pro")
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     grouper.run_grouper(con, NOW_PD)
     con.close()
     win = _okno(path)
@@ -1547,7 +1550,8 @@ def test_os_obiektu_leniwie_czyta_baze_przy_pierwszym_pokazaniu(qapp, tmp_path):
     from horreum.gui.app import ObjectAxisView
     con = db.open_db(str(tmp_path / "l.db"))
     for p in _nameless_tree(tmp_path):
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
     od_razu = ObjectAxisView(con)
     assert od_razu.review.count() > 0 and not od_razu._nieaktualny
     leniwy = ObjectAxisView(con, leniwie=True)

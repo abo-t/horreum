@@ -321,7 +321,7 @@ def _write_fits(path, **cards):
 
 def _scan_in(con, path, volume="V"):
     rec = scan.scan_file(str(path))
-    scan.ingest_record(con, rec, volume=volume, now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, rec, volume=volume, now=NOW, summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     return con.execute("SELECT id, sha1_data FROM frame ORDER BY id DESC LIMIT 1").fetchone()
 
 

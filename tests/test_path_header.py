@@ -67,7 +67,8 @@ def _karta(con, fid, object_raw):
                           header_hash=f"h-{object_raw}", hdu_index=None, compressed=None,
                           size_bytes=None, unreadable_since=None, unreadable_kind=None,
                           unreadable_reason=None, present=1, now=LATER, raw_json="{}",
-                          hot_fields={"object_raw": object_raw}, kind="master_light")
+                          hot_fields={"object_raw": object_raw}, kind="master_light",
+                          pochodzenie=repo.ZEWNETRZNE)
 
 
 def _stan(con, fid):

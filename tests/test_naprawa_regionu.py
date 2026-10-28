@@ -42,7 +42,8 @@ def _klatka(con, root, rel, *, kind="light", obj=None, wsp=VEIL, seed=0):
 
 
 def _wciagnij(con, p):
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
 
 
 def _obiekt(con, fid):

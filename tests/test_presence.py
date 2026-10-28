@@ -91,7 +91,7 @@ def test_3_kopia_pod_wykluczonym_drzewem_nie_jest_kandydatem(tree):
     """Plik pod `_WBPP` istnieje — jest tylko poza zasięgiem skanu → `out_of_reach`, nie kandydat."""
     con, root, vol, _paths = tree
     p = str(_fits(Path(root) / "_WBPP" / "proj.fits", value=99))
-    ingest_record(con, scan_file(p), volume=vol, now=NOW, summary=ScanSummary())
+    ingest_record(con, scan_file(p), volume=vol, now=NOW, summary=ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     s = presence.check(con, root, volume=vol, apply=True, now=LATER)
     assert (s.out_of_reach, s.candidates, s.vanished) == (1, 0, 0)
     assert _loc(con, p)["present"] == 1

@@ -30,7 +30,7 @@ def _baza_z_nagrobkiem(tmp_path):
     con = db.open_db(str(tmp_path / "h.db"))
     p = _fits(tmp_path / "a.fits")
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     loc = con.execute("SELECT id, frame_id FROM location WHERE path = ?", (str(p),)).fetchone()
     repo.user_assign_object(con, alias_norm=None, canon="COS", catalog=None, kind="own",
                             frame_ids=[loc["frame_id"]], now=NOW)
@@ -295,7 +295,7 @@ def test_failed_z_karta_skan_potwierdzajacy_gasi_nagrobek_odwracalnie(tmp_path, 
     assert _wpisy(con, "R")[0][0] == "failed"
 
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     assert _stan(con, fid) == (None, None, None)
     (status, reason), = _wpisy(con, "R")
     assert status == "applied" and f"commicie {res.commit_id}" in reason
@@ -304,7 +304,7 @@ def test_failed_z_karta_skan_potwierdzajacy_gasi_nagrobek_odwracalnie(tmp_path, 
                        (res.commit_id,)).fetchone()[0] == 1
 
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())                     # idempotentne
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)  # idempotentne
     assert _ev(con, "object.tombstone_cleared") == 1
 
     ures = writeback.undo(con, res.commit_id, now=NOW)
@@ -321,7 +321,7 @@ def test_failed_skan_innego_naglowka_nie_potwierdza(tmp_path, monkeypatch):
     with fits.open(str(p), mode="update") as hdul:
         hdul[0].header["TELESCOP"] = "RC8"
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     assert _stan(con, fid) == (None, "user_cleared", cos)
     assert _wpisy(con, "R")[0][0] == "failed"
     con.close()
@@ -347,7 +347,7 @@ def test_failed_dwa_commity_jednego_przebiegu_nie_potwierdza(tmp_path, monkeypat
         res = writeback.commit(con, "R", now=NOW)
     assert len(res.failed) == 1, res
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                       summary=scan.ScanSummary())
+                       summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     assert _stan(con, fid) == (None, "user_cleared", cos)
     assert [w[0] for w in _wpisy(con, "R")] == ["failed", "failed"]
     con.close()

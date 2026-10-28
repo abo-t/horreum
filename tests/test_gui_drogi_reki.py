@@ -253,7 +253,8 @@ def wb_view(qapp, tmp_path):
     hdu.header["OBSERVER"] = "Ja"
     hdu.writeto(str(p), overwrite=True)
     con = db.open_db(str(tmp_path / "wb.db"))
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     v = FramesView(con, now_fn=lambda: NOW)
     v._writeback_async = False
     yield v, con, p
@@ -524,7 +525,8 @@ def _baza_z_fitsem(tmp_path, nazwa):
     hdu.writeto(str(p), overwrite=True)
     path = str(tmp_path / f"{nazwa}.db")
     con = db.open_db(path)
-    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                       pochodzenie=repo.ZEWNETRZNE)
     con.close()
     return path
 

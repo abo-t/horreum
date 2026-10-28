@@ -25,7 +25,7 @@ from PySide6.QtGui import QFontMetrics, QGuiApplication
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
-from horreum import db, scan, writeback
+from horreum import db, repo, scan, writeback
 from horreum.gui import i18n, queries
 from horreum.gui.app import NAV_DOM, NAV_DOSTAWA, NAV_ZBIORY, STRONA_ZBIORY, MainWindow
 from horreum.gui.i18n_catalog import CATALOG
@@ -94,7 +94,8 @@ def _baza_z_plikami(tmp_path, n):
     for i in range(n):
         p = tmp_path / f"raw{i}.fits"
         _fits(p, i, f"2024-03-{15 + i:02d}T21:30:45")
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
         pliki.append(p)
     return path, con, pliki
 
@@ -1237,7 +1238,7 @@ def test_wynik_okna_naprawy_na_pasku_przezywa_nawigacje_i_zegar(qapp, tmp_path, 
     con = db.open_db(str(path))
     for p in _nameless_tree(tmp_path):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     con.close()
     monkeypatch.setitem(WritebackWorker._OPS, "commit", _odmowa_zapisu)
     _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
@@ -1536,7 +1537,7 @@ def test_udany_zapis_naprawy_zdanie_trwa_a_polecenie_kopiuje_sie_ze_szczegolu(qa
     con = db.open_db(str(path))
     for p in _nameless_tree(tmp_path):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     con.close()
     okna = _naprawa_reka_testu(monkeypatch, lambda dlg: QTest.mouseClick(dlg.save_btn, Qt.LeftButton))
     win = MainWindow(str(path))

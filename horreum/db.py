@@ -165,6 +165,10 @@ from importlib import resources
 # znaczy „nie zbadano”, nie „czysto”. Kopie sprzed migracji bada etap Dostawy `scan.backfill_copy_facts`.
 # 0047 to PRZYROST (nowa tabela, AR-318): `migration_log` - chwila zastosowania migracji w TEJ bazie.
 # Granica „nietkniętych” plików przerwanego cofnięcia to chwila 0044 tej bazy (gdy brak - chwila 0047).
+# 0048 to PRZYROST (nowa tabela, AR-421): `location_state` - rodowód stanu lokacji: każda transakcja, w której
+# baza poznaje wynik pisarza (zapis, cofnięcie, odzysk) albo odczyt zmienia odcisk pliku, dopisuje wiersz
+# z pochodzeniem i identyfikatorami operacji. Wchodzi PUSTA - historia sprzed migracji nieznana, reguła klasy
+# cofnięcia schodzi wtedy do reguły sprzed rodowodu.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -212,6 +216,7 @@ MIGRATIONS = [
     (45, "0045_atomic_undo_settled.sql"),
     (46, "0046_location_nonprintable.sql"),
     (47, "0047_migration_log.sql"),
+    (48, "0048_location_state.sql"),
 ]
 # Od tej wersji istnieje `migration_log` (0047): każda zastosowana migracja dopisuje w nim wiersz w swojej
 # transakcji, a 0047 - także za migracje zastosowane przed nią w tym samym przebiegu (`migrate`).

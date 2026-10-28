@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from horreum import cli, db, scan
+from horreum import cli, db, repo, scan
 
 NOW = "2026-07-04T00:00:00+00:00"
 
@@ -34,7 +34,8 @@ def _seed(tmp_path):
         p = tmp_path / f"raw{i}.fits"
         _write_fits(p, fill=i + 1, IMAGETYP="Light", OBJECT=obj, FILTER="Ha",
                     **{"DATE-OBS": dobs, "EXPTIME": 300.0})
-        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary(),
+                           pochodzenie=repo.ZEWNETRZNE)
         files.append(p)
     con.close()
     return dbp, files

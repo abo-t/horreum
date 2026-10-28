@@ -261,7 +261,7 @@ def widok_f(qapp, tmp_path):
             hdu.header[k] = val
         hdu.writeto(str(p), overwrite=True)
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     grouper.run_grouper(con, NOW)
     v = FramesView(con, now_fn=lambda: NOW)
     v._writeback_async = False
@@ -717,7 +717,7 @@ def _baza_f_w_pliku(tmp_path):
             hdu.header[k] = val
         hdu.writeto(str(p), overwrite=True)
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
     grouper.run_grouper(con, NOW)
     con.close()
     return str(path)

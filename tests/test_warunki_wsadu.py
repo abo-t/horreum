@@ -51,7 +51,7 @@ def test_import_odrzuca_lokacje_zapisana_w_miejscu_w_trakcie(tmp_path):
             return
         vol = con.execute("SELECT volume FROM location").fetchone()[0]
         scan.ingest_record(con, scan.scan_file(str(b)), volume=vol, now=NOW,
-                           summary=scan.ScanSummary())
+                           summary=scan.ScanSummary(), pochodzenie=repo.ZEWNETRZNE)
         lb = _loc(con, b)
         repo.stage_pending(con, run_id="R", location_id=lb["id"], keyword="OBJECT", idx=0,
                            op="set", old_value=None, new_value="M 31", new_type="str",

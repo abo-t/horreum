@@ -383,9 +383,10 @@ def test_zatwierdz_klasyfikuje_backupy_przebiegu_raz(qapp, tmp_path, monkeypatch
         con.close()
 
 
-def test_udany_zapis_przy_padzie_odczytu_faktow_stawia_cofnij_tej_operacji(qapp, tmp_path, monkeypatch):
-    """Odczyt zakresu w wykonawcy pada po UDANYM zapisie: „Cofnij” stoi z zakresem commitu tej operacji
-    (`CommitResult.commit_id` jest wiarygodny). Falsyfikator: brak faktów = brak „Cofnij”."""
+def test_udany_zapis_przy_padzie_odczytu_faktow_bez_cofnij_ze_zdaniem_okien(qapp, tmp_path, monkeypatch):
+    """Odczyt zakresu w wykonawcy pada po UDANYM zapisie: jedna reguła z oknami kart (AR-362) - „Cofnij” nie stoi,
+    a zdanie kończy człon `wb.write_facts_unknown` z numerem commitu rdzenia (droga CLI); pliki zostają zapisane.
+    Falsyfikator: zakres zgadywany z `CommitResult` (dawne „Cofnij” przy faktach nieznanych)."""
     _path, con, pliki = _baza_szuflady(tmp_path, 2)
     przed = _bajty(pliki)
     v = _widok_szuflady(con, inline=True)
@@ -394,9 +395,10 @@ def test_udany_zapis_przy_padzie_odczytu_faktow_stawia_cofnij_tej_operacji(qapp,
         with monkeypatch.context() as m:
             m.setattr(writeback, "_klasy_przebiegu", lambda *a, **k: (_ for _ in ()).throw(sqlite3_blad()))
             _klik_w(v.drawer.btn_commit)
-        assert v._undo_btn.isVisible() and v._undo_commity == (1,)
-        _klik_w(v._undo_btn)
-        assert _bajty(pliki) == przed
+        assert v._undo_mode is None and not getattr(v, "_undo_commity", None)
+        tekst = v.drawer.result.text()
+        assert tekst.endswith(i18n.t("wb.write_facts_unknown") + i18n.t("grid.wb.commit_id", id=1)), tekst
+        assert _bajty(pliki) != przed
     finally:
         _zamknij_widok(v)
         con.close()

@@ -3699,9 +3699,11 @@ class ObjectAxisView(QWidget):
 
     def _zywy(self, wpis):
         """Czy zamiar wpisu ma jeszcze co wykonać - stan z BAZY, nie z pamięci osi (gest zamknięty inną drogą: wiersz
-        Porządków, Oś teleskopu, drugie okno, CLI). Karty: choć jeden backup commitu bez trwałego dowodu zakończenia
-        cofnięcia (reguła rdzenia `writeback._cofniecie_zakonczone`, bez odczytu plików). Dopisanie: gest
-        „Dopisz nowy…” otwarty (ślad `telescope_add` bez `undone_at`).
+        Porządków, Oś teleskopu, drugie okno, CLI). Karty: zakres „Cofnij” commitu ma co zrobić - ta sama reguła klasy
+        co szuflada i okna kart (`writeback.zakresy_cofniecia` zawężony do commitu, `ZakresCofniecia.cofnij`; jedna
+        migawka, bez odczytu plików, AR-362): commit cofnięty łańcuchem przebiegu, sam zapis otwarty (rozstrzyga odzysk)
+        i plik po odzysku nie podają recepty. Dopisanie: gest „Dopisz nowy…” otwarty (ślad `telescope_add` bez
+        `undone_at`).
 
         NAJPIERW TOŻSAMOŚĆ ZAMIARU (AR-336): baza pod ścieżką kolejki to ta sama biblioteka tylko wtedy, gdy zamiar wpisu
         (`_Odlozona.tozsamosc` z chwili odłożenia - `run_id` commitu, ślad gestu dopisania) jest w niej ten sam; plik
@@ -3713,8 +3715,8 @@ class ObjectAxisView(QWidget):
             if wpis.tozsamosc is None or queries.przebieg_commitu(self.con, cel) != wpis.tozsamosc:
                 return False
             from horreum import writeback      # lazy: rdzeń pisarza ciągnie astropy (`_cofnij_zapis_kart` też)
-            return not all(writeback._cofniecie_zakonczone(self.con, cel, b)
-                           for b in writeback.backups_for_commit(self.con, cel))
+            zakres = writeback.zakresy_cofniecia(self.con, wpis.tozsamosc, (cel,))[1]
+            return zakres is not None and zakres.cofnij
         assert rodzaj == "dopisanie", wpis.klucz
         return wpis.tozsamosc is not None and queries.slad_dopisania(self.con, cel) == wpis.tozsamosc
 

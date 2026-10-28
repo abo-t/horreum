@@ -6477,8 +6477,10 @@ class FramesView(QWidget):
 
         PRZEBIEG ZAMKNIĘTY (nic nie czeka) dostaje „Cofnij” CAŁEGO przebiegu z zakresem z faktów wykonawcy
         (`wb_worker.CzescZapisu.zakres`) - także commit sprzed przerwania i sprzed restartu okna (decyzja CEO),
-        także gdy ta operacja sama nic nie podmieniła. Fakty nieznane (odczyt wykonawcy padł, wywołanie wprost)
-        - zakres z commitu TEJ operacji (`commit_do_cofniecia`, wiarygodny `CommitResult.commit_id`)."""
+        także gdy ta operacja sama nic nie podmieniła. Fakty NIEZNANE (odczyt wykonawcy padł) - jedna reguła z oknami
+        kart (AR-362): bez „Cofnij”, a zdanie - także zapisu przerwanego - kończy człon `wb.write_facts_unknown`
+        z numerem commitu rdzenia (droga CLI). Wywołanie wprost bez faktów - zakres z commitu TEJ operacji
+        (`commit_do_cofniecia`, wiarygodny `CommitResult.commit_id`)."""
         from horreum.gui.wb_worker import (ogon_czesci_zapisu,   # jedna reguła z oknami kart (AR-161)
                                            zdanie_drogi_zapisu)
         fakty = self._wez_fakty(op)
@@ -6488,11 +6490,24 @@ class FramesView(QWidget):
         # „przerwano, N do dokończenia” w tej samej chwili, w której padło.
         self._refresh_drawer()
         remaining = self._pending_count()
+        # Człon faktów nieznanych PRZED rozgałęzieniem po `remaining` - każda gałąź zdania szuflady i paska, jak okna
+        # kart (`wb_worker.zdanie_commitu_kart`: człon i kotwica commitu rdzenia także przy przerwaniu).
+        nieznane = ""
+        if fakty is not None and not fakty.zakres_znany:
+            nieznane = i18n.t("wb.write_facts_unknown")
+            if res.commit_id is not None:
+                nieznane += i18n.t("grid.wb.commit_id", id=res.commit_id)
+        # Czy TA operacja coś podmieniła: z faktów wykonawcy, gdy znane (pliki commitów tej operacji w klasach rdzenia
+        # - podmiana niepotwierdzona nie ma `CommitResult.commit_id`, a jest zapisem), inaczej z `commit_id`.
+        if fakty is not None and fakty.zapisane is not None:
+            podmienila = bool(fakty.zapisane or fakty.do_sprawdzenia or fakty.otwarte)
+        else:
+            podmienila = commit_do_cofniecia(res) is not None
         zakres, wczesniej, razem = None, False, ""
         if remaining == 0:
             zakres = self._zakres_po_zapisie(res, fakty)
             # Ta operacja nic nie podmieniła, a przebieg ma zapis sprzed przerwania - zdanie mówi, skąd „Cofnij”.
-            wczesniej = commit_do_cofniecia(res) is None
+            wczesniej = not podmienila
             # …a gdy podmieniła, przebieg zaś ma pliki spoza niej (AR-367): „N zapisane teraz · razem M w przebiegu”
             # - M to liczba etykiety „Zatwierdzono: M” (fakty wykonawcy; nieznane - zdanie jak dotąd).
             if not wczesniej and zakres is not None and fakty is not None and fakty.zakres_znany:
@@ -6502,14 +6517,14 @@ class FramesView(QWidget):
         droga = zdanie_drogi_zapisu(res)                 # pusty bez spadku - jak w oknach kart
         if remaining > 0:                                # przerwane anulowaniem
             ogon = ogon_czesci_zapisu(remaining)
-            self.drawer.set_count(remaining, result=summary + wskazanie + droga + ogon)
+            self.drawer.set_count(remaining, result=summary + wskazanie + droga + ogon + nieznane)
         else:
             if self._postaw_cofnij_przebiegu(res.run_id, summary + wskazanie + droga + razem, zakres,
                                              wczesniej=wczesniej):
                 ogon = self._kotwica_commitow(self._undo_commity)   # pasek; szuflada - `_install_undo`
-            else:                                        # nic do cofnięcia (blocked/failed/skipped)
+            else:                                        # nic do cofnięcia (blocked/failed/skipped, fakty nieznane)
                 ogon = ""
-                self._pusta(result=summary + wskazanie + droga + self._czlon_otwartych(zakres))
+                self._pusta(result=summary + wskazanie + droga + self._czlon_otwartych(zakres) + nieznane)
             self._run_id = None                          # R#5: run domknięty commitem
             self._pokaz_ponowienie("karty", res.run_id)
         self._podpowiedz_wyniku(podpowiedz)
@@ -6530,13 +6545,13 @@ class FramesView(QWidget):
         self._odloz_podglad_do_przylozenia(pozostale)
         self._oznacz_przeladowanie_z_zaznaczeniem()
         # Szczegół zdania (spadek, różne powody, tekst systemu) - w podpowiedzi paska (AR-218).
-        self._przeladuj_po_gescie(i18n.t("grid.wb.status", summary=summary + droga + razem + ogon),
+        self._przeladuj_po_gescie(i18n.t("grid.wb.status", summary=summary + droga + razem + ogon + nieznane),
                                   poza=False, szczegol=podpowiedz)
         # Karta w pliku to zeznanie klatki (`header`, `cards`), a z niego liczą się wiersze Porządków
         # („Nagłówek inny niż folder", kopie niezgodne…) - więc commit, który COKOLWIEK podmienił,
-        # rusza plakietkę. Warunek to reguła „Cofnij" (plik zmieniony, także `failed` z kopią
-        # nagłówka) albo niepuste `applied` przy przerwaniu anulowaniem.
-        if res.applied or commit_do_cofniecia(res) is not None:
+        # rusza plakietkę. Warunek to `podmienila` wyżej (fakty wykonawcy albo reguła „Cofnij” - plik zmieniony,
+        # także `failed` z kopią nagłówka) albo niepuste `applied` przy przerwaniu anulowaniem.
+        if res.applied or podmienila:
             self.stan_porzadkow_changed.emit()
 
     def _odloz_podglad_do_przylozenia(self, podglad, etykieta=None):
@@ -6686,12 +6701,14 @@ class FramesView(QWidget):
 
     @staticmethod
     def _zakres_po_zapisie(res, fakty):
-        """Zakres „Cofnij” po udanym zapisie: z faktów wykonawcy, a gdy odczyt faktów padł albo ich nie ma -
-        co najmniej commit TEJ operacji (`commit_do_cofniecia`): plik zmieniony, liczba potwierdzonych
-        nieznana - zapisane pliki wyniku albo „do sprawdzenia”."""
+        """Zakres „Cofnij” po udanym zapisie - JEDNA reguła z oknami kart (`commit_do_cofniecia` z faktami, AR-362):
+        z faktów wykonawcy; fakty NIEZNANE (odczyt wykonawcy padł) - None: bez „Cofnij”, zdanie mówi to członem
+        `wb.write_facts_unknown` (`_after_commit`). Wywołanie wprost bez faktów - commit TEJ operacji
+        (`CommitResult.commit_id`): plik zmieniony, liczba potwierdzonych nieznana - zapisane pliki wyniku albo
+        „do sprawdzenia”."""
         if fakty is not None and fakty.zakres_znany:
             return fakty.zakres
-        commit_id = commit_do_cofniecia(res)
+        commit_id = commit_do_cofniecia(res, fakty)
         if commit_id is None:
             return None
         zapisane = len(res.applied) + len(res.withheld)

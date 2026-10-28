@@ -52,6 +52,11 @@ from .catalog import catalog_canon, catalog_label, xref
 # wymieniona tu jawnie, żeby audyt enumu nie czerwienił się na zastanej bazie.
 ALIAS_SOURCES = frozenset({"header", "catalog_xref", "common_name", "curated", "solar", "comet",
                            "review", "user"})
+# Źródła na klatce, w których obiekt wynika z NAZWY w nagłówku (`header.object_raw`) - werdykt cofnięcia karty
+# `OBJECT` „bez dowodu” / „zostaje” (`repo._plan_obiektu_z_karty`, AR-364, AR-383): `alias` to trafienie zapisanej
+# równoważności TEJ nazwy (ścieżka daje propozycje, nie źródło `alias` - przypisanie z propozycji ma źródło `path`).
+# Poza: `review` i `user` z `ALIAS_SOURCES` (brak pisarza albo gest ręki), `twin`, `region`, `path`, `user_cleared`.
+HEADER_NAME_SOURCES = frozenset({"header", "catalog_xref", "common_name", "curated", "solar", "comet", "alias"})
 # Źródła na KLATCE = źródła aliasu + szczeble, które nazwy nie zapisują (`region`, `path`), + `alias`
 # (trafienie zapisanej wcześniej równoważności) i `user` (gest człowieka, pomija całą drabinę).
 #

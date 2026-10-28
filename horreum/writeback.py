@@ -4940,26 +4940,149 @@ _JUZ_LANCUCHEM = PowodPozycji("już cofnięte - zapis wrócił razem ze starszym
                               "undo_already_chain")
 
 
+# ------------------------------------------------ REGUŁA KLASY COFNIĘCIA (AR-362)
+# JEDNA czysta reguła nad faktami bazy (`klasa_backupu` nad `FaktyBackupu`) - dawniej trzy lustra jednego drzewa:
+# wsad `_klasy_przebiegu`, predykaty per backup (`_cofniecie_zakonczone` + `_cofniete_lancuchem` + fazy) i pętla
+# wiersza Porządków. Fakty dają DWA zasilacze z literałami SQL (SQL poza `repo.py` wyłącznie literałem): wsadowy
+# (`_fakty_przebiegu` - trzy odczyty na przebieg w jednej migawce) i pojedynczy (`_fakty_backupu` - jeden odczyt na
+# backup, starsze backupy przebiegu leniwie, `_starsze_w_przebiegu`). Rozjazd zasilaczy pinuje test równoważności
+# (te same fakty i klasy na każdym przypadku klas).
+#
+# ŁAŃCUCH WYŁĄCZNIE W PRZEBIEGU: łańcuch między przebiegami (cofnięcie C2, potem C1 innego przebiegu na tej samej
+# lokacji) wymaga trwałego dowodu następstwa DOMKNIĘĆ cofnięć obu dróg, którego baza nie ma (`atomic_undo.id`
+# porządkuje próby, nie domknięcia; cofnięcie w miejscu nie ma śladu w tej sekwencji) - AR-362, wpis rejestru.
+
+
+@dataclasses.dataclass(frozen=True)
+class FaktyBackupu:
+    """Fakty JEDNEGO backupu nagłówka, z których reguła klasy cofnięcia (`klasa_backupu`) rozstrzyga, czy „Cofnij”
+    ma co zrobić - wyłącznie z bazy, bez odczytu pliku (AR-176):
+
+      * `niepodmieniony` - commit pliku nie podmienił (`unreplaced_at`, 0024);
+      * `niepotwierdzony` - podmiana drogi atomowej bez potwierdzenia (`pending_since`, AR-40);
+      * `opisuje_wynik` - baza opisuje plik jako wynik commitu (`location.header_hash IS post_hash`, lokacja jest);
+      * `faza_zapisu`, `faza_cofniecia` - faza OSTATNIEJ operacji `inplace_op` rodzaju `commit`/`undo` tej pary
+        (commit, lokacja) albo None (`_ostatnia_operacja`);
+      * `slad_wciagniety` - WŁASNE cofnięcie atomowe raz się domknęło: ślad `atomic_undo` z `synced_at` (stawia go
+        wyłącznie transakcja re-syncu albo rozliczenia „już cofnięte” tego cofnięcia, razem ze skutkami w bazie);
+      * `wynik_wlasny` - wciągnięty ślad, którego para odcisków jest parą lokacji (`_wynik_wlasny_w_bazie`)."""
+    id: int
+    commit_id: int
+    location_id: int
+    niepodmieniony: bool
+    niepotwierdzony: bool
+    opisuje_wynik: bool
+    faza_zapisu: str | None
+    faza_cofniecia: str | None
+    slad_wciagniety: bool
+    wynik_wlasny: bool
+
+
+def dowod_zakonczenia(f: FaktyBackupu) -> bool:
+    """TRWAŁY DOWÓD, że cofania nie ma albo już się zakończyło (AR-176): commit pliku nie podmienił, operacja
+    cofnięcia w miejscu zamknięta (`synced`) albo baza wciągnęła wynik własnego cofnięcia atomowego (AR-182).
+    Zgodny `header_hash` lokacji tym dowodem NIE jest (`_cofniecie_zakonczone`)."""
+    return f.niepodmieniony or f.faza_cofniecia == "synced" or f.wynik_wlasny
+
+
+def lancuch_przebiegu(f: FaktyBackupu, starsze) -> bool:
+    """ŁAŃCUCH PRZEBIEGU (AR-345): własne cofnięcie atomowe backupu raz się domknęło ORAZ starszy commit TEGO
+    przebiegu ma backup tej lokacji z dowodem zakończenia (`dowod_zakonczenia` - wprost, bez rekurencji łańcucha).
+    `starsze` - fakty backupów starszych commitów przebiegu na lokacji (bez `unreplaced_at`); iterowane wyłącznie
+    przy własnym śladzie wciągniętym (zasilacz pojedynczy czyta je leniwie). Opis granic - `_cofniete_lancuchem`."""
+    return f.slad_wciagniety and any(dowod_zakonczenia(s) for s in starsze)
+
+
+def klasa_backupu(f: FaktyBackupu, starsze=()) -> str:
+    """Klasa backupu dla zakresu „Cofnij” - czysta reguła (bez bazy), jedna dla wsadu (`_klasy_przebiegu`), pętli
+    cofnięcia, predykatów rdzenia, wiersza Porządków i recepty osi (opis klas - `_klasy_przebiegu`):
+
+      * `"zakonczony"` - dowód zakończenia albo łańcuch przebiegu (`lancuch_przebiegu`);
+      * `"otwarty"` - operacja zapisu albo cofnięcia w miejscu w fazie otwartej (`repo.INPLACE_OPEN_PHASES`);
+      * `"poza"` - operacja commitu po odzysku (`recovered`);
+      * `"niepewny"` - operacja zwolniona ręką (`released`) albo backup drogi atomowej niepotwierdzony;
+      * `"zatwierdzony"` - reszta: podmiana potwierdzona."""
+    if dowod_zakonczenia(f) or lancuch_przebiegu(f, starsze):
+        return "zakonczony"
+    if f.faza_zapisu in repo.INPLACE_OPEN_PHASES or f.faza_cofniecia in repo.INPLACE_OPEN_PHASES:
+        return "otwarty"
+    if f.faza_zapisu is not None:
+        return ("poza" if f.faza_zapisu == "recovered" else "niepewny" if f.faza_zapisu == "released"
+                else "zatwierdzony")
+    return "niepewny" if f.niepotwierdzony else "zatwierdzony"
+
+
+def _fakty_z_wiersza(r) -> FaktyBackupu:
+    """`FaktyBackupu` z wiersza zasilacza pojedynczego (kolumny w kolejności pól)."""
+    return FaktyBackupu(int(r[0]), int(r[1]), int(r[2]), bool(r[3]), bool(r[4]), bool(r[5]), r[6], r[7],
+                        bool(r[8]), bool(r[9]))
+
+
+def _fakty_backupu(con, b) -> FaktyBackupu:
+    """ZASILACZ POJEDYNCZY reguły klasy: fakty backupu `b` (wiersz z `id`) JEDNYM odczytem - fazy ostatnich operacji
+    rodzaju i ślady atomowe podzapytaniami (indeksy `idx_inplace_op_commit`, `idx_atomic_undo_backup`). Para (commit,
+    lokacja) - z wiersza `header_backups`, nie od wołającego. `hb.post_hash IS l.header_hash` (nie odwrotnie):
+    literał warunku koniecznego Porządków rozpoznaje po swoim zapisie podgląd zapytań testu parytetu."""
+    return _fakty_z_wiersza(con.execute(
+        "SELECT hb.id, hb.commit_id, hb.location_id, hb.unreplaced_at IS NOT NULL, hb.pending_since IS NOT NULL, "
+        "l.id IS NOT NULL AND hb.post_hash IS l.header_hash, "
+        "(SELECT io.phase FROM inplace_op io WHERE io.commit_id = hb.commit_id "
+        " AND io.location_id = hb.location_id AND io.kind = 'commit' ORDER BY io.id DESC LIMIT 1), "
+        "(SELECT io.phase FROM inplace_op io WHERE io.commit_id = hb.commit_id "
+        " AND io.location_id = hb.location_id AND io.kind = 'undo' ORDER BY io.id DESC LIMIT 1), "
+        "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL), "
+        "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL "
+        " AND au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash) "
+        "FROM header_backups hb LEFT JOIN location l ON l.id = hb.location_id WHERE hb.id = ?",
+        (int(b["id"]),)).fetchone())
+
+
+def _starsze_w_przebiegu(con, f: FaktyBackupu):
+    """Fakty backupów STARSZYCH commitów przebiegu backupu `f` na jego lokacji (bez `unreplaced_at`), od
+    najnowszego - GENERATOR: odczyt dopiero przy pierwszym kroku, więc reguła, która łańcucha nie sprawdza
+    (dowód wprost, brak własnego śladu), go nie wykonuje."""
+    yield from (_fakty_z_wiersza(r) for r in con.execute(
+        "SELECT hb.id, hb.commit_id, hb.location_id, hb.unreplaced_at IS NOT NULL, hb.pending_since IS NOT NULL, "
+        "l.id IS NOT NULL AND hb.post_hash IS l.header_hash, "
+        "(SELECT io.phase FROM inplace_op io WHERE io.commit_id = hb.commit_id "
+        " AND io.location_id = hb.location_id AND io.kind = 'commit' ORDER BY io.id DESC LIMIT 1), "
+        "(SELECT io.phase FROM inplace_op io WHERE io.commit_id = hb.commit_id "
+        " AND io.location_id = hb.location_id AND io.kind = 'undo' ORDER BY io.id DESC LIMIT 1), "
+        "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL), "
+        "EXISTS (SELECT 1 FROM atomic_undo au WHERE au.backup_id = hb.id AND au.synced_at IS NOT NULL "
+        " AND au.result_sha1 = l.file_sha1 AND au.result_hash = l.header_hash) "
+        "FROM header_backups hb JOIN commits c ON c.id = hb.commit_id LEFT JOIN location l ON l.id = hb.location_id "
+        "WHERE c.run_id = (SELECT run_id FROM commits WHERE id = ?) AND hb.location_id = ? "
+        "AND hb.commit_id < ? AND hb.unreplaced_at IS NULL ORDER BY hb.commit_id DESC",
+        (f.commit_id, f.location_id, f.commit_id)).fetchall())
+
+
+def _klasa_z_bazy(con, b) -> tuple[FaktyBackupu, str]:
+    """Fakty i klasa backupu `b` zasilaczem pojedynczym (starsze przebiegu - leniwie)."""
+    f = _fakty_backupu(con, b)
+    return f, klasa_backupu(f, _starsze_w_przebiegu(con, f))
+
+
+def _nowszy_od(a, b) -> bool:
+    """Czy backup `a` to NOWSZY zapis tej samej lokacji niż `b`: późniejszy commit i późniejszy backup (backup
+    powstaje przy zapisie commitu) - porządek straży nowszego zapisu (`_nowszy_zywy_zapis`, literał
+    `commit_id > ? AND id > ?`) i wiersza Porządków (`czekajacy_na_lokacji`)."""
+    return a["commit_id"] > b["commit_id"] and a["id"] > b["id"]
+
+
 def _cofniete_lancuchem(con, commit_id, b) -> bool:
-    """Czy backup `b` commitu jest „już cofnięty” ŁAŃCUCHEM przebiegu: (a) jego WŁASNE cofnięcie atomowe
-    raz się domknęło (wiersz `atomic_undo` z `synced_at` - stawia go wyłącznie transakcja re-syncu tego
+    """Czy backup `b` commitu jest „już cofnięty” ŁAŃCUCHEM przebiegu (`lancuch_przebiegu`): (a) jego WŁASNE cofnięcie
+    atomowe raz się domknęło (wiersz `atomic_undo` z `synced_at` - stawia go wyłącznie transakcja re-syncu tego
     cofnięcia, razem ze skutkami w bazie) ORAZ (b) starszy commit TEGO przebiegu ma backup tej lokacji
-    z dowodem zakończenia (`_cofniecie_zakonczone`). Straż nowszego zapisu (`_nowszy_zywy_zapis`) nie pozwala
+    z dowodem zakończenia (`dowod_zakonczenia`). Straż nowszego zapisu (`_nowszy_zywy_zapis`) nie pozwala
     domknąć starszego przed nowszym, więc baza opisuje wtedy stan sprzed starszego, a własna para śladu
     nowszego już się z lokacją nie zgadza - ponowienie szłoby w `undo_header_changed`. Warunek (a): starszy
     cofnięty, ZANIM nowszy zapisał tę lokację (np. `header-fix --undo` przed podjęciem przebiegu), nie domyka
     nowszego - ten wciąż trzeba cofnąć. Cofnięcie nowszego w miejscu łańcucha nie potrzebuje: domyka je faza
-    `synced` jego operacji (`_cofniecie_zakonczone`)."""
-    if con.execute("SELECT 1 FROM atomic_undo WHERE backup_id = ? AND synced_at IS NOT NULL LIMIT 1",
-                   (b["id"],)).fetchone() is None:
-        return False
-    starsze = con.execute(
-        "SELECT hb.id, hb.commit_id, hb.location_id FROM header_backups hb "
-        "JOIN commits c ON c.id = hb.commit_id "
-        "WHERE c.run_id = (SELECT run_id FROM commits WHERE id = ?) AND hb.location_id = ? "
-        "AND hb.commit_id < ? AND hb.unreplaced_at IS NULL ORDER BY hb.commit_id DESC",
-        (commit_id, int(b["location_id"]), commit_id)).fetchall()
-    return any(_cofniecie_zakonczone(con, s["commit_id"], s) for s in starsze)
+    `synced` jego operacji (`dowod_zakonczenia`). Granica: starszy z INNEGO przebiegu łańcucha nie domyka (blok
+    reguły wyżej)."""
+    f = _fakty_backupu(con, b)
+    return lancuch_przebiegu(f, _starsze_w_przebiegu(con, f))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4998,22 +5121,33 @@ def _klasy_przebiegu(con, run_id) -> list[tuple[int, int, str]]:
       * `"zatwierdzony"` - podmiana potwierdzona: operacja w fazie `written`/`synced` albo backup drogi
         atomowej potwierdzony w transakcji straży podmiany.
 
-    ODCZYT WSADOWY: trzy zapytania na przebieg zamiast sześciu-siedmiu na backup (pomiar przed: 2000 plików
-    jednego commitu - 12-14 tys. zapytań, mediana 122-167 ms w wątku okna, który pyta o zakres przy „Odrzuć”
-    i zamknięciu przebiegu). Reguły są LUSTREM predykatów cofnięcia na migawce bazy: ostatnia operacja rodzaju
-    (`_ostatnia_operacja`), ślad atomowy wciągnięty z parą lokacji (`_wynik_wlasny_w_bazie`), dowód zakończenia
-    i łańcuch; równoważność z nimi na wszystkich klasach i nakładkach pinuje test - zmiana predykatu cofnięcia
-    zmienia i to lustro. Trzy odczyty idą w JEDNEJ migawce WAL (własna transakcja odczytu, zamykana wycofaniem;
-    w transakcji wołającego - w niej, bez zamykania): zapis innego połączenia między nimi nie złoży pary stanów,
-    która nigdy nie istniała."""
+    Klasa - reguła klasy (`klasa_backupu`) nad faktami zasilacza wsadowego (`_fakty_przebiegu`); łańcuch - starsze
+    backupy TEGO przebiegu z tej samej listy."""
+    starsze: dict[int, list] = {}               # lokacja → fakty backupów starszych commitów przebiegu
+    klasy = []
+    for f in _fakty_przebiegu(con, run_id):
+        klasy.append((f.commit_id, f.location_id, klasa_backupu(f, starsze.get(f.location_id, ()))))
+        starsze.setdefault(f.location_id, []).append(f)
+    return klasy
+
+
+def _fakty_przebiegu(con, run_id) -> list[FaktyBackupu]:
+    """ZASILACZ WSADOWY reguły klasy: `FaktyBackupu` każdego backupu przebiegu kart `run_id` (bez `unreplaced_at`)
+    po commitach rosnąco - trzy zapytania na przebieg zamiast odczytu per backup (pomiar przed: 2000 plików jednego
+    commitu - 12-14 tys. zapytań, mediana 122-167 ms w wątku okna, który pyta o zakres przy „Odrzuć” i zamknięciu
+    przebiegu). Fakty - te same co zasilacz pojedynczy (`_fakty_backupu`): ostatnia operacja rodzaju, ślad atomowy
+    wciągnięty i z parą lokacji; równość faktów obu zasilaczy na wszystkich klasach i nakładkach pinuje test.
+    Trzy odczyty idą w JEDNEJ migawce WAL (własna transakcja odczytu, zamykana wycofaniem; w transakcji wołającego -
+    w niej, bez zamykania): zapis innego połączenia między nimi nie złoży pary stanów, która nigdy nie istniała."""
     wlasna = not con.in_transaction
     if wlasna:
         con.execute("BEGIN")                    # migawka WAL na trzy odczyty (wzór `gui/grid_workers.py`)
     try:
         backupy = con.execute(
-            "SELECT hb.id, hb.commit_id, hb.location_id, hb.pending_since FROM header_backups hb "
-            "JOIN commits c ON c.id = hb.commit_id WHERE c.run_id = ? AND hb.unreplaced_at IS NULL "
-            "ORDER BY hb.commit_id, hb.id", (run_id,)).fetchall()
+            "SELECT hb.id, hb.commit_id, hb.location_id, hb.pending_since IS NOT NULL, "
+            "l.id IS NOT NULL AND hb.post_hash IS l.header_hash FROM header_backups hb "
+            "JOIN commits c ON c.id = hb.commit_id LEFT JOIN location l ON l.id = hb.location_id "
+            "WHERE c.run_id = ? AND hb.unreplaced_at IS NULL ORDER BY hb.commit_id, hb.id", (run_id,)).fetchall()
         faza: dict[tuple, str] = {}             # (commit, lokacja, rodzaj) → faza OSTATNIEJ operacji
         for r in con.execute(
                 "SELECT io.commit_id, io.location_id, io.kind, io.phase FROM inplace_op io "
@@ -5031,26 +5165,9 @@ def _klasy_przebiegu(con, run_id) -> list[tuple[int, int, str]]:
     finally:
         if wlasna:
             con.rollback()                      # odczyt - nic do zatwierdzenia
-
-    def zakonczony(b):                          # `_cofniecie_zakonczone` backupu bez `unreplaced_at`
-        return faza.get((b["commit_id"], b["location_id"], "undo")) == "synced" or b["id"] in wlasne
-
-    starsze: dict[int, list] = {}               # lokacja → backupy starszych commitów przebiegu
-    klasy = []
-    for b in backupy:
-        cid, lid = int(b["commit_id"]), int(b["location_id"])
-        op_c, op_u = faza.get((cid, lid, "commit")), faza.get((cid, lid, "undo"))
-        if zakonczony(b) or (b["id"] in domkniete and any(zakonczony(s) for s in starsze.get(lid, ()))):
-            k = "zakonczony"
-        elif op_c in repo.INPLACE_OPEN_PHASES or op_u in repo.INPLACE_OPEN_PHASES:
-            k = "otwarty"
-        elif op_c is not None:
-            k = "poza" if op_c == "recovered" else "niepewny" if op_c == "released" else "zatwierdzony"
-        else:
-            k = "niepewny" if b["pending_since"] is not None else "zatwierdzony"
-        klasy.append((cid, lid, k))
-        starsze.setdefault(lid, []).append(b)
-    return klasy
+    return [FaktyBackupu(int(r[0]), int(r[1]), int(r[2]), False, bool(r[3]), bool(r[4]),
+                         faza.get((r[1], r[2], "commit")), faza.get((r[1], r[2], "undo")),
+                         r[0] in domkniete, r[0] in wlasne) for r in backupy]
 
 
 def _zakres_z_klas(klasy, commity=None) -> ZakresCofniecia | None:
@@ -5167,8 +5284,8 @@ def _cofnij_backupy(con, wynik_id, pozycje, *, now, progress, should_cancel) -> 
         if should_cancel is not None and should_cancel():
             cancelled = True
             granica = _granica_sladu(con)
-            stany = ["zakonczony" if _cofniete_lancuchem(con, c, r)
-                     else _stan_nieprzetworzonego(con, c, r, granica) for c, r in pozycje[i:]]
+            # Klasa nieprzetworzonego niesie łańcuch przebiegu (reguła klasy) - jedno pytanie na backup.
+            stany = [_stan_nieprzetworzonego(con, c, r, granica) for c, r in pozycje[i:]]
             remaining = sum(1 for s in stany if s != "zakonczony")
             untouched = stany.count("nietkniety")
             break
@@ -5213,14 +5330,9 @@ def _cofniecie_zakonczone(con, commit_id, b) -> bool:
     skan po zewnętrznym powrocie pliku wyrównuje nagłówek, a cały plik i skutki cofnięcia w bazie
     (nagrobek AR-38, wstrzymania) mogą być inne - rozstrzyga dopiero cofnięcie tego backupu. Droga
     atomowa (AR-182): ślad własnego cofnięcia, który baza wciągnęła (`_wynik_wlasny_w_bazie`). Każdy
-    inny backup wymaga sprawdzenia."""
-    if con.execute("SELECT unreplaced_at FROM header_backups WHERE id = ?",
-                   (b["id"],)).fetchone()[0] is not None:
-        return True
-    op_u = _ostatnia_operacja(con, commit_id, int(b["location_id"]), "undo")
-    if op_u is not None and op_u["phase"] == "synced":
-        return True
-    return _wynik_wlasny_w_bazie(con, b) is not None
+    inny backup wymaga sprawdzenia - chyba że domyka go łańcuch przebiegu (`lancuch_przebiegu`): klasa
+    `zakonczony` reguły klasy (`klasa_backupu`), ta sama, z której wsad liczy zakres „Cofnij”."""
+    return _klasa_z_bazy(con, b)[1] == "zakonczony"
 
 
 def _granica_sladu(con):
@@ -5259,27 +5371,22 @@ def _nowszy_zywy_zapis(con, b):
     atomową). Nowszy commit, który zapisał tę samą kartę (A → B → A), zostawia ten sam region i ten
     sam nagłówek - bez tej straży cofnięcie starszego commitu cofnęłoby nowszą decyzję.
 
-    Nowszy = backup tej samej lokacji z późniejszego commitu, podmieniony (`unreplaced_at IS NULL`),
-    bez trwałego dowodu zakończenia własnego cofnięcia (`_cofniecie_zakonczone`) i z
-    `location.header_hash = post_hash` nowszego - ostatni warunek gasi wieczną blokadę po nowszym
-    commicie cofniętym atomowo bez śladu (sprzed 0044: baza opisuje wtedy plik sprzed niego).
+    Nowszy (`_nowszy_od`) = backup tej samej lokacji z późniejszego commitu, podmieniony (`unreplaced_at IS
+    NULL`), z `location.header_hash = post_hash` nowszego i klasą reguły (`klasa_backupu`) inną niż `zakonczony`
+    - dowód zakończenia własnego cofnięcia albo łańcuch przebiegu nowszego (zapis cofnięty razem ze starszym
+    zapisem swojego przebiegu nie jest żywy). Warunek odcisku gasi wieczną blokadę po nowszym commicie cofniętym
+    atomowo bez śladu (sprzed 0044: baza opisuje wtedy plik sprzed niego).
     Odczyt kandydatów indeksem pokrywającym `UNIQUE(commit_id, location_id)` (zakres `commit_id`) -
     na kopii `pf4` 0,31 ms na backup najstarszego commitu; droga po kluczu głównym (`id > ?`) to 33 ms."""
-    lid = int(b["location_id"])
-    commit_b = con.execute("SELECT commit_id FROM header_backups WHERE id = ?",
-                           (b["id"],)).fetchone()[0]
-    nowsze = con.execute(
-        "SELECT id, commit_id FROM header_backups WHERE commit_id > ? AND location_id = ? "
-        "AND id > ? ORDER BY id DESC", (commit_b, lid, b["id"])).fetchall()
-    if not nowsze:
-        return None
-    naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()
-    for n in nowsze:
-        nb = con.execute("SELECT * FROM header_backups WHERE id = ?", (n["id"],)).fetchone()
-        if (nb["unreplaced_at"] is None and naglowek is not None
-                and naglowek[0] == nb["post_hash"]
-                and not _cofniecie_zakonczone(con, nb["commit_id"], nb)):
-            return int(nb["commit_id"])
+    f = _fakty_backupu(con, b)
+    for n in con.execute(
+            "SELECT id, commit_id FROM header_backups WHERE commit_id > ? AND location_id = ? "
+            "AND id > ? ORDER BY id DESC", (f.commit_id, f.location_id, f.id)).fetchall():
+        assert _nowszy_od(n, {"commit_id": f.commit_id, "id": f.id}), (n, f)   # literał = `_nowszy_od`
+        nf = _fakty_backupu(con, n)
+        if (not nf.niepodmieniony and nf.opisuje_wynik
+                and klasa_backupu(nf, _starsze_w_przebiegu(con, nf)) != "zakonczony"):
+            return nf.commit_id
     return None
 
 
@@ -5301,16 +5408,15 @@ def _stan_nieprzetworzonego(con, commit_id, b, granica) -> str:
         droga śladu nie zostawiała;
       * `"do_sprawdzenia"` - reszta: ślad bez dowodu zakończenia, nowszy zapis lokacji, baza opisuje
         inny plik, commit sprzed granicy (cofnięcie sprzed 0044 przerwane między podmianą a re-synciem
-        nie zostawiało w bazie nic) - zdanie nie obiecuje stanu, którego rdzeń nie zna."""
-    if _cofniecie_zakonczone(con, commit_id, b):
+        nie zostawiało w bazie nic) - zdanie nie obiecuje stanu, którego rdzeń nie zna.
+    Klasa `zakonczony` i „baza opisuje wynik” - z reguły klasy (`_klasa_z_bazy`: dowód wprost albo łańcuch
+    przebiegu, `FaktyBackupu.opisuje_wynik`)."""
+    f, klasa = _klasa_z_bazy(con, b)
+    if klasa == "zakonczony":
         return "zakonczony"
     if _slad_proby_cofniecia(con, commit_id, b) or _nowszy_zywy_zapis(con, b) is not None:
         return "do_sprawdzenia"
-    lid = int(b["location_id"])
-    naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()
-    if naglowek is None or naglowek[0] != b["post_hash"]:
-        return "do_sprawdzenia"
-    if granica is None:
+    if not f.opisuje_wynik or granica is None:
         return "do_sprawdzenia"
     po_granicy = con.execute(
         "SELECT julianday(applied_at) >= julianday(?, '+1 second') FROM commits WHERE id = ?",
@@ -5323,20 +5429,42 @@ def _czeka_na_dokonczenie(con, commit_id, b) -> bool:
     „Dokończ cofnięcie”, AR-318): bez dowodu zakończenia, bez nowszego żywego zapisu lokacji, a baza
     opisuje plik jako wynik commitu - ten sam plik, który cofnięcie ma przywrócić. Backup, którego
     lokację nadpisał nowszy commit, nie jest resztą tego cofnięcia. Najtańszy warunek pierwszy:
-    plik cofnięty do końca ma w bazie nagłówek sprzed commitu."""
-    naglowek = con.execute("SELECT header_hash FROM location WHERE id = ?",
-                           (int(b["location_id"]),)).fetchone()
-    if naglowek is None or naglowek[0] != b["post_hash"]:
+    plik cofnięty do końca ma w bazie nagłówek sprzed commitu. „Bez dowodu zakończenia” = klasa reguły
+    (`klasa_backupu`) inna niż `zakonczony` - backup domknięty łańcuchem przebiegu też nie czeka."""
+    f = _fakty_backupu(con, b)
+    if not f.opisuje_wynik:
         return False
-    return not _cofniecie_zakonczone(con, commit_id, b) and _nowszy_zywy_zapis(con, b) is None
+    return (klasa_backupu(f, _starsze_w_przebiegu(con, f)) != "zakonczony"
+            and _nowszy_zywy_zapis(con, b) is None)
+
+
+def czekajacy_na_lokacji(con, backupy) -> list:
+    """Backupy JEDNEJ lokacji, które czekają na dokończenie cofnięcia (wiersz Porządków „Dokończ cofnięcie”,
+    `gui.queries.niedokonczone_cofniecia_kart`) - najwyżej jeden. `backupy` = backupy lokacji spełniające warunek
+    konieczny (baza opisuje plik jako wynik commitu), od najnowszego (`commit_id`, `id` malejąco); wiersze z `id`,
+    `commit_id`. Zakończone (`_cofniecie_zakonczone` - reguła klasy, z łańcuchem przebiegu) się pomija, a PIERWSZY
+    niezakończony rozstrzyga lokację regułą `_czeka_na_dokonczenie`: starsze od niego (`_nowszy_od`) nie czekają -
+    on sam albo nowszy od niego żywy zapis jest dla nich „nowszym żywym zapisem” (`_nowszy_zywy_zapis`). Predykaty
+    po nazwie modułu - pętla nie trzyma własnej kopii reguły."""
+    czekaja, zywy = [], None
+    for b in backupy:
+        if zywy is not None and _nowszy_od(zywy, b):
+            continue
+        if _cofniecie_zakonczone(con, b["commit_id"], b):
+            continue
+        zywy = b
+        if _czeka_na_dokonczenie(con, b["commit_id"], b):
+            czekaja.append(b)
+    return czekaja
 
 
 def _wynik_wlasny_w_bazie(con, b):
     """Ślad cofnięcia backupu `b` drogą atomową (`atomic_undo`, AR-182), który baza wciągnęła
     (`synced_at`) i którego para odcisków jest parą lokacji (`location.file_sha1`/`header_hash`) -
-    ostatni pełny odczyt bazy to był ten wynik; najnowszy taki albo `None`. Bez odczytu pliku: JEDNA
-    reguła dla dowodu zakończenia (`_cofniecie_zakonczone`) i szybkiej ścieżki „już cofnięte”
-    (`_cofnij_lokacje`, która dokłada `mtime` pliku)."""
+    ostatni pełny odczyt bazy to był ten wynik; najnowszy taki albo `None`. Bez odczytu pliku: szybka ścieżka
+    „już cofnięte” (`_cofnij_lokacje`, która dokłada `mtime` pliku). Ten sam warunek jest faktem reguły klasy
+    (`FaktyBackupu.wynik_wlasny` w literałach zasilaczy `_fakty_backupu`, `_klasy_przebiegu`) - zgodność pinuje
+    test równoważności zasilaczy."""
     return con.execute(
         "SELECT au.id, au.result_sha1, au.result_hash FROM atomic_undo au "
         "JOIN location l ON l.id = ? "

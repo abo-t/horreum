@@ -37,6 +37,7 @@ from .resolve.headers import (FAKTY_BIEZACE, FAKTY_DO_DOCIAGNIECIA,   # stan fak
                               FAKTY_NOWSZE, copy_facts_state,
                               copy_testimony)            # źródło `header` (kopia wiodąca, AR-4)
 from .resolve.objects import (CLEARABLE_OBJECT_SOURCES,  # enum źródeł osi OBIEKT —
+                              HEADER_NAME_SOURCES,      # …obiekt z nazwy w nagłówku (AR-383)
                               OBJECT_SOURCES,           # jeden właściciel (S1/S2b)
                               STICKY_OBJECT_SOURCES,    # …ręki, nietykalne dla cofnięcia (AR-38)
                               TRANSFERABLE_OBJECT_SOURCES,   # …i przeżywające podmianę (R4)
@@ -3521,7 +3522,8 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
 
       * `None` - wariant tej klatki nie dotyczy (nic do zrobienia, nic do powiedzenia);
       * `("bez_dowodu",)` - karta była, a dowodu pochodzenia z parą (commit, plik) nie ma (zapis sprzed pary), klatka
-        jest przy obiekcie ze źródłem `header`, którego już żadna kopia nie mówi: nic nie odtwarzamy (bez zgadywania),
+        jest przy obiekcie ze źródłem z nazwy nagłówka (`HEADER_NAME_SOURCES`, AR-383), którego już żadna kopia nie
+        mówi: nic nie odtwarzamy (bez zgadywania),
         klatka zostaje - zdanie to liczy (AR-364);
       * `("wrocil",)` - stan sprzed już odtworzony (znacznik `card_undone` z tą parą);
       * `("zostaje",)` - przypisanie z karty było, ale oś klatki zmieniła się po nim (ręka, kolejny
@@ -3548,11 +3550,12 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
          odcisk, dwa commity tej samej karty dzielą odcisk i sekundę, commit wieloplikowy ma jedno
          `applied_at` na wszystkie pliki, a niezwiązane `header.adopted` może nieść ten sam odcisk. Brak
          zdarzenia z parą (commit zapisany przed dowodem, zeznanie z innej kopii): klatka zostaje, nic nie
-         zgadujemy - przy obiekcie ze źródłem `header` → `bez_dowodu` (kroki 4 i 4b przeszły: nazwy nie mówi już
+         zgadujemy - przy obiekcie ze źródłem z nazwy nagłówka (`HEADER_NAME_SOURCES`: `header`, `catalog_xref`,
+         `common_name`, `curated`, `solar`, `comet`, `alias`) → `bez_dowodu` (kroki 4 i 4b przeszły: nazwy nie mówi już
          żaden nagłówek, a klatka ją nosi; resolver jej nie odepnie, `resolver.run_resolver` „obiekt bez świadka
          zostaje”), inaczej `None` (źródło regionu, ręki, ścieżki - karta obiektu nie nadała). Brak
-         zdarzenia osi po kotwicy przy klatce z obiektem ze źródłem
-         `header` (przypisanie wyprzedziło późne rozliczenie zapisu) → `zostaje` - zdanie ją liczy.
+         zdarzenia osi po kotwicy przy klatce z obiektem ze źródłem z nazwy
+         nagłówka (przypisanie wyprzedziło późne rozliczenie zapisu) → `zostaje` - zdanie ją liczy.
          Pierwsze zdarzenie osi po kotwicy musi być przypisaniem RESOLVERA - samo
          `object.assigned` (stan sprzed: pustka) albo sąsiednia para
          `object.unassigned` + `object.assigned` (stan sprzed z ładunku odpięcia, `id + 1`, ten sam
@@ -3603,7 +3606,7 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
         # (kroki 4 i 4b wyżej), zostaje przy nim bez słowa, czy nadała go ta karta - zdanie wyniku to mówi.
         fr = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
                          (frame_id,)).fetchone()
-        if fr is not None and fr["object_id"] is not None and fr["object_source"] == "header":
+        if fr is not None and fr["object_id"] is not None and fr["object_source"] in HEADER_NAME_SOURCES:
             return ("bez_dowodu",)
         return None
     osi = con.execute(
@@ -3616,7 +3619,7 @@ def _plan_obiektu_z_karty(con, *, frame_id, commit_id, location_id):
         # cofnięciu go nie mówi (krok 4) - klatka zostaje i zdanie ją liczy.
         fr = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
                          (frame_id,)).fetchone()
-        if fr is not None and fr["object_id"] is not None and fr["object_source"] == "header":
+        if fr is not None and fr["object_id"] is not None and fr["object_source"] in HEADER_NAME_SOURCES:
             return ("zostaje",)
         return None
     if osi[0]["actor"] != "resolver":

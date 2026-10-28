@@ -322,26 +322,17 @@ def test_klasy_backupu_licza_zatwierdzone_do_sprawdzenia_i_otwarte(tmp_path, mon
 
 
 def _klasy_wprost(con, run_id):
-    """Wzorzec równoważności odczytu wsadowego (`writeback._klasy_przebiegu`): klasa każdego backupu z ŻYWYCH
-    predykatów cofnięcia, zapytaniami per backup."""
-    klasy = []
-    for cid in writeback._commity_przebiegu(con, run_id):
-        for b in writeback.backups_for_commit(con, cid):
-            lid = int(b["location_id"])
-            op_c = writeback._ostatnia_operacja(con, cid, lid, "commit")
-            op_u = writeback._ostatnia_operacja(con, cid, lid, "undo")
-            if writeback._cofniecie_zakonczone(con, cid, b) or writeback._cofniete_lancuchem(con, cid, b):
-                k = "zakonczony"
-            elif {o["phase"] for o in (op_c, op_u) if o is not None} & set(repo.INPLACE_OPEN_PHASES):
-                k = "otwarty"
-            elif op_c is not None:
-                k = {"recovered": "poza", "released": "niepewny"}.get(op_c["phase"], "zatwierdzony")
-            else:
-                pending = con.execute("SELECT pending_since FROM header_backups WHERE id = ?",
-                                      (b["id"],)).fetchone()[0]
-                k = "zatwierdzony" if pending is None else "niepewny"
-            klasy.append((cid, lid, k))
-    return klasy
+    """Wzorzec równoważności odczytu wsadowego (`writeback._klasy_przebiegu`): klasa każdego backupu zasilaczem
+    POJEDYNCZYM reguły klasy (`writeback._klasa_z_bazy` - fakty jednym odczytem na backup, starsze backupy przebiegu
+    osobnym odczytem), nie wsadem - drzewo klas jest jedno (`writeback.klasa_backupu`)."""
+    return [(cid, int(b["location_id"]), writeback._klasa_z_bazy(con, b)[1])
+            for cid in writeback._commity_przebiegu(con, run_id) for b in writeback.backups_for_commit(con, cid)]
+
+
+def _fakty_wprost(con, run_id):
+    """Fakty każdego backupu przebiegu zasilaczem pojedynczym (`writeback._fakty_backupu`) - wzorzec faktów wsadu."""
+    return [writeback._fakty_backupu(con, b)
+            for cid in writeback._commity_przebiegu(con, run_id) for b in writeback.backups_for_commit(con, cid)]
 
 
 def _cofniecie_nieweryfikowane(tmp_path, monkeypatch, *, odzysk):
@@ -395,45 +386,55 @@ def _slady(con, uklad):
             repo.mark_atomic_undo_synced(con, undo_id=uid, now=NOW)
 
 
-@pytest.mark.parametrize("przypadek", [f"jeden-{s}" for s in ("atomowy", "niepotwierdzony", "zwolniony",
-                                                               "przed_bajtem", "nieweryfikowany", "odzyskany")]
-                         + ["cofniecie-nieweryfikowane", "cofniecie-po-odzysku"]
-                         + [f"slady-{u}" for u in _UKLADY_SLADOW]
-                         + [f"nakladka-{d}-{e}" for d in ("aa", "am", "ma", "mm") for e in _ETAPY_NAKLADKI])
-def test_klasy_wsadowe_rowne_predykatom_cofniecia(tmp_path, monkeypatch, przypadek):
-    """Odczyt wsadowy klas backupów (`_klasy_przebiegu` - trzy zapytania na przebieg) daje to samo, co żywe
-    predykaty cofnięcia per backup (`_klasy_wprost`), w każdej klasie: zapis zakończony w sześciu stanach,
-    cofnięcie w miejscu nieweryfikowane i powtórzone po odzysku (dwie operacje cofnięcia jednego backupu),
-    kilka śladów cofnięcia atomowego jednego backupu (z parą lokacji i bez, wciągnięte i nie), nakładka każdej
-    pary dróg przed cofnięciem, po cofnięciu nowszego (także z plikiem zmienionym potem z zewnątrz), po
-    cofnięciu przebiegu i po przerwaniu (łańcuch). Falsyfikatory: pierwsza operacja rodzaju zamiast ostatniej;
-    dowód zakończenia bez śladu atomowego; wyłącznie najnowszy ślad atomowy; otwarta operacja cofnięcia
-    pominięta; łańcuch bez starszego commitu; klasy faz commitu."""
+PRZYPADKI_KLAS = ([f"jeden-{s}" for s in ("atomowy", "niepotwierdzony", "zwolniony", "przed_bajtem",
+                                           "nieweryfikowany", "odzyskany")]
+                  + ["cofniecie-nieweryfikowane", "cofniecie-po-odzysku"]
+                  + [f"slady-{u}" for u in _UKLADY_SLADOW]
+                  + [f"nakladka-{d}-{e}" for d in ("aa", "am", "ma", "mm") for e in _ETAPY_NAKLADKI])
+
+
+def _scena_klas(tmp_path, monkeypatch, przypadek):
+    """Baza przypadku `przypadek` (`PRZYPADKI_KLAS`) - przebieg `R` na prawdziwym pisarzu; zwraca połączenie."""
     rodzaj, _, reszta = przypadek.partition("-")
     if rodzaj == "jeden":
-        con = _jeden_zapis(tmp_path, reszta, monkeypatch)[0]
-    elif rodzaj == "slady":
+        return _jeden_zapis(tmp_path, reszta, monkeypatch)[0]
+    if rodzaj == "slady":
         con = _jeden_zapis(tmp_path, "atomowy", monkeypatch)[0]
         _slady(con, reszta)
         assert [k for *_x, k in _klasy_wprost(con, "R")] == [_UKLADY_SLADOW[reszta][1]]
-    elif rodzaj == "cofniecie":
-        con = _cofniecie_nieweryfikowane(tmp_path, monkeypatch, odzysk=reszta == "po-odzysku")
-    else:
-        droga, etap = reszta.split("-")
-        con, pliki = _nakladka(tmp_path, droga)
-        if etap in ("po_cofnieciu_nowszego", "zmiana_po_cofnieciu_nowszego"):
-            writeback.undo(con, 2, now=NOW)
-        if etap == "zmiana_po_cofnieciu_nowszego":          # plik L0 zmieniony z zewnątrz i przeskanowany
-            fits.setval(str(pliki[0]), "OBSERVER", value="obcy")
-            scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary())
-        elif etap == "po_cofnieciu_przebiegu":
-            writeback.undo_run(con, (1, 2), now=NOW)
-        elif etap == "przerwane":
-            licz = []
-            writeback.undo_run(con, (1, 2), now=NOW, should_cancel=lambda: licz.append(1) or len(licz) > 2)
+        return con
+    if rodzaj == "cofniecie":
+        return _cofniecie_nieweryfikowane(tmp_path, monkeypatch, odzysk=reszta == "po-odzysku")
+    droga, etap = reszta.split("-")
+    con, pliki = _nakladka(tmp_path, droga)
+    if etap in ("po_cofnieciu_nowszego", "zmiana_po_cofnieciu_nowszego"):
+        writeback.undo(con, 2, now=NOW)
+    if etap == "zmiana_po_cofnieciu_nowszego":          # plik L0 zmieniony z zewnątrz i przeskanowany
+        fits.setval(str(pliki[0]), "OBSERVER", value="obcy")
+        scan.ingest_record(con, scan.scan_file(str(pliki[0])), volume="V", now=NOW, summary=scan.ScanSummary())
+    elif etap == "po_cofnieciu_przebiegu":
+        writeback.undo_run(con, (1, 2), now=NOW)
+    elif etap == "przerwane":
+        licz = []
+        writeback.undo_run(con, (1, 2), now=NOW, should_cancel=lambda: licz.append(1) or len(licz) > 2)
+    return con
+
+
+@pytest.mark.parametrize("przypadek", PRZYPADKI_KLAS)
+def test_klasy_wsadowe_rowne_predykatom_cofniecia(tmp_path, monkeypatch, przypadek):
+    """Zasilacz wsadowy reguły klasy (`_fakty_przebiegu`/`_klasy_przebiegu` - trzy zapytania na przebieg) daje te
+    same FAKTY i te same klasy, co zasilacz pojedynczy per backup (`_fakty_wprost`, `_klasy_wprost`), w każdej klasie:
+    zapis zakończony w sześciu stanach, cofnięcie w miejscu nieweryfikowane i powtórzone po odzysku (dwie operacje
+    cofnięcia jednego backupu), kilka śladów cofnięcia atomowego jednego backupu (z parą lokacji i bez, wciągnięte
+    i nie), nakładka każdej pary dróg przed cofnięciem, po cofnięciu nowszego (także z plikiem zmienionym potem
+    z zewnątrz), po cofnięciu przebiegu i po przerwaniu (łańcuch). Falsyfikatory: pierwsza operacja rodzaju zamiast
+    ostatniej; dowód zakończenia bez śladu atomowego; wyłącznie najnowszy ślad atomowy; otwarta operacja cofnięcia
+    pominięta; łańcuch bez starszego commitu; klasy faz commitu."""
+    con = _scena_klas(tmp_path, monkeypatch, przypadek)
     try:
         wzorzec = _klasy_wprost(con, "R")
         assert wzorzec and writeback._klasy_przebiegu(con, "R") == wzorzec, wzorzec
+        assert writeback._fakty_przebiegu(con, "R") == _fakty_wprost(con, "R")
     finally:
         con.close()
 

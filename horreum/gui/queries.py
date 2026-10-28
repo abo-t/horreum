@@ -5856,7 +5856,8 @@ def niedokonczone_cofniecia_kart(con):
       * NA LOKACJI CZEKA NAJWYŻEJ JEDEN BACKUP - najnowszy żywy zapis: `writeback._nowszy_zywy_zapis` odbiera czekanie
         każdemu starszemu backupowi lokacji, gdy nowszy (wyższe `id` i `commit_id` - backup powstaje przy zapisie
         commitu) ma `unreplaced_at IS NULL`, odcisk bazy = swój `post_hash` i nie ma dowodu zakończenia
-        (`writeback._cofniecie_zakonczone`). Backupy lokacji spełniające warunek konieczny idą więc od najnowszego:
+        (`writeback._cofniecie_zakonczone`). Backupy lokacji spełniające warunek konieczny idą więc od najnowszego do
+        reguły rdzenia `writeback.czekajacy_na_lokacji` (AR-362 - porządek i predykaty w jednym miejscu):
         zakończone się pomija, a PIERWSZY niezakończony rozstrzyga lokację regułą rdzenia (`_czeka_na_dokonczenie`) -
         starsze nie czekają (on sam albo nowszy od niego żywy zapis jest dla nich „nowszym żywym zapisem”). Bez tego
         zapis tej samej karty powtarzany na tych samych plikach (A → B → A, każdy cofnięty) kosztował odczyt każdego
@@ -5902,16 +5903,9 @@ def niedokonczone_cofniecia_kart(con):
             "AND l.header_hash IS hb.post_hash ORDER BY hb.location_id, hb.commit_id DESC, hb.id DESC",
             (json.dumps(sorted(set(kandydaci) | z_zamiaru)),)).fetchall()
         czeka: dict[int, int] = {}              # commit → liczba czekających plików
-        zywy = None                             # najnowszy niezakończony backup bieżącej lokacji
-        for b in zywe:
-            # Starszy od żywego zapisu tej lokacji (oba warunki `_nowszy_zywy_zapis`: `commit_id` i `id`) nie czeka.
-            if (zywy is not None and b["location_id"] == zywy["location_id"]
-                    and b["commit_id"] < zywy["commit_id"] and b["id"] < zywy["id"]):
-                continue
-            if writeback._cofniecie_zakonczone(con, b["commit_id"], b):
-                continue
-            zywy = b
-            if writeback._czeka_na_dokonczenie(con, b["commit_id"], b):
+        # Lokację rozstrzyga reguła rdzenia (`writeback.czekajacy_na_lokacji`) - bez kopii porządku i predykatów tutaj.
+        for _lid, backupy in itertools.groupby(zywe, key=lambda r: r["location_id"]):
+            for b in writeback.czekajacy_na_lokacji(con, backupy):
                 czeka[b["commit_id"]] = czeka.get(b["commit_id"], 0) + 1
         wynik = []
         for commit_id in sorted(czeka):

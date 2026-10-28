@@ -28,6 +28,33 @@ from horreum.gui import facet_model, i18n, queries, rows, theme
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
 
 
+# STAŁE RÓL, WYRÓWNAŃ, FLAG I STYLU MODELU (AR-357) - liczone RAZ, z pełnej ścieżki enuma. Skrót trybu zgodności
+# PySide6 (`Qt.DisplayRole`, `Qt.AlignRight`, `QStyle.PM_…`) kosztuje ~2 µs na dostęp wobec ~11 ns stałej modułu
+# (zmierzone `timeit`), a `data()` i delegaty płacą go w każdej komórce kadru i każdym wierszu rachunku szerokości:
+# natywnie na kopii pf4 malowanie kadru klasycznej 47,7 → 28,5 ms, `_szerokosci_znajdz` 82,2 → 30,4 ms (mediany 10
+# biegów). Role to `int` - porównanie działa dla roli z C++ (`int`) i z Pythona (`ItemDataRole`, `IntEnum`); flagi
+# zostają `Qt.ItemFlag` (`flags()` zwraca ten sam typ co baza), wyrównanie - `int`, jak dotąd. Metody modelu
+# i delegatów skrótów nie używają (bramka AST w `tests/test_gui_role_grid_model.py`); wartości domyślne argumentów
+# (`role=Qt.DisplayRole`) liczą się raz przy `def`.
+_ROLA_TEKSTU = int(Qt.ItemDataRole.DisplayRole)
+_ROLA_PODPOWIEDZI = int(Qt.ItemDataRole.ToolTipRole)
+_ROLA_KOLORU = int(Qt.ItemDataRole.ForegroundRole)
+_ROLA_CZCIONKI = int(Qt.ItemDataRole.FontRole)
+_ROLA_WYROWNANIA = int(Qt.ItemDataRole.TextAlignmentRole)
+_ROLA_EDYCJI = int(Qt.ItemDataRole.EditRole)
+_ROLA_TLA = int(Qt.ItemDataRole.BackgroundRole)
+_WYROWNANIE_LICZB = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+_FLAGA_EDYCJI = Qt.ItemFlag.ItemIsEditable
+_FLAGI_BELKI = Qt.ItemFlag.ItemIsEnabled
+_POZIOMO = Qt.Orientation.Horizontal
+_ELIZJA_W_SRODKU = Qt.TextElideMode.ElideMiddle
+_ELIZJA_Z_PRAWEJ = Qt.TextElideMode.ElideRight
+_BEZ_ZAWIJANIA = ~QStyleOptionViewItem.ViewItemFeature.WrapText
+_PROSTOKAT_TEKSTU = QStyle.SubElement.SE_ItemViewItemText
+_MARGINES_RAMKI = QStyle.PixelMetric.PM_FocusFrameHMargin
+_ELEMENT_KOMORKI = QStyle.ControlElement.CE_ItemViewItem
+
+
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
 # (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
 # date_obs+path (zero zmian SQL). Kolumna renamu: grupowanie po Δh wykrawa homogeniczny wsad (§1).
@@ -1268,8 +1295,8 @@ class _ElizjaWSrodku(QStyledItemDelegate):
 
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
-        option.textElideMode = Qt.ElideMiddle
-        option.features &= ~QStyleOptionViewItem.WrapText
+        option.textElideMode = _ELIZJA_W_SRODKU
+        option.features &= _BEZ_ZAWIJANIA
 
     @staticmethod
     def tekst_w_linii(option):
@@ -1277,9 +1304,9 @@ class _ElizjaWSrodku(QStyledItemDelegate):
         tekstu (`SE_ItemViewItemText`) minus margines, który styl odejmuje sam przy rysowaniu
         (`PM_FocusFrameHMargin` + 1 z każdej strony). Mieści się w całości - zostaje bez zmian."""
         styl = option.widget.style() if option.widget is not None else QApplication.style()
-        prostokat = styl.subElementRect(QStyle.SE_ItemViewItemText, option, option.widget)
-        margines = styl.pixelMetric(QStyle.PM_FocusFrameHMargin, None, option.widget) + 1
-        return option.fontMetrics.elidedText(option.text, Qt.ElideMiddle,
+        prostokat = styl.subElementRect(_PROSTOKAT_TEKSTU, option, option.widget)
+        margines = styl.pixelMetric(_MARGINES_RAMKI, None, option.widget) + 1
+        return option.fontMetrics.elidedText(option.text, _ELIZJA_W_SRODKU,
                                              max(0, prostokat.width() - 2 * margines))
 
     def paint(self, painter, option, index):
@@ -1287,7 +1314,7 @@ class _ElizjaWSrodku(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         opt.text = self.tekst_w_linii(opt)
         styl = opt.widget.style() if opt.widget is not None else QApplication.style()
-        styl.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        styl.drawControl(_ELEMENT_KOMORKI, opt, painter, opt.widget)
 
 
 class _DelegatBelki(QStyledItemDelegate):
@@ -1307,8 +1334,8 @@ class _DelegatBelki(QStyledItemDelegate):
 
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
-        option.textElideMode = Qt.ElideRight
-        option.features &= ~QStyleOptionViewItem.WrapText
+        option.textElideMode = _ELIZJA_Z_PRAWEJ
+        option.features &= _BEZ_ZAWIJANIA
 
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
@@ -1973,9 +2000,9 @@ class GridTableModel(QAbstractTableModel):
         return len(self._base) + self._kw_off() + len(self._keywords)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role != Qt.DisplayRole:
+        if role != _ROLA_TEKSTU:
             return None
-        if orientation == Qt.Horizontal:
+        if orientation == _POZIOMO:
             if section == self._preview_col():
                 return self._preview_label
             if section == self._version_col():
@@ -2027,9 +2054,9 @@ class GridTableModel(QAbstractTableModel):
     def flags(self, index):
         base = super().flags(index)
         if index.isValid() and isinstance(self._rows[index.row()], dict) and "_group" in self._rows[index.row()]:
-            return Qt.ItemIsEnabled  # nagłówek grupy: nieselektowalny
+            return _FLAGI_BELKI  # nagłówek grupy: nieselektowalny
         if index.isValid() and self._komorka_edytowalna(index):
-            return base | Qt.ItemIsEditable
+            return base | _FLAGA_EDYCJI
         return base
 
     def _komorka_edytowalna(self, index):
@@ -2057,7 +2084,7 @@ class GridTableModel(QAbstractTableModel):
     def setData(self, index, value, role=Qt.EditRole):
         """Wpis człowieka w komórkę keyworda → `cell_edit_requested` (bez komentarza). Model się nie
         zmienia, więc zwraca False - widok pokaże zmianę podglądem po stage'u."""
-        if role != Qt.EditRole:
+        if role != _ROLA_EDYCJI:
             return False
         self.request_cell_edit(index, value, "")
         return False
@@ -2090,17 +2117,17 @@ class GridTableModel(QAbstractTableModel):
             # Pogrubienie ZOSTAJE (belka jest belką); kursywa i szarość mówią „to nie jest
             # przypisany obiekt". Zmierzone na żywym archiwum: 79 grup, największa 2344 klatki.
             stan = row.get("_group_state")
-            if role == Qt.DisplayRole and col == 0:
+            if role == _ROLA_TEKSTU and col == 0:
                 return f"▸ {row['_group']}  ({row['_count']})"
-            if role == Qt.BackgroundRole:
+            if role == _ROLA_TLA:
                 return _COLORS["group_bg"]
-            if role == Qt.FontRole and col == 0:
+            if role == _ROLA_CZCIONKI and col == 0:
                 f = QFont(); f.setBold(True); f.setItalic(stan is not None); return f
             if stan is None or col != 0:
                 return None
-            if role == Qt.ForegroundRole:
+            if role == _ROLA_KOLORU:
                 return _COLORS["missing"]
-            if role == Qt.ToolTipRole:
+            if role == _ROLA_PODPOWIEDZI:
                 return _group_tip(row, stan)
             return None
 
@@ -2137,7 +2164,7 @@ class GridTableModel(QAbstractTableModel):
         f = row.get("_wersja")
         if not f:
             return None
-        if role == Qt.DisplayRole:
+        if role == _ROLA_TEKSTU:
             czlony = [i18n.t("grid.version.kept")] if f.get("kept") else []
             czlony.append(i18n.t(f"grid.version.kind.{f['kind']}"))
             if f.get("witness"):
@@ -2154,7 +2181,7 @@ class GridTableModel(QAbstractTableModel):
             elif row.get("filetype") == "fits":
                 czlony.append(i18n.t("grid.version.images_fits"))
             return " · ".join(czlony)
-        if role == Qt.ToolTipRole:
+        if role == _ROLA_PODPOWIEDZI:
             swiadek = f.get("witness")
             tip = (i18n.t(f"grid.version.why.{swiadek}" if swiadek else "grid.version.why.none")
                    + i18n.t("grid.version.window", start=_okno(f.get("window_start")),
@@ -2171,7 +2198,7 @@ class GridTableModel(QAbstractTableModel):
                 tip += i18n.t("grid.version.kept_tip", at=_chwila(f.get("kept_at")) or "?",
                               reopen=i18n.t("grid.version.reopen"))
             return tip
-        if role == Qt.ForegroundRole and (f["kind"] != queries.WERSJA_INNA or f.get("kept")):
+        if role == _ROLA_KOLORU and (f["kind"] != queries.WERSJA_INNA or f.get("kept")):
             return _COLORS["missing"]      # bez dowodu wersji albo po werdykcie - wyciszone
         return None
 
@@ -2182,11 +2209,11 @@ class GridTableModel(QAbstractTableModel):
         if pv is None:
             return None
         if "skipped" in pv:
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return i18n.t("grid.preview.skipped")
-            if role == Qt.ForegroundRole:
+            if role == _ROLA_KOLORU:
                 return _COLORS["missing"]
-            if role == Qt.ToolTipRole:
+            if role == _ROLA_PODPOWIEDZI:
                 # Powód makra z kodem (reguła karty, suma kontrolna) w języku UI (AR-167).
                 from horreum.gui.wb_worker import tekst_powodu
                 return i18n.t("grid.preview.skipped_tip", reason=tekst_powodu(pv["skipped"]))
@@ -2209,25 +2236,25 @@ class GridTableModel(QAbstractTableModel):
                 if k.get("comment") is not None:
                     tip += i18n.t("grid.preview.comment_tip", comment=k["comment"])
                 return tip
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 if len(karty) == 1:
                     return _zmiana(karty[0])
                 return " · ".join(f"{k['keyword']}: {_zmiana(k)}" for k in karty)
-            if role == Qt.ToolTipRole:
+            if role == _ROLA_PODPOWIEDZI:
                 return "\n".join(_tip(k) for k in karty)
-            if role == Qt.FontRole:
+            if role == _ROLA_CZCIONKI:
                 f = QFont(); f.setBold(True); return f
             return None
-        if role == Qt.DisplayRole:
+        if role == _ROLA_TEKSTU:
             if pv.get("op") == "rename":
                 return str(pv["new"])          # tylko NOWA nazwa (stara jest w kol. „Ścieżka"; wiz #1)
             old = "∅" if pv.get("old") is None else str(pv["old"])
             return f"{old} → {pv['new']}"
-        if role == Qt.ToolTipRole:
+        if role == _ROLA_PODPOWIEDZI:
             if pv.get("op") == "rename":       # stara i nowa nazwa pliku w języku UI (AR-193)
                 return i18n.t("grid.preview.rename_tip", old=pv.get("old"), new=pv["new"])
             return f"{pv['keyword']}: {pv.get('old')!r} → {pv['new']!r} ({pv['op']})"
-        if role == Qt.FontRole:
+        if role == _ROLA_CZCIONKI:
             f = QFont(); f.setBold(True); return f
         return None
 
@@ -2255,7 +2282,7 @@ class GridTableModel(QAbstractTableModel):
         vanished = (not superseded and not retired and row.get("present") == 0
                     and (row.get("n_present") or 0) == 0)
         dup = (row.get("n_present") or 0) > 1
-        if role == Qt.BackgroundRole:
+        if role == _ROLA_TLA:
             # Podgląd makra WYGRYWA tło (bieżący fokus): dotknięty/pominięty wiersz widoczny w
             # kolumnach bazowych NIEZALEŻNIE od scrolla poziomego (wizytator #1/#2 — „widać zanim zapiszesz").
             pv = self._preview.get(row.get("frame_id")) if self._preview else None
@@ -2272,7 +2299,7 @@ class GridTableModel(QAbstractTableModel):
             return None
         if key == "path":
             path = row.get("path") or ""
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 name = os.path.basename(path) if path else i18n.t("object.no_location")
                 # Klatka zastąpiona MÓWI TO WPROST W KOMÓRCE, nie tylko tłem i tooltipem: tło niesie
                 # kolor (a użytkownik bywa daltonistą albo ma inny motyw), tooltip wymaga najechania,
@@ -2292,7 +2319,7 @@ class GridTableModel(QAbstractTableModel):
                     return i18n.t("grid.cell.retired", name=name)
                 # Prefiks „×N" PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek.
                 return f"×{row['n_present']}  {name}" if dup else name
-            if role == Qt.ToolTipRole:
+            if role == _ROLA_PODPOWIEDZI:
                 extra = i18n.t("grid.tip.absorbed", id=row.get("superseded_by")) if (
                     superseded and row.get("absorbed")) else _superseded_tip(row) if superseded else (
                     _retired_back_tip(row) if retired_back else
@@ -2311,11 +2338,11 @@ class GridTableModel(QAbstractTableModel):
             # (`:g`); ŻADNYCH stringów-znaczników (mieszany typ rozbrajałby sort numeryczny R1 #6). Flaga
             # niepełnogodzinności mieszka WYŁĄCZNIE w panelu daty RenameBar, nie w komórce.
             v = row.get("_dt_delta")
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return "" if v is None else f"{v:g}"           # None → pusta komórka (R1 #7)
-            if role == Qt.TextAlignmentRole and v is not None:
-                return int(Qt.AlignRight | Qt.AlignVCenter)
-            if role == Qt.ToolTipRole and v is not None:
+            if role == _ROLA_WYROWNANIA and v is not None:
+                return _WYROWNANIE_LICZB
+            if role == _ROLA_PODPOWIEDZI and v is not None:
                 return f"DATE-OBS − czas z nazwy = {v!r} h"     # surowy float (kontrola kwantyzacji)
             return None
         if key == "_object":
@@ -2327,15 +2354,15 @@ class GridTableModel(QAbstractTableModel):
             # brak karty keyworda (kursywa + `missing`), bo „to nie jest przypisany obiekt" jest
             # brakiem, a nie ostrzeżeniem. Kanon zostaje nietknięty.
             stan = row.get("_object_state", "canon")
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return row.get("_object") or ""
             if stan == "canon":
                 return None
-            if role == Qt.ForegroundRole:
+            if role == _ROLA_KOLORU:
                 return _COLORS["missing"]
-            if role == Qt.FontRole:
+            if role == _ROLA_CZCIONKI:
                 f = QFont(); f.setItalic(True); return f
-            if role == Qt.ToolTipRole:
+            if role == _ROLA_PODPOWIEDZI:
                 return _object_tip(row, stan)
             return None
         if key == "_images":
@@ -2344,10 +2371,10 @@ class GridTableModel(QAbstractTableModel):
             # Stan rodowodu gotowego obrazu; n.d. (inny rodzaj) = pusta komórka bez podpowiedzi.
             stan = row.get("_rodowod")
             if stan is None:
-                return "" if role == Qt.DisplayRole else None
-            if role == Qt.DisplayRole:
+                return "" if role == _ROLA_TEKSTU else None
+            if role == _ROLA_TEKSTU:
                 return i18n.t(_STANY_RODOWODU[stan])
-            if role == Qt.ToolTipRole:
+            if role == _ROLA_PODPOWIEDZI:
                 # „Dokładny" z werdyktem ręki na klatce nowszej niż obraz (AR-153): pewność
                 # deklarowana, nie faktyczna - podpowiedź mówi to i nazywa gest panelu.
                 if stan == "exact" and row.get("_rodowod_nowsze"):
@@ -2356,14 +2383,14 @@ class GridTableModel(QAbstractTableModel):
                 return i18n.t(_TIPY_RODOWODU[stan])
             # Role z motywu: „do potwierdzenia" to robota (warn), „z okna czasu" - kandydat, którego
             # nikt nie potwierdził (secondary); brak rodowodu - rola braku, jak brak karty.
-            if stan == "pending" and role == Qt.ForegroundRole:
+            if stan == "pending" and role == _ROLA_KOLORU:
                 return _COLORS["warn"]
-            if stan == "window" and role == Qt.ForegroundRole:
+            if stan == "window" and role == _ROLA_KOLORU:
                 return _COLORS["secondary_text"]
             if stan in _RODOWOD_BRAK:
-                if role == Qt.ForegroundRole:
+                if role == _ROLA_KOLORU:
                     return _COLORS["missing"]
-                if role == Qt.FontRole:
+                if role == _ROLA_CZCIONKI:
                     f = QFont(); f.setItalic(True); return f
             return None
         if key == "exptime":
@@ -2372,23 +2399,23 @@ class GridTableModel(QAbstractTableModel):
             # w `_sort_key`. Wartość, której sufit jednego miejsca nie pokazuje dokładnie (odbiór
             # 0.19.0 ZB12: 1/160 s mówi „0.0 s"), podpowiedź podaje pełną liczbą - jak komórka EXPTIME.
             v = row.get("exptime")
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return "" if v is None else i18n.t("find.cell.exposure",
                                                    s=f"{float(v):.{self._miejsca_czasu}f}")
-            if role == Qt.TextAlignmentRole and v is not None:
-                return int(Qt.AlignRight | Qt.AlignVCenter)
-            if role == Qt.ToolTipRole and v is not None and not _dokladnie(float(v), self._miejsca_czasu):
+            if role == _ROLA_WYROWNANIA and v is not None:
+                return _WYROWNANIE_LICZB
+            if role == _ROLA_PODPOWIEDZI and v is not None and not _dokladnie(float(v), self._miejsca_czasu):
                 return i18n.t("find.cell.exposure", s=str(float(v)))
             return None
         if key == "note":
             # Uwaga ścięta szerokością kolumny, pełna w tooltipie - kolumna zapowiada, nie czyta.
             v = row.get("note")
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return v or ""
-            if role == Qt.ToolTipRole and v:
+            if role == _ROLA_PODPOWIEDZI and v:
                 return v
             return None
-        if role == Qt.DisplayRole:
+        if role == _ROLA_TEKSTU:
             v = row.get(key)
             return "" if v is None else str(v)
         return None
@@ -2406,20 +2433,20 @@ class GridTableModel(QAbstractTableModel):
         „nie wiem" jest stanem archiwum, nie robotą."""
         tekst = row.get("_images") or ""
         if tekst:
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return tekst
-            if role == Qt.TextAlignmentRole:
-                return int(Qt.AlignRight | Qt.AlignVCenter)
+            if role == _ROLA_WYROWNANIA:
+                return _WYROWNANIE_LICZB
             return None
         if not (self._obrazy_pytajnik and row.get("copy_facts_class")):
-            return "" if role == Qt.DisplayRole else None
-        if role == Qt.DisplayRole:
+            return "" if role == _ROLA_TEKSTU else None
+        if role == _ROLA_TEKSTU:
             return "?"
-        if role == Qt.TextAlignmentRole:
-            return int(Qt.AlignRight | Qt.AlignVCenter)
-        if role == Qt.ForegroundRole:
+        if role == _ROLA_WYROWNANIA:
+            return _WYROWNANIE_LICZB
+        if role == _ROLA_KOLORU:
             return _COLORS["missing"]
-        if role == Qt.ToolTipRole:
+        if role == _ROLA_PODPOWIEDZI:
             return i18n.t("grid.tip.images_unknown") + i18n.t(
                 "grid.tip.copy_unread", place=i18n.t("nav.dostawa"),
                 check=i18n.t("pipeline.btn.presence"), mark=i18n.t("pipeline.btn.mark_vanished"))
@@ -2427,33 +2454,33 @@ class GridTableModel(QAbstractTableModel):
 
     def _kw_cell(self, row, kw, role):
         cell = row["cells"].get(kw, pivot_mod.MISSING)
-        if role == Qt.EditRole:
+        if role == _ROLA_EDYCJI:
             # Edytor startuje od wartości karty, a przy braku karty od pustego pola - znak „—"
             # w polu edycji zostałby zapisany jako wartość nowej karty.
             return "" if cell is pivot_mod.MISSING or cell.raw is None else str(cell.raw)
         if cell is pivot_mod.MISSING:
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return _MISSING_TEXT
-            if role == Qt.ForegroundRole:
+            if role == _ROLA_KOLORU:
                 return _COLORS["missing"]
-            if role == Qt.FontRole:
+            if role == _ROLA_CZCIONKI:
                 f = QFont(); f.setItalic(True); return f
-            if role == Qt.TextAlignmentRole and kw in self._numeric_kw:
-                return int(Qt.AlignRight | Qt.AlignVCenter)   # „—" pod słupkiem liczb (wizytator P3-7)
-            if role == Qt.ToolTipRole:
+            if role == _ROLA_WYROWNANIA and kw in self._numeric_kw:
+                return _WYROWNANIE_LICZB   # „—" pod słupkiem liczb (wizytator P3-7)
+            if role == _ROLA_PODPOWIEDZI:
                 return i18n.t("grid.cell.no_card_tip")   # w języku UI (AR-181)
             return None
         if kw == _EXPTIME and cell.num is not None:
             # Jedna precyzja kolumny zamiast zapisu karty (AR-115, sufit jednego miejsca - odbiór
             # 0.19.0 ZB12; reguła przy `miejsca_ekspozycji`).
-            if role == Qt.DisplayRole:
+            if role == _ROLA_TEKSTU:
                 return f"{cell.num:.{self._miejsca_exptime}f}"
-            if role == Qt.ToolTipRole and not _dokladnie(cell.num, self._miejsca_exptime):
+            if role == _ROLA_PODPOWIEDZI and not _dokladnie(cell.num, self._miejsca_exptime):
                 return str(cell.raw)
-        if role == Qt.DisplayRole:
+        if role == _ROLA_TEKSTU:
             return "" if cell.raw is None else str(cell.raw)
-        if role == Qt.TextAlignmentRole and kw in self._numeric_kw:
-            return int(Qt.AlignRight | Qt.AlignVCenter)   # wyrównanie kolumny, nie karty (AR-77)
+        if role == _ROLA_WYROWNANIA and kw in self._numeric_kw:
+            return _WYROWNANIE_LICZB   # wyrównanie kolumny, nie karty (AR-77)
         return None
 
     # ---- sort + grupowanie ----

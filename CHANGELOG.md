@@ -6,6 +6,40 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.24.0] - 2026-10-29
+
+Wydanie o **szufladzie, która nie przywraca cofniętego zapisu i umie cofnąć się o krok dalej**. Zapis kart cofnięty
+kiedyś - także w poprzedniej sesji - nie wraca przy kolejnym „Cofnij”, bo program prowadzi historię stanu każdego
+pliku. Po „Cofnij” szuflada proponuje „Cofnij poprzedni zapis” tych samych plików, także po ponownym otwarciu
+programu. **Schemat bazy 47 → 48** (historia stanu plików): pierwsze otwarcie bazy dodaje pustą tabelę, dane się nie
+zmieniają, ale bazę otwartą w tej wersji 0.23.0 i starsze już nie otworzą - przed pierwszym uruchomieniem zrób kopię
+pliku bazy.
+
+### Dodane
+
+- **„Cofnij poprzedni zapis”:** po „Cofnij” zapisu kart, które cofnęło się w całości, ten sam przycisk szuflady
+  Zbiorów cofa starszy zapis tych samych plików - „Cofnij poprzedni zapis (commit N)”, zdanie „Starszy zapis kart
+  tych plików z RRRR-MM-DD”. Gdy starszy zapis dotyczył części plików, zdanie podaje ich liczbę („Starszy zapis kart
+  2 z tych plików z …”). Po ponownym otwarciu programu przycisk wraca ze zdaniem, który zapis jest cofnięty („Zapis
+  z … jest cofnięty. Te same 3 pliki mają starszy zapis kart z …”). Jeden krok: po cofnięciu starszego zapisu
+  szuflada nie proponuje kolejnego - dalej cofa `horreum header-fix --undo N`. Przez około sekundę po przezbrojeniu
+  przycisk jest wygaszony, żeby drugi klik „na upewnienie” nie cofnął starszego zapisu.
+- **Historia stanu plików** (migracja 0048): każdy zapis kart, cofnięcie, odzysk i zmiana pliku z zewnątrz zostawia
+  wiersz z odciskiem pliku po zmianie. Baza po migracji zaczyna z pustą historią - o plikach sprzed migracji program
+  wie tyle co dotąd.
+
+### Zmienione
+
+- **Zapis cofnięty między sesjami nie wraca:** gdy plik po cofnięciu wrócił z zewnątrz do stanu z wynikiem zapisu
+  (A → B → A), „Cofnij” mówi „już cofnięte - według historii pliku tego zapisu nie ma już w pliku”, zamiast przywracać
+  wynik, który człowiek cofnął - w szufladzie, oknach kart, oknie zmiany obiektu, Porządkach i `horreum header-fix
+  --undo`.
+- **„Już cofnięte” bez czytania pliku** tylko wtedy, gdy plik ma ten sam czas modyfikacji co w bazie - plik zmieniony
+  od ostatniego skanu jest czytany.
+- **Cofnięcie po odzysku przerwanego zapisu**, gdy wynik zapisu wrócił do pliku z zewnątrz, sprawdza bajty pliku pod
+  blokadą zapisu. Plik, którego nie da się dowieść, zostaje nietknięty ze zdaniem „nie udało się dowieść, że plik
+  jest bajtowym wynikiem cofanego zapisu - cofnięcie go nie zapisało, plik nietknięty”.
+
 ## [0.23.0] - 2026-10-28
 
 Wydanie o **Planerze, który nie gubi wpisu, Porządkach z klawiatury i szufladzie, która daje „Cofnij” także po
@@ -1891,7 +1925,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.23.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/abo-t/horreum/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/abo-t/horreum/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/abo-t/horreum/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/abo-t/horreum/compare/v0.20.0...v0.21.0

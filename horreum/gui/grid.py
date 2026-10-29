@@ -5939,8 +5939,10 @@ class FramesView(QWidget):
     def _postaw_cofnij_ostatniego(self, result=None):
         """Szuflada bez niczego czekającego: OSTATNI zapis szuflady z „Cofnij” (AR-367, AR-382,
         `queries.ostatni_zapis_szuflady`) - zapis kart: „Cofnij” całego przebiegu, zmiana nazw: „Cofnij” nazw
-        przebiegu. True, gdy „Cofnij” stanęło. „Cofnij” było stanem sesji, więc po zamknięciu okna zapisany przebieg
-        zostawał z drogą wyłącznie w CLI (`header-fix --undo N` per commit, `rename --undo RUN`). Zdanie mówi datę
+        przebiegu, ostatni zapis kart cofnięty w całości ze starszym zapisem tych plików: „Cofnij poprzedni zapis”
+        (AR-443, `_uzbroj_poprzedni` ze zdaniem, który zapis jest cofnięty). True, gdy „Cofnij” stanęło. „Cofnij” było
+        stanem sesji, więc po zamknięciu okna zapisany przebieg zostawał z drogą wyłącznie w CLI (`header-fix --undo N`
+        per commit, `rename --undo RUN`). Zdanie mówi datę
         zapisu - przebieg mógł zapisać okno kart albo CLI, a pochodzenia przebiegu baza nie zna; etykieta, kropka,
         przycisk i „Ponów nieudane (N)” są te same co po zapisie w sesji, a nowy staging zdejmuje je jak każde
         „Cofnij” (`_dismiss_undo`). `result` - zdanie gestu, który szufladę opróżnił („Odrzuć”, AR-381): idzie przed
@@ -5984,6 +5986,9 @@ class FramesView(QWidget):
             zdanie = i18n.t_plural("grid.drawer.last_rename", n, day=dzien, undo=cofnij)
             self._postaw_cofnij_nazw(ostatni["run_id"], " · ".join(z for z in (result, zdanie) if z), n)
             self._pokaz_ponowienie("nazwy", ostatni["run_id"])
+            return True
+        if ostatni["klinga"] == "poprzedni":           # AR-443: bez „Ponów nieudane” - cofnięcie je zgasiło
+            self._uzbroj_poprzedni(ostatni, result, cofniety_kiedy=ostatni["cofniety_kiedy"])
             return True
         zakres = ostatni["zakres"]
         zdanie = i18n.t_plural("grid.drawer.last_write", zakres.zatwierdzone + zakres.do_sprawdzenia,
@@ -6681,14 +6686,16 @@ class FramesView(QWidget):
         self._podglad_po_zapisie = self.model._preview
         self.table.setColumnHidden(kolumna, True)
 
-    def _install_undo(self, run_id, zakres, summary, *, tryb="macro"):
+    def _install_undo(self, run_id, zakres, summary, *, tryb="macro", okno=True):
         """Po zapisie makra szuflada oferuje jednorazowe „Cofnij" CAŁEGO przebiegu `run_id` (AR-345): cel to
         commity `zakres` (`writeback.ZakresCofniecia`) ZAMROŻONE teraz - wykonawca cofa dokładnie je
         (`undo_run`), nie commity odczytane przy kliku. Etykieta „Zatwierdzono: N” (pliki z potwierdzoną
         podmianą) albo, bez takich, „Do sprawdzenia: K” zamiast pustostanu, by nie przeczyła wynikowi obok
         (wizytator D2) - bez identyfikatora commitu: niesie go zdanie wyniku w tym samym wierszu (AR-255),
         doklejony w jednym miejscu (`_zdanie_przy_cofnij`, AR-276) - `summary` przychodzi bez niego.
-        `tryb` - `"poprzedni"` dla starszego zapisu tych samych plików (AR-389, `_postaw_cofnij_poprzedni`)."""
+        `tryb` - `"poprzedni"` dla starszego zapisu tych samych plików (AR-389, `_postaw_cofnij_poprzedni`); `okno` -
+        czy tryb `poprzedni` dostaje okno przezbrojenia (`_ensure_undo_button`) - False przy odczycie ze stanu, gdy
+        przycisk nie przezbraja się pod klikiem „Cofnij”."""
         self._undo_run_id = run_id
         self._undo_commity = tuple(zakres.commity)
         self._undo_mode = tryb                           # dispatch współdzielonego „Cofnij" (R1 #3)
@@ -6696,22 +6703,23 @@ class FramesView(QWidget):
                     else i18n.t("grid.wb.to_check_label", n=zakres.do_sprawdzenia + zakres.otwarte))
         self.drawer.set_count(0, result=self._zdanie_przy_cofnij(summary), label=etykieta)
         self.drawer.set_commit_actions_visible(False)   # jedyna sensowna akcja teraz to Cofnij (#5)
-        self._ensure_undo_button()
+        self._ensure_undo_button(okno=okno)
         self._undo_btn.setVisible(True)
 
-    def _ensure_undo_button(self):
+    def _ensure_undo_button(self, *, okno=True):
         """Współdzielony przycisk „Cofnij" (tworzony RAZ, stabilny handler → dispatch po `_undo_mode`;
         bez churnu connect/disconnect, który sypał RuntimeWarning - wzorzec makra). Każde wołanie to
         UZBROJENIE (AR-389): etykieta trybu (`_etykieta_cofnij` - „Cofnij poprzedni zapis (commit N)” albo
         „Cofnij”, także po trybie `poprzedni`), a gest zaczęty przed nim nie klika nowego celu (`_PrzyciskCofnij`).
         Tryb `poprzedni` dostaje okno przezbrojenia (`_okno_przezbrojenia_ms`): klik „na upewnienie” po „Cofnij” trafiał
-        w nowy cel."""
+        w nowy cel. `okno=False` - tryb `poprzedni` ze stanu (otwarcie bazy, „Odrzuć”, AR-443): przycisk nie zmienia celu
+        pod klikiem, więc nie stoi wygaszony bez powodu (bramka `sol` Z3)."""
         if not hasattr(self, "_undo_btn"):
             self._undo_btn = _PrzyciskCofnij(i18n.t("grid.action.undo"))
             self._undo_btn.clicked.connect(self._dispatch_undo)
             self.drawer.layout().addWidget(self._undo_btn)
         self._undo_btn.uzbroj(self._etykieta_cofnij(),
-                              okno_ms=_okno_przezbrojenia_ms() if self._undo_mode == "poprzedni" else 0)
+                              okno_ms=_okno_przezbrojenia_ms() if okno and self._undo_mode == "poprzedni" else 0)
 
     def _etykieta_cofnij(self):
         """Etykieta wspólnego przycisku dla bieżącego trybu: `poprzedni` (AR-389) - „Cofnij poprzedni zapis (commit
@@ -6816,8 +6824,8 @@ class FramesView(QWidget):
         """Gest trybu `poprzedni` (AR-389): po cofnięciu DOMKNIĘTYM przebiegu kart `run_id` ten sam przycisk dostaje
         cel „Cofnij poprzedni zapis (commit N)” - starszy zapis TYCH SAMYCH plików (`queries.poprzedni_zapis_kart`) -
         a zdanie `wynik` (cofnięcia) zyskuje człon „Starszy zapis kart tych plików z RRRR-MM-DD” z kotwicą commitu
-        (`_install_undo` → `_zdanie_przy_cofnij`). True, gdy przycisk przezbrojono. Dawniej starszy zapis cofał
-        wyłącznie CLI (`header-fix --undo N`).
+        (`_install_undo` → `_zdanie_przy_cofnij`; część plików - „N z tych plików”, `_uzbroj_poprzedni`). True, gdy
+        przycisk przezbrojono. Dawniej starszy zapis cofał wyłącznie CLI (`header-fix --undo N`).
 
         Decyzja pod blokadą szuflady, jak `_postaw_cofnij_ostatniego` (wzór AR-345: odczyt, blokada, ponowny odczyt
         pod nią): cudza blokada (inne okno, CLI w biegu) - bez „poprzedni” i BEZ odroczenia, zdanie cofnięcia zostaje.
@@ -6825,7 +6833,6 @@ class FramesView(QWidget):
         przebiegu (`_dispatch_undo` zdjął je przed cofnięciem). Błąd bazy - False (odczyt pomocniczy nie wywraca ogona
         cofnięcia, wzór `_zakres_z_bazy`). NIE odczyt „ostatniego zapisu”: pytamy o poprzednika przebiegu, którego
         cofnięcie rdzeń właśnie domknął."""
-        from horreum.gui.wb_worker import czlony_niepewnych
         try:
             if queries.poprzedni_zapis_kart(self.con, run_id) is None:
                 return False
@@ -6841,14 +6848,33 @@ class FramesView(QWidget):
             return False
         if poprzedni is None:
             return False
-        zakres = poprzedni["zakres"]
-        zdanie = " · ".join(z for z in (wynik, i18n.t("grid.drawer.older_write",
-                                                       day=self._dzien_zapisu(poprzedni["kiedy"]))) if z)
+        self._uzbroj_poprzedni(poprzedni, wynik)
+        return True
+
+    def _uzbroj_poprzedni(self, poprzedni, wynik, cofniety_kiedy=None):
+        """Przezbrojenie wspólnego przycisku na „Cofnij poprzedni zapis (commit N)” (AR-389) z poprzednikiem `poprzedni`
+        (`queries.poprzedni_zapis_kart`): zdanie `wynik` (cofnięcia w sesji albo gestu, który szufladę opróżnił) i człon
+        o starszym zapisie - po zdaniu cofnięcia w sesji „tych plików”, a ze stanu (`cofniety_kiedy` - chwila cofniętego
+        zapisu, `_postaw_cofnij_ostatniego`, AR-443) zdanie, który zapis jest cofnięty i ilu plików dotyczy: zdania
+        cofnięcia, do którego „tych plików” by się odnosiło, w szufladzie wtedy nie ma. Poprzednik na części plików
+        cofniętego zapisu (AR-444) - człon z liczbą plików, które klik cofnie."""
+        from horreum.gui.wb_worker import czlony_niepewnych
+        zakres, dzien = poprzedni["zakres"], self._dzien_zapisu(poprzedni["kiedy"])
+        czesc = poprzedni["pliki"] < poprzedni["wszystkich"]
+        if cofniety_kiedy is None:
+            czlon = (i18n.t("grid.drawer.older_write_part", n=poprzedni["pliki"], day=dzien) if czesc
+                     else i18n.t("grid.drawer.older_write", day=dzien))
+        elif czesc:
+            czlon = i18n.t_plural("grid.drawer.older_after_restart_part", poprzedni["pliki"],
+                                  all=poprzedni["wszystkich"], undone=self._dzien_zapisu(cofniety_kiedy), day=dzien)
+        else:
+            czlon = i18n.t_plural("grid.drawer.older_after_restart", poprzedni["pliki"],
+                                  undone=self._dzien_zapisu(cofniety_kiedy), day=dzien)
+        zdanie = " · ".join(z for z in (wynik, czlon) if z)
         przycisk = self._etykieta_poprzedniego(zakres.commity)
         self._install_undo(poprzedni["run_id"], zakres,
                            zdanie + czlony_niepewnych(zakres.do_sprawdzenia, zakres.otwarte, przycisk=przycisk),
-                           tryb="poprzedni")
-        return True
+                           tryb="poprzedni", okno=cofniety_kiedy is None)
 
     # ---- „Cofnij” CAŁEGO przebiegu kart i „Ponów nieudane” (AR-345, AR-347) ----
     # Każde zamknięcie przebiegu kart (zapis, awaria, „Odrzuć”, przebieg wyczyszczony do zera) pyta o zakres

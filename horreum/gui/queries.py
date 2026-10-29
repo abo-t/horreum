@@ -5511,9 +5511,10 @@ def przebiegi_szuflady_izolowane(con):
 
 def ostatni_zapis_szuflady(con):
     """Ostatni zapis szuflady Zbiorów do „Cofnij” po otwarciu bazy i po „Odrzuć” (AR-367, AR-381, AR-382):
-    `{"klinga": "karty", "run_id", "kiedy", "zakres"}`, `{"klinga": "nazwy", "run_id", "kiedy", "zapisane"}`
-    albo None. „Cofnij” szuflady było stanem sesji - po zamknięciu okna zapisany przebieg zostawał z drogą
-    wyłącznie w CLI (`header-fix --undo N` per commit, `rename --undo RUN`), a szuflada mówiła „pusta”.
+    `{"klinga": "karty", "run_id", "kiedy", "zakres"}`, `{"klinga": "nazwy", "run_id", "kiedy", "zapisane"}`,
+    `{"klinga": "poprzedni", "run_id", "kiedy", "zakres", "pliki", "wszystkich", "cofniety_kiedy"}` albo None. „Cofnij”
+    szuflady było stanem sesji - po zamknięciu okna zapisany przebieg zostawał z drogą wyłącznie w CLI
+    (`header-fix --undo N` per commit, `rename --undo RUN`), a szuflada mówiła „pusta”.
 
     Karty: przebieg z NAJNOWSZYM commitem spoza przebiegów zmiany obiektu (`object_change_run` - mają własne
     okno i wiersz Porządków); plik zapisany później przez zmianę obiektu chroni rdzeń przy kliku
@@ -5521,8 +5522,11 @@ def ostatni_zapis_szuflady(con):
     (tylko przy `zakres.cofnij`). Nazwy: przebieg z najnowszym zapisem nazw (`_ostatni_zapis_nazw`). Klinga
     wygrywa NOWSZYM zapisem (porównanie chwil w SQL - `julianday` czyta zapis ze strefą i bez); remis - karty.
     Bez cofania się do starszego zapisu: ostatni zapis cofnięty w całości (karty albo nazwy) to brak „Cofnij”,
-    nie „Cofnij” zapisu sprzed niego - także drugiej klingi. Historia nazw, w której zapisu nie da się przypisać
-    jednoznacznie, to JAWNA odmowa wyboru (None), gdy ten zapis mógłby być najnowszy - bez spadania do kart.
+    nie „Cofnij” zapisu sprzed niego - także drugiej klingi. JEDYNY wyjątek (AR-443, decyzja CEO): ostatni zapis
+    kart cofnięty w całości, a jego pliki mają starszy zapis kart (`poprzedni_zapis_kart`, ta sama reguła co po
+    „Cofnij” w sesji) - klinga `"poprzedni"` z poprzednikiem i chwilą cofniętego zapisu (`cofniety_kiedy`) do zdania
+    o tym, których plików dotyczy. Historia nazw, w której zapisu nie da się przypisać jednoznacznie, to JAWNA
+    odmowa wyboru (None), gdy ten zapis mógłby być najnowszy - bez spadania do kart.
 
     None także wtedy, gdy w szufladzie cokolwiek czeka - przebieg do podjęcia, zatrzymany izolacją albo nazwy
     z otwartym zamiarem (`_przebiegi_kart_szuflady`, `_przebiegi_nazw_szuflady` - te same predykaty, które
@@ -5557,7 +5561,12 @@ def ostatni_zapis_szuflady(con):
         if karty is None:
             return None
         zakres = writeback.przebieg_do_cofniecia(con, karty["run_id"])
-        if zakres is None or not zakres.cofnij:
+        if zakres is None:                 # cofnięty w całości - starszy zapis tych plików (AR-443) w tej migawce
+            poprzedni = poprzedni_zapis_kart(con, karty["run_id"])
+            if poprzedni is None:
+                return None
+            return {"klinga": "poprzedni", **poprzedni, "cofniety_kiedy": karty["applied_at"]}
+        if not zakres.cofnij:
             return None
         return {"klinga": "karty", "run_id": karty["run_id"], "kiedy": karty["applied_at"], "zakres": zakres}
     finally:
@@ -5800,9 +5809,9 @@ def odrzucenia_szuflady(con, *, ts, actor):
 def poprzedni_zapis_kart(con, run_id):
     """Starszy zapis kart TYCH SAMYCH plików do „Cofnij poprzedni zapis” po „Cofnij” przebiegu kart `run_id`, który cofnął
     się w całości (AR-389, decyzja CEO: tylko starszy zapis tych plików, nigdy dowolny starszy przebieg):
-    `{"run_id", "kiedy", "zakres"}` - przebieg poprzednika, `commits.applied_at` jego najnowszego commitu i zakres
-    `writeback.przebieg_do_cofniecia` - albo None. Dawniej po takim „Cofnij” starszy zapis cofał wyłącznie CLI
-    (`header-fix --undo N`).
+    `{"run_id", "kiedy", "zakres", "pliki", "wszystkich"}` - przebieg poprzednika, `commits.applied_at` jego najnowszego
+    commitu, zakres `writeback.przebieg_do_cofniecia`, liczba jego plików i liczba plików cofniętego zapisu (L) - albo
+    None. Dawniej po takim „Cofnij” starszy zapis cofał wyłącznie CLI (`header-fix --undo N`).
 
     Reguła (każde niespełnienie - None, BEZ szukania dalej):
       * w szufladzie nic nie czeka (`_przebiegi_kart_szuflady`, `_przebiegi_nazw_szuflady` - te same predykaty co
@@ -5812,15 +5821,23 @@ def poprzedni_zapis_kart(con, run_id):
         filtra odcisku (filtr wybrałby zapis starszy niż bezpośrednio poprzedni, gdy jego wynik ktoś nadpisał). L =
         lokacje backupów `run_id` bez `unreplaced_at` - pliki, które zapis naprawdę zmienił;
       * poprzednik spoza przebiegów zmiany obiektu (`object_change_run` - mają własne okno);
-      * (a) lokacje CAŁEGO przebiegu poprzednika (wszystkich jego commitów, backupy bez `unreplaced_at`) to DOKŁADNIE L -
-        najwęższe odczytanie „tych samych plików” (poprzednik na części plików cofniętego zapisu też odpada: zdanie
-        „Starszy zapis kart tych plików” mówiłoby o plikach, których klik nie cofa),
+      * (a) lokacje CAŁEGO przebiegu poprzednika (wszystkich jego commitów, backupy bez `unreplaced_at`) mieszczą się
+        w L - poprzednik na CZĘŚCI plików cofniętego zapisu przechodzi (AR-444, decyzja CEO), a zdanie mówi, ilu plików
+        klik dotknie („Starszy zapis kart N z tych plików”, `pliki` < `wszystkich`); plik spoza L odpada (klik cofnąłby
+        plik, którego cofnięty zapis nie ruszył),
         (b) na każdej z nich najnowszy backup poprzednika opisuje lokację (`post_hash IS location.header_hash`);
       * (c) zakres poprzednika obejmuje KAŻDĄ jego lokację (`zatwierdzone + do_sprawdzenia` = liczba lokacji, `otwarte`
         0): poprzednik cofnięty kiedyś w części (plik z dowodem zakończenia, którego wynik wrócił potem z zewnątrz)
-        cofnąłby się tylko na pozostałych plikach - para stanów, której nigdy nie było.
-    JEDEN KROK: szuflada woła tę funkcję wyłącznie po „Cofnij” przebiegu (tryb `"macro"`), nigdy po cofnięciu samego
-    poprzednika - starszy łańcuch zostaje CLI.
+        cofnąłby się tylko na pozostałych plikach - para stanów, której nigdy nie było;
+      * (d) między PIERWSZYM commitem poprzednika a cofniętym zapisem żaden commit innego przebiegu nie zmienił pliku
+        z L (backup bez `unreplaced_at`): przebieg poprzednika z kilku commitów przepleciony cudzym zapisem cofnąłby
+        swoje pliki sprzed pierwszego commitu, a plik zmieniony w środku zostawił po zmianie - para stanów, której nigdy
+        nie było (bramka AR-443/AR-444, `sol` Z2; przy części plików plik spoza poprzednika też należy do L).
+    JEDEN KROK: szuflada woła tę funkcję po „Cofnij” przebiegu (tryb `"macro"`), nigdy po cofnięciu samego poprzednika,
+    a po restarcie przez `ostatni_zapis_szuflady` (AR-443) dla najnowszego przebiegu kart - poprzednik już cofnięty
+    odpada na (b) i (c), więc starszy łańcuch zostaje CLI. Wyjątek bez drugiego kroku: wynik cofniętego poprzednika
+    wrócił z zewnątrz, a reguła klasy uznaje go za żywy (droga atomowa) - wraca TEN SAM poprzednik, jak „Cofnij”
+    ostatniego zapisu przy takim powrocie; poprzednika poprzednika nie ma nigdy (bramka `sol` Z1 odrzucona).
 
     JEDNA MIGAWKA WAL na wszystkie odczyty, także obu zakresów (własna transakcja odczytu zamykana wycofaniem; w
     transakcji wołającego - w niej; wzór `ostatni_zapis_szuflady`, `writeback._fakty_przebiegu` wchodzi w tę samą
@@ -5857,7 +5874,15 @@ def poprzedni_zapis_kart(con, run_id):
                 "WHERE c.run_id = ? AND hb.unreplaced_at IS NULL "
                 "ORDER BY hb.location_id, hb.commit_id DESC, hb.id DESC", (poprzedni,)):
             opisuje.setdefault(lid, bool(zgodny))
-        if set(opisuje) != lokacje or not all(opisuje.values()):
+        if not set(opisuje) <= lokacje or not all(opisuje.values()):
+            return None
+        if con.execute(
+                "SELECT 1 FROM header_backups hb JOIN commits c ON c.id = hb.commit_id "
+                "WHERE hb.unreplaced_at IS NULL AND c.run_id <> ? "
+                "  AND c.id > (SELECT min(id) FROM commits WHERE run_id = ?) "
+                "  AND c.id < (SELECT min(id) FROM commits WHERE run_id = ?) "
+                "  AND hb.location_id IN (SELECT value FROM json_each(?)) LIMIT 1",
+                (poprzedni, poprzedni, run_id, json.dumps(sorted(lokacje)))).fetchone() is not None:
             return None
         zakres = writeback.przebieg_do_cofniecia(con, poprzedni)
         if (zakres is None or zakres.otwarte
@@ -5865,7 +5890,8 @@ def poprzedni_zapis_kart(con, run_id):
             return None
         kiedy = con.execute("SELECT applied_at FROM commits WHERE run_id = ? ORDER BY id DESC LIMIT 1",
                             (poprzedni,)).fetchone()[0]
-        return {"run_id": poprzedni, "kiedy": kiedy, "zakres": zakres}
+        return {"run_id": poprzedni, "kiedy": kiedy, "zakres": zakres, "pliki": len(opisuje),
+                "wszystkich": len(lokacje)}
     finally:
         if wlasna:
             con.rollback()                 # odczyt - nic do zatwierdzenia

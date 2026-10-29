@@ -3696,6 +3696,24 @@ CATALOG = {
                                  "en": "Undo the previous write (commits {ids})"},
     "grid.drawer.older_write": {"pl": "Starszy zapis kart tych plików z {day}",
                                 "en": "Older card write of these files on {day}"},
+    # AR-444 (decyzja CEO): starszy zapis dotyczy CZĘŚCI plików cofniętego zapisu - `n` to pliki, które klik cofnie.
+    "grid.drawer.older_write_part": {"pl": "Starszy zapis kart {n} z tych plików z {day}",
+                                     "en": "Older card write of {n} of these files on {day}"},
+    # AR-443 (decyzja CEO): to samo po restarcie, gdy szuflada nie ma zdania cofnięcia, do którego „tych plików” by się
+    # odnosiło - zdanie mówi, który zapis jest cofnięty (`undone` - data lokalna RRRR-MM-DD) i ilu plików dotyczy.
+    "grid.drawer.older_after_restart": {
+        "pl": {"one": "Zapis z {undone} jest cofnięty. Ten sam plik ma starszy zapis kart z {day}",
+               "few": "Zapis z {undone} jest cofnięty. Te same {n} pliki mają starszy zapis kart z {day}",
+               "many": "Zapis z {undone} jest cofnięty. Tych samych {n} plików ma starszy zapis kart z {day}"},
+        "en": {"one": "The write of {undone} is undone. The same file has an older card write on {day}",
+               "other": "The write of {undone} is undone. The same {n} files have an older card write on {day}"}},
+    # AR-443 + AR-444: po restarcie, starszy zapis na części plików - `n` z `all` plików cofniętego zapisu.
+    "grid.drawer.older_after_restart_part": {
+        "pl": {"one": "Zapis z {undone} jest cofnięty. {n} z jego {all} plików ma starszy zapis kart z {day}",
+               "few": "Zapis z {undone} jest cofnięty. {n} z jego {all} plików mają starszy zapis kart z {day}",
+               "many": "Zapis z {undone} jest cofnięty. {n} z jego {all} plików ma starszy zapis kart z {day}"},
+        "en": {"one": "The write of {undone} is undone. {n} of its {all} files has an older card write on {day}",
+               "other": "The write of {undone} is undone. {n} of its {all} files have an older card write on {day}"}},
     "grid.drawer.retry_tip": {
         "pl": "Zmiany, których zapis się nie udał, a plików nie ruszył, wracają do szuflady - „{commit}” "
               "spróbuje jeszcze raz",

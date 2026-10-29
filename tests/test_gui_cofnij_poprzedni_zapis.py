@@ -1,8 +1,10 @@
 """Szuflada Zbiorów - „Cofnij poprzedni zapis” (AR-389, decyzja CEO): po „Cofnij” przebiegu kart, które cofnęło się
 w całości, ten sam przycisk cofa starszy zapis TYCH SAMYCH plików - etykieta „Cofnij poprzedni zapis (commit N)”, zdanie
 „Starszy zapis kart tych plików z RRRR-MM-DD (commit N)”; nigdy dowolny starszy przebieg, jeden krok (starszy łańcuch -
-CLI `header-fix --undo`). Reguła wyboru - `queries.poprzedni_zapis_kart`; przycisk - `FramesView._postaw_cofnij_poprzedni`,
-straże gestu - `grid._PrzyciskCofnij`.
+CLI `header-fix --undo`). Poprzednik na części plików cofniętego zapisu - „Starszy zapis kart N z tych plików” (AR-444);
+po restarcie przycisk stoi ze zdaniem, który zapis jest cofnięty i ilu plików dotyczy (AR-443). Reguła wyboru -
+`queries.poprzedni_zapis_kart` (po restarcie przez `queries.ostatni_zapis_szuflady`); przycisk -
+`FramesView._postaw_cofnij_poprzedni` i `_uzbroj_poprzedni`, straże gestu - `grid._PrzyciskCofnij`.
 
 Kliki prawdziwe: `QTest` na widżecie, a tam, gdzie liczy się droga spontaniczna (wykrywanie dwukliku, gest przytrzymany
 przez przezbrojenie) - na `windowHandle()` okna. Zapisy poprzednich sesji prawdziwym rdzeniem (jak okno kart albo CLI),
@@ -182,14 +184,11 @@ def test_cofnij_zapisu_z_tej_sesji_stawia_cofnij_poprzedni(qapp, tmp_path):
 # ============================================================ tylko starszy zapis TYCH SAMYCH plików, bez szukania dalej
 
 
-@pytest.mark.parametrize("r1, r2", [([0, 1], [0]), ([1], [0]), ([0], [0, 1])],
-                         ids=["szerszy", "rozlaczny", "podzbior"])
+@pytest.mark.parametrize("r1, r2", [([0, 1], [0]), ([1], [0])], ids=["szerszy", "rozlaczny"])
 def test_poprzednik_na_innych_plikach_niz_cofniety_bez_cofnij_poprzedni(qapp, tmp_path, r1, r2):
-    """Starszy przebieg zapisał inne pliki niż cofnięty: także plik, którego cofnięty nie dotknął (R1 na 0 i 1, R2 na
-    0), wyłącznie inne pliki (R1 na 1, R2 na 0) albo tylko część plików cofniętego (R1 na 0, R2 na 0 i 1 - najwęższe
-    odczytanie „tych samych plików”: zdanie o „tych plikach” mówiłoby o pliku, którego klik nie cofa). Po „Cofnij”
-    przycisk znika. Falsyfikatory: lokacje poprzednika jako podzbiór cofniętego zamiast równości; bez warunku
-    lokacji."""
+    """Starszy przebieg zapisał plik spoza cofniętego: także plik, którego cofnięty nie dotknął (R1 na 0 i 1, R2 na 0)
+    albo wyłącznie inne pliki (R1 na 1, R2 na 0) - klik cofnąłby plik, którego cofnięty zapis nie ruszył. Po „Cofnij”
+    przycisk znika. Falsyfikatory: lokacje poprzednika jako nadzbiór dopuszczony obok podzbioru; bez warunku lokacji."""
     path, con, pliki = _baza_szuflady(tmp_path, 2)
     _zapis(con, "R1", r1, "EQ6")
     _zapis(con, "R2", r2, "EQ8")
@@ -198,6 +197,33 @@ def test_poprzednik_na_innych_plikach_niz_cofniety_bez_cofnij_poprzedni(qapp, tm
     try:
         _klik_cofnij(v, "cofnięcie R2")
         assert _tel(pliki[0]) == ("EQ6" if 0 in r1 else "RC8")
+        assert _bez_cofnij(v) and v._undo_mode is None
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+@pytest.mark.parametrize("r1, r2", [([0], [0, 1]), ([0, 1], [0, 1, 2])], ids=["1_z_2", "2_z_3"])
+def test_poprzednik_na_czesci_plikow_cofnietego_stawia_cofnij_poprzedni_z_liczba(qapp, tmp_path, r1, r2):
+    """Starszy przebieg zapisał CZĘŚĆ plików cofniętego (AR-444, decyzja CEO): po „Cofnij” (R2) przycisk „Cofnij poprzedni
+    zapis (commit 1)”, zdanie kończy się „Starszy zapis kart N z tych plików z … (commit 1)” - N to pliki, które klik
+    cofnie. Klik przywraca stan sprzed obu zapisów na plikach R1, pliki spoza R1 zostają po cofnięciu R2, przycisk znika.
+    Falsyfikatory: równość zbiorów lokacji zamiast podzbioru (przycisk nie staje); zdanie „tych plików” bez liczby."""
+    path, con, pliki = _baza_szuflady(tmp_path, len(r2))
+    (c1,) = _zapis(con, "R1", r1, "EQ6")
+    _zapis(con, "R2", r2, "EQ8")
+    con.close()
+    con, v = _restart(path)
+    try:
+        _klik_cofnij(v, "cofnięcie R2")
+        assert [_tel(p) for p in pliki] == ["EQ6" if n in r1 else "RC8" for n in range(len(r2))]
+        assert v._undo_mode == "poprzedni" and v._undo_commity == (c1,)
+        assert v._undo_btn.text() == i18n.t("grid.drawer.undo_older", id=c1)
+        czlon = " · " + i18n.t("grid.drawer.older_write_part", n=len(r1), day=_DZIEN) + i18n.t("grid.wb.commit_id",
+                                                                                               id=c1)
+        assert v.drawer.result.text().endswith(czlon), v.drawer.result.text()
+        _klik_cofnij(v, "cofnięcie poprzedniego zapisu")
+        assert [_tel(p) for p in pliki] == ["RC8"] * len(r2)
         assert _bez_cofnij(v) and v._undo_mode is None
     finally:
         _zamknij_widok(v)
@@ -832,19 +858,145 @@ def test_blad_bazy_w_odczycie_pod_blokada_oddaje_blokade(qapp, tmp_path, monkeyp
         con.close()
 
 
-def test_restart_przy_stojacym_cofnij_poprzedni_bez_przycisku(qapp, tmp_path):
-    """„Cofnij poprzedni zapis” stoi, ale człowiek go nie klika i zamyka program: po restarcie szuflada go nie stawia
-    (decyzja: przycisk wyłącznie w sesji; najnowszy zapis R2 jest cofnięty, starszy - CLI). Falsyfikator: restart
-    pytający o poprzedni zapis."""
-    path, con, v, p, _przed, _c1 = _po_cofnieciu_r2(tmp_path)
+def _zdanie_po_restarcie(r1, r2, c1):
+    """Zdanie szuflady po restarcie z „Cofnij poprzedni zapis” (AR-443): który zapis jest cofnięty, ilu plików dotyczy
+    starszy (`r1`, `r2` - pliki R1 i cofniętego R2), kotwica commitu."""
+    if len(r1) < len(r2):
+        zdanie = i18n.t_plural("grid.drawer.older_after_restart_part", len(r1), all=len(r2), undone=_DZIEN, day=_DZIEN)
+    else:
+        zdanie = i18n.t_plural("grid.drawer.older_after_restart", len(r1), undone=_DZIEN, day=_DZIEN)
+    return zdanie + i18n.t("grid.wb.commit_id", id=c1)
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_restart_przy_stojacym_cofnij_poprzedni_stawia_go_ze_zdaniem_ktory_zapis(qapp, tmp_path, lang):
+    """„Cofnij poprzedni zapis” stoi, ale człowiek go nie klika i zamyka program (AR-443, decyzja CEO): po restarcie
+    szuflada stawia go znowu - etykieta „Cofnij poprzedni zapis (commit 1)”, zdanie „Zapis z … jest cofnięty. Ten sam
+    plik ma starszy zapis kart z … (commit 1)”, „Zatwierdzono: 1”, blokada oddana, przycisk czynny od razu - bez okna
+    przezbrojenia, bo przy otwarciu nikt nie klikał „Cofnij” (bramka `sol` Z3). Klik przywraca bajty sprzed obu
+    zapisów; kolejny restart nie stawia niczego (jeden krok). EN bez polskich znaków. Falsyfikatory: restart bez
+    pytania o poprzedni zapis (pustostan); zdanie sesji „tych plików” bez zdania, który zapis jest cofnięty; okno
+    przezbrojenia także przy odczycie ze stanu."""
+    i18n.set_lang(lang)
+    path, con, v, p, przed, c1 = _po_cofnieciu_r2(tmp_path)
     _zamknij_widok(v)
     con.close()
     con, v = _restart(path)
     try:
-        assert _bez_cofnij(v) and v._undo_mode is None and _tel(p) == "EQ6"
+        assert v._undo_btn.isEnabled()
+        assert _tel(p) == "EQ6"
+        assert v._undo_btn.isVisible() and v._undo_mode == "poprzedni" and v._undo_commity == (c1,)
+        assert v._undo_btn.text() == i18n.t("grid.drawer.undo_older", id=c1)
+        assert v.drawer.result.text() == _zdanie_po_restarcie([0], [0], c1), v.drawer.result.text()
+        assert v.drawer.label.text() == i18n.t("grid.wb.committed_label", n=1)
+        assert not v.drawer.btn_commit.isVisible() and not _trzyma_blokade(v)
+        if lang == "en":
+            assert not set(v.drawer.result.text() + v._undo_btn.text()) & _POLSKIE, v.drawer.result.text()
+        _klik_cofnij(v, "cofnięcie poprzedniego zapisu po restarcie")
+        assert p.read_bytes() == przed and _bez_cofnij(v) and v._undo_mode is None
+    finally:
+        i18n.set_lang("pl")
+        _zamknij_widok(v)
+        con.close()
+    con, v = _restart(path)
+    try:
+        assert _bez_cofnij(v) and queries.ostatni_zapis_szuflady(con) is None and p.read_bytes() == przed
     finally:
         _zamknij_widok(v)
         con.close()
+
+
+@pytest.mark.parametrize("r1, r2", [([0], [0, 1]), ([0, 1], [0, 1, 2])], ids=["1_z_2", "2_z_3"])
+def test_restart_po_cofnieciu_poprzednik_na_czesci_plikow_mowi_ile(qapp, tmp_path, r1, r2):
+    """AR-443 + AR-444: R2 cofnięty w sesji, restart - starszy zapis R1 dotyczy części plików R2: zdanie „Zapis z … jest
+    cofnięty. N z jego M plików ma(ją) starszy zapis kart z … (commit 1)”. Klik cofa wyłącznie pliki R1. Falsyfikator:
+    zdanie „Ten sam plik / Te same pliki” przy poprzedniku na części plików."""
+    path, con, pliki = _baza_szuflady(tmp_path, len(r2))
+    (c1,) = _zapis(con, "R1", r1, "EQ6")
+    _zapis(con, "R2", r2, "EQ8")
+    assert writeback.undo_run(con, _commity(con, "R2"), now=_NOW).complete
+    con.close()
+    con, v = _restart(path)
+    try:
+        assert v._undo_mode == "poprzedni" and v._undo_commity == (c1,)
+        assert v.drawer.result.text() == _zdanie_po_restarcie(r1, r2, c1), v.drawer.result.text()
+        _klik_cofnij(v, "cofnięcie poprzedniego zapisu po restarcie")
+        assert [_tel(p) for p in pliki] == ["RC8"] * len(r2) and _bez_cofnij(v)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+def test_odrzuc_po_restarcie_oddaje_cofnij_poprzedni_ze_zdaniem_odrzucenia(qapp, tmp_path):
+    """Restart z „Cofnij poprzedni zapis” (AR-443), makro przyciskiem zdejmuje go (nowy staging), „Odrzuć” oddaje go
+    z tym samym celem, a zdanie mówi odrzucenie i który zapis jest cofnięty. Falsyfikator: gałąź „poprzedni” wyłącznie
+    przy otwarciu bazy (po „Odrzuć” pustostan albo „Cofnij” bez celu)."""
+    path, con, v, _p, _przed, c1 = _po_cofnieciu_r2(tmp_path)
+    _zamknij_widok(v)
+    con.close()
+    con, v = _restart(path)
+    try:
+        assert v._undo_mode == "poprzedni"
+        _makro_przyciskiem(v, "TELESCOP", "C14")
+        n = v._pending_count()
+        assert n and _bez_cofnij(v)
+        _klik_w(v.drawer.btn_reject)
+        assert v._undo_btn.isVisible() and v._undo_mode == "poprzedni" and v._undo_commity == (c1,)
+        assert v.drawer.result.text() == (i18n.t_plural("grid.wb.rejected", n) + " · "
+                                          + _zdanie_po_restarcie([0], [0], c1)), v.drawer.result.text()
+        assert not _trzyma_blokade(v)
+    finally:
+        _zamknij_widok(v)
+        con.close()
+
+
+@pytest.mark.parametrize("inplace", [True, False], ids=["w_miejscu", "atomowo"])
+def test_wynik_cofnietego_poprzednika_wraca_z_zewnatrz_bez_drugiego_kroku(tmp_path, inplace):
+    """R0, R1, R2 na jednym pliku; cofnięte R2, potem R1 („jeden krok” wyczerpany), potem bajty wyniku R1 wracają
+    z zewnątrz (skan). Po cofnięciu atomowym reguła klasy uznaje zapis R1 za żywy (powrót wyniku z zewnątrz, pin H2a),
+    więc odczyt po restarcie proponuje R1 jeszcze raz - jak „Cofnij” ostatniego zapisu przy tym samym powrocie; po
+    cofnięciu w miejscu trwały dowód zakończenia mówi „już cofnięte” i nie proponuje nic. W OBU drogach po cofnięciu
+    R1 nic dalej - R0 nigdy (bramka `sol` Z1 odrzucona: to nie drugi krok). Falsyfikator: szukanie poprzednika
+    poprzednika po odmowie (b)/(c)."""
+    _path, con, (p,) = _baza_szuflady(tmp_path, 1)
+    try:
+        _zapis(con, "R0", [0], "C14", inplace=inplace)
+        po_r0 = p.read_bytes()
+        (c1,) = _zapis(con, "R1", [0], "EQ6", inplace=inplace)
+        po_r1 = p.read_bytes()
+        _zapis(con, "R2", [0], "EQ8", inplace=inplace)
+        assert writeback.undo_run(con, _commity(con, "R2"), now=_NOW).complete
+        assert writeback.undo_run(con, (c1,), now=_NOW).complete
+        assert queries.ostatni_zapis_szuflady(con) is None
+        p.write_bytes(po_r1)
+        _skan(con, p)
+        wynik = queries.ostatni_zapis_szuflady(con)
+        if inplace:
+            assert wynik is None, wynik
+            return
+        assert wynik["klinga"] == "poprzedni" and wynik["run_id"] == "R1", wynik
+        assert writeback.undo_run(con, wynik["zakres"].commity, now=_NOW).complete
+        assert p.read_bytes() == po_r0 and queries.ostatni_zapis_szuflady(con) is None
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("klucz, n, kw, oczek", [
+    ("grid.drawer.older_after_restart", 1, {}, "Zapis z D1 jest cofnięty. Ten sam plik ma starszy zapis kart z D0"),
+    ("grid.drawer.older_after_restart", 2, {}, "Zapis z D1 jest cofnięty. Te same 2 pliki mają starszy zapis kart z D0"),
+    ("grid.drawer.older_after_restart", 5, {},
+     "Zapis z D1 jest cofnięty. Tych samych 5 plików ma starszy zapis kart z D0"),
+    ("grid.drawer.older_after_restart_part", 1, {"all": 3},
+     "Zapis z D1 jest cofnięty. 1 z jego 3 plików ma starszy zapis kart z D0"),
+    ("grid.drawer.older_after_restart_part", 2, {"all": 3},
+     "Zapis z D1 jest cofnięty. 2 z jego 3 plików mają starszy zapis kart z D0"),
+    ("grid.drawer.older_after_restart_part", 5, {"all": 8},
+     "Zapis z D1 jest cofnięty. 5 z jego 8 plików ma starszy zapis kart z D0"),
+])
+def test_zdania_po_restarcie_odmiana_polska(klucz, n, kw, oczek):
+    """Formy mnogie zdań po restarcie (AR-443): 1 / 2-4 / 5+ - podmiot i orzeczenie zgodne z liczbą plików."""
+    i18n.set_lang("pl")
+    assert i18n.t_plural(klucz, n, undone="D1", day="D0", **kw) == oczek
 
 
 # ============================================================ reguła odczytu bez okna
@@ -881,6 +1033,14 @@ def _scena_reguly(tmp_path, kod):
             p.write_bytes(bajty)
             _skan(con, p)
         _zapis(con, "R2", [0, 1], "EQ8")
+    elif kod in ("przeplot", "przeplot_rowny"):
+        # R1 z dwóch commitów przepleciony zapisem Q na pliku 1 (bramka `sol` Z2): cofnięcie R1 przywróciłoby plik 0
+        # sprzed pierwszego commitu R1 przy pliku 1 po Q - para, której nie było. `przeplot_rowny` - drugi commit R1 na
+        # pliku 1, zbiór plików R1 równy cofniętemu.
+        _zapis(con, "R1", [0], "EQ6")
+        _zapis(con, "Q", [1], "EQ6")
+        _zapis(con, "R1", [0] if kod == "przeplot" else [1], "EQ7")
+        _zapis(con, "R2", [0, 1], "EQ8")
     elif kod == "zywy":
         # R2 NIE cofnięty, a jego wynik jest bajt w bajt wynikiem R1 (plik wrócił z zewnątrz do stanu wyjściowego, R2
         # zapisał tę samą kartę): (a)-(c) poprzednika przechodzą - odmawia wyłącznie warunek „R2 nie ma czego cofać”.
@@ -902,19 +1062,27 @@ def _scena_reguly(tmp_path, kod):
                         (_NOW,))
     if kod == "czeka":
         _nazwy_czekaja(path, "N")
-    return con, ("R1" if kod == "przechodzi" else None)
+    return con, ("R1" if kod in ("przechodzi", "podzbior") else None)
 
 
-@pytest.mark.parametrize("kod", ["przechodzi", "zywy", "a", "podzbior", "b", "c", "czesciowy", "obiekt", "czeka",
-                                 "niepodmieniony"])
+_PLIKI_SCENY = {"przechodzi": (1, 1), "podzbior": (1, 2)}   # (pliki poprzednika, pliki cofniętego R2)
+
+
+_KODY_REGULY = ["przechodzi", "zywy", "a", "podzbior", "b", "c", "czesciowy", "obiekt", "czeka", "niepodmieniony",
+                "przeplot", "przeplot_rowny"]
+
+
+@pytest.mark.parametrize("kod", _KODY_REGULY)
 def test_poprzedni_zapis_kart_regula(tmp_path, kod):
-    """Reguła `queries.poprzedni_zapis_kart` po cofnięciu R2: przechodzi - R1 z datą najnowszego commitu i zakresem;
-    None, gdy R2 ma co cofać (także gdy jego wynik jest bajt w bajt wynikiem R1), poprzednik ma plik spoza cofniętego
-    (a) albo tylko część jego plików (a - równość zbiorów), poprzednika nie ma w pliku (b - także gdy starszy zapis
-    jest), poprzednik nie ma czego cofać (c - jego cofnięcie w miejscu domknięte, wynik wrócił z zewnątrz), zakres
-    poprzednika nie obejmuje każdej jego lokacji (c - cofnięty kiedyś w części), poprzednik to zmiana obiektu,
-    w szufladzie coś czeka, plik bez podmiany przez R2 jest poza „tymi plikami”. Migawka własna zamknięta po odczycie;
-    w transakcji wołającego - w niej. Falsyfikatory: brak któregokolwiek warunku; L z backupami bez podmiany."""
+    """Reguła `queries.poprzedni_zapis_kart` po cofnięciu R2: przechodzi - R1 z datą najnowszego commitu, zakresem
+    i liczbami plików; poprzednik na części plików cofniętego też (podzbior - AR-444: 1 z 2); None, gdy R2 ma co cofać
+    (także gdy jego wynik jest bajt w bajt wynikiem R1), poprzednik ma plik spoza cofniętego (a), poprzednika nie ma
+    w pliku (b - także gdy starszy zapis jest), poprzednik nie ma czego cofać (c - jego cofnięcie w miejscu domknięte,
+    wynik wrócił z zewnątrz), zakres poprzednika nie obejmuje każdej jego lokacji (c - cofnięty kiedyś w części),
+    poprzednik to zmiana obiektu, w szufladzie coś czeka, plik bez podmiany przez R2 jest poza „tymi plikami”, cudzy
+    commit na pliku z L między pierwszym commitem poprzednika a cofniętym zapisem (d - przy części plików i przy
+    równym zbiorze). Migawka własna zamknięta po odczycie; w transakcji wołającego - w niej. Falsyfikatory: brak
+    któregokolwiek warunku; L z backupami bez podmiany; równość zbiorów lokacji zamiast podzbioru."""
     con, oczek = _scena_reguly(tmp_path, kod)
     try:
         wynik = queries.poprzedni_zapis_kart(con, "R2")
@@ -922,9 +1090,38 @@ def test_poprzedni_zapis_kart_regula(tmp_path, kod):
         assert not con.in_transaction
         if oczek is not None:
             assert wynik["kiedy"] == _NOW and wynik["zakres"].commity == _commity(con, "R1")
+            assert (wynik["pliki"], wynik["wszystkich"]) == _PLIKI_SCENY[kod]
             con.execute("BEGIN")
             try:
                 assert queries.poprzedni_zapis_kart(con, "R2")["run_id"] == oczek and con.in_transaction
+            finally:
+                con.rollback()
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("kod", _KODY_REGULY)
+def test_ostatni_zapis_szuflady_po_cofnietym_daje_poprzedni(tmp_path, kod):
+    """Odczyt po restarcie (AR-443): najnowszy przebieg kart R2 cofnięty w całości - `ostatni_zapis_szuflady` daje
+    klingę „poprzedni” z poprzednikiem tej samej reguły (`poprzedni_zapis_kart`) i chwilą cofniętego zapisu; R2 z czymś
+    do cofania (zywy) - jak dawniej „karty” R2; każda odmowa reguły i czekające w szufladzie - None. W transakcji
+    wołającego - w niej, bez drugiej migawki. Falsyfikatory: brak gałęzi (None po cofniętym); gałąź bez reguły
+    poprzednika (szuka dalej po odmowie)."""
+    con, oczek = _scena_reguly(tmp_path, kod)
+    try:
+        wynik = queries.ostatni_zapis_szuflady(con)
+        assert not con.in_transaction
+        if kod == "zywy":
+            assert wynik["klinga"] == "karty" and wynik["run_id"] == "R2", wynik
+        elif oczek is None:
+            assert wynik is None, wynik
+        else:
+            assert wynik["klinga"] == "poprzedni" and wynik["run_id"] == oczek, wynik
+            assert wynik["cofniety_kiedy"] == _NOW and wynik["zakres"].commity == _commity(con, "R1")
+            assert (wynik["pliki"], wynik["wszystkich"]) == _PLIKI_SCENY[kod]
+            con.execute("BEGIN")
+            try:
+                assert queries.ostatni_zapis_szuflady(con)["run_id"] == oczek and con.in_transaction
             finally:
                 con.rollback()
     finally:
